@@ -5,7 +5,10 @@ from datetime import datetime, time, timedelta
 import pytz
 from collections import defaultdict
 from dotenv import load_dotenv
-
+import time
+import tempfile
+import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill
 
 load_dotenv()
 
@@ -129,12 +132,12 @@ class KeyCRMAPI:
         """Get all available order statuses"""
         return self._make_request("GET", "status")
 
-
     def get_sales_by_product_and_source_for_date(
             self,
             target_date,
             tz_name="Europe/Kiev",
-            page_size=100):
+            exclude_status_id=None,
+            telegram_manager_ids=None):
         """
         Get sales data aggregated by product and source for a specific local-date window
         or date range, using KeyCRM's `created_between` filter.
@@ -146,14 +149,20 @@ class KeyCRMAPI:
                                               - (start_date, end_date) tuple for a date range
             tz_name (str): Timezone name to define your local midnight-to-midnight.
                            Default is "Europe/Kiev" (Kyiv timezone).
-            page_size (int): Number of orders to fetch per page.
+            exclude_status_id (int, optional): Status ID to exclude from results
+            telegram_manager_ids (list, optional): List of manager IDs to include for Telegram orders
 
         Returns:
             tuple:
                 sales_dict (dict): { source_id: { product_name: total_qty, … }, … }
                 counts_dict (dict): { source_id: total_order_count, … }
-                total_orders (int): total orders retrieved for that date
+                total_orders (int): total orders retrieved that passed all filters
         """
+        # Ensure telegram_manager_ids is a list of strings for easier comparison
+        if telegram_manager_ids is None:
+            telegram_manager_ids = []
+        telegram_manager_ids = [str(id) for id in telegram_manager_ids]
+
         # Determine if we're dealing with a single date or date range
         if isinstance(target_date, tuple) and len(target_date) == 2:
             start_date, end_date = target_date
@@ -171,11 +180,13 @@ class KeyCRMAPI:
         start = datetime.strptime(start_date, "%Y-%m-%d").date()
         end = datetime.strptime(end_date, "%Y-%m-%d").date()
 
-        # Initialize container for all orders
+        # Initialize containers for orders
         all_orders = []
-
-        # Process each day in the range individually
+        excluded_orders = []
+        filtered_telegram_orders = []
         current = start
+
+        # For each day in our date range
         while current <= end:
             # HARDCODED TIME CONVERSION: Kyiv is UTC+3
             # A full day in Kyiv (00:00 to 23:59) corresponds to:
@@ -184,38 +195,97 @@ class KeyCRMAPI:
             prev_day = current - timedelta(days=1)
             prev_day_str = prev_day.strftime("%Y-%m-%d")
 
-            # Define the UTC time window for this Kyiv day
             utc_start_str = f"{prev_day_str} 21:00:00"
             utc_end_str = f"{current_day_str} 20:59:59"
 
-            # Query for this day
+            # For each source, get the full order details
             params = {
-                "include": "products",
-                "limit": page_size,
+                "include": "products,manager",  # Include manager for filtering
+                "limit": 50,  # KeyCRM API appears to have a 50-item limit per page
                 "filter[created_between]": f"{utc_start_str}, {utc_end_str}",
             }
 
-            # Get orders for this day
+            # Get all orders for this day
+            day_orders = []
             page = 1
+            total_pages = None
+
             while True:
                 params["page"] = page
                 resp = self.get_orders(params)
+
                 if isinstance(resp, dict) and resp.get("error"):
+                    print(f"API Error: {resp['error']}")
                     break
 
+                # Extract batch of orders
                 batch = resp.get("data", [])
                 if not batch:
                     break
 
-                all_orders.extend(batch)
-                if len(batch) < page_size:
+                # Try to extract pagination metadata if available
+                if total_pages is None and resp.get("meta") and "last_page" in resp.get("meta", {}):
+                    total_pages = resp["meta"]["last_page"]
+                    total_items = resp["meta"].get("total", "unknown")
+
+                # Process each order in the batch
+                for order in batch:
+                    # Get manager ID if present
+                    manager_id = None
+                    if "manager" in order and order["manager"]:
+                        manager = order["manager"]
+                        manager_id = manager.get("id")
+
+                    # Get the status ID
+                    status_id = None
+                    if "status_id" in order:
+                        status_id = order["status_id"]
+                    elif "status" in order and order["status"] and "id" in order["status"]:
+                        status_id = order["status"]["id"]
+
+                    # Convert to string for comparison
+                    status_id_str = str(status_id) if status_id is not None else "None"
+                    manager_id_str = str(manager_id) if manager_id is not None else "None"
+                    exclude_id_str = str(exclude_status_id) if exclude_status_id is not None else None
+
+                    # Get source ID
+                    source_id = order.get("source_id")
+
+                    # Skip orders with excluded status
+                    if exclude_id_str and status_id_str == exclude_id_str:
+                        excluded_orders.append(order)
+                        continue
+
+                    # Handle Telegram orders separately
+                    if source_id == 2:  # Telegram source ID
+                        # For Telegram, only include orders from specified managers
+                        if telegram_manager_ids and manager_id_str not in telegram_manager_ids:
+                            filtered_telegram_orders.append(order)
+                            continue
+
+                    # Add order to filtered list
+                    day_orders.append(order)
+
+                # Check if we've reached the last page
+                if total_pages and page >= total_pages:
                     break
+
+                # Or if we got fewer results than requested
+                if len(batch) < params["limit"]:
+                    break
+
                 page += 1
+
+                # Add a small delay to avoid hitting API rate limits
+                time.sleep(0.5)
+
+            # Add this day's orders to the overall list
+            all_orders.extend(day_orders)
 
             # Move to next day
             current += timedelta(days=1)
 
-        # Once we have all orders for the entire date range, perform aggregation
+        # Once we have all filtered orders for the entire date range, perform aggregation
         sales = defaultdict(lambda: defaultdict(int))
         for order in all_orders:
             src = order.get("source_id") or "unknown"
@@ -230,10 +300,163 @@ class KeyCRMAPI:
             src = order.get("source_id") or "unknown"
             counts[src] += 1
 
-        # Return plain dicts + total
+        # Return plain dicts + total (exactly 3 values as expected)
         sales_dict = {src: dict(prod_map) for src, prod_map in sales.items()}
         counts_dict = dict(counts)
         total_orders = len(all_orders)
 
-        # Ensure we return exactly 3 values as expected
         return sales_dict, counts_dict, total_orders
+
+    def send_sales_summary_excel_to_telegram(
+            self,
+            target_date,
+            bot_token,
+            chat_id,
+            tz_name="Europe/Kiev",
+            exclude_status_id=None,
+            telegram_manager_ids=None):
+        """
+        Generate a sales summary Excel file and send it to a Telegram chat.
+
+        Args:
+            target_date (date or str or tuple): The date(s) to get sales for
+            bot_token (str): Telegram bot API token
+            chat_id (str or int): Telegram chat ID to send the file to
+            tz_name (str): Timezone name (default: "Europe/Kiev")
+            exclude_status_id (int, optional): Status ID to exclude from results
+            telegram_manager_ids (list, optional): List of manager IDs to include for Telegram orders
+
+        Returns:
+            bool: True if the file was sent successfully, False otherwise
+        """
+        try:
+            # Get sales data
+            sales_data, counts, total = self.get_sales_by_product_and_source_for_date(
+                target_date=target_date,
+                tz_name=tz_name,
+                exclude_status_id=exclude_status_id,
+                telegram_manager_ids=telegram_manager_ids
+            )
+
+            # Determine the date range string for the report header and filename
+            if isinstance(target_date, tuple) and len(target_date) == 2:
+                date_range_str = f"{target_date[0]}_to_{target_date[1]}"
+                display_date = f"{target_date[0]} to {target_date[1]}"
+            else:
+                if isinstance(target_date, str):
+                    date_range_str = target_date
+                    display_date = target_date
+                else:
+                    date_range_str = target_date.strftime('%Y-%m-%d')
+                    display_date = date_range_str
+
+            # Create Excel workbook
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Sales Summary"
+
+            # Define styles
+            header_font = Font(name='Arial', size=12, bold=True)
+            header_fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+            source_font = Font(name='Arial', size=11, bold=True)
+            source_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+
+            # Write header rows
+            ws['A1'] = f"Sales Summary for {display_date} (Timezone: {tz_name})"
+            ws['A1'].font = Font(name='Arial', size=14, bold=True)
+            ws.merge_cells('A1:C1')
+
+            ws['A2'] = f"Total Orders: {total}"
+            ws['A2'].font = header_font
+
+            row = 3
+            if exclude_status_id is not None:
+                ws[f'A{row}'] = f"Excluded Orders with Status ID: {exclude_status_id}"
+                ws[f'A{row}'].font = Font(name='Arial', size=10)
+                row += 1
+
+            if telegram_manager_ids:
+                ws[
+                    f'A{row}'] = f"Filtered Telegram Orders to Managers: {', '.join(str(id) for id in telegram_manager_ids)}"
+                ws[f'A{row}'].font = Font(name='Arial', size=10)
+                row += 1
+
+            row += 1  # Empty row as separator
+
+            # For each source
+            for src_id, products in sales_data.items():
+                # Map numeric/string src_id → human name if possible
+                try:
+                    src_key = int(src_id)
+                except (ValueError, TypeError):
+                    src_key = src_id
+
+                src_name = source_dct.get(src_key, src_id)
+                order_count = counts.get(src_id, 0)
+
+                # Write source name and order count
+                ws[f'A{row}'] = f"Source: {src_name}"
+                ws[f'A{row}'].font = source_font
+                ws[f'A{row}'].fill = source_fill
+                ws.merge_cells(f'A{row}:C{row}')
+                row += 1
+
+                ws[f'A{row}'] = f"Total Orders: {order_count}"
+                ws[f'A{row}'].font = Font(name='Arial', size=10, bold=True)
+                row += 1
+
+                # Column headers
+                ws[f'A{row}'] = "Product"
+                ws[f'B{row}'] = "Quantity"
+                ws[f'A{row}'].font = header_font
+                ws[f'B{row}'].font = header_font
+                ws[f'A{row}'].fill = header_fill
+                ws[f'B{row}'].fill = header_fill
+                row += 1
+
+                # Sort products by quantity in descending order
+                sorted_products = sorted(products.items(), key=lambda x: x[1], reverse=True)
+
+                # Write each product and its quantity
+                for product_name, quantity in sorted_products:
+                    ws[f'A{row}'] = product_name
+                    ws[f'B{row}'] = quantity
+                    row += 1
+
+                # Add empty row between sources
+                row += 1
+
+            # Set column widths
+            ws.column_dimensions['A'].width = 60
+            ws.column_dimensions['B'].width = 15
+
+            # Create a temporary file to save the Excel
+            with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp_file:
+                temp_file_path = temp_file.name
+
+            # Save Excel file
+            wb.save(temp_file_path)
+
+            # Create a human-readable filename
+            current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"sales_report_{date_range_str}_{current_time}.xlsx"
+
+            # Send the file to Telegram
+            url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
+
+            with open(temp_file_path, 'rb') as file:
+                files = {'document': (filename, file)}
+                data = {'chat_id': chat_id, 'caption': f"Sales Report for {display_date}"}
+                response = requests.post(url, data=data, files=files)
+
+            # Print a success message with summary to console
+            if response.status_code == 200:
+                print(f"\nSales report for {display_date} sent to Telegram successfully.")
+                return True
+            else:
+                print(f"Failed to send report to Telegram. Error: {response.text}")
+                return False
+
+        except Exception as e:
+            print(f"Error generating or sending sales report: {str(e)}")
+            return False

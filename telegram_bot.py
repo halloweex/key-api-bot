@@ -40,6 +40,9 @@ GENERATING_REPORT = 6
 # Predefined date range options
 SELECTING_RANGE_OPTION = 7
 
+# Add this near the top of the file where other states are defined
+SELECTING_REPORT_TYPE = 9
+
 # Initialize KeyCRM client
 API_KEY = os.getenv("KEYCRM_API_KEY")
 keycrm_client = KeyCRMAPI(API_KEY)
@@ -47,6 +50,56 @@ keycrm_client = KeyCRMAPI(API_KEY)
 # Date range data storage
 user_data = {}
 
+
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Start the report generation process by asking for the report type."""
+    # Ask for report type first
+    keyboard = [
+        [
+            InlineKeyboardButton("Summary Report", callback_data="report_type_summary"),
+            InlineKeyboardButton("Detailed Report", callback_data="report_type_detailed")
+        ],
+        [
+            InlineKeyboardButton("Excel Report", callback_data="report_type_excel")
+        ]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Please select the report type:", reply_markup=reply_markup)
+
+    return SELECTING_REPORT_TYPE
+
+
+async def report_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle the report type selection."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    selected_type = query.data.split('_')[-1]
+
+    # Initialize the user data
+    if user_id not in user_data:
+        user_data[user_id] = {"report_type": selected_type}
+    else:
+        user_data[user_id]["report_type"] = selected_type
+
+    # Now ask for date range
+    # Get current year and previous 2 years
+    current_year = datetime.now().year
+    keyboard = [
+        [InlineKeyboardButton(str(year), callback_data=f"start_year_{year}")
+         for year in range(current_year - 2, current_year + 1)]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(
+        f"Selected report type: {selected_type.capitalize()}\n\n"
+        f"Now please select the START year:",
+        reply_markup=reply_markup
+    )
+
+    return SELECTING_START_YEAR
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Send a message when the command /start is issued."""
@@ -63,7 +116,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     help_text = (
         "📊 *KeyCRM Sales Report Bot* 📊\n\n"
         "*Available Commands:*\n"
-        "/report - Generate a custom sales report by selecting dates\n"
+        "/report - Generate a report (summary, detailed, or Excel)\n"
         "/quick\\_report - Choose from predefined date ranges\n"
         "/today - Get today's sales report\n"
         "/yesterday - Get yesterday's sales report\n"
@@ -116,23 +169,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "To generate a report, click on any of the commands above or use the menu button."
             )
 
-async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Start the report generation process by asking for the start year."""
-    # Initialize the user data
-    user_id = update.effective_user.id
-    user_data[user_id] = {"start_date": None, "end_date": None}
-
-    # Get current year and previous 2 years
-    current_year = datetime.now().year
-    keyboard = [
-        [InlineKeyboardButton(str(year), callback_data=f"start_year_{year}")
-         for year in range(current_year - 2, current_year + 1)]
-    ]
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Please select the START year:", reply_markup=reply_markup)
-
-    return SELECTING_START_YEAR
 
 
 async def quick_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -228,14 +264,25 @@ async def range_selection_callback(update: Update, context: ContextTypes.DEFAULT
     user_data[user_id]["start_date"] = start_date
     user_data[user_id]["end_date"] = end_date
 
-    # Show the selected date range
+    # Ask for report type
+    keyboard = [
+        [
+            InlineKeyboardButton("Summary Report", callback_data="report_type_summary"),
+            InlineKeyboardButton("Detailed Report", callback_data="report_type_detailed")
+        ],
+        [
+            InlineKeyboardButton("Excel Report", callback_data="report_type_excel")
+        ]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(
-        f"Generating report for date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n"
-        f"Please wait..."
+        f"Selected date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n"
+        f"Now please select the report type:",
+        reply_markup=reply_markup
     )
 
-    # Generate the report
-    return await generate_report(update, context)
+    return SELECTING_REPORT_TYPE
 
 
 # Shortcut commands for specific date ranges
@@ -540,30 +587,6 @@ async def end_month_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return SELECTING_END_DAY
 
 
-async def end_day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle the selection of the end day and generate the report."""
-    query = update.callback_query
-    await query.answer()
-
-    user_id = update.effective_user.id
-    selected_day = int(query.data.split('_')[-1])
-
-    # Save the complete end date
-    selected_year = user_data[user_id]["end_year"]
-    selected_month = user_data[user_id]["end_month"]
-    user_data[user_id]["end_date"] = datetime(selected_year, selected_month, selected_day).date()
-
-    # Now we have both start and end dates, generate the report
-    start_date = user_data[user_id]["start_date"]
-    end_date = user_data[user_id]["end_date"]
-
-    await query.edit_message_text(
-        f"Generating report for date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n"
-        f"Please wait..."
-    )
-
-    # Generate and send the report
-    return await generate_report(update, context)
 
 
 async def generate_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -741,6 +764,87 @@ async def generate_report_direct(update: Update, context: ContextTypes.DEFAULT_T
 
     return ConversationHandler.END
 
+async def end_day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle the selection of the end day and generate the report."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    selected_day = int(query.data.split('_')[-1])
+
+    # Save the complete end date
+    selected_year = user_data[user_id]["end_year"]
+    selected_month = user_data[user_id]["end_month"]
+    user_data[user_id]["end_date"] = datetime(selected_year, selected_month, selected_day).date()
+
+    # Now we have both start and end dates, generate the report
+    start_date = user_data[user_id]["start_date"]
+    end_date = user_data[user_id]["end_date"]
+    report_type = user_data[user_id].get("report_type", "summary")  # Default to summary
+
+    await query.edit_message_text(
+        f"Generating {report_type.capitalize()} report for date range:\n"
+        f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n"
+        f"Please wait..."
+    )
+
+    # Generate and send the appropriate report type
+    if report_type == "excel":
+        return await generate_excel_report(update, context)
+    else:
+        return await generate_report(update, context)
+
+async def generate_excel_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Generate and send an Excel sales report for the selected date range."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    start_date = user_data[user_id]["start_date"]
+    end_date = user_data[user_id]["end_date"]
+
+    # Get bot token from environment
+    bot_token = BOT_TOKEN
+    chat_id = update.effective_chat.id
+
+    try:
+        # Show processing message
+        await query.edit_message_text(
+            f"Generating Excel report for {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}...\n"
+            f"This may take a moment."
+        )
+
+        # Generate and send Excel report via the KeyCRM API function
+        success = keycrm_client.send_sales_summary_excel_to_telegram(
+            target_date=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')),
+            bot_token=bot_token,
+            chat_id=chat_id,
+            tz_name="Etc/GMT-3",  # Adjust timezone as needed
+            exclude_status_id=None,  # Can be parameterized if needed
+            telegram_manager_ids=None  # Can be parameterized if needed
+        )
+
+        if success:
+            await query.edit_message_text(
+                f"Excel report for {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')} "
+                f"has been generated and sent successfully."
+            )
+        else:
+            await query.edit_message_text(
+                f"There was an error generating the Excel report. Please try again."
+            )
+
+    except Exception as e:
+        logger.error(f"Error generating Excel report: {e}")
+        await query.edit_message_text(
+            f"Sorry, there was an error generating the Excel report:\n{str(e)}\n"
+            f"Please try again with a different date range."
+        )
+
+    # Clear user data for this user
+    if user_id in user_data:
+        del user_data[user_id]
+
+    return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancel and end the conversation."""
@@ -810,6 +914,7 @@ def main() -> None:
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("report", report_command)],
         states={
+            SELECTING_REPORT_TYPE: [CallbackQueryHandler(report_type_callback, pattern=r"^report_type_")],
             SELECTING_START_YEAR: [CallbackQueryHandler(start_year_callback, pattern=r"^start_year_")],
             SELECTING_START_MONTH: [CallbackQueryHandler(start_month_callback, pattern=r"^start_month_")],
             SELECTING_START_DAY: [CallbackQueryHandler(start_day_callback, pattern=r"^start_day_")],
