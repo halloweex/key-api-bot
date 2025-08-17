@@ -30,6 +30,7 @@ class KeyCRMAPI:
             api_key (str): Your KeyCRM API key
             base_url (str): The base URL for the KeyCRM API
         """
+        print(f"Initializing KeyCRM with API key: {api_key[:10] if api_key else 'NONE'}...")
         self.api_key = api_key
         self.base_url = base_url
         self.headers = {
@@ -132,6 +133,43 @@ class KeyCRMAPI:
         """Get all available order statuses"""
         return self._make_request("GET", "status")
 
+    def get_top_products_site_instagram(
+            self,
+            target_date,
+            limit=10,
+            tz_name="Europe/Kiev",
+            exclude_status_id=None):
+        """Get TOP products for Site (Opencart) + Instagram combined."""
+
+        # Use the updated get_sales_by_product_and_source_for_date that returns 4 values
+        sales_dict, _, _, _, _ = self.get_sales_by_product_and_source_for_date(
+            target_date=target_date,
+            tz_name=tz_name,
+            exclude_status_id=exclude_status_id
+        )
+
+        # Combine Site (Opencart id=3) and Instagram (id=1) products
+        combined_products = defaultdict(int)
+        total_quantity = 0
+
+        for source_id in [1, 3]:  # Instagram and Opencart
+            if source_id in sales_dict:
+                for product_name, quantity in sales_dict[source_id].items():
+                    combined_products[product_name] += quantity
+                    total_quantity += quantity
+
+        # Sort by quantity and get top N
+        sorted_products = sorted(combined_products.items(), key=lambda x: x[1], reverse=True)
+        top_products = sorted_products[:limit]
+
+        # Calculate percentages
+        result = []
+        for product_name, quantity in top_products:
+            percentage = (quantity / total_quantity * 100) if total_quantity > 0 else 0
+            result.append((product_name, quantity, percentage))
+
+        return result, total_quantity
+
     def get_sales_by_product_and_source_for_date(
             self,
             target_date,
@@ -184,6 +222,7 @@ class KeyCRMAPI:
         all_orders = []
         excluded_orders = []
         filtered_telegram_orders = []
+        returned_orders = []
         current = start
 
         # For each day in our date range
@@ -248,10 +287,13 @@ class KeyCRMAPI:
                     manager_id_str = str(manager_id) if manager_id is not None else "None"
                     exclude_id_str = str(exclude_status_id) if exclude_status_id is not None else None
 
-                    # Get source ID
                     source_id = order.get("source_id")
 
-                    # Skip orders with excluded status
+                    # Track returned orders separately (status_id 22)
+                    if status_id in [22, 19]:
+                        returned_orders.append(order)
+                        continue
+
                     if exclude_id_str and status_id_str == exclude_id_str:
                         excluded_orders.append(order)
                         continue
@@ -287,12 +329,17 @@ class KeyCRMAPI:
 
         # Once we have all filtered orders for the entire date range, perform aggregation
         sales = defaultdict(lambda: defaultdict(int))
+        revenue = defaultdict(float)
         for order in all_orders:
             src = order.get("source_id") or "unknown"
+            order_total = 0  # ADD this
             for prod in order.get("products", []):
                 name = prod.get("name") or f"#{prod.get('id')}"
                 qty = int(prod.get("quantity", 0))
+                price = float(prod.get("price", 0))  # ADD this
                 sales[src][name] += qty
+                order_total += qty * price  # ADD this
+            revenue[src] += order_total  # ADD this
 
         # Count orders per-source
         counts = defaultdict(int)
@@ -304,8 +351,24 @@ class KeyCRMAPI:
         sales_dict = {src: dict(prod_map) for src, prod_map in sales.items()}
         counts_dict = dict(counts)
         total_orders = len(all_orders)
+        revenue_dict = dict(revenue)
 
-        return sales_dict, counts_dict, total_orders
+        # Process returns data
+        returns_data = defaultdict(lambda: {"count": 0, "revenue": 0})
+        for order in returned_orders:
+            src = order.get("source_id") or "unknown"
+            returns_data[src]["count"] += 1
+
+            order_total = 0
+            for prod in order.get("products", []):
+                qty = int(prod.get("quantity", 0))
+                price = float(prod.get("price", 0))
+                order_total += qty * price
+
+            returns_data[src]["revenue"] += order_total
+
+        returns_dict = {src: dict(data) for src, data in returns_data.items()}
+        return sales_dict, counts_dict, total_orders, revenue_dict, returns_dict
 
     def send_sales_summary_excel_to_telegram(
             self,
@@ -331,7 +394,7 @@ class KeyCRMAPI:
         """
         try:
             # Get sales data
-            sales_data, counts, total = self.get_sales_by_product_and_source_for_date(
+            sales_data, counts, total, revenue_data, returns_data = self.get_sales_by_product_and_source_for_date(
                 target_date=target_date,
                 tz_name=tz_name,
                 exclude_status_id=exclude_status_id,
@@ -405,6 +468,15 @@ class KeyCRMAPI:
                 ws[f'A{row}'].font = Font(name='Arial', size=10, bold=True)
                 row += 1
 
+                # ADD these lines:
+                total_revenue = revenue_data.get(src_id, 0)
+                avg_check = total_revenue / order_count if order_count > 0 else 0
+
+                ws[f'A{row}'] = f"Average Check: {avg_check:.2f} UAH"
+                ws[f'A{row}'].font = Font(name='Arial', size=10, bold=True)
+                ws[f'A{row}'].fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+                row += 1
+
                 # Column headers
                 ws[f'A{row}'] = "Product"
                 ws[f'B{row}'] = "Quantity"
@@ -460,3 +532,34 @@ class KeyCRMAPI:
         except Exception as e:
             print(f"Error generating or sending sales report: {str(e)}")
             return False
+
+    def get_top_products_by_source(
+            self,
+            target_date,
+            source_id,
+            limit=10,
+            tz_name="Europe/Kiev",
+            exclude_status_id=None):
+        """Get TOP products for a specific source."""
+
+        sales_dict, _, _, _, _ = self.get_sales_by_product_and_source_for_date(
+            target_date=target_date,
+            tz_name=tz_name,
+            exclude_status_id=exclude_status_id
+        )
+
+        # Get products for specific source
+        products = sales_dict.get(source_id, {})
+        total_quantity = sum(products.values())
+
+        # Sort by quantity and get top N
+        sorted_products = sorted(products.items(), key=lambda x: x[1], reverse=True)
+        top_products = sorted_products[:limit]
+
+        # Calculate percentages
+        result = []
+        for product_name, quantity in top_products:
+            percentage = (quantity / total_quantity * 100) if total_quantity > 0 else 0
+            result.append((product_name, quantity, percentage))
+
+        return result, total_quantity

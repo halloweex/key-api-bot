@@ -42,9 +42,11 @@ SELECTING_CUSTOM_END_YEAR = 5
 SELECTING_CUSTOM_END_MONTH = 6
 SELECTING_CUSTOM_END_DAY = 7
 GENERATING_REPORT = 8
+SELECTING_TOP10_SOURCE = 9
 
 # Initialize KeyCRM client
 API_KEY = os.getenv("KEYCRM_API_KEY")
+print(f"API Key from .env: {API_KEY[:10] if API_KEY else 'NOT FOUND'}...")
 keycrm_client = KeyCRMAPI(API_KEY)
 
 # Date range data storage
@@ -53,7 +55,8 @@ user_data = {}
 # UI Constants
 REPORT_TYPES = {
     "summary": "📊 Summary Report",
-    "excel": "📑 Excel Report"
+    "excel": "📑 Excel Report",
+    "top10": "🏆 TOP-10 Products"
 }
 
 DATE_RANGES = {
@@ -251,6 +254,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             InlineKeyboardButton(REPORT_TYPES["excel"], callback_data="report_type_excel")
         ],
         [
+            InlineKeyboardButton(REPORT_TYPES["top10"], callback_data="report_type_top10")  # ADD this
+        ],
+        [
             InlineKeyboardButton("🔙 Cancel", callback_data="go_back")
         ]
     ]
@@ -280,6 +286,9 @@ async def report_command_from_callback(update: Update, context: ContextTypes.DEF
             InlineKeyboardButton(REPORT_TYPES["excel"], callback_data="report_type_excel")
         ],
         [
+            InlineKeyboardButton(REPORT_TYPES["top10"], callback_data="report_type_top10")  # ADD this
+        ],
+        [
             InlineKeyboardButton("🔙 Cancel", callback_data="go_back")
         ]
     ]
@@ -307,6 +316,38 @@ async def report_type_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     user_id = update.effective_user.id
     selected_type = query.data.split('_')[-1]
+
+    # ADD this check:
+    if selected_type == "top10":
+        # Store report type
+        if user_id not in user_data:
+            user_data[user_id] = {"report_type": selected_type}
+        else:
+            user_data[user_id]["report_type"] = selected_type
+
+        # Show source selection
+        message = (
+            f"{bold('🏆 TOP-10 Products Report')}\n\n"
+            f"{italic('Select the source to view TOP-10 products:')}"
+        )
+
+        keyboard = [
+            [
+                InlineKeyboardButton("📸 Instagram", callback_data="top10_source_1"),
+                InlineKeyboardButton("🛍️ Shopify", callback_data="top10_source_4")
+            ],
+            [
+                InlineKeyboardButton("✈️ Telegram", callback_data="top10_source_2"),
+                InlineKeyboardButton("🌐 All Sources", callback_data="top10_source_all")
+            ],
+            [
+                InlineKeyboardButton("🔙 Back", callback_data="back_to_report_type")
+            ]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode="HTML")
+        return SELECTING_TOP10_SOURCE
 
     # Initialize the user data
     if user_id not in user_data:
@@ -482,6 +523,62 @@ async def custom_start_year_callback(update: Update, context: ContextTypes.DEFAU
 
     return SELECTING_CUSTOM_START_MONTH
 
+
+async def top10_source_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle TOP-10 source selection."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "back_to_report_type":
+        # Go back to report type selection
+        return await report_command_from_callback(update, context)
+
+    user_id = update.effective_user.id
+    source_selection = query.data.split('_')[-1]
+
+    # Store the selected source
+    user_data[user_id]["top10_source"] = source_selection
+
+    # Now proceed to date range selection
+    progress = create_progress_indicator(2, 3)
+
+    keyboard = [
+        [
+            InlineKeyboardButton(DATE_RANGES["today"], callback_data="range_today"),
+            InlineKeyboardButton(DATE_RANGES["yesterday"], callback_data="range_yesterday")
+        ],
+        [
+            InlineKeyboardButton(DATE_RANGES["thisweek"], callback_data="range_thisweek"),
+            InlineKeyboardButton(DATE_RANGES["thismonth"], callback_data="range_thismonth")
+        ],
+        [
+            InlineKeyboardButton(DATE_RANGES["custom"], callback_data="range_custom")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back", callback_data="back_to_source_selection")
+        ]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Show which source was selected
+    source_names = {
+        "1": "Instagram",
+        "2": "Telegram",
+        "4": "Shopify",
+        "all": "All Sources"
+    }
+
+    message = (
+        f"{bold('📊 Sales Report Generator')}\n\n"
+        f"{progress} {italic('Step 2 of 3: Select Date Range')}\n\n"
+        f"Report: {bold('TOP-10 Products')}\n"
+        f"Source: {bold(source_names.get(source_selection, 'Unknown'))}\n\n"
+        f"Now, please select the date range:"
+    )
+
+    await query.edit_message_text(message, reply_markup=reply_markup, parse_mode="HTML")
+    return SELECTING_DATE_RANGE
 
 async def custom_start_month_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle the selection of the custom start month."""
@@ -918,6 +1015,8 @@ async def prepare_generate_report(update: Update, context: ContextTypes.DEFAULT_
     # Generate the appropriate report
     if report_type == "excel":
         return await generate_excel_report(update, context)
+    elif report_type == "top10":
+        return await generate_top10_report(update, context)
     else:
         return await generate_summary_report(update, context)
 
@@ -936,6 +1035,8 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
     # Initialize counters
     total_sales_by_source = defaultdict(int)
     total_order_counts_by_source = defaultdict(int)
+    total_revenue_by_source = defaultdict(float)
+    total_returns_by_source = defaultdict(lambda: {"count": 0, "revenue": 0})
     total_orders_count = 0
 
     try:
@@ -945,7 +1046,7 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
             date_str = current.strftime("%Y-%m-%d")
 
             # Get sales data for this day
-            by_source, order_counts, day_total = keycrm_client.get_sales_by_product_and_source_for_date(
+            by_source, order_counts, day_total, revenue_data, returns_data = keycrm_client.get_sales_by_product_and_source_for_date(
                 target_date=date_str,
                 tz_name="Etc/GMT-3",  # Adjust timezone as needed
                 telegram_manager_ids=['19', '22', '4', '16']
@@ -958,6 +1059,15 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
             # Accumulate order counts
             for src_id, cnt in order_counts.items():
                 total_order_counts_by_source[src_id] += cnt
+
+            # ADD THESE LINES - accumulate revenue:
+            for src_id, revenue in revenue_data.items():
+                total_revenue_by_source[src_id] += revenue
+
+            # Accumulate returns
+            for src_id, return_info in returns_data.items():
+                total_returns_by_source[src_id]["count"] += return_info["count"]
+                total_returns_by_source[src_id]["revenue"] += return_info["revenue"]
 
             total_orders_count += day_total
             current += timedelta(days=1)
@@ -977,15 +1087,20 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
         # Add total quantity section with better formatting
         for src_id, qty in sorted(total_sales_by_source.items(), key=lambda x: x[1], reverse=True):
             name = source_dct.get(int(src_id), src_id)
-            report += f"• {bold(name)}: {qty}\n"
-        report += "\n"
+            order_count = total_order_counts_by_source.get(src_id, 0)
+            revenue = total_revenue_by_source.get(src_id, 0)
+            avg_check = revenue / order_count if order_count > 0 else 0
 
-        # Add order counts section with better formatting
-        report += f"{bold('🛒 ORDER Numbers by Source')}\n"
-        for src_id, cnt in sorted(total_order_counts_by_source.items(), key=lambda x: x[1], reverse=True):
-            name = source_dct.get(int(src_id), src_id)
-            report += f"• {bold(name)}: {cnt}\n"
-        report += "\n"
+            report += f"\n{bold(name)}:\n"
+            report += f"  • Products: {qty}\n"
+            report += f"  • Orders: {order_count}\n"
+            report += f"  • Avg Check: {avg_check:.2f} UAH\n"
+
+            # Returns data
+            returns = total_returns_by_source.get(src_id, {"count": 0, "revenue": 0})
+            if returns["count"] > 0:
+                return_rate = (returns["count"] / order_count * 100) if order_count > 0 else 0
+                report += f"  • Returns/Canceled: {returns['count']} ({return_rate:.1f}%)\n"
 
         # Add footer with timestamp and action buttons
         report += f"📝 {italic(f'Report generated on {report_time}')}"
@@ -995,6 +1110,9 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
             [
                 InlineKeyboardButton("📊 New Report", callback_data="cmd_report"),
                 InlineKeyboardButton("📑 Excel Version", callback_data="convert_to_excel")
+            ],
+            [
+                InlineKeyboardButton("🏆 TOP-10 Products", callback_data="convert_to_top10")  # ADD THIS LINE
             ],
             [InlineKeyboardButton("🏠 Main Menu", callback_data="cmd_start")]
         ]
@@ -1139,6 +1257,173 @@ async def generate_excel_report(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 
+async def change_top10_source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Change TOP-10 source while keeping the same date range."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+
+    # Keep the date range but let user select new source
+    if user_id in user_data and "start_date" in user_data[user_id]:
+        start_date = user_data[user_id]["start_date"]
+        end_date = user_data[user_id]["end_date"]
+
+        message = (
+            f"{bold('🏆 TOP-10 Products Report')}\n\n"
+            f"📅 Date: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
+            f"{italic('Select a source to view TOP-10 products:')}"
+        )
+
+        keyboard = [
+            [
+                InlineKeyboardButton("📸 Instagram", callback_data="quick_top10_1"),
+                InlineKeyboardButton("🛍️ Shopify", callback_data="quick_top10_4")
+            ],
+            [
+                InlineKeyboardButton("✈️ Telegram", callback_data="quick_top10_2"),
+                InlineKeyboardButton("🌐 All Sources", callback_data="quick_top10_all")
+            ],
+            [
+                InlineKeyboardButton("🔙 Main Menu", callback_data="cmd_start")
+            ]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await query.edit_message_text("Session expired. Please start a new report.", parse_mode="HTML")
+
+    return ConversationHandler.END
+
+
+async def quick_top10_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Generate TOP-10 for selected source using existing date range."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    source_selection = query.data.split('_')[-1]
+
+    # Update source selection
+    user_data[user_id]["top10_source"] = source_selection
+
+    # Generate report directly
+    return await generate_top10_report(update, context)
+
+async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Generate TOP-10 products report for selected source(s)."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    start_date = user_data[user_id]["start_date"]
+    end_date = user_data[user_id]["end_date"]
+    source_selection = user_data[user_id].get("top10_source", "all")
+
+    try:
+        now = datetime.now(pytz.timezone("Etc/GMT-3"))
+        report_time = now.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Define sources
+        all_sources = [
+            (1, "Instagram", "📸"),
+            (4, "Shopify", "🛍️"),
+            (2, "Telegram", "✈️")
+        ]
+
+        # Determine which sources to process
+        if source_selection == "all":
+            sources_to_process = all_sources
+            title = "🏆 TOP-10 PRODUCTS BY SOURCE"
+        else:
+            source_id = int(source_selection)
+            sources_to_process = [s for s in all_sources if s[0] == source_id]
+            source_name = sources_to_process[0][1] if sources_to_process else "Unknown"
+            title = f"🏆 TOP-10 PRODUCTS - {source_name.upper()}"
+
+        # First message - header
+        header_message = (
+            f"{bold(title)}\n\n"
+            f"📅 {bold('Date Range')}: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
+            f"⏳ {italic('Generating report...')}"
+        )
+
+        await query.edit_message_text(header_message, parse_mode="HTML")
+
+        medals = ["🥇", "🥈", "🥉"]
+        sources_with_data = 0
+
+        # Process selected source(s)
+        for source_id, source_name, emoji in sources_to_process:
+            top_products, total_quantity = keycrm_client.get_top_products_by_source(
+                target_date=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')),
+                source_id=source_id,
+                limit=10,
+                tz_name="Etc/GMT-3"
+            )
+
+            if total_quantity > 0:
+                sources_with_data += 1
+                report = f"{emoji} {bold(source_name.upper())}\n"
+                report += f"{'─' * 30}\n"
+                report += f"📦 Total Sold: {bold(str(total_quantity))}\n\n"
+
+                for i, (product_name, quantity, percentage) in enumerate(top_products, 1):
+                    if len(product_name) > 60:
+                        display_name = product_name[:57] + "..."
+                    else:
+                        display_name = product_name
+
+                    if i <= 3:
+                        medal = medals[i - 1]
+                        report += f"{medal} {bold(f'{quantity}')} ({percentage:.1f}%) - {display_name}\n\n"
+                    else:
+                        report += f"{bold(f'{i}.')} {quantity} ({percentage:.1f}%) - {display_name}\n"
+                        if i < len(top_products):
+                            report += "\n"
+
+                report += f"\n{'─' * 30}\n"
+                report += f"📝 {italic(report_time)}"
+
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=report,
+                    parse_mode="HTML"
+                )
+            else:
+                no_sales_message = f"{emoji} {bold(source_name.upper())}: {italic('No sales in this period')}"
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=no_sales_message,
+                    parse_mode="HTML"
+                )
+
+        # Final message
+        final_message = f"✅ Report generated successfully!"
+
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 New Report", callback_data="cmd_report"),
+                InlineKeyboardButton("🏆 Other Sources", callback_data="change_top10_source")
+            ],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="cmd_start")]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=final_message,
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        logger.error(f"Error generating TOP-10 report: {e}")
+        await query.edit_message_text(f"⚠️ Error: {str(e)}", parse_mode="HTML")
+
+    return ConversationHandler.END
+
 async def convert_report_format(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Convert between report formats (Summary/Excel) without starting the whole process again."""
     query = update.callback_query
@@ -1150,12 +1435,19 @@ async def convert_report_format(update: Update, context: ContextTypes.DEFAULT_TY
     # Check if we have previously selected dates for this user
     if user_id in user_data and "start_date" in user_data[user_id] and "end_date" in user_data[user_id]:
         # Use the existing date range
-        user_data[user_id]["report_type"] = conversion_type
+
+        type_mapping = {
+            "excel": "excel",
+            "summary": "summary",
+            "top10": "top10"
+        }
+        converted_type = type_mapping.get(conversion_type, conversion_type)
+        user_data[user_id]["report_type"] = converted_type
 
         # Show loading message for the conversion
         loading_message = (
             f"{bold('🔄 Converting Report Format')}\n\n"
-            f"Converting to {bold(conversion_type.capitalize())} format using the same date range:\n"
+            f"Converting to {bold(converted_type.capitalize())} format using the same date range:\n"
             f"📅 {bold(user_data[user_id]['start_date'].strftime('%Y-%m-%d'))} to "
             f"{bold(user_data[user_id]['end_date'].strftime('%Y-%m-%d'))}\n\n"
             f"⏳ {italic('Please wait...')}"
@@ -1294,8 +1586,11 @@ def main() -> None:
             CallbackQueryHandler(report_command_from_callback, pattern=r"^cmd_report$"),
             CallbackQueryHandler(command_button_handler, pattern=r"^cmd_"),
             CallbackQueryHandler(convert_report_format, pattern=r"^convert_to_"),
-            CallbackQueryHandler(quick_report_callback, pattern=r"^quick_")
+            CallbackQueryHandler(quick_report_callback, pattern=r"^quick_"),
+            CallbackQueryHandler(change_top10_source, pattern=r"^change_top10_source$"),
+            CallbackQueryHandler(quick_top10_callback, pattern=r"^quick_top10_")
         ],
+
         states={
             SELECTING_REPORT_TYPE: [
                 CallbackQueryHandler(report_type_callback, pattern=r"^report_type_|^go_back")
@@ -1322,6 +1617,9 @@ def main() -> None:
             ],
             SELECTING_CUSTOM_END_DAY: [
                 CallbackQueryHandler(custom_end_day_callback, pattern=r"^custom_end_day_|^back_to_custom_end_month")
+            ],
+            SELECTING_TOP10_SOURCE: [
+                CallbackQueryHandler(top10_source_callback, pattern=r"^top10_source_|^back_to_report_type")
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
