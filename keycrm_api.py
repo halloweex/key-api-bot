@@ -2,13 +2,13 @@ import os
 import requests
 import json
 from datetime import datetime, time, timedelta
-import pytz
 from collections import defaultdict
 from dotenv import load_dotenv
 import time
 import tempfile
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
+from zoneinfo import ZoneInfo
 
 load_dotenv()
 
@@ -137,7 +137,7 @@ class KeyCRMAPI:
             self,
             target_date,
             limit=10,
-            tz_name="Europe/Kiev",
+            tz_name="Europe/Kyiv",
             exclude_status_id=None):
         """Get TOP products for Site (Opencart) + Instagram combined."""
 
@@ -173,7 +173,7 @@ class KeyCRMAPI:
     def get_sales_by_product_and_source_for_date(
             self,
             target_date,
-            tz_name="Europe/Kiev",
+            tz_name="Europe/Kyiv",
             exclude_status_id=None,
             telegram_manager_ids=None):
         """
@@ -186,7 +186,7 @@ class KeyCRMAPI:
                                               - 'YYYY-MM-DD' string
                                               - (start_date, end_date) tuple for a date range
             tz_name (str): Timezone name to define your local midnight-to-midnight.
-                           Default is "Europe/Kiev" (Kyiv timezone).
+                           Default is "Europe/Kyiv" (Kyiv timezone).
             exclude_status_id (int, optional): Status ID to exclude from results
             telegram_manager_ids (list, optional): List of manager IDs to include for Telegram orders
 
@@ -224,18 +224,20 @@ class KeyCRMAPI:
         filtered_telegram_orders = []
         returned_orders = []
         current = start
-
+        print(f"DEBUG tz_name: {tz_name}")
+        tz = ZoneInfo(tz_name)
+        #tz = ZoneInfo("Europe/Kyiv")  # Использует актуальную системную tzdata
         # For each day in our date range
         while current <= end:
-            # HARDCODED TIME CONVERSION: Kyiv is UTC+3
-            # A full day in Kyiv (00:00 to 23:59) corresponds to:
-            # Previous day 21:00 to current day 20:59 in UTC
-            current_day_str = current.strftime("%Y-%m-%d")
-            prev_day = current - timedelta(days=1)
-            prev_day_str = prev_day.strftime("%Y-%m-%d")
+            # Create local midnight and end of day
+            local_start = datetime(current.year, current.month, current.day, 0, 0, 0, tzinfo=tz)
+            local_end = datetime(current.year, current.month, current.day, 23, 59, 59, tzinfo=tz)
 
-            utc_start_str = f"{prev_day_str} 21:00:00"
-            utc_end_str = f"{current_day_str} 20:59:59"
+            utc_start = local_start.astimezone(ZoneInfo("UTC"))
+            utc_end = local_end.astimezone(ZoneInfo("UTC"))
+
+            utc_start_str = utc_start.strftime("%Y-%m-%d %H:%M:%S")
+            utc_end_str = utc_end.strftime("%Y-%m-%d %H:%M:%S")
 
             # For each source, get the full order details
             params = {
@@ -332,14 +334,12 @@ class KeyCRMAPI:
         revenue = defaultdict(float)
         for order in all_orders:
             src = order.get("source_id") or "unknown"
-            order_total = 0  # ADD this
             for prod in order.get("products", []):
                 name = prod.get("name") or f"#{prod.get('id')}"
                 qty = int(prod.get("quantity", 0))
-                price = float(prod.get("price", 0))  # ADD this
                 sales[src][name] += qty
-                order_total += qty * price  # ADD this
-            revenue[src] += order_total  # ADD this
+            order_total = float(order.get("grand_total", 0))
+            revenue[src] += order_total
 
         # Count orders per-source
         counts = defaultdict(int)
@@ -358,13 +358,7 @@ class KeyCRMAPI:
         for order in returned_orders:
             src = order.get("source_id") or "unknown"
             returns_data[src]["count"] += 1
-
-            order_total = 0
-            for prod in order.get("products", []):
-                qty = int(prod.get("quantity", 0))
-                price = float(prod.get("price", 0))
-                order_total += qty * price
-
+            order_total = float(order.get("grand_total", 0))
             returns_data[src]["revenue"] += order_total
 
         returns_dict = {src: dict(data) for src, data in returns_data.items()}
@@ -375,7 +369,7 @@ class KeyCRMAPI:
             target_date,
             bot_token,
             chat_id,
-            tz_name="Europe/Kiev",
+            tz_name="Europe/Kyiv",
             exclude_status_id=None,
             telegram_manager_ids=None):
         """
@@ -385,7 +379,7 @@ class KeyCRMAPI:
             target_date (date or str or tuple): The date(s) to get sales for
             bot_token (str): Telegram bot API token
             chat_id (str or int): Telegram chat ID to send the file to
-            tz_name (str): Timezone name (default: "Europe/Kiev")
+            tz_name (str): Timezone name (default: "Europe/Kyiv")
             exclude_status_id (int, optional): Status ID to exclude from results
             telegram_manager_ids (list, optional): List of manager IDs to include for Telegram orders
 
@@ -538,7 +532,7 @@ class KeyCRMAPI:
             target_date,
             source_id,
             limit=10,
-            tz_name="Europe/Kiev",
+            tz_name="Europe/Kyiv",
             exclude_status_id=None):
         """Get TOP products for a specific source."""
 

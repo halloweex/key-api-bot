@@ -1048,7 +1048,7 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
             # Get sales data for this day
             by_source, order_counts, day_total, revenue_data, returns_data = keycrm_client.get_sales_by_product_and_source_for_date(
                 target_date=date_str,
-                tz_name="Etc/GMT-3",  # Adjust timezone as needed
+                tz_name="Europe/Kyiv",  # Adjust timezone as needed
                 telegram_manager_ids=['19', '22', '4', '16']
             )
 
@@ -1073,7 +1073,7 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
             current += timedelta(days=1)
 
         # Build final timestamp in GMT+3
-        now = datetime.now(pytz.timezone("Etc/GMT-3"))
+        now = datetime.now(pytz.timezone("Europe/Kyiv"))
         report_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
         # Format the report with improved styling
@@ -1321,7 +1321,7 @@ async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TY
     source_selection = user_data[user_id].get("top10_source", "all")
 
     try:
-        now = datetime.now(pytz.timezone("Etc/GMT-3"))
+        now = datetime.now(pytz.timezone("Europe/Kyiv"))
         report_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
         # Define sources
@@ -1359,7 +1359,7 @@ async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TY
                 target_date=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')),
                 source_id=source_id,
                 limit=10,
-                tz_name="Etc/GMT-3"
+                tz_name="Europe/Kyiv"
             )
 
             if total_quantity > 0:
