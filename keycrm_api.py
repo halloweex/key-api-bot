@@ -236,14 +236,17 @@ class KeyCRMAPI:
             utc_start = local_start.astimezone(ZoneInfo("UTC"))
             utc_end = local_end.astimezone(ZoneInfo("UTC"))
 
+            utc_end_extended = utc_end + timedelta(hours=4)
+
             utc_start_str = utc_start.strftime("%Y-%m-%d %H:%M:%S")
             utc_end_str = utc_end.strftime("%Y-%m-%d %H:%M:%S")
+            utc_end_extended_str = utc_end_extended.strftime("%Y-%m-%d %H:%M:%S")
 
             # For each source, get the full order details
             params = {
                 "include": "products,manager",  # Include manager for filtering
                 "limit": 50,  # KeyCRM API appears to have a 50-item limit per page
-                "filter[created_between]": f"{utc_start_str}, {utc_end_str}",
+                "filter[created_between]": f"{utc_start_str}, {utc_end_extended_str}",
             }
 
             # Get all orders for this day
@@ -271,6 +274,12 @@ class KeyCRMAPI:
 
                 # Process each order in the batch
                 for order in batch:
+                    # Filter by ordered_at (not created_at) to match CRM UI
+                    ordered_at_str = order.get("ordered_at")
+                    if ordered_at_str:
+                        ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
+                        if not (utc_start <= ordered_at <= utc_end):
+                            continue  # Skip - ordered_at outside target day
                     # Get manager ID if present
                     manager_id = None
                     if "manager" in order and order["manager"]:
@@ -292,7 +301,7 @@ class KeyCRMAPI:
                     source_id = order.get("source_id")
 
                     # Track returned orders separately (status_id 22)
-                    if status_id in [22, 19]:
+                    if status_id in [22, 19, 21, 23]:
                         returned_orders.append(order)
                         continue
 
