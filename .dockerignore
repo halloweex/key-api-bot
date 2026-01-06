@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.git/
+.gitignore
+.idea/
+.claude/
+*.pem
+*.md
+test.py
+REFACTORING_SUMMARY.md

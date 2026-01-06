@@ -1,0 +1,289 @@
+"""
+Message formatters and text utilities for the Telegram bot.
+
+Contains text formatting helpers, message templates, and report formatters.
+"""
+from datetime import date
+from typing import Dict, List, Tuple
+from bot.config import REPORT_TYPES, SOURCE_MAPPING, MEDALS
+
+
+# ─── Text Formatting Helpers ────────────────────────────────────────────────
+
+def bold(text: str) -> str:
+    """Make text bold in Telegram HTML format."""
+    return f"<b>{text}</b>"
+
+
+def italic(text: str) -> str:
+    """Make text italic in Telegram HTML format."""
+    return f"<i>{text}</i>"
+
+
+def code(text: str) -> str:
+    """Format text as code in Telegram HTML format."""
+    return f"<code>{text}</code>"
+
+
+def create_progress_indicator(current_step: int, total_steps: int) -> str:
+    """Create a progress indicator for multi-step processes."""
+    filled = "●" * current_step
+    empty = "○" * (total_steps - current_step)
+    return f"{filled}{empty}"
+
+
+# ─── Message Templates ──────────────────────────────────────────────────────
+
+class Messages:
+    """Standard message templates."""
+
+    @staticmethod
+    def welcome(username: str) -> str:
+        """Generate welcome message."""
+        return (
+            f"👋 {bold('Welcome, ' + username)}! \n\n"
+            f"I'm your {bold('KeyCRM Sales Report')} assistant. I can help you generate detailed sales reports "
+            f"from your KeyCRM data.\n\n"
+            f"🚀 {italic('What would you like to do?')}"
+        )
+
+    @staticmethod
+    def help_text() -> str:
+        """Generate help message."""
+        return (
+            f"{bold('📊 KeyCRM Sales Report Bot 📊')}\n\n"
+            f"{bold('Available Commands:')}\n"
+            f"• /report - Generate a sales report\n"
+            f"• /cancel - Cancel the current operation\n"
+            f"• /help - Show this help message\n\n"
+            f"{bold('How to use:')}\n"
+            f"1️⃣ Start with /report command\n"
+            f"2️⃣ Select report type (Summary or Excel)\n"
+            f"3️⃣ Choose date range\n"
+            f"4️⃣ View your report results\n\n"
+            f"{italic('Need more assistance? Contact support at support@example.com')}"
+        )
+
+    @staticmethod
+    def cancel() -> str:
+        """Generate cancellation message."""
+        return (
+            f"{bold('🛑 Operation Cancelled')}\n\n"
+            f"I've cancelled the current operation as requested.\n"
+            f"What would you like to do next?"
+        )
+
+    @staticmethod
+    def report_selection(step: int = 1, total_steps: int = 3) -> str:
+        """Generate report type selection message."""
+        progress = create_progress_indicator(step, total_steps)
+        return (
+            f"{bold('📊 Sales Report Generator')}\n\n"
+            f"{progress} {italic(f'Step {step} of {total_steps}: Select Report Type')}\n\n"
+            f"Please choose the type of report you'd like to generate:"
+        )
+
+    @staticmethod
+    def date_selection(report_type: str, step: int = 2, total_steps: int = 3) -> str:
+        """Generate date range selection message."""
+        progress = create_progress_indicator(step, total_steps)
+        return (
+            f"{bold('📊 Sales Report Generator')}\n\n"
+            f"{progress} {italic(f'Step {step} of {total_steps}: Select Date Range')}\n\n"
+            f"Selected report type: {bold(REPORT_TYPES.get(report_type, report_type))}\n\n"
+            f"Now, please select the date range for your report:"
+        )
+
+    @staticmethod
+    def top10_date_selection(source_name: str, step: int = 2, total_steps: int = 3) -> str:
+        """Generate date selection message for TOP-10 report."""
+        progress = create_progress_indicator(step, total_steps)
+        return (
+            f"{bold('📊 Sales Report Generator')}\n\n"
+            f"{progress} {italic(f'Step {step} of {total_steps}: Select Date Range')}\n\n"
+            f"Report: {bold('TOP-10 Products')}\n"
+            f"Source: {bold(source_name)}\n\n"
+            f"Now, please select the date range:"
+        )
+
+    @staticmethod
+    def loading(report_type: str, start_date: date, end_date: date, step: int = 3, total_steps: int = 3) -> str:
+        """Generate loading message."""
+        progress = create_progress_indicator(step, total_steps)
+        return (
+            f"{bold('📊 Sales Report Generator')}\n\n"
+            f"{progress} {italic(f'Step {step} of {total_steps}: Generating Report')}\n\n"
+            f"Report type: {bold(REPORT_TYPES.get(report_type, report_type))}\n"
+            f"Date range: {bold(start_date.strftime('%Y-%m-%d'))} to {bold(end_date.strftime('%Y-%m-%d'))}\n\n"
+            f"⏳ {italic('Please wait while I generate your report...')}"
+        )
+
+    @staticmethod
+    def excel_preparing(start_date: date, end_date: date) -> str:
+        """Generate Excel file preparation message."""
+        return (
+            f"{bold('📑 Preparing Excel Report')}\n\n"
+            f"📅 {bold('Date Range')}: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
+            f"⏳ {italic('Creating your Excel file...')}\n"
+            f"This may take a moment depending on the amount of data."
+        )
+
+    @staticmethod
+    def excel_success(start_date: date, end_date: date) -> str:
+        """Generate Excel success message."""
+        return (
+            f"{bold('✅ Excel Report Generated!')}\n\n"
+            f"📅 {bold('Date Range')}: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
+            f"📎 Your Excel file has been sent as a separate message.\n"
+            f"📊 {italic('What would you like to do next?')}"
+        )
+
+    @staticmethod
+    def error(error_msg: str) -> str:
+        """Generate error message."""
+        return (
+            f"{bold('⚠️ Error Generating Report')}\n\n"
+            f"I encountered a problem while generating your report:\n"
+            f"{italic(error_msg)}\n\n"
+            f"Please try again with a different date range or contact support if the issue persists."
+        )
+
+    @staticmethod
+    def excel_error(error_msg: str = None) -> str:
+        """Generate Excel error message."""
+        if error_msg:
+            return (
+                f"{bold('⚠️ Excel Report Error')}\n\n"
+                f"I encountered an issue while generating your Excel report:\n"
+                f"{italic(error_msg)}\n\n"
+                f"Would you like to try again or generate a summary report instead?"
+            )
+        else:
+            return (
+                f"{bold('⚠️ Excel Report Error')}\n\n"
+                f"I was unable to generate your Excel report.\n\n"
+                f"Would you like to try again or generate a summary report instead?"
+            )
+
+    @staticmethod
+    def custom_date_prompt(step_name: str, step_num: int, total_steps: int, context: str = "") -> str:
+        """Generate custom date selection prompt."""
+        return (
+            f"{bold('📊 Custom Date Selection')}\n\n"
+            f"{italic(f'Step {step_num} of {total_steps}: {step_name}')}\n\n"
+            f"{context}"
+        )
+
+    @staticmethod
+    def top10_source_selection() -> str:
+        """Generate TOP-10 source selection message."""
+        return (
+            f"{bold('🏆 TOP-10 Products Report')}\n\n"
+            f"{italic('Select the source to view TOP-10 products:')}"
+        )
+
+    @staticmethod
+    def top10_change_source(start_date: date, end_date: date) -> str:
+        """Generate TOP-10 change source message."""
+        return (
+            f"{bold('🏆 TOP-10 Products Report')}\n\n"
+            f"📅 Date: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
+            f"{italic('Select a source to view TOP-10 products:')}"
+        )
+
+
+# ─── Report Formatters ──────────────────────────────────────────────────────
+
+class ReportFormatters:
+    """Report formatting functions."""
+
+    @staticmethod
+    def format_summary(
+        sales_by_source: Dict,
+        order_counts: Dict,
+        revenue_by_source: Dict,
+        returns_by_source: Dict,
+        total_orders: int,
+        start_date: date,
+        end_date: date,
+        report_time: str
+    ) -> str:
+        """Format summary sales report."""
+        start_date_str = start_date.strftime("%Y-%m-%d")
+        end_date_str = end_date.strftime("%Y-%m-%d")
+
+        report = (
+            f"{bold('📊 SALES SUMMARY REPORT')}\n\n"
+            f"📅 {bold('Date Range')}: {start_date_str} to {end_date_str}\n"
+            f"📈 {bold('Total Orders')}: {total_orders}\n\n"
+            f"{bold('📦 TOTAL Products by Source')}\n"
+        )
+
+        # Add data for each source - sort by total quantity (sum of all products)
+        for src_id, products_dict in sorted(sales_by_source.items(), key=lambda x: sum(x[1].values()), reverse=True):
+            qty = sum(products_dict.values())
+            name = SOURCE_MAPPING.get(int(src_id), src_id)
+            order_count = order_counts.get(src_id, 0)
+            revenue = revenue_by_source.get(src_id, 0)
+            avg_check = revenue / order_count if order_count > 0 else 0
+
+            report += f"\n{bold(name)}:\n"
+            report += f"  • Products: {qty}\n"
+            report += f"  • Orders: {order_count}\n"
+            report += f"  • Avg Check: {avg_check:.2f} UAH\n"
+
+            # Returns data
+            returns = returns_by_source.get(src_id, {"count": 0, "revenue": 0})
+            if returns["count"] > 0:
+                return_rate = (returns["count"] / order_count * 100) if order_count > 0 else 0
+                report += f"  • Returns/Canceled: {returns['count']} ({return_rate:.1f}%)\n"
+
+        # Add footer
+        report += f"\n📝 {italic(f'Report generated on {report_time}')}"
+
+        return report
+
+    @staticmethod
+    def format_top10(
+        top_products: List[Tuple[str, int, float]],
+        source_name: str,
+        emoji: str,
+        total_quantity: int,
+        report_time: str
+    ) -> str:
+        """Format TOP-10 products report."""
+        if total_quantity == 0:
+            return f"{emoji} {bold(source_name.upper())}: {italic('No sales in this period')}"
+
+        report = f"{emoji} {bold(source_name.upper())}\n"
+        report += f"{'─' * 30}\n"
+        report += f"📦 Total Sold: {bold(str(total_quantity))}\n\n"
+
+        for i, (product_name, quantity, percentage) in enumerate(top_products, 1):
+            # Truncate long product names
+            if len(product_name) > 60:
+                display_name = product_name[:57] + "..."
+            else:
+                display_name = product_name
+
+            if i <= 3:
+                medal = MEDALS[i - 1]
+                report += f"{medal} {bold(str(quantity))} ({percentage:.1f}%) - {display_name}\n\n"
+            else:
+                report += f"{bold(f'{i}.')} {quantity} ({percentage:.1f}%) - {display_name}\n"
+                if i < len(top_products):
+                    report += "\n"
+
+        report += f"\n{'─' * 30}\n"
+        report += f"📝 {italic(report_time)}"
+
+        return report
+
+    @staticmethod
+    def format_top10_header(title: str, start_date: date, end_date: date) -> str:
+        """Format TOP-10 report header."""
+        return (
+            f"{bold(title)}\n\n"
+            f"📅 {bold('Date Range')}: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
+            f"⏳ {italic('Generating report...')}"
+        )
