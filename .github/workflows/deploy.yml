@@ -39,6 +39,7 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             cd /home/${{ secrets.EC2_USER }}/key-api-bot
+            git pull origin main
             docker-compose pull
             docker-compose up -d
             docker image prune -f
