@@ -11,7 +11,7 @@ import time
 import tempfile
 import requests
 import openpyxl
-from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.styles import Font, PatternFill
 from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Any
@@ -67,10 +67,9 @@ class ReportService:
             - revenue_dict: {source_id: total_revenue, ...}
             - returns_dict: {source_id: {"count": N, "revenue": R}, ...}
         """
-        # Ensure telegram_manager_ids is a list of strings
+        # Use default manager IDs if not provided
         if telegram_manager_ids is None:
             telegram_manager_ids = TELEGRAM_MANAGER_IDS
-        telegram_manager_ids = [str(id) for id in telegram_manager_ids]
 
         # Determine if we're dealing with a single date or date range
         if isinstance(target_date, tuple) and len(target_date) == 2:
@@ -93,7 +92,7 @@ class ReportService:
         all_orders = []
         returned_orders = []
         tz = ZoneInfo(tz_name)
-        return_status_ids = {19, 21, 22, 23}
+        return_status_ids = set(RETURN_STATUS_IDS)
 
         # Calculate UTC boundaries for the ENTIRE period
         local_period_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
@@ -180,7 +179,7 @@ class ReportService:
             page += 1
 
             # Add a small delay to avoid hitting API rate limits
-            time.sleep(0.3)
+            time.sleep(API_REQUEST_DELAY)
 
         # Aggregate sales data
         sales = defaultdict(lambda: defaultdict(int))

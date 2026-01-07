@@ -70,7 +70,7 @@ def create_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(handlers.report_type_callback, pattern=r"^report_type_|^go_back")
             ],
             ConversationState.SELECTING_DATE_RANGE: [
-                CallbackQueryHandler(handlers.date_range_callback, pattern=r"^range_|^back_to_report_type")
+                CallbackQueryHandler(handlers.date_range_callback, pattern=r"^range_|^back_to_report_type|^back_to_source_selection")
             ],
             ConversationState.SELECTING_CUSTOM_START_YEAR: [
                 CallbackQueryHandler(handlers.custom_start_year_callback, pattern=r"^custom_start_year_|^back_to_date_range")

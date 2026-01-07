@@ -193,6 +193,14 @@ async def prepare_generate_report(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     user_id = update.effective_user.id
 
+    # Validate session data exists
+    if user_id not in user_data or "start_date" not in user_data[user_id]:
+        await query.edit_message_text(
+            "⚠️ Session expired. Please start a new report with /report",
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
     start_date = user_data[user_id]["start_date"]
     end_date = user_data[user_id]["end_date"]
     report_type = user_data[user_id]["report_type"]
@@ -228,6 +236,14 @@ async def date_range_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_REPORT_TYPE
+
+    if query.data == "back_to_source_selection":
+        await query.edit_message_text(
+            Messages.top10_source_selection(),
+            reply_markup=Keyboards.top10_sources(),
+            parse_mode="HTML"
+        )
+        return ConversationState.SELECTING_TOP10_SOURCE
 
     user_id = update.effective_user.id
     selected_range = query.data.split('_')[1]
@@ -652,6 +668,14 @@ async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     user_id = update.effective_user.id
 
+    # Validate session data exists
+    if user_id not in user_data or "start_date" not in user_data[user_id]:
+        await query.edit_message_text(
+            "⚠️ Session expired. Please start a new report with /report",
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
     start_date = user_data[user_id]["start_date"]
     end_date = user_data[user_id]["end_date"]
     source_selection = user_data[user_id].get("top10_source", "all")
@@ -730,6 +754,14 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     user_id = update.effective_user.id
 
+    # Validate session data exists
+    if user_id not in user_data or "start_date" not in user_data[user_id]:
+        await query.edit_message_text(
+            "⚠️ Session expired. Please start a new report with /report",
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
     start_date = user_data[user_id]["start_date"]
     end_date = user_data[user_id]["end_date"]
 
@@ -784,6 +816,14 @@ async def generate_excel_report(update: Update, context: ContextTypes.DEFAULT_TY
     """Generate and send an Excel sales report."""
     query = update.callback_query
     user_id = update.effective_user.id
+
+    # Validate session data exists
+    if user_id not in user_data or "start_date" not in user_data[user_id]:
+        await query.edit_message_text(
+            "⚠️ Session expired. Please start a new report with /report",
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
 
     start_date = user_data[user_id]["start_date"]
     end_date = user_data[user_id]["end_date"]

@@ -81,7 +81,7 @@ SOURCE_EMOJIS = {
 
 # ─── Pagination Settings ────────────────────────────────────────────────────
 API_PAGE_LIMIT = 50  # KeyCRM API page limit
-API_REQUEST_DELAY = 0.5  # Delay between API calls in seconds
+API_REQUEST_DELAY = 0.3  # Delay between API calls in seconds
 
 # ─── Medal Emojis for TOP-10 ────────────────────────────────────────────────
 MEDALS = ["🥇", "🥈", "🥉"]
