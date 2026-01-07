@@ -4,9 +4,15 @@ Pure HTTP client for KeyCRM OpenAPI.
 This module contains ONLY HTTP request methods and simple API wrappers.
 Business logic is handled in services.py.
 """
+import logging
 import requests
 from typing import Dict, Optional, Any
 from bot.config import KEYCRM_BASE_URL
+
+logger = logging.getLogger(__name__)
+
+# Request timeout in seconds
+REQUEST_TIMEOUT = 30
 
 
 class KeyCRMClient:
@@ -50,13 +56,13 @@ class KeyCRMClient:
 
         try:
             if method.upper() == "GET":
-                response = requests.get(url, headers=self.headers, params=params)
+                response = requests.get(url, headers=self.headers, params=params, timeout=REQUEST_TIMEOUT)
             elif method.upper() == "POST":
-                response = requests.post(url, headers=self.headers, json=data)
+                response = requests.post(url, headers=self.headers, json=data, timeout=REQUEST_TIMEOUT)
             elif method.upper() == "PUT":
-                response = requests.put(url, headers=self.headers, json=data)
+                response = requests.put(url, headers=self.headers, json=data, timeout=REQUEST_TIMEOUT)
             elif method.upper() == "DELETE":
-                response = requests.delete(url, headers=self.headers, params=params)
+                response = requests.delete(url, headers=self.headers, params=params, timeout=REQUEST_TIMEOUT)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
 
@@ -66,11 +72,14 @@ class KeyCRMClient:
                 return response.json()
             return {"status": "success"}
 
+        except requests.exceptions.Timeout:
+            logger.error(f"Request timeout after {REQUEST_TIMEOUT}s: {method} {endpoint}")
+            return {"error": f"Request timeout after {REQUEST_TIMEOUT} seconds"}
+
         except requests.exceptions.RequestException as e:
-            print(f"Error making request: {e}")
+            logger.error(f"API request failed: {method} {endpoint}", exc_info=True)
             if hasattr(e, 'response') and e.response is not None:
-                print(f"Response status code: {e.response.status_code}")
-                print(f"Response body: {e.response.text}")
+                logger.error(f"Response: {e.response.status_code} - {e.response.text[:200]}")
             return {"error": str(e)}
 
     # ─── Order API Methods ──────────────────────────────────────────────────

@@ -3,9 +3,70 @@ Message formatters and text utilities for the Telegram bot.
 
 Contains text formatting helpers, message templates, and report formatters.
 """
+import logging
 from datetime import date
 from typing import Dict, List, Tuple
 from bot.config import REPORT_TYPES, SOURCE_MAPPING, MEDALS
+
+logger = logging.getLogger(__name__)
+
+# Telegram message length limit
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+TELEGRAM_SAFE_MESSAGE_LENGTH = 3500  # Leave room for formatting
+
+
+def truncate_message(message: str, max_length: int = TELEGRAM_SAFE_MESSAGE_LENGTH) -> str:
+    """
+    Truncate message if it exceeds max length.
+
+    Args:
+        message: The message to truncate
+        max_length: Maximum allowed length
+
+    Returns:
+        Truncated message with indicator if truncated
+    """
+    if len(message) <= max_length:
+        return message
+
+    logger.warning(f"Message truncated from {len(message)} to {max_length} characters")
+    truncated = message[:max_length - 50]
+    return truncated + "\n\n⚠️ <i>Message truncated due to length...</i>"
+
+
+def split_message(message: str, max_length: int = TELEGRAM_SAFE_MESSAGE_LENGTH) -> List[str]:
+    """
+    Split a long message into multiple parts.
+
+    Args:
+        message: The message to split
+        max_length: Maximum length per part
+
+    Returns:
+        List of message parts
+    """
+    if len(message) <= max_length:
+        return [message]
+
+    parts = []
+    lines = message.split('\n')
+    current_part = ""
+
+    for line in lines:
+        # If adding this line would exceed limit, start a new part
+        if len(current_part) + len(line) + 1 > max_length:
+            if current_part:
+                parts.append(current_part.rstrip())
+            current_part = line + '\n'
+        else:
+            current_part += line + '\n'
+
+    # Add the last part
+    if current_part:
+        parts.append(current_part.rstrip())
+
+    logger.info(f"Message split into {len(parts)} parts")
+    return parts
 
 
 # ─── Text Formatting Helpers ────────────────────────────────────────────────

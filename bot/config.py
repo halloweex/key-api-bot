@@ -79,9 +79,43 @@ SOURCE_EMOJIS = {
     4: "🛍️"
 }
 
+# Sources available for TOP-10 reports (id, name, emoji)
+TOP10_SOURCES = [
+    (1, "Instagram", "📸"),
+    (4, "Shopify", "🛍️"),
+    (2, "Telegram", "✈️")
+]
+
 # ─── Pagination Settings ────────────────────────────────────────────────────
 API_PAGE_LIMIT = 50  # KeyCRM API page limit
 API_REQUEST_DELAY = 0.3  # Delay between API calls in seconds
+
+# ─── Order Sync Buffer ─────────────────────────────────────────────────────
+# Buffer time (hours) added to API queries to catch orders with delayed sync.
+# Some integrations (Shopify, Opencart) may have delays between when an order
+# is placed (ordered_at) and when it syncs to KeyCRM (created_at).
+# We filter by created_at in API but then filter by ordered_at locally.
+ORDER_SYNC_BUFFER_HOURS = 24
+
+# ─── Date Picker Settings ──────────────────────────────────────────────────
+YEAR_RANGE_PAST = 2  # How many years back to show in date picker
+
+
+def get_year_choices(from_year: int = None) -> list:
+    """
+    Get list of years for date picker.
+
+    Args:
+        from_year: Optional start year. If None, uses current_year - YEAR_RANGE_PAST
+
+    Returns:
+        List of years from from_year to current year
+    """
+    from datetime import datetime
+    current_year = datetime.now().year
+    start_year = from_year if from_year else current_year - YEAR_RANGE_PAST
+    return list(range(start_year, current_year + 1))
+
 
 # ─── Medal Emojis for TOP-10 ────────────────────────────────────────────────
 MEDALS = ["🥇", "🥈", "🥉"]

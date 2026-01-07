@@ -36,21 +36,20 @@ async def setup_command_menu(application: Application) -> None:
             BotCommand("cancel", "🛑 Cancel current operation")
         ]
 
-        print("Setting bot commands...")
+        logger.info("Setting bot commands...")
         await application.bot.set_my_commands(commands)
-        print("Bot commands set successfully")
+        logger.info("Bot commands set successfully")
 
         # Set menu button
         try:
-            print("Setting menu button...")
+            logger.info("Setting menu button...")
             await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-            print("Menu button set successfully")
+            logger.info("Menu button set successfully")
         except Exception as menu_error:
-            print(f"Warning: Could not set menu button: {menu_error}")
-            print("This is not critical - the commands will still work.")
+            logger.warning(f"Could not set menu button: {menu_error} (not critical)")
 
     except Exception as e:
-        print(f"Error in setup_command_menu: {e}")
+        logger.error(f"Error in setup_command_menu: {e}", exc_info=True)
 
 
 def create_conversation_handler() -> ConversationHandler:
@@ -103,17 +102,17 @@ def main() -> None:
     """Start the bot."""
     # Validate configuration
     if not BOT_TOKEN:
-        print("Error: No BOT_TOKEN found in environment variables.")
-        print("Please set the BOT_TOKEN environment variable or add it to your .env file.")
+        logger.error("No BOT_TOKEN found in environment variables")
+        logger.error("Please set the BOT_TOKEN environment variable or add it to your .env file")
         return
 
     if not KEYCRM_API_KEY:
-        print("Error: No KEYCRM_API_KEY found in environment variables.")
-        print("Please set the KEYCRM_API_KEY environment variable or add it to your .env file.")
+        logger.error("No KEYCRM_API_KEY found in environment variables")
+        logger.error("Please set the KEYCRM_API_KEY environment variable or add it to your .env file")
         return
 
-    print(f"Starting KeyCRM Telegram bot (Refactored Version)...")
-    print(f"API Key: {KEYCRM_API_KEY[:10] if KEYCRM_API_KEY else 'NOT FOUND'}...")
+    logger.info("Starting KeyCRM Telegram bot (Refactored Version)...")
+    logger.debug("API Key configured successfully")
 
     # Initialize services
     api_client = KeyCRMClient(KEYCRM_API_KEY)
@@ -125,7 +124,7 @@ def main() -> None:
     # Create the Application
     application = Application.builder().token(BOT_TOKEN).build()
 
-    print("Registering command handlers...")
+    logger.info("Registering command handlers...")
 
     # Add conversation handler
     conv_handler = create_conversation_handler()
@@ -143,20 +142,29 @@ def main() -> None:
     async def set_commands(context):
         try:
             await setup_command_menu(application)
-            print("Command menu setup complete.")
+            logger.info("Command menu setup complete")
         except Exception as e:
-            print(f"Error setting up command menu: {e}")
+            logger.error(f"Error setting up command menu: {e}", exc_info=True)
+
+    # Periodic session cleanup job
+    async def cleanup_sessions(context):
+        count = handlers.cleanup_expired_sessions()
+        if count > 0:
+            logger.debug(f"Cleaned up {count} expired sessions")
 
     # Set up command menu at startup
     application.job_queue.run_once(set_commands, 1)
 
-    print("Bot initialized. Starting polling...")
+    # Run session cleanup every 10 minutes
+    application.job_queue.run_repeating(cleanup_sessions, interval=600, first=60)
+
+    logger.info("Bot initialized. Starting polling...")
 
     # Start the bot
     try:
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
-        print(f"Error starting bot: {e}")
+        logger.error(f"Error starting bot: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

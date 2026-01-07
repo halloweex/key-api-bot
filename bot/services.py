@@ -7,11 +7,31 @@ This module contains all business logic extracted from keycrm_api.py:
 - TOP-10 product calculations
 - Telegram file sending
 """
+import logging
 import time
 import tempfile
 import requests
 import openpyxl
+
+logger = logging.getLogger(__name__)
+
 from openpyxl.styles import Font, PatternFill
+
+
+class KeyCRMAPIError(Exception):
+    """Custom exception for KeyCRM API errors."""
+    def __init__(self, message: str, error_details: str = None):
+        self.message = message
+        self.error_details = error_details
+        super().__init__(self.message)
+
+
+class ReportGenerationError(Exception):
+    """Custom exception for report generation errors."""
+    def __init__(self, message: str, cause: Exception = None):
+        self.message = message
+        self.cause = cause
+        super().__init__(self.message)
 from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Any
@@ -24,7 +44,8 @@ from bot.config import (
     TELEGRAM_MANAGER_IDS,
     RETURN_STATUS_IDS,
     API_PAGE_LIMIT,
-    API_REQUEST_DELAY
+    API_REQUEST_DELAY,
+    ORDER_SYNC_BUFFER_HOURS
 )
 
 
@@ -101,8 +122,8 @@ class ReportService:
         utc_period_start = local_period_start.astimezone(ZoneInfo("UTC"))
         utc_period_end = local_period_end.astimezone(ZoneInfo("UTC"))
 
-        # Extend created_between by +24 hours to catch delayed syncs (Shopify, etc.)
-        utc_created_end = utc_period_end + timedelta(hours=24)
+        # Extend created_between to catch orders with delayed sync (see ORDER_SYNC_BUFFER_HOURS)
+        utc_created_end = utc_period_end + timedelta(hours=ORDER_SYNC_BUFFER_HOURS)
 
         # Single request params for entire period
         params = {
@@ -118,8 +139,9 @@ class ReportService:
             resp = self.api.get_orders(params)
 
             if isinstance(resp, dict) and resp.get("error"):
-                print(f"API Error: {resp['error']}")
-                break
+                error_msg = resp['error']
+                logger.error(f"API Error while fetching orders: {error_msg}")
+                raise KeyCRMAPIError("Failed to fetch orders from KeyCRM", error_msg)
 
             # Extract batch of orders
             batch = resp.get("data", [])
@@ -414,12 +436,12 @@ class ReportService:
                 response = requests.post(url, data=data, files=files)
 
             if response.status_code == 200:
-                print(f"\nSales report for {display_date} sent to Telegram successfully.")
+                logger.info(f"Sales report for {display_date} sent to Telegram successfully")
                 return True
             else:
-                print(f"Failed to send report to Telegram. Error: {response.text}")
+                logger.error(f"Failed to send report to Telegram: {response.status_code} - {response.text}")
                 return False
 
         except Exception as e:
-            print(f"Error generating or sending sales report: {str(e)}")
+            logger.error(f"Error generating or sending sales report: {str(e)}", exc_info=True)
             return False

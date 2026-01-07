@@ -4,10 +4,12 @@ Telegram bot handlers organized by functionality.
 All 25 handlers from telegram_bot.py, reorganized and using new
 keyboards and formatters modules to eliminate duplication.
 """
+import asyncio
 import logging
 import calendar
-import pytz
 from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
+from typing import Dict, Any, Optional
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
@@ -17,20 +19,109 @@ from bot.config import (
     SOURCE_NAMES,
     SOURCE_EMOJIS,
     DEFAULT_TIMEZONE,
-    TELEGRAM_MANAGER_IDS
+    TELEGRAM_MANAGER_IDS,
+    TOP10_SOURCES,
+    get_year_choices
 )
 from bot.keyboards import Keyboards
-from bot.formatters import Messages, ReportFormatters, create_progress_indicator
-from bot.services import ReportService
+from bot.formatters import Messages, ReportFormatters, create_progress_indicator, truncate_message
+from bot.services import ReportService, KeyCRMAPIError, ReportGenerationError
 
 # Logger
 logger = logging.getLogger(__name__)
 
-# Global user data storage (will be replaced with proper state management later)
-user_data = {}
+# Session timeout in minutes
+SESSION_TIMEOUT_MINUTES = 30
 
-# Global service instance (will be injected properly in main.py)
-report_service: ReportService = None
+# Global user data storage with session management
+user_data: Dict[int, Dict[str, Any]] = {}
+
+# Global service instance (injected in main.py)
+report_service: Optional[ReportService] = None
+
+
+def get_user_session(user_id: int) -> Optional[Dict[str, Any]]:
+    """Get user session if it exists and is not expired."""
+    if user_id not in user_data:
+        return None
+
+    session = user_data[user_id]
+    created_at = session.get("_created_at")
+
+    if created_at:
+        elapsed = datetime.now() - created_at
+        if elapsed > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
+            # Session expired, clean it up
+            logger.info(f"Session expired for user {user_id} after {elapsed}")
+            del user_data[user_id]
+            return None
+
+    return session
+
+
+def create_user_session(user_id: int, initial_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Create a new user session with timestamp."""
+    session = {"_created_at": datetime.now()}
+    if initial_data:
+        session.update(initial_data)
+    user_data[user_id] = session
+    return session
+
+
+def update_user_session(user_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Update user session, creating if needed."""
+    if user_id not in user_data:
+        return create_user_session(user_id, data)
+
+    user_data[user_id].update(data)
+    return user_data[user_id]
+
+
+def cleanup_expired_sessions() -> int:
+    """Remove all expired sessions. Returns count of removed sessions."""
+    now = datetime.now()
+    expired_users = []
+
+    for user_id, session in user_data.items():
+        created_at = session.get("_created_at")
+        if created_at and (now - created_at) > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
+            expired_users.append(user_id)
+
+    for user_id in expired_users:
+        del user_data[user_id]
+
+    if expired_users:
+        logger.info(f"Cleaned up {len(expired_users)} expired sessions")
+
+    return len(expired_users)
+
+
+def calculate_date_range(range_name: str) -> tuple[date, date]:
+    """
+    Calculate start and end dates for a given range name.
+
+    Args:
+        range_name: One of 'today', 'yesterday', 'thisweek', 'thismonth'
+
+    Returns:
+        Tuple of (start_date, end_date)
+    """
+    today = date.today()
+
+    if range_name == "today":
+        return today, today
+    elif range_name == "yesterday":
+        yesterday = today - timedelta(days=1)
+        return yesterday, yesterday
+    elif range_name == "thisweek":
+        start = today - timedelta(days=today.weekday())
+        return start, today
+    elif range_name == "thismonth":
+        start = date(today.year, today.month, 1)
+        return start, today
+    else:
+        raise ValueError(f"Unknown date range: {range_name}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # COMMAND HANDLERS
@@ -160,10 +251,7 @@ async def report_type_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # Handle TOP-10 report type
     if selected_type == "top10":
-        if user_id not in user_data:
-            user_data[user_id] = {"report_type": selected_type}
-        else:
-            user_data[user_id]["report_type"] = selected_type
+        update_user_session(user_id, {"report_type": selected_type})
 
         await query.edit_message_text(
             Messages.top10_source_selection(),
@@ -172,11 +260,8 @@ async def report_type_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return ConversationState.SELECTING_TOP10_SOURCE
 
-    # Initialize user data
-    if user_id not in user_data:
-        user_data[user_id] = {"report_type": selected_type}
-    else:
-        user_data[user_id]["report_type"] = selected_type
+    # Initialize user data with session management
+    update_user_session(user_id, {"report_type": selected_type})
 
     # Ask for date range
     await query.edit_message_text(
@@ -193,17 +278,18 @@ async def prepare_generate_report(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     user_id = update.effective_user.id
 
-    # Validate session data exists
-    if user_id not in user_data or "start_date" not in user_data[user_id]:
+    # Validate session data exists and is not expired
+    session = get_user_session(user_id)
+    if not session or "start_date" not in session:
         await query.edit_message_text(
             "⚠️ Session expired. Please start a new report with /report",
             parse_mode="HTML"
         )
         return ConversationHandler.END
 
-    start_date = user_data[user_id]["start_date"]
-    end_date = user_data[user_id]["end_date"]
-    report_type = user_data[user_id]["report_type"]
+    start_date = session["start_date"]
+    end_date = session["end_date"]
+    report_type = session["report_type"]
 
     # Show loading message
     await query.edit_message_text(
@@ -248,37 +334,15 @@ async def date_range_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id
     selected_range = query.data.split('_')[1]
 
-    today = date.today()
-
     # Process predefined date ranges
-    if selected_range == "today":
-        user_data[user_id]["start_date"] = today
-        user_data[user_id]["end_date"] = today
-        return await prepare_generate_report(update, context)
-
-    elif selected_range == "yesterday":
-        yesterday = today - timedelta(days=1)
-        user_data[user_id]["start_date"] = yesterday
-        user_data[user_id]["end_date"] = yesterday
-        return await prepare_generate_report(update, context)
-
-    elif selected_range == "thisweek":
-        start_date = today - timedelta(days=today.weekday())
+    if selected_range in ("today", "yesterday", "thisweek", "thismonth"):
+        start_date, end_date = calculate_date_range(selected_range)
         user_data[user_id]["start_date"] = start_date
-        user_data[user_id]["end_date"] = today
-        return await prepare_generate_report(update, context)
-
-    elif selected_range == "thismonth":
-        start_date = date(today.year, today.month, 1)
-        user_data[user_id]["start_date"] = start_date
-        user_data[user_id]["end_date"] = today
+        user_data[user_id]["end_date"] = end_date
         return await prepare_generate_report(update, context)
 
     elif selected_range == "custom":
         # Start custom date selection
-        current_year = datetime.now().year
-        years = list(range(current_year - 2, current_year + 1))
-
         message = Messages.custom_date_prompt(
             "Select START year",
             1, 6,
@@ -287,7 +351,7 @@ async def date_range_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.year_picker(years, "back_to_date_range"),
+            reply_markup=Keyboards.year_picker(get_year_choices(), "back_to_date_range"),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_START_YEAR
@@ -351,9 +415,6 @@ async def custom_start_month_callback(update: Update, context: ContextTypes.DEFA
     await query.answer()
 
     if query.data == "back_to_custom_start_year":
-        current_year = datetime.now().year
-        years = list(range(current_year - 2, current_year + 1))
-
         message = Messages.custom_date_prompt(
             "Select START year",
             1, 6,
@@ -362,7 +423,7 @@ async def custom_start_month_callback(update: Update, context: ContextTypes.DEFA
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.year_picker(years, "back_to_date_range"),
+            reply_markup=Keyboards.year_picker(get_year_choices(), "back_to_date_range"),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_START_YEAR
@@ -418,13 +479,13 @@ async def custom_start_day_callback(update: Update, context: ContextTypes.DEFAUL
     selected_year = user_data[user_id]["custom_start_year"]
     selected_month = user_data[user_id]["custom_start_month"]
     user_data[user_id]["start_date"] = datetime(selected_year, selected_month, selected_day).date()
+    start_date = user_data[user_id]["start_date"]
 
     # Move to end date selection
     current_year = datetime.now().year
     if selected_year == current_year:
         # Skip year selection, go to month
         user_data[user_id]["custom_end_year"] = current_year
-        start_date = user_data[user_id]["start_date"]
 
         message = Messages.custom_date_prompt(
             "Select END month",
@@ -441,10 +502,7 @@ async def custom_start_day_callback(update: Update, context: ContextTypes.DEFAUL
         )
         return ConversationState.SELECTING_CUSTOM_END_MONTH
     else:
-        # Show year selection for end date
-        years = list(range(selected_year, current_year + 1))
-        start_date = user_data[user_id]["start_date"]
-
+        # Show year selection for end date (from start year to current year)
         message = Messages.custom_date_prompt(
             "Select END year",
             4, 6,
@@ -453,7 +511,7 @@ async def custom_start_day_callback(update: Update, context: ContextTypes.DEFAUL
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.end_year_picker(years, "back_to_custom_start_day"),
+            reply_markup=Keyboards.end_year_picker(get_year_choices(selected_year), "back_to_custom_start_day"),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_END_YEAR
@@ -517,8 +575,6 @@ async def custom_end_month_callback(update: Update, context: ContextTypes.DEFAUL
     if query.data == "back_to_custom_end_year":
         user_id = update.effective_user.id
         start_date = user_data[user_id]["start_date"]
-        current_year = datetime.now().year
-        years = list(range(start_date.year, current_year + 1))
 
         message = Messages.custom_date_prompt(
             "Select END year",
@@ -528,7 +584,7 @@ async def custom_end_month_callback(update: Update, context: ContextTypes.DEFAUL
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.end_year_picker(years, "back_to_custom_start_day"),
+            reply_markup=Keyboards.end_year_picker(get_year_choices(start_date.year), "back_to_custom_start_day"),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_END_YEAR
@@ -668,28 +724,25 @@ async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     user_id = update.effective_user.id
 
-    # Validate session data exists
-    if user_id not in user_data or "start_date" not in user_data[user_id]:
+    # Validate session data exists and is not expired
+    session = get_user_session(user_id)
+    if not session or "start_date" not in session:
         await query.edit_message_text(
             "⚠️ Session expired. Please start a new report with /report",
             parse_mode="HTML"
         )
         return ConversationHandler.END
 
-    start_date = user_data[user_id]["start_date"]
-    end_date = user_data[user_id]["end_date"]
-    source_selection = user_data[user_id].get("top10_source", "all")
+    start_date = session["start_date"]
+    end_date = session["end_date"]
+    source_selection = session.get("top10_source", "all")
 
     try:
-        now = datetime.now(pytz.timezone(DEFAULT_TIMEZONE))
+        now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE))
         report_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Define sources
-        all_sources = [
-            (1, "Instagram", "📸"),
-            (4, "Shopify", "🛍️"),
-            (2, "Telegram", "✈️")
-        ]
+        # Use sources from config
+        all_sources = TOP10_SOURCES
 
         # Determine which sources to process
         if source_selection == "all":
@@ -709,7 +762,9 @@ async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TY
 
         # Process each source
         for source_id, source_name, emoji in sources_to_process:
-            top_products, total_quantity = report_service.calculate_top10_products(
+            # Run in thread to avoid blocking event loop
+            top_products, total_quantity = await asyncio.to_thread(
+                report_service.calculate_top10_products,
                 target_date=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')),
                 source_id=source_id,
                 limit=10,
@@ -723,6 +778,9 @@ async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TY
                 total_quantity,
                 report_time
             )
+
+            # Truncate if needed
+            report = truncate_message(report)
 
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
@@ -738,9 +796,21 @@ async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode="HTML"
         )
 
+    except KeyCRMAPIError as e:
+        logger.error(f"KeyCRM API error in TOP-10: {e.message} - {e.error_details}")
+        await query.edit_message_text(
+            "❌ <b>API Error</b>\n\nFailed to connect to KeyCRM. Please try again later.",
+            reply_markup=Keyboards.error_retry(),
+            parse_mode="HTML"
+        )
+
     except Exception as e:
-        logger.error(f"Error generating TOP-10 report: {e}")
-        await query.edit_message_text(f"⚠️ Error: {str(e)}", parse_mode="HTML")
+        logger.error(f"Error generating TOP-10 report: {e}", exc_info=True)
+        await query.edit_message_text(
+            f"⚠️ Error generating report: {str(e)}",
+            reply_markup=Keyboards.error_retry(),
+            parse_mode="HTML"
+        )
 
     return ConversationHandler.END
 
@@ -754,21 +824,23 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     user_id = update.effective_user.id
 
-    # Validate session data exists
-    if user_id not in user_data or "start_date" not in user_data[user_id]:
+    # Validate session data exists and is not expired
+    session = get_user_session(user_id)
+    if not session or "start_date" not in session:
         await query.edit_message_text(
             "⚠️ Session expired. Please start a new report with /report",
             parse_mode="HTML"
         )
         return ConversationHandler.END
 
-    start_date = user_data[user_id]["start_date"]
-    end_date = user_data[user_id]["end_date"]
+    start_date = session["start_date"]
+    end_date = session["end_date"]
 
     try:
-        # Get sales data
+        # Get sales data (run in thread to avoid blocking event loop)
         sales_by_source, order_counts, total_orders, revenue_by_source, returns_by_source = (
-            report_service.aggregate_sales_data(
+            await asyncio.to_thread(
+                report_service.aggregate_sales_data,
                 target_date=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')),
                 tz_name=DEFAULT_TIMEZONE,
                 telegram_manager_ids=TELEGRAM_MANAGER_IDS
@@ -776,7 +848,7 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
         )
 
         # Get report timestamp
-        now = datetime.now(pytz.timezone(DEFAULT_TIMEZONE))
+        now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE))
         report_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
         # Format report
@@ -791,6 +863,9 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
             report_time
         )
 
+        # Truncate if needed to stay within Telegram limits
+        report = truncate_message(report)
+
         # Send report
         await query.edit_message_text(
             report,
@@ -798,16 +873,21 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
             parse_mode="HTML"
         )
 
+    except KeyCRMAPIError as e:
+        logger.error(f"KeyCRM API error: {e.message} - {e.error_details}")
+        await query.edit_message_text(
+            "❌ <b>API Error</b>\n\nFailed to connect to KeyCRM. Please try again later.",
+            reply_markup=Keyboards.error_retry(),
+            parse_mode="HTML"
+        )
+
     except Exception as e:
-        logger.error(f"Error generating report: {e}")
+        logger.error(f"Error generating report: {e}", exc_info=True)
         await query.edit_message_text(
             Messages.error(str(e)),
             reply_markup=Keyboards.error_retry(),
             parse_mode="HTML"
         )
-
-        if user_id in user_data:
-            del user_data[user_id]
 
     return ConversationHandler.END
 
@@ -817,16 +897,17 @@ async def generate_excel_report(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     user_id = update.effective_user.id
 
-    # Validate session data exists
-    if user_id not in user_data or "start_date" not in user_data[user_id]:
+    # Validate session data exists and is not expired
+    session = get_user_session(user_id)
+    if not session or "start_date" not in session:
         await query.edit_message_text(
             "⚠️ Session expired. Please start a new report with /report",
             parse_mode="HTML"
         )
         return ConversationHandler.END
 
-    start_date = user_data[user_id]["start_date"]
-    end_date = user_data[user_id]["end_date"]
+    start_date = session["start_date"]
+    end_date = session["end_date"]
 
     # Get bot token from context
     bot_token = context.bot.token
@@ -839,8 +920,9 @@ async def generate_excel_report(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode="HTML"
         )
 
-        # Generate and send Excel
-        success = report_service.generate_excel_report(
+        # Generate and send Excel (run in thread to avoid blocking event loop)
+        success = await asyncio.to_thread(
+            report_service.generate_excel_report,
             target_date=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')),
             bot_token=bot_token,
             chat_id=chat_id,
@@ -919,30 +1001,13 @@ async def quick_report_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     user_id = update.effective_user.id
 
-    # Initialize user data
-    if user_id not in user_data:
-        user_data[user_id] = {}
+    # Initialize user data and set report type
+    update_user_session(user_id, {"report_type": report_type})
 
-    user_data[user_id]["report_type"] = report_type
-
-    # Process date range
-    today = date.today()
-
-    if date_range == "today":
-        user_data[user_id]["start_date"] = today
-        user_data[user_id]["end_date"] = today
-    elif date_range == "yesterday":
-        yesterday = today - timedelta(days=1)
-        user_data[user_id]["start_date"] = yesterday
-        user_data[user_id]["end_date"] = yesterday
-    elif date_range == "thisweek":
-        start_date = today - timedelta(days=today.weekday())
-        user_data[user_id]["start_date"] = start_date
-        user_data[user_id]["end_date"] = today
-    elif date_range == "thismonth":
-        start_date = date(today.year, today.month, 1)
-        user_data[user_id]["start_date"] = start_date
-        user_data[user_id]["end_date"] = today
+    # Calculate and set date range
+    start_date, end_date = calculate_date_range(date_range)
+    user_data[user_id]["start_date"] = start_date
+    user_data[user_id]["end_date"] = end_date
 
     # Generate report
     return await prepare_generate_report(update, context)

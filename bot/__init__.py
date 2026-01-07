@@ -16,15 +16,23 @@ Package structure:
 __version__ = "2.0.0"
 __author__ = "KeyCRM Bot Team"
 
-from bot.config import BOT_TOKEN, KEYCRM_API_KEY
+from bot.config import BOT_TOKEN, KEYCRM_API_KEY, DEFAULT_TIMEZONE
 from bot.api_client import KeyCRMClient
-from bot.services import ReportService
+from bot.services import ReportService, KeyCRMAPIError, ReportGenerationError
 from bot.main import main
 
 __all__ = [
+    # Configuration
     "BOT_TOKEN",
     "KEYCRM_API_KEY",
+    "DEFAULT_TIMEZONE",
+    # API Client
     "KeyCRMClient",
+    # Services
     "ReportService",
+    # Exceptions
+    "KeyCRMAPIError",
+    "ReportGenerationError",
+    # Entry point
     "main",
 ]
