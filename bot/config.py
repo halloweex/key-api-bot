@@ -60,8 +60,9 @@ DATE_RANGES = {
     "today": "📅 Today",
     "yesterday": "📅 Yesterday",
     "thisweek": "📆 This Week",
+    "lastweek": "📆 Last Week",
     "thismonth": "📆 This Month",
-    "custom": "🗓️ Custom Date Range"
+    "custom": "🗓️ Custom Range"
 }
 
 # ─── Source Names with Emojis ───────────────────────────────────────────────

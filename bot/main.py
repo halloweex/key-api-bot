@@ -17,6 +17,7 @@ from bot.config import BOT_TOKEN, KEYCRM_API_KEY, ConversationState
 from bot.api_client import KeyCRMClient
 from bot.services import ReportService
 from bot import handlers
+from bot import database
 
 # Configure logging
 logging.basicConfig(
@@ -30,10 +31,13 @@ async def setup_command_menu(application: Application) -> None:
     """Set up the bot commands in the menu."""
     try:
         commands = [
-            BotCommand("start", "👋 Start the bot"),
-            BotCommand("help", "ℹ️ Show help information"),
-            BotCommand("report", "📊 Generate a sales report"),
-            BotCommand("cancel", "🛑 Cancel current operation")
+            BotCommand("today", "📊 Today's sales summary"),
+            BotCommand("yesterday", "📊 Yesterday's sales"),
+            BotCommand("week", "📆 This week's sales"),
+            BotCommand("repeat", "🔄 Repeat last report"),
+            BotCommand("report", "📋 Full report options"),
+            BotCommand("help", "ℹ️ Help & commands"),
+            BotCommand("cancel", "🛑 Cancel operation")
         ]
 
         logger.info("Setting bot commands...")
@@ -60,7 +64,8 @@ def create_conversation_handler() -> ConversationHandler:
             CallbackQueryHandler(handlers.report_command_from_callback, pattern=r"^cmd_report$"),
             CallbackQueryHandler(handlers.command_button_handler, pattern=r"^cmd_"),
             CallbackQueryHandler(handlers.convert_report_format, pattern=r"^convert_to_"),
-            CallbackQueryHandler(handlers.quick_report_callback, pattern=r"^quick_"),
+            CallbackQueryHandler(handlers.quick_report_callback, pattern=r"^quick_summary_"),
+            CallbackQueryHandler(handlers.repeat_last_callback, pattern=r"^repeat_last$"),
             CallbackQueryHandler(handlers.change_top10_source, pattern=r"^change_top10_source$"),
             CallbackQueryHandler(handlers.quick_top10_callback, pattern=r"^quick_top10_")
         ],
@@ -112,6 +117,10 @@ def main() -> None:
         return
 
     logger.info("Starting KeyCRM Telegram bot (Refactored Version)...")
+
+    # Initialize database
+    logger.info("Initializing database...")
+    database.init_database()
     logger.debug("API Key configured successfully")
 
     # Initialize services
@@ -135,6 +144,12 @@ def main() -> None:
     application.add_handler(CommandHandler("help", handlers.help_command))
     application.add_handler(CommandHandler("cancel", handlers.cancel_command))
 
+    # Add quick command handlers
+    application.add_handler(CommandHandler("today", handlers.today_command))
+    application.add_handler(CommandHandler("yesterday", handlers.yesterday_command))
+    application.add_handler(CommandHandler("week", handlers.week_command))
+    application.add_handler(CommandHandler("repeat", handlers.repeat_command))
+
     # Add general callback query handler for unhandled callbacks
     application.add_handler(CallbackQueryHandler(handlers.command_button_handler, pattern=r"^cmd_"))
 
@@ -152,11 +167,21 @@ def main() -> None:
         if count > 0:
             logger.debug(f"Cleaned up {count} expired sessions")
 
+    # Periodic database cleanup job
+    async def cleanup_database(context):
+        cache_count = database.cache_cleanup()
+        history_count = database.cleanup_old_history(days=30)
+        if cache_count > 0 or history_count > 0:
+            logger.debug(f"DB cleanup: {cache_count} cache, {history_count} history")
+
     # Set up command menu at startup
     application.job_queue.run_once(set_commands, 1)
 
     # Run session cleanup every 10 minutes
     application.job_queue.run_repeating(cleanup_sessions, interval=600, first=60)
+
+    # Run database cleanup every hour
+    application.job_queue.run_repeating(cleanup_database, interval=3600, first=120)
 
     logger.info("Bot initialized. Starting polling...")
 

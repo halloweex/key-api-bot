@@ -26,6 +26,7 @@ from bot.config import (
 from bot.keyboards import Keyboards
 from bot.formatters import Messages, ReportFormatters, create_progress_indicator, truncate_message
 from bot.services import ReportService, KeyCRMAPIError, ReportGenerationError
+from bot import database
 
 # Logger
 logger = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 # Session timeout in minutes
 SESSION_TIMEOUT_MINUTES = 30
 
-# Global user data storage with session management
+# Global user data storage with session management (in-memory for active sessions)
 user_data: Dict[int, Dict[str, Any]] = {}
 
 # Global service instance (injected in main.py)
@@ -101,7 +102,7 @@ def calculate_date_range(range_name: str) -> tuple[date, date]:
     Calculate start and end dates for a given range name.
 
     Args:
-        range_name: One of 'today', 'yesterday', 'thisweek', 'thismonth'
+        range_name: One of 'today', 'yesterday', 'thisweek', 'thismonth', 'lastweek'
 
     Returns:
         Tuple of (start_date, end_date)
@@ -116,11 +117,43 @@ def calculate_date_range(range_name: str) -> tuple[date, date]:
     elif range_name == "thisweek":
         start = today - timedelta(days=today.weekday())
         return start, today
+    elif range_name == "lastweek":
+        # Last week: Monday to Sunday of the previous week
+        this_monday = today - timedelta(days=today.weekday())
+        last_monday = this_monday - timedelta(days=7)
+        last_sunday = this_monday - timedelta(days=1)
+        return last_monday, last_sunday
     elif range_name == "thismonth":
         start = date(today.year, today.month, 1)
         return start, today
     else:
         raise ValueError(f"Unknown date range: {range_name}")
+
+
+def save_last_report(user_id: int, report_type: str, start_date: date, end_date: date, source: str = None):
+    """Save the last report settings for a user (persistent in database)."""
+    database.save_report_history(
+        user_id=user_id,
+        report_type=report_type,
+        start_date=start_date.strftime('%Y-%m-%d') if isinstance(start_date, date) else start_date,
+        end_date=end_date.strftime('%Y-%m-%d') if isinstance(end_date, date) else end_date,
+        source=source
+    )
+
+
+def get_last_report(user_id: int) -> Optional[Dict[str, Any]]:
+    """Get the last report settings for a user from database."""
+    report = database.get_last_report(user_id)
+    if not report:
+        return None
+
+    # Convert date strings back to date objects
+    return {
+        "report_type": report["report_type"],
+        "start_date": datetime.strptime(report["start_date"], '%Y-%m-%d').date(),
+        "end_date": datetime.strptime(report["end_date"], '%Y-%m-%d').date(),
+        "source": report.get("source")
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -176,6 +209,321 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_markup=Keyboards.cancel_operation(),
         parse_mode="HTML"
     )
+
+    return ConversationHandler.END
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# QUICK COMMAND HANDLERS - Instant access to common reports
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Generate today's summary report instantly - /today command."""
+    return await _generate_quick_summary(update, context, "today")
+
+
+async def yesterday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Generate yesterday's summary report instantly - /yesterday command."""
+    return await _generate_quick_summary(update, context, "yesterday")
+
+
+async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Generate this week's summary report instantly - /week command."""
+    return await _generate_quick_summary(update, context, "thisweek")
+
+
+async def _generate_quick_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, range_name: str) -> int:
+    """Internal helper to generate a quick summary report."""
+    user_id = update.effective_user.id
+    start_date, end_date = calculate_date_range(range_name)
+
+    # Create session with the date range
+    create_user_session(user_id, {
+        "report_type": "summary",
+        "start_date": start_date,
+        "end_date": end_date
+    })
+
+    # Send loading message
+    range_labels = {
+        "today": "Today",
+        "yesterday": "Yesterday",
+        "thisweek": "This Week"
+    }
+    label = range_labels.get(range_name, range_name)
+
+    loading_msg = await update.message.reply_text(
+        f"⏳ <b>Generating {label}'s Report...</b>\n\n"
+        f"📅 {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}",
+        parse_mode="HTML"
+    )
+
+    try:
+        # Get sales data
+        sales_by_source, order_counts, total_orders, revenue_by_source, returns_by_source = (
+            await asyncio.to_thread(
+                report_service.aggregate_sales_data,
+                target_date=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')),
+                tz_name=DEFAULT_TIMEZONE,
+                telegram_manager_ids=TELEGRAM_MANAGER_IDS
+            )
+        )
+
+        # Get report timestamp
+        now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE))
+        report_time = now.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Format report
+        report = ReportFormatters.format_summary(
+            sales_by_source,
+            order_counts,
+            revenue_by_source,
+            returns_by_source,
+            total_orders,
+            start_date,
+            end_date,
+            report_time
+        )
+
+        # Truncate if needed
+        report = truncate_message(report)
+
+        # Save as last report
+        save_last_report(user_id, "summary", start_date, end_date)
+
+        # Edit loading message with the report
+        await loading_msg.edit_text(
+            report,
+            reply_markup=Keyboards.post_report_actions(include_summary=False),
+            parse_mode="HTML"
+        )
+
+    except KeyCRMAPIError as e:
+        logger.error(f"KeyCRM API error: {e.message} - {e.error_details}")
+        await loading_msg.edit_text(
+            "❌ <b>API Error</b>\n\nFailed to connect to KeyCRM. Please try again later.",
+            reply_markup=Keyboards.error_retry(),
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        logger.error(f"Error generating quick report: {e}", exc_info=True)
+        await loading_msg.edit_text(
+            Messages.error(str(e)),
+            reply_markup=Keyboards.error_retry(),
+            parse_mode="HTML"
+        )
+
+    return ConversationHandler.END
+
+
+async def repeat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Repeat the last report - /repeat command."""
+    user_id = update.effective_user.id
+    last_report = get_last_report(user_id)
+
+    if not last_report:
+        await update.message.reply_text(
+            "📊 <b>No recent report found</b>\n\n"
+            "Use /today, /yesterday, or /report to generate a new report first.",
+            reply_markup=Keyboards.quick_actions(),
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
+    # Restore the session
+    create_user_session(user_id, {
+        "report_type": last_report["report_type"],
+        "start_date": last_report["start_date"],
+        "end_date": last_report["end_date"],
+        "top10_source": last_report.get("source")
+    })
+
+    # Send loading message
+    report_type = last_report["report_type"]
+    start_date = last_report["start_date"]
+    end_date = last_report["end_date"]
+
+    loading_msg = await update.message.reply_text(
+        f"🔄 <b>Repeating Last Report</b>\n\n"
+        f"Type: {REPORT_TYPES.get(report_type, report_type)}\n"
+        f"📅 {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
+        f"⏳ Generating...",
+        parse_mode="HTML"
+    )
+
+    # Generate based on report type
+    try:
+        if report_type == "summary":
+            sales_by_source, order_counts, total_orders, revenue_by_source, returns_by_source = (
+                await asyncio.to_thread(
+                    report_service.aggregate_sales_data,
+                    target_date=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')),
+                    tz_name=DEFAULT_TIMEZONE,
+                    telegram_manager_ids=TELEGRAM_MANAGER_IDS
+                )
+            )
+
+            now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE))
+            report_time = now.strftime("%Y-%m-%d %H:%M:%S")
+
+            report = ReportFormatters.format_summary(
+                sales_by_source,
+                order_counts,
+                revenue_by_source,
+                returns_by_source,
+                total_orders,
+                start_date,
+                end_date,
+                report_time
+            )
+            report = truncate_message(report)
+
+            await loading_msg.edit_text(
+                report,
+                reply_markup=Keyboards.post_report_actions(include_summary=False),
+                parse_mode="HTML"
+            )
+
+        elif report_type == "excel":
+            bot_token = context.bot.token
+            chat_id = update.effective_chat.id
+
+            success = await asyncio.to_thread(
+                report_service.generate_excel_report,
+                target_date=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')),
+                bot_token=bot_token,
+                chat_id=chat_id,
+                tz_name=DEFAULT_TIMEZONE,
+                telegram_manager_ids=TELEGRAM_MANAGER_IDS
+            )
+
+            if success:
+                await loading_msg.edit_text(
+                    Messages.excel_success(start_date, end_date),
+                    reply_markup=Keyboards.post_report_actions(include_excel=False),
+                    parse_mode="HTML"
+                )
+            else:
+                await loading_msg.edit_text(
+                    Messages.excel_error(),
+                    reply_markup=Keyboards.error_retry(),
+                    parse_mode="HTML"
+                )
+
+    except Exception as e:
+        logger.error(f"Error repeating report: {e}", exc_info=True)
+        await loading_msg.edit_text(
+            Messages.error(str(e)),
+            reply_markup=Keyboards.error_retry(),
+            parse_mode="HTML"
+        )
+
+    return ConversationHandler.END
+
+
+async def repeat_last_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle repeat_last button from main menu."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    last_report = get_last_report(user_id)
+
+    if not last_report:
+        await query.edit_message_text(
+            "📊 <b>No recent report found</b>\n\n"
+            "Generate a report first using the quick buttons above.",
+            reply_markup=Keyboards.quick_actions(),
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
+    # Restore the session
+    create_user_session(user_id, {
+        "report_type": last_report["report_type"],
+        "start_date": last_report["start_date"],
+        "end_date": last_report["end_date"],
+        "top10_source": last_report.get("source")
+    })
+
+    report_type = last_report["report_type"]
+    start_date = last_report["start_date"]
+    end_date = last_report["end_date"]
+
+    await query.edit_message_text(
+        f"🔄 <b>Repeating Last Report</b>\n\n"
+        f"Type: {REPORT_TYPES.get(report_type, report_type)}\n"
+        f"📅 {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
+        f"⏳ Generating...",
+        parse_mode="HTML"
+    )
+
+    try:
+        if report_type == "summary":
+            sales_by_source, order_counts, total_orders, revenue_by_source, returns_by_source = (
+                await asyncio.to_thread(
+                    report_service.aggregate_sales_data,
+                    target_date=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')),
+                    tz_name=DEFAULT_TIMEZONE,
+                    telegram_manager_ids=TELEGRAM_MANAGER_IDS
+                )
+            )
+
+            now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE))
+            report_time = now.strftime("%Y-%m-%d %H:%M:%S")
+
+            report = ReportFormatters.format_summary(
+                sales_by_source,
+                order_counts,
+                revenue_by_source,
+                returns_by_source,
+                total_orders,
+                start_date,
+                end_date,
+                report_time
+            )
+            report = truncate_message(report)
+
+            await query.edit_message_text(
+                report,
+                reply_markup=Keyboards.post_report_actions(include_summary=False),
+                parse_mode="HTML"
+            )
+
+        elif report_type == "excel":
+            bot_token = context.bot.token
+            chat_id = update.effective_chat.id
+
+            success = await asyncio.to_thread(
+                report_service.generate_excel_report,
+                target_date=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')),
+                bot_token=bot_token,
+                chat_id=chat_id,
+                tz_name=DEFAULT_TIMEZONE,
+                telegram_manager_ids=TELEGRAM_MANAGER_IDS
+            )
+
+            if success:
+                await query.edit_message_text(
+                    Messages.excel_success(start_date, end_date),
+                    reply_markup=Keyboards.post_report_actions(include_excel=False),
+                    parse_mode="HTML"
+                )
+            else:
+                await query.edit_message_text(
+                    Messages.excel_error(),
+                    reply_markup=Keyboards.error_retry(),
+                    parse_mode="HTML"
+                )
+
+    except Exception as e:
+        logger.error(f"Error repeating report via callback: {e}", exc_info=True)
+        await query.edit_message_text(
+            Messages.error(str(e)),
+            reply_markup=Keyboards.error_retry(),
+            parse_mode="HTML"
+        )
 
     return ConversationHandler.END
 
@@ -335,7 +683,7 @@ async def date_range_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     selected_range = query.data.split('_')[1]
 
     # Process predefined date ranges
-    if selected_range in ("today", "yesterday", "thisweek", "thismonth"):
+    if selected_range in ("today", "yesterday", "thisweek", "lastweek", "thismonth"):
         start_date, end_date = calculate_date_range(selected_range)
         user_data[user_id]["start_date"] = start_date
         user_data[user_id]["end_date"] = end_date
@@ -866,6 +1214,9 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
         # Truncate if needed to stay within Telegram limits
         report = truncate_message(report)
 
+        # Save as last report for repeat functionality
+        save_last_report(user_id, "summary", start_date, end_date)
+
         # Send report
         await query.edit_message_text(
             report,
@@ -931,6 +1282,9 @@ async def generate_excel_report(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
         if success:
+            # Save as last report for repeat functionality
+            save_last_report(user_id, "excel", start_date, end_date)
+
             await query.edit_message_text(
                 Messages.excel_success(start_date, end_date),
                 reply_markup=Keyboards.post_report_actions(include_excel=False),

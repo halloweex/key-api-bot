@@ -15,10 +15,36 @@ class Keyboards:
 
     @staticmethod
     def main_menu() -> InlineKeyboardMarkup:
-        """Create main menu keyboard with Generate Report and Help buttons."""
+        """Create main menu keyboard with quick actions and full menu access."""
         keyboard = [
-            [InlineKeyboardButton("📊 Generate Report", callback_data="cmd_report")],
+            # Quick actions row - most common tasks
+            [
+                InlineKeyboardButton("📊 Today", callback_data="quick_summary_today"),
+                InlineKeyboardButton("📊 Yesterday", callback_data="quick_summary_yesterday")
+            ],
+            # Secondary quick actions
+            [
+                InlineKeyboardButton("📆 This Week", callback_data="quick_summary_thisweek"),
+                InlineKeyboardButton("🔄 Repeat Last", callback_data="repeat_last")
+            ],
+            # Full menu access
+            [InlineKeyboardButton("📋 More Options...", callback_data="cmd_report")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="cmd_help")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def quick_actions() -> InlineKeyboardMarkup:
+        """Create quick actions keyboard for fast report access."""
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Today", callback_data="quick_summary_today"),
+                InlineKeyboardButton("📊 Yesterday", callback_data="quick_summary_yesterday")
+            ],
+            [
+                InlineKeyboardButton("📆 This Week", callback_data="quick_summary_thisweek"),
+                InlineKeyboardButton("📋 More Options", callback_data="cmd_report")
+            ]
         ]
         return InlineKeyboardMarkup(keyboard)
 
@@ -53,15 +79,19 @@ class Keyboards:
     def date_ranges(back_callback: str = "back_to_report_type") -> InlineKeyboardMarkup:
         """Create date range selection keyboard."""
         keyboard = [
+            # Most common - today and yesterday
             [
                 InlineKeyboardButton(DATE_RANGES["today"], callback_data="range_today"),
                 InlineKeyboardButton(DATE_RANGES["yesterday"], callback_data="range_yesterday")
             ],
+            # Week options
             [
                 InlineKeyboardButton(DATE_RANGES["thisweek"], callback_data="range_thisweek"),
-                InlineKeyboardButton(DATE_RANGES["thismonth"], callback_data="range_thismonth")
+                InlineKeyboardButton(DATE_RANGES["lastweek"], callback_data="range_lastweek")
             ],
+            # Month and custom
             [
+                InlineKeyboardButton(DATE_RANGES["thismonth"], callback_data="range_thismonth"),
                 InlineKeyboardButton(DATE_RANGES["custom"], callback_data="range_custom")
             ],
             [
@@ -90,21 +120,21 @@ class Keyboards:
 
     @staticmethod
     def year_picker(years: List[int], back_callback: str) -> InlineKeyboardMarkup:
-        """Create year picker keyboard."""
+        """Create year picker keyboard with horizontal layout."""
         keyboard = []
-        for year in years:
-            keyboard.append([InlineKeyboardButton(str(year), callback_data=f"custom_start_year_{year}")])
-
+        # Put all years in a single row (typically 2-3 years)
+        year_row = [InlineKeyboardButton(str(year), callback_data=f"custom_start_year_{year}") for year in years]
+        keyboard.append(year_row)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_callback)])
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
     def end_year_picker(years: List[int], back_callback: str) -> InlineKeyboardMarkup:
-        """Create end year picker keyboard."""
+        """Create end year picker keyboard with horizontal layout."""
         keyboard = []
-        for year in years:
-            keyboard.append([InlineKeyboardButton(str(year), callback_data=f"custom_end_year_{year}")])
-
+        # Put all years in a single row (typically 2-3 years)
+        year_row = [InlineKeyboardButton(str(year), callback_data=f"custom_end_year_{year}") for year in years]
+        keyboard.append(year_row)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_callback)])
         return InlineKeyboardMarkup(keyboard)
 

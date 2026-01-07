@@ -19,6 +19,7 @@ __author__ = "KeyCRM Bot Team"
 from bot.config import BOT_TOKEN, KEYCRM_API_KEY, DEFAULT_TIMEZONE
 from bot.api_client import KeyCRMClient
 from bot.services import ReportService, KeyCRMAPIError, ReportGenerationError
+from bot.database import init_database, get_user_preferences, save_user_preferences
 from bot.main import main
 
 __all__ = [
@@ -33,6 +34,10 @@ __all__ = [
     # Exceptions
     "KeyCRMAPIError",
     "ReportGenerationError",
+    # Database
+    "init_database",
+    "get_user_preferences",
+    "save_user_preferences",
     # Entry point
     "main",
 ]

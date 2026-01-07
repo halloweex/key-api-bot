@@ -166,3 +166,8 @@ cython_debug/
 
 # Claude Code CLI
 .claude/
+
+# SQLite Database
+data/
+*.db
+*.db-journal
