@@ -41,5 +41,5 @@ jobs:
             cd /home/${{ secrets.EC2_USER }}/key-api-bot
             git pull origin main
             docker-compose pull
-            docker-compose up -d
+            docker-compose up -d --force-recreate
             docker image prune -f

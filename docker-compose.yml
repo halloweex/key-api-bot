@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   bot:
-    build: .
+    image: halloweex/keycrm-bot:latest
     container_name: keycrm-bot
     restart: unless-stopped
     env_file:
