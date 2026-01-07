@@ -31,13 +31,10 @@ async def setup_command_menu(application: Application) -> None:
     """Set up the bot commands in the menu."""
     try:
         commands = [
-            BotCommand("today", "📊 Today's sales summary"),
-            BotCommand("yesterday", "📊 Yesterday's sales"),
-            BotCommand("week", "📆 This week's sales"),
-            BotCommand("repeat", "🔄 Repeat last report"),
-            BotCommand("report", "📋 Full report options"),
-            BotCommand("help", "ℹ️ Help & commands"),
-            BotCommand("cancel", "🛑 Cancel operation")
+            BotCommand("start", "👋 Start the bot"),
+            BotCommand("help", "ℹ️ Show help information"),
+            BotCommand("report", "📊 Generate a sales report"),
+            BotCommand("cancel", "🛑 Cancel current operation")
         ]
 
         logger.info("Setting bot commands...")
@@ -64,8 +61,7 @@ def create_conversation_handler() -> ConversationHandler:
             CallbackQueryHandler(handlers.report_command_from_callback, pattern=r"^cmd_report$"),
             CallbackQueryHandler(handlers.command_button_handler, pattern=r"^cmd_"),
             CallbackQueryHandler(handlers.convert_report_format, pattern=r"^convert_to_"),
-            CallbackQueryHandler(handlers.quick_report_callback, pattern=r"^quick_summary_"),
-            CallbackQueryHandler(handlers.repeat_last_callback, pattern=r"^repeat_last$"),
+            CallbackQueryHandler(handlers.quick_report_callback, pattern=r"^quick_"),
             CallbackQueryHandler(handlers.change_top10_source, pattern=r"^change_top10_source$"),
             CallbackQueryHandler(handlers.quick_top10_callback, pattern=r"^quick_top10_")
         ],
@@ -121,6 +117,7 @@ def main() -> None:
     # Initialize database
     logger.info("Initializing database...")
     database.init_database()
+
     logger.debug("API Key configured successfully")
 
     # Initialize services
@@ -143,12 +140,6 @@ def main() -> None:
     application.add_handler(CommandHandler("start", handlers.start_command))
     application.add_handler(CommandHandler("help", handlers.help_command))
     application.add_handler(CommandHandler("cancel", handlers.cancel_command))
-
-    # Add quick command handlers
-    application.add_handler(CommandHandler("today", handlers.today_command))
-    application.add_handler(CommandHandler("yesterday", handlers.yesterday_command))
-    application.add_handler(CommandHandler("week", handlers.week_command))
-    application.add_handler(CommandHandler("repeat", handlers.repeat_command))
 
     # Add general callback query handler for unhandled callbacks
     application.add_handler(CallbackQueryHandler(handlers.command_button_handler, pattern=r"^cmd_"))

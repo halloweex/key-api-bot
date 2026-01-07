@@ -102,33 +102,27 @@ class Messages:
     def welcome(username: str) -> str:
         """Generate welcome message."""
         return (
-            f"👋 {bold('Welcome, ' + username)}!\n\n"
-            f"I'm your {bold('KeyCRM Sales Report')} assistant.\n\n"
-            f"⚡ {bold('Quick Commands:')}\n"
-            f"• /today - Today's summary\n"
-            f"• /yesterday - Yesterday's summary\n"
-            f"• /week - This week's summary\n"
-            f"• /repeat - Repeat last report\n\n"
-            f"Or use the buttons below:"
+            f"👋 {bold('Welcome, ' + username)}! \n\n"
+            f"I'm your {bold('KeyCRM Sales Report')} assistant. I can help you generate detailed sales reports "
+            f"from your KeyCRM data.\n\n"
+            f"🚀 {italic('What would you like to do?')}"
         )
 
     @staticmethod
     def help_text() -> str:
         """Generate help message."""
         return (
-            f"{bold('📊 KeyCRM Sales Report Bot')}\n\n"
-            f"{bold('⚡ Quick Commands:')}\n"
-            f"• /today - Instant today's summary\n"
-            f"• /yesterday - Instant yesterday's summary\n"
-            f"• /week - This week's summary\n"
-            f"• /repeat - Repeat your last report\n\n"
-            f"{bold('📋 Full Options:')}\n"
-            f"• /report - All report types & custom dates\n"
-            f"• /cancel - Cancel current operation\n\n"
-            f"{bold('💡 Tips:')}\n"
-            f"• Use quick commands for instant access\n"
-            f"• After a report, use buttons to convert formats\n"
-            f"• 'Repeat Last' saves your most recent settings"
+            f"{bold('📊 KeyCRM Sales Report Bot 📊')}\n\n"
+            f"{bold('Available Commands:')}\n"
+            f"• /report - Generate a sales report\n"
+            f"• /cancel - Cancel the current operation\n"
+            f"• /help - Show this help message\n\n"
+            f"{bold('How to use:')}\n"
+            f"1️⃣ Start with /report command\n"
+            f"2️⃣ Select report type (Summary or Excel)\n"
+            f"3️⃣ Choose date range\n"
+            f"4️⃣ View your report results\n\n"
+            f"{italic('Need more assistance? Contact support at support@example.com')}"
         )
 
     @staticmethod

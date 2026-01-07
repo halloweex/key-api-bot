@@ -15,36 +15,10 @@ class Keyboards:
 
     @staticmethod
     def main_menu() -> InlineKeyboardMarkup:
-        """Create main menu keyboard with quick actions and full menu access."""
+        """Create main menu keyboard with Generate Report and Help buttons."""
         keyboard = [
-            # Quick actions row - most common tasks
-            [
-                InlineKeyboardButton("📊 Today", callback_data="quick_summary_today"),
-                InlineKeyboardButton("📊 Yesterday", callback_data="quick_summary_yesterday")
-            ],
-            # Secondary quick actions
-            [
-                InlineKeyboardButton("📆 This Week", callback_data="quick_summary_thisweek"),
-                InlineKeyboardButton("🔄 Repeat Last", callback_data="repeat_last")
-            ],
-            # Full menu access
-            [InlineKeyboardButton("📋 More Options...", callback_data="cmd_report")],
+            [InlineKeyboardButton("📊 Generate Report", callback_data="cmd_report")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="cmd_help")]
-        ]
-        return InlineKeyboardMarkup(keyboard)
-
-    @staticmethod
-    def quick_actions() -> InlineKeyboardMarkup:
-        """Create quick actions keyboard for fast report access."""
-        keyboard = [
-            [
-                InlineKeyboardButton("📊 Today", callback_data="quick_summary_today"),
-                InlineKeyboardButton("📊 Yesterday", callback_data="quick_summary_yesterday")
-            ],
-            [
-                InlineKeyboardButton("📆 This Week", callback_data="quick_summary_thisweek"),
-                InlineKeyboardButton("📋 More Options", callback_data="cmd_report")
-            ]
         ]
         return InlineKeyboardMarkup(keyboard)
 
@@ -79,19 +53,15 @@ class Keyboards:
     def date_ranges(back_callback: str = "back_to_report_type") -> InlineKeyboardMarkup:
         """Create date range selection keyboard."""
         keyboard = [
-            # Most common - today and yesterday
             [
                 InlineKeyboardButton(DATE_RANGES["today"], callback_data="range_today"),
                 InlineKeyboardButton(DATE_RANGES["yesterday"], callback_data="range_yesterday")
             ],
-            # Week options
             [
                 InlineKeyboardButton(DATE_RANGES["thisweek"], callback_data="range_thisweek"),
-                InlineKeyboardButton(DATE_RANGES["lastweek"], callback_data="range_lastweek")
+                InlineKeyboardButton(DATE_RANGES["thismonth"], callback_data="range_thismonth")
             ],
-            # Month and custom
             [
-                InlineKeyboardButton(DATE_RANGES["thismonth"], callback_data="range_thismonth"),
                 InlineKeyboardButton(DATE_RANGES["custom"], callback_data="range_custom")
             ],
             [
