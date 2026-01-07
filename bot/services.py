@@ -47,6 +47,10 @@ from bot.config import (
     API_REQUEST_DELAY,
     ORDER_SYNC_BUFFER_HOURS
 )
+from bot import database
+
+# Cache TTL in minutes
+SALES_CACHE_TTL = 5  # Cache sales data for 5 minutes
 
 
 class ReportService:
@@ -104,6 +108,21 @@ class ReportService:
             start_date = start_date.strftime('%Y-%m-%d')
         if not isinstance(end_date, str):
             end_date = end_date.strftime('%Y-%m-%d')
+
+        # Check cache first
+        cache_key = f"sales:{start_date}:{end_date}:{tz_name}:{exclude_status_id}"
+        cached = database.cache_get(cache_key)
+        if cached:
+            logger.info(f"Cache HIT for {cache_key}")
+            return (
+                cached['sales_dict'],
+                cached['counts_dict'],
+                cached['total_orders'],
+                cached['revenue_dict'],
+                cached['returns_dict']
+            )
+
+        logger.info(f"Cache MISS for {cache_key} - fetching from API")
 
         # Parse the strings into date objects
         start = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -236,6 +255,16 @@ class ReportService:
         total_orders = len(all_orders)
         revenue_dict = dict(revenue)
         returns_dict = {src: dict(data) for src, data in returns_data.items()}
+
+        # Save to cache
+        database.cache_set(cache_key, {
+            'sales_dict': sales_dict,
+            'counts_dict': counts_dict,
+            'total_orders': total_orders,
+            'revenue_dict': revenue_dict,
+            'returns_dict': returns_dict
+        }, ttl_minutes=SALES_CACHE_TTL)
+        logger.info(f"Cached sales data for {cache_key} (TTL: {SALES_CACHE_TTL} min)")
 
         return sales_dict, counts_dict, total_orders, revenue_dict, returns_dict
 
