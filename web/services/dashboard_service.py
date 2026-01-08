@@ -82,16 +82,24 @@ def _warm_cache_for_period(period: str) -> None:
 def _cache_warming_loop() -> None:
     """Background loop that warms cache every 4 minutes."""
     import logging
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     logger = logging.getLogger(__name__)
 
     while not _stop_warming.is_set():
         try:
-            logger.info("Cache warming: pre-fetching data...")
-            # Warm cache for common periods
-            for period in ["today", "yesterday", "week", "month"]:
-                if _stop_warming.is_set():
-                    break
-                _warm_cache_for_period(period)
+            logger.info("Cache warming: pre-fetching data (parallel)...")
+            # Warm cache for all periods in parallel
+            periods = ["today", "yesterday", "week", "month"]
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(_warm_cache_for_period, p): p for p in periods}
+                for future in as_completed(futures):
+                    if _stop_warming.is_set():
+                        break
+                    period = futures[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"Cache warming error for {period}: {e}")
             logger.info("Cache warming: complete")
         except Exception as e:
             logger.error(f"Cache warming error: {e}")
@@ -332,24 +340,27 @@ def get_sales_by_source(
 
     _, counts_dict, _, revenue_dict, _ = _get_aggregated_data(start_date, end_date)
 
-    labels = []
-    orders_data = []
-    revenue_data = []
-    colors = []
-
+    # Build data for each source
+    source_data = []
     for source_id in [1, 2, 4]:  # Instagram, Telegram, Shopify (Opencart excluded)
-        source_name = SOURCE_MAPPING.get(source_id, f"Source {source_id}")
-        labels.append(source_name)
-        # Handle both int and string keys from API
-        orders_data.append(counts_dict.get(source_id, counts_dict.get(str(source_id), 0)))
-        revenue_data.append(round(revenue_dict.get(source_id, revenue_dict.get(str(source_id), 0)), 2))
-        colors.append(SOURCE_COLORS.get(source_id, "#999999"))
+        orders = counts_dict.get(source_id, counts_dict.get(str(source_id), 0))
+        revenue = round(revenue_dict.get(source_id, revenue_dict.get(str(source_id), 0)), 2)
+        source_data.append({
+            'source_id': source_id,
+            'name': SOURCE_MAPPING.get(source_id, f"Source {source_id}"),
+            'orders': orders,
+            'revenue': revenue,
+            'color': SOURCE_COLORS.get(source_id, "#999999")
+        })
+
+    # Sort by orders descending
+    source_data.sort(key=lambda x: x['orders'], reverse=True)
 
     return {
-        "labels": labels,
-        "orders": orders_data,
-        "revenue": revenue_data,
-        "backgroundColor": colors
+        "labels": [s['name'] for s in source_data],
+        "orders": [s['orders'] for s in source_data],
+        "revenue": [s['revenue'] for s in source_data],
+        "backgroundColor": [s['color'] for s in source_data]
     }
 
 
@@ -594,23 +605,24 @@ def _get_sales_by_source_with_category(
         start_date, end_date, category_id
     )
 
-    labels = []
-    orders_data = []
-    revenue_data = []
-    colors = []
-
+    # Build data for each source
+    source_data = []
     for source_id in [1, 2, 4]:
-        source_name = SOURCE_MAPPING.get(source_id, f"Source {source_id}")
-        labels.append(source_name)
-        orders_data.append(source_orders.get(source_id, 0))
-        revenue_data.append(round(source_revenue.get(source_id, 0), 2))
-        colors.append(SOURCE_COLORS.get(source_id, "#999999"))
+        source_data.append({
+            'name': SOURCE_MAPPING.get(source_id, f"Source {source_id}"),
+            'orders': source_orders.get(source_id, 0),
+            'revenue': round(source_revenue.get(source_id, 0), 2),
+            'color': SOURCE_COLORS.get(source_id, "#999999")
+        })
+
+    # Sort by orders descending
+    source_data.sort(key=lambda x: x['orders'], reverse=True)
 
     result = {
-        "labels": labels,
-        "orders": orders_data,
-        "revenue": revenue_data,
-        "backgroundColor": colors
+        "labels": [s['name'] for s in source_data],
+        "orders": [s['orders'] for s in source_data],
+        "revenue": [s['revenue'] for s in source_data],
+        "backgroundColor": [s['color'] for s in source_data]
     }
     _set_cached(cache_key, result)
     return result
