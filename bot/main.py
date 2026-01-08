@@ -156,6 +156,11 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handlers.auth_approve_user, pattern=r"^auth_approve_\d+$"))
     application.add_handler(CallbackQueryHandler(handlers.auth_deny_user, pattern=r"^auth_deny_\d+$"))
 
+    # Add admin user management
+    application.add_handler(CommandHandler("users", handlers.admin_users_command))
+    application.add_handler(CallbackQueryHandler(handlers.admin_revoke_user, pattern=r"^admin_revoke_\d+$"))
+    application.add_handler(CallbackQueryHandler(handlers.admin_close, pattern=r"^admin_close$"))
+
     # Add startup action to set up command menu
     async def set_commands(context):
         try:

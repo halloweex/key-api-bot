@@ -1359,3 +1359,145 @@ async def auth_request_again(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
     return ConversationHandler.END
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ADMIN USER MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show list of approved users for admin management."""
+    user = update.effective_user
+
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ Admin access required.", parse_mode="HTML")
+        return
+
+    users = database.get_all_authorized_users()
+
+    if not users:
+        await update.message.reply_text(
+            "📋 <b>No approved users</b>\n\nNo users have been approved yet.",
+            parse_mode="HTML"
+        )
+        return
+
+    message = "👥 <b>Approved Users</b>\n\n"
+
+    keyboard = []
+    for u in users[:20]:  # Limit to 20 users
+        username = f"@{u['username']}" if u.get('username') else "N/A"
+        name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
+        last_active = u.get('last_activity') or u.get('reviewed_at') or "Never"
+
+        message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
+        message += f"  Last active: {last_active}\n\n"
+
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🚫 Revoke {name[:15]}",
+                callback_data=f"admin_revoke_{u['user_id']}"
+            )
+        ])
+
+    if len(users) > 20:
+        message += f"\n<i>...and {len(users) - 20} more users</i>"
+
+    keyboard.append([InlineKeyboardButton("🔙 Close", callback_data="admin_close")])
+
+    await update.message.reply_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+
+async def admin_revoke_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin revokes user access."""
+    query = update.callback_query
+    admin = update.effective_user
+
+    if not is_admin(admin.id):
+        await query.answer("Admin access required", show_alert=True)
+        return
+
+    target_user_id = int(query.data.split('_')[-1])
+    user_info = database.get_user_auth_status(target_user_id)
+
+    if not user_info:
+        await query.answer("User not found", show_alert=True)
+        return
+
+    # Revoke access
+    success = database.revoke_user(target_user_id, admin.id)
+
+    if success:
+        await query.answer("Access revoked!")
+
+        # Notify the user
+        try:
+            keyboard = [[
+                InlineKeyboardButton("🔄 Request Again", callback_data="auth_request_again")
+            ]]
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    "🔒 <b>Access Revoked</b>\n\n"
+                    "Your access to this bot has been revoked by an administrator.\n\n"
+                    "You can request access again:"
+                ),
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify user {target_user_id} about revocation: {e}")
+
+        # Refresh the user list
+        await show_updated_user_list(query, admin.id)
+    else:
+        await query.answer("Failed to revoke access", show_alert=True)
+
+
+async def show_updated_user_list(query, admin_id: int) -> None:
+    """Show updated user list after revocation."""
+    users = database.get_all_authorized_users()
+
+    if not users:
+        await query.edit_message_text(
+            "📋 <b>No approved users</b>\n\nAll users have been revoked.",
+            parse_mode="HTML"
+        )
+        return
+
+    message = "👥 <b>Approved Users</b>\n\n"
+    keyboard = []
+
+    for u in users[:20]:
+        username = f"@{u['username']}" if u.get('username') else "N/A"
+        name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
+        last_active = u.get('last_activity') or u.get('reviewed_at') or "Never"
+
+        message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
+        message += f"  Last active: {last_active}\n\n"
+
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🚫 Revoke {name[:15]}",
+                callback_data=f"admin_revoke_{u['user_id']}"
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton("🔙 Close", callback_data="admin_close")])
+
+    await query.edit_message_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+
+async def admin_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Close admin panel."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("✅ Admin panel closed.", parse_mode="HTML")
