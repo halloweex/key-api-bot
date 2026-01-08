@@ -17,7 +17,8 @@ async def get_revenue_trend(
 ):
     """Get revenue trend data for line chart."""
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return dashboard_service.get_revenue_trend(start, end)
+    # Use async version for better performance
+    return await dashboard_service.async_get_revenue_trend(start, end)
 
 
 @router.get("/sales/by-source")

@@ -411,3 +411,112 @@ def get_summary_stats(start_date: str, end_date: str) -> Dict[str, Any]:
         "startDate": start_date,
         "endDate": end_date
     }
+
+
+# ─── Async Functions ─────────────────────────────────────────────────────────
+
+async def async_get_revenue_trend(
+    start_date: str,
+    end_date: str,
+    granularity: str = "daily"
+) -> Dict[str, Any]:
+    """
+    Async version of get_revenue_trend.
+    Uses httpx for non-blocking HTTP requests with parallel pagination.
+    """
+    # Check cache first
+    cache_key = f"revenue_trend:{start_date}:{end_date}:{granularity}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    from bot.config import RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
+    from zoneinfo import ZoneInfo
+    from web.services.async_client import AsyncKeyCRMClient
+
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    # Initialize daily revenue dict
+    daily_revenue = {}
+    current = start
+    while current <= end:
+        daily_revenue[current.strftime("%Y-%m-%d")] = 0.0
+        current += timedelta(days=1)
+
+    try:
+        client = AsyncKeyCRMClient()
+        tz = ZoneInfo(DEFAULT_TIMEZONE)
+
+        # Calculate UTC boundaries
+        local_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
+        local_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)
+        utc_start = local_start.astimezone(ZoneInfo("UTC"))
+        utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
+
+        params = {
+            "include": "products,manager",
+            "limit": 50,
+            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
+        }
+
+        # Fetch all orders using async parallel pagination
+        all_orders = await client.fetch_all_orders(params)
+        return_status_ids = set(RETURN_STATUS_IDS)
+
+        for order in all_orders:
+            # Filter by ordered_at
+            ordered_at_str = order.get("ordered_at")
+            if not ordered_at_str:
+                continue
+            ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
+
+            # Check if within range
+            if not (utc_start <= ordered_at <= local_end.astimezone(ZoneInfo("UTC"))):
+                continue
+
+            # Skip returns
+            status_id = order.get("status_id")
+            if status_id in return_status_ids:
+                continue
+
+            # Filter Telegram orders by manager
+            source_id = order.get("source_id")
+            if source_id == 2:
+                manager = order.get("manager")
+                manager_id = str(manager.get("id")) if manager else None
+                if manager_id not in TELEGRAM_MANAGER_IDS:
+                    continue
+
+            # Get local date and add revenue
+            local_ordered = ordered_at.astimezone(tz)
+            date_key = local_ordered.strftime("%Y-%m-%d")
+            if date_key in daily_revenue:
+                daily_revenue[date_key] += float(order.get("grand_total", 0))
+
+    except Exception:
+        pass
+
+    # Build response
+    labels = []
+    data = []
+    current = start
+    while current <= end:
+        date_key = current.strftime("%Y-%m-%d")
+        labels.append(current.strftime("%d.%m"))
+        data.append(round(daily_revenue.get(date_key, 0), 2))
+        current += timedelta(days=1)
+
+    result = {
+        "labels": labels,
+        "datasets": [{
+            "label": "Revenue (UAH)",
+            "data": data,
+            "borderColor": "#16A34A",
+            "backgroundColor": "rgba(22, 163, 74, 0.1)",
+            "fill": True,
+            "tension": 0.3
+        }]
+    }
+    _set_cached(cache_key, result)
+    return result
