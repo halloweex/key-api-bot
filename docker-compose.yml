@@ -10,3 +10,16 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
+
+  web:
+    image: halloweex/keycrm-web:latest
+    container_name: keycrm-web
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Kyiv
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
