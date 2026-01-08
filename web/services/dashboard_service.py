@@ -151,8 +151,9 @@ def get_sales_by_source(start_date: str, end_date: str) -> Dict[str, Any]:
     for source_id in [1, 2, 3, 4]:  # Instagram, Telegram, Opencart, Shopify
         source_name = SOURCE_MAPPING.get(source_id, f"Source {source_id}")
         labels.append(source_name)
-        orders_data.append(counts_dict.get(source_id, 0))
-        revenue_data.append(round(revenue_dict.get(source_id, 0), 2))
+        # Handle both int and string keys from API
+        orders_data.append(counts_dict.get(source_id, counts_dict.get(str(source_id), 0)))
+        revenue_data.append(round(revenue_dict.get(source_id, revenue_dict.get(str(source_id), 0)), 2))
         colors.append(SOURCE_COLORS.get(source_id, "#999999"))
 
     return {
@@ -194,7 +195,8 @@ def get_top_products(
     # Aggregate products across sources or filter by source
     products = {}
     if source_id:
-        products = sales_dict.get(source_id, {})
+        # Handle both int and string keys
+        products = sales_dict.get(source_id, sales_dict.get(str(source_id), {}))
     else:
         for src_products in sales_dict.values():
             for product_name, qty in src_products.items():
