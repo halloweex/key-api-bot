@@ -3,6 +3,8 @@ Dashboard service for transforming sales data into chart-friendly formats.
 """
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
+import threading
+import time
 
 from bot.api_client import KeyCRMClient
 from bot.services import ReportService
@@ -11,6 +13,52 @@ from bot.config import (
     SOURCE_MAPPING,
     DEFAULT_TIMEZONE,
 )
+
+
+# ─── In-Memory Cache ─────────────────────────────────────────────────────────
+CACHE_TTL_SECONDS = 300  # 5 minutes
+
+_cache: Dict[str, Any] = {}
+_cache_lock = threading.Lock()
+
+
+def _get_cached(key: str) -> Optional[Any]:
+    """Get value from cache if not expired."""
+    with _cache_lock:
+        if key in _cache:
+            data, timestamp = _cache[key]
+            if time.time() - timestamp < CACHE_TTL_SECONDS:
+                return data
+            del _cache[key]
+    return None
+
+
+def _set_cached(key: str, value: Any) -> None:
+    """Store value in cache with timestamp."""
+    with _cache_lock:
+        _cache[key] = (value, time.time())
+
+
+def _get_aggregated_data(start_date: str, end_date: str) -> tuple:
+    """
+    Get aggregated sales data with caching.
+    Returns: (sales_dict, counts_dict, total_orders, revenue_dict, returns_dict)
+    """
+    cache_key = f"aggregated:{start_date}:{end_date}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    service = get_report_service()
+    try:
+        result = service.aggregate_sales_data(
+            target_date=(start_date, end_date),
+            tz_name=DEFAULT_TIMEZONE
+        )
+        _set_cached(cache_key, result)
+        return result
+    except Exception:
+        return ({}, {}, 0, {}, {})
 
 
 # Source colors for charts
@@ -73,6 +121,7 @@ def get_revenue_trend(
 ) -> Dict[str, Any]:
     """
     Get revenue data over time for line chart.
+    Optimized: fetches all data in ONE API call, then groups by day.
 
     Args:
         start_date: Start date (YYYY-MM-DD)
@@ -82,33 +131,105 @@ def get_revenue_trend(
     Returns:
         Chart.js compatible data structure
     """
-    service = get_report_service()
+    # Check cache first
+    cache_key = f"revenue_trend:{start_date}:{end_date}:{granularity}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    from bot.api_client import KeyCRMClient
+    from bot.config import KEYCRM_API_KEY, RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
+    from zoneinfo import ZoneInfo
 
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
 
-    labels = []
-    data = []
-
+    # Initialize daily revenue dict
+    daily_revenue = {}
     current = start
     while current <= end:
-        date_str = current.strftime("%Y-%m-%d")
-
-        try:
-            _, _, _, revenue_dict, _ = service.aggregate_sales_data(
-                target_date=date_str,
-                tz_name=DEFAULT_TIMEZONE
-            )
-            total_revenue = sum(revenue_dict.values())
-        except Exception:
-            total_revenue = 0
-
-        labels.append(current.strftime("%d.%m"))
-        data.append(round(total_revenue, 2))
-
+        daily_revenue[current.strftime("%Y-%m-%d")] = 0.0
         current += timedelta(days=1)
 
-    return {
+    try:
+        # Fetch ALL orders for the entire period in ONE call
+        client = KeyCRMClient(KEYCRM_API_KEY)
+        tz = ZoneInfo(DEFAULT_TIMEZONE)
+
+        # Calculate UTC boundaries
+        local_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
+        local_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)
+        utc_start = local_start.astimezone(ZoneInfo("UTC"))
+        utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
+
+        params = {
+            "include": "products,manager",
+            "limit": 50,
+            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
+        }
+
+        page = 1
+        return_status_ids = set(RETURN_STATUS_IDS)
+
+        while True:
+            params["page"] = page
+            resp = client.get_orders(params)
+
+            if isinstance(resp, dict) and resp.get("error"):
+                break
+
+            batch = resp.get("data", [])
+            if not batch:
+                break
+
+            for order in batch:
+                # Filter by ordered_at
+                ordered_at_str = order.get("ordered_at")
+                if not ordered_at_str:
+                    continue
+                ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
+
+                # Check if within range
+                if not (utc_start <= ordered_at <= local_end.astimezone(ZoneInfo("UTC"))):
+                    continue
+
+                # Skip returns
+                status_id = order.get("status_id")
+                if status_id in return_status_ids:
+                    continue
+
+                # Filter Telegram orders by manager
+                source_id = order.get("source_id")
+                if source_id == 2:
+                    manager = order.get("manager")
+                    manager_id = str(manager.get("id")) if manager else None
+                    if manager_id not in TELEGRAM_MANAGER_IDS:
+                        continue
+
+                # Get local date and add revenue
+                local_ordered = ordered_at.astimezone(tz)
+                date_key = local_ordered.strftime("%Y-%m-%d")
+                if date_key in daily_revenue:
+                    daily_revenue[date_key] += float(order.get("grand_total", 0))
+
+            if len(batch) < params["limit"]:
+                break
+            page += 1
+
+    except Exception:
+        pass
+
+    # Build response
+    labels = []
+    data = []
+    current = start
+    while current <= end:
+        date_key = current.strftime("%Y-%m-%d")
+        labels.append(current.strftime("%d.%m"))
+        data.append(round(daily_revenue.get(date_key, 0), 2))
+        current += timedelta(days=1)
+
+    result = {
         "labels": labels,
         "datasets": [{
             "label": "Revenue (UAH)",
@@ -119,6 +240,8 @@ def get_revenue_trend(
             "tension": 0.3
         }]
     }
+    _set_cached(cache_key, result)
+    return result
 
 
 def get_sales_by_source(start_date: str, end_date: str) -> Dict[str, Any]:
@@ -132,16 +255,7 @@ def get_sales_by_source(start_date: str, end_date: str) -> Dict[str, Any]:
     Returns:
         Chart.js compatible data structure
     """
-    service = get_report_service()
-
-    try:
-        _, counts_dict, _, revenue_dict, _ = service.aggregate_sales_data(
-            target_date=(start_date, end_date),
-            tz_name=DEFAULT_TIMEZONE
-        )
-    except Exception:
-        counts_dict = {}
-        revenue_dict = {}
+    _, counts_dict, _, revenue_dict, _ = _get_aggregated_data(start_date, end_date)
 
     labels = []
     orders_data = []
@@ -182,15 +296,7 @@ def get_top_products(
     Returns:
         Chart.js compatible data structure
     """
-    service = get_report_service()
-
-    try:
-        sales_dict, _, _, _, _ = service.aggregate_sales_data(
-            target_date=(start_date, end_date),
-            tz_name=DEFAULT_TIMEZONE
-        )
-    except Exception:
-        sales_dict = {}
+    sales_dict, _, _, _, _ = _get_aggregated_data(start_date, end_date)
 
     # Aggregate products across sources or filter by source
     products = {}
@@ -234,18 +340,7 @@ def get_summary_stats(start_date: str, end_date: str) -> Dict[str, Any]:
     Returns:
         Summary statistics dictionary
     """
-    service = get_report_service()
-
-    try:
-        _, counts_dict, total_orders, revenue_dict, returns_dict = service.aggregate_sales_data(
-            target_date=(start_date, end_date),
-            tz_name=DEFAULT_TIMEZONE
-        )
-    except Exception:
-        counts_dict = {}
-        total_orders = 0
-        revenue_dict = {}
-        returns_dict = {}
+    _, counts_dict, total_orders, revenue_dict, returns_dict = _get_aggregated_data(start_date, end_date)
 
     total_revenue = sum(revenue_dict.values())
     avg_check = total_revenue / total_orders if total_orders > 0 else 0
