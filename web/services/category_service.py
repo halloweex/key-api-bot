@@ -20,22 +20,33 @@ _last_products_update: float = 0
 CACHE_TTL = 3600  # 1 hour
 _products_loaded = False
 
+# Singleton session for connection pooling
+_session: Optional[requests.Session] = None
 
-def _get_headers() -> Dict[str, str]:
-    return {"Authorization": f"Bearer {KEYCRM_API_KEY}"}
+
+def _get_session() -> requests.Session:
+    """Get singleton session with connection pooling."""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update({
+            "Authorization": f"Bearer {KEYCRM_API_KEY}",
+            "Content-Type": "application/json"
+        })
+    return _session
 
 
 def fetch_all_categories() -> Dict[int, Dict[str, Any]]:
     """Fetch all categories from KeyCRM API."""
     categories = {}
     page = 1
+    session = _get_session()
 
     while True:
         try:
             url = f"{KEYCRM_BASE_URL}/products/categories"
-            resp = requests.get(
+            resp = session.get(
                 url,
-                headers=_get_headers(),
                 params={"page": page, "limit": 50},
                 timeout=30
             )
@@ -64,7 +75,7 @@ def fetch_product_category(product_id: int) -> Optional[int]:
     """Fetch category_id for a single product."""
     try:
         url = f"{KEYCRM_BASE_URL}/products/{product_id}"
-        resp = requests.get(url, headers=_get_headers(), timeout=10)
+        resp = _get_session().get(url, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         return data.get("category_id")
@@ -80,15 +91,15 @@ def fetch_all_products_categories() -> Dict[int, int]:
     """
     product_categories = {}
     page = 1
+    session = _get_session()
 
     logger.info("Starting batch fetch of all products...")
 
     while True:
         try:
             url = f"{KEYCRM_BASE_URL}/products"
-            resp = requests.get(
+            resp = session.get(
                 url,
-                headers=_get_headers(),
                 params={"page": page, "limit": 50},
                 timeout=30
             )

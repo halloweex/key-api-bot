@@ -32,6 +32,9 @@ class KeyCRMClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+        # Use session for connection pooling (reuses TCP connections)
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
 
     def _make_request(
         self,
@@ -56,13 +59,13 @@ class KeyCRMClient:
 
         try:
             if method.upper() == "GET":
-                response = requests.get(url, headers=self.headers, params=params, timeout=REQUEST_TIMEOUT)
+                response = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             elif method.upper() == "POST":
-                response = requests.post(url, headers=self.headers, json=data, timeout=REQUEST_TIMEOUT)
+                response = self.session.post(url, json=data, timeout=REQUEST_TIMEOUT)
             elif method.upper() == "PUT":
-                response = requests.put(url, headers=self.headers, json=data, timeout=REQUEST_TIMEOUT)
+                response = self.session.put(url, json=data, timeout=REQUEST_TIMEOUT)
             elif method.upper() == "DELETE":
-                response = requests.delete(url, headers=self.headers, params=params, timeout=REQUEST_TIMEOUT)
+                response = self.session.delete(url, params=params, timeout=REQUEST_TIMEOUT)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
 

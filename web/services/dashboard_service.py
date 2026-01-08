@@ -127,10 +127,18 @@ SOURCE_COLORS = {
 SOURCE_COLORS_LIST = ["#7C3AED", "#2563EB", "#F59E0B", "#eb4200"]
 
 
+# Singleton instances for connection reuse
+_client: Optional[KeyCRMClient] = None
+_report_service: Optional[ReportService] = None
+
+
 def get_report_service() -> ReportService:
-    """Create and return a ReportService instance."""
-    client = KeyCRMClient(KEYCRM_API_KEY)
-    return ReportService(client)
+    """Get singleton ReportService instance (reuses connections)."""
+    global _client, _report_service
+    if _report_service is None:
+        _client = KeyCRMClient(KEYCRM_API_KEY)
+        _report_service = ReportService(_client)
+    return _report_service
 
 
 def parse_period(period: Optional[str], start_date: Optional[str], end_date: Optional[str]) -> tuple:
@@ -208,7 +216,10 @@ def get_revenue_trend(
 
     try:
         # Fetch ALL orders for the entire period in ONE call
-        client = KeyCRMClient(KEYCRM_API_KEY)
+        # Use singleton client for connection reuse
+        if _client is None:
+            get_report_service()  # Initialize singleton
+        client = _client
         tz = ZoneInfo(DEFAULT_TIMEZONE)
 
         # Calculate UTC boundaries
@@ -446,8 +457,16 @@ def _fetch_orders_with_category_filter(
     """
     from bot.config import RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
     from zoneinfo import ZoneInfo
-    from web.services.category_service import get_product_category, get_category_with_children
-    import requests
+    from web.services.category_service import (
+        get_category_with_children,
+        warm_product_cache,
+        _product_category_cache,
+        _products_loaded
+    )
+
+    # Pre-load product categories to avoid N+1 queries
+    if not _products_loaded:
+        warm_product_cache()
 
     # Get all category IDs to match (including children)
     valid_category_ids = set(get_category_with_children(category_id))
@@ -461,7 +480,8 @@ def _fetch_orders_with_category_filter(
     utc_start = local_start.astimezone(ZoneInfo("UTC"))
     utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
 
-    headers = {"Authorization": f"Bearer {KEYCRM_API_KEY}"}
+    from web.services.category_service import _get_session
+    session = _get_session()
     return_status_ids = set(RETURN_STATUS_IDS)
 
     # Aggregation dicts
@@ -485,9 +505,8 @@ def _fetch_orders_with_category_filter(
             "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
         }
 
-        resp = requests.get(
+        resp = session.get(
             f"{KEYCRM_BASE_URL}/order",
-            headers=headers,
             params=params,
             timeout=30
         )
@@ -531,8 +550,9 @@ def _fetch_orders_with_category_filter(
                 product_id = offer.get("product_id") if offer else None
 
                 if product_id:
-                    prod_category_id = get_product_category(product_id)
-                    if prod_category_id in valid_category_ids:
+                    # Use cached dict lookup instead of function call (N+1 fix)
+                    prod_category_id = _product_category_cache.get(product_id)
+                    if prod_category_id and prod_category_id in valid_category_ids:
                         order_has_matching_product = True
                         product_revenue = float(product.get("price_sold", 0)) * int(product.get("quantity", 1))
                         order_matching_revenue += product_revenue
