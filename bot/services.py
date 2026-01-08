@@ -298,7 +298,8 @@ class ReportService:
         )
 
         # Get products for specific source
-        products = sales_dict.get(source_id, {})
+        # Note: JSON serialization converts int keys to strings, so try both
+        products = sales_dict.get(source_id, sales_dict.get(str(source_id), {}))
         total_quantity = sum(products.values())
 
         # Sort by quantity and get top N
