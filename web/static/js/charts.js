@@ -265,6 +265,18 @@ async function loadSalesCharts() {
                 plugins: {
                     legend: {
                         display: false
+                    },
+                    datalabels: {
+                        color: '#fff',
+                        font: {
+                            weight: 'bold',
+                            size: 14
+                        },
+                        anchor: 'center',
+                        align: 'center',
+                        formatter: function(value) {
+                            return value > 0 ? value : '';
+                        }
                     }
                 },
                 scales: {
@@ -272,7 +284,8 @@ async function loadSalesCharts() {
                         beginAtZero: true
                     }
                 }
-            }
+            },
+            plugins: [ChartDataLabels]
         });
 
         // Revenue by source (doughnut chart)
@@ -308,9 +321,22 @@ async function loadSalesCharts() {
                                 return `${context.label}: ${formatCurrency(value)} (${percentage}%)`;
                             }
                         }
+                    },
+                    datalabels: {
+                        color: '#fff',
+                        font: {
+                            weight: 'bold',
+                            size: 12
+                        },
+                        formatter: function(value, context) {
+                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                            const percentage = ((value / total) * 100).toFixed(0);
+                            return percentage > 5 ? percentage + '%' : '';
+                        }
                     }
                 }
-            }
+            },
+            plugins: [ChartDataLabels]
         });
     } catch (error) {
         console.error('Error loading sales charts:', error);
@@ -356,6 +382,19 @@ async function loadTopProducts() {
                                 return `Quantity: ${context.parsed.x} (${percentage}%)`;
                             }
                         }
+                    },
+                    datalabels: {
+                        color: '#fff',
+                        font: {
+                            weight: 'bold',
+                            size: 11
+                        },
+                        anchor: 'center',
+                        align: 'center',
+                        formatter: function(value, context) {
+                            const percentage = data.percentages[context.dataIndex];
+                            return value > 0 ? `${value} (${percentage}%)` : '';
+                        }
                     }
                 },
                 scales: {
@@ -363,7 +402,8 @@ async function loadTopProducts() {
                         beginAtZero: true
                     }
                 }
-            }
+            },
+            plugins: [ChartDataLabels]
         });
     } catch (error) {
         console.error('Error loading top products:', error);
