@@ -68,8 +68,13 @@ def authorized(func):
         if not user:
             return ConversationHandler.END
 
-        # Admins always have access
+        # Admins always have access - auto-approve them in DB too
         if is_admin(user.id):
+            # Ensure admin is in approved users table
+            if not database.is_user_authorized(user.id):
+                database.request_access(user.id, user.username, user.first_name, user.last_name)
+                database.approve_user(user.id, user.id)
+                logger.info(f"Auto-approved admin {user.id}")
             return await func(update, context, *args, **kwargs)
 
         # Check authorization status
