@@ -86,9 +86,16 @@ def init_database():
             status TEXT DEFAULT 'pending',
             requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             reviewed_at TIMESTAMP,
-            reviewed_by INTEGER
+            reviewed_by INTEGER,
+            last_activity TIMESTAMP
         )
     """)
+
+    # Add last_activity column if it doesn't exist (migration for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE authorized_users ADD COLUMN last_activity TIMESTAMP")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
     # Create index for status lookups
     cursor.execute("""
@@ -277,6 +284,65 @@ def reset_user_to_pending(user_id: int) -> bool:
     if success:
         logger.info(f"User {user_id} reset to pending status")
     return success
+
+
+def update_last_activity(user_id: int) -> None:
+    """Update user's last activity timestamp."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE authorized_users
+        SET last_activity = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND status = ?
+    """, (user_id, STATUS_APPROVED))
+
+    conn.commit()
+    conn.close()
+
+
+def revoke_inactive_users(days: int = 45) -> int:
+    """
+    Revoke access for users inactive for X days.
+    Returns count of revoked users.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cutoff = datetime.now() - timedelta(days=days)
+
+    # Get users to revoke (for logging)
+    cursor.execute("""
+        SELECT user_id, username FROM authorized_users
+        WHERE status = ? AND (
+            last_activity < ? OR
+            (last_activity IS NULL AND reviewed_at < ?)
+        )
+    """, (STATUS_APPROVED, cutoff.isoformat(), cutoff.isoformat()))
+
+    users_to_revoke = cursor.fetchall()
+
+    if users_to_revoke:
+        # Revoke inactive users
+        cursor.execute("""
+            UPDATE authorized_users
+            SET status = ?
+            WHERE status = ? AND (
+                last_activity < ? OR
+                (last_activity IS NULL AND reviewed_at < ?)
+            )
+        """, (STATUS_DENIED, STATUS_APPROVED, cutoff.isoformat(), cutoff.isoformat()))
+
+        revoked_count = cursor.rowcount
+        conn.commit()
+
+        for user in users_to_revoke:
+            logger.info(f"Revoked inactive user {user[0]} (@{user[1]}) - no activity for {days}+ days")
+    else:
+        revoked_count = 0
+
+    conn.close()
+    return revoked_count
 
 
 # ═══════════════════════════════════════════════════════════════════════════

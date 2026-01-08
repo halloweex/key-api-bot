@@ -133,7 +133,8 @@ def authorized(func):
                 )
             return ConversationHandler.END
 
-        # User is approved
+        # User is approved - update last activity
+        database.update_last_activity(user.id)
         return await func(update, context, *args, **kwargs)
     return wrapper
 

@@ -177,6 +177,12 @@ def main() -> None:
         if cache_count > 0 or history_count > 0:
             logger.debug(f"DB cleanup: {cache_count} cache, {history_count} history")
 
+    # Periodic inactive user revocation (runs daily)
+    async def revoke_inactive_users(context):
+        revoked_count = database.revoke_inactive_users(days=45)
+        if revoked_count > 0:
+            logger.info(f"Revoked {revoked_count} inactive users (45+ days)")
+
     # Set up command menu at startup
     application.job_queue.run_once(set_commands, 1)
 
@@ -185,6 +191,9 @@ def main() -> None:
 
     # Run database cleanup every hour
     application.job_queue.run_repeating(cleanup_database, interval=3600, first=120)
+
+    # Run inactive user revocation daily (86400 seconds = 24 hours)
+    application.job_queue.run_repeating(revoke_inactive_users, interval=86400, first=300)
 
     logger.info("Bot initialized. Starting polling...")
 
