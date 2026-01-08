@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# ─── Version ───────────────────────────────────────────────────────────────
+VERSION = "1.0.0"
+
 # ─── Environment Variables ──────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 KEYCRM_API_KEY = os.getenv("KEYCRM_API_KEY")

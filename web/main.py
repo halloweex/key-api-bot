@@ -5,7 +5,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from web.config import STATIC_DIR
+from web.config import STATIC_DIR, VERSION
 from web.routes import api, pages
 
 # Configure logging
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="KeyCRM Dashboard",
     description="Sales analytics dashboard for KeyCRM",
-    version="1.0.0"
+    version=VERSION
 )
 
 # Mount static files

@@ -6,7 +6,7 @@ Contains text formatting helpers, message templates, and report formatters.
 import logging
 from datetime import date
 from typing import Dict, List, Tuple
-from bot.config import REPORT_TYPES, SOURCE_MAPPING, MEDALS
+from bot.config import REPORT_TYPES, SOURCE_MAPPING, MEDALS, VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,7 @@ class Messages:
             f"{bold('📊 KeyCRM Sales Report Bot 📊')}\n\n"
             f"{bold('Available Commands:')}\n"
             f"• /report - Generate a sales report\n"
+            f"• /dashboard - Open sales dashboard\n"
             f"• /cancel - Cancel the current operation\n"
             f"• /help - Show this help message\n\n"
             f"{bold('How to use:')}\n"
@@ -122,7 +123,7 @@ class Messages:
             f"2️⃣ Select report type (Summary or Excel)\n"
             f"3️⃣ Choose date range\n"
             f"4️⃣ View your report results\n\n"
-            f"{italic('Need more assistance? Contact support at support@example.com')}"
+            f"{italic(f'Version {VERSION}')}"
         )
 
     @staticmethod

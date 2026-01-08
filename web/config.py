@@ -19,4 +19,5 @@ from bot.config import (
     SOURCE_MAPPING,
     SOURCE_EMOJIS,
     DEFAULT_TIMEZONE,
+    VERSION,
 )

@@ -25,7 +25,8 @@ from bot.config import (
     get_year_choices,
     is_admin,
     ADMIN_USER_IDS,
-    DASHBOARD_URL
+    DASHBOARD_URL,
+    VERSION
 )
 from bot import database
 from bot.keyboards import Keyboards, ReplyKeyboards
