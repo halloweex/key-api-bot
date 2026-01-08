@@ -281,7 +281,7 @@ async function loadSalesCharts() {
                 },
                 scales: {
                     y: {
-                        beginAtZero: true
+                        display: false
                     }
                 }
             },
@@ -399,7 +399,7 @@ async function loadTopProducts() {
                 },
                 scales: {
                     x: {
-                        beginAtZero: true
+                        display: false
                     }
                 }
             },

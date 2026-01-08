@@ -377,13 +377,10 @@ def get_top_products(
             for product_name, qty in src_products.items():
                 products[product_name] = products.get(product_name, 0) + qty
 
-    # Sort and limit
+    # Sort and limit (descending - highest at top)
     sorted_products = sorted(products.items(), key=lambda x: x[1], reverse=True)[:limit]
 
-    # Reverse for horizontal bar (highest at top)
-    sorted_products = list(reversed(sorted_products))
-
-    labels = [p[0][:30] + "..." if len(p[0]) > 30 else p[0] for p in sorted_products]
+    labels = [p[0][:40] + "..." if len(p[0]) > 40 else p[0] for p in sorted_products]
     data = [p[1] for p in sorted_products]
 
     # Calculate percentages
@@ -616,11 +613,10 @@ def _get_top_products_with_category(
         start_date, end_date, category_id
     )
 
-    # Sort and limit
+    # Sort and limit (descending - highest at top)
     sorted_products = sorted(products.items(), key=lambda x: x[1], reverse=True)[:limit]
-    sorted_products = list(reversed(sorted_products))
 
-    labels = [p[0][:30] + "..." if len(p[0]) > 30 else p[0] for p in sorted_products]
+    labels = [p[0][:40] + "..." if len(p[0]) > 40 else p[0] for p in sorted_products]
     data = [p[1] for p in sorted_products]
 
     total = sum(data) if data else 1

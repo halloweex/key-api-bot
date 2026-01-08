@@ -234,6 +234,12 @@ main {
     max-height: 350px;
 }
 
+/* Top products chart needs more height for 10 items */
+#topProductsChart {
+    min-height: 400px !important;
+    max-height: 450px !important;
+}
+
 /* Footer */
 footer {
     text-align: center;
