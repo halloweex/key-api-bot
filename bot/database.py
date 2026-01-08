@@ -97,6 +97,12 @@ def init_database():
     except sqlite3.OperationalError:
         pass  # Column already exists
 
+    # Add denial_count column if it doesn't exist (migration for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE authorized_users ADD COLUMN denial_count INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Create index for status lookups
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_authorized_users_status
@@ -116,6 +122,13 @@ def init_database():
 STATUS_PENDING = 'pending'
 STATUS_APPROVED = 'approved'
 STATUS_DENIED = 'denied'
+STATUS_FROZEN = 'frozen'
+
+# Max denial count before freezing
+MAX_DENIAL_COUNT = 5
+
+# Freeze duration in days
+FREEZE_DURATION_DAYS = 30
 
 
 def get_user_auth_status(user_id: int) -> Optional[Dict[str, Any]]:
@@ -149,6 +162,69 @@ def has_pending_request(user_id: int) -> bool:
     if not status:
         return False
     return status['status'] == STATUS_PENDING
+
+
+def is_user_frozen(user_id: int) -> bool:
+    """
+    Check if user is frozen (too many denials).
+    Auto-unfreezes after FREEZE_DURATION_DAYS.
+    """
+    status = get_user_auth_status(user_id)
+    if not status:
+        return False
+
+    if status['status'] != STATUS_FROZEN:
+        return False
+
+    # Check if freeze period has expired
+    reviewed_at = status.get('reviewed_at')
+    if reviewed_at:
+        try:
+            frozen_date = datetime.fromisoformat(reviewed_at)
+            if datetime.now() - frozen_date > timedelta(days=FREEZE_DURATION_DAYS):
+                # Auto-unfreeze: reset to denied so user can request again
+                _auto_unfreeze_user(user_id)
+                logger.info(f"User {user_id} auto-unfrozen after {FREEZE_DURATION_DAYS} days")
+                return False
+        except (ValueError, TypeError):
+            pass
+
+    return True
+
+
+def _auto_unfreeze_user(user_id: int) -> None:
+    """Internal: Reset frozen user to denied status."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE authorized_users
+        SET status = ?, denial_count = 0
+        WHERE user_id = ? AND status = ?
+    """, (STATUS_DENIED, user_id, STATUS_FROZEN))
+
+    conn.commit()
+    conn.close()
+
+
+def unfreeze_user(user_id: int, admin_id: int) -> bool:
+    """Admin unfreezes a user. Resets denial count. Returns True if successful."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE authorized_users
+        SET status = ?, denial_count = 0, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+        WHERE user_id = ? AND status = ?
+    """, (STATUS_DENIED, admin_id, user_id, STATUS_FROZEN))
+
+    success = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+
+    if success:
+        logger.info(f"User {user_id} unfrozen by admin {admin_id}")
+    return success
 
 
 def request_access(
@@ -188,13 +264,13 @@ def request_access(
 
 
 def approve_user(user_id: int, admin_id: int) -> bool:
-    """Approve user access. Returns True if successful."""
+    """Approve user access. Resets denial count. Returns True if successful."""
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
         UPDATE authorized_users
-        SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+        SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?, denial_count = 0
         WHERE user_id = ?
     """, (STATUS_APPROVED, admin_id, user_id))
 
@@ -207,24 +283,44 @@ def approve_user(user_id: int, admin_id: int) -> bool:
     return success
 
 
-def deny_user(user_id: int, admin_id: int) -> bool:
-    """Deny user access. Returns True if successful."""
+def deny_user(user_id: int, admin_id: int) -> tuple[bool, bool]:
+    """
+    Deny user access. Increments denial count.
+    Returns (success, is_frozen) tuple.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
+    # Get current denial count
+    cursor.execute("SELECT denial_count FROM authorized_users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    current_count = (row[0] or 0) if row else 0
+    new_count = current_count + 1
+
+    # Determine new status
+    if new_count >= MAX_DENIAL_COUNT:
+        new_status = STATUS_FROZEN
+        is_frozen = True
+    else:
+        new_status = STATUS_DENIED
+        is_frozen = False
+
     cursor.execute("""
         UPDATE authorized_users
-        SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+        SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?, denial_count = ?
         WHERE user_id = ?
-    """, (STATUS_DENIED, admin_id, user_id))
+    """, (new_status, admin_id, new_count, user_id))
 
     success = cursor.rowcount > 0
     conn.commit()
     conn.close()
 
     if success:
-        logger.info(f"User {user_id} denied by admin {admin_id}")
-    return success
+        if is_frozen:
+            logger.info(f"User {user_id} FROZEN by admin {admin_id} (denied {new_count} times)")
+        else:
+            logger.info(f"User {user_id} denied by admin {admin_id} (count: {new_count}/{MAX_DENIAL_COUNT})")
+    return success, is_frozen
 
 
 def get_pending_requests() -> List[Dict[str, Any]]:
@@ -261,21 +357,48 @@ def get_all_authorized_users() -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def get_frozen_users() -> List[Dict[str, Any]]:
+    """Get all frozen users."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT * FROM authorized_users
+        WHERE status = ?
+        ORDER BY reviewed_at DESC
+    """, (STATUS_FROZEN,))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
 def revoke_user(user_id: int, admin_id: int) -> bool:
     """Revoke user access (set to denied). Returns True if successful."""
-    return deny_user(user_id, admin_id)
+    success, _ = deny_user(user_id, admin_id)
+    return success
 
 
-def reset_user_to_pending(user_id: int) -> bool:
-    """Reset user status to pending (for re-requesting access)."""
+def reset_user_to_pending(user_id: int) -> tuple[bool, bool]:
+    """
+    Reset user status to pending (for re-requesting access).
+    Returns (success, was_frozen) tuple.
+    Frozen users cannot reset.
+    """
+    # Check if frozen first
+    if is_user_frozen(user_id):
+        logger.warning(f"Frozen user {user_id} attempted to re-request access")
+        return False, True
+
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
         UPDATE authorized_users
         SET status = ?, requested_at = CURRENT_TIMESTAMP, reviewed_at = NULL, reviewed_by = NULL
-        WHERE user_id = ?
-    """, (STATUS_PENDING, user_id))
+        WHERE user_id = ? AND status != ?
+    """, (STATUS_PENDING, user_id, STATUS_FROZEN))
 
     success = cursor.rowcount > 0
     conn.commit()
@@ -283,7 +406,7 @@ def reset_user_to_pending(user_id: int) -> bool:
 
     if success:
         logger.info(f"User {user_id} reset to pending status")
-    return success
+    return success, False
 
 
 def update_last_activity(user_id: int) -> None:

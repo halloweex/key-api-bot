@@ -159,6 +159,7 @@ def main() -> None:
     # Add admin user management
     application.add_handler(CommandHandler("users", handlers.admin_users_command))
     application.add_handler(CallbackQueryHandler(handlers.admin_revoke_user, pattern=r"^admin_revoke_\d+$"))
+    application.add_handler(CallbackQueryHandler(handlers.admin_unfreeze_user, pattern=r"^admin_unfreeze_\d+$"))
     application.add_handler(CallbackQueryHandler(handlers.admin_close, pattern=r"^admin_close$"))
 
     # Add startup action to set up command menu

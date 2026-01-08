@@ -47,6 +47,12 @@ ACCESS_DENIED_MESSAGE = (
     "Please contact the administrator."
 )
 
+ACCESS_FROZEN_MESSAGE = (
+    "🚫 <b>Access Frozen</b>\n\n"
+    "Your account has been frozen due to multiple denied requests.\n"
+    "Please contact the administrator directly."
+)
+
 ACCESS_PENDING_MESSAGE = (
     "⏳ <b>Access Pending</b>\n\n"
     "Your access request is being reviewed.\n"
@@ -109,6 +115,14 @@ def authorized(func):
                 await update.callback_query.answer("Your request is pending", show_alert=True)
             elif update.message:
                 await update.message.reply_text(ACCESS_PENDING_MESSAGE, parse_mode="HTML")
+            return ConversationHandler.END
+
+        if auth_status['status'] == database.STATUS_FROZEN:
+            logger.warning(f"Frozen user {user.id} attempted access")
+            if update.callback_query:
+                await update.callback_query.answer("Account frozen", show_alert=True)
+            elif update.message:
+                await update.message.reply_text(ACCESS_FROZEN_MESSAGE, parse_mode="HTML")
             return ConversationHandler.END
 
         if auth_status['status'] == database.STATUS_DENIED:
@@ -1298,36 +1312,60 @@ async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Get user info before denying
     user_info = database.get_user_auth_status(target_user_id)
+    denial_count = (user_info.get('denial_count') or 0) + 1
 
     # Deny user
-    success = database.deny_user(target_user_id, admin.id)
+    success, is_frozen = database.deny_user(target_user_id, admin.id)
 
     if success:
-        await query.answer("User denied!")
+        if is_frozen:
+            await query.answer("User frozen!")
 
-        # Update admin message
-        await query.edit_message_text(
-            f"❌ <b>User Denied</b>\n\n"
-            f"<b>User ID:</b> <code>{target_user_id}</code>\n"
-            f"<b>Username:</b> @{user_info.get('username') or 'N/A'}\n"
-            f"<b>Name:</b> {user_info.get('first_name') or ''} {user_info.get('last_name') or ''}\n\n"
-            f"<i>Denied by you</i>",
-            parse_mode="HTML"
-        )
-
-        # Notify the user with option to request again
-        try:
-            keyboard = [[
-                InlineKeyboardButton("🔄 Request Again", callback_data="auth_request_again")
-            ]]
-            await context.bot.send_message(
-                chat_id=target_user_id,
-                text=ACCESS_DENIED_MESSAGE + "\n\nYou can request access again:",
-                reply_markup=InlineKeyboardMarkup(keyboard),
+            # Update admin message
+            await query.edit_message_text(
+                f"🚫 <b>User Frozen</b>\n\n"
+                f"<b>User ID:</b> <code>{target_user_id}</code>\n"
+                f"<b>Username:</b> @{user_info.get('username') or 'N/A'}\n"
+                f"<b>Name:</b> {user_info.get('first_name') or ''} {user_info.get('last_name') or ''}\n\n"
+                f"<i>Denied {denial_count} times - account frozen</i>",
                 parse_mode="HTML"
             )
-        except Exception as e:
-            logger.error(f"Failed to notify user {target_user_id} about denial: {e}")
+
+            # Notify the user - no re-request option
+            try:
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text=ACCESS_FROZEN_MESSAGE,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify user {target_user_id} about freeze: {e}")
+        else:
+            await query.answer("User denied!")
+
+            # Update admin message
+            await query.edit_message_text(
+                f"❌ <b>User Denied</b>\n\n"
+                f"<b>User ID:</b> <code>{target_user_id}</code>\n"
+                f"<b>Username:</b> @{user_info.get('username') or 'N/A'}\n"
+                f"<b>Name:</b> {user_info.get('first_name') or ''} {user_info.get('last_name') or ''}\n\n"
+                f"<i>Denied by you ({denial_count}/{database.MAX_DENIAL_COUNT})</i>",
+                parse_mode="HTML"
+            )
+
+            # Notify the user with option to request again
+            try:
+                keyboard = [[
+                    InlineKeyboardButton("🔄 Request Again", callback_data="auth_request_again")
+                ]]
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text=ACCESS_DENIED_MESSAGE + f"\n\n<i>({denial_count}/{database.MAX_DENIAL_COUNT} denials)</i>\n\nYou can request access again:",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify user {target_user_id} about denial: {e}")
     else:
         await query.answer("Failed to deny user", show_alert=True)
 
@@ -1340,9 +1378,14 @@ async def auth_request_again(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user = update.effective_user
 
     # Reset status to pending
-    success = database.reset_user_to_pending(user.id)
+    success, was_frozen = database.reset_user_to_pending(user.id)
 
-    if success:
+    if was_frozen:
+        await query.edit_message_text(
+            ACCESS_FROZEN_MESSAGE,
+            parse_mode="HTML"
+        )
+    elif success:
         # Notify admins
         await notify_admins_new_request(context, user)
 
@@ -1366,7 +1409,7 @@ async def auth_request_again(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show list of approved users for admin management."""
+    """Show list of approved and frozen users for admin management."""
     user = update.effective_user
 
     if not is_admin(user.id):
@@ -1374,34 +1417,59 @@ async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     users = database.get_all_authorized_users()
+    frozen_users = database.get_frozen_users()
 
-    if not users:
+    if not users and not frozen_users:
         await update.message.reply_text(
-            "📋 <b>No approved users</b>\n\nNo users have been approved yet.",
+            "📋 <b>No users</b>\n\nNo approved or frozen users.",
             parse_mode="HTML"
         )
         return
 
-    message = "👥 <b>Approved Users</b>\n\n"
-
+    message = ""
     keyboard = []
-    for u in users[:20]:  # Limit to 20 users
-        username = f"@{u['username']}" if u.get('username') else "N/A"
-        name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
-        last_active = u.get('last_activity') or u.get('reviewed_at') or "Never"
 
-        message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
-        message += f"  Last active: {last_active}\n\n"
+    # Approved users
+    if users:
+        message += "👥 <b>Approved Users</b>\n\n"
+        for u in users[:15]:
+            username = f"@{u['username']}" if u.get('username') else "N/A"
+            name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
+            last_active = u.get('last_activity') or u.get('reviewed_at') or "Never"
 
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🚫 Revoke {name[:15]}",
-                callback_data=f"admin_revoke_{u['user_id']}"
-            )
-        ])
+            message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
+            message += f"  Last active: {last_active}\n\n"
 
-    if len(users) > 20:
-        message += f"\n<i>...and {len(users) - 20} more users</i>"
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🚫 Revoke {name[:15]}",
+                    callback_data=f"admin_revoke_{u['user_id']}"
+                )
+            ])
+
+        if len(users) > 15:
+            message += f"<i>...and {len(users) - 15} more approved users</i>\n\n"
+
+    # Frozen users
+    if frozen_users:
+        message += "🧊 <b>Frozen Users</b>\n\n"
+        for u in frozen_users[:10]:
+            username = f"@{u['username']}" if u.get('username') else "N/A"
+            name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
+            frozen_at = u.get('reviewed_at') or "Unknown"
+
+            message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
+            message += f"  Frozen: {frozen_at}\n\n"
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🔓 Unfreeze {name[:15]}",
+                    callback_data=f"admin_unfreeze_{u['user_id']}"
+                )
+            ])
+
+        if len(frozen_users) > 10:
+            message += f"<i>...and {len(frozen_users) - 10} more frozen users</i>\n"
 
     keyboard.append([InlineKeyboardButton("🔙 Close", callback_data="admin_close")])
 
@@ -1459,33 +1527,61 @@ async def admin_revoke_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def show_updated_user_list(query, admin_id: int) -> None:
-    """Show updated user list after revocation."""
+    """Show updated user list after revocation/unfreeze."""
     users = database.get_all_authorized_users()
+    frozen_users = database.get_frozen_users()
 
-    if not users:
+    if not users and not frozen_users:
         await query.edit_message_text(
-            "📋 <b>No approved users</b>\n\nAll users have been revoked.",
+            "📋 <b>No users</b>\n\nNo approved or frozen users.",
             parse_mode="HTML"
         )
         return
 
-    message = "👥 <b>Approved Users</b>\n\n"
+    message = ""
     keyboard = []
 
-    for u in users[:20]:
-        username = f"@{u['username']}" if u.get('username') else "N/A"
-        name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
-        last_active = u.get('last_activity') or u.get('reviewed_at') or "Never"
+    # Approved users
+    if users:
+        message += "👥 <b>Approved Users</b>\n\n"
+        for u in users[:15]:
+            username = f"@{u['username']}" if u.get('username') else "N/A"
+            name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
+            last_active = u.get('last_activity') or u.get('reviewed_at') or "Never"
 
-        message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
-        message += f"  Last active: {last_active}\n\n"
+            message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
+            message += f"  Last active: {last_active}\n\n"
 
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🚫 Revoke {name[:15]}",
-                callback_data=f"admin_revoke_{u['user_id']}"
-            )
-        ])
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🚫 Revoke {name[:15]}",
+                    callback_data=f"admin_revoke_{u['user_id']}"
+                )
+            ])
+
+        if len(users) > 15:
+            message += f"<i>...and {len(users) - 15} more approved users</i>\n\n"
+
+    # Frozen users
+    if frozen_users:
+        message += "🧊 <b>Frozen Users</b>\n\n"
+        for u in frozen_users[:10]:
+            username = f"@{u['username']}" if u.get('username') else "N/A"
+            name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
+            frozen_at = u.get('reviewed_at') or "Unknown"
+
+            message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
+            message += f"  Frozen: {frozen_at}\n\n"
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🔓 Unfreeze {name[:15]}",
+                    callback_data=f"admin_unfreeze_{u['user_id']}"
+                )
+            ])
+
+        if len(frozen_users) > 10:
+            message += f"<i>...and {len(frozen_users) - 10} more frozen users</i>\n"
 
     keyboard.append([InlineKeyboardButton("🔙 Close", callback_data="admin_close")])
 
@@ -1494,6 +1590,52 @@ async def show_updated_user_list(query, admin_id: int) -> None:
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML"
     )
+
+
+async def admin_unfreeze_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin unfreezes a user."""
+    query = update.callback_query
+    admin = update.effective_user
+
+    if not is_admin(admin.id):
+        await query.answer("Admin access required", show_alert=True)
+        return
+
+    target_user_id = int(query.data.split('_')[-1])
+    user_info = database.get_user_auth_status(target_user_id)
+
+    if not user_info:
+        await query.answer("User not found", show_alert=True)
+        return
+
+    # Unfreeze user
+    success = database.unfreeze_user(target_user_id, admin.id)
+
+    if success:
+        await query.answer("User unfrozen!")
+
+        # Notify the user
+        try:
+            keyboard = [[
+                InlineKeyboardButton("🔑 Request Access", callback_data="auth_request_access")
+            ]]
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    "🔓 <b>Account Unfrozen</b>\n\n"
+                    "Your account has been unfrozen by an administrator.\n"
+                    "You can now request access again:"
+                ),
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify user {target_user_id} about unfreeze: {e}")
+
+        # Refresh the user list
+        await show_updated_user_list(query, admin.id)
+    else:
+        await query.answer("Failed to unfreeze user", show_alert=True)
 
 
 async def admin_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
