@@ -76,9 +76,187 @@ def init_database():
         )
     """)
 
+    # Authorized users table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS authorized_users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            status TEXT DEFAULT 'pending',
+            requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TIMESTAMP,
+            reviewed_by INTEGER
+        )
+    """)
+
+    # Create index for status lookups
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_authorized_users_status
+        ON authorized_users(status)
+    """)
+
     conn.commit()
     conn.close()
     logger.info(f"Database initialized at {DB_PATH}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# USER AUTHORIZATION
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Status constants
+STATUS_PENDING = 'pending'
+STATUS_APPROVED = 'approved'
+STATUS_DENIED = 'denied'
+
+
+def get_user_auth_status(user_id: int) -> Optional[Dict[str, Any]]:
+    """Get user authorization status."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT * FROM authorized_users WHERE user_id = ?",
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        return dict(row)
+    return None
+
+
+def is_user_authorized(user_id: int) -> bool:
+    """Check if user is authorized (approved status)."""
+    status = get_user_auth_status(user_id)
+    if not status:
+        return False
+    return status['status'] == STATUS_APPROVED
+
+
+def has_pending_request(user_id: int) -> bool:
+    """Check if user has a pending access request."""
+    status = get_user_auth_status(user_id)
+    if not status:
+        return False
+    return status['status'] == STATUS_PENDING
+
+
+def request_access(
+    user_id: int,
+    username: str = None,
+    first_name: str = None,
+    last_name: str = None
+) -> bool:
+    """
+    Request access to the bot.
+    Returns True if new request created, False if already exists.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Check if already exists
+    cursor.execute(
+        "SELECT status FROM authorized_users WHERE user_id = ?",
+        (user_id,)
+    )
+    existing = cursor.fetchone()
+
+    if existing:
+        conn.close()
+        return False  # Already has a record
+
+    # Create new request
+    cursor.execute("""
+        INSERT INTO authorized_users (user_id, username, first_name, last_name, status)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, username, first_name, last_name, STATUS_PENDING))
+
+    conn.commit()
+    conn.close()
+    logger.info(f"Access request created for user {user_id} (@{username})")
+    return True
+
+
+def approve_user(user_id: int, admin_id: int) -> bool:
+    """Approve user access. Returns True if successful."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE authorized_users
+        SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+        WHERE user_id = ?
+    """, (STATUS_APPROVED, admin_id, user_id))
+
+    success = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+
+    if success:
+        logger.info(f"User {user_id} approved by admin {admin_id}")
+    return success
+
+
+def deny_user(user_id: int, admin_id: int) -> bool:
+    """Deny user access. Returns True if successful."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE authorized_users
+        SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+        WHERE user_id = ?
+    """, (STATUS_DENIED, admin_id, user_id))
+
+    success = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+
+    if success:
+        logger.info(f"User {user_id} denied by admin {admin_id}")
+    return success
+
+
+def get_pending_requests() -> List[Dict[str, Any]]:
+    """Get all pending access requests."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT * FROM authorized_users
+        WHERE status = ?
+        ORDER BY requested_at ASC
+    """, (STATUS_PENDING,))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def get_all_authorized_users() -> List[Dict[str, Any]]:
+    """Get all approved users."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT * FROM authorized_users
+        WHERE status = ?
+        ORDER BY reviewed_at DESC
+    """, (STATUS_APPROVED,))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def revoke_user(user_id: int, admin_id: int) -> bool:
+    """Revoke user access (set to denied). Returns True if successful."""
+    return deny_user(user_id, admin_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

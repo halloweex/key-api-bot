@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
+from functools import wraps
 from bot.config import (
     ConversationState,
     REPORT_TYPES,
@@ -21,8 +22,11 @@ from bot.config import (
     DEFAULT_TIMEZONE,
     TELEGRAM_MANAGER_IDS,
     TOP10_SOURCES,
-    get_year_choices
+    get_year_choices,
+    is_admin,
+    ADMIN_USER_IDS
 )
+from bot import database
 from bot.keyboards import Keyboards, ReplyKeyboards
 from bot.formatters import Messages, ReportFormatters, create_progress_indicator, truncate_message
 from bot.services import ReportService, KeyCRMAPIError, ReportGenerationError
@@ -32,6 +36,91 @@ logger = logging.getLogger(__name__)
 
 # Session timeout in minutes
 SESSION_TIMEOUT_MINUTES = 30
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AUTHORIZATION
+# ═══════════════════════════════════════════════════════════════════════════
+
+ACCESS_DENIED_MESSAGE = (
+    "🔒 <b>Access Denied</b>\n\n"
+    "Your access request was denied.\n"
+    "Please contact the administrator."
+)
+
+ACCESS_PENDING_MESSAGE = (
+    "⏳ <b>Access Pending</b>\n\n"
+    "Your access request is being reviewed.\n"
+    "Please wait for admin approval."
+)
+
+REQUEST_ACCESS_MESSAGE = (
+    "🔐 <b>Access Required</b>\n\n"
+    "This bot requires authorization.\n"
+    "Click the button below to request access."
+)
+
+
+def authorized(func):
+    """Decorator to check if user is authorized."""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user = update.effective_user
+        if not user:
+            return ConversationHandler.END
+
+        # Admins always have access
+        if is_admin(user.id):
+            return await func(update, context, *args, **kwargs)
+
+        # Check authorization status
+        auth_status = database.get_user_auth_status(user.id)
+
+        if not auth_status:
+            # New user - show request access prompt
+            logger.info(f"New user {user.id} (@{user.username}) - showing access request")
+
+            keyboard = [[
+                InlineKeyboardButton("🔑 Request Access", callback_data="auth_request_access")
+            ]]
+
+            if update.callback_query:
+                await update.callback_query.answer()
+                await update.callback_query.edit_message_text(
+                    REQUEST_ACCESS_MESSAGE,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="HTML"
+                )
+            elif update.message:
+                await update.message.reply_text(
+                    REQUEST_ACCESS_MESSAGE,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="HTML"
+                )
+            return ConversationHandler.END
+
+        if auth_status['status'] == database.STATUS_PENDING:
+            logger.info(f"User {user.id} has pending request")
+            if update.callback_query:
+                await update.callback_query.answer("Your request is pending", show_alert=True)
+            elif update.message:
+                await update.message.reply_text(ACCESS_PENDING_MESSAGE, parse_mode="HTML")
+            return ConversationHandler.END
+
+        if auth_status['status'] == database.STATUS_DENIED:
+            logger.warning(f"Denied user {user.id} attempted access")
+            if update.callback_query:
+                await update.callback_query.answer("Access denied", show_alert=True)
+            elif update.message:
+                await update.message.reply_text(ACCESS_DENIED_MESSAGE, parse_mode="HTML")
+            return ConversationHandler.END
+
+        # User is approved
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+
+# Need to import here to avoid circular imports
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # Global user data storage with session management
 user_data: Dict[int, Dict[str, Any]] = {}
@@ -127,6 +216,7 @@ def calculate_date_range(range_name: str) -> tuple[date, date]:
 # COMMAND HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════
 
+@authorized
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Send a welcome message when /start is issued."""
     user = update.effective_user
@@ -148,6 +238,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return ConversationHandler.END
 
 
+@authorized
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a helpful message when /help is issued."""
     try:
@@ -166,6 +257,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
 
+@authorized
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancel and end the conversation."""
     user_id = update.effective_user.id
@@ -181,6 +273,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 
+@authorized
 async def command_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle command buttons from menus (cmd_report, cmd_help, cmd_start)."""
     query = update.callback_query
@@ -213,6 +306,7 @@ async def command_button_handler(update: Update, context: ContextTypes.DEFAULT_T
 # REPORT FLOW HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════
 
+@authorized
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Start the report generation process."""
     await update.message.reply_text(
@@ -1018,6 +1112,7 @@ async def quick_report_callback(update: Update, context: ContextTypes.DEFAULT_TY
 # REPLY KEYBOARD TEXT HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════
 
+@authorized
 async def reply_keyboard_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle '📊 Report' button from reply keyboard."""
     await update.message.reply_text(
@@ -1028,6 +1123,7 @@ async def reply_keyboard_report(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationState.SELECTING_REPORT_TYPE
 
 
+@authorized
 async def reply_keyboard_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle 'ℹ️ Help' button from reply keyboard."""
     await update.message.reply_text(
@@ -1035,3 +1131,178 @@ async def reply_keyboard_help(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=Keyboards.help_menu(),
         parse_mode="HTML"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AUTHORIZATION HANDLERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def auth_request_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle access request from new user."""
+    query = update.callback_query
+    await query.answer()
+
+    user = update.effective_user
+
+    # Create access request
+    is_new = database.request_access(
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name
+    )
+
+    if is_new:
+        # Notify admins
+        await notify_admins_new_request(context, user)
+
+        await query.edit_message_text(
+            "✅ <b>Access Requested!</b>\n\n"
+            f"Your request has been sent to the administrator.\n\n"
+            f"<b>Your details:</b>\n"
+            f"• User ID: <code>{user.id}</code>\n"
+            f"• Username: @{user.username or 'N/A'}\n"
+            f"• Name: {user.first_name or ''} {user.last_name or ''}\n\n"
+            "⏳ Please wait for approval.",
+            parse_mode="HTML"
+        )
+    else:
+        # Already has a request
+        status = database.get_user_auth_status(user.id)
+        if status['status'] == database.STATUS_PENDING:
+            await query.edit_message_text(
+                ACCESS_PENDING_MESSAGE,
+                parse_mode="HTML"
+            )
+        elif status['status'] == database.STATUS_DENIED:
+            await query.edit_message_text(
+                ACCESS_DENIED_MESSAGE,
+                parse_mode="HTML"
+            )
+
+    return ConversationHandler.END
+
+
+async def notify_admins_new_request(context: ContextTypes.DEFAULT_TYPE, user) -> None:
+    """Notify all admins about new access request."""
+    if not ADMIN_USER_IDS:
+        logger.warning("No admin IDs configured - cannot notify about access request")
+        return
+
+    message = (
+        "🔔 <b>New Access Request</b>\n\n"
+        f"<b>User ID:</b> <code>{user.id}</code>\n"
+        f"<b>Username:</b> @{user.username or 'N/A'}\n"
+        f"<b>Name:</b> {user.first_name or ''} {user.last_name or ''}\n\n"
+        "Choose an action:"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Approve", callback_data=f"auth_approve_{user.id}"),
+            InlineKeyboardButton("❌ Deny", callback_data=f"auth_deny_{user.id}")
+        ]
+    ]
+
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
+            )
+            logger.info(f"Notified admin {admin_id} about access request from {user.id}")
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id}: {e}")
+
+
+async def auth_approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin approves user access."""
+    query = update.callback_query
+    admin = update.effective_user
+
+    if not is_admin(admin.id):
+        await query.answer("You are not authorized to approve users", show_alert=True)
+        return
+
+    # Extract user_id from callback data
+    target_user_id = int(query.data.split('_')[-1])
+
+    # Approve user
+    success = database.approve_user(target_user_id, admin.id)
+
+    if success:
+        await query.answer("User approved!")
+
+        # Update admin message
+        user_info = database.get_user_auth_status(target_user_id)
+        await query.edit_message_text(
+            f"✅ <b>User Approved</b>\n\n"
+            f"<b>User ID:</b> <code>{target_user_id}</code>\n"
+            f"<b>Username:</b> @{user_info.get('username') or 'N/A'}\n"
+            f"<b>Name:</b> {user_info.get('first_name') or ''} {user_info.get('last_name') or ''}\n\n"
+            f"<i>Approved by you</i>",
+            parse_mode="HTML"
+        )
+
+        # Notify the user
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    "🎉 <b>Access Granted!</b>\n\n"
+                    "Your access request has been approved.\n"
+                    "You can now use the bot.\n\n"
+                    "Use /start to begin."
+                ),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify user {target_user_id} about approval: {e}")
+    else:
+        await query.answer("Failed to approve user", show_alert=True)
+
+
+async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin denies user access."""
+    query = update.callback_query
+    admin = update.effective_user
+
+    if not is_admin(admin.id):
+        await query.answer("You are not authorized to deny users", show_alert=True)
+        return
+
+    # Extract user_id from callback data
+    target_user_id = int(query.data.split('_')[-1])
+
+    # Get user info before denying
+    user_info = database.get_user_auth_status(target_user_id)
+
+    # Deny user
+    success = database.deny_user(target_user_id, admin.id)
+
+    if success:
+        await query.answer("User denied!")
+
+        # Update admin message
+        await query.edit_message_text(
+            f"❌ <b>User Denied</b>\n\n"
+            f"<b>User ID:</b> <code>{target_user_id}</code>\n"
+            f"<b>Username:</b> @{user_info.get('username') or 'N/A'}\n"
+            f"<b>Name:</b> {user_info.get('first_name') or ''} {user_info.get('last_name') or ''}\n\n"
+            f"<i>Denied by you</i>",
+            parse_mode="HTML"
+        )
+
+        # Notify the user
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=ACCESS_DENIED_MESSAGE,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify user {target_user_id} about denial: {e}")
+    else:
+        await query.answer("Failed to deny user", show_alert=True)

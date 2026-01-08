@@ -14,6 +14,18 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 KEYCRM_API_KEY = os.getenv("KEYCRM_API_KEY")
 
+# ─── Authorization ─────────────────────────────────────────────────────────
+# Admin user IDs who can approve/deny access requests
+# Example: ADMIN_USER_IDS=123456789,987654321
+_admin_users_str = os.getenv("ADMIN_USER_IDS", "")
+ADMIN_USER_IDS: set[int] = set(
+    int(uid.strip()) for uid in _admin_users_str.split(",") if uid.strip().isdigit()
+)
+
+def is_admin(user_id: int) -> bool:
+    """Check if user is an admin."""
+    return user_id in ADMIN_USER_IDS
+
 # ─── API Configuration ──────────────────────────────────────────────────────
 KEYCRM_BASE_URL = "https://openapi.keycrm.app/v1"
 

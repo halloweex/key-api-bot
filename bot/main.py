@@ -150,6 +150,11 @@ def main() -> None:
     # Add reply keyboard text handlers
     application.add_handler(MessageHandler(filters.Regex(r"^ℹ️ Help$"), handlers.reply_keyboard_help))
 
+    # Add authorization handlers
+    application.add_handler(CallbackQueryHandler(handlers.auth_request_access, pattern=r"^auth_request_access$"))
+    application.add_handler(CallbackQueryHandler(handlers.auth_approve_user, pattern=r"^auth_approve_\d+$"))
+    application.add_handler(CallbackQueryHandler(handlers.auth_deny_user, pattern=r"^auth_deny_\d+$"))
+
     # Add startup action to set up command menu
     async def set_commands(context):
         try:
