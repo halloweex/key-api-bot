@@ -1172,24 +1172,24 @@ async def reply_keyboard_help(update: Update, context: ContextTypes.DEFAULT_TYPE
 @authorized
 async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send dashboard link when /dashboard is issued."""
+    keyboard = [[InlineKeyboardButton("📈 Open Dashboard", url=DASHBOARD_URL)]]
     await update.message.reply_text(
         f"📈 <b>Sales Dashboard</b>\n\n"
-        f"View interactive charts and analytics:\n"
-        f"<a href=\"{DASHBOARD_URL}\">{DASHBOARD_URL}</a>",
+        f"View interactive charts and analytics:",
         parse_mode="HTML",
-        disable_web_page_preview=False
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
 @authorized
 async def reply_keyboard_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle '📈 Dashboard' button from reply keyboard."""
+    keyboard = [[InlineKeyboardButton("📈 Open Dashboard", url=DASHBOARD_URL)]]
     await update.message.reply_text(
         f"📈 <b>Sales Dashboard</b>\n\n"
-        f"View interactive charts and analytics:\n"
-        f"<a href=\"{DASHBOARD_URL}\">{DASHBOARD_URL}</a>",
+        f"View interactive charts and analytics:",
         parse_mode="HTML",
-        disable_web_page_preview=False
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 

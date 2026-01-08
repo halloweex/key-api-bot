@@ -33,7 +33,7 @@ def is_admin(user_id: int) -> bool:
 KEYCRM_BASE_URL = "https://openapi.keycrm.app/v1"
 
 # ─── Dashboard URL ─────────────────────────────────────────────────────────
-DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://108.130.86.30:8080")
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://108.130.86.30")
 
 # ─── Timezone Configuration ─────────────────────────────────────────────────
 DEFAULT_TIMEZONE = "Europe/Kyiv"
