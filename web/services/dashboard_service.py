@@ -89,7 +89,7 @@ def _cache_warming_loop() -> None:
         try:
             logger.info("Cache warming: pre-fetching data (parallel)...")
             # Warm cache for all periods in parallel
-            periods = ["today", "yesterday", "week", "month"]
+            periods = ["today", "yesterday", "week", "last_week", "month", "last_month"]
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {executor.submit(_warm_cache_for_period, p): p for p in periods}
                 for future in as_completed(futures):
@@ -140,6 +140,33 @@ _client: Optional[KeyCRMClient] = None
 _report_service: Optional[ReportService] = None
 
 
+def _wrap_label(text: str, max_chars: int = 25) -> List[str]:
+    """Wrap long text into multiple lines for Chart.js labels."""
+    if len(text) <= max_chars:
+        return [text]
+
+    words = text.split()
+    lines = []
+    current_line = ""
+
+    for word in words:
+        if len(current_line) + len(word) + 1 <= max_chars:
+            current_line = f"{current_line} {word}".strip()
+        else:
+            if current_line:
+                lines.append(current_line)
+            current_line = word
+
+    if current_line:
+        lines.append(current_line)
+
+    # Limit to 2 lines max
+    if len(lines) > 2:
+        lines = [lines[0], lines[1][:max_chars-3] + "..."]
+
+    return lines
+
+
 def get_report_service() -> ReportService:
     """Get singleton ReportService instance (reuses connections)."""
     global _client, _report_service
@@ -173,10 +200,22 @@ def parse_period(period: Optional[str], start_date: Optional[str], end_date: Opt
             # This week (Monday to today)
             start_of_week = today - timedelta(days=today.weekday())
             return (start_of_week.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
+        elif period == "last_week":
+            # Last week (Monday to Sunday)
+            start_of_this_week = today - timedelta(days=today.weekday())
+            end_of_last_week = start_of_this_week - timedelta(days=1)
+            start_of_last_week = end_of_last_week - timedelta(days=6)
+            return (start_of_last_week.strftime("%Y-%m-%d"), end_of_last_week.strftime("%Y-%m-%d"))
         elif period == "month":
             # This month (1st to today)
             start_of_month = today.replace(day=1)
             return (start_of_month.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
+        elif period == "last_month":
+            # Last month (1st to last day)
+            first_of_this_month = today.replace(day=1)
+            last_of_last_month = first_of_this_month - timedelta(days=1)
+            first_of_last_month = last_of_last_month.replace(day=1)
+            return (first_of_last_month.strftime("%Y-%m-%d"), last_of_last_month.strftime("%Y-%m-%d"))
 
     # Use provided dates or default to today
     if start_date and end_date:
@@ -402,7 +441,7 @@ def get_top_products(
     # Sort and limit (descending - highest at top)
     sorted_products = sorted(products.items(), key=lambda x: x[1], reverse=True)[:limit]
 
-    labels = [p[0][:40] + "..." if len(p[0]) > 40 else p[0] for p in sorted_products]
+    labels = [_wrap_label(p[0]) for p in sorted_products]
     data = [p[1] for p in sorted_products]
 
     # Calculate percentages
@@ -648,7 +687,7 @@ def _get_top_products_with_category(
     # Sort and limit (descending - highest at top)
     sorted_products = sorted(products.items(), key=lambda x: x[1], reverse=True)[:limit]
 
-    labels = [p[0][:40] + "..." if len(p[0]) > 40 else p[0] for p in sorted_products]
+    labels = [_wrap_label(p[0]) for p in sorted_products]
     data = [p[1] for p in sorted_products]
 
     total = sum(data) if data else 1
