@@ -23,7 +23,8 @@ class ReplyKeyboards:
     def main_menu() -> ReplyKeyboardMarkup:
         """Create persistent main menu keyboard at bottom of chat."""
         keyboard = [
-            [KeyboardButton("📊 Report"), KeyboardButton("ℹ️ Help")],
+            [KeyboardButton("📊 Report"), KeyboardButton("📈 Dashboard")],
+            [KeyboardButton("ℹ️ Help")],
         ]
         return ReplyKeyboardMarkup(
             keyboard,

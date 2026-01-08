@@ -36,6 +36,7 @@ async def setup_command_menu(application: Application) -> None:
             BotCommand("start", "👋 Start the bot"),
             BotCommand("help", "ℹ️ Show help information"),
             BotCommand("report", "📊 Generate a sales report"),
+            BotCommand("dashboard", "📈 Open sales dashboard"),
             BotCommand("cancel", "🛑 Cancel current operation")
         ]
 
@@ -143,12 +144,14 @@ def main() -> None:
     application.add_handler(CommandHandler("start", handlers.start_command))
     application.add_handler(CommandHandler("help", handlers.help_command))
     application.add_handler(CommandHandler("cancel", handlers.cancel_command))
+    application.add_handler(CommandHandler("dashboard", handlers.dashboard_command))
 
     # Add general callback query handler for unhandled callbacks
     application.add_handler(CallbackQueryHandler(handlers.command_button_handler, pattern=r"^cmd_"))
 
     # Add reply keyboard text handlers
     application.add_handler(MessageHandler(filters.Regex(r"^ℹ️ Help$"), handlers.reply_keyboard_help))
+    application.add_handler(MessageHandler(filters.Regex(r"^📈 Dashboard$"), handlers.reply_keyboard_dashboard))
 
     # Add authorization handlers
     application.add_handler(CallbackQueryHandler(handlers.auth_request_access, pattern=r"^auth_request_access$"))

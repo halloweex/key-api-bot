@@ -24,7 +24,8 @@ from bot.config import (
     TOP10_SOURCES,
     get_year_choices,
     is_admin,
-    ADMIN_USER_IDS
+    ADMIN_USER_IDS,
+    DASHBOARD_URL
 )
 from bot import database
 from bot.keyboards import Keyboards, ReplyKeyboards
@@ -1164,6 +1165,30 @@ async def reply_keyboard_help(update: Update, context: ContextTypes.DEFAULT_TYPE
         Messages.help_text(),
         reply_markup=Keyboards.help_menu(),
         parse_mode="HTML"
+    )
+
+
+@authorized
+async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send dashboard link when /dashboard is issued."""
+    await update.message.reply_text(
+        f"📈 <b>Sales Dashboard</b>\n\n"
+        f"View interactive charts and analytics:\n"
+        f"<a href=\"{DASHBOARD_URL}\">{DASHBOARD_URL}</a>",
+        parse_mode="HTML",
+        disable_web_page_preview=False
+    )
+
+
+@authorized
+async def reply_keyboard_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle '📈 Dashboard' button from reply keyboard."""
+    await update.message.reply_text(
+        f"📈 <b>Sales Dashboard</b>\n\n"
+        f"View interactive charts and analytics:\n"
+        f"<a href=\"{DASHBOARD_URL}\">{DASHBOARD_URL}</a>",
+        parse_mode="HTML",
+        disable_web_page_preview=False
     )
 
 
