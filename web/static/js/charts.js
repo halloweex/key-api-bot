@@ -252,7 +252,7 @@ async function loadTopProducts() {
                 datasets: [{
                     label: 'Quantity',
                     data: data.data,
-                    backgroundColor: '#3498db',
+                    backgroundColor: data.backgroundColor,
                     borderRadius: 4
                 }]
             },

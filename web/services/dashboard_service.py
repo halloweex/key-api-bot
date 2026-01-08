@@ -148,7 +148,7 @@ def get_sales_by_source(start_date: str, end_date: str) -> Dict[str, Any]:
     revenue_data = []
     colors = []
 
-    for source_id in [1, 2, 3, 4]:  # Instagram, Telegram, Opencart, Shopify
+    for source_id in [1, 2, 4]:  # Instagram, Telegram, Shopify (Opencart excluded)
         source_name = SOURCE_MAPPING.get(source_id, f"Source {source_id}")
         labels.append(source_name)
         # Handle both int and string keys from API
