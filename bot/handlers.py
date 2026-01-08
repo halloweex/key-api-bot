@@ -23,7 +23,7 @@ from bot.config import (
     TOP10_SOURCES,
     get_year_choices
 )
-from bot.keyboards import Keyboards
+from bot.keyboards import Keyboards, ReplyKeyboards
 from bot.formatters import Messages, ReportFormatters, create_progress_indicator, truncate_message
 from bot.services import ReportService, KeyCRMAPIError, ReportGenerationError
 
@@ -133,9 +133,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     welcome_message = Messages.welcome(user.first_name)
 
     try:
+        # Send welcome with persistent reply keyboard
         await update.message.reply_text(
             welcome_message,
-            reply_markup=Keyboards.main_menu(),
+            reply_markup=ReplyKeyboards.main_menu(),
             parse_mode="HTML"
         )
     except Exception as e:
@@ -1011,3 +1012,26 @@ async def quick_report_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Generate report
     return await prepare_generate_report(update, context)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# REPLY KEYBOARD TEXT HANDLERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def reply_keyboard_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle '📊 Report' button from reply keyboard."""
+    await update.message.reply_text(
+        Messages.report_selection(),
+        reply_markup=Keyboards.report_types(),
+        parse_mode="HTML"
+    )
+    return ConversationState.SELECTING_REPORT_TYPE
+
+
+async def reply_keyboard_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle 'ℹ️ Help' button from reply keyboard."""
+    await update.message.reply_text(
+        Messages.help_text(),
+        reply_markup=Keyboards.help_menu(),
+        parse_mode="HTML"
+    )

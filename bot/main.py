@@ -9,8 +9,10 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
     ConversationHandler,
+    filters,
 )
 
 from bot.config import BOT_TOKEN, KEYCRM_API_KEY, ConversationState
@@ -58,6 +60,7 @@ def create_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
             CommandHandler("report", handlers.report_command),
+            MessageHandler(filters.Regex(r"^📊 Report$"), handlers.reply_keyboard_report),
             CallbackQueryHandler(handlers.report_command_from_callback, pattern=r"^cmd_report$"),
             CallbackQueryHandler(handlers.command_button_handler, pattern=r"^cmd_"),
             CallbackQueryHandler(handlers.convert_report_format, pattern=r"^convert_to_"),
@@ -143,6 +146,9 @@ def main() -> None:
 
     # Add general callback query handler for unhandled callbacks
     application.add_handler(CallbackQueryHandler(handlers.command_button_handler, pattern=r"^cmd_"))
+
+    # Add reply keyboard text handlers
+    application.add_handler(MessageHandler(filters.Regex(r"^ℹ️ Help$"), handlers.reply_keyboard_help))
 
     # Add startup action to set up command menu
     async def set_commands(context):

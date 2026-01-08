@@ -6,8 +6,35 @@ throughout the codebase.
 """
 import calendar
 from typing import List
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove
+)
 from bot.config import REPORT_TYPES, DATE_RANGES, SOURCE_NAMES
+
+
+class ReplyKeyboards:
+    """Factory class for creating reply keyboards (persistent bottom buttons)."""
+
+    @staticmethod
+    def main_menu() -> ReplyKeyboardMarkup:
+        """Create persistent main menu keyboard at bottom of chat."""
+        keyboard = [
+            [KeyboardButton("📊 Report"), KeyboardButton("ℹ️ Help")],
+        ]
+        return ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True,
+            one_time_keyboard=False
+        )
+
+    @staticmethod
+    def remove() -> ReplyKeyboardRemove:
+        """Remove reply keyboard."""
+        return ReplyKeyboardRemove()
 
 
 class Keyboards:
