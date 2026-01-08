@@ -152,6 +152,7 @@ def main() -> None:
 
     # Add authorization handlers
     application.add_handler(CallbackQueryHandler(handlers.auth_request_access, pattern=r"^auth_request_access$"))
+    application.add_handler(CallbackQueryHandler(handlers.auth_request_again, pattern=r"^auth_request_again$"))
     application.add_handler(CallbackQueryHandler(handlers.auth_approve_user, pattern=r"^auth_approve_\d+$"))
     application.add_handler(CallbackQueryHandler(handlers.auth_deny_user, pattern=r"^auth_deny_\d+$"))
 

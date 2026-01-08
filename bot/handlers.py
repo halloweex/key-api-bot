@@ -113,10 +113,24 @@ def authorized(func):
 
         if auth_status['status'] == database.STATUS_DENIED:
             logger.warning(f"Denied user {user.id} attempted access")
+
+            keyboard = [[
+                InlineKeyboardButton("🔄 Request Again", callback_data="auth_request_again")
+            ]]
+
             if update.callback_query:
-                await update.callback_query.answer("Access denied", show_alert=True)
+                await update.callback_query.answer()
+                await update.callback_query.edit_message_text(
+                    ACCESS_DENIED_MESSAGE + "\n\nYou can request access again:",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="HTML"
+                )
             elif update.message:
-                await update.message.reply_text(ACCESS_DENIED_MESSAGE, parse_mode="HTML")
+                await update.message.reply_text(
+                    ACCESS_DENIED_MESSAGE + "\n\nYou can request access again:",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="HTML"
+                )
             return ConversationHandler.END
 
         # User is approved
@@ -1300,14 +1314,47 @@ async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode="HTML"
         )
 
-        # Notify the user
+        # Notify the user with option to request again
         try:
+            keyboard = [[
+                InlineKeyboardButton("🔄 Request Again", callback_data="auth_request_again")
+            ]]
             await context.bot.send_message(
                 chat_id=target_user_id,
-                text=ACCESS_DENIED_MESSAGE,
+                text=ACCESS_DENIED_MESSAGE + "\n\nYou can request access again:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="HTML"
             )
         except Exception as e:
             logger.error(f"Failed to notify user {target_user_id} about denial: {e}")
     else:
         await query.answer("Failed to deny user", show_alert=True)
+
+
+async def auth_request_again(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle re-request access from denied user."""
+    query = update.callback_query
+    await query.answer()
+
+    user = update.effective_user
+
+    # Reset status to pending
+    success = database.reset_user_to_pending(user.id)
+
+    if success:
+        # Notify admins
+        await notify_admins_new_request(context, user)
+
+        await query.edit_message_text(
+            "✅ <b>Access Re-Requested!</b>\n\n"
+            f"Your new request has been sent to the administrator.\n\n"
+            "⏳ Please wait for approval.",
+            parse_mode="HTML"
+        )
+    else:
+        await query.edit_message_text(
+            "⚠️ Failed to submit request. Please try /start again.",
+            parse_mode="HTML"
+        )
+
+    return ConversationHandler.END

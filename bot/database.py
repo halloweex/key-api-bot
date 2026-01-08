@@ -259,6 +259,26 @@ def revoke_user(user_id: int, admin_id: int) -> bool:
     return deny_user(user_id, admin_id)
 
 
+def reset_user_to_pending(user_id: int) -> bool:
+    """Reset user status to pending (for re-requesting access)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE authorized_users
+        SET status = ?, requested_at = CURRENT_TIMESTAMP, reviewed_at = NULL, reviewed_by = NULL
+        WHERE user_id = ?
+    """, (STATUS_PENDING, user_id))
+
+    success = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+
+    if success:
+        logger.info(f"User {user_id} reset to pending status")
+    return success
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # USER PREFERENCES
 # ═══════════════════════════════════════════════════════════════════════════
