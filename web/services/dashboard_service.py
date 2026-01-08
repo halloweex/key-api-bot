@@ -15,13 +15,13 @@ from bot.config import (
 
 # Source colors for charts
 SOURCE_COLORS = {
-    1: "#E1306C",  # Instagram - pink
-    2: "#0088CC",  # Telegram - blue
-    3: "#FF6600",  # Opencart - orange
-    4: "#96BF48",  # Shopify - green
+    1: "#7C3AED",  # Instagram - purple (Accent)
+    2: "#2563EB",  # Telegram - blue (Primary)
+    3: "#F59E0B",  # Opencart - orange (Warning)
+    4: "#16A34A",  # Shopify - green (Success)
 }
 
-SOURCE_COLORS_LIST = ["#E1306C", "#0088CC", "#FF6600", "#96BF48"]
+SOURCE_COLORS_LIST = ["#7C3AED", "#2563EB", "#F59E0B", "#16A34A"]
 
 
 def get_report_service() -> ReportService:
@@ -113,8 +113,8 @@ def get_revenue_trend(
         "datasets": [{
             "label": "Revenue (UAH)",
             "data": data,
-            "borderColor": "#4CAF50",
-            "backgroundColor": "rgba(76, 175, 80, 0.1)",
+            "borderColor": "#16A34A",
+            "backgroundColor": "rgba(22, 163, 74, 0.1)",
             "fill": True,
             "tension": 0.3
         }]
@@ -219,7 +219,7 @@ def get_top_products(
         "labels": labels,
         "data": data,
         "percentages": percentages,
-        "backgroundColor": "#3498db"
+        "backgroundColor": "#2563EB"
     }
 
 

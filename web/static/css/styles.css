@@ -14,7 +14,7 @@ body {
 
 /* Header */
 header {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(135deg, #2563EB 0%, #7C3AED 100%);
     color: white;
     padding: 1.5rem 2rem;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
@@ -56,7 +56,7 @@ header h1 {
 
 .period-btn.active {
     background: white;
-    color: #667eea;
+    color: #2563EB;
     font-weight: 600;
 }
 
@@ -80,7 +80,7 @@ header h1 {
 
 #applyDates {
     background: white;
-    color: #667eea;
+    color: #2563EB;
     border: none;
     padding: 0.5rem 1rem;
     border-radius: 6px;
@@ -140,23 +140,23 @@ main {
 }
 
 .orders-icon {
-    background: #e3f2fd;
-    color: #1976d2;
+    background: #DBEAFE;
+    color: #2563EB;
 }
 
 .revenue-icon {
-    background: #e8f5e9;
-    color: #388e3c;
+    background: #DCFCE7;
+    color: #16A34A;
 }
 
 .avg-icon {
-    background: #fff3e0;
-    color: #f57c00;
+    background: #FEF3C7;
+    color: #F59E0B;
 }
 
 .returns-icon {
-    background: #fce4ec;
-    color: #c2185b;
+    background: #FEE2E2;
+    color: #DC2626;
 }
 
 .card-content {
@@ -243,7 +243,7 @@ footer {
     width: 50px;
     height: 50px;
     border: 4px solid #f0f0f0;
-    border-top-color: #667eea;
+    border-top-color: #2563EB;
     border-radius: 50%;
     animation: spin 1s linear infinite;
 }
