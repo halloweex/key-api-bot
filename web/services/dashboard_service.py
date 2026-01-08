@@ -10,6 +10,7 @@ from bot.api_client import KeyCRMClient
 from bot.services import ReportService
 from bot.config import (
     KEYCRM_API_KEY,
+    KEYCRM_BASE_URL,
     SOURCE_MAPPING,
     DEFAULT_TIMEZONE,
 )
@@ -120,10 +121,10 @@ SOURCE_COLORS = {
     1: "#7C3AED",  # Instagram - purple (Accent)
     2: "#2563EB",  # Telegram - blue (Primary)
     3: "#F59E0B",  # Opencart - orange (Warning)
-    4: "#16A34A",  # Shopify - green (Success)
+    4: "#eb4200",  # Shopify - orange-red
 }
 
-SOURCE_COLORS_LIST = ["#7C3AED", "#2563EB", "#F59E0B", "#16A34A"]
+SOURCE_COLORS_LIST = ["#7C3AED", "#2563EB", "#F59E0B", "#eb4200"]
 
 
 def get_report_service() -> ReportService:
@@ -298,17 +299,26 @@ def get_revenue_trend(
     return result
 
 
-def get_sales_by_source(start_date: str, end_date: str) -> Dict[str, Any]:
+def get_sales_by_source(
+    start_date: str,
+    end_date: str,
+    category_id: Optional[int] = None
+) -> Dict[str, Any]:
     """
     Get sales data aggregated by source for bar/pie chart.
 
     Args:
         start_date: Start date (YYYY-MM-DD)
         end_date: End date (YYYY-MM-DD)
+        category_id: Optional category filter
 
     Returns:
         Chart.js compatible data structure
     """
+    if category_id:
+        # Use category-filtered data
+        return _get_sales_by_source_with_category(start_date, end_date, category_id)
+
     _, counts_dict, _, revenue_dict, _ = _get_aggregated_data(start_date, end_date)
 
     labels = []
@@ -336,7 +346,8 @@ def get_top_products(
     start_date: str,
     end_date: str,
     source_id: Optional[int] = None,
-    limit: int = 10
+    limit: int = 10,
+    category_id: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Get top products for horizontal bar chart.
@@ -346,10 +357,14 @@ def get_top_products(
         end_date: End date (YYYY-MM-DD)
         source_id: Optional source filter (1=Instagram, 2=Telegram, etc.)
         limit: Number of products to return
+        category_id: Optional category filter
 
     Returns:
         Chart.js compatible data structure
     """
+    if category_id:
+        return _get_top_products_with_category(start_date, end_date, source_id, limit, category_id)
+
     sales_dict, _, _, _, _ = _get_aggregated_data(start_date, end_date)
 
     # Aggregate products across sources or filter by source
@@ -383,17 +398,25 @@ def get_top_products(
     }
 
 
-def get_summary_stats(start_date: str, end_date: str) -> Dict[str, Any]:
+def get_summary_stats(
+    start_date: str,
+    end_date: str,
+    category_id: Optional[int] = None
+) -> Dict[str, Any]:
     """
     Get summary statistics for dashboard cards.
 
     Args:
         start_date: Start date (YYYY-MM-DD)
         end_date: End date (YYYY-MM-DD)
+        category_id: Optional category filter
 
     Returns:
         Summary statistics dictionary
     """
+    if category_id:
+        return _get_summary_stats_with_category(start_date, end_date, category_id)
+
     _, counts_dict, total_orders, revenue_dict, returns_dict = _get_aggregated_data(start_date, end_date)
 
     total_revenue = sum(revenue_dict.values())
@@ -413,17 +436,279 @@ def get_summary_stats(start_date: str, end_date: str) -> Dict[str, Any]:
     }
 
 
+# ─── Category Filtering Functions ────────────────────────────────────────────
+
+def _fetch_orders_with_category_filter(
+    start_date: str,
+    end_date: str,
+    category_id: int
+) -> tuple:
+    """
+    Fetch orders and filter by category.
+    Returns: (filtered_orders, product_revenues)
+    """
+    from bot.config import RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
+    from zoneinfo import ZoneInfo
+    from web.services.category_service import get_product_category, get_category_with_children
+    import requests
+
+    # Get all category IDs to match (including children)
+    valid_category_ids = set(get_category_with_children(category_id))
+
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    tz = ZoneInfo(DEFAULT_TIMEZONE)
+    local_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
+    local_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)
+    utc_start = local_start.astimezone(ZoneInfo("UTC"))
+    utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
+
+    headers = {"Authorization": f"Bearer {KEYCRM_API_KEY}"}
+    return_status_ids = set(RETURN_STATUS_IDS)
+
+    # Aggregation dicts
+    source_orders = {1: 0, 2: 0, 4: 0}  # source_id -> order count
+    source_revenue = {1: 0.0, 2: 0.0, 4: 0.0}  # source_id -> revenue
+    products = {}  # product_name -> quantity
+    daily_revenue = {}
+
+    # Initialize daily revenue
+    current = start
+    while current <= end:
+        daily_revenue[current.strftime("%Y-%m-%d")] = 0.0
+        current += timedelta(days=1)
+
+    page = 1
+    while True:
+        params = {
+            "include": "products.offer,manager",
+            "limit": 50,
+            "page": page,
+            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
+        }
+
+        resp = requests.get(
+            f"{KEYCRM_BASE_URL}/order",
+            headers=headers,
+            params=params,
+            timeout=30
+        )
+
+        if resp.status_code != 200:
+            break
+
+        data = resp.json()
+        batch = data.get("data", [])
+        if not batch:
+            break
+
+        for order in batch:
+            # Filter by ordered_at
+            ordered_at_str = order.get("ordered_at")
+            if not ordered_at_str:
+                continue
+            ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
+
+            if not (utc_start <= ordered_at <= local_end.astimezone(ZoneInfo("UTC"))):
+                continue
+
+            # Skip returns
+            if order.get("status_id") in return_status_ids:
+                continue
+
+            # Filter Telegram orders by manager
+            source_id = order.get("source_id")
+            if source_id == 2:
+                manager = order.get("manager")
+                manager_id = str(manager.get("id")) if manager else None
+                if manager_id not in TELEGRAM_MANAGER_IDS:
+                    continue
+
+            # Check if any product matches the category
+            order_has_matching_product = False
+            order_matching_revenue = 0.0
+
+            for product in order.get("products", []):
+                offer = product.get("offer", {})
+                product_id = offer.get("product_id") if offer else None
+
+                if product_id:
+                    prod_category_id = get_product_category(product_id)
+                    if prod_category_id in valid_category_ids:
+                        order_has_matching_product = True
+                        product_revenue = float(product.get("price_sold", 0)) * int(product.get("quantity", 1))
+                        order_matching_revenue += product_revenue
+
+                        # Add to products dict
+                        product_name = product.get("name", "Unknown")
+                        qty = int(product.get("quantity", 1))
+                        products[product_name] = products.get(product_name, 0) + qty
+
+            if order_has_matching_product and source_id in source_orders:
+                source_orders[source_id] += 1
+                source_revenue[source_id] += order_matching_revenue
+
+                # Add to daily revenue
+                local_ordered = ordered_at.astimezone(tz)
+                date_key = local_ordered.strftime("%Y-%m-%d")
+                if date_key in daily_revenue:
+                    daily_revenue[date_key] += order_matching_revenue
+
+        if len(batch) < 50:
+            break
+        page += 1
+
+    return source_orders, source_revenue, products, daily_revenue
+
+
+def _get_sales_by_source_with_category(
+    start_date: str,
+    end_date: str,
+    category_id: int
+) -> Dict[str, Any]:
+    """Get sales by source filtered by category."""
+    cache_key = f"sales_by_source_cat:{start_date}:{end_date}:{category_id}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    source_orders, source_revenue, _, _ = _fetch_orders_with_category_filter(
+        start_date, end_date, category_id
+    )
+
+    labels = []
+    orders_data = []
+    revenue_data = []
+    colors = []
+
+    for source_id in [1, 2, 4]:
+        source_name = SOURCE_MAPPING.get(source_id, f"Source {source_id}")
+        labels.append(source_name)
+        orders_data.append(source_orders.get(source_id, 0))
+        revenue_data.append(round(source_revenue.get(source_id, 0), 2))
+        colors.append(SOURCE_COLORS.get(source_id, "#999999"))
+
+    result = {
+        "labels": labels,
+        "orders": orders_data,
+        "revenue": revenue_data,
+        "backgroundColor": colors
+    }
+    _set_cached(cache_key, result)
+    return result
+
+
+def _get_top_products_with_category(
+    start_date: str,
+    end_date: str,
+    source_id: Optional[int],
+    limit: int,
+    category_id: int
+) -> Dict[str, Any]:
+    """Get top products filtered by category."""
+    cache_key = f"top_products_cat:{start_date}:{end_date}:{source_id}:{limit}:{category_id}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    _, _, products, _ = _fetch_orders_with_category_filter(
+        start_date, end_date, category_id
+    )
+
+    # Sort and limit
+    sorted_products = sorted(products.items(), key=lambda x: x[1], reverse=True)[:limit]
+    sorted_products = list(reversed(sorted_products))
+
+    labels = [p[0][:30] + "..." if len(p[0]) > 30 else p[0] for p in sorted_products]
+    data = [p[1] for p in sorted_products]
+
+    total = sum(data) if data else 1
+    percentages = [round(d / total * 100, 1) for d in data]
+
+    result = {
+        "labels": labels,
+        "data": data,
+        "percentages": percentages,
+        "backgroundColor": "#2563EB"
+    }
+    _set_cached(cache_key, result)
+    return result
+
+
+def _get_summary_stats_with_category(
+    start_date: str,
+    end_date: str,
+    category_id: int
+) -> Dict[str, Any]:
+    """Get summary stats filtered by category."""
+    cache_key = f"summary_cat:{start_date}:{end_date}:{category_id}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    source_orders, source_revenue, _, _ = _fetch_orders_with_category_filter(
+        start_date, end_date, category_id
+    )
+
+    total_orders = sum(source_orders.values())
+    total_revenue = sum(source_revenue.values())
+    avg_check = total_revenue / total_orders if total_orders > 0 else 0
+
+    result = {
+        "totalOrders": total_orders,
+        "totalRevenue": round(total_revenue, 2),
+        "avgCheck": round(avg_check, 2),
+        "totalReturns": 0,  # Returns not filtered by category for now
+        "returnsRevenue": 0,
+        "startDate": start_date,
+        "endDate": end_date
+    }
+    _set_cached(cache_key, result)
+    return result
+
+
 # ─── Async Functions ─────────────────────────────────────────────────────────
 
 async def async_get_revenue_trend(
     start_date: str,
     end_date: str,
+    category_id: Optional[int] = None,
     granularity: str = "daily"
 ) -> Dict[str, Any]:
     """
     Async version of get_revenue_trend.
     Uses httpx for non-blocking HTTP requests with parallel pagination.
     """
+    # If category filter, use sync version with category
+    if category_id:
+        _, _, _, daily_revenue = _fetch_orders_with_category_filter(
+            start_date, end_date, category_id
+        )
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+        labels = []
+        data = []
+        current = start
+        while current <= end:
+            date_key = current.strftime("%Y-%m-%d")
+            labels.append(current.strftime("%d.%m"))
+            data.append(round(daily_revenue.get(date_key, 0), 2))
+            current += timedelta(days=1)
+
+        return {
+            "labels": labels,
+            "datasets": [{
+                "label": "Revenue (UAH)",
+                "data": data,
+                "borderColor": "#16A34A",
+                "backgroundColor": "rgba(22, 163, 74, 0.1)",
+                "fill": True,
+                "tension": 0.3
+            }]
+        }
+
     # Check cache first
     cache_key = f"revenue_trend:{start_date}:{end_date}:{granularity}"
     cached = _get_cached(cache_key)

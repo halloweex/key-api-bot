@@ -10,6 +10,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from web.config import STATIC_DIR, VERSION
 from web.routes import api, pages
 from web.services.dashboard_service import start_cache_warming, stop_cache_warming
+from web.services.category_service import warm_product_cache
 
 # Configure logging
 logging.basicConfig(
@@ -40,6 +41,11 @@ app.include_router(api.router, prefix="/api")
 @app.on_event("startup")
 async def startup_event():
     logger.info("KeyCRM Dashboard started")
+    # Pre-load product categories for filtering
+    logger.info("Warming product category cache...")
+    warm_product_cache()
+    logger.info("Product category cache ready")
+    # Start background cache warming
     start_cache_warming()
     logger.info("Background cache warming started")
 

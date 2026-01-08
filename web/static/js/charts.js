@@ -4,18 +4,91 @@ let ordersChart = null;
 let revenueBySourceChart = null;
 let topProductsChart = null;
 
-// Current period
+// Current filters
 let currentPeriod = 'week';
 let customStartDate = null;
 let customEndDate = null;
+let currentParentCategoryId = null;
+let currentCategoryId = null;
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     initDateInputs();
     initPeriodButtons();
     initApplyButton();
+    initCategoryFilter();
+    loadCategories();
     loadAllData();
 });
+
+// Load parent categories for filter dropdown
+async function loadCategories() {
+    try {
+        const response = await fetch('/api/categories');
+        const categories = await response.json();
+
+        const select = document.getElementById('parentCategoryFilter');
+        categories.forEach(cat => {
+            const option = document.createElement('option');
+            option.value = cat.id;
+            option.textContent = cat.name;
+            select.appendChild(option);
+        });
+    } catch (error) {
+        console.error('Error loading categories:', error);
+    }
+}
+
+// Load child categories for a parent
+async function loadChildCategories(parentId) {
+    const select = document.getElementById('categoryFilter');
+
+    // Clear existing options
+    select.innerHTML = '<option value="">All Subcategories</option>';
+
+    if (!parentId) {
+        select.disabled = true;
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/categories/${parentId}/children`);
+        const categories = await response.json();
+
+        if (categories.length > 0) {
+            categories.forEach(cat => {
+                const option = document.createElement('option');
+                option.value = cat.id;
+                option.textContent = cat.name;
+                select.appendChild(option);
+            });
+            select.disabled = false;
+        } else {
+            select.disabled = true;
+        }
+    } catch (error) {
+        console.error('Error loading child categories:', error);
+        select.disabled = true;
+    }
+}
+
+// Category filter handlers
+function initCategoryFilter() {
+    // Parent category change
+    document.getElementById('parentCategoryFilter').addEventListener('change', function() {
+        currentParentCategoryId = this.value ? parseInt(this.value) : null;
+        currentCategoryId = null;
+        document.getElementById('categoryFilter').value = '';
+        loadChildCategories(currentParentCategoryId);
+        loadAllData();
+    });
+
+    // Child category change
+    document.getElementById('categoryFilter').addEventListener('change', function() {
+        currentCategoryId = this.value ? parseInt(this.value) : null;
+        loadAllData();
+    });
+}
 
 // Initialize date inputs with today's date
 function initDateInputs() {
@@ -57,12 +130,23 @@ function initApplyButton() {
 
 // Build query string
 function buildQuery() {
+    let query = '';
+
     if (currentPeriod) {
-        return `?period=${currentPeriod}`;
+        query = `?period=${currentPeriod}`;
     } else if (customStartDate && customEndDate) {
-        return `?start_date=${customStartDate}&end_date=${customEndDate}`;
+        query = `?start_date=${customStartDate}&end_date=${customEndDate}`;
+    } else {
+        query = '?period=today';
     }
-    return '?period=today';
+
+    // Add category filter - use child category if selected, otherwise parent
+    const effectiveCategoryId = currentCategoryId || currentParentCategoryId;
+    if (effectiveCategoryId) {
+        query += `&category_id=${effectiveCategoryId}`;
+    }
+
+    return query;
 }
 
 // Show/hide loading overlay

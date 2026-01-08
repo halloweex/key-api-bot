@@ -60,6 +60,27 @@ header h1 {
     font-weight: 600;
 }
 
+.category-filter {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.category-filter select {
+    padding: 0.5rem 1rem;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.9);
+    font-size: 0.9rem;
+    cursor: pointer;
+    min-width: 150px;
+}
+
+.category-filter select:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 .custom-dates {
     display: flex;
     align-items: center;
