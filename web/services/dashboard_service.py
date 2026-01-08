@@ -61,6 +61,60 @@ def _get_aggregated_data(start_date: str, end_date: str) -> tuple:
         return ({}, {}, 0, {}, {})
 
 
+# ─── Background Cache Warming ────────────────────────────────────────────────
+_warming_thread: Optional[threading.Thread] = None
+_stop_warming = threading.Event()
+
+
+def _warm_cache_for_period(period: str) -> None:
+    """Pre-fetch data for a specific period."""
+    try:
+        start, end = parse_period(period, None, None)
+        # Warm aggregated data
+        _get_aggregated_data(start, end)
+        # Warm revenue trend
+        get_revenue_trend(start, end)
+    except Exception:
+        pass
+
+
+def _cache_warming_loop() -> None:
+    """Background loop that warms cache every 4 minutes."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    while not _stop_warming.is_set():
+        try:
+            logger.info("Cache warming: pre-fetching data...")
+            # Warm cache for common periods
+            for period in ["today", "yesterday", "week", "month"]:
+                if _stop_warming.is_set():
+                    break
+                _warm_cache_for_period(period)
+            logger.info("Cache warming: complete")
+        except Exception as e:
+            logger.error(f"Cache warming error: {e}")
+
+        # Wait 4 minutes (less than 5-min TTL to keep cache fresh)
+        _stop_warming.wait(240)
+
+
+def start_cache_warming() -> None:
+    """Start background cache warming thread."""
+    global _warming_thread
+    if _warming_thread is None or not _warming_thread.is_alive():
+        _stop_warming.clear()
+        _warming_thread = threading.Thread(target=_cache_warming_loop, daemon=True)
+        _warming_thread.start()
+
+
+def stop_cache_warming() -> None:
+    """Stop background cache warming thread."""
+    _stop_warming.set()
+    if _warming_thread:
+        _warming_thread.join(timeout=5)
+
+
 # Source colors for charts
 SOURCE_COLORS = {
     1: "#7C3AED",  # Instagram - purple (Accent)
