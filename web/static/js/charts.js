@@ -5,7 +5,7 @@ let revenueBySourceChart = null;
 let topProductsChart = null;
 
 // Current period
-let currentPeriod = 'today';
+let currentPeriod = 'week';
 let customStartDate = null;
 let customEndDate = null;
 
