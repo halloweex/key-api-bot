@@ -802,7 +802,8 @@ async def top10_source_callback(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = update.effective_user.id
     source_selection = query.data.split('_')[-1]
 
-    user_data[user_id]["top10_source"] = source_selection
+    # Update session with source selection
+    session = update_user_session(user_id, {"top10_source": source_selection})
 
     # Proceed to date range selection
     source_name = SOURCE_NAMES.get(source_selection, "Unknown")
@@ -845,7 +846,17 @@ async def quick_top10_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     source_selection = query.data.split('_')[-1]
 
-    user_data[user_id]["top10_source"] = source_selection
+    # Check if session exists and has required data
+    session = get_user_session(user_id)
+    if not session or "start_date" not in session:
+        await query.edit_message_text(
+            "⚠️ Session expired. Please start a new report with /report",
+            reply_markup=Keyboards.error_retry(),
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
+    session["top10_source"] = source_selection
 
     return await generate_top10_report(update, context)
 

@@ -103,8 +103,8 @@ class Messages:
         """Generate welcome message."""
         return (
             f"👋 {bold('Welcome, ' + username)}! \n\n"
-            f"I'm your {bold('KeyCRM Sales Report')} assistant. I can help you generate detailed sales reports "
-            f"from your KeyCRM data.\n\n"
+            f"I'm your {bold('KoreanStory Sales Report')} assistant. I can help you generate detailed sales reports "
+            f"and analytics.\n\n"
             f"🚀 {italic('What would you like to do?')}"
         )
 
@@ -112,17 +112,20 @@ class Messages:
     def help_text() -> str:
         """Generate help message."""
         return (
-            f"{bold('📊 KeyCRM Sales Report Bot 📊')}\n\n"
+            f"{bold('📊 KoreanStory Sales Report Bot 📊')}\n\n"
             f"{bold('Available Commands:')}\n"
             f"• /report - Generate a sales report\n"
-            f"• /dashboard - Open sales dashboard\n"
             f"• /cancel - Cancel the current operation\n"
             f"• /help - Show this help message\n\n"
-            f"{bold('How to use:')}\n"
-            f"1️⃣ Start with /report command\n"
-            f"2️⃣ Select report type (Summary or Excel)\n"
-            f"3️⃣ Choose date range\n"
-            f"4️⃣ View your report results\n\n"
+            f"{bold('Report Types:')}\n"
+            f"📝 {bold('Summary')} - Sales overview by source\n"
+            f"📊 {bold('Excel')} - Detailed Excel report\n"
+            f"🏆 {bold('TOP-10')} - Best-selling products by source\n\n"
+            f"{bold('Date Ranges:')}\n"
+            f"Today, Yesterday, This Week, Last Week,\n"
+            f"This Month, Last Month, Custom dates\n\n"
+            f"{bold('Web Dashboard:')}\n"
+            f"📈 http://108.130.86.30:8080\n\n"
             f"{italic(f'Version {VERSION}')}"
         )
 
