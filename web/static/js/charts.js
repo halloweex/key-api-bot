@@ -16,6 +16,7 @@ let customStartDate = null;
 let customEndDate = null;
 let currentParentCategoryId = null;
 let currentCategoryId = null;
+let currentBrand = null;
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
@@ -23,7 +24,9 @@ document.addEventListener('DOMContentLoaded', function() {
     initPeriodButtons();
     initApplyButton();
     initCategoryFilter();
+    initBrandFilter();
     loadCategories();
+    loadBrands();
     loadAllData();
 });
 
@@ -43,6 +46,32 @@ async function loadCategories() {
     } catch (error) {
         console.error('Error loading categories:', error);
     }
+}
+
+// Load brands for filter dropdown
+async function loadBrands() {
+    try {
+        const response = await fetch('/api/brands');
+        const brands = await response.json();
+
+        const select = document.getElementById('brandFilter');
+        brands.forEach(brand => {
+            const option = document.createElement('option');
+            option.value = brand.name;
+            option.textContent = brand.name;
+            select.appendChild(option);
+        });
+    } catch (error) {
+        console.error('Error loading brands:', error);
+    }
+}
+
+// Brand filter handler
+function initBrandFilter() {
+    document.getElementById('brandFilter').addEventListener('change', function() {
+        currentBrand = this.value || null;
+        loadAllData();
+    });
 }
 
 // Load child categories for a parent
@@ -150,6 +179,11 @@ function buildQuery() {
     const effectiveCategoryId = currentCategoryId || currentParentCategoryId;
     if (effectiveCategoryId) {
         query += `&category_id=${effectiveCategoryId}`;
+    }
+
+    // Add brand filter
+    if (currentBrand) {
+        query += `&brand=${encodeURIComponent(currentBrand)}`;
     }
 
     return query;
@@ -431,10 +465,7 @@ function formatCurrency(value) {
 // Load customer insights
 async function loadCustomerInsights() {
     try {
-        const query = currentPeriod ? `?period=${currentPeriod}` :
-            (customStartDate && customEndDate ? `?start_date=${customStartDate}&end_date=${customEndDate}` : '?period=week');
-
-        const response = await fetch('/api/customers/insights' + query);
+        const response = await fetch('/api/customers/insights' + buildQuery());
         const data = await response.json();
 
         // Update customer metrics cards
@@ -526,10 +557,7 @@ async function loadCustomerInsights() {
 // Load product performance
 async function loadProductPerformance() {
     try {
-        const query = currentPeriod ? `?period=${currentPeriod}` :
-            (customStartDate && customEndDate ? `?start_date=${customStartDate}&end_date=${customEndDate}` : '?period=week');
-
-        const response = await fetch('/api/products/performance' + query);
+        const response = await fetch('/api/products/performance' + buildQuery());
         const data = await response.json();
 
         // Category breakdown pie chart

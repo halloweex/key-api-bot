@@ -360,7 +360,8 @@ def get_revenue_trend(
 def get_sales_by_source(
     start_date: str,
     end_date: str,
-    category_id: Optional[int] = None
+    category_id: Optional[int] = None,
+    brand: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Get sales data aggregated by source for bar/pie chart.
@@ -369,13 +370,14 @@ def get_sales_by_source(
         start_date: Start date (YYYY-MM-DD)
         end_date: End date (YYYY-MM-DD)
         category_id: Optional category filter
+        brand: Optional brand filter
 
     Returns:
         Chart.js compatible data structure
     """
-    if category_id:
-        # Use category-filtered data
-        return _get_sales_by_source_with_category(start_date, end_date, category_id)
+    if category_id or brand:
+        # Use filtered data
+        return _get_sales_by_source_with_filter(start_date, end_date, category_id, brand)
 
     _, counts_dict, _, revenue_dict, _ = _get_aggregated_data(start_date, end_date)
 
@@ -408,7 +410,8 @@ def get_top_products(
     end_date: str,
     source_id: Optional[int] = None,
     limit: int = 10,
-    category_id: Optional[int] = None
+    category_id: Optional[int] = None,
+    brand: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Get top products for horizontal bar chart.
@@ -419,12 +422,13 @@ def get_top_products(
         source_id: Optional source filter (1=Instagram, 2=Telegram, etc.)
         limit: Number of products to return
         category_id: Optional category filter
+        brand: Optional brand filter
 
     Returns:
         Chart.js compatible data structure
     """
-    if category_id:
-        return _get_top_products_with_category(start_date, end_date, source_id, limit, category_id)
+    if category_id or brand:
+        return _get_top_products_with_filter(start_date, end_date, source_id, limit, category_id, brand)
 
     sales_dict, _, _, _, _ = _get_aggregated_data(start_date, end_date)
 
@@ -459,7 +463,8 @@ def get_top_products(
 def get_summary_stats(
     start_date: str,
     end_date: str,
-    category_id: Optional[int] = None
+    category_id: Optional[int] = None,
+    brand: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Get summary statistics for dashboard cards.
@@ -468,12 +473,13 @@ def get_summary_stats(
         start_date: Start date (YYYY-MM-DD)
         end_date: End date (YYYY-MM-DD)
         category_id: Optional category filter
+        brand: Optional brand filter
 
     Returns:
         Summary statistics dictionary
     """
-    if category_id:
-        return _get_summary_stats_with_category(start_date, end_date, category_id)
+    if category_id or brand:
+        return _get_summary_stats_with_filter(start_date, end_date, category_id, brand)
 
     _, counts_dict, total_orders, revenue_dict, returns_dict = _get_aggregated_data(start_date, end_date)
 
@@ -494,16 +500,17 @@ def get_summary_stats(
     }
 
 
-# ─── Category Filtering Functions ────────────────────────────────────────────
+# ─── Unified Filter Functions (Category + Brand) ─────────────────────────────
 
-def _fetch_orders_with_category_filter(
+def _fetch_orders_with_filter(
     start_date: str,
     end_date: str,
-    category_id: int
+    category_id: Optional[int] = None,
+    brand: Optional[str] = None
 ) -> tuple:
     """
-    Fetch orders and filter by category.
-    Returns: (filtered_orders, product_revenues)
+    Fetch orders and filter by category and/or brand.
+    Returns: (source_orders, source_revenue, products, daily_revenue)
     """
     from bot.config import RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
     from zoneinfo import ZoneInfo
@@ -513,13 +520,19 @@ def _fetch_orders_with_category_filter(
         _product_category_cache,
         _products_loaded
     )
+    from web.services.brand_service import get_product_brand_cache, warm_brand_cache
 
-    # Pre-load product categories to avoid N+1 queries
+    # Pre-load caches
     if not _products_loaded:
         warm_product_cache()
 
+    # Get brand cache
+    product_brand_cache = get_product_brand_cache()
+
     # Get all category IDs to match (including children)
-    valid_category_ids = set(get_category_with_children(category_id))
+    valid_category_ids = None
+    if category_id:
+        valid_category_ids = set(get_category_with_children(category_id))
 
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
@@ -591,7 +604,7 @@ def _fetch_orders_with_category_filter(
                 if manager_id not in TELEGRAM_MANAGER_IDS:
                     continue
 
-            # Check if any product matches the category
+            # Check if any product matches the filters
             order_has_matching_product = False
             order_matching_revenue = 0.0
 
@@ -600,9 +613,20 @@ def _fetch_orders_with_category_filter(
                 product_id = offer.get("product_id") if offer else None
 
                 if product_id:
-                    # Use cached dict lookup instead of function call (N+1 fix)
-                    prod_category_id = _product_category_cache.get(product_id)
-                    if prod_category_id and prod_category_id in valid_category_ids:
+                    # Check category filter
+                    category_match = True
+                    if valid_category_ids:
+                        prod_category_id = _product_category_cache.get(product_id)
+                        category_match = prod_category_id and prod_category_id in valid_category_ids
+
+                    # Check brand filter
+                    brand_match = True
+                    if brand:
+                        prod_brand = product_brand_cache.get(product_id)
+                        brand_match = prod_brand and prod_brand == brand
+
+                    # Both filters must match
+                    if category_match and brand_match:
                         order_has_matching_product = True
                         product_revenue = float(product.get("price_sold", 0)) * int(product.get("quantity", 1))
                         order_matching_revenue += product_revenue
@@ -629,19 +653,20 @@ def _fetch_orders_with_category_filter(
     return source_orders, source_revenue, products, daily_revenue
 
 
-def _get_sales_by_source_with_category(
+def _get_sales_by_source_with_filter(
     start_date: str,
     end_date: str,
-    category_id: int
+    category_id: Optional[int] = None,
+    brand: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Get sales by source filtered by category."""
-    cache_key = f"sales_by_source_cat:{start_date}:{end_date}:{category_id}"
+    """Get sales by source filtered by category and/or brand."""
+    cache_key = f"sales_by_source_filter:{start_date}:{end_date}:{category_id}:{brand}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
 
-    source_orders, source_revenue, _, _ = _fetch_orders_with_category_filter(
-        start_date, end_date, category_id
+    source_orders, source_revenue, _, _ = _fetch_orders_with_filter(
+        start_date, end_date, category_id, brand
     )
 
     # Build data for each source
@@ -667,21 +692,22 @@ def _get_sales_by_source_with_category(
     return result
 
 
-def _get_top_products_with_category(
+def _get_top_products_with_filter(
     start_date: str,
     end_date: str,
     source_id: Optional[int],
     limit: int,
-    category_id: int
+    category_id: Optional[int] = None,
+    brand: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Get top products filtered by category."""
-    cache_key = f"top_products_cat:{start_date}:{end_date}:{source_id}:{limit}:{category_id}"
+    """Get top products filtered by category and/or brand."""
+    cache_key = f"top_products_filter:{start_date}:{end_date}:{source_id}:{limit}:{category_id}:{brand}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
 
-    _, _, products, _ = _fetch_orders_with_category_filter(
-        start_date, end_date, category_id
+    _, _, products, _ = _fetch_orders_with_filter(
+        start_date, end_date, category_id, brand
     )
 
     # Sort and limit (descending - highest at top)
@@ -703,19 +729,20 @@ def _get_top_products_with_category(
     return result
 
 
-def _get_summary_stats_with_category(
+def _get_summary_stats_with_filter(
     start_date: str,
     end_date: str,
-    category_id: int
+    category_id: Optional[int] = None,
+    brand: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Get summary stats filtered by category."""
-    cache_key = f"summary_cat:{start_date}:{end_date}:{category_id}"
+    """Get summary stats filtered by category and/or brand."""
+    cache_key = f"summary_filter:{start_date}:{end_date}:{category_id}:{brand}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
 
-    source_orders, source_revenue, _, _ = _fetch_orders_with_category_filter(
-        start_date, end_date, category_id
+    source_orders, source_revenue, _, _ = _fetch_orders_with_filter(
+        start_date, end_date, category_id, brand
     )
 
     total_orders = sum(source_orders.values())
@@ -726,7 +753,7 @@ def _get_summary_stats_with_category(
         "totalOrders": total_orders,
         "totalRevenue": round(total_revenue, 2),
         "avgCheck": round(avg_check, 2),
-        "totalReturns": 0,  # Returns not filtered by category for now
+        "totalReturns": 0,  # Returns not filtered for now
         "returnsRevenue": 0,
         "startDate": start_date,
         "endDate": end_date
@@ -741,20 +768,24 @@ def _get_summary_stats_with_category(
 # CUSTOMER INSIGHTS
 # ═══════════════════════════════════════════════════════════════════════════
 
-def get_customer_insights(start_date: str, end_date: str) -> Dict[str, Any]:
+def get_customer_insights(start_date: str, end_date: str, brand: Optional[str] = None) -> Dict[str, Any]:
     """
     Get customer insights: new vs returning, AOV trend, repeat rate.
 
     Returns:
         Dict with customer analytics data
     """
-    cache_key = f"customer_insights:{start_date}:{end_date}"
+    cache_key = f"customer_insights:{start_date}:{end_date}:{brand}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
 
     from bot.config import RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
     from zoneinfo import ZoneInfo
+    from web.services.brand_service import get_product_brand_cache
+
+    # Get brand cache if filtering by brand
+    product_brand_cache = get_product_brand_cache() if brand else {}
 
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
@@ -765,9 +796,8 @@ def get_customer_insights(start_date: str, end_date: str) -> Dict[str, Any]:
     utc_start = local_start.astimezone(ZoneInfo("UTC"))
     utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
 
-    if _client is None:
-        get_report_service()
-    client = _client
+    from web.services.category_service import _get_session
+    session = _get_session()
 
     return_status_ids = set(RETURN_STATUS_IDS)
 
@@ -784,17 +814,18 @@ def get_customer_insights(start_date: str, end_date: str) -> Dict[str, Any]:
     page = 1
     while True:
         params = {
-            "include": "buyer,manager",
+            "include": "buyer,manager,products.offer" if brand else "buyer,manager",
             "limit": 50,
             "page": page,
             "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
         }
 
-        resp = client.get_orders(params)
-        if isinstance(resp, dict) and resp.get("error"):
+        resp = session.get(f"{KEYCRM_BASE_URL}/order", params=params, timeout=30)
+        if resp.status_code != 200:
             break
 
-        batch = resp.get("data", [])
+        data = resp.json()
+        batch = data.get("data", [])
         if not batch:
             break
 
@@ -817,6 +848,24 @@ def get_customer_insights(start_date: str, end_date: str) -> Dict[str, Any]:
                 if manager_id not in TELEGRAM_MANAGER_IDS:
                     continue
 
+            # If brand filter, check if order has matching product
+            if brand:
+                has_brand_product = False
+                brand_revenue = 0.0
+                for product in order.get("products", []):
+                    offer = product.get("offer", {})
+                    product_id = offer.get("product_id") if offer else None
+                    if product_id:
+                        prod_brand = product_brand_cache.get(product_id)
+                        if prod_brand == brand:
+                            has_brand_product = True
+                            brand_revenue += float(product.get("price_sold", 0)) * int(product.get("quantity", 1))
+                if not has_brand_product:
+                    continue
+                order_revenue = brand_revenue
+            else:
+                order_revenue = float(order.get("grand_total", 0))
+
             # Track customer
             buyer = order.get("buyer", {})
             buyer_id = buyer.get("id") if buyer else None
@@ -829,7 +878,7 @@ def get_customer_insights(start_date: str, end_date: str) -> Dict[str, Any]:
             local_ordered = ordered_at.astimezone(tz)
             date_key = local_ordered.strftime("%Y-%m-%d")
             if date_key in daily_aov:
-                daily_aov[date_key]["revenue"] += float(order.get("grand_total", 0))
+                daily_aov[date_key]["revenue"] += order_revenue
                 daily_aov[date_key]["orders"] += 1
 
         if len(batch) < 50:
@@ -897,14 +946,14 @@ def get_customer_insights(start_date: str, end_date: str) -> Dict[str, Any]:
 # PRODUCT PERFORMANCE
 # ═══════════════════════════════════════════════════════════════════════════
 
-def get_product_performance(start_date: str, end_date: str) -> Dict[str, Any]:
+def get_product_performance(start_date: str, end_date: str, brand: Optional[str] = None) -> Dict[str, Any]:
     """
     Get product performance: top by revenue, category breakdown, brands.
 
     Returns:
         Dict with product analytics data
     """
-    cache_key = f"product_performance:{start_date}:{end_date}"
+    cache_key = f"product_performance:{start_date}:{end_date}:{brand}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
@@ -917,10 +966,14 @@ def get_product_performance(start_date: str, end_date: str) -> Dict[str, Any]:
         warm_product_cache,
         _products_loaded
     )
+    from web.services.brand_service import get_product_brand_cache
 
     # Pre-load product categories
     if not _products_loaded:
         warm_product_cache()
+
+    # Get brand cache if filtering
+    product_brand_cache = get_product_brand_cache() if brand else {}
 
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
@@ -989,6 +1042,15 @@ def get_product_performance(start_date: str, end_date: str) -> Dict[str, Any]:
 
             # Process products
             for product in order.get("products", []):
+                offer = product.get("offer", {})
+                product_id = offer.get("product_id") if offer else None
+
+                # Check brand filter
+                if brand and product_id:
+                    prod_brand = product_brand_cache.get(product_id)
+                    if prod_brand != brand:
+                        continue
+
                 product_name = product.get("name", "Unknown")
                 qty = int(product.get("quantity", 1))
                 revenue = float(product.get("price_sold", 0)) * qty
@@ -998,9 +1060,6 @@ def get_product_performance(start_date: str, end_date: str) -> Dict[str, Any]:
                 product_quantity[product_name] = product_quantity.get(product_name, 0) + qty
 
                 # Get category from product
-                offer = product.get("offer", {})
-                product_id = offer.get("product_id") if offer else None
-
                 if product_id:
                     cat_id = _product_category_cache.get(product_id)
                     if cat_id and cat_id in categories:
@@ -1068,16 +1127,17 @@ async def async_get_revenue_trend(
     start_date: str,
     end_date: str,
     category_id: Optional[int] = None,
-    granularity: str = "daily"
+    granularity: str = "daily",
+    brand: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Async version of get_revenue_trend.
     Uses httpx for non-blocking HTTP requests with parallel pagination.
     """
-    # If category filter, use sync version with category
-    if category_id:
-        _, _, _, daily_revenue = _fetch_orders_with_category_filter(
-            start_date, end_date, category_id
+    # If category or brand filter, use sync version with filter
+    if category_id or brand:
+        _, _, _, daily_revenue = _fetch_orders_with_filter(
+            start_date, end_date, category_id, brand
         )
         start = datetime.strptime(start_date, "%Y-%m-%d").date()
         end = datetime.strptime(end_date, "%Y-%m-%d").date()
