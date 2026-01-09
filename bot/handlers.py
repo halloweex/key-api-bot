@@ -1754,7 +1754,7 @@ async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         # Perform search
         results = await asyncio.to_thread(
-            report_service.client.search_orders,
+            report_service.api.search_orders,
             query_text,
             search_type,
             10
