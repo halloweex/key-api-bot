@@ -223,6 +223,101 @@ main {
     margin-bottom: 1rem;
     padding-bottom: 0.5rem;
     border-bottom: 2px solid #f0f0f0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* Info button */
+.info-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    width: 18px;
+    height: 18px;
+    color: #9CA3AF;
+    transition: color 0.2s;
+    flex-shrink: 0;
+}
+
+.info-btn:hover {
+    color: #2563EB;
+}
+
+.info-btn svg {
+    width: 100%;
+    height: 100%;
+}
+
+/* Info tooltip */
+.info-tooltip {
+    display: none;
+    position: absolute;
+    top: 3rem;
+    left: 1rem;
+    right: 1rem;
+    z-index: 100;
+}
+
+.info-tooltip.active {
+    display: block;
+}
+
+.info-tooltip-content {
+    background: white;
+    border: 1px solid #E5E7EB;
+    border-radius: 8px;
+    padding: 1rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    position: relative;
+}
+
+.info-tooltip-content h4 {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #374151;
+    margin-bottom: 0.75rem;
+    padding-right: 1.5rem;
+}
+
+.info-tooltip-content p {
+    font-size: 0.85rem;
+    color: #6B7280;
+    margin-bottom: 0.5rem;
+    line-height: 1.5;
+}
+
+.info-tooltip-content p:last-child {
+    margin-bottom: 0;
+}
+
+.info-tooltip-content strong {
+    color: #374151;
+}
+
+.info-tooltip-close {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    background: none;
+    border: none;
+    font-size: 1.25rem;
+    color: #9CA3AF;
+    cursor: pointer;
+    padding: 0;
+    width: 24px;
+    height: 24px;
+    line-height: 1;
+}
+
+.info-tooltip-close:hover {
+    color: #374151;
+}
+
+/* Position relative for tooltip container */
+.chart-container {
+    position: relative;
 }
 
 .chart-container canvas {

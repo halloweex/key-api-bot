@@ -25,10 +25,40 @@ document.addEventListener('DOMContentLoaded', function() {
     initApplyButton();
     initCategoryFilter();
     initBrandFilter();
+    initInfoTooltips();
     loadCategories();
     loadBrands();
     loadAllData();
 });
+
+// Initialize info tooltips
+function initInfoTooltips() {
+    // Customers info tooltip
+    const customersInfoBtn = document.getElementById('customersInfoBtn');
+    const customersInfoTooltip = document.getElementById('customersInfoTooltip');
+
+    if (customersInfoBtn && customersInfoTooltip) {
+        customersInfoBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            customersInfoTooltip.classList.toggle('active');
+        });
+
+        // Close button
+        const closeBtn = customersInfoTooltip.querySelector('.info-tooltip-close');
+        if (closeBtn) {
+            closeBtn.addEventListener('click', function() {
+                customersInfoTooltip.classList.remove('active');
+            });
+        }
+
+        // Close when clicking outside
+        document.addEventListener('click', function(e) {
+            if (!customersInfoTooltip.contains(e.target) && e.target !== customersInfoBtn) {
+                customersInfoTooltip.classList.remove('active');
+            }
+        });
+    }
+}
 
 // Load parent categories for filter dropdown
 async function loadCategories() {

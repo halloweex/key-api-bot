@@ -856,7 +856,8 @@ def get_customer_insights(start_date: str, end_date: str, brand: Optional[str] =
     return_status_ids = set(RETURN_STATUS_IDS)
 
     # Track customers and daily AOV
-    customer_orders: Dict[int, List[datetime]] = {}
+    # Store buyer_id -> (buyer_created_at, order_count)
+    customer_data: Dict[int, Dict[str, Any]] = {}
     daily_aov = _init_daily_dict(start, end, {"revenue": 0.0, "orders": 0})
 
     page = 1
@@ -905,13 +906,26 @@ def get_customer_insights(start_date: str, end_date: str, brand: Optional[str] =
                 else:
                     order_revenue = float(order.get("grand_total", 0))
 
-                # Track customer
+                # Track customer with their created_at for new vs returning analysis
                 buyer = order.get("buyer", {})
                 buyer_id = buyer.get("id") if buyer else None
                 if buyer_id:
-                    if buyer_id not in customer_orders:
-                        customer_orders[buyer_id] = []
-                    customer_orders[buyer_id].append(ordered_at)
+                    if buyer_id not in customer_data:
+                        # Parse buyer's created_at to determine if they're new or returning
+                        buyer_created_str = buyer.get("created_at")
+                        buyer_created_at = None
+                        if buyer_created_str:
+                            try:
+                                buyer_created_at = datetime.fromisoformat(
+                                    buyer_created_str.replace("Z", "+00:00")
+                                )
+                            except (ValueError, AttributeError):
+                                pass
+                        customer_data[buyer_id] = {
+                            "created_at": buyer_created_at,
+                            "order_count": 0
+                        }
+                    customer_data[buyer_id]["order_count"] += 1
 
                 # Track daily AOV
                 local_ordered = ordered_at.astimezone(tz)
@@ -928,15 +942,35 @@ def get_customer_insights(start_date: str, end_date: str, brand: Optional[str] =
             logger.error(f"Error fetching customer insights: {e}")
             break
 
-    # Calculate metrics
-    # For new vs returning: check if customer had orders before this period
-    # Simplified: count customers with 1 order vs multiple orders in period
-    new_customers = sum(1 for orders in customer_orders.values() if len(orders) == 1)
-    returning_customers = sum(1 for orders in customer_orders.values() if len(orders) > 1)
-    total_customers = len(customer_orders)
+    # Calculate metrics using buyer's created_at for true new vs returning analysis
+    # New customer: registered during this period (created_at >= period start)
+    # Returning customer: registered before this period (created_at < period start)
+    new_customers = 0
+    returning_customers = 0
+    repeat_purchasers = 0  # Customers who made multiple orders in this period
 
-    # Repeat purchase rate
-    repeat_rate = (returning_customers / total_customers * 100) if total_customers > 0 else 0
+    for data in customer_data.values():
+        buyer_created_at = data.get("created_at")
+        order_count = data.get("order_count", 0)
+
+        if buyer_created_at:
+            # Compare buyer creation time with period start (both in UTC)
+            if buyer_created_at >= utc_start:
+                new_customers += 1
+            else:
+                returning_customers += 1
+        else:
+            # If no created_at, count as returning (existing customer)
+            returning_customers += 1
+
+        # Track repeat purchasers (made >1 order in this period)
+        if order_count > 1:
+            repeat_purchasers += 1
+
+    total_customers = len(customer_data)
+
+    # Repeat purchase rate: % of customers who made multiple orders in this period
+    repeat_rate = (repeat_purchasers / total_customers * 100) if total_customers > 0 else 0
 
     # Build AOV trend data
     aov_labels = []
@@ -976,6 +1010,7 @@ def get_customer_insights(start_date: str, end_date: str, brand: Optional[str] =
             "totalCustomers": total_customers,
             "newCustomers": new_customers,
             "returningCustomers": returning_customers,
+            "repeatPurchasers": repeat_purchasers,
             "repeatRate": round(repeat_rate, 1),
             "averageOrderValue": round(overall_aov, 2)
         }

@@ -1538,26 +1538,7 @@ async def admin_revoke_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if success:
         await query.answer("Access revoked!")
-
-        # Notify the user
-        try:
-            keyboard = [[
-                InlineKeyboardButton("🔄 Request Again", callback_data="auth_request_again")
-            ]]
-            await context.bot.send_message(
-                chat_id=target_user_id,
-                text=(
-                    "🔒 <b>Access Revoked</b>\n\n"
-                    "Your access to this bot has been revoked by an administrator.\n\n"
-                    "You can request access again:"
-                ),
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logger.error(f"Failed to notify user {target_user_id} about revocation: {e}")
-
-        # Refresh the user list
+        # Refresh the user list (silent revoke - no notification to user)
         await show_updated_user_list(query, admin.id)
     else:
         await query.answer("Failed to revoke access", show_alert=True)
