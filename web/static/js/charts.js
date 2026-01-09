@@ -9,6 +9,9 @@ let aovTrendChart = null;
 // Product performance charts
 let categoryChart = null;
 let topRevenueChart = null;
+// Brand analytics charts
+let brandRevenueChart = null;
+let brandQuantityChart = null;
 
 // Current filters
 let currentPeriod = 'week';
@@ -239,7 +242,8 @@ async function loadAllData() {
             loadSalesCharts(),
             loadTopProducts(),
             loadCustomerInsights(),
-            loadProductPerformance()
+            loadProductPerformance(),
+            loadBrandAnalytics()
         ]);
     } catch (error) {
         console.error('Error loading data:', error);
@@ -701,5 +705,145 @@ async function loadProductPerformance() {
         });
     } catch (error) {
         console.error('Error loading product performance:', error);
+    }
+}
+
+// Load brand analytics
+async function loadBrandAnalytics() {
+    try {
+        // Build query without brand filter for brand analytics
+        let query = '';
+        if (currentPeriod) {
+            query = `?period=${currentPeriod}`;
+        } else if (customStartDate && customEndDate) {
+            query = `?start_date=${customStartDate}&end_date=${customEndDate}`;
+        } else {
+            query = '?period=today';
+        }
+
+        const response = await fetch('/api/brands/analytics' + query);
+        const data = await response.json();
+
+        // Update brand metrics cards
+        document.getElementById('totalBrands').textContent = data.metrics.totalBrands.toLocaleString();
+        document.getElementById('topBrandName').textContent = data.metrics.topBrand;
+        document.getElementById('topBrandShare').textContent = data.metrics.topBrandShare + '%';
+
+        // Top brands by revenue bar chart
+        const revenueCtx = document.getElementById('brandRevenueChart').getContext('2d');
+
+        if (brandRevenueChart) {
+            brandRevenueChart.destroy();
+        }
+
+        brandRevenueChart = new Chart(revenueCtx, {
+            type: 'bar',
+            data: {
+                labels: data.topByRevenue.labels,
+                datasets: [{
+                    label: 'Revenue',
+                    data: data.topByRevenue.data,
+                    backgroundColor: data.topByRevenue.backgroundColor,
+                    borderRadius: 4
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                const index = context.dataIndex;
+                                const qty = data.topByRevenue.quantities[index];
+                                const orders = data.topByRevenue.orders[index];
+                                return `Revenue: ${formatCurrency(context.parsed.x)} (${qty} items, ${orders} orders)`;
+                            }
+                        }
+                    },
+                    datalabels: {
+                        color: '#fff',
+                        font: {
+                            weight: 'bold',
+                            size: 10
+                        },
+                        anchor: 'center',
+                        align: 'center',
+                        formatter: function(value, context) {
+                            return value > 0 ? formatCurrency(value) : '';
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        display: false
+                    }
+                }
+            },
+            plugins: [ChartDataLabels]
+        });
+
+        // Top brands by quantity bar chart
+        const quantityCtx = document.getElementById('brandQuantityChart').getContext('2d');
+
+        if (brandQuantityChart) {
+            brandQuantityChart.destroy();
+        }
+
+        brandQuantityChart = new Chart(quantityCtx, {
+            type: 'bar',
+            data: {
+                labels: data.topByQuantity.labels,
+                datasets: [{
+                    label: 'Quantity',
+                    data: data.topByQuantity.data,
+                    backgroundColor: data.topByQuantity.backgroundColor,
+                    borderRadius: 4
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                const index = context.dataIndex;
+                                const revenue = data.topByQuantity.revenue[index];
+                                return `Quantity: ${context.parsed.x} (${formatCurrency(revenue)})`;
+                            }
+                        }
+                    },
+                    datalabels: {
+                        color: '#fff',
+                        font: {
+                            weight: 'bold',
+                            size: 11
+                        },
+                        anchor: 'center',
+                        align: 'center',
+                        formatter: function(value, context) {
+                            return value > 0 ? value : '';
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        display: false
+                    }
+                }
+            },
+            plugins: [ChartDataLabels]
+        });
+    } catch (error) {
+        console.error('Error loading brand analytics:', error);
     }
 }

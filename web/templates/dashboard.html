@@ -175,6 +175,52 @@
                 <canvas id="topRevenueChart"></canvas>
             </div>
         </section>
+
+        <!-- Brand Analytics Section -->
+        <section class="section-divider">
+            <h2>Brand Analytics</h2>
+        </section>
+
+        <section class="summary-cards brand-cards">
+            <div class="card">
+                <div class="card-icon brand-icon">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                </div>
+                <div class="card-content">
+                    <span class="card-label">Total Brands</span>
+                    <span class="card-value" id="totalBrands">-</span>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-icon top-brand-icon">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+                </div>
+                <div class="card-content">
+                    <span class="card-label">Top Brand</span>
+                    <span class="card-value" id="topBrandName">-</span>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-icon share-icon">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/></svg>
+                </div>
+                <div class="card-content">
+                    <span class="card-label">Top Brand Share</span>
+                    <span class="card-value" id="topBrandShare">-</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="charts-grid">
+            <div class="chart-container">
+                <h3>Top 10 Brands (by Revenue)</h3>
+                <canvas id="brandRevenueChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <h3>Top 10 Brands (by Quantity)</h3>
+                <canvas id="brandQuantityChart"></canvas>
+            </div>
+        </section>
     </main>
 
     <footer>

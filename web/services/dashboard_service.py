@@ -1180,6 +1180,157 @@ def get_product_performance(start_date: str, end_date: str, brand: Optional[str]
     return result
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# BRAND ANALYTICS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def get_brand_analytics(start_date: str, end_date: str) -> Dict[str, Any]:
+    """
+    Get brand analytics: top brands by revenue, orders, quantity.
+
+    Returns:
+        Dict with brand analytics data
+    """
+    cache_key = f"brand_analytics:{start_date}:{end_date}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    from web.services.brand_service import get_product_brand_cache
+    from web.services.category_service import _get_session
+
+    product_brand_cache = get_product_brand_cache()
+
+    # Parse dates using utility
+    start, end, local_start, local_end, utc_start, utc_end_buffer, tz = _parse_date_range(
+        start_date, end_date
+    )
+
+    session = _get_session()
+    return_status_ids = set(RETURN_STATUS_IDS)
+
+    # Track brand metrics
+    brand_revenue: Dict[str, float] = {}
+    brand_quantity: Dict[str, int] = {}
+    brand_orders: Dict[str, set] = {}  # Track unique orders per brand
+
+    page = 1
+    while True:
+        params = {
+            "include": "products.offer,manager",
+            "limit": 50,
+            "page": page,
+            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end_buffer.strftime('%Y-%m-%d %H:%M:%S')}",
+        }
+
+        try:
+            resp = session.get(f"{KEYCRM_BASE_URL}/order", params=params, timeout=30)
+            if resp.status_code != 200:
+                logger.error(f"API returned status {resp.status_code} fetching brand analytics")
+                break
+
+            data = resp.json()
+            batch = data.get("data", [])
+            if not batch:
+                break
+
+            for order in batch:
+                # Use utility for order validation
+                is_valid, ordered_at = _is_valid_order(
+                    order, utc_start, local_end, return_status_ids
+                )
+                if not is_valid:
+                    continue
+
+                order_id = order.get("id")
+
+                # Process products
+                for product in order.get("products", []):
+                    offer = product.get("offer", {})
+                    product_id = offer.get("product_id") if offer else None
+
+                    if not product_id:
+                        continue
+
+                    brand = product_brand_cache.get(product_id)
+                    if not brand:
+                        brand = "Unknown"
+
+                    qty = int(product.get("quantity", 1))
+                    revenue = float(product.get("price_sold", 0)) * qty
+
+                    # Track brand metrics
+                    brand_revenue[brand] = brand_revenue.get(brand, 0) + revenue
+                    brand_quantity[brand] = brand_quantity.get(brand, 0) + qty
+
+                    # Track unique orders for this brand
+                    if brand not in brand_orders:
+                        brand_orders[brand] = set()
+                    brand_orders[brand].add(order_id)
+
+            if len(batch) < 50:
+                break
+            page += 1
+
+        except Exception as e:
+            logger.error(f"Error fetching brand analytics: {e}")
+            break
+
+    # Convert order sets to counts
+    brand_order_counts = {brand: len(orders) for brand, orders in brand_orders.items()}
+
+    # Build top brands by revenue (top 10)
+    sorted_by_revenue = sorted(brand_revenue.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    # Color palette for brands
+    brand_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4", "#14B8A6", "#EF4444"]
+
+    top_brands_revenue = {
+        "labels": [b[0] for b in sorted_by_revenue],
+        "data": [round(b[1], 2) for b in sorted_by_revenue],
+        "quantities": [brand_quantity.get(b[0], 0) for b in sorted_by_revenue],
+        "orders": [brand_order_counts.get(b[0], 0) for b in sorted_by_revenue],
+        "backgroundColor": brand_colors[:len(sorted_by_revenue)]
+    }
+
+    # Build top brands by quantity (top 10)
+    sorted_by_quantity = sorted(brand_quantity.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    top_brands_quantity = {
+        "labels": [b[0] for b in sorted_by_quantity],
+        "data": [b[1] for b in sorted_by_quantity],
+        "revenue": [round(brand_revenue.get(b[0], 0), 2) for b in sorted_by_quantity],
+        "backgroundColor": brand_colors[:len(sorted_by_quantity)]
+    }
+
+    # Calculate totals
+    total_revenue = sum(brand_revenue.values())
+    total_quantity = sum(brand_quantity.values())
+    total_orders = sum(brand_order_counts.values())
+    unique_brands = len([b for b in brand_revenue.keys() if b != "Unknown"])
+
+    # Top brand info
+    top_brand = sorted_by_revenue[0][0] if sorted_by_revenue else "N/A"
+    top_brand_revenue = sorted_by_revenue[0][1] if sorted_by_revenue else 0
+    top_brand_share = (top_brand_revenue / total_revenue * 100) if total_revenue > 0 else 0
+
+    result = {
+        "topByRevenue": top_brands_revenue,
+        "topByQuantity": top_brands_quantity,
+        "metrics": {
+            "totalBrands": unique_brands,
+            "topBrand": top_brand,
+            "topBrandShare": round(top_brand_share, 1),
+            "totalRevenue": round(total_revenue, 2),
+            "totalQuantity": total_quantity,
+            "avgBrandRevenue": round(total_revenue / unique_brands, 2) if unique_brands > 0 else 0
+        }
+    }
+
+    _set_cached(cache_key, result)
+    return result
+
+
 async def async_get_revenue_trend(
     start_date: str,
     end_date: str,

@@ -105,3 +105,14 @@ async def get_product_performance(
     """Get product performance: top by revenue, category breakdown."""
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return dashboard_service.get_product_performance(start, end, brand=brand)
+
+
+@router.get("/brands/analytics")
+async def get_brand_analytics(
+    period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
+):
+    """Get brand analytics: top brands by revenue and quantity."""
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    return dashboard_service.get_brand_analytics(start, end)

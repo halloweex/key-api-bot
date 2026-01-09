@@ -384,6 +384,26 @@ main {
     color: #D97706;
 }
 
+/* Brand cards */
+.brand-cards {
+    grid-template-columns: repeat(3, 1fr);
+}
+
+.brand-icon {
+    background: #EDE9FE;
+    color: #7C3AED;
+}
+
+.top-brand-icon {
+    background: #DCFCE7;
+    color: #16A34A;
+}
+
+.share-icon {
+    background: #DBEAFE;
+    color: #2563EB;
+}
+
 /* Footer */
 footer {
     text-align: center;
