@@ -3,6 +3,12 @@ let revenueChart = null;
 let ordersChart = null;
 let revenueBySourceChart = null;
 let topProductsChart = null;
+// Customer insights charts
+let customersChart = null;
+let aovTrendChart = null;
+// Product performance charts
+let categoryChart = null;
+let topRevenueChart = null;
 
 // Current filters
 let currentPeriod = 'week';
@@ -167,7 +173,9 @@ async function loadAllData() {
             loadSummary(),
             loadRevenueChart(),
             loadSalesCharts(),
-            loadTopProducts()
+            loadTopProducts(),
+            loadCustomerInsights(),
+            loadProductPerformance()
         ]);
     } catch (error) {
         console.error('Error loading data:', error);
@@ -418,4 +426,222 @@ function formatCurrency(value) {
         minimumFractionDigits: 0,
         maximumFractionDigits: 0
     }).format(value);
+}
+
+// Load customer insights
+async function loadCustomerInsights() {
+    try {
+        const query = currentPeriod ? `?period=${currentPeriod}` :
+            (customStartDate && customEndDate ? `?start_date=${customStartDate}&end_date=${customEndDate}` : '?period=week');
+
+        const response = await fetch('/api/customers/insights' + query);
+        const data = await response.json();
+
+        // Update customer metrics cards
+        document.getElementById('totalCustomers').textContent = data.metrics.totalCustomers.toLocaleString();
+        document.getElementById('repeatRate').textContent = data.metrics.repeatRate + '%';
+        document.getElementById('avgOrderValue').textContent = formatCurrency(data.metrics.averageOrderValue);
+
+        // New vs Returning Customers pie chart
+        const customersCtx = document.getElementById('customersChart').getContext('2d');
+
+        if (customersChart) {
+            customersChart.destroy();
+        }
+
+        customersChart = new Chart(customersCtx, {
+            type: 'doughnut',
+            data: {
+                labels: data.newVsReturning.labels,
+                datasets: [{
+                    data: data.newVsReturning.data,
+                    backgroundColor: data.newVsReturning.backgroundColor,
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom'
+                    },
+                    datalabels: {
+                        color: '#fff',
+                        font: {
+                            weight: 'bold',
+                            size: 14
+                        },
+                        formatter: function(value, context) {
+                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                            if (total === 0) return '';
+                            const percentage = ((value / total) * 100).toFixed(0);
+                            return percentage > 5 ? value + '\n(' + percentage + '%)' : '';
+                        }
+                    }
+                }
+            },
+            plugins: [ChartDataLabels]
+        });
+
+        // AOV Trend line chart
+        const aovCtx = document.getElementById('aovTrendChart').getContext('2d');
+
+        if (aovTrendChart) {
+            aovTrendChart.destroy();
+        }
+
+        aovTrendChart = new Chart(aovCtx, {
+            type: 'line',
+            data: data.aovTrend,
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: false
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            callback: function(value) {
+                                return formatCurrency(value);
+                            }
+                        }
+                    }
+                },
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                }
+            }
+        });
+    } catch (error) {
+        console.error('Error loading customer insights:', error);
+    }
+}
+
+// Load product performance
+async function loadProductPerformance() {
+    try {
+        const query = currentPeriod ? `?period=${currentPeriod}` :
+            (customStartDate && customEndDate ? `?start_date=${customStartDate}&end_date=${customEndDate}` : '?period=week');
+
+        const response = await fetch('/api/products/performance' + query);
+        const data = await response.json();
+
+        // Category breakdown pie chart
+        const categoryCtx = document.getElementById('categoryChart').getContext('2d');
+
+        if (categoryChart) {
+            categoryChart.destroy();
+        }
+
+        categoryChart = new Chart(categoryCtx, {
+            type: 'doughnut',
+            data: {
+                labels: data.categoryBreakdown.labels,
+                datasets: [{
+                    data: data.categoryBreakdown.revenue,
+                    backgroundColor: data.categoryBreakdown.backgroundColor,
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom'
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                const value = context.parsed;
+                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                const percentage = ((value / total) * 100).toFixed(1);
+                                const qty = data.categoryBreakdown.quantity[context.dataIndex];
+                                return `${context.label}: ${formatCurrency(value)} (${percentage}%) - ${qty} items`;
+                            }
+                        }
+                    },
+                    datalabels: {
+                        color: '#fff',
+                        font: {
+                            weight: 'bold',
+                            size: 11
+                        },
+                        formatter: function(value, context) {
+                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                            if (total === 0) return '';
+                            const percentage = ((value / total) * 100).toFixed(0);
+                            return percentage > 5 ? percentage + '%' : '';
+                        }
+                    }
+                }
+            },
+            plugins: [ChartDataLabels]
+        });
+
+        // Top products by revenue bar chart
+        const revenueCtx = document.getElementById('topRevenueChart').getContext('2d');
+
+        if (topRevenueChart) {
+            topRevenueChart.destroy();
+        }
+
+        topRevenueChart = new Chart(revenueCtx, {
+            type: 'bar',
+            data: {
+                labels: data.topByRevenue.labels,
+                datasets: [{
+                    label: 'Revenue',
+                    data: data.topByRevenue.data,
+                    backgroundColor: data.topByRevenue.backgroundColor,
+                    borderRadius: 4
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                const index = context.dataIndex;
+                                const qty = data.topByRevenue.quantities[index];
+                                return `Revenue: ${formatCurrency(context.parsed.x)} (${qty} sold)`;
+                            }
+                        }
+                    },
+                    datalabels: {
+                        color: '#fff',
+                        font: {
+                            weight: 'bold',
+                            size: 10
+                        },
+                        anchor: 'center',
+                        align: 'center',
+                        formatter: function(value, context) {
+                            return value > 0 ? formatCurrency(value) : '';
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        display: false
+                    }
+                }
+            },
+            plugins: [ChartDataLabels]
+        });
+    } catch (error) {
+        console.error('Error loading product performance:', error);
+    }
 }

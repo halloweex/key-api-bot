@@ -71,3 +71,25 @@ async def get_summary(
     """Get summary statistics for dashboard cards."""
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return dashboard_service.get_summary_stats(start, end, category_id)
+
+
+@router.get("/customers/insights")
+async def get_customer_insights(
+    period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
+):
+    """Get customer insights: new vs returning, AOV trend, repeat rate."""
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    return dashboard_service.get_customer_insights(start, end)
+
+
+@router.get("/products/performance")
+async def get_product_performance(
+    period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
+):
+    """Get product performance: top by revenue, category breakdown."""
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    return dashboard_service.get_product_performance(start, end)

@@ -240,6 +240,55 @@ main {
     max-height: 450px !important;
 }
 
+#topRevenueChart {
+    min-height: 400px !important;
+    max-height: 450px !important;
+}
+
+/* Section divider */
+.section-divider {
+    margin: 3rem 0 1.5rem;
+    padding: 1rem 0;
+    border-bottom: 2px solid #e5e7eb;
+}
+
+.section-divider h2 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: #374151;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.section-divider h2::before {
+    content: '';
+    width: 4px;
+    height: 24px;
+    background: linear-gradient(135deg, #2563EB 0%, #7C3AED 100%);
+    border-radius: 2px;
+}
+
+/* Customer cards */
+.customer-cards {
+    grid-template-columns: repeat(3, 1fr);
+}
+
+.customers-icon {
+    background: #E0E7FF;
+    color: #4F46E5;
+}
+
+.repeat-icon {
+    background: #D1FAE5;
+    color: #059669;
+}
+
+.aov-icon {
+    background: #FEF3C7;
+    color: #D97706;
+}
+
 /* Footer */
 footer {
     text-align: center;

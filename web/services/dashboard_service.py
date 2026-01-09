@@ -737,6 +737,333 @@ def _get_summary_stats_with_category(
 
 # ─── Async Functions ─────────────────────────────────────────────────────────
 
+# ═══════════════════════════════════════════════════════════════════════════
+# CUSTOMER INSIGHTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def get_customer_insights(start_date: str, end_date: str) -> Dict[str, Any]:
+    """
+    Get customer insights: new vs returning, AOV trend, repeat rate.
+
+    Returns:
+        Dict with customer analytics data
+    """
+    cache_key = f"customer_insights:{start_date}:{end_date}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    from bot.config import RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
+    from zoneinfo import ZoneInfo
+
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    tz = ZoneInfo(DEFAULT_TIMEZONE)
+    local_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
+    local_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)
+    utc_start = local_start.astimezone(ZoneInfo("UTC"))
+    utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
+
+    if _client is None:
+        get_report_service()
+    client = _client
+
+    return_status_ids = set(RETURN_STATUS_IDS)
+
+    # Track customers
+    customer_orders = {}  # buyer_id -> list of order dates
+    daily_aov = {}  # date -> (total_revenue, order_count)
+
+    # Initialize daily AOV
+    current = start
+    while current <= end:
+        daily_aov[current.strftime("%Y-%m-%d")] = {"revenue": 0.0, "orders": 0}
+        current += timedelta(days=1)
+
+    page = 1
+    while True:
+        params = {
+            "include": "buyer,manager",
+            "limit": 50,
+            "page": page,
+            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
+        }
+
+        resp = client.get_orders(params)
+        if isinstance(resp, dict) and resp.get("error"):
+            break
+
+        batch = resp.get("data", [])
+        if not batch:
+            break
+
+        for order in batch:
+            ordered_at_str = order.get("ordered_at")
+            if not ordered_at_str:
+                continue
+            ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
+
+            if not (utc_start <= ordered_at <= local_end.astimezone(ZoneInfo("UTC"))):
+                continue
+
+            if order.get("status_id") in return_status_ids:
+                continue
+
+            source_id = order.get("source_id")
+            if source_id == 2:
+                manager = order.get("manager")
+                manager_id = str(manager.get("id")) if manager else None
+                if manager_id not in TELEGRAM_MANAGER_IDS:
+                    continue
+
+            # Track customer
+            buyer = order.get("buyer", {})
+            buyer_id = buyer.get("id") if buyer else None
+            if buyer_id:
+                if buyer_id not in customer_orders:
+                    customer_orders[buyer_id] = []
+                customer_orders[buyer_id].append(ordered_at)
+
+            # Track daily AOV
+            local_ordered = ordered_at.astimezone(tz)
+            date_key = local_ordered.strftime("%Y-%m-%d")
+            if date_key in daily_aov:
+                daily_aov[date_key]["revenue"] += float(order.get("grand_total", 0))
+                daily_aov[date_key]["orders"] += 1
+
+        if len(batch) < 50:
+            break
+        page += 1
+
+    # Calculate metrics
+    # For new vs returning: check if customer had orders before this period
+    # Simplified: count customers with 1 order vs multiple orders in period
+    new_customers = sum(1 for orders in customer_orders.values() if len(orders) == 1)
+    returning_customers = sum(1 for orders in customer_orders.values() if len(orders) > 1)
+    total_customers = len(customer_orders)
+
+    # Repeat purchase rate
+    repeat_rate = (returning_customers / total_customers * 100) if total_customers > 0 else 0
+
+    # Build AOV trend data
+    aov_labels = []
+    aov_data = []
+    current = start
+    while current <= end:
+        date_key = current.strftime("%Y-%m-%d")
+        aov_labels.append(current.strftime("%d.%m"))
+        day_data = daily_aov.get(date_key, {"revenue": 0, "orders": 0})
+        aov = day_data["revenue"] / day_data["orders"] if day_data["orders"] > 0 else 0
+        aov_data.append(round(aov, 2))
+        current += timedelta(days=1)
+
+    # Calculate overall AOV
+    total_revenue = sum(d["revenue"] for d in daily_aov.values())
+    total_orders = sum(d["orders"] for d in daily_aov.values())
+    overall_aov = total_revenue / total_orders if total_orders > 0 else 0
+
+    result = {
+        "newVsReturning": {
+            "labels": ["New Customers", "Returning Customers"],
+            "data": [new_customers, returning_customers],
+            "backgroundColor": ["#2563EB", "#16A34A"]
+        },
+        "aovTrend": {
+            "labels": aov_labels,
+            "datasets": [{
+                "label": "AOV (UAH)",
+                "data": aov_data,
+                "borderColor": "#F59E0B",
+                "backgroundColor": "rgba(245, 158, 11, 0.1)",
+                "fill": True,
+                "tension": 0.3
+            }]
+        },
+        "metrics": {
+            "totalCustomers": total_customers,
+            "newCustomers": new_customers,
+            "returningCustomers": returning_customers,
+            "repeatRate": round(repeat_rate, 1),
+            "averageOrderValue": round(overall_aov, 2)
+        }
+    }
+
+    _set_cached(cache_key, result)
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PRODUCT PERFORMANCE
+# ═══════════════════════════════════════════════════════════════════════════
+
+def get_product_performance(start_date: str, end_date: str) -> Dict[str, Any]:
+    """
+    Get product performance: top by revenue, category breakdown, brands.
+
+    Returns:
+        Dict with product analytics data
+    """
+    cache_key = f"product_performance:{start_date}:{end_date}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    from bot.config import RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
+    from zoneinfo import ZoneInfo
+    from web.services.category_service import (
+        get_categories,
+        _product_category_cache,
+        warm_product_cache,
+        _products_loaded
+    )
+
+    # Pre-load product categories
+    if not _products_loaded:
+        warm_product_cache()
+
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    tz = ZoneInfo(DEFAULT_TIMEZONE)
+    local_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
+    local_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)
+    utc_start = local_start.astimezone(ZoneInfo("UTC"))
+    utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
+
+    from web.services.category_service import _get_session
+    session = _get_session()
+
+    return_status_ids = set(RETURN_STATUS_IDS)
+
+    # Track products by revenue
+    product_revenue = {}  # product_name -> revenue
+    product_quantity = {}  # product_name -> quantity
+    category_revenue = {}  # category_name -> revenue
+    category_quantity = {}  # category_name -> quantity
+
+    # Get categories for lookup
+    categories = get_categories()
+
+    page = 1
+    while True:
+        params = {
+            "include": "products.offer,manager",
+            "limit": 50,
+            "page": page,
+            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
+        }
+
+        resp = session.get(
+            f"{KEYCRM_BASE_URL}/order",
+            params=params,
+            timeout=30
+        )
+
+        if resp.status_code != 200:
+            break
+
+        data = resp.json()
+        batch = data.get("data", [])
+        if not batch:
+            break
+
+        for order in batch:
+            ordered_at_str = order.get("ordered_at")
+            if not ordered_at_str:
+                continue
+            ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
+
+            if not (utc_start <= ordered_at <= local_end.astimezone(ZoneInfo("UTC"))):
+                continue
+
+            if order.get("status_id") in return_status_ids:
+                continue
+
+            source_id = order.get("source_id")
+            if source_id == 2:
+                manager = order.get("manager")
+                manager_id = str(manager.get("id")) if manager else None
+                if manager_id not in TELEGRAM_MANAGER_IDS:
+                    continue
+
+            # Process products
+            for product in order.get("products", []):
+                product_name = product.get("name", "Unknown")
+                qty = int(product.get("quantity", 1))
+                revenue = float(product.get("price_sold", 0)) * qty
+
+                # Track product revenue and quantity
+                product_revenue[product_name] = product_revenue.get(product_name, 0) + revenue
+                product_quantity[product_name] = product_quantity.get(product_name, 0) + qty
+
+                # Get category from product
+                offer = product.get("offer", {})
+                product_id = offer.get("product_id") if offer else None
+
+                if product_id:
+                    cat_id = _product_category_cache.get(product_id)
+                    if cat_id and cat_id in categories:
+                        # Get root category name
+                        cat = categories[cat_id]
+                        # Walk up to root
+                        while cat.get('parent_id') and cat['parent_id'] in categories:
+                            cat = categories[cat['parent_id']]
+                        cat_name = cat.get('name', 'Other')
+                    else:
+                        cat_name = 'Other'
+                else:
+                    cat_name = 'Other'
+
+                category_revenue[cat_name] = category_revenue.get(cat_name, 0) + revenue
+                category_quantity[cat_name] = category_quantity.get(cat_name, 0) + qty
+
+        if len(batch) < 50:
+            break
+        page += 1
+
+    # Build top products by revenue (top 10)
+    sorted_by_revenue = sorted(product_revenue.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    top_by_revenue = {
+        "labels": [_wrap_label(p[0]) for p in sorted_by_revenue],
+        "data": [round(p[1], 2) for p in sorted_by_revenue],
+        "quantities": [product_quantity.get(p[0], 0) for p in sorted_by_revenue],
+        "backgroundColor": "#16A34A"
+    }
+
+    # Build category breakdown
+    sorted_categories = sorted(category_revenue.items(), key=lambda x: x[1], reverse=True)
+
+    # Color palette for categories
+    category_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4"]
+
+    category_breakdown = {
+        "labels": [c[0] for c in sorted_categories],
+        "revenue": [round(c[1], 2) for c in sorted_categories],
+        "quantity": [category_quantity.get(c[0], 0) for c in sorted_categories],
+        "backgroundColor": category_colors[:len(sorted_categories)]
+    }
+
+    # Calculate totals
+    total_revenue = sum(product_revenue.values())
+    total_quantity = sum(product_quantity.values())
+
+    result = {
+        "topByRevenue": top_by_revenue,
+        "categoryBreakdown": category_breakdown,
+        "metrics": {
+            "totalProducts": len(product_revenue),
+            "totalRevenue": round(total_revenue, 2),
+            "totalQuantity": total_quantity,
+            "avgProductRevenue": round(total_revenue / len(product_revenue), 2) if product_revenue else 0
+        }
+    }
+
+    _set_cached(cache_key, result)
+    return result
+
+
 async def async_get_revenue_trend(
     start_date: str,
     end_date: str,
