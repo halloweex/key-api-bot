@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─── Version ───────────────────────────────────────────────────────────────
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # ─── Environment Variables ──────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -65,6 +65,10 @@ class ConversationState(IntEnum):
     SELECTING_CUSTOM_END_DAY = 7
     GENERATING_REPORT = 8
     SELECTING_TOP10_SOURCE = 9
+    # Search states
+    SEARCH_WAITING_QUERY = 10
+    # Settings states
+    SETTINGS_MENU = 11
 
 # ─── Report Types ───────────────────────────────────────────────────────────
 REPORT_TYPES = {

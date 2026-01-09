@@ -34,9 +34,11 @@ async def setup_command_menu(application: Application) -> None:
     try:
         commands = [
             BotCommand("start", "👋 Start the bot"),
-            BotCommand("help", "ℹ️ Show help information"),
             BotCommand("report", "📊 Generate a sales report"),
+            BotCommand("search", "🔍 Search orders"),
+            BotCommand("settings", "⚙️ User settings"),
             BotCommand("dashboard", "📈 Open sales dashboard"),
+            BotCommand("help", "ℹ️ Show help information"),
             BotCommand("cancel", "🛑 Cancel current operation")
         ]
 
@@ -61,8 +63,12 @@ def create_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
             CommandHandler("report", handlers.report_command),
+            CommandHandler("search", handlers.search_command),
+            CommandHandler("settings", handlers.settings_command),
             MessageHandler(filters.Regex(r"^📊 Report$"), handlers.reply_keyboard_report),
             CallbackQueryHandler(handlers.report_command_from_callback, pattern=r"^cmd_report$"),
+            CallbackQueryHandler(handlers.search_command_from_callback, pattern=r"^cmd_search$"),
+            CallbackQueryHandler(handlers.settings_command_from_callback, pattern=r"^cmd_settings$"),
             CallbackQueryHandler(handlers.command_button_handler, pattern=r"^cmd_"),
             CallbackQueryHandler(handlers.convert_report_format, pattern=r"^convert_to_"),
             CallbackQueryHandler(handlers.quick_report_callback, pattern=r"^quick_"),
@@ -96,6 +102,13 @@ def create_conversation_handler() -> ConversationHandler:
             ],
             ConversationState.SELECTING_TOP10_SOURCE: [
                 CallbackQueryHandler(handlers.top10_source_callback, pattern=r"^top10_source_|^back_to_report_type")
+            ],
+            ConversationState.SEARCH_WAITING_QUERY: [
+                CallbackQueryHandler(handlers.search_type_callback, pattern=r"^search_type_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.search_query_handler)
+            ],
+            ConversationState.SETTINGS_MENU: [
+                CallbackQueryHandler(handlers.settings_callback, pattern=r"^settings_|^set_")
             ],
         },
         fallbacks=[CommandHandler("cancel", handlers.cancel_command)],

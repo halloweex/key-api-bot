@@ -225,3 +225,41 @@ class KeyCRMClient:
             API response containing statuses data
         """
         return self._make_request("GET", "status")
+
+    # ─── Search Methods ────────────────────────────────────────────────────
+
+    def search_orders(
+        self,
+        query: str,
+        search_type: str = "all",
+        limit: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Search orders by ID, customer name, or phone.
+
+        Args:
+            query: Search query string
+            search_type: Type of search - 'id', 'name', 'phone', or 'all'
+            limit: Maximum results to return
+
+        Returns:
+            API response containing matching orders
+        """
+        params = {
+            "include": "products,buyer",
+            "limit": limit
+        }
+
+        # If query is numeric, try to get order by ID first
+        if search_type == "id" or (search_type == "all" and query.isdigit()):
+            order = self.get_order(int(query))
+            if order and "error" not in order and "id" in order:
+                return {"data": [order], "total": 1}
+
+        # Search by buyer info
+        if search_type in ("name", "all"):
+            params["filter[buyer_full_name]"] = query
+        elif search_type == "phone":
+            params["filter[buyer_phone]"] = query
+
+        return self._make_request("GET", "order", params=params)

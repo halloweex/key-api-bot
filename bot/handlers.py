@@ -1680,3 +1680,242 @@ async def admin_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("✅ Admin panel closed.", parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SEARCH HANDLERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@authorized
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle /search command - start order search."""
+    await update.message.reply_text(
+        "🔍 <b>Search Orders</b>\n\n"
+        "How would you like to search?",
+        reply_markup=Keyboards.search_type(),
+        parse_mode="HTML"
+    )
+    return ConversationState.SEARCH_WAITING_QUERY
+
+
+@authorized
+async def search_command_from_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle search from callback."""
+    query = update.callback_query
+    await query.answer()
+
+    await query.edit_message_text(
+        "🔍 <b>Search Orders</b>\n\n"
+        "How would you like to search?",
+        reply_markup=Keyboards.search_type(),
+        parse_mode="HTML"
+    )
+    return ConversationState.SEARCH_WAITING_QUERY
+
+
+async def search_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle search type selection."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    search_type = query.data.split('_')[-1]  # id, name, or phone
+
+    update_user_session(user_id, {"search_type": search_type})
+
+    type_labels = {
+        "id": "Order ID",
+        "name": "Customer Name",
+        "phone": "Phone Number"
+    }
+
+    await query.edit_message_text(
+        f"🔍 <b>Search by {type_labels.get(search_type, search_type)}</b>\n\n"
+        f"Please type your search query:",
+        parse_mode="HTML"
+    )
+    return ConversationState.SEARCH_WAITING_QUERY
+
+
+async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle search query text input."""
+    user_id = update.effective_user.id
+    query_text = update.message.text.strip()
+
+    session = get_user_session(user_id)
+    search_type = session.get("search_type", "all") if session else "all"
+
+    # Show searching message
+    searching_msg = await update.message.reply_text(
+        "🔍 Searching...",
+        parse_mode="HTML"
+    )
+
+    try:
+        # Perform search
+        results = await asyncio.to_thread(
+            report_service.client.search_orders,
+            query_text,
+            search_type,
+            10
+        )
+
+        orders = results.get("data", [])
+
+        if not orders:
+            await searching_msg.edit_text(
+                f"🔍 <b>No Results</b>\n\n"
+                f"No orders found for: <code>{query_text}</code>",
+                reply_markup=Keyboards.search_results_actions(),
+                parse_mode="HTML"
+            )
+            return ConversationHandler.END
+
+        # Format results
+        message = f"🔍 <b>Search Results</b>\n"
+        message += f"Found {len(orders)} order(s) for: <code>{query_text}</code>\n\n"
+
+        for order in orders[:5]:  # Limit to 5 results
+            order_id = order.get("id", "?")
+            status = order.get("status_group", {}).get("name", "Unknown")
+            buyer = order.get("buyer", {})
+            buyer_name = buyer.get("full_name", "Unknown")
+            buyer_phone = buyer.get("phone", "N/A")
+            total = order.get("grand_total", 0)
+            created = order.get("created_at", "")[:10]
+
+            message += f"📦 <b>Order #{order_id}</b>\n"
+            message += f"   👤 {buyer_name}\n"
+            message += f"   📱 {buyer_phone}\n"
+            message += f"   💰 {total} UAH\n"
+            message += f"   📊 {status}\n"
+            message += f"   📅 {created}\n\n"
+
+        if len(orders) > 5:
+            message += f"<i>...and {len(orders) - 5} more results</i>\n"
+
+        await searching_msg.edit_text(
+            message,
+            reply_markup=Keyboards.search_results_actions(),
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        logger.error(f"Search error: {e}", exc_info=True)
+        await searching_msg.edit_text(
+            f"⚠️ Search failed: {str(e)}",
+            reply_markup=Keyboards.search_results_actions(),
+            parse_mode="HTML"
+        )
+
+    return ConversationHandler.END
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SETTINGS HANDLERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@authorized
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle /settings command."""
+    user_id = update.effective_user.id
+    prefs = database.get_user_preferences(user_id) or {}
+
+    await update.message.reply_text(
+        "⚙️ <b>Settings</b>\n\n"
+        "Configure your preferences:",
+        reply_markup=Keyboards.settings_menu(prefs),
+        parse_mode="HTML"
+    )
+    return ConversationState.SETTINGS_MENU
+
+
+@authorized
+async def settings_command_from_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle settings from callback."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    prefs = database.get_user_preferences(user_id) or {}
+
+    await query.edit_message_text(
+        "⚙️ <b>Settings</b>\n\n"
+        "Configure your preferences:",
+        reply_markup=Keyboards.settings_menu(prefs),
+        parse_mode="HTML"
+    )
+    return ConversationState.SETTINGS_MENU
+
+
+async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle settings menu callbacks."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    action = query.data
+
+    if action == "settings_timezone":
+        await query.edit_message_text(
+            "🌍 <b>Select Timezone</b>\n\n"
+            "Choose your timezone:",
+            reply_markup=Keyboards.settings_timezone(),
+            parse_mode="HTML"
+        )
+    elif action == "settings_date_range":
+        await query.edit_message_text(
+            "📅 <b>Default Date Range</b>\n\n"
+            "Choose the default date range for reports:",
+            reply_markup=Keyboards.settings_date_range(),
+            parse_mode="HTML"
+        )
+    elif action == "settings_notifications":
+        await query.edit_message_text(
+            "🔔 <b>Notifications</b>\n\n"
+            "Enable or disable notifications:",
+            reply_markup=Keyboards.settings_notifications(),
+            parse_mode="HTML"
+        )
+    elif action == "settings_back":
+        prefs = database.get_user_preferences(user_id) or {}
+        await query.edit_message_text(
+            "⚙️ <b>Settings</b>\n\n"
+            "Configure your preferences:",
+            reply_markup=Keyboards.settings_menu(prefs),
+            parse_mode="HTML"
+        )
+    elif action.startswith("set_tz_"):
+        timezone = action.replace("set_tz_", "")
+        database.update_user_preference(user_id, "timezone", timezone)
+        prefs = database.get_user_preferences(user_id) or {}
+        await query.edit_message_text(
+            f"✅ Timezone set to <b>{timezone}</b>\n\n"
+            "⚙️ <b>Settings</b>",
+            reply_markup=Keyboards.settings_menu(prefs),
+            parse_mode="HTML"
+        )
+    elif action.startswith("set_range_"):
+        date_range = action.replace("set_range_", "")
+        database.update_user_preference(user_id, "default_date_range", date_range)
+        prefs = database.get_user_preferences(user_id) or {}
+        range_label = {'today': 'Today', 'week': 'This Week', 'month': 'This Month'}.get(date_range, date_range)
+        await query.edit_message_text(
+            f"✅ Default range set to <b>{range_label}</b>\n\n"
+            "⚙️ <b>Settings</b>",
+            reply_markup=Keyboards.settings_menu(prefs),
+            parse_mode="HTML"
+        )
+    elif action.startswith("set_notif_"):
+        enabled = action.replace("set_notif_", "") == "1"
+        database.update_user_preference(user_id, "notifications_enabled", 1 if enabled else 0)
+        prefs = database.get_user_preferences(user_id) or {}
+        status = "enabled" if enabled else "disabled"
+        await query.edit_message_text(
+            f"✅ Notifications <b>{status}</b>\n\n"
+            "⚙️ <b>Settings</b>",
+            reply_markup=Keyboards.settings_menu(prefs),
+            parse_mode="HTML"
+        )
+
+    return ConversationState.SETTINGS_MENU

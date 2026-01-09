@@ -41,10 +41,23 @@ def init_database():
             default_source TEXT DEFAULT NULL,
             default_report_type TEXT DEFAULT 'summary',
             timezone TEXT DEFAULT 'Europe/Kyiv',
+            default_date_range TEXT DEFAULT 'week',
+            notifications_enabled INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Add new columns if they don't exist (migration for existing DBs)
+    try:
+        cursor.execute("ALTER TABLE user_preferences ADD COLUMN default_date_range TEXT DEFAULT 'week'")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    try:
+        cursor.execute("ALTER TABLE user_preferences ADD COLUMN notifications_enabled INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
     # Report history table
     cursor.execute("""
@@ -493,21 +506,25 @@ def save_user_preferences(
     user_id: int,
     default_source: str = None,
     default_report_type: str = "summary",
-    timezone: str = "Europe/Kyiv"
+    timezone: str = "Europe/Kyiv",
+    default_date_range: str = "week",
+    notifications_enabled: bool = True
 ) -> None:
     """Save or update user preferences."""
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
-        INSERT INTO user_preferences (user_id, default_source, default_report_type, timezone, updated_at)
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO user_preferences (user_id, default_source, default_report_type, timezone, default_date_range, notifications_enabled, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             default_source = excluded.default_source,
             default_report_type = excluded.default_report_type,
             timezone = excluded.timezone,
+            default_date_range = excluded.default_date_range,
+            notifications_enabled = excluded.notifications_enabled,
             updated_at = CURRENT_TIMESTAMP
-    """, (user_id, default_source, default_report_type, timezone))
+    """, (user_id, default_source, default_report_type, timezone, default_date_range, 1 if notifications_enabled else 0))
 
     conn.commit()
     conn.close()
@@ -524,7 +541,7 @@ def update_user_preference(user_id: int, key: str, value: Any) -> None:
     cursor = conn.cursor()
 
     # Only allow specific keys
-    allowed_keys = {'default_source', 'default_report_type', 'timezone'}
+    allowed_keys = {'default_source', 'default_report_type', 'timezone', 'default_date_range', 'notifications_enabled'}
     if key not in allowed_keys:
         logger.warning(f"Attempted to update invalid preference key: {key}")
         return

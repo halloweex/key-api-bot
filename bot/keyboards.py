@@ -287,3 +287,99 @@ class Keyboards:
             [InlineKeyboardButton("🏠 Main Menu", callback_data="cmd_start")]
         ]
         return InlineKeyboardMarkup(keyboard)
+
+    # ─── Search Keyboards ──────────────────────────────────────────────────
+
+    @staticmethod
+    def search_type() -> InlineKeyboardMarkup:
+        """Create search type selection keyboard."""
+        keyboard = [
+            [
+                InlineKeyboardButton("🔢 Order ID", callback_data="search_type_id"),
+                InlineKeyboardButton("👤 Customer Name", callback_data="search_type_name")
+            ],
+            [
+                InlineKeyboardButton("📱 Phone Number", callback_data="search_type_phone")
+            ],
+            [InlineKeyboardButton("🔙 Cancel", callback_data="cmd_start")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def search_results_actions() -> InlineKeyboardMarkup:
+        """Create search results action buttons."""
+        keyboard = [
+            [InlineKeyboardButton("🔍 New Search", callback_data="cmd_search")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="cmd_start")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    # ─── Settings Keyboards ────────────────────────────────────────────────
+
+    @staticmethod
+    def settings_menu(prefs: dict = None) -> InlineKeyboardMarkup:
+        """Create settings menu keyboard."""
+        prefs = prefs or {}
+        tz = prefs.get('timezone', 'Europe/Kyiv')
+        date_range = prefs.get('default_date_range', 'week')
+        notif = prefs.get('notifications_enabled', 1)
+
+        # Format display values
+        tz_display = tz.split('/')[-1] if '/' in tz else tz
+        range_display = {'today': 'Today', 'week': 'Week', 'month': 'Month'}.get(date_range, date_range.title())
+        notif_display = "✅ On" if notif else "❌ Off"
+
+        keyboard = [
+            [InlineKeyboardButton(f"🌍 Timezone: {tz_display}", callback_data="settings_timezone")],
+            [InlineKeyboardButton(f"📅 Default Range: {range_display}", callback_data="settings_date_range")],
+            [InlineKeyboardButton(f"🔔 Notifications: {notif_display}", callback_data="settings_notifications")],
+            [InlineKeyboardButton("🔙 Back", callback_data="cmd_start")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def settings_timezone() -> InlineKeyboardMarkup:
+        """Create timezone selection keyboard."""
+        keyboard = [
+            [
+                InlineKeyboardButton("🇺🇦 Kyiv", callback_data="set_tz_Europe/Kyiv"),
+                InlineKeyboardButton("🇵🇱 Warsaw", callback_data="set_tz_Europe/Warsaw")
+            ],
+            [
+                InlineKeyboardButton("🇩🇪 Berlin", callback_data="set_tz_Europe/Berlin"),
+                InlineKeyboardButton("🇬🇧 London", callback_data="set_tz_Europe/London")
+            ],
+            [
+                InlineKeyboardButton("🇺🇸 New York", callback_data="set_tz_America/New_York"),
+                InlineKeyboardButton("🇺🇸 Los Angeles", callback_data="set_tz_America/Los_Angeles")
+            ],
+            [InlineKeyboardButton("🔙 Back", callback_data="settings_back")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def settings_date_range() -> InlineKeyboardMarkup:
+        """Create default date range selection keyboard."""
+        keyboard = [
+            [
+                InlineKeyboardButton("📅 Today", callback_data="set_range_today"),
+                InlineKeyboardButton("📆 This Week", callback_data="set_range_week")
+            ],
+            [
+                InlineKeyboardButton("📆 This Month", callback_data="set_range_month")
+            ],
+            [InlineKeyboardButton("🔙 Back", callback_data="settings_back")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def settings_notifications() -> InlineKeyboardMarkup:
+        """Create notifications toggle keyboard."""
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Enable", callback_data="set_notif_1"),
+                InlineKeyboardButton("❌ Disable", callback_data="set_notif_0")
+            ],
+            [InlineKeyboardButton("🔙 Back", callback_data="settings_back")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
