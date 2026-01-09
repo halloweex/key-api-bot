@@ -1,10 +1,12 @@
 """
 Dashboard service for transforming sales data into chart-friendly formats.
 """
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+import logging
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional, Any, Tuple, Union
 import threading
 import time
+from zoneinfo import ZoneInfo
 
 from bot.api_client import KeyCRMClient
 from bot.services import ReportService
@@ -13,7 +15,11 @@ from bot.config import (
     KEYCRM_BASE_URL,
     SOURCE_MAPPING,
     DEFAULT_TIMEZONE,
+    RETURN_STATUS_IDS,
+    TELEGRAM_MANAGER_IDS,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ─── In-Memory Cache ─────────────────────────────────────────────────────────
@@ -40,7 +46,7 @@ def _set_cached(key: str, value: Any) -> None:
         _cache[key] = (value, time.time())
 
 
-def _get_aggregated_data(start_date: str, end_date: str) -> tuple:
+def _get_aggregated_data(start_date: str, end_date: str) -> Tuple[Dict, Dict, int, Dict, Dict]:
     """
     Get aggregated sales data with caching.
     Returns: (sales_dict, counts_dict, total_orders, revenue_dict, returns_dict)
@@ -58,7 +64,8 @@ def _get_aggregated_data(start_date: str, end_date: str) -> tuple:
         )
         _set_cached(cache_key, result)
         return result
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to aggregate sales data for {start_date} to {end_date}: {e}")
         return ({}, {}, 0, {}, {})
 
 
@@ -75,8 +82,8 @@ def _warm_cache_for_period(period: str) -> None:
         _get_aggregated_data(start, end)
         # Warm revenue trend
         get_revenue_trend(start, end)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Cache warming failed for period '{period}': {e}")
 
 
 def _cache_warming_loop() -> None:
@@ -176,7 +183,7 @@ def get_report_service() -> ReportService:
     return _report_service
 
 
-def parse_period(period: Optional[str], start_date: Optional[str], end_date: Optional[str]) -> tuple:
+def parse_period(period: Optional[str], start_date: Optional[str], end_date: Optional[str]) -> Tuple[str, str]:
     """
     Parse period shortcut or dates into (start_date, end_date) tuple.
 
@@ -224,6 +231,115 @@ def parse_period(period: Optional[str], start_date: Optional[str], end_date: Opt
     return (today.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
 
 
+# ─── Date/Time Utilities ──────────────────────────────────────────────────────
+
+def _parse_date_range(
+    start_date: str,
+    end_date: str,
+    tz_name: str = DEFAULT_TIMEZONE
+) -> Tuple[date, date, datetime, datetime, datetime, datetime, ZoneInfo]:
+    """
+    Parse date strings into local and UTC boundaries with timezone info.
+
+    Args:
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        tz_name: Timezone name (default: Europe/Kyiv)
+
+    Returns:
+        Tuple of (start_date, end_date, local_start, local_end, utc_start, utc_end_with_buffer, tz)
+        - start_date, end_date: date objects
+        - local_start, local_end: datetime with local timezone
+        - utc_start: start of day in UTC
+        - utc_end_with_buffer: end of day in UTC + 24h buffer (for API filtering)
+        - tz: ZoneInfo object
+    """
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    tz = ZoneInfo(tz_name)
+    local_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
+    local_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)
+    utc_start = local_start.astimezone(ZoneInfo("UTC"))
+    utc_end_with_buffer = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
+
+    return start, end, local_start, local_end, utc_start, utc_end_with_buffer, tz
+
+
+def _init_daily_dict(
+    start: Union[date, datetime],
+    end: Union[date, datetime],
+    default_value: Any = 0.0
+) -> Dict[str, Any]:
+    """
+    Initialize a dictionary with date keys for the given range.
+
+    Args:
+        start: Start date
+        end: End date
+        default_value: Default value for each day (0.0 or {"revenue": 0.0, "orders": 0})
+
+    Returns:
+        Dict with date string keys initialized to default_value
+    """
+    daily_dict = {}
+    current = start
+    while current <= end:
+        if isinstance(default_value, dict):
+            daily_dict[current.strftime("%Y-%m-%d")] = default_value.copy()
+        else:
+            daily_dict[current.strftime("%Y-%m-%d")] = default_value
+        current += timedelta(days=1)
+    return daily_dict
+
+
+def _is_valid_order(
+    order: Dict[str, Any],
+    utc_start: datetime,
+    local_end: datetime,
+    return_status_ids: set
+) -> Tuple[bool, Optional[datetime]]:
+    """
+    Check if order is valid (within date range and not a return).
+
+    Args:
+        order: Order dict from API
+        utc_start: Start boundary in UTC
+        local_end: End boundary with local timezone (will be converted to UTC)
+        return_status_ids: Set of return/cancel status IDs to exclude
+
+    Returns:
+        Tuple of (is_valid, ordered_at_datetime or None)
+    """
+    ordered_at_str = order.get("ordered_at")
+    if not ordered_at_str:
+        return False, None
+
+    try:
+        ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
+    except (ValueError, AttributeError) as e:
+        logger.debug(f"Invalid ordered_at format: {ordered_at_str}, error: {e}")
+        return False, None
+
+    # Convert local_end to UTC for comparison
+    utc_end = local_end.astimezone(ZoneInfo("UTC"))
+    if not (utc_start <= ordered_at <= utc_end):
+        return False, None
+
+    if order.get("status_id") in return_status_ids:
+        return False, None
+
+    # Filter Telegram orders by manager
+    source_id = order.get("source_id")
+    if source_id == 2:
+        manager = order.get("manager")
+        manager_id = str(manager.get("id")) if manager else None
+        if manager_id not in TELEGRAM_MANAGER_IDS:
+            return False, None
+
+    return True, ordered_at
+
+
 def get_revenue_trend(
     start_date: str,
     end_date: str,
@@ -241,44 +357,27 @@ def get_revenue_trend(
     Returns:
         Chart.js compatible data structure
     """
-    # Check cache first
     cache_key = f"revenue_trend:{start_date}:{end_date}:{granularity}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
 
-    from bot.api_client import KeyCRMClient
-    from bot.config import KEYCRM_API_KEY, RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
-    from zoneinfo import ZoneInfo
-
-    start = datetime.strptime(start_date, "%Y-%m-%d").date()
-    end = datetime.strptime(end_date, "%Y-%m-%d").date()
-
-    # Initialize daily revenue dict
-    daily_revenue = {}
-    current = start
-    while current <= end:
-        daily_revenue[current.strftime("%Y-%m-%d")] = 0.0
-        current += timedelta(days=1)
+    # Parse dates and initialize daily revenue using utilities
+    start, end, local_start, local_end, utc_start, utc_end_buffer, tz = _parse_date_range(
+        start_date, end_date
+    )
+    daily_revenue = _init_daily_dict(start, end, 0.0)
 
     try:
-        # Fetch ALL orders for the entire period in ONE call
         # Use singleton client for connection reuse
         if _client is None:
-            get_report_service()  # Initialize singleton
+            get_report_service()
         client = _client
-        tz = ZoneInfo(DEFAULT_TIMEZONE)
-
-        # Calculate UTC boundaries
-        local_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
-        local_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)
-        utc_start = local_start.astimezone(ZoneInfo("UTC"))
-        utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
 
         params = {
             "include": "products,manager",
             "limit": 50,
-            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
+            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end_buffer.strftime('%Y-%m-%d %H:%M:%S')}",
         }
 
         page = 1
@@ -289,6 +388,7 @@ def get_revenue_trend(
             resp = client.get_orders(params)
 
             if isinstance(resp, dict) and resp.get("error"):
+                logger.error(f"API error fetching orders: {resp.get('error')}")
                 break
 
             batch = resp.get("data", [])
@@ -296,28 +396,12 @@ def get_revenue_trend(
                 break
 
             for order in batch:
-                # Filter by ordered_at
-                ordered_at_str = order.get("ordered_at")
-                if not ordered_at_str:
+                # Use utility for order validation
+                is_valid, ordered_at = _is_valid_order(
+                    order, utc_start, local_end, return_status_ids
+                )
+                if not is_valid:
                     continue
-                ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
-
-                # Check if within range
-                if not (utc_start <= ordered_at <= local_end.astimezone(ZoneInfo("UTC"))):
-                    continue
-
-                # Skip returns
-                status_id = order.get("status_id")
-                if status_id in return_status_ids:
-                    continue
-
-                # Filter Telegram orders by manager
-                source_id = order.get("source_id")
-                if source_id == 2:
-                    manager = order.get("manager")
-                    manager_id = str(manager.get("id")) if manager else None
-                    if manager_id not in TELEGRAM_MANAGER_IDS:
-                        continue
 
                 # Get local date and add revenue
                 local_ordered = ordered_at.astimezone(tz)
@@ -329,8 +413,8 @@ def get_revenue_trend(
                 break
             page += 1
 
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Error fetching revenue trend: {e}")
 
     # Build response
     labels = []
@@ -507,26 +591,26 @@ def _fetch_orders_with_filter(
     end_date: str,
     category_id: Optional[int] = None,
     brand: Optional[str] = None
-) -> tuple:
+) -> Tuple[Dict[int, int], Dict[int, float], Dict[str, int], Dict[str, float]]:
     """
     Fetch orders and filter by category and/or brand.
-    Returns: (source_orders, source_revenue, products, daily_revenue)
+
+    Returns:
+        Tuple of (source_orders, source_revenue, products, daily_revenue)
     """
-    from bot.config import RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
-    from zoneinfo import ZoneInfo
     from web.services.category_service import (
         get_category_with_children,
         warm_product_cache,
         _product_category_cache,
-        _products_loaded
+        _products_loaded,
+        _get_session
     )
-    from web.services.brand_service import get_product_brand_cache, warm_brand_cache
+    from web.services.brand_service import get_product_brand_cache
 
     # Pre-load caches
     if not _products_loaded:
         warm_product_cache()
 
-    # Get brand cache
     product_brand_cache = get_product_brand_cache()
 
     # Get all category IDs to match (including children)
@@ -534,30 +618,19 @@ def _fetch_orders_with_filter(
     if category_id:
         valid_category_ids = set(get_category_with_children(category_id))
 
-    start = datetime.strptime(start_date, "%Y-%m-%d").date()
-    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    # Parse dates using utility
+    start, end, local_start, local_end, utc_start, utc_end_buffer, tz = _parse_date_range(
+        start_date, end_date
+    )
 
-    tz = ZoneInfo(DEFAULT_TIMEZONE)
-    local_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
-    local_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)
-    utc_start = local_start.astimezone(ZoneInfo("UTC"))
-    utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
-
-    from web.services.category_service import _get_session
     session = _get_session()
     return_status_ids = set(RETURN_STATUS_IDS)
 
     # Aggregation dicts
-    source_orders = {1: 0, 2: 0, 4: 0}  # source_id -> order count
-    source_revenue = {1: 0.0, 2: 0.0, 4: 0.0}  # source_id -> revenue
-    products = {}  # product_name -> quantity
-    daily_revenue = {}
-
-    # Initialize daily revenue
-    current = start
-    while current <= end:
-        daily_revenue[current.strftime("%Y-%m-%d")] = 0.0
-        current += timedelta(days=1)
+    source_orders: Dict[int, int] = {1: 0, 2: 0, 4: 0}
+    source_revenue: Dict[int, float] = {1: 0.0, 2: 0.0, 4: 0.0}
+    products: Dict[str, int] = {}
+    daily_revenue = _init_daily_dict(start, end, 0.0)
 
     page = 1
     while True:
@@ -565,90 +638,79 @@ def _fetch_orders_with_filter(
             "include": "products.offer,manager",
             "limit": 50,
             "page": page,
-            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
+            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end_buffer.strftime('%Y-%m-%d %H:%M:%S')}",
         }
 
-        resp = session.get(
-            f"{KEYCRM_BASE_URL}/order",
-            params=params,
-            timeout=30
-        )
+        try:
+            resp = session.get(f"{KEYCRM_BASE_URL}/order", params=params, timeout=30)
+            if resp.status_code != 200:
+                logger.error(f"API returned status {resp.status_code} fetching orders")
+                break
 
-        if resp.status_code != 200:
-            break
+            data = resp.json()
+            batch = data.get("data", [])
+            if not batch:
+                break
 
-        data = resp.json()
-        batch = data.get("data", [])
-        if not batch:
-            break
-
-        for order in batch:
-            # Filter by ordered_at
-            ordered_at_str = order.get("ordered_at")
-            if not ordered_at_str:
-                continue
-            ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
-
-            if not (utc_start <= ordered_at <= local_end.astimezone(ZoneInfo("UTC"))):
-                continue
-
-            # Skip returns
-            if order.get("status_id") in return_status_ids:
-                continue
-
-            # Filter Telegram orders by manager
-            source_id = order.get("source_id")
-            if source_id == 2:
-                manager = order.get("manager")
-                manager_id = str(manager.get("id")) if manager else None
-                if manager_id not in TELEGRAM_MANAGER_IDS:
+            for order in batch:
+                # Use utility for order validation
+                is_valid, ordered_at = _is_valid_order(
+                    order, utc_start, local_end, return_status_ids
+                )
+                if not is_valid:
                     continue
 
-            # Check if any product matches the filters
-            order_has_matching_product = False
-            order_matching_revenue = 0.0
+                source_id = order.get("source_id")
 
-            for product in order.get("products", []):
-                offer = product.get("offer", {})
-                product_id = offer.get("product_id") if offer else None
+                # Check if any product matches the filters
+                order_has_matching_product = False
+                order_matching_revenue = 0.0
 
-                if product_id:
-                    # Check category filter
-                    category_match = True
-                    if valid_category_ids:
-                        prod_category_id = _product_category_cache.get(product_id)
-                        category_match = prod_category_id and prod_category_id in valid_category_ids
+                for product in order.get("products", []):
+                    offer = product.get("offer", {})
+                    product_id = offer.get("product_id") if offer else None
 
-                    # Check brand filter
-                    brand_match = True
-                    if brand:
-                        prod_brand = product_brand_cache.get(product_id)
-                        brand_match = prod_brand and prod_brand == brand
+                    if product_id:
+                        # Check category filter
+                        category_match = True
+                        if valid_category_ids:
+                            prod_category_id = _product_category_cache.get(product_id)
+                            category_match = prod_category_id and prod_category_id in valid_category_ids
 
-                    # Both filters must match
-                    if category_match and brand_match:
-                        order_has_matching_product = True
-                        product_revenue = float(product.get("price_sold", 0)) * int(product.get("quantity", 1))
-                        order_matching_revenue += product_revenue
+                        # Check brand filter
+                        brand_match = True
+                        if brand:
+                            prod_brand = product_brand_cache.get(product_id)
+                            brand_match = prod_brand and prod_brand == brand
 
-                        # Add to products dict
-                        product_name = product.get("name", "Unknown")
-                        qty = int(product.get("quantity", 1))
-                        products[product_name] = products.get(product_name, 0) + qty
+                        # Both filters must match
+                        if category_match and brand_match:
+                            order_has_matching_product = True
+                            product_revenue = float(product.get("price_sold", 0)) * int(product.get("quantity", 1))
+                            order_matching_revenue += product_revenue
 
-            if order_has_matching_product and source_id in source_orders:
-                source_orders[source_id] += 1
-                source_revenue[source_id] += order_matching_revenue
+                            # Add to products dict
+                            product_name = product.get("name", "Unknown")
+                            qty = int(product.get("quantity", 1))
+                            products[product_name] = products.get(product_name, 0) + qty
 
-                # Add to daily revenue
-                local_ordered = ordered_at.astimezone(tz)
-                date_key = local_ordered.strftime("%Y-%m-%d")
-                if date_key in daily_revenue:
-                    daily_revenue[date_key] += order_matching_revenue
+                if order_has_matching_product and source_id in source_orders:
+                    source_orders[source_id] += 1
+                    source_revenue[source_id] += order_matching_revenue
 
-        if len(batch) < 50:
+                    # Add to daily revenue
+                    local_ordered = ordered_at.astimezone(tz)
+                    date_key = local_ordered.strftime("%Y-%m-%d")
+                    if date_key in daily_revenue:
+                        daily_revenue[date_key] += order_matching_revenue
+
+            if len(batch) < 50:
+                break
+            page += 1
+
+        except Exception as e:
+            logger.error(f"Error fetching orders with filter: {e}")
             break
-        page += 1
 
     return source_orders, source_revenue, products, daily_revenue
 
@@ -780,36 +842,22 @@ def get_customer_insights(start_date: str, end_date: str, brand: Optional[str] =
     if cached is not None:
         return cached
 
-    from bot.config import RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
-    from zoneinfo import ZoneInfo
     from web.services.brand_service import get_product_brand_cache
+    from web.services.category_service import _get_session
 
-    # Get brand cache if filtering by brand
     product_brand_cache = get_product_brand_cache() if brand else {}
 
-    start = datetime.strptime(start_date, "%Y-%m-%d").date()
-    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    # Parse dates using utility
+    start, end, local_start, local_end, utc_start, utc_end_buffer, tz = _parse_date_range(
+        start_date, end_date
+    )
 
-    tz = ZoneInfo(DEFAULT_TIMEZONE)
-    local_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
-    local_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)
-    utc_start = local_start.astimezone(ZoneInfo("UTC"))
-    utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
-
-    from web.services.category_service import _get_session
     session = _get_session()
-
     return_status_ids = set(RETURN_STATUS_IDS)
 
-    # Track customers
-    customer_orders = {}  # buyer_id -> list of order dates
-    daily_aov = {}  # date -> (total_revenue, order_count)
-
-    # Initialize daily AOV
-    current = start
-    while current <= end:
-        daily_aov[current.strftime("%Y-%m-%d")] = {"revenue": 0.0, "orders": 0}
-        current += timedelta(days=1)
+    # Track customers and daily AOV
+    customer_orders: Dict[int, List[datetime]] = {}
+    daily_aov = _init_daily_dict(start, end, {"revenue": 0.0, "orders": 0})
 
     page = 1
     while True:
@@ -817,73 +865,68 @@ def get_customer_insights(start_date: str, end_date: str, brand: Optional[str] =
             "include": "buyer,manager,products.offer" if brand else "buyer,manager",
             "limit": 50,
             "page": page,
-            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
+            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end_buffer.strftime('%Y-%m-%d %H:%M:%S')}",
         }
 
-        resp = session.get(f"{KEYCRM_BASE_URL}/order", params=params, timeout=30)
-        if resp.status_code != 200:
-            break
+        try:
+            resp = session.get(f"{KEYCRM_BASE_URL}/order", params=params, timeout=30)
+            if resp.status_code != 200:
+                logger.error(f"API returned status {resp.status_code} fetching customer insights")
+                break
 
-        data = resp.json()
-        batch = data.get("data", [])
-        if not batch:
-            break
+            data = resp.json()
+            batch = data.get("data", [])
+            if not batch:
+                break
 
-        for order in batch:
-            ordered_at_str = order.get("ordered_at")
-            if not ordered_at_str:
-                continue
-            ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
-
-            if not (utc_start <= ordered_at <= local_end.astimezone(ZoneInfo("UTC"))):
-                continue
-
-            if order.get("status_id") in return_status_ids:
-                continue
-
-            source_id = order.get("source_id")
-            if source_id == 2:
-                manager = order.get("manager")
-                manager_id = str(manager.get("id")) if manager else None
-                if manager_id not in TELEGRAM_MANAGER_IDS:
+            for order in batch:
+                # Use utility for order validation
+                is_valid, ordered_at = _is_valid_order(
+                    order, utc_start, local_end, return_status_ids
+                )
+                if not is_valid:
                     continue
 
-            # If brand filter, check if order has matching product
-            if brand:
-                has_brand_product = False
-                brand_revenue = 0.0
-                for product in order.get("products", []):
-                    offer = product.get("offer", {})
-                    product_id = offer.get("product_id") if offer else None
-                    if product_id:
-                        prod_brand = product_brand_cache.get(product_id)
-                        if prod_brand == brand:
-                            has_brand_product = True
-                            brand_revenue += float(product.get("price_sold", 0)) * int(product.get("quantity", 1))
-                if not has_brand_product:
-                    continue
-                order_revenue = brand_revenue
-            else:
-                order_revenue = float(order.get("grand_total", 0))
+                # If brand filter, check if order has matching product
+                if brand:
+                    has_brand_product = False
+                    brand_revenue = 0.0
+                    for product in order.get("products", []):
+                        offer = product.get("offer", {})
+                        product_id = offer.get("product_id") if offer else None
+                        if product_id:
+                            prod_brand = product_brand_cache.get(product_id)
+                            if prod_brand == brand:
+                                has_brand_product = True
+                                brand_revenue += float(product.get("price_sold", 0)) * int(product.get("quantity", 1))
+                    if not has_brand_product:
+                        continue
+                    order_revenue = brand_revenue
+                else:
+                    order_revenue = float(order.get("grand_total", 0))
 
-            # Track customer
-            buyer = order.get("buyer", {})
-            buyer_id = buyer.get("id") if buyer else None
-            if buyer_id:
-                if buyer_id not in customer_orders:
-                    customer_orders[buyer_id] = []
-                customer_orders[buyer_id].append(ordered_at)
+                # Track customer
+                buyer = order.get("buyer", {})
+                buyer_id = buyer.get("id") if buyer else None
+                if buyer_id:
+                    if buyer_id not in customer_orders:
+                        customer_orders[buyer_id] = []
+                    customer_orders[buyer_id].append(ordered_at)
 
-            # Track daily AOV
-            local_ordered = ordered_at.astimezone(tz)
-            date_key = local_ordered.strftime("%Y-%m-%d")
-            if date_key in daily_aov:
-                daily_aov[date_key]["revenue"] += order_revenue
-                daily_aov[date_key]["orders"] += 1
+                # Track daily AOV
+                local_ordered = ordered_at.astimezone(tz)
+                date_key = local_ordered.strftime("%Y-%m-%d")
+                if date_key in daily_aov:
+                    daily_aov[date_key]["revenue"] += order_revenue
+                    daily_aov[date_key]["orders"] += 1
 
-        if len(batch) < 50:
+            if len(batch) < 50:
+                break
+            page += 1
+
+        except Exception as e:
+            logger.error(f"Error fetching customer insights: {e}")
             break
-        page += 1
 
     # Calculate metrics
     # For new vs returning: check if customer had orders before this period
@@ -958,13 +1001,12 @@ def get_product_performance(start_date: str, end_date: str, brand: Optional[str]
     if cached is not None:
         return cached
 
-    from bot.config import RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
-    from zoneinfo import ZoneInfo
     from web.services.category_service import (
         get_categories,
         _product_category_cache,
         warm_product_cache,
-        _products_loaded
+        _products_loaded,
+        _get_session
     )
     from web.services.brand_service import get_product_brand_cache
 
@@ -972,30 +1014,22 @@ def get_product_performance(start_date: str, end_date: str, brand: Optional[str]
     if not _products_loaded:
         warm_product_cache()
 
-    # Get brand cache if filtering
     product_brand_cache = get_product_brand_cache() if brand else {}
 
-    start = datetime.strptime(start_date, "%Y-%m-%d").date()
-    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    # Parse dates using utility
+    start, end, local_start, local_end, utc_start, utc_end_buffer, tz = _parse_date_range(
+        start_date, end_date
+    )
 
-    tz = ZoneInfo(DEFAULT_TIMEZONE)
-    local_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
-    local_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)
-    utc_start = local_start.astimezone(ZoneInfo("UTC"))
-    utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
-
-    from web.services.category_service import _get_session
     session = _get_session()
-
     return_status_ids = set(RETURN_STATUS_IDS)
 
     # Track products by revenue
-    product_revenue = {}  # product_name -> revenue
-    product_quantity = {}  # product_name -> quantity
-    category_revenue = {}  # category_name -> revenue
-    category_quantity = {}  # category_name -> quantity
+    product_revenue: Dict[str, float] = {}
+    product_quantity: Dict[str, int] = {}
+    category_revenue: Dict[str, float] = {}
+    category_quantity: Dict[str, int] = {}
 
-    # Get categories for lookup
     categories = get_categories()
 
     page = 1
@@ -1004,82 +1038,70 @@ def get_product_performance(start_date: str, end_date: str, brand: Optional[str]
             "include": "products.offer,manager",
             "limit": 50,
             "page": page,
-            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
+            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end_buffer.strftime('%Y-%m-%d %H:%M:%S')}",
         }
 
-        resp = session.get(
-            f"{KEYCRM_BASE_URL}/order",
-            params=params,
-            timeout=30
-        )
+        try:
+            resp = session.get(f"{KEYCRM_BASE_URL}/order", params=params, timeout=30)
+            if resp.status_code != 200:
+                logger.error(f"API returned status {resp.status_code} fetching product performance")
+                break
 
-        if resp.status_code != 200:
-            break
+            data = resp.json()
+            batch = data.get("data", [])
+            if not batch:
+                break
 
-        data = resp.json()
-        batch = data.get("data", [])
-        if not batch:
-            break
-
-        for order in batch:
-            ordered_at_str = order.get("ordered_at")
-            if not ordered_at_str:
-                continue
-            ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
-
-            if not (utc_start <= ordered_at <= local_end.astimezone(ZoneInfo("UTC"))):
-                continue
-
-            if order.get("status_id") in return_status_ids:
-                continue
-
-            source_id = order.get("source_id")
-            if source_id == 2:
-                manager = order.get("manager")
-                manager_id = str(manager.get("id")) if manager else None
-                if manager_id not in TELEGRAM_MANAGER_IDS:
+            for order in batch:
+                # Use utility for order validation
+                is_valid, ordered_at = _is_valid_order(
+                    order, utc_start, local_end, return_status_ids
+                )
+                if not is_valid:
                     continue
 
-            # Process products
-            for product in order.get("products", []):
-                offer = product.get("offer", {})
-                product_id = offer.get("product_id") if offer else None
+                # Process products
+                for product in order.get("products", []):
+                    offer = product.get("offer", {})
+                    product_id = offer.get("product_id") if offer else None
 
-                # Check brand filter
-                if brand and product_id:
-                    prod_brand = product_brand_cache.get(product_id)
-                    if prod_brand != brand:
-                        continue
+                    # Check brand filter
+                    if brand and product_id:
+                        prod_brand = product_brand_cache.get(product_id)
+                        if prod_brand != brand:
+                            continue
 
-                product_name = product.get("name", "Unknown")
-                qty = int(product.get("quantity", 1))
-                revenue = float(product.get("price_sold", 0)) * qty
+                    product_name = product.get("name", "Unknown")
+                    qty = int(product.get("quantity", 1))
+                    revenue = float(product.get("price_sold", 0)) * qty
 
-                # Track product revenue and quantity
-                product_revenue[product_name] = product_revenue.get(product_name, 0) + revenue
-                product_quantity[product_name] = product_quantity.get(product_name, 0) + qty
+                    # Track product revenue and quantity
+                    product_revenue[product_name] = product_revenue.get(product_name, 0) + revenue
+                    product_quantity[product_name] = product_quantity.get(product_name, 0) + qty
 
-                # Get category from product
-                if product_id:
-                    cat_id = _product_category_cache.get(product_id)
-                    if cat_id and cat_id in categories:
-                        # Get root category name
-                        cat = categories[cat_id]
-                        # Walk up to root
-                        while cat.get('parent_id') and cat['parent_id'] in categories:
-                            cat = categories[cat['parent_id']]
-                        cat_name = cat.get('name', 'Other')
+                    # Get category from product
+                    if product_id:
+                        cat_id = _product_category_cache.get(product_id)
+                        if cat_id and cat_id in categories:
+                            cat = categories[cat_id]
+                            while cat.get('parent_id') and cat['parent_id'] in categories:
+                                cat = categories[cat['parent_id']]
+                            cat_name = cat.get('name', 'Other')
+                        else:
+                            cat_name = 'Other'
                     else:
                         cat_name = 'Other'
-                else:
-                    cat_name = 'Other'
 
-                category_revenue[cat_name] = category_revenue.get(cat_name, 0) + revenue
-                category_quantity[cat_name] = category_quantity.get(cat_name, 0) + qty
+                    category_revenue[cat_name] = category_revenue.get(cat_name, 0) + revenue
+                    category_quantity[cat_name] = category_quantity.get(cat_name, 0) + qty
 
-        if len(batch) < 50:
+            if len(batch) < 50:
+                break
+            page += 1
+
+        except Exception as e:
+            logger.error(f"Error fetching product performance: {e}")
             break
-        page += 1
 
     # Build top products by revenue (top 10)
     sorted_by_revenue = sorted(product_revenue.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -1139,8 +1161,7 @@ async def async_get_revenue_trend(
         _, _, _, daily_revenue = _fetch_orders_with_filter(
             start_date, end_date, category_id, brand
         )
-        start = datetime.strptime(start_date, "%Y-%m-%d").date()
-        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        start, end, _, _, _, _, _ = _parse_date_range(start_date, end_date)
 
         labels = []
         data = []
@@ -1163,69 +1184,38 @@ async def async_get_revenue_trend(
             }]
         }
 
-    # Check cache first
     cache_key = f"revenue_trend:{start_date}:{end_date}:{granularity}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
 
-    from bot.config import RETURN_STATUS_IDS, TELEGRAM_MANAGER_IDS
-    from zoneinfo import ZoneInfo
     from web.services.async_client import AsyncKeyCRMClient
 
-    start = datetime.strptime(start_date, "%Y-%m-%d").date()
-    end = datetime.strptime(end_date, "%Y-%m-%d").date()
-
-    # Initialize daily revenue dict
-    daily_revenue = {}
-    current = start
-    while current <= end:
-        daily_revenue[current.strftime("%Y-%m-%d")] = 0.0
-        current += timedelta(days=1)
+    # Parse dates using utility
+    start, end, local_start, local_end, utc_start, utc_end_buffer, tz = _parse_date_range(
+        start_date, end_date
+    )
+    daily_revenue = _init_daily_dict(start, end, 0.0)
 
     try:
         client = AsyncKeyCRMClient()
-        tz = ZoneInfo(DEFAULT_TIMEZONE)
-
-        # Calculate UTC boundaries
-        local_start = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=tz)
-        local_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)
-        utc_start = local_start.astimezone(ZoneInfo("UTC"))
-        utc_end = local_end.astimezone(ZoneInfo("UTC")) + timedelta(hours=24)
 
         params = {
             "include": "products,manager",
             "limit": 50,
-            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end.strftime('%Y-%m-%d %H:%M:%S')}",
+            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end_buffer.strftime('%Y-%m-%d %H:%M:%S')}",
         }
 
-        # Fetch all orders using async parallel pagination
         all_orders = await client.fetch_all_orders(params)
         return_status_ids = set(RETURN_STATUS_IDS)
 
         for order in all_orders:
-            # Filter by ordered_at
-            ordered_at_str = order.get("ordered_at")
-            if not ordered_at_str:
+            # Use utility for order validation
+            is_valid, ordered_at = _is_valid_order(
+                order, utc_start, local_end, return_status_ids
+            )
+            if not is_valid:
                 continue
-            ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
-
-            # Check if within range
-            if not (utc_start <= ordered_at <= local_end.astimezone(ZoneInfo("UTC"))):
-                continue
-
-            # Skip returns
-            status_id = order.get("status_id")
-            if status_id in return_status_ids:
-                continue
-
-            # Filter Telegram orders by manager
-            source_id = order.get("source_id")
-            if source_id == 2:
-                manager = order.get("manager")
-                manager_id = str(manager.get("id")) if manager else None
-                if manager_id not in TELEGRAM_MANAGER_IDS:
-                    continue
 
             # Get local date and add revenue
             local_ordered = ordered_at.astimezone(tz)
@@ -1233,8 +1223,8 @@ async def async_get_revenue_trend(
             if date_key in daily_revenue:
                 daily_revenue[date_key] += float(order.get("grand_total", 0))
 
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Error in async_get_revenue_trend: {e}")
 
     # Build response
     labels = []

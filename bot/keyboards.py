@@ -296,10 +296,10 @@ class Keyboards:
         keyboard = [
             [
                 InlineKeyboardButton("🔢 Order ID", callback_data="search_type_id"),
-                InlineKeyboardButton("👤 Customer Name", callback_data="search_type_name")
+                InlineKeyboardButton("📱 Phone", callback_data="search_type_phone")
             ],
             [
-                InlineKeyboardButton("📱 Phone Number", callback_data="search_type_phone")
+                InlineKeyboardButton("📧 Email", callback_data="search_type_email")
             ],
             [InlineKeyboardButton("🔙 Cancel", callback_data="cmd_start")]
         ]

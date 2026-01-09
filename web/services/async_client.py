@@ -3,10 +3,13 @@ Async HTTP client for KeyCRM API.
 Used by web dashboard for faster data fetching.
 """
 import asyncio
-from typing import Dict, List, Any, Optional
+import logging
+from typing import Dict, List, Any
 import httpx
 
 from bot.config import KEYCRM_API_KEY, KEYCRM_BASE_URL
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncKeyCRMClient:
@@ -35,7 +38,11 @@ class AsyncKeyCRMClient:
             )
             response.raise_for_status()
             return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error fetching orders page {params.get('page')}: {e.response.status_code}")
+            return {"error": str(e), "data": []}
         except Exception as e:
+            logger.error(f"Error fetching orders page {params.get('page')}: {e}")
             return {"error": str(e), "data": []}
 
     async def fetch_all_orders(

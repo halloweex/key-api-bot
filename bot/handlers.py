@@ -1719,19 +1719,19 @@ async def search_type_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
 
     user_id = update.effective_user.id
-    search_type = query.data.split('_')[-1]  # id, name, or phone
+    search_type = query.data.split('_')[-1]  # id, phone, or email
 
     update_user_session(user_id, {"search_type": search_type})
 
     type_labels = {
         "id": "Order ID",
-        "name": "Customer Name",
-        "phone": "Phone Number"
+        "phone": "Phone Number",
+        "email": "Email"
     }
 
     await query.edit_message_text(
         f"🔍 <b>Search by {type_labels.get(search_type, search_type)}</b>\n\n"
-        f"Please type your search query:",
+        f"Please enter {type_labels.get(search_type, 'your query')}:",
         parse_mode="HTML"
     )
     return ConversationState.SEARCH_WAITING_QUERY

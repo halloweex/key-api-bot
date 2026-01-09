@@ -235,18 +235,18 @@ class KeyCRMClient:
         limit: int = 10
     ) -> Dict[str, Any]:
         """
-        Search orders by ID, customer name, or phone.
+        Search orders by ID, phone, or email.
 
         Args:
             query: Search query string
-            search_type: Type of search - 'id', 'name', 'phone', or 'all'
+            search_type: Type of search - 'id', 'phone', 'email', or 'all'
             limit: Maximum results to return
 
         Returns:
             API response containing matching orders
         """
         params = {
-            "include": "products,buyer",
+            "include": "products,buyer,status",
             "limit": limit
         }
 
@@ -256,10 +256,13 @@ class KeyCRMClient:
             if order and "error" not in order and "id" in order:
                 return {"data": [order], "total": 1}
 
-        # Search by buyer info
-        if search_type in ("name", "all"):
-            params["filter[buyer_full_name]"] = query
-        elif search_type == "phone":
+        # Search by buyer info (KeyCRM API supported filters)
+        if search_type == "phone" or (search_type == "all" and query.startswith("+")):
+            params["filter[buyer_phone]"] = query
+        elif search_type == "email" or (search_type == "all" and "@" in query):
+            params["filter[buyer_email]"] = query
+        elif search_type == "all":
+            # Default to phone search for non-ID, non-email queries
             params["filter[buyer_phone]"] = query
 
         return self._make_request("GET", "order", params=params)
