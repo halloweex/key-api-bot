@@ -364,15 +364,18 @@ main {
     max-height: 350px;
 }
 
-/* Top products chart needs more height for 10 items */
-#topProductsChart {
-    min-height: 400px !important;
-    max-height: 450px !important;
+/* Top products charts need more height for 10 items */
+#topProductsChart,
+#topRevenueChart {
+    min-height: 350px !important;
+    max-height: 400px !important;
 }
 
-#topRevenueChart {
-    min-height: 400px !important;
-    max-height: 450px !important;
+/* Brand charts */
+#brandRevenueChart,
+#brandQuantityChart {
+    min-height: 350px !important;
+    max-height: 400px !important;
 }
 
 /* Section divider */
