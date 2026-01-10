@@ -486,17 +486,67 @@ footer {
         padding: 1rem;
     }
 
+    .header-top {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+
     header h1 {
         font-size: 1.4rem;
     }
 
+    .user-info {
+        width: 100%;
+        justify-content: space-between;
+    }
+
     .date-controls {
         flex-direction: column;
-        align-items: flex-start;
+        align-items: stretch;
+        width: 100%;
     }
 
     .period-buttons {
         flex-wrap: wrap;
+        width: 100%;
+    }
+
+    .period-btn {
+        flex: 1;
+        min-width: calc(33.33% - 0.35rem);
+        padding: 0.5rem 0.5rem;
+        font-size: 0.8rem;
+        text-align: center;
+    }
+
+    .category-filter {
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .category-filter select {
+        width: 100%;
+        min-width: unset;
+    }
+
+    .custom-dates {
+        flex-wrap: wrap;
+        width: 100%;
+    }
+
+    .custom-dates input[type="date"] {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .custom-dates span {
+        flex-shrink: 0;
+    }
+
+    #applyDates {
+        width: 100%;
+        margin-top: 0.25rem;
     }
 
     main {
@@ -511,11 +561,24 @@ footer {
         grid-column: 1;
     }
 
+    .summary-cards {
+        grid-template-columns: 1fr;
+    }
+
+    .customer-cards,
+    .brand-cards {
+        grid-template-columns: 1fr;
+    }
+
     .card {
         padding: 1rem;
     }
 
     .card-value {
+        font-size: 1.2rem;
+    }
+
+    .section-divider h2 {
         font-size: 1.2rem;
     }
 }
