@@ -11,7 +11,15 @@
 </head>
 <body>
     <header>
-        <h1>KoreanStory Sales Dashboard</h1>
+        <div class="header-top">
+            <h1>KoreanStory Sales Dashboard</h1>
+            {% if user %}
+            <div class="user-info">
+                <span class="user-name">{{ user.first_name }}{% if user.username %} (@{{ user.username }}){% endif %}</span>
+                <a href="/logout" class="logout-btn">Logout</a>
+            </div>
+            {% endif %}
+        </div>
         <div class="date-controls">
             <div class="period-buttons">
                 <button class="period-btn" data-period="today">Today</button>

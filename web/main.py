@@ -8,9 +8,10 @@ from fastapi.responses import ORJSONResponse
 from starlette.middleware.gzip import GZipMiddleware
 
 from web.config import STATIC_DIR, VERSION
-from web.routes import api, pages
+from web.routes import api, pages, auth
 from web.services.dashboard_service import start_cache_warming, stop_cache_warming
 from web.services.category_service import warm_product_cache
+from bot.database import init_database
 
 # Configure logging
 logging.basicConfig(
@@ -34,13 +35,17 @@ app.add_middleware(GZipMiddleware, minimum_size=500)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Include routers
+app.include_router(auth.router)  # Auth routes first (login, logout, callback)
 app.include_router(pages.router)
 app.include_router(api.router, prefix="/api")
 
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("KeyCRM Dashboard started")
+    logger.info("KoreanStory Dashboard started")
+    # Initialize database (creates tables if not exist)
+    init_database()
+    logger.info("Database initialized")
     # Pre-load product categories for filtering
     logger.info("Warming product category cache...")
     warm_product_cache()

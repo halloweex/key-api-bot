@@ -15,6 +15,7 @@ VERSION = "1.2.0"
 
 # ─── Environment Variables ──────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "ksorderbot")  # Without @
 KEYCRM_API_KEY = os.getenv("KEYCRM_API_KEY")
 
 # ─── Authorization ─────────────────────────────────────────────────────────
