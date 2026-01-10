@@ -21,6 +21,22 @@ let currentParentCategoryId = null;
 let currentCategoryId = null;
 let currentBrand = null;
 
+// Revenue milestones (UAH) - period-specific
+const MILESTONES = {
+    daily: [
+        { amount: 200000, message: '200K Daily Revenue!', emoji: '🎉' },
+    ],
+    weekly: [
+        { amount: 800000, message: '800K Weekly Revenue!', emoji: '🔥' },
+        { amount: 1000000, message: '1 MILLION Weekly!', emoji: '🚀🎆' },
+        { amount: 2000000, message: '2 MILLION Weekly!', emoji: '💎🎇' },
+    ],
+    monthly: [
+        { amount: 10000000, message: '10 MILLION Monthly!', emoji: '👑🎇🎆' },
+    ]
+};
+let lastCelebratedMilestone = {}; // Track per period type
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     initDateInputs();
@@ -33,6 +49,100 @@ document.addEventListener('DOMContentLoaded', function() {
     loadBrands();
     loadAllData();
 });
+
+// Check and celebrate revenue milestones
+function checkMilestones(revenue) {
+    // Determine period type
+    let periodType = null;
+    if (currentPeriod === 'today' || currentPeriod === 'yesterday') {
+        periodType = 'daily';
+    } else if (currentPeriod === 'week' || currentPeriod === 'last_week') {
+        periodType = 'weekly';
+    } else if (currentPeriod === 'month' || currentPeriod === 'last_month') {
+        periodType = 'monthly';
+    }
+
+    // No milestones for custom periods
+    if (!periodType || !MILESTONES[periodType]) {
+        return;
+    }
+
+    // Find the highest milestone reached for this period type
+    let highestMilestone = null;
+    for (const milestone of MILESTONES[periodType]) {
+        if (revenue >= milestone.amount) {
+            highestMilestone = milestone;
+        }
+    }
+
+    // Initialize tracking for this period type
+    if (!lastCelebratedMilestone[periodType]) {
+        lastCelebratedMilestone[periodType] = 0;
+    }
+
+    // Only celebrate if we hit a new milestone (higher than last celebrated for this period)
+    if (highestMilestone && highestMilestone.amount > lastCelebratedMilestone[periodType]) {
+        lastCelebratedMilestone[periodType] = highestMilestone.amount;
+        celebrate(highestMilestone);
+    }
+}
+
+// Launch celebration with confetti
+function celebrate(milestone) {
+    // Format amount for display
+    let amountText;
+    if (milestone.amount >= 1000000) {
+        amountText = `₴${(milestone.amount / 1000000).toFixed(1)}M`;
+    } else {
+        amountText = `₴${(milestone.amount / 1000).toFixed(0)}K`;
+    }
+
+    // Create celebration overlay
+    const overlay = document.createElement('div');
+    overlay.className = 'celebration-overlay';
+    overlay.innerHTML = `
+        <div class="celebration-message">
+            <span class="celebration-emoji">${milestone.emoji}</span>
+            <h2>${milestone.message}</h2>
+            <p>Congratulations on reaching ${amountText}!</p>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    // Create confetti
+    createConfetti();
+
+    // Remove after animation
+    setTimeout(() => {
+        overlay.classList.add('fade-out');
+        setTimeout(() => overlay.remove(), 500);
+    }, 4000);
+
+    // Click to dismiss
+    overlay.addEventListener('click', () => {
+        overlay.classList.add('fade-out');
+        setTimeout(() => overlay.remove(), 500);
+    });
+}
+
+// Create confetti particles
+function createConfetti() {
+    const colors = ['#2563EB', '#7C3AED', '#16A34A', '#F59E0B', '#DC2626', '#EC4899'];
+    const confettiCount = 150;
+
+    for (let i = 0; i < confettiCount; i++) {
+        const confetti = document.createElement('div');
+        confetti.className = 'confetti';
+        confetti.style.left = Math.random() * 100 + 'vw';
+        confetti.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+        confetti.style.animationDuration = (Math.random() * 3 + 2) + 's';
+        confetti.style.animationDelay = Math.random() * 2 + 's';
+        document.body.appendChild(confetti);
+
+        // Remove after animation
+        setTimeout(() => confetti.remove(), 5000);
+    }
+}
 
 // Initialize info tooltips
 function initInfoTooltips() {
@@ -58,6 +168,32 @@ function initInfoTooltips() {
         document.addEventListener('click', function(e) {
             if (!customersInfoTooltip.contains(e.target) && e.target !== customersInfoBtn) {
                 customersInfoTooltip.classList.remove('active');
+            }
+        });
+    }
+
+    // AOV info tooltip
+    const aovInfoBtn = document.getElementById('aovInfoBtn');
+    const aovInfoTooltip = document.getElementById('aovInfoTooltip');
+
+    if (aovInfoBtn && aovInfoTooltip) {
+        aovInfoBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            aovInfoTooltip.classList.toggle('active');
+        });
+
+        // Close button
+        const aovCloseBtn = aovInfoTooltip.querySelector('.info-tooltip-close');
+        if (aovCloseBtn) {
+            aovCloseBtn.addEventListener('click', function() {
+                aovInfoTooltip.classList.remove('active');
+            });
+        }
+
+        // Close when clicking outside
+        document.addEventListener('click', function(e) {
+            if (!aovInfoTooltip.contains(e.target) && e.target !== aovInfoBtn) {
+                aovInfoTooltip.classList.remove('active');
             }
         });
     }
@@ -262,6 +398,9 @@ async function loadSummary() {
         document.getElementById('totalRevenue').textContent = formatCurrency(data.totalRevenue);
         document.getElementById('avgCheck').textContent = formatCurrency(data.avgCheck);
         document.getElementById('totalReturns').textContent = data.totalReturns.toLocaleString();
+
+        // Check for milestone celebrations
+        checkMilestones(data.totalRevenue);
     } catch (error) {
         console.error('Error loading summary:', error);
     }
