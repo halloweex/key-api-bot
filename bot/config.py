@@ -142,3 +142,19 @@ def get_year_choices(from_year: int = None) -> list:
 
 # ─── Medal Emojis for TOP-10 ────────────────────────────────────────────────
 MEDALS = ["🥇", "🥈", "🥉"]
+
+# ─── Revenue Milestones ───────────────────────────────────────────────────────
+# Milestones for celebration (UAH) - period-specific
+REVENUE_MILESTONES = {
+    "daily": [
+        {"amount": 200000, "message": "200K Daily Revenue!", "emoji": "🎉"},
+    ],
+    "weekly": [
+        {"amount": 800000, "message": "800K Weekly Revenue!", "emoji": "🔥"},
+        {"amount": 1000000, "message": "1 MILLION Weekly!", "emoji": "🚀🎆"},
+        {"amount": 2000000, "message": "2 MILLION Weekly!", "emoji": "💎🎇"},
+    ],
+    "monthly": [
+        {"amount": 10000000, "message": "10 MILLION Monthly!", "emoji": "👑🎇🎆"},
+    ],
+}

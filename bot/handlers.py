@@ -26,11 +26,12 @@ from bot.config import (
     is_admin,
     ADMIN_USER_IDS,
     DASHBOARD_URL,
-    VERSION
+    VERSION,
+    REVENUE_MILESTONES
 )
 from bot import database
 from bot.keyboards import Keyboards, ReplyKeyboards
-from bot.formatters import Messages, ReportFormatters, create_progress_indicator, truncate_message
+from bot.formatters import Messages, ReportFormatters, create_progress_indicator, truncate_message, check_milestone
 from bot.services import ReportService, KeyCRMAPIError, ReportGenerationError
 
 # Logger
@@ -1900,3 +1901,140 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
     return ConversationState.SETTINGS_MENU
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SCHEDULED MILESTONE CHECK JOB
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def check_and_broadcast_milestones(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Scheduled job to check revenue milestones and broadcast to all users.
+    Runs at end of day/week to check if milestones were hit.
+    """
+    from bot.formatters import bold
+
+    logger.info("Running milestone check job...")
+
+    now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE))
+
+    # Determine what periods to check based on current time
+    periods_to_check = []
+
+    # Always check daily (for today)
+    today = now.date()
+    periods_to_check.append({
+        "type": "daily",
+        "key": today.isoformat(),
+        "start": today,
+        "end": today,
+        "label": f"Today ({today.strftime('%d.%m.%Y')})"
+    })
+
+    # Check weekly on Sunday (end of week)
+    if now.weekday() == 6:  # Sunday
+        week_start = today - timedelta(days=6)
+        periods_to_check.append({
+            "type": "weekly",
+            "key": f"{week_start.isocalendar()[0]}-W{week_start.isocalendar()[1]:02d}",
+            "start": week_start,
+            "end": today,
+            "label": f"This Week ({week_start.strftime('%d.%m')} - {today.strftime('%d.%m.%Y')})"
+        })
+
+    # Check monthly on last day of month
+    last_day_of_month = calendar.monthrange(now.year, now.month)[1]
+    if now.day == last_day_of_month:
+        month_start = today.replace(day=1)
+        periods_to_check.append({
+            "type": "monthly",
+            "key": f"{today.year}-{today.month:02d}",
+            "start": month_start,
+            "end": today,
+            "label": f"This Month ({today.strftime('%B %Y')})"
+        })
+
+    # Get all authorized users
+    authorized_users = database.get_all_authorized_users()
+    if not authorized_users:
+        logger.info("No authorized users to notify")
+        return
+
+    # Check each period
+    for period in periods_to_check:
+        period_type = period["type"]
+        period_key = period["key"]
+        milestones = REVENUE_MILESTONES.get(period_type, [])
+
+        if not milestones:
+            continue
+
+        try:
+            # Get revenue for this period
+            sales_by_source, order_counts, total_orders, revenue_by_source, returns_by_source = (
+                await asyncio.to_thread(
+                    report_service.aggregate_sales_data,
+                    target_date=(period["start"].strftime('%Y-%m-%d'), period["end"].strftime('%Y-%m-%d')),
+                    tz_name=DEFAULT_TIMEZONE,
+                    telegram_manager_ids=TELEGRAM_MANAGER_IDS
+                )
+            )
+
+            total_revenue = sum(revenue_by_source.values())
+            logger.info(f"Milestone check for {period_type} ({period_key}): ₴{total_revenue:,.0f}")
+
+            # Find highest milestone reached
+            highest_milestone = None
+            for milestone in milestones:
+                if total_revenue >= milestone["amount"]:
+                    highest_milestone = milestone
+
+            if not highest_milestone:
+                continue
+
+            # Check if already celebrated
+            if database.is_milestone_celebrated(period_type, period_key, highest_milestone["amount"]):
+                logger.info(f"Milestone {highest_milestone['amount']} already celebrated for {period_key}")
+                continue
+
+            # Mark as celebrated
+            if not database.mark_milestone_celebrated(period_type, period_key, highest_milestone["amount"], total_revenue):
+                continue
+
+            # Format congratulations message
+            amount = highest_milestone["amount"]
+            if amount >= 1000000:
+                amount_text = f"₴{amount / 1000000:.1f}M"
+            else:
+                amount_text = f"₴{amount / 1000:.0f}K"
+
+            emoji = highest_milestone["emoji"]
+            message = highest_milestone["message"]
+
+            congrats_msg = (
+                f"{'🎊' * 8}\n\n"
+                f"{emoji} {bold('MILESTONE REACHED!')} {emoji}\n\n"
+                f"🏆 {bold(message)}\n\n"
+                f"📅 {period['label']}\n"
+                f"💰 Revenue: {bold(f'₴{total_revenue:,.0f}')}\n"
+                f"📦 Orders: {bold(str(total_orders))}\n\n"
+                f"{'🎊' * 8}"
+            )
+
+            # Broadcast to all authorized users
+            success_count = 0
+            for user in authorized_users:
+                try:
+                    await context.bot.send_message(
+                        chat_id=user["user_id"],
+                        text=congrats_msg,
+                        parse_mode="HTML"
+                    )
+                    success_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to send milestone to user {user['user_id']}: {e}")
+
+            logger.info(f"Milestone {amount_text} broadcast to {success_count}/{len(authorized_users)} users")
+
+        except Exception as e:
+            logger.error(f"Error checking milestone for {period_type}: {e}", exc_info=True)

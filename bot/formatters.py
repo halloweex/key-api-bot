@@ -6,7 +6,7 @@ Contains text formatting helpers, message templates, and report formatters.
 import logging
 from datetime import date
 from typing import Dict, List, Tuple
-from bot.config import REPORT_TYPES, SOURCE_MAPPING, MEDALS, VERSION
+from bot.config import REPORT_TYPES, SOURCE_MAPPING, MEDALS, VERSION, REVENUE_MILESTONES
 
 logger = logging.getLogger(__name__)
 
@@ -352,3 +352,65 @@ class ReportFormatters:
             f"📅 {bold('Date Range')}: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
             f"⏳ {italic('Generating report...')}"
         )
+
+
+def get_period_type(start_date: date, end_date: date) -> str:
+    """
+    Determine period type based on date range.
+
+    Returns: 'daily', 'weekly', 'monthly', or None
+    """
+    days = (end_date - start_date).days + 1
+
+    if days == 1:
+        return "daily"
+    elif days <= 7:
+        return "weekly"
+    elif days <= 31:
+        return "monthly"
+    return None
+
+
+def check_milestone(total_revenue: float, start_date: date, end_date: date) -> str | None:
+    """
+    Check if revenue hits a milestone and return congratulations message.
+
+    Args:
+        total_revenue: Total revenue for the period
+        start_date: Start date of the report
+        end_date: End date of the report
+
+    Returns:
+        Congratulations message if milestone hit, None otherwise
+    """
+    period_type = get_period_type(start_date, end_date)
+
+    if not period_type or period_type not in REVENUE_MILESTONES:
+        return None
+
+    # Find the highest milestone reached
+    highest_milestone = None
+    for milestone in REVENUE_MILESTONES[period_type]:
+        if total_revenue >= milestone["amount"]:
+            highest_milestone = milestone
+
+    if not highest_milestone:
+        return None
+
+    # Format amount for display
+    amount = highest_milestone["amount"]
+    if amount >= 1000000:
+        amount_text = f"₴{amount / 1000000:.1f}M"
+    else:
+        amount_text = f"₴{amount / 1000:.0f}K"
+
+    emoji = highest_milestone["emoji"]
+    message = highest_milestone["message"]
+
+    return (
+        f"\n\n{'🎊' * 10}\n\n"
+        f"{emoji} {bold('MILESTONE REACHED!')} {emoji}\n\n"
+        f"🏆 {bold(message)}\n\n"
+        f"💰 Revenue: {bold(amount_text)}\n\n"
+        f"{'🎊' * 10}"
+    )

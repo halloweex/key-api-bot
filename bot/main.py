@@ -208,6 +208,17 @@ def main() -> None:
     # Set up command menu at startup
     application.job_queue.run_once(set_commands, 1)
 
+    # Schedule milestone check job - runs at 23:30 Kyiv time daily
+    from datetime import time as dt_time
+    from zoneinfo import ZoneInfo
+    milestone_time = dt_time(hour=23, minute=30, tzinfo=ZoneInfo("Europe/Kyiv"))
+    application.job_queue.run_daily(
+        handlers.check_and_broadcast_milestones,
+        time=milestone_time,
+        name="milestone_check"
+    )
+    logger.info(f"Milestone check scheduled daily at {milestone_time}")
+
     # Run session cleanup every 10 minutes
     application.job_queue.run_repeating(cleanup_sessions, interval=600, first=60)
 

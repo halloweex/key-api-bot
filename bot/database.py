@@ -122,6 +122,19 @@ def init_database():
         ON authorized_users(status)
     """)
 
+    # Celebrated milestones table (to avoid duplicate notifications)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS celebrated_milestones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_type TEXT NOT NULL,
+            period_key TEXT NOT NULL,
+            milestone_amount INTEGER NOT NULL,
+            revenue REAL NOT NULL,
+            celebrated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(period_type, period_key, milestone_amount)
+        )
+    """)
+
     conn.commit()
     conn.close()
     logger.info(f"Database initialized at {DB_PATH}")
@@ -761,3 +774,66 @@ def get_database_stats() -> Dict[str, int]:
 
     conn.close()
     return stats
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MILESTONE TRACKING
+# ═══════════════════════════════════════════════════════════════════════════
+
+def is_milestone_celebrated(period_type: str, period_key: str, milestone_amount: int) -> bool:
+    """Check if a milestone has already been celebrated for a given period."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT 1 FROM celebrated_milestones
+        WHERE period_type = ? AND period_key = ? AND milestone_amount = ?
+    """, (period_type, period_key, milestone_amount))
+
+    result = cursor.fetchone() is not None
+    conn.close()
+    return result
+
+
+def mark_milestone_celebrated(period_type: str, period_key: str, milestone_amount: int, revenue: float) -> bool:
+    """Mark a milestone as celebrated. Returns True if newly inserted, False if already exists."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            INSERT INTO celebrated_milestones (period_type, period_key, milestone_amount, revenue)
+            VALUES (?, ?, ?, ?)
+        """, (period_type, period_key, milestone_amount, revenue))
+        conn.commit()
+        result = True
+    except sqlite3.IntegrityError:
+        # Already celebrated
+        result = False
+
+    conn.close()
+    return result
+
+
+def get_celebrated_milestones(period_type: str = None, limit: int = 10) -> List[Dict[str, Any]]:
+    """Get recent celebrated milestones."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if period_type:
+        cursor.execute("""
+            SELECT * FROM celebrated_milestones
+            WHERE period_type = ?
+            ORDER BY celebrated_at DESC
+            LIMIT ?
+        """, (period_type, limit))
+    else:
+        cursor.execute("""
+            SELECT * FROM celebrated_milestones
+            ORDER BY celebrated_at DESC
+            LIMIT ?
+        """, (limit,))
+
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
