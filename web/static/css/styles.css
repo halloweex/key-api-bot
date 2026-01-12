@@ -483,6 +483,117 @@ footer {
     }
 }
 
+/* Milestone Progress */
+.milestone-section {
+    margin-bottom: 2rem;
+}
+
+.milestone-container {
+    background: white;
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.milestone-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+}
+
+.milestone-label {
+    font-size: 0.9rem;
+    color: #666;
+    font-weight: 500;
+}
+
+.milestone-label span {
+    color: #2563EB;
+    font-weight: 600;
+}
+
+.milestone-percentage {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #16A34A;
+}
+
+.milestone-track {
+    position: relative;
+    height: 24px;
+    background: linear-gradient(90deg, #E5E7EB 0%, #F3F4F6 100%);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 0.5rem;
+}
+
+.milestone-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    background: linear-gradient(90deg, #16A34A 0%, #22C55E 50%, #4ADE80 100%);
+    border-radius: 12px;
+    transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+    min-width: 0;
+}
+
+.milestone-fill.exceeded {
+    background: linear-gradient(90deg, #7C3AED 0%, #A855F7 50%, #C084FC 100%);
+}
+
+.milestone-markers {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+.milestone-marker {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    width: 2px;
+    background: rgba(255, 255, 255, 0.6);
+}
+
+.milestone-marker::after {
+    content: attr(data-label);
+    position: absolute;
+    top: -18px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 0.65rem;
+    color: #9CA3AF;
+    white-space: nowrap;
+}
+
+.milestone-values {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.milestone-current {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #16A34A;
+}
+
+.milestone-goal {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #6B7280;
+}
+
+/* Hide milestone section when not applicable */
+.milestone-section.hidden {
+    display: none;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     header {
@@ -583,6 +694,28 @@ footer {
 
     .section-divider h2 {
         font-size: 1.2rem;
+    }
+
+    .milestone-container {
+        padding: 1rem;
+    }
+
+    .milestone-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.25rem;
+    }
+
+    .milestone-percentage {
+        font-size: 1rem;
+    }
+
+    .milestone-track {
+        height: 20px;
+    }
+
+    .milestone-marker::after {
+        font-size: 0.55rem;
     }
 }
 

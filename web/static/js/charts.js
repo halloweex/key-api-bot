@@ -52,6 +52,84 @@ document.addEventListener('DOMContentLoaded', function() {
     loadAllData();
 });
 
+// Update milestone progress bar
+function updateMilestoneProgress(revenue) {
+    const section = document.getElementById('milestoneSection');
+    const fill = document.getElementById('milestoneFill');
+    const percentage = document.getElementById('milestonePercentage');
+    const target = document.getElementById('milestoneTarget');
+    const current = document.getElementById('milestoneCurrent');
+    const goal = document.getElementById('milestoneGoal');
+
+    // Determine period type and get milestone
+    let periodType = null;
+    let periodLabel = '';
+    if (currentPeriod === 'today' || currentPeriod === 'yesterday') {
+        periodType = 'daily';
+        periodLabel = 'Daily Goal';
+    } else if (currentPeriod === 'week' || currentPeriod === 'last_week') {
+        periodType = 'weekly';
+        periodLabel = 'Weekly Goal';
+    } else if (currentPeriod === 'month' || currentPeriod === 'last_month') {
+        periodType = 'monthly';
+        periodLabel = 'Monthly Goal';
+    }
+
+    // Hide for custom periods
+    if (!periodType || !MILESTONES[periodType] || MILESTONES[periodType].length === 0) {
+        section.classList.add('hidden');
+        return;
+    }
+
+    section.classList.remove('hidden');
+
+    // Get the first (primary) milestone for this period
+    const milestones = MILESTONES[periodType];
+    const primaryMilestone = milestones[0];
+    const milestoneAmount = primaryMilestone.amount;
+
+    // Calculate progress
+    const progress = Math.min((revenue / milestoneAmount) * 100, 100);
+    const exceeded = revenue >= milestoneAmount;
+
+    // Format amounts
+    const formatAmount = (amount) => {
+        if (amount >= 1000000) {
+            return `₴${(amount / 1000000).toFixed(1)}M`;
+        } else if (amount >= 1000) {
+            return `₴${(amount / 1000).toFixed(0)}K`;
+        }
+        return `₴${amount.toFixed(0)}`;
+    };
+
+    // Update UI
+    target.textContent = periodLabel;
+    fill.style.width = `${progress}%`;
+    fill.classList.toggle('exceeded', exceeded);
+    percentage.textContent = `${Math.round(progress)}%`;
+    percentage.style.color = exceeded ? '#7C3AED' : '#16A34A';
+    current.textContent = formatAmount(revenue);
+    current.style.color = exceeded ? '#7C3AED' : '#16A34A';
+    goal.textContent = formatAmount(milestoneAmount);
+
+    // Add markers for additional milestones if any
+    const markersContainer = document.getElementById('milestoneMarkers');
+    markersContainer.innerHTML = '';
+
+    if (milestones.length > 1) {
+        milestones.slice(1).forEach(m => {
+            const markerPos = (m.amount / milestoneAmount) * 100;
+            if (markerPos <= 100) {
+                const marker = document.createElement('div');
+                marker.className = 'milestone-marker';
+                marker.style.left = `${markerPos}%`;
+                marker.dataset.label = formatAmount(m.amount);
+                markersContainer.appendChild(marker);
+            }
+        });
+    }
+}
+
 // Check and celebrate revenue milestones
 function checkMilestones(revenue) {
     // Determine period type
@@ -413,6 +491,9 @@ async function loadSummary() {
         document.getElementById('totalRevenue').textContent = formatCurrency(data.totalRevenue);
         document.getElementById('avgCheck').textContent = formatCurrency(data.avgCheck);
         document.getElementById('totalReturns').textContent = data.totalReturns.toLocaleString();
+
+        // Update milestone progress bar
+        updateMilestoneProgress(data.totalRevenue);
 
         // Check for milestone celebrations
         checkMilestones(data.totalRevenue);
