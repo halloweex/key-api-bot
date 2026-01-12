@@ -66,25 +66,20 @@ function initFiltersToggle() {
     }
 }
 
-// Track reached milestones for particle effects
-let reachedMilestones = {};
+// Track previous revenue to detect milestone crossings
+let previousRevenue = 0;
 
-// Check if milestone was just reached and create particles
+// Check if milestone was just crossed and create particles
 function checkMilestoneReached(revenue, milestones, fillElement) {
-    const periodKey = currentPeriod || 'custom';
-
-    if (!reachedMilestones[periodKey]) {
-        reachedMilestones[periodKey] = new Set();
-    }
-
-    milestones.forEach((m, index) => {
-        const milestoneKey = `${periodKey}-${m.amount}`;
-        if (revenue >= m.amount && !reachedMilestones[periodKey].has(m.amount)) {
-            reachedMilestones[periodKey].add(m.amount);
-            // Create particle burst at milestone position
+    // Only trigger particles if revenue increased and crossed a milestone
+    milestones.forEach((m) => {
+        if (previousRevenue < m.amount && revenue >= m.amount) {
+            // Just crossed this milestone!
             createMilestoneParticles(fillElement, m.amount, milestones[milestones.length - 1].amount);
         }
     });
+
+    previousRevenue = revenue;
 }
 
 // Create particle burst effect at milestone
@@ -96,22 +91,23 @@ function createMilestoneParticles(fillElement, milestoneAmount, maxMilestone) {
     celebration.className = 'milestone-celebration';
     celebration.style.left = `${position}%`;
 
-    const colors = ['#FFD700', '#FFA500', '#FF6347', '#7C3AED', '#16A34A', '#2563EB'];
-    const particleCount = 12;
+    const colors = ['#FFD700', '#FFA500', '#FF6347', '#7C3AED', '#16A34A', '#2563EB', '#EC4899'];
+    const particleCount = 16;
 
     for (let i = 0; i < particleCount; i++) {
         const particle = document.createElement('div');
         particle.className = 'milestone-particle';
         particle.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
 
-        // Random direction
-        const angle = (i / particleCount) * 360;
-        const distance = 20 + Math.random() * 30;
+        // Random direction in full circle
+        const angle = (i / particleCount) * 360 + (Math.random() * 20 - 10);
+        const distance = 30 + Math.random() * 40;
         const tx = Math.cos(angle * Math.PI / 180) * distance;
         const ty = Math.sin(angle * Math.PI / 180) * distance;
 
         particle.style.setProperty('--tx', `${tx}px`);
         particle.style.setProperty('--ty', `${ty}px`);
+        particle.style.animationDelay = `${Math.random() * 0.1}s`;
 
         celebration.appendChild(particle);
     }
@@ -119,7 +115,15 @@ function createMilestoneParticles(fillElement, milestoneAmount, maxMilestone) {
     track.appendChild(celebration);
 
     // Remove after animation
-    setTimeout(() => celebration.remove(), 1000);
+    setTimeout(() => celebration.remove(), 1200);
+}
+
+// Test function - can be called from console: testParticles()
+window.testParticles = function() {
+    const fill = document.getElementById('milestoneFill');
+    if (fill) {
+        createMilestoneParticles(fill, 800000, 1000000);
+    }
 }
 
 // Update milestone progress bar
@@ -191,15 +195,32 @@ function updateMilestoneProgress(revenue) {
         }
     }
 
+    // Determine theme: green (none) -> gold (partial) -> purple (all)
+    const firstMilestoneReached = currentMilestoneIndex >= 0;
+    const partiallyCompleted = firstMilestoneReached && !allCompleted;
+
+    // Determine color based on state
+    let themeColor = '#16A34A'; // green
+    if (allCompleted) {
+        themeColor = '#7C3AED'; // purple
+    } else if (partiallyCompleted) {
+        themeColor = '#F59E0B'; // gold
+    }
+
     // Update UI
     target.textContent = periodLabel;
     fill.style.width = `${progress}%`;
-    fill.classList.toggle('exceeded', allCompleted);
+    fill.classList.remove('exceeded', 'partial');
+    if (allCompleted) {
+        fill.classList.add('exceeded');
+    } else if (partiallyCompleted) {
+        fill.classList.add('partial');
+    }
     fill.classList.toggle('near-milestone', nearMilestone);
     percentage.textContent = `${Math.round(progress)}%`;
-    percentage.style.color = allCompleted ? '#7C3AED' : '#16A34A';
+    percentage.style.color = themeColor;
     current.textContent = formatAmount(revenue);
-    current.style.color = allCompleted ? '#7C3AED' : '#16A34A';
+    current.style.color = themeColor;
     goal.textContent = formatAmount(maxMilestone);
 
     // Check for newly reached milestones and celebrate

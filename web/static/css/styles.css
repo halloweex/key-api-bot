@@ -672,6 +672,31 @@ footer {
     pointer-events: none;
 }
 
+/* Partial milestone reached (gold theme) */
+.milestone-fill.partial {
+    background: linear-gradient(90deg, #D97706 0%, #F59E0B 50%, #FBBF24 100%);
+}
+
+.milestone-fill.partial::after {
+    box-shadow:
+        0 0 6px 2px rgba(255, 255, 255, 0.8),
+        0 0 12px 4px rgba(245, 158, 11, 0.6);
+}
+
+.milestone-fill.partial.near-milestone {
+    animation: nearGlowGold 1s ease-in-out infinite;
+}
+
+@keyframes nearGlowGold {
+    0%, 100% {
+        box-shadow: 0 0 5px rgba(245, 158, 11, 0.3);
+    }
+    50% {
+        box-shadow: 0 0 15px rgba(245, 158, 11, 0.6), 0 0 25px rgba(245, 158, 11, 0.3);
+    }
+}
+
+/* All milestones exceeded (purple theme) */
 .milestone-fill.exceeded {
     background: linear-gradient(90deg, #7C3AED 0%, #A855F7 50%, #C084FC 100%);
 }
@@ -700,23 +725,38 @@ footer {
 .milestone-celebration {
     position: absolute;
     top: 50%;
+    left: 0;
     transform: translateY(-50%);
     pointer-events: none;
-    z-index: 10;
+    z-index: 100;
 }
 
 .milestone-particle {
     position: absolute;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    box-shadow: 0 0 6px currentColor;
+    animation: particleBurst 1s ease-out forwards;
+}
+
+.milestone-particle:nth-child(odd) {
     width: 6px;
     height: 6px;
-    border-radius: 50%;
-    animation: particleBurst 0.8s ease-out forwards;
+}
+
+.milestone-particle:nth-child(3n) {
+    border-radius: 2px;
+    transform: rotate(45deg);
 }
 
 @keyframes particleBurst {
     0% {
         opacity: 1;
-        transform: translate(0, 0) scale(1);
+        transform: translate(0, 0) scale(1.2);
+    }
+    50% {
+        opacity: 1;
     }
     100% {
         opacity: 0;
