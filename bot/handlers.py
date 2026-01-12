@@ -160,7 +160,9 @@ def authorized(func):
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # Global user data storage with session management
-user_data: Dict[int, Dict[str, Any]] = {}
+import threading
+_user_data: Dict[int, Dict[str, Any]] = {}
+_user_data_lock = threading.RLock()
 
 # Global service instance (injected in main.py)
 report_service: Optional[ReportService] = None
@@ -168,21 +170,23 @@ report_service: Optional[ReportService] = None
 
 def get_user_session(user_id: int) -> Optional[Dict[str, Any]]:
     """Get user session if it exists and is not expired."""
-    if user_id not in user_data:
-        return None
-
-    session = user_data[user_id]
-    created_at = session.get("_created_at")
-
-    if created_at:
-        elapsed = datetime.now() - created_at
-        if elapsed > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
-            # Session expired, clean it up
-            logger.info(f"Session expired for user {user_id} after {elapsed}")
-            del user_data[user_id]
+    with _user_data_lock:
+        if user_id not in _user_data:
             return None
 
-    return session
+        session = _user_data[user_id]
+        created_at = session.get("_created_at")
+
+        if created_at:
+            elapsed = datetime.now() - created_at
+            if elapsed > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
+                # Session expired, clean it up
+                logger.info(f"Session expired for user {user_id} after {elapsed}")
+                del _user_data[user_id]
+                return None
+
+        # Return a copy to avoid race conditions
+        return dict(session)
 
 
 def create_user_session(user_id: int, initial_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -190,17 +194,22 @@ def create_user_session(user_id: int, initial_data: Optional[Dict[str, Any]] = N
     session = {"_created_at": datetime.now()}
     if initial_data:
         session.update(initial_data)
-    user_data[user_id] = session
+    with _user_data_lock:
+        _user_data[user_id] = session
     return session
 
 
 def update_user_session(user_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
     """Update user session, creating if needed."""
-    if user_id not in user_data:
-        return create_user_session(user_id, data)
+    with _user_data_lock:
+        if user_id not in _user_data:
+            session = {"_created_at": datetime.now()}
+            session.update(data)
+            _user_data[user_id] = session
+            return session
 
-    user_data[user_id].update(data)
-    return user_data[user_id]
+        _user_data[user_id].update(data)
+        return dict(_user_data[user_id])
 
 
 def cleanup_expired_sessions() -> int:
@@ -208,18 +217,23 @@ def cleanup_expired_sessions() -> int:
     now = datetime.now()
     expired_users = []
 
-    for user_id, session in user_data.items():
-        created_at = session.get("_created_at")
-        if created_at and (now - created_at) > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
-            expired_users.append(user_id)
+    with _user_data_lock:
+        for user_id, session in _user_data.items():
+            created_at = session.get("_created_at")
+            if created_at and (now - created_at) > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
+                expired_users.append(user_id)
 
-    for user_id in expired_users:
-        del user_data[user_id]
+        for user_id in expired_users:
+            del _user_data[user_id]
 
     if expired_users:
         logger.info(f"Cleaned up {len(expired_users)} expired sessions")
 
     return len(expired_users)
+
+
+# Backward compatibility alias
+user_data = _user_data
 
 
 def calculate_date_range(range_name: str) -> tuple[date, date]:

@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 from web.services.auth_service import (
     verify_telegram_auth,
@@ -14,6 +15,10 @@ from web.services.auth_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Secret key for signing sessions (use BOT_TOKEN as secret)
+SECRET_KEY = os.getenv("BOT_TOKEN", "fallback-secret-key-change-me")
+session_serializer = URLSafeTimedSerializer(SECRET_KEY)
 
 router = APIRouter(tags=["auth"])
 
@@ -29,6 +34,9 @@ SESSION_COOKIE = "dashboard_session"
 # Session duration (7 days)
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 
+# Use secure cookies in production (HTTPS)
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+
 
 @router.get("/login")
 async def login_page(request: Request, error: str = None, status: str = None):
@@ -36,16 +44,15 @@ async def login_page(request: Request, error: str = None, status: str = None):
     # Check if already logged in
     session = request.cookies.get(SESSION_COOKIE)
     if session:
-        # Verify session is still valid
-        import json
+        # Verify session is still valid (with signature)
         try:
-            session_data = json.loads(session)
+            session_data = session_serializer.loads(session, max_age=SESSION_MAX_AGE)
             user_id = session_data.get('user_id')
             if user_id:
                 access = check_user_access(user_id)
                 if access['authorized']:
                     return RedirectResponse(url="/", status_code=302)
-        except (json.JSONDecodeError, KeyError):
+        except (BadSignature, SignatureExpired):
             pass
 
     # Build callback URL
@@ -92,15 +99,16 @@ async def telegram_callback(request: Request):
     # Create session
     session_data = create_session_data(auth_data)
 
-    # Set session cookie and redirect to dashboard
-    import json
+    # Sign session data and set cookie
+    signed_session = session_serializer.dumps(session_data)
     response = RedirectResponse(url="/", status_code=302)
     response.set_cookie(
         key=SESSION_COOKIE,
-        value=json.dumps(session_data),
+        value=signed_session,
         max_age=SESSION_MAX_AGE,
         httponly=True,
-        samesite="lax"
+        samesite="lax",
+        secure=COOKIE_SECURE
     )
 
     logger.info(f"User {user_id} (@{auth_data.get('username', 'unknown')}) logged in successfully")
@@ -121,14 +129,13 @@ def get_current_user(request: Request) -> dict | None:
 
     Returns user data dict or None if not authenticated.
     """
-    import json
-
     session = request.cookies.get(SESSION_COOKIE)
     if not session:
         return None
 
     try:
-        session_data = json.loads(session)
+        # Verify signature and check expiration
+        session_data = session_serializer.loads(session, max_age=SESSION_MAX_AGE)
         user_id = session_data.get('user_id')
         if not user_id:
             return None
@@ -139,7 +146,8 @@ def get_current_user(request: Request) -> dict | None:
             return None
 
         return session_data
-    except (json.JSONDecodeError, KeyError):
+    except (BadSignature, SignatureExpired):
+        logger.warning("Invalid or expired session signature")
         return None
 
 

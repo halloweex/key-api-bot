@@ -18,6 +18,7 @@ from bot.config import (
     RETURN_STATUS_IDS,
     TELEGRAM_MANAGER_IDS,
 )
+from core.models import Order, SourceId, OrderStatus
 
 logger = logging.getLogger(__name__)
 
@@ -294,50 +295,44 @@ def _init_daily_dict(
 
 
 def _is_valid_order(
-    order: Dict[str, Any],
+    order_data: Dict[str, Any],
     utc_start: datetime,
     local_end: datetime,
-    return_status_ids: set
+    return_status_ids: set = None
 ) -> Tuple[bool, Optional[datetime]]:
     """
     Check if order is valid (within date range and not a return).
 
     Args:
-        order: Order dict from API
+        order_data: Order dict from API
         utc_start: Start boundary in UTC
         local_end: End boundary with local timezone (will be converted to UTC)
-        return_status_ids: Set of return/cancel status IDs to exclude
+        return_status_ids: Deprecated, uses OrderStatus.return_statuses()
 
     Returns:
         Tuple of (is_valid, ordered_at_datetime or None)
     """
-    ordered_at_str = order.get("ordered_at")
-    if not ordered_at_str:
-        return False, None
+    # Parse order using model
+    order = Order.from_api(order_data)
 
-    try:
-        ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
-    except (ValueError, AttributeError) as e:
-        logger.debug(f"Invalid ordered_at format: {ordered_at_str}, error: {e}")
+    if not order.ordered_at:
         return False, None
 
     # Convert local_end to UTC for comparison
     utc_end = local_end.astimezone(ZoneInfo("UTC"))
-    if not (utc_start <= ordered_at <= utc_end):
+    if not order.is_within_period(utc_start, utc_end):
         return False, None
 
-    if order.get("status_id") in return_status_ids:
+    # Check if return/canceled
+    if order.is_return:
         return False, None
 
     # Filter Telegram orders by manager
-    source_id = order.get("source_id")
-    if source_id == 2:
-        manager = order.get("manager")
-        manager_id = str(manager.get("id")) if manager else None
-        if manager_id not in TELEGRAM_MANAGER_IDS:
+    if order.source == SourceId.TELEGRAM:
+        if not order.matches_manager(TELEGRAM_MANAGER_IDS):
             return False, None
 
-    return True, ordered_at
+    return True, order.ordered_at
 
 
 def _fetch_daily_revenue(
@@ -682,9 +677,10 @@ def _fetch_orders_with_filter(
     session = _get_session()
     return_status_ids = set(RETURN_STATUS_IDS)
 
-    # Aggregation dicts
-    source_orders: Dict[int, int] = {1: 0, 2: 0, 4: 0}
-    source_revenue: Dict[int, float] = {1: 0.0, 2: 0.0, 4: 0.0}
+    # Aggregation dicts - use SourceId enum for active sources
+    active_source_ids = [s.value for s in SourceId.active_sources()]
+    source_orders: Dict[int, int] = {sid: 0 for sid in active_source_ids}
+    source_revenue: Dict[int, float] = {sid: 0.0 for sid in active_source_ids}
     products: Dict[str, int] = {}
     daily_revenue = _init_daily_dict(start, end, 0.0)
 
@@ -708,55 +704,52 @@ def _fetch_orders_with_filter(
             if not batch:
                 break
 
-            for order in batch:
+            for order_data in batch:
                 # Use utility for order validation
                 is_valid, ordered_at = _is_valid_order(
-                    order, utc_start, local_end, return_status_ids
+                    order_data, utc_start, local_end
                 )
                 if not is_valid:
                     continue
 
-                order_source_id = order.get("source_id")
+                # Parse order using model
+                order = Order.from_api(order_data)
 
                 # Check source filter
-                if source_id and order_source_id != source_id:
+                if source_id and order.source_id != source_id:
                     continue
 
                 # Check if any product matches the filters
                 order_has_matching_product = False
                 order_matching_revenue = 0.0
 
-                for product in order.get("products", []):
-                    offer = product.get("offer", {})
-                    product_id = offer.get("product_id") if offer else None
+                for prod in order.products:
+                    prod_id = prod.product_id
 
-                    if product_id:
+                    if prod_id:
                         # Check category filter
                         category_match = True
                         if valid_category_ids:
-                            prod_category_id = _product_category_cache.get(product_id)
+                            prod_category_id = _product_category_cache.get(prod_id)
                             category_match = prod_category_id and prod_category_id in valid_category_ids
 
                         # Check brand filter
                         brand_match = True
                         if brand:
-                            prod_brand = product_brand_cache.get(product_id)
-                            brand_match = prod_brand and prod_brand == brand
+                            prod_brand = product_brand_cache.get(prod_id)
+                            brand_match = prod_brand and prod_brand.lower() == brand.lower()
 
                         # Both filters must match
                         if category_match and brand_match:
                             order_has_matching_product = True
-                            product_revenue = float(product.get("price_sold", 0)) * int(product.get("quantity", 1))
-                            order_matching_revenue += product_revenue
+                            order_matching_revenue += prod.total
 
                             # Add to products dict
-                            product_name = product.get("name", "Unknown")
-                            qty = int(product.get("quantity", 1))
-                            products[product_name] = products.get(product_name, 0) + qty
+                            products[prod.name] = products.get(prod.name, 0) + prod.quantity
 
-                if order_has_matching_product and order_source_id in source_orders:
-                    source_orders[order_source_id] += 1
-                    source_revenue[order_source_id] += order_matching_revenue
+                if order_has_matching_product and order.source_id in source_orders:
+                    source_orders[order.source_id] += 1
+                    source_revenue[order.source_id] += order_matching_revenue
 
                     # Add to daily revenue
                     local_ordered = ordered_at.astimezone(tz)
@@ -946,61 +939,52 @@ def get_customer_insights(start_date: str, end_date: str, brand: Optional[str] =
             if not batch:
                 break
 
-            for order in batch:
+            for order_data in batch:
                 # Use utility for order validation
                 is_valid, ordered_at = _is_valid_order(
-                    order, utc_start, local_end, return_status_ids
+                    order_data, utc_start, local_end
                 )
                 if not is_valid:
                     continue
 
+                # Parse order using model
+                order = Order.from_api(order_data)
+
                 # Check source filter
-                if source_id and order.get("source_id") != source_id:
+                if source_id and order.source_id != source_id:
                     continue
 
                 # If brand filter, check if order has matching product
                 if brand:
                     has_brand_product = False
                     brand_revenue = 0.0
-                    for product in order.get("products", []):
-                        offer = product.get("offer", {})
-                        product_id = offer.get("product_id") if offer else None
-                        if product_id:
-                            prod_brand = product_brand_cache.get(product_id)
-                            if prod_brand == brand:
+                    for prod in order.products:
+                        prod_id = prod.product_id
+                        if prod_id:
+                            prod_brand = product_brand_cache.get(prod_id)
+                            if prod_brand and prod_brand.lower() == brand.lower():
                                 has_brand_product = True
-                                brand_revenue += float(product.get("price_sold", 0)) * int(product.get("quantity", 1))
+                                brand_revenue += prod.total
                     if not has_brand_product:
                         continue
                     order_revenue = brand_revenue
                 else:
-                    order_revenue = float(order.get("grand_total", 0))
+                    order_revenue = order.grand_total
 
-                # Track customer with their created_at for new vs returning analysis
-                buyer = order.get("buyer", {})
-                buyer_id = buyer.get("id") if buyer else None
-
-                # Parse buyer's created_at to determine if this order is from returning customer
-                buyer_created_str = buyer.get("created_at") if buyer else None
-                buyer_created_at = None
-                if buyer_created_str:
-                    try:
-                        buyer_created_at = datetime.fromisoformat(
-                            buyer_created_str.replace("Z", "+00:00")
-                        )
-                    except (ValueError, AttributeError):
-                        pass
+                # Use buyer model for customer analysis
+                buyer = order.buyer
+                buyer_id = buyer.id if buyer else None
 
                 # Count this order for repeat rate calculation
                 total_orders_count += 1
-                if buyer_created_at and buyer_created_at < utc_start:
+                if buyer and buyer.is_returning(utc_start):
                     # Order is from a returning customer (registered before period start)
                     orders_from_returning += 1
 
                 if buyer_id:
                     if buyer_id not in customer_data:
                         customer_data[buyer_id] = {
-                            "created_at": buyer_created_at,
+                            "created_at": buyer.created_at if buyer else None,
                             "order_count": 0
                         }
                     customer_data[buyer_id]["order_count"] += 1

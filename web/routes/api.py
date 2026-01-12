@@ -5,7 +5,7 @@ All endpoints are rate-limited to prevent abuse:
 - Lightweight endpoints (categories, brands): 60 requests/minute
 - Data-heavy endpoints (revenue, summary, etc.): 30 requests/minute
 """
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, HTTPException
 from typing import Optional
 
 from slowapi import Limiter
@@ -14,6 +14,14 @@ from slowapi.util import get_remote_address
 from web.services import dashboard_service
 from web.services import category_service
 from web.services import brand_service
+from core.validators import (
+    validate_period,
+    validate_source_id,
+    validate_category_id,
+    validate_brand_name,
+    validate_limit
+)
+from core.exceptions import ValidationError
 
 router = APIRouter(tags=["api"])
 
@@ -34,6 +42,10 @@ async def get_categories(request: Request):
 @limiter.limit("60/minute")
 async def get_child_categories(request: Request, parent_id: int):
     """Get child categories for a parent category."""
+    try:
+        validate_category_id(parent_id, allow_none=False)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return category_service.get_child_categories(parent_id)
 
 
@@ -58,6 +70,14 @@ async def get_revenue_trend(
     brand: Optional[str] = Query(None, description="Filter by brand name")
 ):
     """Get revenue trend data for line chart."""
+    try:
+        validate_period(period)
+        validate_source_id(source_id)
+        validate_category_id(category_id)
+        brand = validate_brand_name(brand)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.async_get_revenue_trend(start, end, category_id, brand=brand, source_id=source_id)
 
@@ -74,6 +94,14 @@ async def get_sales_by_source(
     brand: Optional[str] = Query(None, description="Filter by brand name")
 ):
     """Get sales data by source for bar/pie chart."""
+    try:
+        validate_period(period)
+        validate_source_id(source_id)
+        validate_category_id(category_id)
+        brand = validate_brand_name(brand)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return dashboard_service.get_sales_by_source(start, end, category_id, brand=brand, source_id=source_id)
 
@@ -91,6 +119,15 @@ async def get_top_products(
     limit: int = Query(10, description="Number of products to return")
 ):
     """Get top products for horizontal bar chart."""
+    try:
+        validate_period(period)
+        validate_source_id(source_id)
+        validate_category_id(category_id)
+        brand = validate_brand_name(brand)
+        limit = validate_limit(limit, max_value=50)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return dashboard_service.get_top_products(start, end, source_id, limit, category_id, brand=brand)
 
@@ -107,6 +144,14 @@ async def get_summary(
     brand: Optional[str] = Query(None, description="Filter by brand name")
 ):
     """Get summary statistics for dashboard cards."""
+    try:
+        validate_period(period)
+        validate_source_id(source_id)
+        validate_category_id(category_id)
+        brand = validate_brand_name(brand)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return dashboard_service.get_summary_stats(start, end, category_id, brand=brand, source_id=source_id)
 
@@ -122,6 +167,13 @@ async def get_customer_insights(
     brand: Optional[str] = Query(None, description="Filter by brand name")
 ):
     """Get customer insights: new vs returning, AOV trend, repeat rate."""
+    try:
+        validate_period(period)
+        validate_source_id(source_id)
+        brand = validate_brand_name(brand)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return dashboard_service.get_customer_insights(start, end, brand=brand, source_id=source_id)
 
@@ -137,6 +189,13 @@ async def get_product_performance(
     brand: Optional[str] = Query(None, description="Filter by brand name")
 ):
     """Get product performance: top by revenue, category breakdown."""
+    try:
+        validate_period(period)
+        validate_source_id(source_id)
+        brand = validate_brand_name(brand)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return dashboard_service.get_product_performance(start, end, brand=brand, source_id=source_id)
 
@@ -150,6 +209,11 @@ async def get_brand_analytics(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
 ):
     """Get brand analytics: top brands by revenue and quantity."""
+    try:
+        validate_period(period)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return dashboard_service.get_brand_analytics(start, end)
 

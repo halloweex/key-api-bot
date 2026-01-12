@@ -48,6 +48,7 @@ from bot.config import (
     ORDER_SYNC_BUFFER_HOURS
 )
 from bot import database
+from core.models import Order, SourceId
 
 # Cache TTL in minutes
 SALES_CACHE_TTL = 5  # Cache sales data for 5 minutes
@@ -168,47 +169,29 @@ class ReportService:
                 break
 
             # Process each order in the batch
-            for order in batch:
+            for order_data in batch:
+                # Parse order using model
+                order = Order.from_api(order_data)
+
                 # Filter by ordered_at (not created_at) to match CRM UI
-                ordered_at_str = order.get("ordered_at")
-                if not ordered_at_str:
+                if not order.ordered_at:
                     continue  # No ordered_at — skip
-                ordered_at = datetime.fromisoformat(ordered_at_str.replace("Z", "+00:00"))
-                if not (utc_period_start <= ordered_at <= utc_period_end):
+                if not order.is_within_period(utc_period_start, utc_period_end):
                     continue  # Outside target period
 
-                # Get manager ID if present
-                manager_id = None
-                if "manager" in order and order["manager"]:
-                    manager = order["manager"]
-                    manager_id = manager.get("id")
-
-                # Get the status ID
-                status_id = None
-                if "status_id" in order:
-                    status_id = order["status_id"]
-                elif "status" in order and order["status"] and "id" in order["status"]:
-                    status_id = order["status"]["id"]
-
-                # Convert to string for comparison
-                status_id_str = str(status_id) if status_id is not None else "None"
-                manager_id_str = str(manager_id) if manager_id is not None else "None"
-                exclude_id_str = str(exclude_status_id) if exclude_status_id is not None else None
-
-                source_id = order.get("source_id")
-
                 # Track returned orders separately
-                if status_id in return_status_ids:
+                if order.is_return:
                     returned_orders.append(order)
                     continue
 
-                if exclude_id_str and status_id_str == exclude_id_str:
+                # Check excluded status
+                if exclude_status_id and order.status_id == exclude_status_id:
                     continue
 
                 # Handle Telegram orders separately
-                if source_id == 2:  # Telegram source ID
+                if order.source == SourceId.TELEGRAM:
                     # For Telegram, only include orders from specified managers
-                    if telegram_manager_ids and manager_id_str not in telegram_manager_ids:
+                    if telegram_manager_ids and not order.matches_manager(telegram_manager_ids):
                         continue
 
                 all_orders.append(order)
@@ -227,27 +210,24 @@ class ReportService:
         revenue = defaultdict(float)
 
         for order in all_orders:
-            src = order.get("source_id") or "unknown"
-            for prod in order.get("products", []):
-                name = prod.get("name") or f"#{prod.get('id')}"
-                qty = int(prod.get("quantity", 0))
-                sales[src][name] += qty
-            order_total = float(order.get("grand_total", 0))
-            revenue[src] += order_total
+            src = order.source_id or "unknown"
+            for prod in order.products:
+                name = prod.name or f"#{prod.product_id}"
+                sales[src][name] += prod.quantity
+            revenue[src] += order.grand_total
 
         # Count orders per-source
         counts = defaultdict(int)
         for order in all_orders:
-            src = order.get("source_id") or "unknown"
+            src = order.source_id or "unknown"
             counts[src] += 1
 
         # Process returns data
         returns_data = defaultdict(lambda: {"count": 0, "revenue": 0})
         for order in returned_orders:
-            src = order.get("source_id") or "unknown"
+            src = order.source_id or "unknown"
             returns_data[src]["count"] += 1
-            order_total = float(order.get("grand_total", 0))
-            returns_data[src]["revenue"] += order_total
+            returns_data[src]["revenue"] += order.grand_total
 
         # Convert to plain dicts
         sales_dict = {src: dict(prod_map) for src, prod_map in sales.items()}
