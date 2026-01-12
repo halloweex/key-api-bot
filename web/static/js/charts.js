@@ -84,38 +84,52 @@ function checkMilestoneReached(revenue, milestones, fillElement) {
 
 // Create particle burst effect at milestone
 function createMilestoneParticles(fillElement, milestoneAmount, maxMilestone) {
-    const track = fillElement.parentElement;
-    const position = (milestoneAmount / maxMilestone) * 100;
+    const track = document.querySelector('.milestone-track');
+    if (!track) return;
 
-    const celebration = document.createElement('div');
-    celebration.className = 'milestone-celebration';
-    celebration.style.left = `${position}%`;
+    const position = (milestoneAmount / maxMilestone) * 100;
+    const trackRect = track.getBoundingClientRect();
+    const xPos = (position / 100) * trackRect.width;
 
     const colors = ['#FFD700', '#FFA500', '#FF6347', '#7C3AED', '#16A34A', '#2563EB', '#EC4899'];
-    const particleCount = 16;
+    const particleCount = 20;
 
     for (let i = 0; i < particleCount; i++) {
         const particle = document.createElement('div');
-        particle.className = 'milestone-particle';
-        particle.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+        particle.style.cssText = `
+            position: fixed;
+            left: ${trackRect.left + xPos}px;
+            top: ${trackRect.top + trackRect.height / 2}px;
+            width: 10px;
+            height: 10px;
+            background: ${colors[Math.floor(Math.random() * colors.length)]};
+            border-radius: ${Math.random() > 0.5 ? '50%' : '2px'};
+            pointer-events: none;
+            z-index: 9999;
+            box-shadow: 0 0 6px currentColor;
+        `;
 
-        // Random direction in full circle
-        const angle = (i / particleCount) * 360 + (Math.random() * 20 - 10);
-        const distance = 30 + Math.random() * 40;
+        document.body.appendChild(particle);
+
+        // Animate with JS for reliability
+        const angle = (i / particleCount) * 360;
+        const distance = 40 + Math.random() * 60;
         const tx = Math.cos(angle * Math.PI / 180) * distance;
         const ty = Math.sin(angle * Math.PI / 180) * distance;
+        const duration = 600 + Math.random() * 400;
 
-        particle.style.setProperty('--tx', `${tx}px`);
-        particle.style.setProperty('--ty', `${ty}px`);
-        particle.style.animationDelay = `${Math.random() * 0.1}s`;
+        particle.animate([
+            { transform: 'translate(0, 0) scale(1)', opacity: 1 },
+            { transform: `translate(${tx}px, ${ty}px) scale(0)`, opacity: 0 }
+        ], {
+            duration: duration,
+            easing: 'ease-out',
+            fill: 'forwards'
+        });
 
-        celebration.appendChild(particle);
+        // Remove after animation
+        setTimeout(() => particle.remove(), duration + 100);
     }
-
-    track.appendChild(celebration);
-
-    // Remove after animation
-    setTimeout(() => celebration.remove(), 1200);
 }
 
 // Test function - can be called from console: testParticles()
@@ -123,6 +137,9 @@ window.testParticles = function() {
     const fill = document.getElementById('milestoneFill');
     if (fill) {
         createMilestoneParticles(fill, 800000, 1000000);
+        console.log('Particles triggered!');
+    } else {
+        console.log('Fill element not found');
     }
 }
 
@@ -226,7 +243,7 @@ function updateMilestoneProgress(revenue) {
     // Check for newly reached milestones and celebrate
     checkMilestoneReached(revenue, milestones, fill);
 
-    // Add markers for all milestones
+    // Add markers for all milestones with tier-based colors
     const markersContainer = document.getElementById('milestoneMarkers');
     markersContainer.innerHTML = '';
 
@@ -234,6 +251,15 @@ function updateMilestoneProgress(revenue) {
         const markerPos = (m.amount / maxMilestone) * 100;
         const marker = document.createElement('div');
         marker.className = 'milestone-marker';
+
+        // Assign tier class based on position (first = gold, last = purple, middle = blue)
+        if (index === 0) {
+            marker.classList.add('tier-gold');
+        } else if (index === milestones.length - 1) {
+            marker.classList.add('tier-purple');
+        } else {
+            marker.classList.add('tier-blue');
+        }
 
         // Mark as reached if revenue >= this milestone
         if (revenue >= m.amount) {

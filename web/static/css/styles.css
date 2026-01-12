@@ -800,26 +800,58 @@ footer {
     white-space: nowrap;
 }
 
-/* Reached milestone marker */
+/* Tier-based marker colors */
+.milestone-marker.tier-gold::before {
+    background: #D97706;
+    border-color: #D97706;
+}
+.milestone-marker.tier-gold::after {
+    color: #D97706;
+}
+
+.milestone-marker.tier-purple::before {
+    background: #7C3AED;
+    border-color: #7C3AED;
+}
+.milestone-marker.tier-purple::after {
+    color: #7C3AED;
+}
+
+.milestone-marker.tier-blue::before {
+    background: #2563EB;
+    border-color: #2563EB;
+}
+.milestone-marker.tier-blue::after {
+    color: #2563EB;
+}
+
+/* Unreached markers are dimmed */
+.milestone-marker:not(.reached)::before {
+    opacity: 0.4;
+}
+.milestone-marker:not(.reached)::after {
+    opacity: 0.6;
+}
+
+/* Reached markers are fully visible */
 .milestone-marker.reached::before {
-    background: #16A34A;
-    border-color: #16A34A;
+    opacity: 1;
+    box-shadow: 0 0 8px currentColor;
 }
-
 .milestone-marker.reached::after {
-    color: #16A34A;
+    opacity: 1;
+    font-weight: 700;
 }
 
-/* Current target marker */
+/* Current target marker - pulsing */
 .milestone-marker.current-target::before {
-    background: #F59E0B;
-    border-color: #F59E0B;
     animation: pulse-marker 1.5s ease infinite;
+    opacity: 1;
 }
 
 .milestone-marker.current-target::after {
-    color: #F59E0B;
     font-weight: 700;
+    opacity: 1;
 }
 
 @keyframes pulse-marker {
