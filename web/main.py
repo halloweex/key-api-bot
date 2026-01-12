@@ -2,10 +2,14 @@
 FastAPI web application for KeyCRM Dashboard.
 """
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, JSONResponse
 from starlette.middleware.gzip import GZipMiddleware
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from web.config import STATIC_DIR, VERSION
 from web.routes import api, pages, auth
@@ -20,6 +24,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Rate limiter configuration
+limiter = Limiter(key_func=get_remote_address)
+
 # Create FastAPI app
 app = FastAPI(
     title="KeyCRM Dashboard",
@@ -27,6 +34,22 @@ app = FastAPI(
     version=VERSION,
     default_response_class=ORJSONResponse  # 3-10x faster JSON serialization
 )
+
+# Add rate limiter to app state
+app.state.limiter = limiter
+
+# Custom rate limit exceeded handler
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    logger.warning(f"Rate limit exceeded for {get_remote_address(request)}")
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "Rate limit exceeded",
+            "detail": "Too many requests. Please try again later.",
+            "retry_after": exc.detail
+        }
+    )
 
 # Add Gzip compression (min 500 bytes to compress)
 app.add_middleware(GZipMiddleware, minimum_size=500)

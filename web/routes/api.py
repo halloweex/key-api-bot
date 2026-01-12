@@ -1,8 +1,15 @@
 """
 API routes for chart data.
+
+All endpoints are rate-limited to prevent abuse:
+- Lightweight endpoints (categories, brands): 60 requests/minute
+- Data-heavy endpoints (revenue, summary, etc.): 30 requests/minute
 """
-from fastapi import APIRouter, Query
-from typing import Optional, List
+from fastapi import APIRouter, Query, Request
+from typing import Optional
+
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from web.services import dashboard_service
 from web.services import category_service
@@ -10,27 +17,39 @@ from web.services import brand_service
 
 router = APIRouter(tags=["api"])
 
+# Rate limiter (uses app.state.limiter from main.py)
+limiter = Limiter(key_func=get_remote_address)
+
+
+# ─── Lightweight Endpoints (60/minute) ─────────────────────────────────────────
 
 @router.get("/categories")
-async def get_categories():
+@limiter.limit("60/minute")
+async def get_categories(request: Request):
     """Get list of root categories for filter dropdown."""
     return category_service.get_categories_for_api()
 
 
 @router.get("/categories/{parent_id}/children")
-async def get_child_categories(parent_id: int):
+@limiter.limit("60/minute")
+async def get_child_categories(request: Request, parent_id: int):
     """Get child categories for a parent category."""
     return category_service.get_child_categories(parent_id)
 
 
 @router.get("/brands")
-async def get_brands():
+@limiter.limit("60/minute")
+async def get_brands(request: Request):
     """Get list of brands for filter dropdown."""
     return brand_service.get_brands_for_api()
 
 
+# ─── Data-Heavy Endpoints (30/minute) ──────────────────────────────────────────
+
 @router.get("/revenue/trend")
+@limiter.limit("30/minute")
 async def get_revenue_trend(
+    request: Request,
     period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
@@ -44,7 +63,9 @@ async def get_revenue_trend(
 
 
 @router.get("/sales/by-source")
+@limiter.limit("30/minute")
 async def get_sales_by_source(
+    request: Request,
     period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
@@ -58,7 +79,9 @@ async def get_sales_by_source(
 
 
 @router.get("/products/top")
+@limiter.limit("30/minute")
 async def get_top_products(
+    request: Request,
     period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
@@ -73,7 +96,9 @@ async def get_top_products(
 
 
 @router.get("/summary")
+@limiter.limit("30/minute")
 async def get_summary(
+    request: Request,
     period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
@@ -87,7 +112,9 @@ async def get_summary(
 
 
 @router.get("/customers/insights")
+@limiter.limit("30/minute")
 async def get_customer_insights(
+    request: Request,
     period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
@@ -100,7 +127,9 @@ async def get_customer_insights(
 
 
 @router.get("/products/performance")
+@limiter.limit("30/minute")
 async def get_product_performance(
+    request: Request,
     period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
@@ -113,7 +142,9 @@ async def get_product_performance(
 
 
 @router.get("/brands/analytics")
+@limiter.limit("30/minute")
 async def get_brand_analytics(
+    request: Request,
     period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
@@ -121,3 +152,4 @@ async def get_brand_analytics(
     """Get brand analytics: top brands by revenue and quantity."""
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return dashboard_service.get_brand_analytics(start, end)
+
