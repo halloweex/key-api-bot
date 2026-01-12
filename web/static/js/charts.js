@@ -47,10 +47,25 @@ document.addEventListener('DOMContentLoaded', function() {
     initCategoryFilter();
     initBrandFilter();
     initInfoTooltips();
+    initFiltersToggle();
     loadCategories();
     loadBrands();
     loadAllData();
 });
+
+// Filters collapse toggle
+function initFiltersToggle() {
+    const toggle = document.getElementById('filtersToggle');
+    const collapsible = document.getElementById('filtersCollapsible');
+
+    if (toggle && collapsible) {
+        toggle.addEventListener('click', function() {
+            const isExpanded = toggle.getAttribute('aria-expanded') === 'true';
+            toggle.setAttribute('aria-expanded', !isExpanded);
+            collapsible.classList.toggle('expanded', !isExpanded);
+        });
+    }
+}
 
 // Update milestone progress bar
 function updateMilestoneProgress(revenue) {

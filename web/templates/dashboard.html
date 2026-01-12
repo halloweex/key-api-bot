@@ -21,36 +21,45 @@
             {% endif %}
         </div>
         <div class="date-controls">
-            <div class="period-buttons">
-                <button class="period-btn" data-period="today">Today</button>
-                <button class="period-btn" data-period="yesterday">Yesterday</button>
-                <button class="period-btn active" data-period="week">This Week</button>
-                <button class="period-btn" data-period="last_week">Last Week</button>
-                <button class="period-btn" data-period="month">This Month</button>
-                <button class="period-btn" data-period="last_month">Last Month</button>
+            <div class="controls-main">
+                <div class="period-buttons">
+                    <button class="period-btn" data-period="today">Today</button>
+                    <button class="period-btn" data-period="yesterday">Yesterday</button>
+                    <button class="period-btn active" data-period="week">This Week</button>
+                    <button class="period-btn" data-period="last_week">Last Week</button>
+                    <button class="period-btn" data-period="month">This Month</button>
+                    <button class="period-btn" data-period="last_month">Last Month</button>
+                </div>
+                <button class="filters-toggle" id="filtersToggle" aria-expanded="false">
+                    <svg class="filter-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+                    <span>Filters</span>
+                    <svg class="chevron-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/></svg>
+                </button>
             </div>
-            <div class="category-filter">
-                <select id="sourceFilter">
-                    <option value="">All Sources</option>
-                    <option value="1">Instagram</option>
-                    <option value="2">Telegram</option>
-                    <option value="4">Shopify</option>
-                </select>
-                <select id="parentCategoryFilter">
-                    <option value="">All Categories</option>
-                </select>
-                <select id="categoryFilter" disabled>
-                    <option value="">All Subcategories</option>
-                </select>
-                <select id="brandFilter">
-                    <option value="">All Brands</option>
-                </select>
-            </div>
-            <div class="custom-dates">
-                <input type="date" id="startDate" />
-                <span>to</span>
-                <input type="date" id="endDate" />
-                <button id="applyDates">Apply</button>
+            <div class="filters-collapsible" id="filtersCollapsible">
+                <div class="category-filter">
+                    <select id="sourceFilter">
+                        <option value="">All Sources</option>
+                        <option value="1">Instagram</option>
+                        <option value="2">Telegram</option>
+                        <option value="4">Shopify</option>
+                    </select>
+                    <select id="parentCategoryFilter">
+                        <option value="">All Categories</option>
+                    </select>
+                    <select id="categoryFilter" disabled>
+                        <option value="">All Subcategories</option>
+                    </select>
+                    <select id="brandFilter">
+                        <option value="">All Brands</option>
+                    </select>
+                </div>
+                <div class="custom-dates">
+                    <input type="date" id="startDate" />
+                    <span>to</span>
+                    <input type="date" id="endDate" />
+                    <button id="applyDates">Apply</button>
+                </div>
             </div>
         </div>
     </header>
