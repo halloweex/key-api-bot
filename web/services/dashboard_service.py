@@ -340,36 +340,26 @@ def _is_valid_order(
     return True, ordered_at
 
 
-def get_revenue_trend(
+def _fetch_daily_revenue(
     start_date: str,
-    end_date: str,
-    granularity: str = "daily"
-) -> Dict[str, Any]:
+    end_date: str
+) -> Dict[str, float]:
     """
-    Get revenue data over time for line chart.
-    Optimized: fetches all data in ONE API call, then groups by day.
+    Fetch daily revenue for a date range.
 
     Args:
         start_date: Start date (YYYY-MM-DD)
         end_date: End date (YYYY-MM-DD)
-        granularity: 'daily', 'weekly', or 'monthly'
 
     Returns:
-        Chart.js compatible data structure
+        Dict mapping date strings to revenue amounts
     """
-    cache_key = f"revenue_trend:{start_date}:{end_date}:{granularity}"
-    cached = _get_cached(cache_key)
-    if cached is not None:
-        return cached
-
-    # Parse dates and initialize daily revenue using utilities
     start, end, local_start, local_end, utc_start, utc_end_buffer, tz = _parse_date_range(
         start_date, end_date
     )
     daily_revenue = _init_daily_dict(start, end, 0.0)
 
     try:
-        # Use singleton client for connection reuse
         if _client is None:
             get_report_service()
         client = _client
@@ -396,14 +386,12 @@ def get_revenue_trend(
                 break
 
             for order in batch:
-                # Use utility for order validation
                 is_valid, ordered_at = _is_valid_order(
                     order, utc_start, local_end, return_status_ids
                 )
                 if not is_valid:
                     continue
 
-                # Get local date and add revenue
                 local_ordered = ordered_at.astimezone(tz)
                 date_key = local_ordered.strftime("%Y-%m-%d")
                 if date_key in daily_revenue:
@@ -414,9 +402,43 @@ def get_revenue_trend(
             page += 1
 
     except Exception as e:
-        logger.error(f"Error fetching revenue trend: {e}")
+        logger.error(f"Error fetching daily revenue: {e}")
 
-    # Build response
+    return daily_revenue
+
+
+def get_revenue_trend(
+    start_date: str,
+    end_date: str,
+    granularity: str = "daily",
+    include_comparison: bool = True
+) -> Dict[str, Any]:
+    """
+    Get revenue data over time for line chart with optional previous period comparison.
+
+    Args:
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        granularity: 'daily', 'weekly', or 'monthly'
+        include_comparison: Include previous period data for comparison
+
+    Returns:
+        Chart.js compatible data structure with current and previous period datasets
+    """
+    cache_key = f"revenue_trend:{start_date}:{end_date}:{granularity}:{include_comparison}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    # Parse current period dates
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    period_days = (end - start).days + 1
+
+    # Fetch current period revenue
+    daily_revenue = _fetch_daily_revenue(start_date, end_date)
+
+    # Build current period data
     labels = []
     data = []
     current = start
@@ -426,16 +448,49 @@ def get_revenue_trend(
         data.append(round(daily_revenue.get(date_key, 0), 2))
         current += timedelta(days=1)
 
+    # Build datasets
+    datasets = [{
+        "label": "This Period",
+        "data": data,
+        "borderColor": "#16A34A",
+        "backgroundColor": "rgba(22, 163, 74, 0.1)",
+        "fill": True,
+        "tension": 0.3,
+        "borderWidth": 2
+    }]
+
+    # Add previous period comparison if requested
+    if include_comparison and period_days <= 31:  # Only for periods up to 1 month
+        prev_end = start - timedelta(days=1)
+        prev_start = prev_end - timedelta(days=period_days - 1)
+
+        prev_start_str = prev_start.strftime("%Y-%m-%d")
+        prev_end_str = prev_end.strftime("%Y-%m-%d")
+
+        prev_daily_revenue = _fetch_daily_revenue(prev_start_str, prev_end_str)
+
+        # Build previous period data (aligned with current period labels)
+        prev_data = []
+        prev_current = prev_start
+        while prev_current <= prev_end:
+            date_key = prev_current.strftime("%Y-%m-%d")
+            prev_data.append(round(prev_daily_revenue.get(date_key, 0), 2))
+            prev_current += timedelta(days=1)
+
+        datasets.append({
+            "label": "Previous Period",
+            "data": prev_data,
+            "borderColor": "#9CA3AF",
+            "backgroundColor": "transparent",
+            "fill": False,
+            "tension": 0.3,
+            "borderWidth": 2,
+            "borderDash": [5, 5]
+        })
+
     result = {
         "labels": labels,
-        "datasets": [{
-            "label": "Revenue (UAH)",
-            "data": data,
-            "borderColor": "#16A34A",
-            "backgroundColor": "rgba(22, 163, 74, 0.1)",
-            "fill": True,
-            "tension": 0.3
-        }]
+        "datasets": datasets
     }
     _set_cached(cache_key, result)
     return result
@@ -1362,10 +1417,10 @@ async def async_get_revenue_trend(
     source_id: Optional[int] = None
 ) -> Dict[str, Any]:
     """
-    Async version of get_revenue_trend.
-    Uses httpx for non-blocking HTTP requests with parallel pagination.
+    Async version of get_revenue_trend with previous period comparison.
+    When filters are applied, comparison is disabled.
     """
-    # If category, brand, or source filter, use sync version with filter
+    # If category, brand, or source filter, use filtered version without comparison
     if category_id or brand or source_id:
         _, _, _, daily_revenue = _fetch_orders_with_filter(
             start_date, end_date, category_id, brand, source_id
@@ -1384,77 +1439,15 @@ async def async_get_revenue_trend(
         return {
             "labels": labels,
             "datasets": [{
-                "label": "Revenue (UAH)",
+                "label": "This Period",
                 "data": data,
                 "borderColor": "#16A34A",
                 "backgroundColor": "rgba(22, 163, 74, 0.1)",
                 "fill": True,
-                "tension": 0.3
+                "tension": 0.3,
+                "borderWidth": 2
             }]
         }
 
-    cache_key = f"revenue_trend:{start_date}:{end_date}:{granularity}"
-    cached = _get_cached(cache_key)
-    if cached is not None:
-        return cached
-
-    from web.services.async_client import AsyncKeyCRMClient
-
-    # Parse dates using utility
-    start, end, local_start, local_end, utc_start, utc_end_buffer, tz = _parse_date_range(
-        start_date, end_date
-    )
-    daily_revenue = _init_daily_dict(start, end, 0.0)
-
-    try:
-        client = AsyncKeyCRMClient()
-
-        params = {
-            "include": "products,manager",
-            "limit": 50,
-            "filter[created_between]": f"{utc_start.strftime('%Y-%m-%d %H:%M:%S')}, {utc_end_buffer.strftime('%Y-%m-%d %H:%M:%S')}",
-        }
-
-        all_orders = await client.fetch_all_orders(params)
-        return_status_ids = set(RETURN_STATUS_IDS)
-
-        for order in all_orders:
-            # Use utility for order validation
-            is_valid, ordered_at = _is_valid_order(
-                order, utc_start, local_end, return_status_ids
-            )
-            if not is_valid:
-                continue
-
-            # Get local date and add revenue
-            local_ordered = ordered_at.astimezone(tz)
-            date_key = local_ordered.strftime("%Y-%m-%d")
-            if date_key in daily_revenue:
-                daily_revenue[date_key] += float(order.get("grand_total", 0))
-
-    except Exception as e:
-        logger.error(f"Error in async_get_revenue_trend: {e}")
-
-    # Build response
-    labels = []
-    data = []
-    current = start
-    while current <= end:
-        date_key = current.strftime("%Y-%m-%d")
-        labels.append(current.strftime("%d.%m"))
-        data.append(round(daily_revenue.get(date_key, 0), 2))
-        current += timedelta(days=1)
-
-    result = {
-        "labels": labels,
-        "datasets": [{
-            "label": "Revenue (UAH)",
-            "data": data,
-            "borderColor": "#16A34A",
-            "backgroundColor": "rgba(22, 163, 74, 0.1)",
-            "fill": True,
-            "tension": 0.3
-        }]
-    }
-    _set_cached(cache_key, result)
-    return result
+    # Use sync version with comparison support (already optimized)
+    return get_revenue_trend(start_date, end_date, granularity, include_comparison=True)

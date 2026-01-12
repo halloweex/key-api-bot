@@ -514,6 +514,9 @@ async function loadRevenueChart() {
             revenueChart.destroy();
         }
 
+        // Show legend if there are multiple datasets (comparison)
+        const showLegend = data.datasets && data.datasets.length > 1;
+
         revenueChart = new Chart(ctx, {
             type: 'line',
             data: data,
@@ -522,7 +525,19 @@ async function loadRevenueChart() {
                 maintainAspectRatio: false,
                 plugins: {
                     legend: {
-                        display: false
+                        display: showLegend,
+                        position: 'top',
+                        labels: {
+                            usePointStyle: true,
+                            padding: 15
+                        }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                return `${context.dataset.label}: ${formatCurrency(context.parsed.y)}`;
+                            }
+                        }
                     }
                 },
                 scales: {
