@@ -828,6 +828,9 @@ async function loadTopProducts() {
             topProductsChart.destroy();
         }
 
+        // Calculate max value for percentage threshold
+        const maxProductQty = Math.max(...data.data);
+
         topProductsChart = new Chart(ctx, {
             type: 'bar',
             data: {
@@ -857,13 +860,22 @@ async function loadTopProducts() {
                         }
                     },
                     datalabels: {
-                        color: '#fff',
                         font: {
                             weight: 'bold',
                             size: 11
                         },
-                        anchor: 'center',
-                        align: 'center',
+                        anchor: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxProductQty) < 0.25 ? 'end' : 'center';
+                        },
+                        align: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxProductQty) < 0.25 ? 'end' : 'center';
+                        },
+                        color: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxProductQty) < 0.25 ? '#374151' : '#fff';
+                        },
                         formatter: function(value, context) {
                             const percentage = data.percentages[context.dataIndex];
                             return value > 0 ? `${value} (${percentage}%)` : '';
@@ -1051,6 +1063,9 @@ async function loadProductPerformance() {
             topRevenueChart.destroy();
         }
 
+        // Calculate max value for percentage threshold
+        const maxProductRevenue = Math.max(...data.topByRevenue.data);
+
         topRevenueChart = new Chart(revenueCtx, {
             type: 'bar',
             data: {
@@ -1080,13 +1095,22 @@ async function loadProductPerformance() {
                         }
                     },
                     datalabels: {
-                        color: '#fff',
                         font: {
                             weight: 'bold',
                             size: 10
                         },
-                        anchor: 'center',
-                        align: 'center',
+                        anchor: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxProductRevenue) < 0.25 ? 'end' : 'center';
+                        },
+                        align: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxProductRevenue) < 0.25 ? 'end' : 'center';
+                        },
+                        color: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxProductRevenue) < 0.25 ? '#374151' : '#fff';
+                        },
                         formatter: function(value, context) {
                             return value > 0 ? formatCurrency(value) : '';
                         }
@@ -1133,6 +1157,9 @@ async function loadBrandAnalytics() {
             brandRevenueChart.destroy();
         }
 
+        // Calculate max value for percentage threshold
+        const maxRevenue = Math.max(...data.topByRevenue.data);
+
         brandRevenueChart = new Chart(revenueCtx, {
             type: 'bar',
             data: {
@@ -1163,13 +1190,23 @@ async function loadBrandAnalytics() {
                         }
                     },
                     datalabels: {
-                        color: '#fff',
                         font: {
                             weight: 'bold',
                             size: 10
                         },
-                        anchor: 'center',
-                        align: 'center',
+                        // Dynamic positioning based on bar size
+                        anchor: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxRevenue) < 0.25 ? 'end' : 'center';
+                        },
+                        align: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxRevenue) < 0.25 ? 'end' : 'center';
+                        },
+                        color: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxRevenue) < 0.25 ? '#374151' : '#fff';
+                        },
                         formatter: function(value, context) {
                             return value > 0 ? formatCurrency(value) : '';
                         }
@@ -1190,6 +1227,9 @@ async function loadBrandAnalytics() {
         if (brandQuantityChart) {
             brandQuantityChart.destroy();
         }
+
+        // Calculate max value for percentage threshold
+        const maxQuantity = Math.max(...data.topByQuantity.data);
 
         brandQuantityChart = new Chart(quantityCtx, {
             type: 'bar',
@@ -1220,13 +1260,22 @@ async function loadBrandAnalytics() {
                         }
                     },
                     datalabels: {
-                        color: '#fff',
                         font: {
                             weight: 'bold',
                             size: 11
                         },
-                        anchor: 'center',
-                        align: 'center',
+                        anchor: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxQuantity) < 0.25 ? 'end' : 'center';
+                        },
+                        align: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxQuantity) < 0.25 ? 'end' : 'center';
+                        },
+                        color: function(context) {
+                            const value = context.dataset.data[context.dataIndex];
+                            return (value / maxQuantity) < 0.25 ? '#374151' : '#fff';
+                        },
                         formatter: function(value, context) {
                             return value > 0 ? value : '';
                         }
