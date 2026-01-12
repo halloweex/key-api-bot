@@ -66,20 +66,19 @@ function initFiltersToggle() {
     }
 }
 
-// Track previous revenue to detect milestone crossings
-let previousRevenue = 0;
-
-// Check if milestone was just crossed and create particles
+// Trigger particle burst for all reached milestones on load
 function checkMilestoneReached(revenue, milestones, fillElement) {
-    // Only trigger particles if revenue increased and crossed a milestone
-    milestones.forEach((m) => {
-        if (previousRevenue < m.amount && revenue >= m.amount) {
-            // Just crossed this milestone!
-            createMilestoneParticles(fillElement, m.amount, milestones[milestones.length - 1].amount);
+    const maxMilestone = milestones[milestones.length - 1].amount;
+
+    // Trigger particles for each reached milestone with staggered delay
+    milestones.forEach((m, index) => {
+        if (revenue >= m.amount) {
+            // Stagger the bursts so they don't all fire at once
+            setTimeout(() => {
+                createMilestoneParticles(fillElement, m.amount, maxMilestone);
+            }, index * 300);
         }
     });
-
-    previousRevenue = revenue;
 }
 
 // Create particle burst effect at milestone
