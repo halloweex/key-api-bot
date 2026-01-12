@@ -17,6 +17,7 @@ let brandQuantityChart = null;
 let currentPeriod = 'week';
 let customStartDate = null;
 let customEndDate = null;
+let currentSourceId = null;
 let currentParentCategoryId = null;
 let currentCategoryId = null;
 let currentBrand = null;
@@ -42,6 +43,7 @@ document.addEventListener('DOMContentLoaded', function() {
     initDateInputs();
     initPeriodButtons();
     initApplyButton();
+    initSourceFilter();
     initCategoryFilter();
     initBrandFilter();
     initInfoTooltips();
@@ -235,6 +237,14 @@ async function loadBrands() {
     }
 }
 
+// Source filter handler
+function initSourceFilter() {
+    document.getElementById('sourceFilter').addEventListener('change', function() {
+        currentSourceId = this.value ? parseInt(this.value) : null;
+        loadAllData();
+    });
+}
+
 // Brand filter handler
 function initBrandFilter() {
     document.getElementById('brandFilter').addEventListener('change', function() {
@@ -342,6 +352,11 @@ function buildQuery() {
         query = `?start_date=${customStartDate}&end_date=${customEndDate}`;
     } else {
         query = '?period=today';
+    }
+
+    // Add source filter
+    if (currentSourceId) {
+        query += `&source_id=${currentSourceId}`;
     }
 
     // Add category filter - use child category if selected, otherwise parent

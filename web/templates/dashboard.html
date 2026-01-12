@@ -30,6 +30,12 @@
                 <button class="period-btn" data-period="last_month">Last Month</button>
             </div>
             <div class="category-filter">
+                <select id="sourceFilter">
+                    <option value="">All Sources</option>
+                    <option value="1">Instagram</option>
+                    <option value="2">Telegram</option>
+                    <option value="4">Shopify</option>
+                </select>
                 <select id="parentCategoryFilter">
                     <option value="">All Categories</option>
                 </select>
@@ -101,14 +107,6 @@
             <div class="chart-container">
                 <h3>Revenue by Source</h3>
                 <canvas id="revenueBySourceChart"></canvas>
-            </div>
-            <div class="chart-container">
-                <h3>Top 10 Products (by Quantity)</h3>
-                <canvas id="topProductsChart"></canvas>
-            </div>
-            <div class="chart-container">
-                <h3>Top 10 Products (by Revenue)</h3>
-                <canvas id="topRevenueChart"></canvas>
             </div>
         </section>
 
@@ -192,6 +190,14 @@
         </section>
 
         <section class="charts-grid">
+            <div class="chart-container">
+                <h3>Top 10 Products (by Quantity)</h3>
+                <canvas id="topProductsChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <h3>Top 10 Products (by Revenue)</h3>
+                <canvas id="topRevenueChart"></canvas>
+            </div>
             <div class="chart-container full-width">
                 <h3>Sales by Category</h3>
                 <canvas id="categoryChart"></canvas>
