@@ -524,8 +524,9 @@ footer {
     height: 24px;
     background: linear-gradient(90deg, #E5E7EB 0%, #F3F4F6 100%);
     border-radius: 12px;
-    overflow: hidden;
-    margin-bottom: 0.5rem;
+    overflow: visible;
+    margin-top: 1.5rem;
+    margin-bottom: 0.75rem;
 }
 
 .milestone-fill {
@@ -537,10 +538,7 @@ footer {
     border-radius: 12px;
     transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
     min-width: 0;
-}
-
-.milestone-fill.exceeded {
-    background: linear-gradient(90deg, #7C3AED 0%, #A855F7 50%, #C084FC 100%);
+    z-index: 1;
 }
 
 .milestone-markers {
@@ -549,26 +547,75 @@ footer {
     left: 0;
     width: 100%;
     height: 100%;
+    z-index: 2;
     pointer-events: none;
+}
+
+.milestone-fill.exceeded {
+    background: linear-gradient(90deg, #7C3AED 0%, #A855F7 50%, #C084FC 100%);
 }
 
 .milestone-marker {
     position: absolute;
     top: 0;
     height: 100%;
-    width: 2px;
-    background: rgba(255, 255, 255, 0.6);
+    width: 3px;
+    background: rgba(255, 255, 255, 0.8);
+    border-radius: 2px;
+    transition: all 0.3s ease;
+}
+
+.milestone-marker::before {
+    content: '';
+    position: absolute;
+    top: -4px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #E5E7EB;
+    border: 2px solid #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .milestone-marker::after {
     content: attr(data-label);
     position: absolute;
-    top: -18px;
+    top: -22px;
     left: 50%;
     transform: translateX(-50%);
-    font-size: 0.65rem;
-    color: #9CA3AF;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #6B7280;
     white-space: nowrap;
+}
+
+/* Reached milestone marker */
+.milestone-marker.reached::before {
+    background: #16A34A;
+    border-color: #16A34A;
+}
+
+.milestone-marker.reached::after {
+    color: #16A34A;
+}
+
+/* Current target marker */
+.milestone-marker.current-target::before {
+    background: #F59E0B;
+    border-color: #F59E0B;
+    animation: pulse-marker 1.5s ease infinite;
+}
+
+.milestone-marker.current-target::after {
+    color: #F59E0B;
+    font-weight: 700;
+}
+
+@keyframes pulse-marker {
+    0%, 100% { transform: translateX(-50%) scale(1); }
+    50% { transform: translateX(-50%) scale(1.2); }
 }
 
 .milestone-values {

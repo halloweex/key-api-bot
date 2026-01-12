@@ -83,14 +83,19 @@ function updateMilestoneProgress(revenue) {
 
     section.classList.remove('hidden');
 
-    // Get the first (primary) milestone for this period
     const milestones = MILESTONES[periodType];
-    const primaryMilestone = milestones[0];
-    const milestoneAmount = primaryMilestone.amount;
 
-    // Calculate progress
-    const progress = Math.min((revenue / milestoneAmount) * 100, 100);
-    const exceeded = revenue >= milestoneAmount;
+    // Use the highest milestone as the max scale
+    const maxMilestone = milestones[milestones.length - 1].amount;
+
+    // Find current milestone level (highest reached)
+    let currentMilestoneIndex = -1;
+    for (let i = milestones.length - 1; i >= 0; i--) {
+        if (revenue >= milestones[i].amount) {
+            currentMilestoneIndex = i;
+            break;
+        }
+    }
 
     // Format amounts
     const formatAmount = (amount) => {
@@ -102,32 +107,43 @@ function updateMilestoneProgress(revenue) {
         return `₴${amount.toFixed(0)}`;
     };
 
+    // Calculate progress toward max milestone
+    const progress = Math.min((revenue / maxMilestone) * 100, 100);
+    const allCompleted = revenue >= maxMilestone;
+
     // Update UI
     target.textContent = periodLabel;
     fill.style.width = `${progress}%`;
-    fill.classList.toggle('exceeded', exceeded);
+    fill.classList.toggle('exceeded', allCompleted);
     percentage.textContent = `${Math.round(progress)}%`;
-    percentage.style.color = exceeded ? '#7C3AED' : '#16A34A';
+    percentage.style.color = allCompleted ? '#7C3AED' : '#16A34A';
     current.textContent = formatAmount(revenue);
-    current.style.color = exceeded ? '#7C3AED' : '#16A34A';
-    goal.textContent = formatAmount(milestoneAmount);
+    current.style.color = allCompleted ? '#7C3AED' : '#16A34A';
+    goal.textContent = formatAmount(maxMilestone);
 
-    // Add markers for additional milestones if any
+    // Add markers for all milestones
     const markersContainer = document.getElementById('milestoneMarkers');
     markersContainer.innerHTML = '';
 
-    if (milestones.length > 1) {
-        milestones.slice(1).forEach(m => {
-            const markerPos = (m.amount / milestoneAmount) * 100;
-            if (markerPos <= 100) {
-                const marker = document.createElement('div');
-                marker.className = 'milestone-marker';
-                marker.style.left = `${markerPos}%`;
-                marker.dataset.label = formatAmount(m.amount);
-                markersContainer.appendChild(marker);
-            }
-        });
-    }
+    milestones.forEach((m, index) => {
+        const markerPos = (m.amount / maxMilestone) * 100;
+        const marker = document.createElement('div');
+        marker.className = 'milestone-marker';
+
+        // Mark as reached if revenue >= this milestone
+        if (revenue >= m.amount) {
+            marker.classList.add('reached');
+        }
+
+        // Mark as current target (next unreached)
+        if (index === currentMilestoneIndex + 1) {
+            marker.classList.add('current-target');
+        }
+
+        marker.style.left = `${markerPos}%`;
+        marker.dataset.label = formatAmount(m.amount);
+        markersContainer.appendChild(marker);
+    });
 }
 
 // Check and celebrate revenue milestones
