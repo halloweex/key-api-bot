@@ -30,10 +30,9 @@ const MILESTONES = {
     weekly: [
         { amount: 800000, message: '800K Weekly Revenue!', emoji: '🔥' },
         { amount: 1000000, message: '1 MILLION Weekly!', emoji: '🚀🎆' },
-        { amount: 2000000, message: '2 MILLION Weekly!', emoji: '💎🎇' },
     ],
     monthly: [
-        { amount: 10000000, message: '10 MILLION Monthly!', emoji: '👑🎇🎆' },
+        { amount: 4000000, message: '4 MILLION Monthly!', emoji: '👑🎇🎆' },
     ]
 };
 let lastCelebratedMilestone = {}; // Track per period type
@@ -65,6 +64,62 @@ function initFiltersToggle() {
             collapsible.classList.toggle('expanded', !isExpanded);
         });
     }
+}
+
+// Track reached milestones for particle effects
+let reachedMilestones = {};
+
+// Check if milestone was just reached and create particles
+function checkMilestoneReached(revenue, milestones, fillElement) {
+    const periodKey = currentPeriod || 'custom';
+
+    if (!reachedMilestones[periodKey]) {
+        reachedMilestones[periodKey] = new Set();
+    }
+
+    milestones.forEach((m, index) => {
+        const milestoneKey = `${periodKey}-${m.amount}`;
+        if (revenue >= m.amount && !reachedMilestones[periodKey].has(m.amount)) {
+            reachedMilestones[periodKey].add(m.amount);
+            // Create particle burst at milestone position
+            createMilestoneParticles(fillElement, m.amount, milestones[milestones.length - 1].amount);
+        }
+    });
+}
+
+// Create particle burst effect at milestone
+function createMilestoneParticles(fillElement, milestoneAmount, maxMilestone) {
+    const track = fillElement.parentElement;
+    const position = (milestoneAmount / maxMilestone) * 100;
+
+    const celebration = document.createElement('div');
+    celebration.className = 'milestone-celebration';
+    celebration.style.left = `${position}%`;
+
+    const colors = ['#FFD700', '#FFA500', '#FF6347', '#7C3AED', '#16A34A', '#2563EB'];
+    const particleCount = 12;
+
+    for (let i = 0; i < particleCount; i++) {
+        const particle = document.createElement('div');
+        particle.className = 'milestone-particle';
+        particle.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+
+        // Random direction
+        const angle = (i / particleCount) * 360;
+        const distance = 20 + Math.random() * 30;
+        const tx = Math.cos(angle * Math.PI / 180) * distance;
+        const ty = Math.sin(angle * Math.PI / 180) * distance;
+
+        particle.style.setProperty('--tx', `${tx}px`);
+        particle.style.setProperty('--ty', `${ty}px`);
+
+        celebration.appendChild(particle);
+    }
+
+    track.appendChild(celebration);
+
+    // Remove after animation
+    setTimeout(() => celebration.remove(), 1000);
 }
 
 // Update milestone progress bar
@@ -126,15 +181,29 @@ function updateMilestoneProgress(revenue) {
     const progress = Math.min((revenue / maxMilestone) * 100, 100);
     const allCompleted = revenue >= maxMilestone;
 
+    // Check if near a milestone (within 10%)
+    let nearMilestone = false;
+    for (const m of milestones) {
+        const percentToMilestone = (revenue / m.amount) * 100;
+        if (percentToMilestone >= 90 && percentToMilestone < 100) {
+            nearMilestone = true;
+            break;
+        }
+    }
+
     // Update UI
     target.textContent = periodLabel;
     fill.style.width = `${progress}%`;
     fill.classList.toggle('exceeded', allCompleted);
+    fill.classList.toggle('near-milestone', nearMilestone);
     percentage.textContent = `${Math.round(progress)}%`;
     percentage.style.color = allCompleted ? '#7C3AED' : '#16A34A';
     current.textContent = formatAmount(revenue);
     current.style.color = allCompleted ? '#7C3AED' : '#16A34A';
     goal.textContent = formatAmount(maxMilestone);
+
+    // Check for newly reached milestones and celebrate
+    checkMilestoneReached(revenue, milestones, fill);
 
     // Add markers for all milestones
     const markersContainer = document.getElementById('milestoneMarkers');
