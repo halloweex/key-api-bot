@@ -28,7 +28,7 @@ async def fetch_all_categories() -> Dict[int, Dict[str, Any]]:
 
     try:
         # Use pagination to fetch all categories
-        async for batch in client.paginate("product-category", page_size=50):
+        async for batch in client.paginate("products/categories", page_size=50):
             for cat in batch:
                 categories[cat['id']] = {
                     'id': cat['id'],
@@ -52,7 +52,7 @@ async def fetch_all_products_categories() -> Dict[int, int]:
     logger.info("Starting async batch fetch of all products...")
 
     try:
-        async for batch in client.paginate("product", page_size=50):
+        async for batch in client.paginate("products", page_size=50):
             for product in batch:
                 product_id = product.get("id")
                 category_id = product.get("category_id")

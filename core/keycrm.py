@@ -234,11 +234,11 @@ class KeyCRMClient:
         params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Get products with optional filtering."""
-        return await self._request("GET", "product", params=params)
+        return await self._request("GET", "products", params=params)
 
     async def get_product(self, product_id: int) -> Dict[str, Any]:
         """Get single product by ID."""
-        return await self._request("GET", f"product/{product_id}")
+        return await self._request("GET", f"products/{product_id}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # CATEGORY METHODS
@@ -249,7 +249,7 @@ class KeyCRMClient:
         params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Get product categories."""
-        return await self._request("GET", "product-category", params=params)
+        return await self._request("GET", "products/categories", params=params)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # STATUS METHODS
@@ -463,7 +463,7 @@ class KeyCRMClient:
         Returns:
             List of Product objects
         """
-        raw_products = await self.fetch_all("product", params, max_pages=max_pages)
+        raw_products = await self.fetch_all("products", params, max_pages=max_pages)
         return [Product.from_api(data) for data in raw_products]
 
 

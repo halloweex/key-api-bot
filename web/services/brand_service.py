@@ -20,7 +20,7 @@ _brands_loaded = False
 CACHE_TTL = 3600  # 1 hour
 
 # Brand custom field ID (from KeyCRM)
-BRAND_FIELD_UUID = "CT_1006"
+BRAND_FIELD_UUID = "CT_1001"
 BRAND_FIELD_NAME = "Brand"
 
 
@@ -36,7 +36,7 @@ async def fetch_all_products_with_brands() -> tuple:
     logger.info("Starting async batch fetch of all products with brands...")
 
     try:
-        async for batch in client.paginate("product", params={"include": "custom_fields"}, page_size=50):
+        async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
             for product in batch:
                 product_id = product.get("id")
                 if not product_id:
