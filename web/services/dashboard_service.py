@@ -246,17 +246,91 @@ async def get_revenue_trend(
         data.append(round(daily_revenue.get(date_key, 0), 2))
         current += timedelta(days=1)
 
+    datasets = [{
+        "label": "This Period",
+        "data": data,
+        "borderColor": "#16A34A",
+        "backgroundColor": "rgba(22, 163, 74, 0.1)",
+        "fill": True,
+        "tension": 0.3,
+        "borderWidth": 2
+    }]
+
+    # Add previous period comparison if enabled
+    if include_comparison:
+        period_days = (end - start).days + 1
+        prev_end = start - timedelta(days=1)
+        prev_start = prev_end - timedelta(days=period_days - 1)
+
+        prev_start_str = prev_start.strftime("%Y-%m-%d")
+        prev_end_str = prev_end.strftime("%Y-%m-%d")
+
+        # Fetch previous period orders
+        _, _, prev_local_start, prev_local_end, prev_utc_start, prev_utc_end_buffer, _ = _parse_date_range(
+            prev_start_str, prev_end_str
+        )
+        prev_daily_revenue = _init_daily_dict(prev_start, prev_end, 0.0)
+
+        prev_orders = await _fetch_orders_async(prev_start_str, prev_end_str, "products.offer,manager")
+
+        for order_data in prev_orders:
+            is_valid, ordered_at = _is_valid_order(order_data, prev_utc_start, prev_local_end)
+            if not is_valid:
+                continue
+
+            order = Order.from_api(order_data)
+
+            if source_id and order.source_id != source_id:
+                continue
+
+            order_revenue = 0.0
+            if category_id or brand:
+                for prod in order.products:
+                    prod_id = prod.product_id
+                    if prod_id:
+                        category_match = True
+                        if valid_category_ids:
+                            prod_cat = product_category_cache.get(prod_id)
+                            category_match = prod_cat and prod_cat in valid_category_ids
+
+                        brand_match = True
+                        if brand:
+                            prod_brand = product_brand_cache.get(prod_id)
+                            brand_match = prod_brand and prod_brand.lower() == brand.lower()
+
+                        if category_match and brand_match:
+                            order_revenue += prod.total
+            else:
+                order_revenue = order.grand_total
+
+            if order_revenue > 0:
+                local_ordered = ordered_at.astimezone(tz)
+                date_key = local_ordered.strftime("%Y-%m-%d")
+                if date_key in prev_daily_revenue:
+                    prev_daily_revenue[date_key] += order_revenue
+
+        # Build previous period data (aligned with current period labels)
+        prev_data = []
+        prev_current = prev_start
+        while prev_current <= prev_end:
+            date_key = prev_current.strftime("%Y-%m-%d")
+            prev_data.append(round(prev_daily_revenue.get(date_key, 0), 2))
+            prev_current += timedelta(days=1)
+
+        datasets.append({
+            "label": "Previous Period",
+            "data": prev_data,
+            "borderColor": "#9CA3AF",
+            "backgroundColor": "rgba(156, 163, 175, 0.1)",
+            "fill": False,
+            "tension": 0.3,
+            "borderWidth": 2,
+            "borderDash": [5, 5]
+        })
+
     result = {
         "labels": labels,
-        "datasets": [{
-            "label": "This Period",
-            "data": data,
-            "borderColor": "#16A34A",
-            "backgroundColor": "rgba(22, 163, 74, 0.1)",
-            "fill": True,
-            "tension": 0.3,
-            "borderWidth": 2
-        }]
+        "datasets": datasets
     }
 
     await _set_cached(cache_key, result)
