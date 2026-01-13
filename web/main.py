@@ -15,6 +15,7 @@ from web.config import STATIC_DIR, VERSION
 from web.routes import api, pages, auth
 from web.services.dashboard_service import start_cache_warming, stop_cache_warming
 from web.services.category_service import warm_product_cache
+from web.services.brand_service import warm_brand_cache
 from bot.database import init_database
 
 # Configure logging
@@ -69,10 +70,13 @@ async def startup_event():
     # Initialize database (creates tables if not exist)
     init_database()
     logger.info("Database initialized")
-    # Pre-load product categories for filtering
+    # Pre-load product categories and brands for filtering
     logger.info("Warming product category cache...")
     await warm_product_cache()
     logger.info("Product category cache ready")
+    logger.info("Warming brand cache...")
+    await warm_brand_cache()
+    logger.info("Brand cache ready")
     # Start background cache warming
     start_cache_warming()
     logger.info("Background cache warming started")
