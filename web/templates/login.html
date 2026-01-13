@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - KoreanStory Dashboard</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         * {
             margin: 0;
@@ -150,11 +151,92 @@
             </script>
         </div>
 
-        <p class="info-text">
+        <p class="info-text" id="info-text">
             Login with your Telegram account.<br>
             You must be an approved user to access the dashboard.<br><br>
             Need access? Contact the bot: <a href="https://t.me/{{ bot_username }}">@{{ bot_username }}</a>
         </p>
+
+        <div id="webapp-loading" style="display: none;">
+            <p style="color: #6b7280;">Authenticating via Telegram...</p>
+        </div>
     </div>
+
+    <script>
+        // Check if running inside Telegram WebApp
+        (function() {
+            const tg = window.Telegram?.WebApp;
+
+            if (tg && tg.initData) {
+                // Running inside Telegram WebApp - auto-authenticate
+                console.log('WebApp detected, attempting auto-auth...');
+
+                // Hide login widget, show loading
+                const loginWidget = document.querySelector('.telegram-login');
+                const infoText = document.getElementById('info-text');
+                const loadingDiv = document.getElementById('webapp-loading');
+
+                if (loginWidget) loginWidget.style.display = 'none';
+                if (infoText) infoText.style.display = 'none';
+                if (loadingDiv) loadingDiv.style.display = 'block';
+
+                // Expand WebApp to full height
+                tg.expand();
+
+                // Send initData to server for verification
+                fetch('/auth/webapp', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        initData: tg.initData
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Set session cookie (secure for HTTPS)
+                        const isSecure = window.location.protocol === 'https:' ? '; Secure' : '';
+                        document.cookie = `dashboard_session=${data.session}; path=/; max-age=${7 * 24 * 60 * 60}; SameSite=Lax${isSecure}`;
+                        // Redirect to dashboard
+                        window.location.href = '/';
+                    } else {
+                        // Show error
+                        console.error('WebApp auth failed:', data.error);
+                        if (loadingDiv) loadingDiv.style.display = 'none';
+
+                        // Show appropriate message based on status
+                        if (data.status === 'pending') {
+                            document.querySelector('.pending-message')?.style.removeProperty('display');
+                        } else if (data.status === 'denied' || data.status === 'frozen') {
+                            document.querySelector('.denied-message')?.style.removeProperty('display');
+                        } else {
+                            // Show generic error
+                            const errorDiv = document.createElement('div');
+                            errorDiv.className = 'error-message';
+                            errorDiv.textContent = data.error || 'Authentication failed. Please try in browser.';
+                            document.querySelector('.login-container').insertBefore(
+                                errorDiv,
+                                document.querySelector('.telegram-login')
+                            );
+                        }
+
+                        // Show info text again
+                        if (infoText) {
+                            infoText.innerHTML = 'WebApp authentication failed.<br>Please open in browser or contact admin.';
+                            infoText.style.display = 'block';
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('WebApp auth error:', error);
+                    if (loadingDiv) loadingDiv.style.display = 'none';
+                    if (loginWidget) loginWidget.style.display = 'block';
+                    if (infoText) infoText.style.display = 'block';
+                });
+            }
+        })();
+    </script>
 </body>
 </html>

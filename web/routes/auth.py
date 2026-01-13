@@ -10,6 +10,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 from web.services.auth_service import (
     verify_telegram_auth,
+    verify_webapp_auth,
     check_user_access,
     create_session_data
 )
@@ -34,8 +35,9 @@ SESSION_COOKIE = "dashboard_session"
 # Session duration (7 days)
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 
-# Use secure cookies in production (HTTPS)
-COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+# Use secure cookies in production (HTTPS) - auto-detect from DASHBOARD_URL
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")
+COOKIE_SECURE = DASHBOARD_URL.startswith("https://") or os.getenv("COOKIE_SECURE", "false").lower() == "true"
 
 
 @router.get("/login")
@@ -112,6 +114,58 @@ async def telegram_callback(request: Request):
     )
 
     logger.info(f"User {user_id} (@{auth_data.get('username', 'unknown')}) logged in successfully")
+    return response
+
+
+@router.post("/auth/webapp")
+async def webapp_auth(request: Request):
+    """
+    Handle Telegram WebApp authentication.
+
+    Receives initData from Telegram.WebApp.initData and verifies it.
+    Used when dashboard is opened via MenuButtonWebApp.
+    """
+    try:
+        body = await request.json()
+        init_data = body.get('initData', '')
+    except Exception:
+        return {"success": False, "error": "Invalid request body"}
+
+    if not init_data:
+        return {"success": False, "error": "No initData provided"}
+
+    # Verify the WebApp initData
+    user_data = verify_webapp_auth(init_data)
+    if not user_data:
+        return {"success": False, "error": "Invalid WebApp data"}
+
+    # Check if user has access
+    user_id = int(user_data['id'])
+    access = check_user_access(user_id)
+
+    if not access['authorized']:
+        status = access['status']
+        logger.info(f"WebApp user {user_id} denied - status: {status}")
+        return {"success": False, "error": "Not authorized", "status": status}
+
+    # Create session data (convert WebApp format to standard format)
+    auth_data = {
+        'id': str(user_data['id']),
+        'first_name': user_data.get('first_name', ''),
+        'last_name': user_data.get('last_name', ''),
+        'username': user_data.get('username', ''),
+        'photo_url': user_data.get('photo_url', ''),
+        'auth_date': str(user_data['auth_date'])
+    }
+    session_data = create_session_data(auth_data)
+
+    # Sign session data
+    signed_session = session_serializer.dumps(session_data)
+
+    logger.info(f"WebApp user {user_id} (@{user_data.get('username', 'unknown')}) authenticated")
+
+    # Return success with session cookie value (client will set it)
+    response = {"success": True, "session": signed_session}
     return response
 
 
