@@ -9,6 +9,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy bot modules (needed for shared services)
 COPY bot/ ./bot/
 
+# Copy core modules (models, exceptions, etc.)
+COPY core/ ./core/
+
 # Copy web application
 COPY web/ ./web/
 
