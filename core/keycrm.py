@@ -249,7 +249,7 @@ class KeyCRMClient:
         params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Get product categories."""
-        return await self._request("GET", "products-category", params=params)
+        return await self._request("GET", "product-category", params=params)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # STATUS METHODS

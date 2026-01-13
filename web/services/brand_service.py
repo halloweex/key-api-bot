@@ -21,7 +21,7 @@ CACHE_TTL = 3600  # 1 hour
 
 # Brand custom field ID (from KeyCRM)
 BRAND_FIELD_UUID = "CT_1006"
-BRAND_FIELD_NAME = "Бренд"
+BRAND_FIELD_NAME = "Brand"
 
 
 async def fetch_all_products_with_brands() -> tuple:
