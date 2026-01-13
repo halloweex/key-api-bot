@@ -71,7 +71,7 @@ async def startup_event():
     logger.info("Database initialized")
     # Pre-load product categories for filtering
     logger.info("Warming product category cache...")
-    warm_product_cache()
+    await warm_product_cache()
     logger.info("Product category cache ready")
     # Start background cache warming
     start_cache_warming()

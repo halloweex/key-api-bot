@@ -1,20 +1,20 @@
 """
 Brand service for fetching and caching product brands from custom_fields.
+Fully async implementation using core.keycrm client.
 """
+import asyncio
 import logging
-import threading
 import time
 from typing import Dict, List, Optional, Set
 
-from bot.config import KEYCRM_API_KEY, KEYCRM_BASE_URL
-from web.services.category_service import _get_session
+from core.keycrm import get_async_client
 
 logger = logging.getLogger(__name__)
 
 # Cache for brands
 _brands_cache: Set[str] = set()
 _product_brand_cache: Dict[int, str] = {}  # product_id -> brand name
-_cache_lock = threading.Lock()
+_cache_lock = asyncio.Lock()
 _last_cache_update: float = 0
 _brands_loaded = False
 CACHE_TTL = 3600  # 1 hour
@@ -24,31 +24,20 @@ BRAND_FIELD_UUID = "CT_1001"
 BRAND_FIELD_NAME = "Brand"
 
 
-def fetch_all_products_with_brands() -> tuple:
+async def fetch_all_products_with_brands() -> tuple:
     """
     Fetch all products with custom_fields to extract brands.
     Returns: (brands_set, product_brand_dict)
     """
     brands = set()
     product_brands = {}
-    page = 1
-    session = _get_session()
+    client = await get_async_client()
 
-    logger.info("Starting batch fetch of all products with brands...")
+    logger.info("Starting async batch fetch of all products with brands...")
 
-    while True:
-        try:
-            url = f"{KEYCRM_BASE_URL}/products"
-            resp = session.get(
-                url,
-                params={"page": page, "limit": 50, "include": "custom_fields"},
-                timeout=30
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            products = data.get("data", [])
-            for product in products:
+    try:
+        async for batch in client.paginate("product", params={"include": "custom_fields"}, page_size=50):
+            for product in batch:
                 product_id = product.get("id")
                 if not product_id:
                     continue
@@ -63,70 +52,63 @@ def fetch_all_products_with_brands() -> tuple:
                             brands.add(brand)
                             product_brands[product_id] = brand
                         break
-
-            if not data.get("next_page_url"):
-                break
-            page += 1
-
-        except Exception as e:
-            logger.error(f"Error fetching products page {page}: {e}")
-            break
+    except Exception as e:
+        logger.error(f"Error fetching products with brands: {e}")
 
     logger.info(f"Found {len(brands)} unique brands across {len(product_brands)} products")
     return brands, product_brands
 
 
-def warm_brand_cache() -> None:
+async def warm_brand_cache() -> None:
     """Pre-load all product brands into cache."""
     global _brands_cache, _product_brand_cache, _brands_loaded, _last_cache_update
 
-    with _cache_lock:
+    async with _cache_lock:
         if _brands_loaded and time.time() - _last_cache_update < CACHE_TTL:
             return
 
-    brands, product_brands = fetch_all_products_with_brands()
+    brands, product_brands = await fetch_all_products_with_brands()
 
-    with _cache_lock:
+    async with _cache_lock:
         _brands_cache = brands
         _product_brand_cache = product_brands
         _brands_loaded = True
         _last_cache_update = time.time()
 
 
-def get_brands() -> List[str]:
+async def get_brands() -> List[str]:
     """Get list of all brands (sorted)."""
     global _brands_cache, _brands_loaded
 
     if not _brands_loaded:
-        warm_brand_cache()
+        await warm_brand_cache()
 
-    with _cache_lock:
+    async with _cache_lock:
         return sorted(list(_brands_cache))
 
 
-def get_product_brand(product_id: int) -> Optional[str]:
+async def get_product_brand(product_id: int) -> Optional[str]:
     """Get brand name for a product."""
     global _product_brand_cache, _brands_loaded
 
     if not _brands_loaded:
-        warm_brand_cache()
+        await warm_brand_cache()
 
-    with _cache_lock:
+    async with _cache_lock:
         return _product_brand_cache.get(product_id)
 
 
-def get_brands_for_api() -> List[Dict[str, str]]:
+async def get_brands_for_api() -> List[Dict[str, str]]:
     """Get brands formatted for API response."""
-    brands = get_brands()
+    brands = await get_brands()
     return [{"name": brand} for brand in brands]
 
 
-# Export cache for direct access (performance optimization)
 def get_product_brand_cache() -> Dict[int, str]:
-    """Get the product brand cache for bulk lookups."""
-    global _product_brand_cache, _brands_loaded
-
-    if not _brands_loaded:
-        warm_brand_cache()
-
+    """Get the product brand cache for sync access."""
     return _product_brand_cache
+
+
+def is_brands_loaded() -> bool:
+    """Check if brands cache is loaded."""
+    return _brands_loaded

@@ -1,5 +1,6 @@
 """
 API routes for chart data.
+Fully async implementation.
 
 All endpoints are rate-limited to prevent abuse:
 - Lightweight endpoints (categories, brands): 60 requests/minute
@@ -35,7 +36,7 @@ limiter = Limiter(key_func=get_remote_address)
 @limiter.limit("60/minute")
 async def get_categories(request: Request):
     """Get list of root categories for filter dropdown."""
-    return category_service.get_categories_for_api()
+    return await category_service.get_categories_for_api()
 
 
 @router.get("/categories/{parent_id}/children")
@@ -46,14 +47,14 @@ async def get_child_categories(request: Request, parent_id: int):
         validate_category_id(parent_id, allow_none=False)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return category_service.get_child_categories(parent_id)
+    return await category_service.get_child_categories(parent_id)
 
 
 @router.get("/brands")
 @limiter.limit("60/minute")
 async def get_brands(request: Request):
     """Get list of brands for filter dropdown."""
-    return brand_service.get_brands_for_api()
+    return await brand_service.get_brands_for_api()
 
 
 # ─── Data-Heavy Endpoints (30/minute) ──────────────────────────────────────────
@@ -79,7 +80,9 @@ async def get_revenue_trend(
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return await dashboard_service.async_get_revenue_trend(start, end, category_id, brand=brand, source_id=source_id)
+    return await dashboard_service.get_revenue_trend(
+        start, end, category_id=category_id, brand=brand, source_id=source_id
+    )
 
 
 @router.get("/sales/by-source")
@@ -103,7 +106,7 @@ async def get_sales_by_source(
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return dashboard_service.get_sales_by_source(start, end, category_id, brand=brand, source_id=source_id)
+    return await dashboard_service.get_sales_by_source(start, end, category_id, brand=brand, source_id=source_id)
 
 
 @router.get("/products/top")
@@ -129,7 +132,7 @@ async def get_top_products(
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return dashboard_service.get_top_products(start, end, source_id, limit, category_id, brand=brand)
+    return await dashboard_service.get_top_products(start, end, source_id, limit, category_id, brand=brand)
 
 
 @router.get("/summary")
@@ -153,7 +156,7 @@ async def get_summary(
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return dashboard_service.get_summary_stats(start, end, category_id, brand=brand, source_id=source_id)
+    return await dashboard_service.get_summary_stats(start, end, category_id, brand=brand, source_id=source_id)
 
 
 @router.get("/customers/insights")
@@ -175,7 +178,7 @@ async def get_customer_insights(
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return dashboard_service.get_customer_insights(start, end, brand=brand, source_id=source_id)
+    return await dashboard_service.get_customer_insights(start, end, brand=brand, source_id=source_id)
 
 
 @router.get("/products/performance")
@@ -197,7 +200,7 @@ async def get_product_performance(
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return dashboard_service.get_product_performance(start, end, brand=brand, source_id=source_id)
+    return await dashboard_service.get_product_performance(start, end, brand=brand, source_id=source_id)
 
 
 @router.get("/brands/analytics")
@@ -215,5 +218,4 @@ async def get_brand_analytics(
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return dashboard_service.get_brand_analytics(start, end)
-
+    return await dashboard_service.get_brand_analytics(start, end)
