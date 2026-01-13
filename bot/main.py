@@ -165,6 +165,8 @@ def main() -> None:
     # Add reply keyboard text handlers
     application.add_handler(MessageHandler(filters.Regex(r"^ℹ️ Help$"), handlers.reply_keyboard_help))
     application.add_handler(MessageHandler(filters.Regex(r"^📈 Dashboard$"), handlers.reply_keyboard_dashboard))
+    application.add_handler(MessageHandler(filters.Regex(r"^🔍 Search$"), handlers.reply_keyboard_search))
+    application.add_handler(MessageHandler(filters.Regex(r"^⚙️ Settings$"), handlers.reply_keyboard_settings))
 
     # Add authorization handlers
     application.add_handler(CallbackQueryHandler(handlers.auth_request_access, pattern=r"^auth_request_access$"))

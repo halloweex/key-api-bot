@@ -1206,6 +1206,18 @@ async def reply_keyboard_dashboard(update: Update, context: ContextTypes.DEFAULT
     )
 
 
+@authorized
+async def reply_keyboard_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle '🔍 Search' button from reply keyboard."""
+    return await search_command(update, context)
+
+
+@authorized
+async def reply_keyboard_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle '⚙️ Settings' button from reply keyboard."""
+    return await settings_command(update, context)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # AUTHORIZATION HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════
