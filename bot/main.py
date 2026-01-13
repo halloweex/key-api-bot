@@ -4,7 +4,7 @@ Main entry point for the refactored KeyCRM Telegram Bot.
 This module wires together all components and starts the bot.
 """
 import logging
-from telegram import Update, BotCommand, MenuButtonCommands
+from telegram import Update, BotCommand, MenuButtonWebApp, WebAppInfo
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -46,11 +46,14 @@ async def setup_command_menu(application: Application) -> None:
         await application.bot.set_my_commands(commands)
         logger.info("Bot commands set successfully")
 
-        # Set menu button
+        # Set menu button to open web dashboard (requires HTTPS)
         try:
-            logger.info("Setting menu button...")
-            await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-            logger.info("Menu button set successfully")
+            from bot.config import DASHBOARD_URL
+            logger.info("Setting menu button to open dashboard...")
+            web_app = WebAppInfo(url=DASHBOARD_URL)
+            menu_button = MenuButtonWebApp(text="📈 Dashboard", web_app=web_app)
+            await application.bot.set_chat_menu_button(menu_button=menu_button)
+            logger.info(f"Menu button set to open: {DASHBOARD_URL}")
         except Exception as menu_error:
             logger.warning(f"Could not set menu button: {menu_error} (not critical)")
 
