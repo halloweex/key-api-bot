@@ -6,7 +6,6 @@ import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
-import time
 from zoneinfo import ZoneInfo
 
 from bot.config import (
@@ -17,32 +16,21 @@ from bot.config import (
 )
 from core.keycrm import get_async_client
 from core.models import Order, SourceId, OrderStatus
+from core.cache import dashboard_cache
 
 logger = logging.getLogger(__name__)
 
 
-# ─── In-Memory Cache ─────────────────────────────────────────────────────────
-CACHE_TTL_SECONDS = 300  # 5 minutes
-
-_cache: Dict[str, Any] = {}
-_cache_lock = asyncio.Lock()
-
+# ─── Cache Helpers ───────────────────────────────────────────────────────────
 
 async def _get_cached(key: str) -> Optional[Any]:
     """Get value from cache if not expired."""
-    async with _cache_lock:
-        if key in _cache:
-            data, timestamp = _cache[key]
-            if time.time() - timestamp < CACHE_TTL_SECONDS:
-                return data
-            del _cache[key]
-    return None
+    return await dashboard_cache.get(key)
 
 
 async def _set_cached(key: str, value: Any) -> None:
-    """Store value in cache with timestamp."""
-    async with _cache_lock:
-        _cache[key] = (value, time.time())
+    """Store value in cache."""
+    await dashboard_cache.set(key, value)
 
 
 # Source colors for charts

@@ -17,6 +17,7 @@ from web.services import dashboard_service
 from web.services import category_service
 from web.services import brand_service
 from web.config import VERSION
+from core.cache import dashboard_cache
 from core.validators import (
     validate_period,
     validate_source_id,
@@ -49,7 +50,8 @@ async def health_check(request: Request):
         "services": {
             "categories_loaded": category_service.is_products_loaded(),
             "brands_loaded": brand_service.is_brands_loaded()
-        }
+        },
+        "cache": dashboard_cache.stats
     }
 
 
