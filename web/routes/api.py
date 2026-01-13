@@ -16,6 +16,7 @@ from slowapi.util import get_remote_address
 from web.services import dashboard_service
 from web.services import category_service
 from web.services import brand_service
+from core.duckdb_store import get_store
 from web.config import VERSION
 from core.cache import dashboard_cache
 from core.validators import (
@@ -43,6 +44,15 @@ limiter = Limiter(key_func=get_remote_address)
 async def health_check(request: Request):
     """Health check endpoint for Docker/load balancer monitoring."""
     uptime_seconds = int(time.time() - _start_time)
+
+    # Get DuckDB stats if available
+    duckdb_stats = None
+    try:
+        store = await get_store()
+        duckdb_stats = await store.get_stats()
+    except Exception:
+        pass
+
     return {
         "status": "healthy",
         "version": VERSION,
@@ -51,8 +61,27 @@ async def health_check(request: Request):
             "categories_loaded": category_service.is_products_loaded(),
             "brands_loaded": brand_service.is_brands_loaded()
         },
-        "cache": dashboard_cache.stats
+        "cache": dashboard_cache.stats,
+        "duckdb": duckdb_stats
     }
+
+
+@router.get("/duckdb/stats")
+@limiter.limit("60/minute")
+async def get_duckdb_stats(request: Request):
+    """Get DuckDB analytics store statistics."""
+    try:
+        store = await get_store()
+        stats = await store.get_stats()
+        return {
+            "status": "connected",
+            **stats
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
 
 # ─── Lightweight Endpoints (60/minute) ─────────────────────────────────────────

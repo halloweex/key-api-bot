@@ -1,0 +1,716 @@
+"""
+DuckDB analytics store for KeyCRM dashboard.
+
+Provides persistent storage for orders, products, and pre-aggregated statistics.
+Uses incremental sync to minimize API calls and enable fast historical queries.
+"""
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, date, timedelta
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
+from zoneinfo import ZoneInfo
+
+import duckdb
+
+from core.models import Order, SourceId, OrderStatus
+from bot.config import DEFAULT_TIMEZONE, TELEGRAM_MANAGER_IDS
+
+logger = logging.getLogger(__name__)
+
+# Database configuration
+DB_DIR = Path(__file__).parent.parent / "data"
+DB_PATH = DB_DIR / "analytics.duckdb"
+DEFAULT_TZ = ZoneInfo(DEFAULT_TIMEZONE)
+
+
+class DuckDBStore:
+    """
+    Async-compatible DuckDB store for analytics data.
+
+    Features:
+    - Persistent storage (survives restarts)
+    - Incremental sync from KeyCRM API
+    - Pre-aggregated daily statistics
+    - Fast analytical queries
+    """
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = db_path
+        self._connection: Optional[duckdb.DuckDBPyConnection] = None
+        self._lock = asyncio.Lock()
+
+    async def connect(self) -> None:
+        """Initialize database connection and schema."""
+        DB_DIR.mkdir(parents=True, exist_ok=True)
+
+        async with self._lock:
+            if self._connection is None:
+                self._connection = duckdb.connect(str(self.db_path))
+                await self._init_schema()
+                logger.info(f"DuckDB connected: {self.db_path}")
+
+    async def close(self) -> None:
+        """Close database connection."""
+        async with self._lock:
+            if self._connection:
+                self._connection.close()
+                self._connection = None
+                logger.info("DuckDB connection closed")
+
+    @asynccontextmanager
+    async def connection(self):
+        """Get database connection with automatic reconnection."""
+        if self._connection is None:
+            await self.connect()
+        yield self._connection
+
+    async def _init_schema(self) -> None:
+        """Create database schema if not exists."""
+        schema_sql = """
+        -- Orders table
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY,
+            source_id INTEGER NOT NULL,
+            status_id INTEGER NOT NULL,
+            grand_total DECIMAL(12, 2) NOT NULL,
+            ordered_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE,
+            buyer_id INTEGER,
+            manager_id INTEGER,
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Order products (line items)
+        CREATE TABLE IF NOT EXISTS order_products (
+            id INTEGER PRIMARY KEY,
+            order_id INTEGER NOT NULL,
+            product_id INTEGER,
+            name VARCHAR NOT NULL,
+            quantity INTEGER NOT NULL,
+            price_sold DECIMAL(12, 2) NOT NULL,
+            FOREIGN KEY (order_id) REFERENCES orders(id)
+        );
+
+        -- Products catalog
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR NOT NULL,
+            category_id INTEGER,
+            brand VARCHAR,
+            sku VARCHAR,
+            price DECIMAL(12, 2),
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Categories
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR NOT NULL,
+            parent_id INTEGER,
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Pre-aggregated daily statistics (materialized for speed)
+        CREATE TABLE IF NOT EXISTS daily_stats (
+            date DATE NOT NULL,
+            source_id INTEGER NOT NULL,
+            orders_count INTEGER DEFAULT 0,
+            revenue DECIMAL(12, 2) DEFAULT 0,
+            returns_count INTEGER DEFAULT 0,
+            returns_revenue DECIMAL(12, 2) DEFAULT 0,
+            unique_customers INTEGER DEFAULT 0,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (date, source_id)
+        );
+
+        -- Sync metadata
+        CREATE TABLE IF NOT EXISTS sync_metadata (
+            key VARCHAR PRIMARY KEY,
+            value VARCHAR,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Indexes for common queries
+        CREATE INDEX IF NOT EXISTS idx_orders_ordered_at ON orders(ordered_at);
+        CREATE INDEX IF NOT EXISTS idx_orders_source_id ON orders(source_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_status_id ON orders(status_id);
+        CREATE INDEX IF NOT EXISTS idx_order_products_order_id ON order_products(order_id);
+        CREATE INDEX IF NOT EXISTS idx_order_products_product_id ON order_products(product_id);
+        CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id);
+        CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);
+        CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(date);
+        """
+        self._connection.execute(schema_sql)
+        logger.info("DuckDB schema initialized")
+
+    # ─── Sync Methods ─────────────────────────────────────────────────────────
+
+    async def get_last_sync_time(self, key: str = "orders") -> Optional[datetime]:
+        """Get last sync timestamp for incremental updates."""
+        async with self.connection() as conn:
+            result = conn.execute(
+                "SELECT value FROM sync_metadata WHERE key = ?",
+                [f"last_sync_{key}"]
+            ).fetchone()
+            if result and result[0]:
+                return datetime.fromisoformat(result[0])
+            return None
+
+    async def set_last_sync_time(self, key: str = "orders", timestamp: datetime = None) -> None:
+        """Update last sync timestamp."""
+        timestamp = timestamp or datetime.now(DEFAULT_TZ)
+        async with self.connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+            """, [f"last_sync_{key}", timestamp.isoformat()])
+
+    async def upsert_orders(self, orders: List[Dict[str, Any]]) -> int:
+        """
+        Insert or update orders from API response.
+
+        Args:
+            orders: List of order dicts from KeyCRM API
+
+        Returns:
+            Number of orders upserted
+        """
+        if not orders:
+            return 0
+
+        async with self.connection() as conn:
+            count = 0
+            for order_data in orders:
+                order = Order.from_api(order_data)
+
+                # Skip invalid orders
+                if not order.ordered_at:
+                    continue
+
+                # Upsert order
+                conn.execute("""
+                    INSERT OR REPLACE INTO orders
+                    (id, source_id, status_id, grand_total, ordered_at, created_at, buyer_id, manager_id, synced_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, [
+                    order.id,
+                    order.source_id,
+                    order.status_id,
+                    order.grand_total,
+                    order.ordered_at.isoformat() if order.ordered_at else None,
+                    order.created_at.isoformat() if order.created_at else None,
+                    order.buyer.id if order.buyer else None,
+                    order.manager.id if order.manager else None
+                ])
+
+                # Delete existing products for this order
+                conn.execute("DELETE FROM order_products WHERE order_id = ?", [order.id])
+
+                # Insert order products
+                for i, prod in enumerate(order.products):
+                    conn.execute("""
+                        INSERT INTO order_products (id, order_id, product_id, name, quantity, price_sold)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, [
+                        order.id * 10000 + i,  # Generate unique ID
+                        order.id,
+                        prod.product_id,
+                        prod.name,
+                        prod.quantity,
+                        prod.price_sold
+                    ])
+
+                count += 1
+
+            logger.info(f"Upserted {count} orders to DuckDB")
+            return count
+
+    async def upsert_products(self, products: List[Dict[str, Any]]) -> int:
+        """Insert or update products from API response."""
+        if not products:
+            return 0
+
+        async with self.connection() as conn:
+            count = 0
+            for prod_data in products:
+                # Extract brand from custom_fields
+                brand = None
+                for cf in prod_data.get("custom_fields", []):
+                    if cf.get("uuid") == "CT_1001" or cf.get("name") == "Brand":
+                        values = cf.get("value", [])
+                        if values and isinstance(values, list):
+                            brand = values[0]
+                        break
+
+                conn.execute("""
+                    INSERT OR REPLACE INTO products (id, name, category_id, brand, sku, price, synced_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, [
+                    prod_data.get("id"),
+                    prod_data.get("name", "Unknown"),
+                    prod_data.get("category_id"),
+                    brand,
+                    prod_data.get("sku"),
+                    prod_data.get("min_price") or prod_data.get("price")
+                ])
+                count += 1
+
+            logger.info(f"Upserted {count} products to DuckDB")
+            return count
+
+    async def upsert_categories(self, categories: List[Dict[str, Any]]) -> int:
+        """Insert or update categories from API response."""
+        if not categories:
+            return 0
+
+        async with self.connection() as conn:
+            count = 0
+            for cat_data in categories:
+                conn.execute("""
+                    INSERT OR REPLACE INTO categories (id, name, parent_id, synced_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """, [
+                    cat_data.get("id"),
+                    cat_data.get("name", "Unknown"),
+                    cat_data.get("parent_id")
+                ])
+                count += 1
+
+            logger.info(f"Upserted {count} categories to DuckDB")
+            return count
+
+    # ─── Query Methods ────────────────────────────────────────────────────────
+
+    async def get_summary_stats(
+        self,
+        start_date: date,
+        end_date: date,
+        source_id: Optional[int] = None,
+        category_id: Optional[int] = None,
+        brand: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Get summary statistics for a date range."""
+        async with self.connection() as conn:
+            # Build query with filters
+            params = [start_date, end_date]
+
+            # Base query for valid orders
+            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?"]
+
+            # Exclude returns for main stats (convert enums to int values)
+            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+
+            if source_id:
+                where_clauses.append("o.source_id = ?")
+                params.append(source_id)
+
+            # Category/brand filtering requires join with order_products
+            joins = ""
+            if category_id or brand:
+                joins = "JOIN order_products op ON o.id = op.order_id JOIN products p ON op.product_id = p.id"
+                if category_id:
+                    # Get category and children
+                    cat_ids = await self._get_category_with_children(conn, category_id)
+                    where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                    params.extend(cat_ids)
+                if brand:
+                    where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                    params.append(brand)
+
+            where_sql = " AND ".join(where_clauses)
+
+            # Main stats query
+            stats_sql = f"""
+                SELECT
+                    COUNT(DISTINCT CASE WHEN o.status_id NOT IN {return_statuses} THEN o.id END) as total_orders,
+                    COALESCE(SUM(CASE WHEN o.status_id NOT IN {return_statuses} THEN o.grand_total END), 0) as total_revenue,
+                    COUNT(DISTINCT CASE WHEN o.status_id IN {return_statuses} THEN o.id END) as total_returns,
+                    COALESCE(SUM(CASE WHEN o.status_id IN {return_statuses} THEN o.grand_total END), 0) as returns_revenue
+                FROM orders o
+                {joins}
+                WHERE {where_sql}
+            """
+
+            result = conn.execute(stats_sql, params).fetchone()
+
+            total_orders = result[0] or 0
+            total_revenue = float(result[1] or 0)
+            total_returns = result[2] or 0
+            returns_revenue = float(result[3] or 0)
+            avg_check = total_revenue / total_orders if total_orders > 0 else 0
+
+            return {
+                "totalOrders": total_orders,
+                "totalRevenue": round(total_revenue, 2),
+                "avgCheck": round(avg_check, 2),
+                "totalReturns": total_returns,
+                "returnsRevenue": round(returns_revenue, 2),
+                "startDate": start_date.isoformat(),
+                "endDate": end_date.isoformat()
+            }
+
+    async def get_revenue_trend(
+        self,
+        start_date: date,
+        end_date: date,
+        source_id: Optional[int] = None,
+        category_id: Optional[int] = None,
+        brand: Optional[str] = None,
+        include_comparison: bool = True
+    ) -> Dict[str, Any]:
+        """Get daily revenue trend for chart."""
+        async with self.connection() as conn:
+            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+
+            # Build filters
+            params = [start_date, end_date]
+            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+
+            joins = ""
+            if source_id:
+                where_clauses.append("o.source_id = ?")
+                params.append(source_id)
+
+            if category_id or brand:
+                joins = "JOIN order_products op ON o.id = op.order_id JOIN products p ON op.product_id = p.id"
+                if category_id:
+                    cat_ids = await self._get_category_with_children(conn, category_id)
+                    where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                    params.extend(cat_ids)
+                if brand:
+                    where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                    params.append(brand)
+
+            where_sql = " AND ".join(where_clauses)
+
+            # Query daily revenue
+            sql = f"""
+                SELECT
+                    DATE(o.ordered_at) as day,
+                    SUM(o.grand_total) as revenue
+                FROM orders o
+                {joins}
+                WHERE {where_sql}
+                GROUP BY DATE(o.ordered_at)
+                ORDER BY day
+            """
+
+            results = conn.execute(sql, params).fetchall()
+            daily_data = {row[0]: float(row[1]) for row in results}
+
+            # Build labels and data
+            labels = []
+            data = []
+            current = start_date
+            while current <= end_date:
+                labels.append(current.strftime("%d.%m"))
+                data.append(round(daily_data.get(current, 0), 2))
+                current += timedelta(days=1)
+
+            datasets = [{
+                "label": "This Period",
+                "data": data,
+                "borderColor": "#16A34A",
+                "backgroundColor": "rgba(22, 163, 74, 0.1)",
+                "fill": True,
+                "tension": 0.3,
+                "borderWidth": 2
+            }]
+
+            # Add previous period comparison
+            if include_comparison:
+                period_days = (end_date - start_date).days + 1
+                prev_end = start_date - timedelta(days=1)
+                prev_start = prev_end - timedelta(days=period_days - 1)
+
+                prev_params = [prev_start, prev_end]
+                prev_where = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+
+                if source_id:
+                    prev_where.append("o.source_id = ?")
+                    prev_params.append(source_id)
+
+                if category_id or brand:
+                    if category_id:
+                        prev_where.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                        prev_params.extend(cat_ids)
+                    if brand:
+                        prev_where.append("LOWER(p.brand) = LOWER(?)")
+                        prev_params.append(brand)
+
+                prev_sql = f"""
+                    SELECT DATE(o.ordered_at) as day, SUM(o.grand_total) as revenue
+                    FROM orders o {joins}
+                    WHERE {" AND ".join(prev_where)}
+                    GROUP BY DATE(o.ordered_at)
+                    ORDER BY day
+                """
+
+                prev_results = conn.execute(prev_sql, prev_params).fetchall()
+                prev_daily = {row[0]: float(row[1]) for row in prev_results}
+
+                prev_data = []
+                prev_current = prev_start
+                while prev_current <= prev_end:
+                    prev_data.append(round(prev_daily.get(prev_current, 0), 2))
+                    prev_current += timedelta(days=1)
+
+                datasets.append({
+                    "label": "Previous Period",
+                    "data": prev_data,
+                    "borderColor": "#9CA3AF",
+                    "backgroundColor": "rgba(156, 163, 175, 0.1)",
+                    "fill": False,
+                    "tension": 0.3,
+                    "borderWidth": 2,
+                    "borderDash": [5, 5]
+                })
+
+            return {"labels": labels, "datasets": datasets}
+
+    async def get_sales_by_source(
+        self,
+        start_date: date,
+        end_date: date,
+        category_id: Optional[int] = None,
+        brand: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Get sales breakdown by source."""
+        async with self.connection() as conn:
+            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+            params = [start_date, end_date]
+            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+
+            joins = ""
+            if category_id or brand:
+                joins = "JOIN order_products op ON o.id = op.order_id JOIN products p ON op.product_id = p.id"
+                if category_id:
+                    cat_ids = await self._get_category_with_children(conn, category_id)
+                    where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                    params.extend(cat_ids)
+                if brand:
+                    where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                    params.append(brand)
+
+            sql = f"""
+                SELECT
+                    o.source_id,
+                    COUNT(DISTINCT o.id) as orders,
+                    SUM(o.grand_total) as revenue
+                FROM orders o
+                {joins}
+                WHERE {" AND ".join(where_clauses)}
+                GROUP BY o.source_id
+                ORDER BY revenue DESC
+            """
+
+            results = conn.execute(sql, params).fetchall()
+
+            source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
+            source_colors = {1: "#7C3AED", 2: "#2563EB", 4: "#eb4200"}
+
+            labels = []
+            orders = []
+            revenue = []
+            colors = []
+
+            for row in results:
+                sid = row[0]
+                if sid in source_names:  # Only include active sources
+                    labels.append(source_names[sid])
+                    orders.append(row[1])
+                    revenue.append(round(float(row[2]), 2))
+                    colors.append(source_colors.get(sid, "#999999"))
+
+            return {
+                "labels": labels,
+                "orders": orders,
+                "revenue": revenue,
+                "backgroundColor": colors
+            }
+
+    async def get_top_products(
+        self,
+        start_date: date,
+        end_date: date,
+        source_id: Optional[int] = None,
+        category_id: Optional[int] = None,
+        brand: Optional[str] = None,
+        limit: int = 10
+    ) -> Dict[str, Any]:
+        """Get top products by quantity."""
+        async with self.connection() as conn:
+            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+            params = [start_date, end_date]
+            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+
+            if source_id:
+                where_clauses.append("o.source_id = ?")
+                params.append(source_id)
+
+            joins = "JOIN order_products op ON o.id = op.order_id LEFT JOIN products p ON op.product_id = p.id"
+
+            if category_id:
+                cat_ids = await self._get_category_with_children(conn, category_id)
+                where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                params.extend(cat_ids)
+
+            if brand:
+                where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                params.append(brand)
+
+            params.append(limit)
+
+            sql = f"""
+                SELECT
+                    op.name,
+                    SUM(op.quantity) as total_qty
+                FROM orders o
+                {joins}
+                WHERE {" AND ".join(where_clauses)}
+                GROUP BY op.name
+                ORDER BY total_qty DESC
+                LIMIT ?
+            """
+
+            results = conn.execute(sql, params).fetchall()
+
+            labels = [self._wrap_label(row[0]) for row in results]
+            data = [row[1] for row in results]
+            total = sum(data) if data else 1
+            percentages = [round(d / total * 100, 1) for d in data]
+
+            return {
+                "labels": labels,
+                "data": data,
+                "percentages": percentages,
+                "backgroundColor": "#2563EB"
+            }
+
+    async def get_categories(self) -> List[Dict[str, Any]]:
+        """Get root categories for filter dropdown."""
+        async with self.connection() as conn:
+            results = conn.execute("""
+                SELECT id, name FROM categories
+                WHERE parent_id IS NULL
+                ORDER BY name
+            """).fetchall()
+            return [{"id": row[0], "name": row[1]} for row in results]
+
+    async def get_child_categories(self, parent_id: int) -> List[Dict[str, Any]]:
+        """Get child categories for a parent."""
+        async with self.connection() as conn:
+            results = conn.execute("""
+                SELECT id, name FROM categories
+                WHERE parent_id = ?
+                ORDER BY name
+            """, [parent_id]).fetchall()
+            return [{"id": row[0], "name": row[1]} for row in results]
+
+    async def get_brands(self) -> List[Dict[str, str]]:
+        """Get all unique brands for filter dropdown."""
+        async with self.connection() as conn:
+            results = conn.execute("""
+                SELECT DISTINCT brand FROM products
+                WHERE brand IS NOT NULL AND brand != ''
+                ORDER BY brand
+            """).fetchall()
+            return [{"name": row[0]} for row in results]
+
+    # ─── Helper Methods ───────────────────────────────────────────────────────
+
+    async def _get_category_with_children(
+        self,
+        conn: duckdb.DuckDBPyConnection,
+        category_id: int
+    ) -> List[int]:
+        """Get category ID and all descendant IDs."""
+        result = [category_id]
+
+        # Recursive query to get all children
+        children = conn.execute("""
+            WITH RECURSIVE category_tree AS (
+                SELECT id FROM categories WHERE id = ?
+                UNION ALL
+                SELECT c.id FROM categories c
+                JOIN category_tree ct ON c.parent_id = ct.id
+            )
+            SELECT id FROM category_tree
+        """, [category_id]).fetchall()
+
+        return [row[0] for row in children]
+
+    @staticmethod
+    def _wrap_label(text: str, max_chars: int = 25) -> List[str]:
+        """Wrap long text for chart labels."""
+        if not text or len(text) <= max_chars:
+            return [text] if text else ["Unknown"]
+
+        words = text.split()
+        lines = []
+        current_line = ""
+
+        for word in words:
+            if len(current_line) + len(word) + 1 <= max_chars:
+                current_line = f"{current_line} {word}".strip()
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+
+        if current_line:
+            lines.append(current_line)
+
+        if len(lines) > 2:
+            lines = [lines[0], lines[1][:max_chars-3] + "..."]
+
+        return lines
+
+    # ─── Stats Methods ────────────────────────────────────────────────────────
+
+    async def get_stats(self) -> Dict[str, Any]:
+        """Get database statistics."""
+        async with self.connection() as conn:
+            orders_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+            products_count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+            categories_count = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
+
+            min_date = conn.execute("SELECT MIN(DATE(ordered_at)) FROM orders").fetchone()[0]
+            max_date = conn.execute("SELECT MAX(DATE(ordered_at)) FROM orders").fetchone()[0]
+
+            return {
+                "orders": orders_count,
+                "products": products_count,
+                "categories": categories_count,
+                "date_range": {
+                    "min": min_date.isoformat() if min_date else None,
+                    "max": max_date.isoformat() if max_date else None
+                },
+                "db_size_mb": round(self.db_path.stat().st_size / 1024 / 1024, 2) if self.db_path.exists() else 0
+            }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SINGLETON INSTANCE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_store_instance: Optional[DuckDBStore] = None
+
+
+async def get_store() -> DuckDBStore:
+    """Get singleton DuckDB store instance."""
+    global _store_instance
+    if _store_instance is None:
+        _store_instance = DuckDBStore()
+        await _store_instance.connect()
+    return _store_instance
+
+
+async def close_store() -> None:
+    """Close singleton store instance."""
+    global _store_instance
+    if _store_instance:
+        await _store_instance.close()
+        _store_instance = None

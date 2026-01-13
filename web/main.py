@@ -17,6 +17,8 @@ from web.services.dashboard_service import start_cache_warming, stop_cache_warmi
 from web.services.category_service import warm_product_cache
 from web.services.brand_service import warm_brand_cache
 from bot.database import init_database
+from core.duckdb_store import get_store, close_store
+from core.sync_service import init_and_sync, get_sync_service
 
 # Configure logging
 logging.basicConfig(
@@ -70,6 +72,18 @@ async def startup_event():
     # Initialize database (creates tables if not exist)
     init_database()
     logger.info("Database initialized")
+
+    # Initialize DuckDB and sync from API
+    logger.info("Initializing DuckDB analytics store...")
+    try:
+        await init_and_sync(full_sync_days=90)
+        store = await get_store()
+        stats = await store.get_stats()
+        logger.info(f"DuckDB ready: {stats['orders']} orders, {stats['products']} products, {stats['categories']} categories")
+    except Exception as e:
+        logger.error(f"DuckDB initialization failed: {e}", exc_info=True)
+        # Continue without DuckDB - fallback to API-based queries
+
     # Pre-load product categories and brands for filtering
     logger.info("Warming product category cache...")
     await warm_product_cache()
@@ -85,4 +99,12 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     stop_cache_warming()
-    logger.info("KeyCRM Dashboard stopped")
+    # Stop background sync and close DuckDB
+    try:
+        sync_service = await get_sync_service()
+        sync_service.stop_background_sync()
+        await close_store()
+        logger.info("DuckDB closed")
+    except Exception as e:
+        logger.warning(f"Error closing DuckDB: {e}")
+    logger.info("KoreanStory Dashboard stopped")

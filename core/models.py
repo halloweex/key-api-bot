@@ -289,8 +289,10 @@ class Product:
         custom_fields = data.get("custom_fields", [])
         if isinstance(custom_fields, list):
             for cf in custom_fields:
-                if cf.get("name") == "Бренд" or cf.get("uuid") == "CT_1006":
-                    brand = cf.get("value")
+                if cf.get("name") == "Brand" or cf.get("uuid") == "CT_1001":
+                    values = cf.get("value", [])
+                    if values and isinstance(values, list):
+                        brand = values[0]
                     break
 
         return cls(
