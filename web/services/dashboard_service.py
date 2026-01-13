@@ -12,7 +12,6 @@ from bot.api_client import KeyCRMClient
 from bot.services import ReportService
 from bot.config import (
     KEYCRM_API_KEY,
-    KEYCRM_BASE_URL,
     SOURCE_MAPPING,
     DEFAULT_TIMEZONE,
     RETURN_STATUS_IDS,

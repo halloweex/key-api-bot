@@ -7,6 +7,7 @@ keyboards and formatters modules to eliminate duplication.
 import asyncio
 import logging
 import calendar
+import threading
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional
@@ -160,7 +161,6 @@ def authorized(func):
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # Global user data storage with session management
-import threading
 _user_data: Dict[int, Dict[str, Any]] = {}
 _user_data_lock = threading.RLock()
 
