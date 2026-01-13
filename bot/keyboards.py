@@ -26,7 +26,7 @@ class ReplyKeyboards:
         keyboard = [
             [KeyboardButton("📊 Report"), KeyboardButton("🔍 Search")],
             [
-                KeyboardButton("📈 Dashboard", web_app=WebAppInfo(url=DASHBOARD_URL)),
+                KeyboardButton("Dashboard", web_app=WebAppInfo(url=DASHBOARD_URL)),
                 KeyboardButton("⚙️ Settings")
             ],
             [KeyboardButton("ℹ️ Help")],

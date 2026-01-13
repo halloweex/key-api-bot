@@ -51,7 +51,7 @@ async def setup_command_menu(application: Application) -> None:
             from bot.config import DASHBOARD_URL
             logger.info("Setting menu button to open dashboard...")
             web_app = WebAppInfo(url=DASHBOARD_URL)
-            menu_button = MenuButtonWebApp(text="📈 Dashboard", web_app=web_app)
+            menu_button = MenuButtonWebApp(text="Dashboard", web_app=web_app)
             await application.bot.set_chat_menu_button(menu_button=menu_button)
             logger.info(f"Menu button set to open: {DASHBOARD_URL}")
         except Exception as menu_error:
