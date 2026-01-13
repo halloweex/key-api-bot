@@ -3,9 +3,10 @@ API routes for chart data.
 Fully async implementation.
 
 All endpoints are rate-limited to prevent abuse:
-- Lightweight endpoints (categories, brands): 60 requests/minute
+- Lightweight endpoints (categories, brands, health): 60 requests/minute
 - Data-heavy endpoints (revenue, summary, etc.): 30 requests/minute
 """
+import time
 from fastapi import APIRouter, Query, Request, HTTPException
 from typing import Optional
 
@@ -15,6 +16,7 @@ from slowapi.util import get_remote_address
 from web.services import dashboard_service
 from web.services import category_service
 from web.services import brand_service
+from web.config import VERSION
 from core.validators import (
     validate_period,
     validate_source_id,
@@ -26,8 +28,29 @@ from core.exceptions import ValidationError
 
 router = APIRouter(tags=["api"])
 
+# Track startup time for uptime calculation
+_start_time = time.time()
+
 # Rate limiter (uses app.state.limiter from main.py)
 limiter = Limiter(key_func=get_remote_address)
+
+
+# ─── Health Check ────────────────────────────────────────────────────────────
+
+@router.get("/health")
+@limiter.limit("60/minute")
+async def health_check(request: Request):
+    """Health check endpoint for Docker/load balancer monitoring."""
+    uptime_seconds = int(time.time() - _start_time)
+    return {
+        "status": "healthy",
+        "version": VERSION,
+        "uptime_seconds": uptime_seconds,
+        "services": {
+            "categories_loaded": category_service.is_products_loaded(),
+            "brands_loaded": brand_service.is_brands_loaded()
+        }
+    }
 
 
 # ─── Lightweight Endpoints (60/minute) ─────────────────────────────────────────
