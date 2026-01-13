@@ -11,10 +11,9 @@ from telegram import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     KeyboardButton,
-    ReplyKeyboardRemove,
-    WebAppInfo
+    ReplyKeyboardRemove
 )
-from bot.config import REPORT_TYPES, DATE_RANGES, SOURCE_NAMES, DASHBOARD_URL
+from bot.config import REPORT_TYPES, DATE_RANGES, SOURCE_NAMES
 
 
 class ReplyKeyboards:
@@ -25,10 +24,7 @@ class ReplyKeyboards:
         """Create persistent main menu keyboard at bottom of chat."""
         keyboard = [
             [KeyboardButton("📊 Report"), KeyboardButton("🔍 Search")],
-            [
-                KeyboardButton("Dashboard", web_app=WebAppInfo(url=DASHBOARD_URL)),
-                KeyboardButton("⚙️ Settings")
-            ],
+            [KeyboardButton("📈 Dashboard"), KeyboardButton("⚙️ Settings")],
             [KeyboardButton("ℹ️ Help")],
         ]
         return ReplyKeyboardMarkup(
