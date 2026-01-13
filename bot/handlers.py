@@ -10,11 +10,12 @@ import calendar
 import threading
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from functools import wraps
+from core.filters import parse_period
 from bot.config import (
     ConversationState,
     REPORT_TYPES,
@@ -236,7 +237,7 @@ def cleanup_expired_sessions() -> int:
 user_data = _user_data
 
 
-def calculate_date_range(range_name: str) -> tuple[date, date]:
+def calculate_date_range(range_name: str) -> Tuple[date, date]:
     """
     Calculate start and end dates for a given range name.
 
@@ -246,21 +247,7 @@ def calculate_date_range(range_name: str) -> tuple[date, date]:
     Returns:
         Tuple of (start_date, end_date)
     """
-    today = date.today()
-
-    if range_name == "today":
-        return today, today
-    elif range_name == "yesterday":
-        yesterday = today - timedelta(days=1)
-        return yesterday, yesterday
-    elif range_name == "thisweek":
-        start = today - timedelta(days=today.weekday())
-        return start, today
-    elif range_name == "thismonth":
-        start = date(today.year, today.month, 1)
-        return start, today
-    else:
-        raise ValueError(f"Unknown date range: {range_name}")
+    return parse_period(range_name).as_tuple()
 
 
 # ═══════════════════════════════════════════════════════════════════════════

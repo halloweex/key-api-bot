@@ -17,6 +17,7 @@ from bot.config import (
 from core.keycrm import get_async_client
 from core.models import Order, SourceId, OrderStatus
 from core.cache import dashboard_cache
+from core.filters import parse_period as _parse_period_core
 
 logger = logging.getLogger(__name__)
 
@@ -72,38 +73,8 @@ def _wrap_label(text: str, max_chars: int = 25) -> List[str]:
 
 
 def parse_period(period: Optional[str], start_date: Optional[str], end_date: Optional[str]) -> Tuple[str, str]:
-    """
-    Parse period shortcut or dates into (start_date, end_date) tuple.
-    """
-    today = datetime.now().date()
-
-    if period:
-        if period == "today":
-            return (today.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
-        elif period == "yesterday":
-            yesterday = today - timedelta(days=1)
-            return (yesterday.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d"))
-        elif period == "week":
-            start_of_week = today - timedelta(days=today.weekday())
-            return (start_of_week.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
-        elif period == "last_week":
-            start_of_this_week = today - timedelta(days=today.weekday())
-            end_of_last_week = start_of_this_week - timedelta(days=1)
-            start_of_last_week = end_of_last_week - timedelta(days=6)
-            return (start_of_last_week.strftime("%Y-%m-%d"), end_of_last_week.strftime("%Y-%m-%d"))
-        elif period == "month":
-            start_of_month = today.replace(day=1)
-            return (start_of_month.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
-        elif period == "last_month":
-            first_of_this_month = today.replace(day=1)
-            last_of_last_month = first_of_this_month - timedelta(days=1)
-            first_of_last_month = last_of_last_month.replace(day=1)
-            return (first_of_last_month.strftime("%Y-%m-%d"), last_of_last_month.strftime("%Y-%m-%d"))
-
-    if start_date and end_date:
-        return (start_date, end_date)
-
-    return (today.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
+    """Parse period shortcut or dates into (start_date, end_date) tuple."""
+    return _parse_period_core(period, start_date, end_date).as_str_tuple()
 
 
 # ─── Date/Time Utilities ──────────────────────────────────────────────────────
