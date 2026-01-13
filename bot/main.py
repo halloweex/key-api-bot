@@ -166,8 +166,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handlers.command_button_handler, pattern=r"^cmd_"))
 
     # Add reply keyboard text handlers
+    # Note: Dashboard button uses WebApp, opens directly without message
     application.add_handler(MessageHandler(filters.Regex(r"^ℹ️ Help$"), handlers.reply_keyboard_help))
-    application.add_handler(MessageHandler(filters.Regex(r"^📈 Dashboard$"), handlers.reply_keyboard_dashboard))
     application.add_handler(MessageHandler(filters.Regex(r"^🔍 Search$"), handlers.reply_keyboard_search))
     application.add_handler(MessageHandler(filters.Regex(r"^⚙️ Settings$"), handlers.reply_keyboard_settings))
 
