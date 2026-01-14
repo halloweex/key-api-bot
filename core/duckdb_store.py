@@ -668,6 +668,297 @@ class DuckDBStore:
 
         return lines
 
+    # ─── Advanced Analytics Methods ──────────────────────────────────────────────
+
+    async def get_customer_insights(
+        self,
+        start_date: date,
+        end_date: date,
+        source_id: Optional[int] = None,
+        brand: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Get customer insights: new vs returning, AOV trend."""
+        async with self.connection() as conn:
+            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+            params = [start_date, end_date]
+            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+
+            joins = ""
+            if source_id:
+                where_clauses.append("o.source_id = ?")
+                params.append(source_id)
+
+            if brand:
+                joins = "JOIN order_products op ON o.id = op.order_id JOIN products p ON op.product_id = p.id"
+                where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                params.append(brand)
+
+            where_sql = " AND ".join(where_clauses)
+
+            # New vs returning customers (based on buyer creation date)
+            customer_sql = f"""
+                SELECT
+                    COUNT(DISTINCT CASE WHEN DATE(o.created_at) >= ? THEN o.buyer_id END) as new_customers,
+                    COUNT(DISTINCT CASE WHEN DATE(o.created_at) < ? THEN o.buyer_id END) as returning_customers,
+                    COUNT(DISTINCT o.id) as total_orders
+                FROM orders o
+                {joins}
+                WHERE {where_sql} AND o.buyer_id IS NOT NULL
+            """
+            customer_params = [start_date] + params + [start_date]
+            # Simplified: use order created_at as proxy for customer newness
+            customer_result = conn.execute(f"""
+                SELECT
+                    COUNT(DISTINCT o.buyer_id) as total_customers,
+                    COUNT(DISTINCT o.id) as total_orders,
+                    SUM(o.grand_total) as total_revenue
+                FROM orders o
+                {joins}
+                WHERE {where_sql} AND o.buyer_id IS NOT NULL
+            """, params).fetchone()
+
+            total_customers = customer_result[0] or 0
+            total_orders = customer_result[1] or 0
+            total_revenue = float(customer_result[2] or 0)
+
+            # Estimate new vs returning (buyers whose first order in DB is in this period)
+            new_customers_result = conn.execute(f"""
+                WITH first_orders AS (
+                    SELECT buyer_id, MIN(DATE(ordered_at)) as first_order_date
+                    FROM orders
+                    WHERE buyer_id IS NOT NULL
+                    GROUP BY buyer_id
+                )
+                SELECT COUNT(DISTINCT o.buyer_id)
+                FROM orders o
+                {joins}
+                JOIN first_orders fo ON o.buyer_id = fo.buyer_id
+                WHERE {where_sql} AND fo.first_order_date >= ?
+            """, params + [start_date]).fetchone()
+            new_customers = new_customers_result[0] or 0
+            returning_customers = total_customers - new_customers
+
+            # AOV trend by day
+            aov_sql = f"""
+                SELECT
+                    DATE(o.ordered_at) as day,
+                    AVG(o.grand_total) as avg_order_value,
+                    COUNT(DISTINCT o.id) as orders
+                FROM orders o
+                {joins}
+                WHERE {where_sql}
+                GROUP BY DATE(o.ordered_at)
+                ORDER BY day
+            """
+            aov_results = conn.execute(aov_sql, params).fetchall()
+            aov_by_day = {row[0]: {"aov": float(row[1]), "orders": row[2]} for row in aov_results}
+
+            # Build AOV trend data
+            labels = []
+            aov_data = []
+            current = start_date
+            while current <= end_date:
+                labels.append(current.strftime("%d.%m"))
+                day_data = aov_by_day.get(current, {"aov": 0, "orders": 0})
+                aov_data.append(round(day_data["aov"], 2))
+                current += timedelta(days=1)
+
+            overall_aov = total_revenue / total_orders if total_orders > 0 else 0
+
+            return {
+                "newVsReturning": {
+                    "labels": ["New Customers", "Returning Customers"],
+                    "data": [new_customers, returning_customers],
+                    "backgroundColor": ["#2563EB", "#16A34A"]
+                },
+                "aovTrend": {
+                    "labels": labels,
+                    "datasets": [{
+                        "label": "AOV (UAH)",
+                        "data": aov_data,
+                        "borderColor": "#F59E0B",
+                        "backgroundColor": "rgba(245, 158, 11, 0.1)",
+                        "fill": True,
+                        "tension": 0.3
+                    }]
+                },
+                "metrics": {
+                    "totalCustomers": total_customers,
+                    "newCustomers": new_customers,
+                    "returningCustomers": returning_customers,
+                    "totalOrders": total_orders,
+                    "repeatRate": round((returning_customers / total_customers * 100) if total_customers > 0 else 0, 1),
+                    "averageOrderValue": round(overall_aov, 2)
+                }
+            }
+
+    async def get_product_performance(
+        self,
+        start_date: date,
+        end_date: date,
+        source_id: Optional[int] = None,
+        brand: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Get product performance: top by revenue, category breakdown."""
+        async with self.connection() as conn:
+            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+            params = [start_date, end_date]
+            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+
+            if source_id:
+                where_clauses.append("o.source_id = ?")
+                params.append(source_id)
+
+            brand_filter = ""
+            if brand:
+                brand_filter = "AND LOWER(p.brand) = LOWER(?)"
+                params.append(brand)
+
+            where_sql = " AND ".join(where_clauses)
+
+            # Top products by revenue
+            top_revenue_sql = f"""
+                SELECT
+                    op.name,
+                    SUM(op.price_sold * op.quantity) as revenue,
+                    SUM(op.quantity) as quantity
+                FROM orders o
+                JOIN order_products op ON o.id = op.order_id
+                LEFT JOIN products p ON op.product_id = p.id
+                WHERE {where_sql} {brand_filter}
+                GROUP BY op.name
+                ORDER BY revenue DESC
+                LIMIT 10
+            """
+            top_results = conn.execute(top_revenue_sql, params).fetchall()
+
+            top_by_revenue = {
+                "labels": [self._wrap_label(row[0]) for row in top_results],
+                "data": [round(float(row[1]), 2) for row in top_results],
+                "quantities": [row[2] for row in top_results],
+                "backgroundColor": "#16A34A"
+            }
+
+            # Category breakdown
+            cat_params = [start_date, end_date]
+            if source_id:
+                cat_params.append(source_id)
+            if brand:
+                cat_params.append(brand)
+
+            category_sql = f"""
+                SELECT
+                    COALESCE(c.name, 'Other') as category_name,
+                    SUM(op.price_sold * op.quantity) as revenue,
+                    SUM(op.quantity) as quantity
+                FROM orders o
+                JOIN order_products op ON o.id = op.order_id
+                LEFT JOIN products p ON op.product_id = p.id
+                LEFT JOIN categories c ON p.category_id = c.id
+                WHERE {where_sql} {brand_filter}
+                GROUP BY COALESCE(c.name, 'Other')
+                ORDER BY revenue DESC
+            """
+            cat_results = conn.execute(category_sql, params).fetchall()
+
+            category_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4"]
+            category_breakdown = {
+                "labels": [row[0] for row in cat_results],
+                "revenue": [round(float(row[1]), 2) for row in cat_results],
+                "quantity": [row[2] for row in cat_results],
+                "backgroundColor": category_colors[:len(cat_results)]
+            }
+
+            total_revenue = sum(float(row[1]) for row in top_results) if top_results else 0
+            total_quantity = sum(row[2] for row in top_results) if top_results else 0
+
+            return {
+                "topByRevenue": top_by_revenue,
+                "categoryBreakdown": category_breakdown,
+                "metrics": {
+                    "totalProducts": len(top_results),
+                    "totalRevenue": round(total_revenue, 2),
+                    "totalQuantity": total_quantity,
+                    "avgProductRevenue": round(total_revenue / len(top_results), 2) if top_results else 0
+                }
+            }
+
+    async def get_brand_analytics(
+        self,
+        start_date: date,
+        end_date: date,
+        source_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Get brand analytics: top brands by revenue and quantity."""
+        async with self.connection() as conn:
+            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+            params = [start_date, end_date]
+            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+
+            if source_id:
+                where_clauses.append("o.source_id = ?")
+                params.append(source_id)
+
+            where_sql = " AND ".join(where_clauses)
+
+            # Brand stats
+            brand_sql = f"""
+                SELECT
+                    COALESCE(p.brand, 'Unknown') as brand_name,
+                    SUM(op.price_sold * op.quantity) as revenue,
+                    SUM(op.quantity) as quantity,
+                    COUNT(DISTINCT o.id) as orders
+                FROM orders o
+                JOIN order_products op ON o.id = op.order_id
+                LEFT JOIN products p ON op.product_id = p.id
+                WHERE {where_sql}
+                GROUP BY COALESCE(p.brand, 'Unknown')
+                ORDER BY revenue DESC
+            """
+            brand_results = conn.execute(brand_sql, params).fetchall()
+
+            brand_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4", "#14B8A6", "#EF4444"]
+
+            # Top 10 by revenue
+            top_by_revenue = brand_results[:10]
+            top_brands_revenue = {
+                "labels": [row[0] for row in top_by_revenue],
+                "data": [round(float(row[1]), 2) for row in top_by_revenue],
+                "quantities": [row[2] for row in top_by_revenue],
+                "orders": [row[3] for row in top_by_revenue],
+                "backgroundColor": brand_colors[:len(top_by_revenue)]
+            }
+
+            # Top 10 by quantity
+            sorted_by_qty = sorted(brand_results, key=lambda x: x[2], reverse=True)[:10]
+            top_brands_quantity = {
+                "labels": [row[0] for row in sorted_by_qty],
+                "data": [row[2] for row in sorted_by_qty],
+                "revenue": [round(float(row[1]), 2) for row in sorted_by_qty],
+                "backgroundColor": brand_colors[:len(sorted_by_qty)]
+            }
+
+            total_revenue = sum(float(row[1]) for row in brand_results)
+            total_quantity = sum(row[2] for row in brand_results)
+            unique_brands = len([b for b in brand_results if b[0] != "Unknown"])
+
+            top_brand = brand_results[0][0] if brand_results else "N/A"
+            top_brand_revenue = float(brand_results[0][1]) if brand_results else 0
+            top_brand_share = (top_brand_revenue / total_revenue * 100) if total_revenue > 0 else 0
+
+            return {
+                "topByRevenue": top_brands_revenue,
+                "topByQuantity": top_brands_quantity,
+                "metrics": {
+                    "totalBrands": unique_brands,
+                    "topBrand": top_brand,
+                    "topBrandShare": round(top_brand_share, 1),
+                    "totalRevenue": round(total_revenue, 2),
+                    "totalQuantity": total_quantity,
+                    "avgBrandRevenue": round(total_revenue / unique_brands, 2) if unique_brands > 0 else 0
+                }
+            }
+
     # ─── Stats Methods ────────────────────────────────────────────────────────
 
     async def get_stats(self) -> Dict[str, Any]:

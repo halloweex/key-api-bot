@@ -13,9 +13,6 @@ from slowapi.errors import RateLimitExceeded
 
 from web.config import STATIC_DIR, VERSION
 from web.routes import api, pages, auth
-from web.services.dashboard_service import start_cache_warming, stop_cache_warming
-from web.services.category_service import warm_product_cache
-from web.services.brand_service import warm_brand_cache
 from bot.database import init_database
 from core.duckdb_store import get_store, close_store
 from core.sync_service import init_and_sync, get_sync_service
@@ -69,36 +66,32 @@ app.include_router(api.router, prefix="/api")
 @app.on_event("startup")
 async def startup_event():
     logger.info("KoreanStory Dashboard started")
-    # Initialize database (creates tables if not exist)
-    init_database()
-    logger.info("Database initialized")
 
-    # Initialize DuckDB and sync from API
+    # Initialize SQLite database (for bot operations)
+    init_database()
+    logger.info("SQLite database initialized")
+
+    # Initialize DuckDB analytics store and sync from API
     logger.info("Initializing DuckDB analytics store...")
     try:
         await init_and_sync(full_sync_days=90)
         store = await get_store()
         stats = await store.get_stats()
-        logger.info(f"DuckDB ready: {stats['orders']} orders, {stats['products']} products, {stats['categories']} categories")
+        logger.info(
+            f"DuckDB ready: {stats['orders']} orders, "
+            f"{stats['products']} products, "
+            f"{stats['categories']} categories, "
+            f"{stats['db_size_mb']} MB"
+        )
     except Exception as e:
         logger.error(f"DuckDB initialization failed: {e}", exc_info=True)
-        # Continue without DuckDB - fallback to API-based queries
+        raise  # Fail fast - DuckDB is required
 
-    # Pre-load product categories and brands for filtering
-    logger.info("Warming product category cache...")
-    await warm_product_cache()
-    logger.info("Product category cache ready")
-    logger.info("Warming brand cache...")
-    await warm_brand_cache()
-    logger.info("Brand cache ready")
-    # Start background cache warming
-    start_cache_warming()
-    logger.info("Background cache warming started")
+    logger.info("Dashboard ready - all queries use DuckDB")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    stop_cache_warming()
     # Stop background sync and close DuckDB
     try:
         sync_service = await get_sync_service()

@@ -14,11 +14,8 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from web.services import dashboard_service
-from web.services import category_service
-from web.services import brand_service
 from core.duckdb_store import get_store
 from web.config import VERSION
-from core.cache import dashboard_cache
 from core.validators import (
     validate_period,
     validate_source_id,
@@ -45,24 +42,23 @@ async def health_check(request: Request):
     """Health check endpoint for Docker/load balancer monitoring."""
     uptime_seconds = int(time.time() - _start_time)
 
-    # Get DuckDB stats if available
-    duckdb_stats = None
+    # Get DuckDB stats
     try:
         store = await get_store()
         duckdb_stats = await store.get_stats()
-    except Exception:
-        pass
+        duckdb_status = "connected"
+    except Exception as e:
+        duckdb_stats = None
+        duckdb_status = f"error: {e}"
 
     return {
-        "status": "healthy",
+        "status": "healthy" if duckdb_stats else "degraded",
         "version": VERSION,
         "uptime_seconds": uptime_seconds,
-        "services": {
-            "categories_loaded": category_service.is_products_loaded(),
-            "brands_loaded": brand_service.is_brands_loaded()
-        },
-        "cache": dashboard_cache.stats,
-        "duckdb": duckdb_stats
+        "duckdb": {
+            "status": duckdb_status,
+            **(duckdb_stats or {})
+        }
     }
 
 
@@ -90,7 +86,8 @@ async def get_duckdb_stats(request: Request):
 @limiter.limit("60/minute")
 async def get_categories(request: Request):
     """Get list of root categories for filter dropdown."""
-    return await category_service.get_categories_for_api()
+    store = await get_store()
+    return await store.get_categories()
 
 
 @router.get("/categories/{parent_id}/children")
@@ -101,14 +98,16 @@ async def get_child_categories(request: Request, parent_id: int):
         validate_category_id(parent_id, allow_none=False)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return await category_service.get_child_categories(parent_id)
+    store = await get_store()
+    return await store.get_child_categories(parent_id)
 
 
 @router.get("/brands")
 @limiter.limit("60/minute")
 async def get_brands(request: Request):
     """Get list of brands for filter dropdown."""
-    return await brand_service.get_brands_for_api()
+    store = await get_store()
+    return await store.get_brands()
 
 
 # ─── Data-Heavy Endpoints (30/minute) ──────────────────────────────────────────
