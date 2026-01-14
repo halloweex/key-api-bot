@@ -21,7 +21,8 @@ from core.validators import (
     validate_source_id,
     validate_category_id,
     validate_brand_name,
-    validate_limit
+    validate_limit,
+    validate_sales_type
 )
 from core.exceptions import ValidationError
 
@@ -121,7 +122,8 @@ async def get_revenue_trend(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
-    brand: Optional[str] = Query(None, description="Filter by brand name")
+    brand: Optional[str] = Query(None, description="Filter by brand name"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
 ):
     """Get revenue trend data for line chart."""
     try:
@@ -129,12 +131,13 @@ async def get_revenue_trend(
         validate_source_id(source_id)
         validate_category_id(category_id)
         brand = validate_brand_name(brand)
+        sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_revenue_trend(
-        start, end, category_id=category_id, brand=brand, source_id=source_id
+        start, end, category_id=category_id, brand=brand, source_id=source_id, sales_type=sales_type
     )
 
 
@@ -147,7 +150,8 @@ async def get_sales_by_source(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
-    brand: Optional[str] = Query(None, description="Filter by brand name")
+    brand: Optional[str] = Query(None, description="Filter by brand name"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
 ):
     """Get sales data by source for bar/pie chart."""
     try:
@@ -155,11 +159,12 @@ async def get_sales_by_source(
         validate_source_id(source_id)
         validate_category_id(category_id)
         brand = validate_brand_name(brand)
+        sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return await dashboard_service.get_sales_by_source(start, end, category_id, brand=brand, source_id=source_id)
+    return await dashboard_service.get_sales_by_source(start, end, category_id, brand=brand, source_id=source_id, sales_type=sales_type)
 
 
 @router.get("/products/top")
@@ -172,7 +177,8 @@ async def get_top_products(
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
     brand: Optional[str] = Query(None, description="Filter by brand name"),
-    limit: int = Query(10, description="Number of products to return")
+    limit: int = Query(10, description="Number of products to return"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
 ):
     """Get top products for horizontal bar chart."""
     try:
@@ -181,11 +187,12 @@ async def get_top_products(
         validate_category_id(category_id)
         brand = validate_brand_name(brand)
         limit = validate_limit(limit, max_value=50)
+        sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return await dashboard_service.get_top_products(start, end, source_id, limit, category_id, brand=brand)
+    return await dashboard_service.get_top_products(start, end, source_id, limit, category_id, brand=brand, sales_type=sales_type)
 
 
 @router.get("/summary")
@@ -197,7 +204,8 @@ async def get_summary(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
-    brand: Optional[str] = Query(None, description="Filter by brand name")
+    brand: Optional[str] = Query(None, description="Filter by brand name"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
 ):
     """Get summary statistics for dashboard cards."""
     try:
@@ -205,11 +213,12 @@ async def get_summary(
         validate_source_id(source_id)
         validate_category_id(category_id)
         brand = validate_brand_name(brand)
+        sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return await dashboard_service.get_summary_stats(start, end, category_id, brand=brand, source_id=source_id)
+    return await dashboard_service.get_summary_stats(start, end, category_id, brand=brand, source_id=source_id, sales_type=sales_type)
 
 
 @router.get("/customers/insights")
@@ -220,18 +229,20 @@ async def get_customer_insights(
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
-    brand: Optional[str] = Query(None, description="Filter by brand name")
+    brand: Optional[str] = Query(None, description="Filter by brand name"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
 ):
     """Get customer insights: new vs returning, AOV trend, repeat rate."""
     try:
         validate_period(period)
         validate_source_id(source_id)
         brand = validate_brand_name(brand)
+        sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return await dashboard_service.get_customer_insights(start, end, brand=brand, source_id=source_id)
+    return await dashboard_service.get_customer_insights(start, end, brand=brand, source_id=source_id, sales_type=sales_type)
 
 
 @router.get("/products/performance")
@@ -242,18 +253,20 @@ async def get_product_performance(
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
-    brand: Optional[str] = Query(None, description="Filter by brand name")
+    brand: Optional[str] = Query(None, description="Filter by brand name"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
 ):
     """Get product performance: top by revenue, category breakdown."""
     try:
         validate_period(period)
         validate_source_id(source_id)
         brand = validate_brand_name(brand)
+        sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return await dashboard_service.get_product_performance(start, end, brand=brand, source_id=source_id)
+    return await dashboard_service.get_product_performance(start, end, brand=brand, source_id=source_id, sales_type=sales_type)
 
 
 @router.get("/brands/analytics")
@@ -262,13 +275,15 @@ async def get_brand_analytics(
     request: Request,
     period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
 ):
     """Get brand analytics: top brands by revenue and quantity."""
     try:
         validate_period(period)
+        sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return await dashboard_service.get_brand_analytics(start, end)
+    return await dashboard_service.get_brand_analytics(start, end, sales_type=sales_type)

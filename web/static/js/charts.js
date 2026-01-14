@@ -17,6 +17,7 @@ let brandQuantityChart = null;
 let currentPeriod = 'week';
 let customStartDate = null;
 let customEndDate = null;
+let currentSalesType = 'retail';  // retail (default) or b2b
 let currentSourceId = null;
 let currentParentCategoryId = null;
 let currentCategoryId = null;
@@ -42,6 +43,7 @@ document.addEventListener('DOMContentLoaded', function() {
     initDateInputs();
     initPeriodButtons();
     initApplyButton();
+    initSalesTypeFilter();
     initSourceFilter();
     initCategoryFilter();
     initBrandFilter();
@@ -461,6 +463,14 @@ async function loadBrands() {
     }
 }
 
+// Sales type filter handler (Retail/B2B)
+function initSalesTypeFilter() {
+    document.getElementById('salesTypeFilter').addEventListener('change', function() {
+        currentSalesType = this.value;
+        loadAllData();
+    });
+}
+
 // Source filter handler
 function initSourceFilter() {
     document.getElementById('sourceFilter').addEventListener('change', function() {
@@ -576,6 +586,11 @@ function buildQuery() {
         query = `?start_date=${customStartDate}&end_date=${customEndDate}`;
     } else {
         query = '?period=today';
+    }
+
+    // Add sales type filter (retail/b2b)
+    if (currentSalesType) {
+        query += `&sales_type=${currentSalesType}`;
     }
 
     // Add source filter
@@ -1139,6 +1154,11 @@ async function loadBrandAnalytics() {
             query = `?start_date=${customStartDate}&end_date=${customEndDate}`;
         } else {
             query = '?period=today';
+        }
+
+        // Add sales type filter
+        if (currentSalesType) {
+            query += `&sales_type=${currentSalesType}`;
         }
 
         const response = await fetch('/api/brands/analytics' + query);

@@ -291,3 +291,44 @@ def validate_period(
         )
 
     return value
+
+
+def validate_sales_type(
+    value: Optional[str],
+    field: str = "sales_type",
+    allow_none: bool = True
+) -> Optional[str]:
+    """
+    Validate a sales type filter (retail/b2b).
+
+    Args:
+        value: Sales type string to validate
+        field: Field name for error messages
+        allow_none: Whether None is allowed (defaults to 'retail')
+
+    Returns:
+        Validated sales type string or None
+
+    Raises:
+        ValidationError: If sales type is invalid
+    """
+    valid_types = {"retail", "b2b"}
+
+    if value is None or value == "":
+        if allow_none:
+            return "retail"  # Default to retail
+        raise ValidationError(field, "Sales type is required")
+
+    if not isinstance(value, str):
+        raise ValidationError(field, "Must be a string", value)
+
+    value = value.lower().strip()
+
+    if value not in valid_types:
+        raise ValidationError(
+            field,
+            f"Must be one of: {', '.join(sorted(valid_types))}",
+            value
+        )
+
+    return value

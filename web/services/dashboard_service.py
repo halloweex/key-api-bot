@@ -36,7 +36,8 @@ async def get_revenue_trend(
     include_comparison: bool = True,
     category_id: Optional[int] = None,
     brand: Optional[str] = None,
-    source_id: Optional[int] = None
+    source_id: Optional[int] = None,
+    sales_type: str = "retail"
 ) -> Dict[str, Any]:
     """Get revenue data over time for line chart."""
     start, end = _parse_dates(start_date, end_date)
@@ -46,7 +47,8 @@ async def get_revenue_trend(
         source_id=source_id,
         category_id=category_id,
         brand=brand,
-        include_comparison=include_comparison
+        include_comparison=include_comparison,
+        sales_type=sales_type
     )
 
 
@@ -55,7 +57,8 @@ async def get_sales_by_source(
     end_date: str,
     category_id: Optional[int] = None,
     brand: Optional[str] = None,
-    source_id: Optional[int] = None
+    source_id: Optional[int] = None,
+    sales_type: str = "retail"
 ) -> Dict[str, Any]:
     """Get sales data aggregated by source for bar/pie chart."""
     start, end = _parse_dates(start_date, end_date)
@@ -63,7 +66,8 @@ async def get_sales_by_source(
     return await store.get_sales_by_source(
         start, end,
         category_id=category_id,
-        brand=brand
+        brand=brand,
+        sales_type=sales_type
     )
 
 
@@ -73,7 +77,8 @@ async def get_top_products(
     source_id: Optional[int] = None,
     limit: int = 10,
     category_id: Optional[int] = None,
-    brand: Optional[str] = None
+    brand: Optional[str] = None,
+    sales_type: str = "retail"
 ) -> Dict[str, Any]:
     """Get top products for horizontal bar chart."""
     start, end = _parse_dates(start_date, end_date)
@@ -83,7 +88,8 @@ async def get_top_products(
         source_id=source_id,
         category_id=category_id,
         brand=brand,
-        limit=limit
+        limit=limit,
+        sales_type=sales_type
     )
 
 
@@ -92,7 +98,8 @@ async def get_summary_stats(
     end_date: str,
     category_id: Optional[int] = None,
     brand: Optional[str] = None,
-    source_id: Optional[int] = None
+    source_id: Optional[int] = None,
+    sales_type: str = "retail"
 ) -> Dict[str, Any]:
     """Get summary statistics for dashboard cards."""
     start, end = _parse_dates(start_date, end_date)
@@ -101,7 +108,8 @@ async def get_summary_stats(
         start, end,
         source_id=source_id,
         category_id=category_id,
-        brand=brand
+        brand=brand,
+        sales_type=sales_type
     )
 
 
@@ -109,7 +117,8 @@ async def get_customer_insights(
     start_date: str,
     end_date: str,
     brand: Optional[str] = None,
-    source_id: Optional[int] = None
+    source_id: Optional[int] = None,
+    sales_type: str = "retail"
 ) -> Dict[str, Any]:
     """Get customer insights: new vs returning, AOV trend, repeat rate."""
     start, end = _parse_dates(start_date, end_date)
@@ -117,7 +126,8 @@ async def get_customer_insights(
     return await store.get_customer_insights(
         start, end,
         source_id=source_id,
-        brand=brand
+        brand=brand,
+        sales_type=sales_type
     )
 
 
@@ -125,7 +135,8 @@ async def get_product_performance(
     start_date: str,
     end_date: str,
     brand: Optional[str] = None,
-    source_id: Optional[int] = None
+    source_id: Optional[int] = None,
+    sales_type: str = "retail"
 ) -> Dict[str, Any]:
     """Get product performance: top by revenue, category breakdown."""
     start, end = _parse_dates(start_date, end_date)
@@ -133,15 +144,16 @@ async def get_product_performance(
     return await store.get_product_performance(
         start, end,
         source_id=source_id,
-        brand=brand
+        brand=brand,
+        sales_type=sales_type
     )
 
 
-async def get_brand_analytics(start_date: str, end_date: str) -> Dict[str, Any]:
+async def get_brand_analytics(start_date: str, end_date: str, sales_type: str = "retail") -> Dict[str, Any]:
     """Get brand analytics: top brands by revenue and quantity."""
     start, end = _parse_dates(start_date, end_date)
     store = await get_store()
-    return await store.get_brand_analytics(start, end)
+    return await store.get_brand_analytics(start, end, sales_type=sales_type)
 
 
 # ─── Backwards Compatibility ──────────────────────────────────────────────────

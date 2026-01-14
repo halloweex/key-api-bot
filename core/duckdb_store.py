@@ -24,6 +24,12 @@ DB_DIR = Path(__file__).parent.parent / "data"
 DB_PATH = DB_DIR / "analytics.duckdb"
 DEFAULT_TZ = ZoneInfo(DEFAULT_TIMEZONE)
 
+# B2B (wholesale) manager ID - Olga D
+B2B_MANAGER_ID = 15
+
+# Retail manager IDs (exclude B2B/wholesale)
+RETAIL_MANAGER_IDS = [22, 4, 16]
+
 
 class DuckDBStore:
     """
@@ -136,6 +142,7 @@ class DuckDBStore:
         CREATE INDEX IF NOT EXISTS idx_orders_ordered_at ON orders(ordered_at);
         CREATE INDEX IF NOT EXISTS idx_orders_source_id ON orders(source_id);
         CREATE INDEX IF NOT EXISTS idx_orders_status_id ON orders(status_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_manager_id ON orders(manager_id);
         CREATE INDEX IF NOT EXISTS idx_order_products_order_id ON order_products(order_id);
         CREATE INDEX IF NOT EXISTS idx_order_products_product_id ON order_products(product_id);
         CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id);
@@ -144,6 +151,24 @@ class DuckDBStore:
         """
         self._connection.execute(schema_sql)
         logger.info("DuckDB schema initialized")
+
+    def _build_sales_type_filter(self, sales_type: str, table_alias: str = "o") -> str:
+        """Build SQL clause for retail/b2b filtering based on manager_id.
+
+        Args:
+            sales_type: 'retail' or 'b2b'
+            table_alias: Table alias for orders table (default 'o')
+
+        Returns:
+            SQL WHERE clause fragment
+        """
+        if sales_type == "b2b":
+            # B2B = only Olga D (manager_id = 15)
+            return f"{table_alias}.manager_id = {B2B_MANAGER_ID}"
+        else:
+            # Retail = specific managers (22, 4, 16) + Shopify orders (NULL manager)
+            manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
+            return f"({table_alias}.manager_id IS NULL OR {table_alias}.manager_id IN ({manager_list}))"
 
     # ─── Sync Methods ─────────────────────────────────────────────────────────
 
@@ -289,7 +314,8 @@ class DuckDBStore:
         end_date: date,
         source_id: Optional[int] = None,
         category_id: Optional[int] = None,
-        brand: Optional[str] = None
+        brand: Optional[str] = None,
+        sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get summary statistics for a date range."""
         async with self.connection() as conn:
@@ -298,6 +324,9 @@ class DuckDBStore:
 
             # Base query for valid orders
             where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?"]
+
+            # Add sales type filter (retail/b2b)
+            where_clauses.append(self._build_sales_type_filter(sales_type))
 
             # Exclude returns for main stats (convert enums to int values)
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
@@ -358,7 +387,8 @@ class DuckDBStore:
         source_id: Optional[int] = None,
         category_id: Optional[int] = None,
         brand: Optional[str] = None,
-        include_comparison: bool = True
+        include_comparison: bool = True,
+        sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get daily revenue trend for chart."""
         async with self.connection() as conn:
@@ -366,7 +396,11 @@ class DuckDBStore:
 
             # Build filters
             params = [start_date, end_date]
-            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+            where_clauses = [
+                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"o.status_id NOT IN {return_statuses}",
+                self._build_sales_type_filter(sales_type)
+            ]
 
             joins = ""
             if source_id:
@@ -426,7 +460,11 @@ class DuckDBStore:
                 prev_start = prev_end - timedelta(days=period_days - 1)
 
                 prev_params = [prev_start, prev_end]
-                prev_where = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+                prev_where = [
+                    "DATE(o.ordered_at) BETWEEN ? AND ?",
+                    f"o.status_id NOT IN {return_statuses}",
+                    self._build_sales_type_filter(sales_type)
+                ]
 
                 if source_id:
                     prev_where.append("o.source_id = ?")
@@ -475,13 +513,18 @@ class DuckDBStore:
         start_date: date,
         end_date: date,
         category_id: Optional[int] = None,
-        brand: Optional[str] = None
+        brand: Optional[str] = None,
+        sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get sales breakdown by source."""
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
-            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+            where_clauses = [
+                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"o.status_id NOT IN {return_statuses}",
+                self._build_sales_type_filter(sales_type)
+            ]
 
             joins = ""
             if category_id or brand:
@@ -538,13 +581,18 @@ class DuckDBStore:
         source_id: Optional[int] = None,
         category_id: Optional[int] = None,
         brand: Optional[str] = None,
-        limit: int = 10
+        limit: int = 10,
+        sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get top products by quantity."""
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
-            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+            where_clauses = [
+                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"o.status_id NOT IN {return_statuses}",
+                self._build_sales_type_filter(sales_type)
+            ]
 
             if source_id:
                 where_clauses.append("o.source_id = ?")
@@ -675,13 +723,18 @@ class DuckDBStore:
         start_date: date,
         end_date: date,
         source_id: Optional[int] = None,
-        brand: Optional[str] = None
+        brand: Optional[str] = None,
+        sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get customer insights: new vs returning, AOV trend."""
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
-            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+            where_clauses = [
+                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"o.status_id NOT IN {return_statuses}",
+                self._build_sales_type_filter(sales_type)
+            ]
 
             joins = ""
             if source_id:
@@ -797,13 +850,18 @@ class DuckDBStore:
         start_date: date,
         end_date: date,
         source_id: Optional[int] = None,
-        brand: Optional[str] = None
+        brand: Optional[str] = None,
+        sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get product performance: top by revenue, category breakdown."""
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
-            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+            where_clauses = [
+                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"o.status_id NOT IN {return_statuses}",
+                self._build_sales_type_filter(sales_type)
+            ]
 
             if source_id:
                 where_clauses.append("o.source_id = ?")
@@ -887,13 +945,18 @@ class DuckDBStore:
         self,
         start_date: date,
         end_date: date,
-        source_id: Optional[int] = None
+        source_id: Optional[int] = None,
+        sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get brand analytics: top brands by revenue and quantity."""
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
-            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?", f"o.status_id NOT IN {return_statuses}"]
+            where_clauses = [
+                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"o.status_id NOT IN {return_statuses}",
+                self._build_sales_type_filter(sales_type)
+            ]
 
             if source_id:
                 where_clauses.append("o.source_id = ?")
