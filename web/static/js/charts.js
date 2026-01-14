@@ -12,6 +12,10 @@ let topRevenueChart = null;
 // Brand analytics charts
 let brandRevenueChart = null;
 let brandQuantityChart = null;
+// Expense & profit charts
+let profitChart = null;
+let expenseTypeChart = null;
+let expenseTrendChart = null;
 
 // Current filters
 let currentPeriod = 'week';
@@ -633,7 +637,8 @@ async function loadAllData() {
             loadTopProducts(),
             loadCustomerInsights(),
             loadProductPerformance(),
-            loadBrandAnalytics()
+            loadBrandAnalytics(),
+            loadExpenses()
         ]);
     } catch (error) {
         console.error('Error loading data:', error);
@@ -1310,5 +1315,169 @@ async function loadBrandAnalytics() {
         });
     } catch (error) {
         console.error('Error loading brand analytics:', error);
+    }
+}
+
+// Load expenses & profit analysis
+async function loadExpenses() {
+    try {
+        // Build query for expenses (same as main query)
+        const query = buildQuery();
+
+        // Load expense summary and profit analysis in parallel
+        const [expenseSummary, profitData] = await Promise.all([
+            fetch('/api/expenses/summary' + query).then(r => r.json()),
+            fetch('/api/expenses/profit' + query).then(r => r.json())
+        ]);
+
+        // Update expense metrics cards
+        document.getElementById('totalExpenses').textContent = formatCurrency(expenseSummary.metrics.totalExpenses);
+        document.getElementById('grossProfit').textContent = formatCurrency(profitData.metrics.grossProfit);
+        document.getElementById('profitMargin').textContent = profitData.metrics.profitMargin + '%';
+        document.getElementById('ordersWithExpenses').textContent = expenseSummary.metrics.ordersWithExpenses.toLocaleString();
+
+        // Profit chart (revenue vs expenses)
+        const profitCtx = document.getElementById('profitChart').getContext('2d');
+
+        if (profitChart) {
+            profitChart.destroy();
+        }
+
+        profitChart = new Chart(profitCtx, {
+            type: 'line',
+            data: profitData.chart,
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: true,
+                        position: 'top'
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                return `${context.dataset.label}: ${formatCurrency(context.parsed.y)}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            callback: function(value) {
+                                return formatCurrency(value);
+                            }
+                        }
+                    }
+                },
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                }
+            }
+        });
+
+        // Expense by type pie chart
+        const expenseTypeCtx = document.getElementById('expenseTypeChart').getContext('2d');
+
+        if (expenseTypeChart) {
+            expenseTypeChart.destroy();
+        }
+
+        expenseTypeChart = new Chart(expenseTypeCtx, {
+            type: 'doughnut',
+            data: {
+                labels: expenseSummary.byType.labels,
+                datasets: [{
+                    data: expenseSummary.byType.data,
+                    backgroundColor: expenseSummary.byType.backgroundColor,
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            boxWidth: 12,
+                            padding: 8
+                        }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                const value = context.parsed;
+                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                const percentage = ((value / total) * 100).toFixed(1);
+                                const count = expenseSummary.byType.counts[context.dataIndex];
+                                return `${context.label}: ${formatCurrency(value)} (${percentage}%) - ${count} items`;
+                            }
+                        }
+                    },
+                    datalabels: {
+                        color: '#fff',
+                        font: {
+                            weight: 'bold',
+                            size: 11
+                        },
+                        formatter: function(value, context) {
+                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                            if (total === 0) return '';
+                            const percentage = ((value / total) * 100).toFixed(0);
+                            return percentage > 5 ? percentage + '%' : '';
+                        }
+                    }
+                }
+            },
+            plugins: [ChartDataLabels]
+        });
+
+        // Expense trend line chart
+        const expenseTrendCtx = document.getElementById('expenseTrendChart').getContext('2d');
+
+        if (expenseTrendChart) {
+            expenseTrendChart.destroy();
+        }
+
+        expenseTrendChart = new Chart(expenseTrendCtx, {
+            type: 'line',
+            data: expenseSummary.trend,
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                return `Expenses: ${formatCurrency(context.parsed.y)}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            callback: function(value) {
+                                return formatCurrency(value);
+                            }
+                        }
+                    }
+                },
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                }
+            }
+        });
+    } catch (error) {
+        console.error('Error loading expenses:', error);
     }
 }

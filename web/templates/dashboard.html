@@ -280,6 +280,65 @@
                 <canvas id="brandQuantityChart"></canvas>
             </div>
         </section>
+
+        <!-- Expenses & Profit Section -->
+        <section class="section-divider">
+            <h2>Expenses & Profit</h2>
+        </section>
+
+        <section class="summary-cards expense-cards">
+            <div class="card">
+                <div class="card-icon expense-icon">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15 15H3v2h12v-2zm0-8H3v2h12V7zM3 13h18v-2H3v2zm0 8h18v-2H3v2zM3 3v2h18V3H3z"/></svg>
+                </div>
+                <div class="card-content">
+                    <span class="card-label">Total Expenses</span>
+                    <span class="card-value" id="totalExpenses">-</span>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-icon profit-icon">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
+                </div>
+                <div class="card-content">
+                    <span class="card-label">Gross Profit</span>
+                    <span class="card-value" id="grossProfit">-</span>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-icon margin-icon">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-5h2v5zm4 0h-2v-3h2v3zm0-5h-2v-2h2v2zm4 5h-2V7h2v10z"/></svg>
+                </div>
+                <div class="card-content">
+                    <span class="card-label">Profit Margin</span>
+                    <span class="card-value" id="profitMargin">-</span>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-icon expense-count-icon">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>
+                </div>
+                <div class="card-content">
+                    <span class="card-label">Orders with Expenses</span>
+                    <span class="card-value" id="ordersWithExpenses">-</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="charts-grid">
+            <div class="chart-container full-width">
+                <h3>Revenue vs Expenses</h3>
+                <canvas id="profitChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <h3>Expenses by Type</h3>
+                <canvas id="expenseTypeChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <h3>Expense Trend</h3>
+                <canvas id="expenseTrendChart"></canvas>
+            </div>
+        </section>
     </main>
 
     <footer>

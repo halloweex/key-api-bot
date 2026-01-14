@@ -33,6 +33,22 @@ class SyncService:
         self._sync_task: Optional[asyncio.Task] = None
         self._stop_sync = False
 
+    async def _upsert_orders_with_expenses(self, orders: list) -> tuple:
+        """Upsert orders and their expenses.
+
+        Returns:
+            Tuple of (order_count, expense_count)
+        """
+        order_count = await self.store.upsert_orders(orders)
+        expense_count = 0
+
+        for order in orders:
+            expenses = order.get("expenses", [])
+            if expenses:
+                expense_count += await self.store.upsert_expenses(order["id"], expenses)
+
+        return order_count, expense_count
+
     async def full_sync(self, days_back: int = 365) -> dict:
         """
         Perform full sync of all data from KeyCRM.
@@ -44,7 +60,7 @@ class SyncService:
             Dict with sync statistics
         """
         logger.info(f"Starting full sync (last {days_back} days)...")
-        stats = {"orders": 0, "products": 0, "categories": 0}
+        stats = {"orders": 0, "products": 0, "categories": 0, "expense_types": 0, "expenses": 0}
 
         try:
             client = await get_async_client()
@@ -57,6 +73,14 @@ class SyncService:
             stats["categories"] = await self.store.upsert_categories(categories)
             await self.store.set_last_sync_time("categories")
 
+            # Sync expense types
+            logger.info("Syncing expense types...")
+            expense_types = []
+            async for batch in client.paginate("order/expense-type", page_size=50):
+                expense_types.extend(batch)
+            stats["expense_types"] = await self.store.upsert_expense_types(expense_types)
+            await self.store.set_last_sync_time("expense_types")
+
             # Sync products with custom_fields for brand extraction
             logger.info("Syncing products...")
             products = []
@@ -65,13 +89,13 @@ class SyncService:
             stats["products"] = await self.store.upsert_products(products)
             await self.store.set_last_sync_time("products")
 
-            # Sync orders
+            # Sync orders with expenses
             logger.info("Syncing orders...")
             start_date = datetime.now(DEFAULT_TZ) - timedelta(days=days_back)
             end_date = datetime.now(DEFAULT_TZ) + timedelta(days=1)
 
             params = {
-                "include": "products.offer,manager,buyer",
+                "include": "products.offer,manager,buyer,expenses",
                 "filter[created_between]": f"{start_date.strftime('%Y-%m-%d')}, {end_date.strftime('%Y-%m-%d')}",
             }
 
@@ -80,11 +104,15 @@ class SyncService:
                 orders.extend(batch)
                 # Batch insert every 500 orders to avoid memory issues
                 if len(orders) >= 500:
-                    stats["orders"] += await self.store.upsert_orders(orders)
+                    order_count, expense_count = await self._upsert_orders_with_expenses(orders)
+                    stats["orders"] += order_count
+                    stats["expenses"] += expense_count
                     orders = []
 
             if orders:
-                stats["orders"] += await self.store.upsert_orders(orders)
+                order_count, expense_count = await self._upsert_orders_with_expenses(orders)
+                stats["orders"] += order_count
+                stats["expenses"] += expense_count
 
             await self.store.set_last_sync_time("orders")
             logger.info(f"Full sync complete: {stats}")
@@ -102,7 +130,7 @@ class SyncService:
         Returns:
             Dict with sync statistics
         """
-        stats = {"orders": 0, "products": 0, "categories": 0}
+        stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0}
 
         try:
             client = await get_async_client()
@@ -119,9 +147,9 @@ class SyncService:
             sync_from = last_orders_sync - timedelta(minutes=10)
             sync_to = datetime.now(DEFAULT_TZ) + timedelta(minutes=5)
 
-            # Sync new orders
+            # Sync new orders with expenses
             params = {
-                "include": "products.offer,manager,buyer",
+                "include": "products.offer,manager,buyer,expenses",
                 "filter[created_between]": f"{sync_from.strftime('%Y-%m-%d %H:%M:%S')}, {sync_to.strftime('%Y-%m-%d %H:%M:%S')}",
             }
 
@@ -130,9 +158,11 @@ class SyncService:
                 orders.extend(batch)
 
             if orders:
-                stats["orders"] = await self.store.upsert_orders(orders)
+                order_count, expense_count = await self._upsert_orders_with_expenses(orders)
+                stats["orders"] = order_count
+                stats["expenses"] = expense_count
                 await self.store.set_last_sync_time("orders")
-                logger.info(f"Incremental sync: {stats['orders']} orders updated")
+                logger.info(f"Incremental sync: {stats['orders']} orders, {stats['expenses']} expenses updated")
 
             # Sync products less frequently (every hour)
             if not last_products_sync or (datetime.now(DEFAULT_TZ) - last_products_sync).total_seconds() > 3600:
@@ -155,14 +185,14 @@ class SyncService:
         Returns:
             Dict with sync statistics
         """
-        stats = {"orders": 0}
+        stats = {"orders": 0, "expenses": 0}
 
         try:
             client = await get_async_client()
             today = datetime.now(DEFAULT_TZ).date()
 
             params = {
-                "include": "products.offer,manager,buyer",
+                "include": "products.offer,manager,buyer,expenses",
                 "filter[created_between]": f"{today}, {today + timedelta(days=1)}",
             }
 
@@ -171,8 +201,10 @@ class SyncService:
                 orders.extend(batch)
 
             if orders:
-                stats["orders"] = await self.store.upsert_orders(orders)
-                logger.debug(f"Today sync: {stats['orders']} orders")
+                order_count, expense_count = await self._upsert_orders_with_expenses(orders)
+                stats["orders"] = order_count
+                stats["expenses"] = expense_count
+                logger.debug(f"Today sync: {stats['orders']} orders, {stats['expenses']} expenses")
 
         except Exception as e:
             logger.error(f"Today sync error: {e}")

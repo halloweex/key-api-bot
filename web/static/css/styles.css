@@ -512,6 +512,31 @@ main {
     color: #2563EB;
 }
 
+/* Expense cards */
+.expense-cards {
+    grid-template-columns: repeat(4, 1fr);
+}
+
+.expense-icon {
+    background: #FEE2E2;
+    color: #EF4444;
+}
+
+.profit-icon {
+    background: #DCFCE7;
+    color: #16A34A;
+}
+
+.margin-icon {
+    background: #DBEAFE;
+    color: #2563EB;
+}
+
+.expense-count-icon {
+    background: #FEF3C7;
+    color: #F59E0B;
+}
+
 /* Footer */
 footer {
     text-align: center;

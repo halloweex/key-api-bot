@@ -156,6 +156,46 @@ async def get_brand_analytics(start_date: str, end_date: str, sales_type: str = 
     return await store.get_brand_analytics(start, end, sales_type=sales_type)
 
 
+async def get_expense_types() -> list:
+    """Get list of expense types for filter dropdown."""
+    store = await get_store()
+    return await store.get_expense_types()
+
+
+async def get_expense_summary(
+    start_date: str,
+    end_date: str,
+    source_id: Optional[int] = None,
+    expense_type_id: Optional[int] = None,
+    sales_type: str = "retail"
+) -> Dict[str, Any]:
+    """Get expense summary: breakdown by type, daily trend."""
+    start, end = _parse_dates(start_date, end_date)
+    store = await get_store()
+    return await store.get_expense_summary(
+        start, end,
+        source_id=source_id,
+        expense_type_id=expense_type_id,
+        sales_type=sales_type
+    )
+
+
+async def get_profit_analysis(
+    start_date: str,
+    end_date: str,
+    source_id: Optional[int] = None,
+    sales_type: str = "retail"
+) -> Dict[str, Any]:
+    """Get profit analysis: revenue vs expenses."""
+    start, end = _parse_dates(start_date, end_date)
+    store = await get_store()
+    return await store.get_profit_analysis(
+        start, end,
+        source_id=source_id,
+        sales_type=sales_type
+    )
+
+
 # ─── Backwards Compatibility ──────────────────────────────────────────────────
 
 

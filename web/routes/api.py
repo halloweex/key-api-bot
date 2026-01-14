@@ -287,3 +287,67 @@ async def get_brand_analytics(
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_brand_analytics(start, end, sales_type=sales_type)
+
+
+# ─── Expense Endpoints ─────────────────────────────────────────────────────────
+
+
+@router.get("/expense-types")
+@limiter.limit("60/minute")
+async def get_expense_types(request: Request):
+    """Get list of expense types for filter dropdown."""
+    return await dashboard_service.get_expense_types()
+
+
+@router.get("/expenses/summary")
+@limiter.limit("30/minute")
+async def get_expense_summary(
+    request: Request,
+    period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    source_id: Optional[int] = Query(None, description="Filter by source ID"),
+    expense_type_id: Optional[int] = Query(None, description="Filter by expense type ID"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
+):
+    """Get expense summary: breakdown by type, daily trend."""
+    try:
+        validate_period(period)
+        validate_source_id(source_id)
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    return await dashboard_service.get_expense_summary(
+        start, end,
+        source_id=source_id,
+        expense_type_id=expense_type_id,
+        sales_type=sales_type
+    )
+
+
+@router.get("/expenses/profit")
+@limiter.limit("30/minute")
+async def get_profit_analysis(
+    request: Request,
+    period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    source_id: Optional[int] = Query(None, description="Filter by source ID"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
+):
+    """Get profit analysis: revenue vs expenses comparison."""
+    try:
+        validate_period(period)
+        validate_source_id(source_id)
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    return await dashboard_service.get_profit_analysis(
+        start, end,
+        source_id=source_id,
+        sales_type=sales_type
+    )

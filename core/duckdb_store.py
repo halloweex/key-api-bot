@@ -131,6 +131,30 @@ class DuckDBStore:
             PRIMARY KEY (date, source_id)
         );
 
+        -- Expense types (delivery, taxes, advertising, etc.)
+        CREATE TABLE IF NOT EXISTS expense_types (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR NOT NULL,
+            alias VARCHAR,
+            is_active BOOLEAN DEFAULT TRUE,
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Expenses (linked to orders)
+        CREATE TABLE IF NOT EXISTS expenses (
+            id INTEGER PRIMARY KEY,
+            order_id INTEGER NOT NULL,
+            expense_type_id INTEGER,
+            amount DECIMAL(12, 2) NOT NULL,
+            description VARCHAR,
+            status VARCHAR,
+            payment_date TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE,
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (order_id) REFERENCES orders(id),
+            FOREIGN KEY (expense_type_id) REFERENCES expense_types(id)
+        );
+
         -- Sync metadata
         CREATE TABLE IF NOT EXISTS sync_metadata (
             key VARCHAR PRIMARY KEY,
@@ -148,6 +172,9 @@ class DuckDBStore:
         CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id);
         CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);
         CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(date);
+        CREATE INDEX IF NOT EXISTS idx_expenses_order_id ON expenses(order_id);
+        CREATE INDEX IF NOT EXISTS idx_expenses_expense_type_id ON expenses(expense_type_id);
+        CREATE INDEX IF NOT EXISTS idx_expenses_payment_date ON expenses(payment_date);
         """
         self._connection.execute(schema_sql)
         logger.info("DuckDB schema initialized")
@@ -304,6 +331,54 @@ class DuckDBStore:
                 count += 1
 
             logger.info(f"Upserted {count} categories to DuckDB")
+            return count
+
+    async def upsert_expense_types(self, expense_types: List[Dict[str, Any]]) -> int:
+        """Insert or update expense types from API response."""
+        if not expense_types:
+            return 0
+
+        async with self.connection() as conn:
+            count = 0
+            for et in expense_types:
+                conn.execute("""
+                    INSERT OR REPLACE INTO expense_types (id, name, alias, is_active, synced_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, [
+                    et.get("id"),
+                    et.get("name", "Unknown"),
+                    et.get("alias"),
+                    et.get("is_active", True)
+                ])
+                count += 1
+
+            logger.info(f"Upserted {count} expense types to DuckDB")
+            return count
+
+    async def upsert_expenses(self, order_id: int, expenses: List[Dict[str, Any]]) -> int:
+        """Insert or update expenses for an order."""
+        if not expenses:
+            return 0
+
+        async with self.connection() as conn:
+            count = 0
+            for exp in expenses:
+                conn.execute("""
+                    INSERT OR REPLACE INTO expenses
+                    (id, order_id, expense_type_id, amount, description, status, payment_date, created_at, synced_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, [
+                    exp.get("id"),
+                    order_id,
+                    exp.get("expense_type_id"),
+                    exp.get("amount", 0),
+                    exp.get("description"),
+                    exp.get("status"),
+                    exp.get("payment_date"),
+                    exp.get("created_at")
+                ])
+                count += 1
+
             return count
 
     # ─── Query Methods ────────────────────────────────────────────────────────
@@ -1022,6 +1097,230 @@ class DuckDBStore:
                 }
             }
 
+    # ─── Expense Methods ─────────────────────────────────────────────────────
+
+    async def get_expense_types(self) -> List[Dict[str, Any]]:
+        """Get all expense types for filter dropdown."""
+        async with self.connection() as conn:
+            results = conn.execute("""
+                SELECT id, name, alias, is_active
+                FROM expense_types
+                WHERE is_active = TRUE
+                ORDER BY name
+            """).fetchall()
+            return [{"id": row[0], "name": row[1], "alias": row[2]} for row in results]
+
+    async def get_expense_summary(
+        self,
+        start_date: date,
+        end_date: date,
+        source_id: Optional[int] = None,
+        expense_type_id: Optional[int] = None,
+        sales_type: str = "retail"
+    ) -> Dict[str, Any]:
+        """Get expense summary for a date range."""
+        async with self.connection() as conn:
+            params = [start_date, end_date]
+            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?"]
+
+            # Add sales type filter
+            where_clauses.append(self._build_sales_type_filter(sales_type))
+
+            if source_id:
+                where_clauses.append("o.source_id = ?")
+                params.append(source_id)
+
+            if expense_type_id:
+                where_clauses.append("e.expense_type_id = ?")
+                params.append(expense_type_id)
+
+            where_sql = " AND ".join(where_clauses)
+
+            # Total expenses by type
+            by_type_sql = f"""
+                SELECT
+                    COALESCE(et.name, 'Other') as type_name,
+                    et.id as type_id,
+                    SUM(e.amount) as total_amount,
+                    COUNT(e.id) as expense_count
+                FROM expenses e
+                JOIN orders o ON e.order_id = o.id
+                LEFT JOIN expense_types et ON e.expense_type_id = et.id
+                WHERE {where_sql}
+                GROUP BY et.id, et.name
+                ORDER BY total_amount DESC
+            """
+            by_type_results = conn.execute(by_type_sql, params).fetchall()
+
+            # Total expenses summary
+            total_sql = f"""
+                SELECT
+                    COALESCE(SUM(e.amount), 0) as total_expenses,
+                    COUNT(e.id) as expense_count,
+                    COUNT(DISTINCT e.order_id) as orders_with_expenses
+                FROM expenses e
+                JOIN orders o ON e.order_id = o.id
+                WHERE {where_sql}
+            """
+            total_result = conn.execute(total_sql, params).fetchone()
+
+            # Daily expense trend
+            trend_sql = f"""
+                SELECT
+                    DATE(o.ordered_at) as day,
+                    SUM(e.amount) as total_expenses
+                FROM expenses e
+                JOIN orders o ON e.order_id = o.id
+                WHERE {where_sql}
+                GROUP BY DATE(o.ordered_at)
+                ORDER BY day
+            """
+            trend_results = conn.execute(trend_sql, params).fetchall()
+            daily_data = {row[0]: float(row[1]) for row in trend_results}
+
+            # Build trend labels and data
+            labels = []
+            data = []
+            current = start_date
+            while current <= end_date:
+                labels.append(current.strftime("%d.%m"))
+                data.append(round(daily_data.get(current, 0), 2))
+                current += timedelta(days=1)
+
+            # Chart colors
+            expense_colors = ["#EF4444", "#F59E0B", "#8B5CF6", "#06B6D4", "#EC4899", "#14B8A6", "#7C3AED", "#2563EB"]
+
+            # By type breakdown for pie chart
+            by_type_data = {
+                "labels": [row[0] for row in by_type_results],
+                "data": [round(float(row[2]), 2) for row in by_type_results],
+                "counts": [row[3] for row in by_type_results],
+                "backgroundColor": expense_colors[:len(by_type_results)]
+            }
+
+            total_expenses = float(total_result[0] or 0)
+            expense_count = total_result[1] or 0
+            orders_with_expenses = total_result[2] or 0
+
+            return {
+                "byType": by_type_data,
+                "trend": {
+                    "labels": labels,
+                    "datasets": [{
+                        "label": "Expenses (UAH)",
+                        "data": data,
+                        "borderColor": "#EF4444",
+                        "backgroundColor": "rgba(239, 68, 68, 0.1)",
+                        "fill": True,
+                        "tension": 0.3,
+                        "borderWidth": 2
+                    }]
+                },
+                "metrics": {
+                    "totalExpenses": round(total_expenses, 2),
+                    "expenseCount": expense_count,
+                    "ordersWithExpenses": orders_with_expenses,
+                    "avgExpensePerOrder": round(total_expenses / orders_with_expenses, 2) if orders_with_expenses > 0 else 0
+                }
+            }
+
+    async def get_profit_analysis(
+        self,
+        start_date: date,
+        end_date: date,
+        source_id: Optional[int] = None,
+        sales_type: str = "retail"
+    ) -> Dict[str, Any]:
+        """Get profit analysis: revenue vs expenses."""
+        async with self.connection() as conn:
+            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+            params = [start_date, end_date]
+            where_clauses = [
+                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"o.status_id NOT IN {return_statuses}",
+                self._build_sales_type_filter(sales_type)
+            ]
+
+            if source_id:
+                where_clauses.append("o.source_id = ?")
+                params.append(source_id)
+
+            where_sql = " AND ".join(where_clauses)
+
+            # Daily revenue and expenses
+            daily_sql = f"""
+                SELECT
+                    DATE(o.ordered_at) as day,
+                    SUM(o.grand_total) as revenue,
+                    COALESCE(SUM(e.amount), 0) as expenses
+                FROM orders o
+                LEFT JOIN expenses e ON o.id = e.order_id
+                WHERE {where_sql}
+                GROUP BY DATE(o.ordered_at)
+                ORDER BY day
+            """
+            results = conn.execute(daily_sql, params).fetchall()
+            daily_data = {row[0]: {"revenue": float(row[1]), "expenses": float(row[2])} for row in results}
+
+            # Build chart data
+            labels = []
+            revenue_data = []
+            expenses_data = []
+            profit_data = []
+            current = start_date
+            while current <= end_date:
+                labels.append(current.strftime("%d.%m"))
+                day_data = daily_data.get(current, {"revenue": 0, "expenses": 0})
+                revenue = day_data["revenue"]
+                expenses = day_data["expenses"]
+                revenue_data.append(round(revenue, 2))
+                expenses_data.append(round(expenses, 2))
+                profit_data.append(round(revenue - expenses, 2))
+                current += timedelta(days=1)
+
+            total_revenue = sum(revenue_data)
+            total_expenses = sum(expenses_data)
+            total_profit = total_revenue - total_expenses
+            profit_margin = (total_profit / total_revenue * 100) if total_revenue > 0 else 0
+
+            return {
+                "chart": {
+                    "labels": labels,
+                    "datasets": [
+                        {
+                            "label": "Revenue",
+                            "data": revenue_data,
+                            "borderColor": "#16A34A",
+                            "backgroundColor": "rgba(22, 163, 74, 0.1)",
+                            "fill": False,
+                            "tension": 0.3
+                        },
+                        {
+                            "label": "Expenses",
+                            "data": expenses_data,
+                            "borderColor": "#EF4444",
+                            "backgroundColor": "rgba(239, 68, 68, 0.1)",
+                            "fill": False,
+                            "tension": 0.3
+                        },
+                        {
+                            "label": "Gross Profit",
+                            "data": profit_data,
+                            "borderColor": "#2563EB",
+                            "backgroundColor": "rgba(37, 99, 235, 0.2)",
+                            "fill": True,
+                            "tension": 0.3
+                        }
+                    ]
+                },
+                "metrics": {
+                    "totalRevenue": round(total_revenue, 2),
+                    "totalExpenses": round(total_expenses, 2),
+                    "grossProfit": round(total_profit, 2),
+                    "profitMargin": round(profit_margin, 1)
+                }
+            }
+
     # ─── Stats Methods ────────────────────────────────────────────────────────
 
     async def get_stats(self) -> Dict[str, Any]:
@@ -1030,6 +1329,8 @@ class DuckDBStore:
             orders_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
             products_count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
             categories_count = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
+            expenses_count = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
+            expense_types_count = conn.execute("SELECT COUNT(*) FROM expense_types").fetchone()[0]
 
             min_date = conn.execute("SELECT MIN(DATE(ordered_at)) FROM orders").fetchone()[0]
             max_date = conn.execute("SELECT MAX(DATE(ordered_at)) FROM orders").fetchone()[0]
@@ -1038,6 +1339,8 @@ class DuckDBStore:
                 "orders": orders_count,
                 "products": products_count,
                 "categories": categories_count,
+                "expenses": expenses_count,
+                "expense_types": expense_types_count,
                 "date_range": {
                     "min": min_date.isoformat() if min_date else None,
                     "max": max_date.isoformat() if max_date else None
