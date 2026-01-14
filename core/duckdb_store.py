@@ -341,13 +341,24 @@ class DuckDBStore:
         async with self.connection() as conn:
             count = 0
             for et in expense_types:
+                name = et.get("name", "Unknown")
+                alias = et.get("alias")
+
+                # Clean up localization keys (e.g., "dictionaries.expense_types.delivery" -> "Delivery")
+                if name.startswith("dictionaries.expense_types."):
+                    # Use alias as display name, formatted nicely
+                    if alias:
+                        name = alias.replace("_", " ").title()
+                    else:
+                        name = name.replace("dictionaries.expense_types.", "").replace("_", " ").title()
+
                 conn.execute("""
                     INSERT OR REPLACE INTO expense_types (id, name, alias, is_active, synced_at)
                     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """, [
                     et.get("id"),
-                    et.get("name", "Unknown"),
-                    et.get("alias"),
+                    name,
+                    alias,
                     et.get("is_active", True)
                 ])
                 count += 1
