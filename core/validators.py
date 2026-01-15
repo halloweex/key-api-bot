@@ -312,7 +312,7 @@ def validate_sales_type(
     Raises:
         ValidationError: If sales type is invalid
     """
-    valid_types = {"retail", "b2b"}
+    valid_types = {"retail", "b2b", "all"}
 
     if value is None or value == "":
         if allow_none:

@@ -123,7 +123,7 @@ async def get_revenue_trend(
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
     brand: Optional[str] = Query(None, description="Filter by brand name"),
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
 ):
     """Get revenue trend data for line chart."""
     try:
@@ -151,7 +151,7 @@ async def get_sales_by_source(
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
     brand: Optional[str] = Query(None, description="Filter by brand name"),
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
 ):
     """Get sales data by source for bar/pie chart."""
     try:
@@ -178,7 +178,7 @@ async def get_top_products(
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
     brand: Optional[str] = Query(None, description="Filter by brand name"),
     limit: int = Query(10, description="Number of products to return"),
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
 ):
     """Get top products for horizontal bar chart."""
     try:
@@ -205,7 +205,7 @@ async def get_summary(
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
     brand: Optional[str] = Query(None, description="Filter by brand name"),
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
 ):
     """Get summary statistics for dashboard cards."""
     try:
@@ -230,7 +230,7 @@ async def get_customer_insights(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     brand: Optional[str] = Query(None, description="Filter by brand name"),
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
 ):
     """Get customer insights: new vs returning, AOV trend, repeat rate."""
     try:
@@ -254,7 +254,7 @@ async def get_product_performance(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     brand: Optional[str] = Query(None, description="Filter by brand name"),
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
 ):
     """Get product performance: top by revenue, category breakdown."""
     try:
@@ -276,7 +276,7 @@ async def get_brand_analytics(
     period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
 ):
     """Get brand analytics: top brands by revenue and quantity."""
     try:
@@ -308,7 +308,7 @@ async def get_expense_summary(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     expense_type_id: Optional[int] = Query(None, description="Filter by expense type ID"),
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
 ):
     """Get expense summary: breakdown by type, daily trend."""
     try:
@@ -335,7 +335,7 @@ async def get_profit_analysis(
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
 ):
     """Get profit analysis: revenue vs expenses comparison."""
     try:

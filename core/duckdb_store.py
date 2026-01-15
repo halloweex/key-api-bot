@@ -180,16 +180,19 @@ class DuckDBStore:
         logger.info("DuckDB schema initialized")
 
     def _build_sales_type_filter(self, sales_type: str, table_alias: str = "o") -> str:
-        """Build SQL clause for retail/b2b filtering based on manager_id.
+        """Build SQL clause for retail/b2b/all filtering based on manager_id.
 
         Args:
-            sales_type: 'retail' or 'b2b'
+            sales_type: 'retail', 'b2b', or 'all'
             table_alias: Table alias for orders table (default 'o')
 
         Returns:
             SQL WHERE clause fragment
         """
-        if sales_type == "b2b":
+        if sales_type == "all":
+            # All = no manager filter
+            return "1=1"
+        elif sales_type == "b2b":
             # B2B = only Olga D (manager_id = 15)
             return f"{table_alias}.manager_id = {B2B_MANAGER_ID}"
         else:
