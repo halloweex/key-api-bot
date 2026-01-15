@@ -74,7 +74,7 @@ async def startup_event():
     # Initialize DuckDB analytics store and sync from API
     logger.info("Initializing DuckDB analytics store...")
     try:
-        await init_and_sync(full_sync_days=90)
+        await init_and_sync(full_sync_days=365)
         store = await get_store()
         stats = await store.get_stats()
         logger.info(

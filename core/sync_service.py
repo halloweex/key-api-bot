@@ -261,7 +261,7 @@ async def get_sync_service() -> SyncService:
     return _sync_service
 
 
-async def init_and_sync(full_sync_days: int = 90) -> None:
+async def init_and_sync(full_sync_days: int = 365) -> None:
     """
     Initialize store and perform initial sync if needed.
 
