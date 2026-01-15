@@ -14,17 +14,18 @@ import {
 import { ChartContainer } from './ChartContainer'
 import { useSalesBySource } from '../../hooks'
 import { formatCurrency } from '../../utils/formatters'
+import { SOURCE_COLORS } from '../../utils/colors'
 
 export function SalesBySourceChart() {
   const { data, isLoading, error } = useSalesBySource()
 
   const chartData = useMemo(() => {
-    if (!data) return []
+    if (!data?.labels?.length) return []
     return data.labels.map((label, index) => ({
       name: label,
-      revenue: data.revenue[index],
-      orders: data.orders[index],
-      color: data.backgroundColor[index],
+      revenue: data.revenue?.[index] ?? 0,
+      orders: data.orders?.[index] ?? 0,
+      color: data.backgroundColor?.[index] ?? SOURCE_COLORS[index % 3] ?? '#2563EB',
     }))
   }, [data])
 
@@ -32,6 +33,16 @@ export function SalesBySourceChart() {
     chartData.reduce((sum, item) => sum + item.revenue, 0),
     [chartData]
   )
+
+  if (!isLoading && chartData.length === 0) {
+    return (
+      <ChartContainer title="Sales by Source" isLoading={false} error={null}>
+        <div className="h-64 flex items-center justify-center text-slate-500">
+          No data available
+        </div>
+      </ChartContainer>
+    )
+  }
 
   return (
     <ChartContainer
@@ -41,8 +52,8 @@ export function SalesBySourceChart() {
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Bar Chart */}
-        <div className="h-64">
-          <ResponsiveContainer width="100%" height="100%">
+        <div className="h-64 min-h-[256px]">
+          <ResponsiveContainer width="100%" height="100%" minHeight={256}>
             <BarChart data={chartData} layout="vertical" margin={{ left: 20, right: 20 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#374151" horizontal={false} />
               <XAxis
@@ -79,8 +90,8 @@ export function SalesBySourceChart() {
         </div>
 
         {/* Pie Chart */}
-        <div className="h-64">
-          <ResponsiveContainer width="100%" height="100%">
+        <div className="h-64 min-h-[256px]">
+          <ResponsiveContainer width="100%" height="100%" minHeight={256}>
             <PieChart>
               <Pie
                 data={chartData}

@@ -16,6 +16,7 @@ import { COLORS } from '../../utils/colors'
 
 // Truncate long product names
 function truncateName(name: string, maxLength = 25): string {
+  if (!name) return 'Unknown'
   if (name.length <= maxLength) return name
   return name.slice(0, maxLength - 3) + '...'
 }
@@ -24,14 +25,24 @@ export function TopProductsChart() {
   const { data, isLoading, error } = useTopProducts()
 
   const chartData = useMemo(() => {
-    if (!data) return []
+    if (!data?.labels?.length) return []
     return data.labels.map((label, index) => ({
       name: truncateName(label),
-      fullName: label,
-      quantity: data.data[index],
-      percentage: data.percentages[index],
+      fullName: label || 'Unknown',
+      quantity: data.data?.[index] ?? 0,
+      percentage: data.percentages?.[index] ?? 0,
     }))
   }, [data])
+
+  if (!isLoading && chartData.length === 0) {
+    return (
+      <ChartContainer title="Top 10 Products" isLoading={false} error={null}>
+        <div className="h-80 flex items-center justify-center text-slate-500">
+          No data available
+        </div>
+      </ChartContainer>
+    )
+  }
 
   return (
     <ChartContainer
@@ -39,8 +50,8 @@ export function TopProductsChart() {
       isLoading={isLoading}
       error={error as Error | null}
     >
-      <div className="h-80">
-        <ResponsiveContainer width="100%" height="100%">
+      <div className="h-80 min-h-[320px]">
+        <ResponsiveContainer width="100%" height="100%" minHeight={320}>
           <BarChart
             data={chartData}
             layout="vertical"

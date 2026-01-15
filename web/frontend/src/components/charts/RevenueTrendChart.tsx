@@ -18,13 +18,23 @@ export function RevenueTrendChart() {
   const { data, isLoading, error } = useRevenueTrend()
 
   const chartData = useMemo(() => {
-    if (!data) return []
+    if (!data?.labels?.length) return []
     return data.labels.map((label, index) => ({
       date: label,
-      revenue: data.revenue[index],
-      orders: data.orders[index],
+      revenue: data.revenue?.[index] ?? 0,
+      orders: data.orders?.[index] ?? 0,
     }))
   }, [data])
+
+  if (!isLoading && chartData.length === 0) {
+    return (
+      <ChartContainer title="Revenue Trend" isLoading={false} error={null}>
+        <div className="h-72 flex items-center justify-center text-slate-500">
+          No data available
+        </div>
+      </ChartContainer>
+    )
+  }
 
   return (
     <ChartContainer
@@ -32,8 +42,8 @@ export function RevenueTrendChart() {
       isLoading={isLoading}
       error={error as Error | null}
     >
-      <div className="h-72">
-        <ResponsiveContainer width="100%" height="100%">
+      <div className="h-72 min-h-[288px]">
+        <ResponsiveContainer width="100%" height="100%" minHeight={288}>
           <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
             <XAxis

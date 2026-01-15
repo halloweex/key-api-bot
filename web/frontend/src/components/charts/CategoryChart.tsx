@@ -24,19 +24,19 @@ export function CategoryChart() {
 
   // Use breakdown data if drilled down, otherwise use category breakdown from performance
   const chartData = useMemo(() => {
-    if (selectedCategory && breakdownData) {
+    if (selectedCategory && breakdownData?.labels?.length) {
       return breakdownData.labels.map((label: string, index: number) => ({
-        name: label,
-        value: breakdownData.revenue[index],
+        name: label || 'Unknown',
+        value: breakdownData.revenue?.[index] ?? 0,
         color: CATEGORY_COLORS[index % CATEGORY_COLORS.length],
       }))
     }
 
-    if (!performanceData?.categoryBreakdown) return []
+    if (!performanceData?.categoryBreakdown?.labels?.length) return []
 
     return performanceData.categoryBreakdown.labels.map((label, index) => ({
-      name: label,
-      value: performanceData.categoryBreakdown.revenue[index],
+      name: label || 'Unknown',
+      value: performanceData.categoryBreakdown.revenue?.[index] ?? 0,
       color: CATEGORY_COLORS[index % CATEGORY_COLORS.length],
     }))
   }, [performanceData, breakdownData, selectedCategory])
@@ -48,10 +48,8 @@ export function CategoryChart() {
 
   const handleClick = useCallback((data: { name: string }) => {
     if (selectedCategory) {
-      // If already drilled down, go back
       setSelectedCategory(null)
     } else {
-      // Drill down into the clicked category
       setSelectedCategory(data.name)
     }
   }, [selectedCategory])
@@ -63,6 +61,16 @@ export function CategoryChart() {
   const title = selectedCategory
     ? `${selectedCategory} - Subcategories`
     : 'Sales by Category'
+
+  if (!isLoading && chartData.length === 0) {
+    return (
+      <ChartContainer title={title} isLoading={false} error={null}>
+        <div className="h-72 flex items-center justify-center text-slate-500">
+          No data available
+        </div>
+      </ChartContainer>
+    )
+  }
 
   return (
     <ChartContainer
@@ -77,8 +85,8 @@ export function CategoryChart() {
         )
       }
     >
-      <div className="h-72">
-        <ResponsiveContainer width="100%" height="100%">
+      <div className="h-72 min-h-[288px]">
+        <ResponsiveContainer width="100%" height="100%" minHeight={288}>
           <PieChart>
             <Pie
               data={chartData}
