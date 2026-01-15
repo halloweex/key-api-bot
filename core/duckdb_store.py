@@ -993,17 +993,19 @@ class DuckDBStore:
             if brand:
                 cat_params.append(brand)
 
+            # Use parent category (root) for grouping, fall back to direct category if no parent
             category_sql = f"""
                 SELECT
-                    COALESCE(c.name, 'Other') as category_name,
+                    COALESCE(parent_c.name, c.name, 'Other') as category_name,
                     SUM(op.price_sold * op.quantity) as revenue,
                     SUM(op.quantity) as quantity
                 FROM orders o
                 JOIN order_products op ON o.id = op.order_id
                 LEFT JOIN products p ON op.product_id = p.id
                 LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
                 WHERE {where_sql} {brand_filter}
-                GROUP BY COALESCE(c.name, 'Other')
+                GROUP BY COALESCE(parent_c.name, c.name, 'Other')
                 ORDER BY revenue DESC
             """
             cat_results = conn.execute(category_sql, params).fetchall()
