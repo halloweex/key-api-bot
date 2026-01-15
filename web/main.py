@@ -57,9 +57,9 @@ app.add_middleware(GZipMiddleware, minimum_size=500)
 # Mount static files
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# Mount React v2 static files (if build exists)
-if STATIC_V2_DIR.exists():
-    app.mount("/static-v2", StaticFiles(directory=str(STATIC_V2_DIR)), name="static-v2")
+# Mount React v2 static files (create directory if needed)
+STATIC_V2_DIR.mkdir(exist_ok=True)
+app.mount("/static-v2", StaticFiles(directory=str(STATIC_V2_DIR)), name="static-v2")
 
 # Include routers
 app.include_router(auth.router)  # Auth routes first (login, logout, callback)

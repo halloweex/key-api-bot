@@ -41,7 +41,7 @@ async def dashboard_v2(request: Request):
     # Serve the React build index.html
     index_path = STATIC_V2_DIR / "index.html"
     if index_path.exists():
-        return FileResponse(index_path)
+        return HTMLResponse(content=index_path.read_text(), media_type="text/html")
 
     # Fallback message if build doesn't exist
     return HTMLResponse(
