@@ -11,7 +11,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from web.config import STATIC_DIR, VERSION
+from web.config import STATIC_DIR, STATIC_V2_DIR, VERSION
 from web.routes import api, pages, auth
 from bot.database import init_database
 from core.duckdb_store import get_store, close_store
@@ -56,6 +56,10 @@ app.add_middleware(GZipMiddleware, minimum_size=500)
 
 # Mount static files
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# Mount React v2 static files (if build exists)
+if STATIC_V2_DIR.exists():
+    app.mount("/static-v2", StaticFiles(directory=str(STATIC_V2_DIR)), name="static-v2")
 
 # Include routers
 app.include_router(auth.router)  # Auth routes first (login, logout, callback)

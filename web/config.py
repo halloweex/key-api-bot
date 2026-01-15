@@ -12,6 +12,7 @@ WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
+STATIC_V2_DIR = BASE_DIR / "static-v2"  # React build output
 
 # Import shared config from bot
 from bot.config import (
