@@ -56,7 +56,6 @@ document.addEventListener('DOMContentLoaded', function() {
     initBrandFilter();
     initInfoTooltips();
     initFiltersToggle();
-    initCategoryBackButton();
     loadCategories();
     loadBrands();
     loadAllData();
@@ -1026,15 +1025,9 @@ async function loadCustomerInsights() {
 // Category chart drill-down functions
 function updateCategoryChartUI(parentName) {
     const titleEl = document.getElementById('categoryChartTitle');
-    const backBtn = document.getElementById('categoryBackBtn');
-
-    if (parentName) {
-        titleEl.textContent = `Sales by Category: ${parentName}`;
-        backBtn.classList.remove('hidden');
-    } else {
-        titleEl.textContent = 'Sales by Category';
-        backBtn.classList.add('hidden');
-    }
+    titleEl.textContent = parentName
+        ? `Sales by Category: ${parentName}`
+        : 'Sales by Category';
 }
 
 async function loadCategoryChart(categoryData) {
@@ -1065,22 +1058,18 @@ async function loadCategoryChart(categoryData) {
             responsive: true,
             maintainAspectRatio: false,
             onClick: function(event, elements, chart) {
-                console.log('Category chart clicked', { elements, categoryDrillDownParent });
-
-                // Only allow drill-down from parent categories (not when already in subcategory view)
+                // If already drilled down, clicking anywhere goes back to parent view
                 if (categoryDrillDownParent) {
-                    console.log('Already drilled down, ignoring click');
+                    goBackToParentCategories();
                     return;
                 }
 
                 // Use getElementsAtEventForMode for more reliable detection
                 const points = chart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, false);
-                console.log('Points at click:', points);
 
                 if (points.length > 0) {
                     const index = points[0].index;
                     const parentCategory = chartLabels[index];
-                    console.log('Drilling down to:', parentCategory);
                     drillDownToSubcategories(parentCategory);
                 }
             },
@@ -1096,8 +1085,10 @@ async function loadCategoryChart(categoryData) {
                             const percentage = ((value / total) * 100).toFixed(1);
                             const qty = quantityData[context.dataIndex];
                             let label = `${context.label}: ${formatCurrency(value)} (${percentage}%) - ${qty} items`;
-                            // Add hint for parent categories
-                            if (!categoryDrillDownParent) {
+                            // Add hint based on current view
+                            if (categoryDrillDownParent) {
+                                label += ' (click to go back)';
+                            } else {
                                 label += ' (click to drill down)';
                             }
                             return label;
@@ -1153,13 +1144,6 @@ async function drillDownToSubcategories(parentCategory) {
 async function goBackToParentCategories() {
     categoryDrillDownParent = null;
     await loadProductPerformance();
-}
-
-function initCategoryBackButton() {
-    const backBtn = document.getElementById('categoryBackBtn');
-    if (backBtn) {
-        backBtn.addEventListener('click', goBackToParentCategories);
-    }
 }
 
 // Load product performance
