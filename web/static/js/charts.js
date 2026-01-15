@@ -1047,7 +1047,8 @@ async function loadCategoryChart(categoryData) {
     // Update UI based on drill-down state
     updateCategoryChartUI(categoryDrillDownParent);
 
-    // Store quantity data for tooltip access
+    // Store data for click handler access
+    const chartLabels = categoryData.labels;
     const quantityData = categoryData.quantity;
 
     categoryChart = new Chart(categoryCtx, {
@@ -1063,14 +1064,24 @@ async function loadCategoryChart(categoryData) {
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            onClick: async (event, elements) => {
-                // Only allow drill-down from parent categories (not when already in subcategory view)
-                if (categoryDrillDownParent) return;
+            onClick: function(event, elements, chart) {
+                console.log('Category chart clicked', { elements, categoryDrillDownParent });
 
-                if (elements.length > 0) {
-                    const index = elements[0].index;
-                    const parentCategory = categoryData.labels[index];
-                    await drillDownToSubcategories(parentCategory);
+                // Only allow drill-down from parent categories (not when already in subcategory view)
+                if (categoryDrillDownParent) {
+                    console.log('Already drilled down, ignoring click');
+                    return;
+                }
+
+                // Use getElementsAtEventForMode for more reliable detection
+                const points = chart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, false);
+                console.log('Points at click:', points);
+
+                if (points.length > 0) {
+                    const index = points[0].index;
+                    const parentCategory = chartLabels[index];
+                    console.log('Drilling down to:', parentCategory);
+                    drillDownToSubcategories(parentCategory);
                 }
             },
             plugins: {
@@ -1104,6 +1115,10 @@ async function loadCategoryChart(categoryData) {
                         if (total === 0) return '';
                         const percentage = ((value / total) * 100).toFixed(0);
                         return percentage > 5 ? percentage + '%' : '';
+                    },
+                    // Disable datalabels click listener to allow chart onClick to work
+                    listeners: {
+                        click: null
                     }
                 }
             }

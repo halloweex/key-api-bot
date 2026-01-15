@@ -1044,7 +1044,7 @@ class DuckDBStore:
         """Get sales breakdown by subcategories for a given parent category."""
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            params = [start_date, end_date, parent_category_name]
+            params = [start_date, end_date]
             where_clauses = [
                 "DATE(o.ordered_at) BETWEEN ? AND ?",
                 f"o.status_id NOT IN {return_statuses}",
@@ -1055,12 +1055,14 @@ class DuckDBStore:
                 where_clauses.append("o.source_id = ?")
                 params.append(source_id)
 
+            where_sql = " AND ".join(where_clauses)
+
+            # Build brand filter
             brand_filter = ""
+            brand_params = []
             if brand:
                 brand_filter = "AND LOWER(p.brand) = LOWER(?)"
-                params.append(brand)
-
-            where_sql = " AND ".join(where_clauses)
+                brand_params.append(brand)
 
             # Get subcategories for the parent category
             subcategory_sql = f"""
@@ -1079,12 +1081,10 @@ class DuckDBStore:
                 GROUP BY c.name
                 ORDER BY revenue DESC
             """
-            # Add parent_category_name twice for the OR condition
-            params_with_parent = params[:2] + params[2:]  # Keep date params
-            params_with_parent.insert(2, parent_category_name)  # For parent_c.name = ?
-            params_with_parent.insert(3, parent_category_name)  # For c.name = ? (root category case)
+            # Build final params: base params + parent_category (twice) + brand
+            final_params = params + [parent_category_name, parent_category_name] + brand_params
 
-            results = conn.execute(subcategory_sql, params_with_parent).fetchall()
+            results = conn.execute(subcategory_sql, final_params).fetchall()
 
             category_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4"]
 
