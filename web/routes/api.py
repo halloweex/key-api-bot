@@ -289,6 +289,37 @@ async def get_brand_analytics(
     return await dashboard_service.get_brand_analytics(start, end, sales_type=sales_type)
 
 
+@router.get("/categories/breakdown")
+@limiter.limit("30/minute")
+async def get_subcategory_breakdown(
+    request: Request,
+    parent_category: str = Query(..., description="Parent category name to drill down into"),
+    period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    source_id: Optional[int] = Query(None, description="Filter by source ID"),
+    brand: Optional[str] = Query(None, description="Filter by brand name"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """Get sales breakdown by subcategories for a given parent category (drill-down)."""
+    try:
+        validate_period(period)
+        validate_source_id(source_id)
+        brand = validate_brand_name(brand)
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    return await dashboard_service.get_subcategory_breakdown(
+        start, end,
+        parent_category=parent_category,
+        source_id=source_id,
+        brand=brand,
+        sales_type=sales_type
+    )
+
+
 # ─── Expense Endpoints ─────────────────────────────────────────────────────────
 
 

@@ -21,11 +21,14 @@ let expenseTrendChart = null;
 let currentPeriod = 'week';
 let customStartDate = null;
 let customEndDate = null;
-let currentSalesType = 'retail';  // retail (default) or b2b
+let currentSalesType = 'retail';  // retail (default), b2b, or all
 let currentSourceId = null;
 let currentParentCategoryId = null;
 let currentCategoryId = null;
 let currentBrand = null;
+
+// Category chart drill-down state
+let categoryDrillDownParent = null;  // null = showing parent categories, string = showing subcategories of this parent
 
 // Revenue milestones (UAH) - period-specific
 const MILESTONES = {
@@ -53,6 +56,7 @@ document.addEventListener('DOMContentLoaded', function() {
     initBrandFilter();
     initInfoTooltips();
     initFiltersToggle();
+    initCategoryBackButton();
     loadCategories();
     loadBrands();
     loadAllData();
@@ -629,6 +633,9 @@ function hideLoading() {
 async function loadAllData() {
     showLoading();
 
+    // Reset category drill-down state when filters change
+    categoryDrillDownParent = null;
+
     try {
         await Promise.all([
             loadSummary(),
@@ -1016,64 +1023,138 @@ async function loadCustomerInsights() {
     }
 }
 
+// Category chart drill-down functions
+function updateCategoryChartUI(parentName) {
+    const titleEl = document.getElementById('categoryChartTitle');
+    const backBtn = document.getElementById('categoryBackBtn');
+
+    if (parentName) {
+        titleEl.textContent = `Sales by Category: ${parentName}`;
+        backBtn.classList.remove('hidden');
+    } else {
+        titleEl.textContent = 'Sales by Category';
+        backBtn.classList.add('hidden');
+    }
+}
+
+async function loadCategoryChart(categoryData) {
+    const categoryCtx = document.getElementById('categoryChart').getContext('2d');
+
+    if (categoryChart) {
+        categoryChart.destroy();
+    }
+
+    // Update UI based on drill-down state
+    updateCategoryChartUI(categoryDrillDownParent);
+
+    // Store quantity data for tooltip access
+    const quantityData = categoryData.quantity;
+
+    categoryChart = new Chart(categoryCtx, {
+        type: 'doughnut',
+        data: {
+            labels: categoryData.labels,
+            datasets: [{
+                data: categoryData.revenue,
+                backgroundColor: categoryData.backgroundColor,
+                borderWidth: 0
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            onClick: async (event, elements) => {
+                // Only allow drill-down from parent categories (not when already in subcategory view)
+                if (categoryDrillDownParent) return;
+
+                if (elements.length > 0) {
+                    const index = elements[0].index;
+                    const parentCategory = categoryData.labels[index];
+                    await drillDownToSubcategories(parentCategory);
+                }
+            },
+            plugins: {
+                legend: {
+                    position: 'bottom'
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            const value = context.parsed;
+                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                            const percentage = ((value / total) * 100).toFixed(1);
+                            const qty = quantityData[context.dataIndex];
+                            let label = `${context.label}: ${formatCurrency(value)} (${percentage}%) - ${qty} items`;
+                            // Add hint for parent categories
+                            if (!categoryDrillDownParent) {
+                                label += ' (click to drill down)';
+                            }
+                            return label;
+                        }
+                    }
+                },
+                datalabels: {
+                    color: '#fff',
+                    font: {
+                        weight: 'bold',
+                        size: 11
+                    },
+                    formatter: function(value, context) {
+                        const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                        if (total === 0) return '';
+                        const percentage = ((value / total) * 100).toFixed(0);
+                        return percentage > 5 ? percentage + '%' : '';
+                    }
+                }
+            }
+        },
+        plugins: [ChartDataLabels]
+    });
+}
+
+async function drillDownToSubcategories(parentCategory) {
+    try {
+        showLoading();
+
+        // Build query with parent category
+        let query = buildQuery();
+        query += `&parent_category=${encodeURIComponent(parentCategory)}`;
+
+        const response = await fetch('/api/categories/breakdown' + query);
+        const data = await response.json();
+
+        // Update state
+        categoryDrillDownParent = parentCategory;
+
+        // Reload chart with subcategory data
+        await loadCategoryChart(data);
+    } catch (error) {
+        console.error('Error loading subcategories:', error);
+    } finally {
+        hideLoading();
+    }
+}
+
+async function goBackToParentCategories() {
+    categoryDrillDownParent = null;
+    await loadProductPerformance();
+}
+
+function initCategoryBackButton() {
+    const backBtn = document.getElementById('categoryBackBtn');
+    if (backBtn) {
+        backBtn.addEventListener('click', goBackToParentCategories);
+    }
+}
+
 // Load product performance
 async function loadProductPerformance() {
     try {
         const response = await fetch('/api/products/performance' + buildQuery());
         const data = await response.json();
 
-        // Category breakdown pie chart
-        const categoryCtx = document.getElementById('categoryChart').getContext('2d');
-
-        if (categoryChart) {
-            categoryChart.destroy();
-        }
-
-        categoryChart = new Chart(categoryCtx, {
-            type: 'doughnut',
-            data: {
-                labels: data.categoryBreakdown.labels,
-                datasets: [{
-                    data: data.categoryBreakdown.revenue,
-                    backgroundColor: data.categoryBreakdown.backgroundColor,
-                    borderWidth: 0
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: {
-                        position: 'bottom'
-                    },
-                    tooltip: {
-                        callbacks: {
-                            label: function(context) {
-                                const value = context.parsed;
-                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
-                                const percentage = ((value / total) * 100).toFixed(1);
-                                const qty = data.categoryBreakdown.quantity[context.dataIndex];
-                                return `${context.label}: ${formatCurrency(value)} (${percentage}%) - ${qty} items`;
-                            }
-                        }
-                    },
-                    datalabels: {
-                        color: '#fff',
-                        font: {
-                            weight: 'bold',
-                            size: 11
-                        },
-                        formatter: function(value, context) {
-                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
-                            if (total === 0) return '';
-                            const percentage = ((value / total) * 100).toFixed(0);
-                            return percentage > 5 ? percentage + '%' : '';
-                        }
-                    }
-                }
-            },
-            plugins: [ChartDataLabels]
-        });
+        // Load category chart (parent categories or subcategories based on drill-down state)
+        await loadCategoryChart(data.categoryBreakdown);
 
         // Top products by revenue bar chart
         const revenueCtx = document.getElementById('topRevenueChart').getContext('2d');

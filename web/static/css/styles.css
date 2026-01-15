@@ -355,6 +355,42 @@ main {
     height: 100%;
 }
 
+/* Back button for drill-down charts */
+.back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    background: #F3F4F6;
+    border: 1px solid #E5E7EB;
+    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    color: #6B7280;
+    cursor: pointer;
+    margin-left: 0.5rem;
+    transition: all 0.2s;
+    vertical-align: middle;
+}
+
+.back-btn:hover {
+    background: #E5E7EB;
+    color: #374151;
+}
+
+.back-btn svg {
+    width: 14px;
+    height: 14px;
+}
+
+.back-btn.hidden {
+    display: none;
+}
+
+/* Clickable chart cursor */
+#categoryChart {
+    cursor: pointer;
+}
+
 /* Info tooltip */
 .info-tooltip {
     display: none;

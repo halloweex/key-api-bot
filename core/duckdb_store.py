@@ -1032,6 +1032,70 @@ class DuckDBStore:
                 }
             }
 
+    async def get_subcategory_breakdown(
+        self,
+        start_date: date,
+        end_date: date,
+        parent_category_name: str,
+        source_id: Optional[int] = None,
+        brand: Optional[str] = None,
+        sales_type: str = "retail"
+    ) -> Dict[str, Any]:
+        """Get sales breakdown by subcategories for a given parent category."""
+        async with self.connection() as conn:
+            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+            params = [start_date, end_date, parent_category_name]
+            where_clauses = [
+                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"o.status_id NOT IN {return_statuses}",
+                self._build_sales_type_filter(sales_type)
+            ]
+
+            if source_id:
+                where_clauses.append("o.source_id = ?")
+                params.append(source_id)
+
+            brand_filter = ""
+            if brand:
+                brand_filter = "AND LOWER(p.brand) = LOWER(?)"
+                params.append(brand)
+
+            where_sql = " AND ".join(where_clauses)
+
+            # Get subcategories for the parent category
+            subcategory_sql = f"""
+                SELECT
+                    c.name as subcategory_name,
+                    SUM(op.price_sold * op.quantity) as revenue,
+                    SUM(op.quantity) as quantity
+                FROM orders o
+                JOIN order_products op ON o.id = op.order_id
+                LEFT JOIN products p ON op.product_id = p.id
+                LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
+                WHERE {where_sql}
+                    AND (parent_c.name = ? OR (c.name = ? AND c.parent_id IS NULL))
+                    {brand_filter}
+                GROUP BY c.name
+                ORDER BY revenue DESC
+            """
+            # Add parent_category_name twice for the OR condition
+            params_with_parent = params[:2] + params[2:]  # Keep date params
+            params_with_parent.insert(2, parent_category_name)  # For parent_c.name = ?
+            params_with_parent.insert(3, parent_category_name)  # For c.name = ? (root category case)
+
+            results = conn.execute(subcategory_sql, params_with_parent).fetchall()
+
+            category_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4"]
+
+            return {
+                "parentCategory": parent_category_name,
+                "labels": [row[0] for row in results],
+                "revenue": [round(float(row[1]), 2) for row in results],
+                "quantity": [row[2] for row in results],
+                "backgroundColor": category_colors[:len(results)]
+            }
+
     async def get_brand_analytics(
         self,
         start_date: date,

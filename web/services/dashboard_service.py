@@ -156,6 +156,26 @@ async def get_brand_analytics(start_date: str, end_date: str, sales_type: str = 
     return await store.get_brand_analytics(start, end, sales_type=sales_type)
 
 
+async def get_subcategory_breakdown(
+    start_date: str,
+    end_date: str,
+    parent_category: str,
+    source_id: Optional[int] = None,
+    brand: Optional[str] = None,
+    sales_type: str = "retail"
+) -> Dict[str, Any]:
+    """Get sales breakdown by subcategories for a given parent category."""
+    start, end = _parse_dates(start_date, end_date)
+    store = await get_store()
+    return await store.get_subcategory_breakdown(
+        start, end,
+        parent_category_name=parent_category,
+        source_id=source_id,
+        brand=brand,
+        sales_type=sales_type
+    )
+
+
 async def get_expense_types() -> list:
     """Get list of expense types for filter dropdown."""
     store = await get_store()
