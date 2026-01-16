@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, memo } from 'react'
 import {
   LineChart,
   Line,
@@ -10,14 +10,35 @@ import {
   Legend,
 } from 'recharts'
 import { ChartContainer } from './ChartContainer'
+import {
+  CHART_THEME,
+  CHART_DIMENSIONS,
+  TOOLTIP_STYLE,
+  TOOLTIP_LABEL_STYLE,
+  GRID_PROPS,
+  X_AXIS_PROPS,
+  Y_AXIS_PROPS,
+  LEGEND_PROPS,
+  LINE_PROPS,
+  formatAxisK,
+} from './config'
 import { useRevenueTrend } from '../../hooks'
 import { formatCurrency } from '../../utils/formatters'
-import { COLORS } from '../../utils/colors'
 
-export function RevenueTrendChart() {
-  const { data, isLoading, error } = useRevenueTrend()
+// ─── Types ───────────────────────────────────────────────────────────────────
 
-  const chartData = useMemo(() => {
+interface ChartDataPoint {
+  date: string
+  revenue: number
+  orders: number
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
+
+export const RevenueTrendChart = memo(function RevenueTrendChart() {
+  const { data, isLoading, error, refetch } = useRevenueTrend()
+
+  const chartData = useMemo<ChartDataPoint[]>(() => {
     if (!data?.labels?.length) return []
     return data.labels.map((label, index) => ({
       date: label,
@@ -26,87 +47,63 @@ export function RevenueTrendChart() {
     }))
   }, [data])
 
-  if (!isLoading && chartData.length === 0) {
-    return (
-      <ChartContainer title="Revenue Trend" isLoading={false} error={null}>
-        <div className="h-72 flex items-center justify-center text-slate-500">
-          No data available
-        </div>
-      </ChartContainer>
-    )
-  }
+  const isEmpty = !isLoading && chartData.length === 0
 
   return (
     <ChartContainer
       title="Revenue Trend"
       isLoading={isLoading}
       error={error as Error | null}
+      onRetry={refetch}
+      isEmpty={isEmpty}
+      height="lg"
+      ariaLabel="Line chart showing revenue and orders over time"
     >
-      <div className="h-72 min-h-[288px]">
-        <ResponsiveContainer width="100%" height="100%" minHeight={288}>
-          <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-            <XAxis
-              dataKey="date"
-              stroke="#9CA3AF"
-              fontSize={12}
-              tickLine={false}
-            />
+      <div style={{ height: CHART_DIMENSIONS.height.lg }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={chartData} margin={CHART_DIMENSIONS.margin.default}>
+            <CartesianGrid {...GRID_PROPS} />
+            <XAxis dataKey="date" {...X_AXIS_PROPS} />
             <YAxis
               yAxisId="revenue"
-              stroke="#9CA3AF"
-              fontSize={12}
-              tickLine={false}
-              tickFormatter={(value) => `${(value / 1000).toFixed(0)}k`}
+              {...Y_AXIS_PROPS}
+              tickFormatter={formatAxisK}
             />
             <YAxis
               yAxisId="orders"
               orientation="right"
-              stroke="#9CA3AF"
-              fontSize={12}
-              tickLine={false}
+              {...Y_AXIS_PROPS}
             />
             <Tooltip
-              contentStyle={{
-                backgroundColor: '#1E293B',
-                border: '1px solid #374151',
-                borderRadius: '8px',
-              }}
-              labelStyle={{ color: '#F3F4F6' }}
-              formatter={(value, name) => {
-                const numValue = Number(value) || 0
-                return [
-                  name === 'revenue' ? formatCurrency(numValue) : numValue,
-                  name === 'revenue' ? 'Revenue' : 'Orders',
-                ]
-              }}
+              contentStyle={TOOLTIP_STYLE}
+              labelStyle={TOOLTIP_LABEL_STYLE}
+              formatter={(value, name) => [
+                name === 'revenue' ? formatCurrency(Number(value) || 0) : Number(value) || 0,
+                name === 'revenue' ? 'Revenue' : 'Orders',
+              ]}
             />
-            <Legend
-              wrapperStyle={{ color: '#9CA3AF' }}
-            />
+            <Legend {...LEGEND_PROPS} />
             <Line
               yAxisId="revenue"
               type="monotone"
               dataKey="revenue"
               name="Revenue"
-              stroke={COLORS.primary}
-              strokeWidth={2}
-              dot={false}
-              activeDot={{ r: 4, fill: COLORS.primary }}
+              stroke={CHART_THEME.primary}
+              {...LINE_PROPS}
+              activeDot={{ r: 4, fill: CHART_THEME.primary }}
             />
             <Line
               yAxisId="orders"
               type="monotone"
               dataKey="orders"
               name="Orders"
-              stroke={COLORS.accent}
-              strokeWidth={2}
-              dot={false}
-              activeDot={{ r: 4, fill: COLORS.accent }}
+              stroke={CHART_THEME.accent}
+              {...LINE_PROPS}
+              activeDot={{ r: 4, fill: CHART_THEME.accent }}
             />
           </LineChart>
         </ResponsiveContainer>
       </div>
     </ChartContainer>
   )
-}
+})

@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, memo } from 'react'
 import {
   BarChart,
   Bar,
@@ -12,14 +12,37 @@ import {
   Cell,
 } from 'recharts'
 import { ChartContainer } from './ChartContainer'
+import {
+  CHART_DIMENSIONS,
+  TOOLTIP_STYLE,
+  GRID_PROPS,
+  X_AXIS_PROPS,
+  Y_AXIS_PROPS,
+  BAR_PROPS,
+  PIE_PROPS,
+  formatAxisK,
+  formatPieLabel,
+} from './config'
 import { useSalesBySource } from '../../hooks'
 import { formatCurrency } from '../../utils/formatters'
 import { SOURCE_COLORS } from '../../utils/colors'
 
-export function SalesBySourceChart() {
-  const { data, isLoading, error } = useSalesBySource()
+// ─── Types ───────────────────────────────────────────────────────────────────
 
-  const chartData = useMemo(() => {
+interface ChartDataPoint {
+  name: string
+  revenue: number
+  orders: number
+  color: string
+  [key: string]: string | number  // Recharts compatibility
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
+
+export const SalesBySourceChart = memo(function SalesBySourceChart() {
+  const { data, isLoading, error, refetch } = useSalesBySource()
+
+  const chartData = useMemo<ChartDataPoint[]>(() => {
     if (!data?.labels?.length) return []
     return data.labels.map((label, index) => ({
       name: label,
@@ -29,60 +52,52 @@ export function SalesBySourceChart() {
     }))
   }, [data])
 
-  const totalRevenue = useMemo(() =>
-    chartData.reduce((sum, item) => sum + item.revenue, 0),
+  const totalRevenue = useMemo(
+    () => chartData.reduce((sum, item) => sum + item.revenue, 0),
     [chartData]
   )
 
-  if (!isLoading && chartData.length === 0) {
-    return (
-      <ChartContainer title="Sales by Source" isLoading={false} error={null}>
-        <div className="h-64 flex items-center justify-center text-slate-500">
-          No data available
-        </div>
-      </ChartContainer>
-    )
-  }
+  const isEmpty = !isLoading && chartData.length === 0
 
   return (
     <ChartContainer
       title="Sales by Source"
       isLoading={isLoading}
       error={error as Error | null}
+      onRetry={refetch}
+      isEmpty={isEmpty}
+      height="md"
+      ariaLabel="Bar and pie charts showing sales distribution by source"
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Bar Chart */}
-        <div className="h-64 min-h-[256px]">
-          <ResponsiveContainer width="100%" height="100%" minHeight={256}>
-            <BarChart data={chartData} layout="vertical" margin={{ left: 20, right: 20 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#374151" horizontal={false} />
+        <div style={{ height: CHART_DIMENSIONS.height.md }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart
+              data={chartData}
+              layout="vertical"
+              margin={{ left: 20, right: 20 }}
+            >
+              <CartesianGrid {...GRID_PROPS} horizontal={false} />
               <XAxis
                 type="number"
-                stroke="#9CA3AF"
-                fontSize={12}
-                tickLine={false}
-                tickFormatter={(value) => `${(value / 1000).toFixed(0)}k`}
+                {...X_AXIS_PROPS}
+                tickFormatter={formatAxisK}
               />
               <YAxis
                 type="category"
                 dataKey="name"
-                stroke="#9CA3AF"
-                fontSize={12}
-                tickLine={false}
-                width={80}
+                {...Y_AXIS_PROPS}
+                width={CHART_DIMENSIONS.yAxisWidth.md}
               />
               <Tooltip
-                contentStyle={{
-                  backgroundColor: '#1E293B',
-                  border: '1px solid #374151',
-                  borderRadius: '8px',
-                }}
+                contentStyle={TOOLTIP_STYLE}
                 labelStyle={{ color: '#F3F4F6' }}
                 formatter={(value) => [formatCurrency(Number(value) || 0), 'Revenue']}
               />
-              <Bar dataKey="revenue" radius={[0, 4, 4, 0]}>
+              <Bar dataKey="revenue" {...BAR_PROPS}>
                 {chartData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={entry.color} />
+                  <Cell key={`bar-${index}`} fill={entry.color} />
                 ))}
               </Bar>
             </BarChart>
@@ -90,8 +105,8 @@ export function SalesBySourceChart() {
         </div>
 
         {/* Pie Chart */}
-        <div className="h-64 min-h-[256px]">
-          <ResponsiveContainer width="100%" height="100%" minHeight={256}>
+        <div style={{ height: CHART_DIMENSIONS.height.md }}>
+          <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
                 data={chartData}
@@ -101,19 +116,17 @@ export function SalesBySourceChart() {
                 outerRadius={80}
                 dataKey="revenue"
                 nameKey="name"
-                label={({ name, percent }) => `${name}: ${((percent ?? 0) * 100).toFixed(0)}%`}
-                labelLine={false}
+                label={({ name, percent }) =>
+                  `${name}: ${formatPieLabel(percent ?? 0)}`
+                }
+                {...PIE_PROPS}
               >
                 {chartData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={entry.color} />
+                  <Cell key={`pie-${index}`} fill={entry.color} />
                 ))}
               </Pie>
               <Tooltip
-                contentStyle={{
-                  backgroundColor: '#1E293B',
-                  border: '1px solid #374151',
-                  borderRadius: '8px',
-                }}
+                contentStyle={TOOLTIP_STYLE}
                 formatter={(value) => [formatCurrency(Number(value) || 0), 'Revenue']}
               />
             </PieChart>
@@ -121,7 +134,7 @@ export function SalesBySourceChart() {
         </div>
       </div>
 
-      {/* Summary stats */}
+      {/* Summary */}
       <div className="mt-4 pt-4 border-t border-slate-700">
         <div className="flex justify-between items-center">
           <span className="text-slate-400 text-sm">Total Revenue</span>
@@ -130,4 +143,4 @@ export function SalesBySourceChart() {
       </div>
     </ChartContainer>
   )
-}
+})

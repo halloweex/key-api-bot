@@ -1,88 +1,164 @@
-import { useMemo } from 'react'
-import { Card, CardContent, SkeletonCard } from '../ui'
+import { useMemo, useCallback } from 'react'
+import { StatCard, StatCardSkeleton, type StatCardVariant } from './StatCard'
 import { useSummary } from '../../hooks'
 import { formatCurrency, formatNumber, formatPercent } from '../../utils/formatters'
+import type { SummaryResponse } from '../../types/api'
 
-interface StatCardProps {
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface CardConfig {
+  id: string
   label: string
-  value: string
-  subtitle?: string
-  color: 'blue' | 'green' | 'purple' | 'orange' | 'red'
+  variant: StatCardVariant
+  getValue: (data: SummaryResponse) => number
+  formatter: (value: number) => string
+  getSubtitle?: (data: SummaryResponse) => string | undefined
+  ariaLabel?: (data: SummaryResponse) => string
 }
 
-const colorClasses = {
-  blue: 'text-blue-400',
-  green: 'text-green-400',
-  purple: 'text-purple-400',
-  orange: 'text-orange-400',
-  red: 'text-red-400',
+// ─── Card Configuration ──────────────────────────────────────────────────────
+
+const CARD_CONFIGS: CardConfig[] = [
+  {
+    id: 'orders',
+    label: 'Total Orders',
+    variant: 'blue',
+    getValue: (data) => data.totalOrders,
+    formatter: formatNumber,
+    getSubtitle: (data) => `${data.startDate} - ${data.endDate}`,
+    ariaLabel: (data) => `Total orders: ${formatNumber(data.totalOrders)} from ${data.startDate} to ${data.endDate}`,
+  },
+  {
+    id: 'revenue',
+    label: 'Total Revenue',
+    variant: 'green',
+    getValue: (data) => data.totalRevenue,
+    formatter: formatCurrency,
+    ariaLabel: (data) => `Total revenue: ${formatCurrency(data.totalRevenue)}`,
+  },
+  {
+    id: 'avgCheck',
+    label: 'Average Check',
+    variant: 'purple',
+    getValue: (data) => data.avgCheck,
+    formatter: formatCurrency,
+    ariaLabel: (data) => `Average check: ${formatCurrency(data.avgCheck)}`,
+  },
+  {
+    id: 'returns',
+    label: 'Returns',
+    variant: 'orange',
+    getValue: (data) => data.totalReturns,
+    formatter: formatNumber,
+    getSubtitle: (data) => {
+      const rate = data.totalOrders > 0
+        ? (data.totalReturns / (data.totalOrders + data.totalReturns)) * 100
+        : 0
+      return rate > 0 ? `${formatPercent(rate)} return rate` : undefined
+    },
+    ariaLabel: (data) => `Returns: ${formatNumber(data.totalReturns)}`,
+  },
+]
+
+const SKELETON_COUNT = CARD_CONFIGS.length
+
+// ─── Error Component ─────────────────────────────────────────────────────────
+
+interface ErrorStateProps {
+  message: string
+  onRetry?: () => void
 }
 
-function StatCard({ label, value, subtitle, color }: StatCardProps) {
+function ErrorState({ message, onRetry }: ErrorStateProps) {
   return (
-    <Card>
-      <CardContent className="py-3">
-        <p className="text-sm text-slate-400 mb-1">{label}</p>
-        <p className={`text-2xl font-bold ${colorClasses[color]}`}>{value}</p>
-        {subtitle && (
-          <p className="text-xs text-slate-500 mt-1">{subtitle}</p>
+    <div
+      role="alert"
+      className="col-span-full bg-red-900/20 border border-red-800 rounded-lg p-4"
+    >
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <svg
+            className="w-5 h-5 text-red-400"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            aria-hidden="true"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+            />
+          </svg>
+          <p className="text-red-300 text-sm">{message}</p>
+        </div>
+        {onRetry && (
+          <button
+            onClick={onRetry}
+            className="text-sm text-red-300 hover:text-red-200 underline underline-offset-2 transition-colors"
+          >
+            Retry
+          </button>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   )
 }
 
-export function SummaryCards() {
-  const { data, isLoading, error } = useSummary()
+// ─── Loading State ───────────────────────────────────────────────────────────
 
-  const returnRate = useMemo(() => {
-    if (!data || data.totalOrders === 0) return 0
-    return (data.totalReturns / (data.totalOrders + data.totalReturns)) * 100
+function LoadingState() {
+  return (
+    <>
+      {Array.from({ length: SKELETON_COUNT }, (_, i) => (
+        <StatCardSkeleton key={`skeleton-${i}`} />
+      ))}
+    </>
+  )
+}
+
+// ─── Main Component ──────────────────────────────────────────────────────────
+
+export function SummaryCards() {
+  const { data, isLoading, error, refetch } = useSummary()
+
+  const handleRetry = useCallback(() => {
+    refetch()
+  }, [refetch])
+
+  // Memoize rendered cards to prevent unnecessary re-renders
+  const renderedCards = useMemo(() => {
+    if (!data) return null
+
+    return CARD_CONFIGS.map((config) => (
+      <StatCard
+        key={config.id}
+        label={config.label}
+        value={config.getValue(data)}
+        formatter={config.formatter}
+        variant={config.variant}
+        subtitle={config.getSubtitle?.(data)}
+        ariaLabel={config.ariaLabel?.(data)}
+      />
+    ))
   }, [data])
 
-  if (isLoading) {
-    return (
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <SkeletonCard />
-        <SkeletonCard />
-        <SkeletonCard />
-        <SkeletonCard />
-      </div>
-    )
-  }
-
-  if (error || !data) {
-    return (
-      <div className="bg-red-900/30 border border-red-700 rounded-lg p-4">
-        <p className="text-red-300">Failed to load summary data</p>
-      </div>
-    )
-  }
-
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-      <StatCard
-        label="Total Orders"
-        value={formatNumber(data.totalOrders)}
-        subtitle={`${data.startDate} - ${data.endDate}`}
-        color="blue"
-      />
-      <StatCard
-        label="Total Revenue"
-        value={formatCurrency(data.totalRevenue)}
-        color="green"
-      />
-      <StatCard
-        label="Average Check"
-        value={formatCurrency(data.avgCheck)}
-        color="purple"
-      />
-      <StatCard
-        label="Returns"
-        value={formatNumber(data.totalReturns)}
-        subtitle={returnRate > 0 ? `${formatPercent(returnRate)} return rate` : undefined}
-        color="orange"
-      />
-    </div>
+    <section
+      aria-label="Summary statistics"
+      className="grid grid-cols-2 lg:grid-cols-4 gap-4"
+    >
+      {isLoading && <LoadingState />}
+
+      {error && !isLoading && (
+        <ErrorState
+          message="Failed to load summary data"
+          onRetry={handleRetry}
+        />
+      )}
+
+      {!isLoading && !error && data && renderedCards}
+    </section>
   )
 }

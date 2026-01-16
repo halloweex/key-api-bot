@@ -10,8 +10,12 @@
       <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueTrendChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueTrendChart.tsx" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/SalesBySourceChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/SalesBySourceChart.tsx" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/TopProductsChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/TopProductsChart.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/static-v2/assets/index-BJCPmTQK.js" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/static-v2/assets/index-DiDBisWH.css" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/index.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/filters/PeriodFilter.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/filters/PeriodFilter.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/filters/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/filters/index.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/layout/Dashboard.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/layout/Dashboard.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/static-v2/assets/index-B6UTYmH3.js" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/static-v2/assets/index-VAxsZF2J.css" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/web/static-v2/index.html" beforeDir="false" afterPath="$PROJECT_DIR$/web/static-v2/index.html" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -287,7 +291,7 @@
       <workItem from="1768033818711" duration="2174000" />
       <workItem from="1768049467528" duration="304000" />
       <workItem from="1768049798317" duration="1059000" />
-      <workItem from="1768051049268" duration="70327000" />
+      <workItem from="1768051049268" duration="71952000" />
     </task>
     <servers />
   </component>

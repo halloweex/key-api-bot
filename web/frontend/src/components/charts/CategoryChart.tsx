@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback } from 'react'
+import { useMemo, useState, useCallback, memo } from 'react'
 import {
   PieChart,
   Pie,
@@ -8,22 +8,50 @@ import {
   Legend,
 } from 'recharts'
 import { ChartContainer } from './ChartContainer'
+import {
+  CHART_THEME,
+  CHART_DIMENSIONS,
+  TOOLTIP_STYLE,
+  LEGEND_PROPS,
+  PIE_PROPS,
+  formatPieLabel,
+} from './config'
 import { useProductPerformance, useCategoryBreakdown } from '../../hooks'
 import { formatCurrency } from '../../utils/formatters'
 import { CATEGORY_COLORS } from '../../utils/colors'
 import { Button } from '../ui'
 
-export function CategoryChart() {
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface ChartDataPoint {
+  name: string
+  value: number
+  color: string
+  [key: string]: string | number  // Recharts compatibility
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
+
+export const CategoryChart = memo(function CategoryChart() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
 
-  const { data: performanceData, isLoading: loadingPerformance, error: performanceError } = useProductPerformance()
-  const { data: breakdownData, isLoading: loadingBreakdown } = useCategoryBreakdown(selectedCategory)
+  const {
+    data: performanceData,
+    isLoading: loadingPerformance,
+    error: performanceError,
+    refetch: refetchPerformance,
+  } = useProductPerformance()
+
+  const {
+    data: breakdownData,
+    isLoading: loadingBreakdown,
+  } = useCategoryBreakdown(selectedCategory)
 
   const isLoading = selectedCategory ? loadingBreakdown : loadingPerformance
   const error = performanceError
 
-  // Use breakdown data if drilled down, otherwise use category breakdown from performance
-  const chartData = useMemo(() => {
+  const chartData = useMemo<ChartDataPoint[]>(() => {
+    // Drilled-down view
     if (selectedCategory && breakdownData?.labels?.length) {
       return breakdownData.labels.map((label: string, index: number) => ({
         name: label || 'Unknown',
@@ -32,6 +60,7 @@ export function CategoryChart() {
       }))
     }
 
+    // Top-level view
     if (!performanceData?.categoryBreakdown?.labels?.length) return []
 
     return performanceData.categoryBreakdown.labels.map((label, index) => ({
@@ -41,18 +70,14 @@ export function CategoryChart() {
     }))
   }, [performanceData, breakdownData, selectedCategory])
 
-  const totalRevenue = useMemo(() =>
-    chartData.reduce((sum, item) => sum + item.value, 0),
+  const totalRevenue = useMemo(
+    () => chartData.reduce((sum, item) => sum + item.value, 0),
     [chartData]
   )
 
   const handleClick = useCallback((data: { name: string }) => {
-    if (selectedCategory) {
-      setSelectedCategory(null)
-    } else {
-      setSelectedCategory(data.name)
-    }
-  }, [selectedCategory])
+    setSelectedCategory(prev => prev ? null : data.name)
+  }, [])
 
   const handleBack = useCallback(() => {
     setSelectedCategory(null)
@@ -62,31 +87,27 @@ export function CategoryChart() {
     ? `${selectedCategory} - Subcategories`
     : 'Sales by Category'
 
-  if (!isLoading && chartData.length === 0) {
-    return (
-      <ChartContainer title={title} isLoading={false} error={null}>
-        <div className="h-72 flex items-center justify-center text-slate-500">
-          No data available
-        </div>
-      </ChartContainer>
-    )
-  }
+  const isEmpty = !isLoading && chartData.length === 0
 
   return (
     <ChartContainer
       title={title}
       isLoading={isLoading}
       error={error as Error | null}
+      onRetry={refetchPerformance}
+      isEmpty={isEmpty}
+      height="lg"
+      ariaLabel={`Pie chart showing ${selectedCategory ? 'subcategory' : 'category'} sales breakdown`}
       action={
         selectedCategory && (
           <Button size="sm" variant="ghost" onClick={handleBack}>
-            ← Back
+            &larr; Back
           </Button>
         )
       }
     >
-      <div className="h-72 min-h-[288px]">
-        <ResponsiveContainer width="100%" height="100%" minHeight={288}>
+      <div style={{ height: CHART_DIMENSIONS.height.lg }}>
+        <ResponsiveContainer width="100%" height="100%">
           <PieChart>
             <Pie
               data={chartData}
@@ -98,30 +119,25 @@ export function CategoryChart() {
               nameKey="name"
               onClick={handleClick}
               style={{ cursor: 'pointer' }}
-              label={({ percent }) =>
-                (percent ?? 0) > 0.05 ? `${((percent ?? 0) * 100).toFixed(0)}%` : ''
-              }
-              labelLine={false}
+              label={({ percent }) => formatPieLabel(percent ?? 0)}
+              {...PIE_PROPS}
             >
               {chartData.map((entry, index) => (
                 <Cell
                   key={`cell-${index}`}
                   fill={entry.color}
-                  stroke="#1E293B"
+                  stroke={CHART_THEME.background}
                   strokeWidth={2}
                 />
               ))}
             </Pie>
             <Tooltip
-              contentStyle={{
-                backgroundColor: '#1E293B',
-                border: '1px solid #374151',
-                borderRadius: '8px',
-              }}
-              formatter={(value, name) => [formatCurrency(Number(value) || 0), name]}
+              contentStyle={TOOLTIP_STYLE}
+              formatter={(value, name) => [formatCurrency(Number(value) || 0), String(name)]}
             />
             <Legend
-              wrapperStyle={{ color: '#9CA3AF', fontSize: '12px' }}
+              {...LEGEND_PROPS}
+              wrapperStyle={{ ...LEGEND_PROPS.wrapperStyle, fontSize: '12px' }}
               layout="vertical"
               align="right"
               verticalAlign="middle"
@@ -130,7 +146,7 @@ export function CategoryChart() {
         </ResponsiveContainer>
       </div>
 
-      {/* Hint text */}
+      {/* Hint */}
       <div className="mt-2 text-center">
         <p className="text-xs text-slate-500">
           {selectedCategory
@@ -148,4 +164,4 @@ export function CategoryChart() {
       </div>
     </ChartContainer>
   )
-}
+})

@@ -1,84 +1,236 @@
+/**
+ * API Client with timeout, abort support, and enhanced error handling.
+ */
+
+import type {
+  SummaryResponse,
+  RevenueTrendResponse,
+  SalesBySourceResponse,
+  TopProductsResponse,
+  ProductPerformanceResponse,
+  CustomerInsightsResponse,
+  BrandAnalyticsResponse,
+  ExpenseSummaryResponse,
+  ProfitAnalysisResponse,
+  CategoryBreakdown,
+  Category,
+  Brand,
+  ExpenseType,
+  HealthResponse,
+} from '../types/api'
+
+// ─── Configuration ───────────────────────────────────────────────────────────
+
 const API_BASE = '/api'
+const DEFAULT_TIMEOUT = 30000 // 30 seconds
+
+// ─── Error Classes ───────────────────────────────────────────────────────────
 
 export class ApiError extends Error {
   status: number
+  code: string
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code = 'API_ERROR') {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.code = code
+  }
+
+  static fromResponse(response: Response): ApiError {
+    const status = response.status
+
+    // Map common HTTP statuses to meaningful messages
+    const messages: Record<number, string> = {
+      400: 'Invalid request parameters',
+      401: 'Authentication required',
+      403: 'Access denied',
+      404: 'Resource not found',
+      429: 'Too many requests, please slow down',
+      500: 'Server error, please try again',
+      502: 'Server temporarily unavailable',
+      503: 'Service unavailable',
+    }
+
+    const message = messages[status] || `API error: ${response.statusText}`
+    const code = status >= 500 ? 'SERVER_ERROR' : 'CLIENT_ERROR'
+
+    return new ApiError(status, message, code)
   }
 }
 
-async function fetchApi<T>(endpoint: string, queryParams?: string): Promise<T> {
+export class NetworkError extends Error {
+  code: string
+
+  constructor(message: string, code = 'NETWORK_ERROR') {
+    super(message)
+    this.name = 'NetworkError'
+    this.code = code
+  }
+}
+
+export class TimeoutError extends Error {
+  constructor(timeout: number) {
+    super(`Request timed out after ${timeout}ms`)
+    this.name = 'TimeoutError'
+  }
+}
+
+// ─── Fetch with Timeout ──────────────────────────────────────────────────────
+
+interface FetchOptions {
+  timeout?: number
+  signal?: AbortSignal
+}
+
+async function fetchWithTimeout(
+  url: string,
+  options: FetchOptions = {}
+): Promise<Response> {
+  const { timeout = DEFAULT_TIMEOUT, signal: externalSignal } = options
+
+  // Create abort controller for timeout
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeout)
+
+  // Combine external signal with timeout signal
+  const signal = externalSignal
+    ? combineSignals(externalSignal, controller.signal)
+    : controller.signal
+
+  try {
+    const response = await fetch(url, { signal })
+    clearTimeout(timeoutId)
+    return response
+  } catch (error) {
+    clearTimeout(timeoutId)
+
+    if (error instanceof Error) {
+      if (error.name === 'AbortError') {
+        // Check if it was our timeout or external abort
+        if (controller.signal.aborted && !externalSignal?.aborted) {
+          throw new TimeoutError(timeout)
+        }
+        throw error // Re-throw external abort
+      }
+
+      // Network errors (offline, DNS failure, etc.)
+      throw new NetworkError(
+        navigator.onLine
+          ? 'Unable to connect to server'
+          : 'No internet connection',
+        navigator.onLine ? 'CONNECTION_FAILED' : 'OFFLINE'
+      )
+    }
+
+    throw error
+  }
+}
+
+/**
+ * Combines multiple AbortSignals into one.
+ * The combined signal aborts when any of the input signals abort.
+ */
+function combineSignals(...signals: AbortSignal[]): AbortSignal {
+  const controller = new AbortController()
+
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort()
+      break
+    }
+    signal.addEventListener('abort', () => controller.abort(), { once: true })
+  }
+
+  return controller.signal
+}
+
+// ─── Core Fetch Function ─────────────────────────────────────────────────────
+
+async function fetchApi<T>(
+  endpoint: string,
+  queryParams?: string,
+  options?: FetchOptions
+): Promise<T> {
   const url = queryParams
     ? `${API_BASE}${endpoint}?${queryParams}`
     : `${API_BASE}${endpoint}`
 
-  const response = await fetch(url)
+  const response = await fetchWithTimeout(url, options)
 
   if (!response.ok) {
-    throw new ApiError(response.status, `API error: ${response.statusText}`)
+    throw ApiError.fromResponse(response)
   }
 
-  return response.json()
+  try {
+    return await response.json()
+  } catch {
+    throw new ApiError(response.status, 'Invalid response format', 'PARSE_ERROR')
+  }
 }
+
+// ─── API Client ──────────────────────────────────────────────────────────────
 
 export const api = {
   // Summary
-  getSummary: (params: string) =>
-    fetchApi<import('../types/api').SummaryResponse>('/summary', params),
+  getSummary: (params: string, options?: FetchOptions) =>
+    fetchApi<SummaryResponse>('/summary', params, options),
 
   // Revenue
-  getRevenueTrend: (params: string) =>
-    fetchApi<import('../types/api').RevenueTrendResponse>('/revenue/trend', params),
+  getRevenueTrend: (params: string, options?: FetchOptions) =>
+    fetchApi<RevenueTrendResponse>('/revenue/trend', params, options),
 
   // Sales
-  getSalesBySource: (params: string) =>
-    fetchApi<import('../types/api').SalesBySourceResponse>('/sales/by-source', params),
+  getSalesBySource: (params: string, options?: FetchOptions) =>
+    fetchApi<SalesBySourceResponse>('/sales/by-source', params, options),
 
   // Products
-  getTopProducts: (params: string) =>
-    fetchApi<import('../types/api').TopProductsResponse>('/products/top', params),
+  getTopProducts: (params: string, options?: FetchOptions) =>
+    fetchApi<TopProductsResponse>('/products/top', params, options),
 
-  getProductPerformance: (params: string) =>
-    fetchApi<import('../types/api').ProductPerformanceResponse>('/products/performance', params),
+  getProductPerformance: (params: string, options?: FetchOptions) =>
+    fetchApi<ProductPerformanceResponse>('/products/performance', params, options),
 
   // Categories
-  getCategories: () =>
-    fetchApi<import('../types/api').Category[]>('/categories'),
+  getCategories: (options?: FetchOptions) =>
+    fetchApi<Category[]>('/categories', undefined, options),
 
-  getChildCategories: (parentId: number) =>
-    fetchApi<import('../types/api').Category[]>(`/categories/${parentId}/children`),
+  getChildCategories: (parentId: number, options?: FetchOptions) =>
+    fetchApi<Category[]>(`/categories/${parentId}/children`, undefined, options),
 
-  getCategoryBreakdown: (parentCategory: string, params: string) =>
-    fetchApi<import('../types/api').CategoryBreakdown>(
+  getCategoryBreakdown: (parentCategory: string, params: string, options?: FetchOptions) =>
+    fetchApi<CategoryBreakdown>(
       '/categories/breakdown',
-      `${params}&parent_category=${encodeURIComponent(parentCategory)}`
+      `${params}&parent_category=${encodeURIComponent(parentCategory)}`,
+      options
     ),
 
   // Customers
-  getCustomerInsights: (params: string) =>
-    fetchApi<import('../types/api').CustomerInsightsResponse>('/customers/insights', params),
+  getCustomerInsights: (params: string, options?: FetchOptions) =>
+    fetchApi<CustomerInsightsResponse>('/customers/insights', params, options),
 
   // Brands
-  getBrands: () =>
-    fetchApi<import('../types/api').Brand[]>('/brands'),
+  getBrands: (options?: FetchOptions) =>
+    fetchApi<Brand[]>('/brands', undefined, options),
 
-  getBrandAnalytics: (params: string) =>
-    fetchApi<import('../types/api').BrandAnalyticsResponse>('/brands/analytics', params),
+  getBrandAnalytics: (params: string, options?: FetchOptions) =>
+    fetchApi<BrandAnalyticsResponse>('/brands/analytics', params, options),
 
   // Expenses
-  getExpenseTypes: () =>
-    fetchApi<import('../types/api').ExpenseType[]>('/expense-types'),
+  getExpenseTypes: (options?: FetchOptions) =>
+    fetchApi<ExpenseType[]>('/expense-types', undefined, options),
 
-  getExpenseSummary: (params: string) =>
-    fetchApi<import('../types/api').ExpenseSummaryResponse>('/expenses/summary', params),
+  getExpenseSummary: (params: string, options?: FetchOptions) =>
+    fetchApi<ExpenseSummaryResponse>('/expenses/summary', params, options),
 
-  getProfitAnalysis: (params: string) =>
-    fetchApi<import('../types/api').ProfitAnalysisResponse>('/expenses/profit', params),
+  getProfitAnalysis: (params: string, options?: FetchOptions) =>
+    fetchApi<ProfitAnalysisResponse>('/expenses/profit', params, options),
 
   // Health
-  getHealth: () =>
-    fetchApi<import('../types/api').HealthResponse>('/health'),
+  getHealth: (options?: FetchOptions) =>
+    fetchApi<HealthResponse>('/health', undefined, options),
 }
+
+// ─── Type Exports ────────────────────────────────────────────────────────────
+
+export type { FetchOptions }

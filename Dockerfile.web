@@ -1,3 +1,17 @@
+# ─── Stage 1: Build React Frontend ─────────────────────────────────────────────
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /frontend
+
+# Install dependencies first (better layer caching)
+COPY web/frontend/package.json web/frontend/package-lock.json* ./
+RUN npm ci --silent
+
+# Copy source and build
+COPY web/frontend/ ./
+RUN npm run build
+
+# ─── Stage 2: Python Runtime ───────────────────────────────────────────────────
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -14,6 +28,10 @@ COPY core/ ./core/
 
 # Copy web application
 COPY web/ ./web/
+
+# Copy built React app from frontend stage
+# Vite outputs to ../static-v2 relative to web/frontend (i.e., /static-v2 in container)
+COPY --from=frontend-builder /static-v2 ./web/static-v2
 
 # Create data directory for shared SQLite database
 RUN mkdir -p /app/data
