@@ -508,11 +508,12 @@ class DuckDBStore:
 
             where_sql = " AND ".join(where_clauses)
 
-            # Query daily revenue
+            # Query daily revenue and order counts
             sql = f"""
                 SELECT
                     DATE(o.ordered_at) as day,
-                    SUM(o.grand_total) as revenue
+                    SUM(o.grand_total) as revenue,
+                    COUNT(DISTINCT o.id) as order_count
                 FROM orders o
                 {joins}
                 WHERE {where_sql}
@@ -521,15 +522,18 @@ class DuckDBStore:
             """
 
             results = conn.execute(sql, params).fetchall()
-            daily_data = {row[0]: float(row[1]) for row in results}
+            daily_data = {row[0]: (float(row[1]), int(row[2])) for row in results}
 
             # Build labels and data
             labels = []
             data = []
+            orders_data = []
             current = start_date
             while current <= end_date:
                 labels.append(current.strftime("%d.%m"))
-                data.append(round(daily_data.get(current, 0), 2))
+                revenue_val, orders_val = daily_data.get(current, (0, 0))
+                data.append(round(revenue_val, 2))
+                orders_data.append(orders_val)
                 current += timedelta(days=1)
 
             datasets = [{
@@ -595,7 +599,13 @@ class DuckDBStore:
                     "borderDash": [5, 5]
                 })
 
-            return {"labels": labels, "datasets": datasets}
+            # Return both formats: 'datasets' for v1, 'revenue'/'orders' for v2
+            return {
+                "labels": labels,
+                "revenue": data,
+                "orders": orders_data,
+                "datasets": datasets  # Keep for backwards compatibility
+            }
 
     async def get_sales_by_source(
         self,
