@@ -724,13 +724,15 @@ class DuckDBStore:
 
             results = conn.execute(sql, params).fetchall()
 
+            raw_labels = [row[0] or "Unknown" for row in results]
             labels = [self._wrap_label(row[0]) for row in results]
             data = [row[1] for row in results]
             total = sum(data) if data else 1
             percentages = [round(d / total * 100, 1) for d in data]
 
             return {
-                "labels": labels,
+                "labels": raw_labels,  # Plain strings for v2 React frontend
+                "wrappedLabels": labels,  # Wrapped arrays for v1 Chart.js
                 "data": data,
                 "percentages": percentages,
                 "backgroundColor": "#2563EB"
@@ -990,7 +992,8 @@ class DuckDBStore:
             top_results = conn.execute(top_revenue_sql, params).fetchall()
 
             top_by_revenue = {
-                "labels": [self._wrap_label(row[0]) for row in top_results],
+                "labels": [row[0] or "Unknown" for row in top_results],  # Plain strings for v2
+                "wrappedLabels": [self._wrap_label(row[0]) for row in top_results],  # For v1
                 "data": [round(float(row[1]), 2) for row in top_results],
                 "quantities": [row[2] for row in top_results],
                 "backgroundColor": "#16A34A"
