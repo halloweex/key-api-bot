@@ -40,54 +40,52 @@ class SyncService:
         client,
         start_date: str,
         end_date: str,
-        include: str = "products.offer,manager,buyer,expenses"
+        include: str = "products.offer,manager,buyer,expenses",
+        include_updated: bool = True
     ) -> list:
         """
-        Fetch orders with appropriate date filter.
+        Fetch orders with date filters.
 
-        Tries filter[ordered_between] first for accurate date matching.
-        Falls back to filter[created_between] with extended buffer if needed.
+        Uses BOTH created_between AND updated_between to catch:
+        1. New orders (created_between)
+        2. Orders with status changes (updated_between)
+
+        Args:
+            include_updated: If True, also fetch by updated_between (for incremental sync)
         """
-        orders = []
+        orders_by_id = {}
 
-        # Try ordered_between if we haven't determined it's unsupported
-        if self._use_ordered_between is not False:
-            try:
-                params = {
-                    "include": include,
-                    "filter[ordered_between]": f"{start_date}, {end_date}",
-                }
-                async for batch in client.paginate("order", params=params, page_size=50):
-                    orders.extend(batch)
-
-                # If we got here, ordered_between is supported
-                if self._use_ordered_between is None:
-                    logger.info("Using filter[ordered_between] for order sync (preferred)")
-                    self._use_ordered_between = True
-
-                return orders
-
-            except Exception as e:
-                error_msg = str(e).lower()
-                # Check if it's a filter-related error
-                if "filter" in error_msg or "ordered_between" in error_msg or "400" in error_msg:
-                    logger.warning(f"filter[ordered_between] not supported, falling back to created_between: {e}")
-                    self._use_ordered_between = False
-                else:
-                    # Some other error, re-raise
-                    raise
-
-        # Fallback to created_between with extended buffer
-        # The buffer accounts for orders that may have different created_at vs ordered_at
-        logger.debug("Using filter[created_between] with 7-day buffer")
+        # Fetch by created_between
+        logger.debug(f"Fetching orders created between {start_date} and {end_date}")
         params = {
             "include": include,
             "filter[created_between]": f"{start_date}, {end_date}",
         }
         async for batch in client.paginate("order", params=params, page_size=50):
-            orders.extend(batch)
+            for order in batch:
+                orders_by_id[order["id"]] = order
 
-        return orders
+        created_count = len(orders_by_id)
+
+        # Also fetch by updated_between to catch status changes
+        if include_updated:
+            logger.debug(f"Fetching orders updated between {start_date} and {end_date}")
+            params = {
+                "include": include,
+                "filter[updated_between]": f"{start_date}, {end_date}",
+            }
+            try:
+                async for batch in client.paginate("order", params=params, page_size=50):
+                    for order in batch:
+                        orders_by_id[order["id"]] = order  # Overwrites with latest data
+            except Exception as e:
+                logger.warning(f"filter[updated_between] failed: {e}")
+
+        updated_count = len(orders_by_id) - created_count
+        if updated_count > 0:
+            logger.info(f"Fetched {created_count} created + {updated_count} updated orders")
+
+        return list(orders_by_id.values())
 
     async def _upsert_orders_with_expenses(self, orders: list) -> tuple:
         """Upsert orders and their expenses.
