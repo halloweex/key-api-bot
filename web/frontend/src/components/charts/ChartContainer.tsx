@@ -63,11 +63,11 @@ const ErrorState = memo(function ErrorState({ title, onRetry, height }: ErrorSta
               d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
             />
           </svg>
-          <p className="text-red-400 text-sm">Failed to load chart data</p>
+          <p className="text-red-600 text-sm">Failed to load chart data</p>
           {onRetry && (
             <button
               onClick={onRetry}
-              className="text-sm text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors"
+              className="text-sm text-blue-600 hover:text-blue-700 underline underline-offset-2 transition-colors"
             >
               Try again
             </button>

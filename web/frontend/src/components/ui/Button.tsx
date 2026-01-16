@@ -11,8 +11,8 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const variantStyles: Record<ButtonVariant, string> = {
   primary: 'bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800',
-  secondary: 'bg-slate-700 text-white hover:bg-slate-600 active:bg-slate-500',
-  ghost: 'bg-transparent text-slate-300 hover:bg-slate-700 hover:text-white',
+  secondary: 'bg-slate-100 text-slate-700 hover:bg-slate-200 active:bg-slate-300 border border-slate-300',
+  ghost: 'bg-transparent text-slate-600 hover:bg-slate-100 hover:text-slate-900',
 }
 
 const sizeStyles: Record<ButtonSize, string> = {
@@ -23,7 +23,7 @@ const sizeStyles: Record<ButtonSize, string> = {
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ variant = 'secondary', size = 'md', active, className = '', children, ...props }, ref) => {
-    const activeStyles = active ? 'ring-2 ring-blue-500 bg-slate-600' : ''
+    const activeStyles = active ? 'ring-2 ring-blue-500 bg-blue-50 text-blue-700 border-blue-300' : ''
 
     return (
       <button

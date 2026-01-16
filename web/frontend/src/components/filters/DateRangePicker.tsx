@@ -29,15 +29,15 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
         type="date"
         value={start}
         onChange={(e) => setStart(e.target.value)}
-        className="px-3 py-1.5 text-sm bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+        className="px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
-      <span className="text-slate-400">to</span>
+      <span className="text-slate-600">to</span>
       <input
         type="date"
         value={end}
         onChange={(e) => setEnd(e.target.value)}
         max={today}
-        className="px-3 py-1.5 text-sm bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+        className="px-3 py-1.5 text-sm bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
       <Button
         size="sm"

@@ -5,7 +5,7 @@ import { Header, Dashboard } from './components/layout'
 
 const AppShell = memo(function AppShell() {
   return (
-    <div className="min-h-screen bg-slate-900 flex flex-col">
+    <div className="min-h-screen bg-slate-50 flex flex-col">
       <Header />
       <div className="flex-1">
         <Dashboard />

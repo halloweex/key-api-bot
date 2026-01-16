@@ -32,18 +32,18 @@ export interface StatCardProps {
 // ─── Styling ─────────────────────────────────────────────────────────────────
 
 const variantStyles: Record<StatCardVariant, string> = {
-  blue: 'text-blue-400',
-  green: 'text-green-400',
-  purple: 'text-purple-400',
-  orange: 'text-orange-400',
-  red: 'text-red-400',
-  cyan: 'text-cyan-400',
+  blue: 'text-blue-600',
+  green: 'text-green-600',
+  purple: 'text-purple-600',
+  orange: 'text-orange-600',
+  red: 'text-red-600',
+  cyan: 'text-cyan-600',
 }
 
 const trendStyles = {
-  up: 'text-green-400',
-  down: 'text-red-400',
-  neutral: 'text-slate-400',
+  up: 'text-green-600',
+  down: 'text-red-600',
+  neutral: 'text-slate-500',
 } as const
 
 const TrendIcon = {
@@ -90,7 +90,7 @@ export const StatCard = memo(function StatCard({
         >
           {/* Header with label and optional icon */}
           <div className="flex items-center justify-between mb-1">
-            <h3 className="text-sm text-slate-400 font-medium">{label}</h3>
+            <h3 className="text-sm text-slate-600 font-medium">{label}</h3>
             {icon && (
               <span className={`${variantStyles[variant]} opacity-60`} aria-hidden="true">
                 {icon}
@@ -136,8 +136,8 @@ export function StatCardSkeleton() {
     <Card>
       <CardContent className="py-3">
         <div className="animate-pulse">
-          <div className="h-4 w-20 bg-slate-700 rounded mb-2" />
-          <div className="h-8 w-28 bg-slate-700 rounded" />
+          <div className="h-4 w-20 bg-slate-200 rounded mb-2" />
+          <div className="h-8 w-28 bg-slate-200 rounded" />
         </div>
       </CardContent>
     </Card>

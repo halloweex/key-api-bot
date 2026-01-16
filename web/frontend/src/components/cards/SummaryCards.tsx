@@ -74,7 +74,7 @@ function ErrorState({ message, onRetry }: ErrorStateProps) {
   return (
     <div
       role="alert"
-      className="col-span-full bg-red-900/20 border border-red-800 rounded-lg p-4"
+      className="col-span-full bg-red-50 border border-red-200 rounded-lg p-4"
     >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -92,12 +92,12 @@ function ErrorState({ message, onRetry }: ErrorStateProps) {
               d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
             />
           </svg>
-          <p className="text-red-300 text-sm">{message}</p>
+          <p className="text-red-700 text-sm">{message}</p>
         </div>
         {onRetry && (
           <button
             onClick={onRetry}
-            className="text-sm text-red-300 hover:text-red-200 underline underline-offset-2 transition-colors"
+            className="text-sm text-red-600 hover:text-red-800 underline underline-offset-2 transition-colors"
           >
             Retry
           </button>

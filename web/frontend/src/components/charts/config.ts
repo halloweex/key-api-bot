@@ -8,14 +8,14 @@ import type { CSSProperties } from 'react'
 // ─── Theme Colors ────────────────────────────────────────────────────────────
 
 export const CHART_THEME = {
-  // Base colors
-  grid: '#374151',
-  axis: '#9CA3AF',
-  label: '#9CA3AF',
-  background: '#1E293B',
-  border: '#374151',
-  text: '#F3F4F6',
-  muted: '#64748B',
+  // Base colors (light theme)
+  grid: '#E2E8F0',
+  axis: '#64748B',
+  label: '#64748B',
+  background: '#FFFFFF',
+  border: '#E2E8F0',
+  text: '#1E293B',
+  muted: '#94A3B8',
 
   // Semantic colors
   primary: '#2563EB',

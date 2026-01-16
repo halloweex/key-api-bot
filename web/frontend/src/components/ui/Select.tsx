@@ -22,8 +22,8 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
         value={value ?? ''}
         onChange={(e) => onChange(e.target.value || null)}
         className={`
-          px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg
-          text-sm text-white
+          px-3 py-2 bg-white border border-slate-300 rounded-lg
+          text-sm text-slate-900
           focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500
           transition-colors cursor-pointer
           ${className}

@@ -227,10 +227,10 @@ export const MilestoneProgress = memo(function MilestoneProgress({
 
   return (
     <>
-      <div className={`bg-slate-800 rounded-lg p-4 ${className}`}>
+      <div className={`bg-white rounded-lg border border-slate-200 shadow-sm p-4 ${className}`}>
         {/* Header */}
         <div className="flex justify-between items-center mb-3">
-          <span className="text-sm font-medium text-slate-400">{periodLabel}</span>
+          <span className="text-sm font-medium text-slate-600">{periodLabel}</span>
           <span className={`text-sm font-bold ${metrics.textColor}`}>
             {Math.round(metrics.progress)}%
           </span>
@@ -239,7 +239,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         {/* Progress Track */}
         <div
           ref={trackRef}
-          className="relative h-3 bg-slate-700 rounded-full overflow-visible"
+          className="relative h-3 bg-slate-200 rounded-full overflow-visible"
         >
           {/* Fill */}
           <div
@@ -265,7 +265,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
                 key={m.amount}
                 className={`absolute top-1/2 -translate-y-1/2 w-4 h-4 rounded-full border-2 transition-all duration-300 ${markerColor} ${
                   isReached ? 'scale-110 shadow-lg' : 'opacity-50'
-                } ${isNext ? 'ring-2 ring-white/50 ring-offset-1 ring-offset-slate-700' : ''}`}
+                } ${isNext ? 'ring-2 ring-slate-400/50 ring-offset-1 ring-offset-white' : ''}`}
                 style={{ left: `${position}%`, transform: `translateX(-50%) translateY(-50%)` }}
                 title={formatAmount(m.amount)}
               />
@@ -278,7 +278,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
           <span className={`text-sm font-medium ${metrics.textColor}`}>
             {formatCurrency(revenue)}
           </span>
-          <span className="text-sm text-slate-500">
+          <span className="text-sm text-slate-600">
             {formatAmount(metrics.maxMilestone)}
           </span>
         </div>
