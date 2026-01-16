@@ -32,6 +32,62 @@ class SyncService:
         self.store = store
         self._sync_task: Optional[asyncio.Task] = None
         self._stop_sync = False
+        # Track if ordered_between filter is supported
+        self._use_ordered_between: Optional[bool] = None
+
+    async def _fetch_orders_with_date_filter(
+        self,
+        client,
+        start_date: str,
+        end_date: str,
+        include: str = "products.offer,manager,buyer,expenses"
+    ) -> list:
+        """
+        Fetch orders with appropriate date filter.
+
+        Tries filter[ordered_between] first for accurate date matching.
+        Falls back to filter[created_between] with extended buffer if needed.
+        """
+        orders = []
+
+        # Try ordered_between if we haven't determined it's unsupported
+        if self._use_ordered_between is not False:
+            try:
+                params = {
+                    "include": include,
+                    "filter[ordered_between]": f"{start_date}, {end_date}",
+                }
+                async for batch in client.paginate("order", params=params, page_size=50):
+                    orders.extend(batch)
+
+                # If we got here, ordered_between is supported
+                if self._use_ordered_between is None:
+                    logger.info("Using filter[ordered_between] for order sync (preferred)")
+                    self._use_ordered_between = True
+
+                return orders
+
+            except Exception as e:
+                error_msg = str(e).lower()
+                # Check if it's a filter-related error
+                if "filter" in error_msg or "ordered_between" in error_msg or "400" in error_msg:
+                    logger.warning(f"filter[ordered_between] not supported, falling back to created_between: {e}")
+                    self._use_ordered_between = False
+                else:
+                    # Some other error, re-raise
+                    raise
+
+        # Fallback to created_between with extended buffer
+        # The buffer accounts for orders that may have different created_at vs ordered_at
+        logger.debug("Using filter[created_between] with 7-day buffer")
+        params = {
+            "include": include,
+            "filter[created_between]": f"{start_date}, {end_date}",
+        }
+        async for batch in client.paginate("order", params=params, page_size=50):
+            orders.extend(batch)
+
+        return orders
 
     async def _upsert_orders_with_expenses(self, orders: list) -> tuple:
         """Upsert orders and their expenses.
@@ -94,23 +150,18 @@ class SyncService:
             start_date = datetime.now(DEFAULT_TZ) - timedelta(days=days_back)
             end_date = datetime.now(DEFAULT_TZ) + timedelta(days=1)
 
-            params = {
-                "include": "products.offer,manager,buyer,expenses",
-                "filter[created_between]": f"{start_date.strftime('%Y-%m-%d')}, {end_date.strftime('%Y-%m-%d')}",
-            }
+            # Fetch orders using the smart date filter helper
+            all_orders = await self._fetch_orders_with_date_filter(
+                client,
+                start_date.strftime('%Y-%m-%d'),
+                end_date.strftime('%Y-%m-%d')
+            )
 
-            orders = []
-            async for batch in client.paginate("order", params=params, page_size=50):
-                orders.extend(batch)
-                # Batch insert every 500 orders to avoid memory issues
-                if len(orders) >= 500:
-                    order_count, expense_count = await self._upsert_orders_with_expenses(orders)
-                    stats["orders"] += order_count
-                    stats["expenses"] += expense_count
-                    orders = []
-
-            if orders:
-                order_count, expense_count = await self._upsert_orders_with_expenses(orders)
+            # Batch insert in chunks of 500 to avoid memory issues
+            batch_size = 500
+            for i in range(0, len(all_orders), batch_size):
+                batch = all_orders[i:i + batch_size]
+                order_count, expense_count = await self._upsert_orders_with_expenses(batch)
                 stats["orders"] += order_count
                 stats["expenses"] += expense_count
 
@@ -143,19 +194,16 @@ class SyncService:
             if not last_orders_sync:
                 last_orders_sync = datetime.now(DEFAULT_TZ) - timedelta(hours=1)
 
-            # Add buffer for API delays
-            sync_from = last_orders_sync - timedelta(minutes=10)
+            # Add buffer for API delays - extended to 24 hours to catch backdated orders
+            sync_from = last_orders_sync - timedelta(hours=24)
             sync_to = datetime.now(DEFAULT_TZ) + timedelta(minutes=5)
 
-            # Sync new orders with expenses
-            params = {
-                "include": "products.offer,manager,buyer,expenses",
-                "filter[created_between]": f"{sync_from.strftime('%Y-%m-%d %H:%M:%S')}, {sync_to.strftime('%Y-%m-%d %H:%M:%S')}",
-            }
-
-            orders = []
-            async for batch in client.paginate("order", params=params, page_size=50):
-                orders.extend(batch)
+            # Sync new orders with expenses using the smart date filter helper
+            orders = await self._fetch_orders_with_date_filter(
+                client,
+                sync_from.strftime('%Y-%m-%d %H:%M:%S'),
+                sync_to.strftime('%Y-%m-%d %H:%M:%S')
+            )
 
             if orders:
                 order_count, expense_count = await self._upsert_orders_with_expenses(orders)
@@ -190,15 +238,14 @@ class SyncService:
         try:
             client = await get_async_client()
             today = datetime.now(DEFAULT_TZ).date()
+            tomorrow = today + timedelta(days=1)
 
-            params = {
-                "include": "products.offer,manager,buyer,expenses",
-                "filter[created_between]": f"{today}, {today + timedelta(days=1)}",
-            }
-
-            orders = []
-            async for batch in client.paginate("order", params=params, page_size=50):
-                orders.extend(batch)
+            # Sync today's orders using the smart date filter helper
+            orders = await self._fetch_orders_with_date_filter(
+                client,
+                str(today),
+                str(tomorrow)
+            )
 
             if orders:
                 order_count, expense_count = await self._upsert_orders_with_expenses(orders)
@@ -284,3 +331,38 @@ async def init_and_sync(full_sync_days: int = 365) -> None:
     # Start background sync
     sync_service = await get_sync_service()
     await sync_service.start_background_sync(interval_seconds=60)
+
+
+async def force_resync(days_back: int = 365) -> dict:
+    """
+    Force a complete resync by clearing orders and re-fetching from API.
+
+    Use this when data discrepancies are detected between dashboard and KeyCRM.
+    This clears the orders table and performs a fresh sync.
+
+    Args:
+        days_back: Number of days of historical data to sync
+
+    Returns:
+        Dict with sync statistics
+    """
+    logger.warning(f"Force resync requested - clearing orders and syncing last {days_back} days")
+
+    store = await get_store()
+
+    # Clear existing orders and related data
+    async with store.connection() as conn:
+        conn.execute("DELETE FROM expenses")
+        conn.execute("DELETE FROM order_products")
+        conn.execute("DELETE FROM orders")
+        conn.execute("DELETE FROM sync_metadata WHERE key LIKE 'last_sync_orders%'")
+        logger.info("Cleared orders, order_products, expenses tables")
+
+    # Perform fresh full sync
+    sync_service = await get_sync_service()
+    # Reset the filter detection flag
+    sync_service._use_ordered_between = None
+    stats = await sync_service.full_sync(days_back=days_back)
+
+    logger.info(f"Force resync complete: {stats}")
+    return stats

@@ -81,6 +81,30 @@ async def get_duckdb_stats(request: Request):
         }
 
 
+@router.post("/duckdb/resync")
+@limiter.limit("1/minute")
+async def trigger_resync(request: Request, days: int = 365):
+    """
+    Force a complete resync of orders from KeyCRM API.
+
+    Use this when data discrepancies are detected between dashboard and KeyCRM.
+    This clears all order data and performs a fresh sync.
+
+    WARNING: This operation can take several minutes for large datasets.
+    """
+    from core.sync_service import force_resync
+
+    try:
+        stats = await force_resync(days_back=days)
+        return {
+            "status": "success",
+            "message": f"Resync complete - synced last {days} days",
+            "stats": stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Resync failed: {str(e)}")
+
+
 # ─── Lightweight Endpoints (60/minute) ─────────────────────────────────────────
 
 @router.get("/categories")
