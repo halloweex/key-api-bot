@@ -131,6 +131,35 @@ export const truncateText = (text: string, maxLength = 25): string => {
   return `${text.slice(0, maxLength - 3)}...`
 }
 
+/** Wrap text into multiple lines for chart labels */
+export const wrapText = (text: string, maxCharsPerLine = 20): string[] => {
+  if (!text) return ['Unknown']
+
+  const words = text.split(' ')
+  const lines: string[] = []
+  let currentLine = ''
+
+  for (const word of words) {
+    if (currentLine.length + word.length + 1 <= maxCharsPerLine) {
+      currentLine = currentLine ? `${currentLine} ${word}` : word
+    } else {
+      if (currentLine) lines.push(currentLine)
+      currentLine = word.length > maxCharsPerLine
+        ? word.slice(0, maxCharsPerLine - 3) + '...'
+        : word
+    }
+  }
+
+  if (currentLine) lines.push(currentLine)
+
+  // Limit to 2 lines max
+  if (lines.length > 2) {
+    return [lines[0], lines[1].slice(0, maxCharsPerLine - 3) + '...']
+  }
+
+  return lines
+}
+
 /** Format percentage for pie chart labels */
 export const formatPieLabel = (percent: number, threshold = 0.05): string => {
   if (percent < threshold) return ''

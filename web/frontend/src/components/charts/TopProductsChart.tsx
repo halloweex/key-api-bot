@@ -19,7 +19,7 @@ import {
   X_AXIS_PROPS,
   Y_AXIS_PROPS,
   BAR_PROPS,
-  truncateText,
+  wrapText,
 } from './config'
 import { useTopProducts } from '../../hooks'
 import { formatNumber } from '../../utils/formatters'
@@ -28,9 +28,40 @@ import { formatNumber } from '../../utils/formatters'
 
 interface ChartDataPoint {
   name: string
+  lines: string[]
   fullName: string
   quantity: number
   percentage: number
+}
+
+// ─── Custom Y-Axis Tick ───────────────────────────────────────────────────────
+
+interface CustomTickProps {
+  x: number
+  y: number
+  payload: { value: string }
+  tickData: Map<string, string[]>
+}
+
+const CustomYAxisTick = ({ x, y, payload, tickData }: CustomTickProps) => {
+  const lines = tickData.get(payload.value) || [payload.value]
+
+  return (
+    <g transform={`translate(${x},${y})`}>
+      {lines.map((line, index) => (
+        <text
+          key={index}
+          x={-5}
+          y={index * 12 - (lines.length - 1) * 6}
+          textAnchor="end"
+          fill={CHART_THEME.axis}
+          fontSize={CHART_DIMENSIONS.fontSize.sm}
+        >
+          {line}
+        </text>
+      ))}
+    </g>
+  )
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -40,13 +71,24 @@ export const TopProductsChart = memo(function TopProductsChart() {
 
   const chartData = useMemo<ChartDataPoint[]>(() => {
     if (!data?.labels?.length) return []
-    return data.labels.map((label, index) => ({
-      name: truncateText(label, 25),
-      fullName: label || 'Unknown',
-      quantity: data.data?.[index] ?? 0,
-      percentage: data.percentages?.[index] ?? 0,
-    }))
+    return data.labels.map((label, index) => {
+      const lines = wrapText(label, 18)
+      return {
+        name: lines.join(' '),  // Use joined text as unique key
+        lines,
+        fullName: label || 'Unknown',
+        quantity: data.data?.[index] ?? 0,
+        percentage: data.percentages?.[index] ?? 0,
+      }
+    })
   }, [data])
+
+  // Map for custom tick to look up wrapped lines
+  const tickData = useMemo(() => {
+    const map = new Map<string, string[]>()
+    chartData.forEach((item) => map.set(item.name, item.lines))
+    return map
+  }, [chartData])
 
   const isEmpty = !isLoading && chartData.length === 0
 
@@ -73,8 +115,8 @@ export const TopProductsChart = memo(function TopProductsChart() {
               type="category"
               dataKey="name"
               {...Y_AXIS_PROPS}
-              fontSize={CHART_DIMENSIONS.fontSize.sm}
-              width={CHART_DIMENSIONS.yAxisWidth.xl}
+              width={180}
+              tick={(props) => <CustomYAxisTick {...props} tickData={tickData} />}
             />
             <Tooltip
               contentStyle={TOOLTIP_STYLE}
