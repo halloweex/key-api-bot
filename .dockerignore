@@ -12,3 +12,7 @@ __pycache__/
 *.pem
 *.md
 REFACTORING_SUMMARY.md
+
+# Frontend build artifacts (rebuilt in Docker)
+web/frontend/node_modules/
+web/static-v2/
