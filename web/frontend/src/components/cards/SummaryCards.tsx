@@ -1,5 +1,6 @@
 import { useMemo, useCallback } from 'react'
 import { StatCard, StatCardSkeleton, type StatCardVariant } from './StatCard'
+import { MilestoneProgress } from '../ui'
 import { useSummary } from '../../hooks'
 import { formatCurrency, formatNumber, formatPercent } from '../../utils/formatters'
 import type { SummaryResponse } from '../../types/api'
@@ -145,20 +146,28 @@ export function SummaryCards() {
   }, [data])
 
   return (
-    <section
-      aria-label="Summary statistics"
-      className="grid grid-cols-2 lg:grid-cols-4 gap-4"
-    >
-      {isLoading && <LoadingState />}
-
-      {error && !isLoading && (
-        <ErrorState
-          message="Failed to load summary data"
-          onRetry={handleRetry}
-        />
+    <div className="space-y-4">
+      {/* Milestone Progress Bar */}
+      {!isLoading && !error && data && (
+        <MilestoneProgress revenue={data.totalRevenue} />
       )}
 
-      {!isLoading && !error && data && renderedCards}
-    </section>
+      {/* Summary Cards Grid */}
+      <section
+        aria-label="Summary statistics"
+        className="grid grid-cols-2 lg:grid-cols-4 gap-4"
+      >
+        {isLoading && <LoadingState />}
+
+        {error && !isLoading && (
+          <ErrorState
+            message="Failed to load summary data"
+            onRetry={handleRetry}
+          />
+        )}
+
+        {!isLoading && !error && data && renderedCards}
+      </section>
+    </div>
   )
 }
