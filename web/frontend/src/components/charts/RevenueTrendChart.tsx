@@ -59,7 +59,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       height="xl"
       ariaLabel="Line chart showing revenue and orders over time"
     >
-      <div style={{ height: CHART_DIMENSIONS.height.xl }}>
+      <div style={{ height: 350 }}>
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={chartData} margin={CHART_DIMENSIONS.margin.default}>
             <CartesianGrid {...GRID_PROPS} />
