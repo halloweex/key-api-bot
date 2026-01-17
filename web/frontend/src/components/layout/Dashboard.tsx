@@ -5,6 +5,7 @@ import {
   LazyRevenueTrendChart,
   LazySalesBySourceChart,
   LazyTopProductsChart,
+  LazyTopProductsByRevenueChart,
   LazyCategoryChart,
   LazyCustomerInsightsChart,
   LazyBrandAnalyticsChart,
@@ -71,15 +72,20 @@ export const Dashboard = memo(function Dashboard() {
         </ChartSection>
       </GridSection>
 
-      {/* Charts Row 2 - Products & Category */}
+      {/* Charts Row 2 - Top Products (Quantity & Revenue) */}
       <GridSection>
         <ChartSection>
           <LazyTopProductsChart />
         </ChartSection>
         <ChartSection>
-          <LazyCategoryChart />
+          <LazyTopProductsByRevenueChart />
         </ChartSection>
       </GridSection>
+
+      {/* Charts Row 3 - Category Breakdown */}
+      <ChartSection>
+        <LazyCategoryChart />
+      </ChartSection>
 
       {/* Customer Insights - Full Width */}
       <ChartSection>

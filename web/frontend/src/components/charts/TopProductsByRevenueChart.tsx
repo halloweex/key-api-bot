@@ -21,8 +21,8 @@ import {
   BAR_PROPS,
   wrapText,
 } from './config'
-import { useTopProducts } from '../../hooks'
-import { formatNumber } from '../../utils/formatters'
+import { useProductPerformance } from '../../hooks'
+import { formatCurrency, formatNumber } from '../../utils/formatters'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -30,8 +30,8 @@ interface ChartDataPoint {
   name: string
   lines: string[]
   fullName: string
+  revenue: number
   quantity: number
-  percentage: number
 }
 
 // ─── Custom Y-Axis Tick ───────────────────────────────────────────────────────
@@ -66,19 +66,19 @@ const CustomYAxisTick = ({ x, y, payload, tickData }: CustomTickProps) => {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export const TopProductsChart = memo(function TopProductsChart() {
-  const { data, isLoading, error, refetch } = useTopProducts()
+export const TopProductsByRevenueChart = memo(function TopProductsByRevenueChart() {
+  const { data, isLoading, error, refetch } = useProductPerformance()
 
   const chartData = useMemo<ChartDataPoint[]>(() => {
-    if (!data?.labels?.length) return []
-    return data.labels.map((label, index) => {
+    if (!data?.topByRevenue?.labels?.length) return []
+    return data.topByRevenue.labels.map((label, index) => {
       const lines = wrapText(label, 18)
       return {
-        name: lines.join(' '),  // Use joined text as unique key
+        name: lines.join(' '),
         lines,
         fullName: label || 'Unknown',
-        quantity: data.data?.[index] ?? 0,
-        percentage: data.percentages?.[index] ?? 0,
+        revenue: data.topByRevenue.data?.[index] ?? 0,
+        quantity: data.topByRevenue.quantities?.[index] ?? 0,
       }
     })
   }, [data])
@@ -94,13 +94,13 @@ export const TopProductsChart = memo(function TopProductsChart() {
 
   return (
     <ChartContainer
-      title="Top 10 Products by Quantity"
+      title="Top 10 Products by Revenue"
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
       isEmpty={isEmpty}
       height="xl"
-      ariaLabel="Horizontal bar chart showing top 10 products by quantity sold"
+      ariaLabel="Horizontal bar chart showing top 10 products by revenue"
     >
       <div style={{ height: CHART_DIMENSIONS.height.xl }}>
         <ResponsiveContainer width="100%" height="100%">
@@ -122,8 +122,11 @@ export const TopProductsChart = memo(function TopProductsChart() {
               contentStyle={TOOLTIP_STYLE}
               labelStyle={TOOLTIP_LABEL_STYLE}
               formatter={(value, _name, props) => {
-                const percentage = (props.payload as ChartDataPoint)?.percentage ?? 0
-                return [`${formatNumber(Number(value) || 0)} (${percentage.toFixed(1)}%)`, 'Quantity']
+                const quantity = (props.payload as ChartDataPoint)?.quantity ?? 0
+                return [
+                  `${formatCurrency(Number(value) || 0)} (${formatNumber(quantity)} sold)`,
+                  'Revenue',
+                ]
               }}
               labelFormatter={(_label, payload) => {
                 const item = payload?.[0]?.payload as ChartDataPoint | undefined
@@ -131,16 +134,16 @@ export const TopProductsChart = memo(function TopProductsChart() {
               }}
             />
             <Bar
-              dataKey="quantity"
-              fill={CHART_THEME.primary}
+              dataKey="revenue"
+              fill={CHART_THEME.accent}
               {...BAR_PROPS}
             >
               <LabelList
-                dataKey="percentage"
+                dataKey="revenue"
                 position="right"
                 fill={CHART_THEME.label}
                 fontSize={CHART_DIMENSIONS.fontSize.sm}
-                formatter={(value) => `${Number(value).toFixed(1)}%`}
+                formatter={(value: number) => formatCurrency(value)}
               />
             </Bar>
           </BarChart>

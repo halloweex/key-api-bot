@@ -6,6 +6,7 @@ export { ChartContainer } from './ChartContainer'
 export { RevenueTrendChart } from './RevenueTrendChart'
 export { SalesBySourceChart } from './SalesBySourceChart'
 export { TopProductsChart } from './TopProductsChart'
+export { TopProductsByRevenueChart } from './TopProductsByRevenueChart'
 export { CategoryChart } from './CategoryChart'
 export { CustomerInsightsChart } from './CustomerInsightsChart'
 export { BrandAnalyticsChart } from './BrandAnalyticsChart'
@@ -16,6 +17,7 @@ export {
   LazyRevenueTrendChart,
   LazySalesBySourceChart,
   LazyTopProductsChart,
+  LazyTopProductsByRevenueChart,
   LazyCategoryChart,
   LazyCustomerInsightsChart,
   LazyBrandAnalyticsChart,
