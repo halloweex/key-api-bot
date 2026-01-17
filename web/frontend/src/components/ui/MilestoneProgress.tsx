@@ -1,4 +1,4 @@
-import { memo, useMemo, useEffect, useRef, useState } from 'react'
+import { memo, useMemo, useEffect, useRef, useState, useCallback } from 'react'
 import { useFilterStore } from '../../store/filterStore'
 import { formatCurrency } from '../../utils/formatters'
 
@@ -13,6 +13,14 @@ interface Milestone {
 interface MilestoneProgressProps {
   revenue: number
   className?: string
+}
+
+interface Sparkle {
+  id: number
+  x: number
+  y: number
+  size: number
+  delay: number
 }
 
 // ─── Milestone Configuration ──────────────────────────────────────────────────
@@ -96,6 +104,57 @@ function burstParticles(container: HTMLElement, x: number, count: number = 20) {
   }
 }
 
+// ─── Sparkle Generator ───────────────────────────────────────────────────────
+
+function generateSparkles(count: number, progressWidth: number): Sparkle[] {
+  return Array.from({ length: count }, (_, i) => ({
+    id: i,
+    x: Math.random() * Math.max(progressWidth - 10, 10),
+    y: Math.random() * 100,
+    size: Math.random() * 3 + 2,
+    delay: Math.random() * 2,
+  }))
+}
+
+// ─── Sparkle Component ───────────────────────────────────────────────────────
+
+function SparkleParticle({ sparkle }: { sparkle: Sparkle }) {
+  return (
+    <div
+      className="sparkle-particle"
+      style={{
+        left: `${sparkle.x}px`,
+        top: `${sparkle.y}%`,
+        width: `${sparkle.size}px`,
+        height: `${sparkle.size}px`,
+        animationDelay: `${sparkle.delay}s`,
+      }}
+    />
+  )
+}
+
+// ─── Leading Edge Glow ───────────────────────────────────────────────────────
+
+function LeadingEdgeGlow({ progress, themeColor }: { progress: number; themeColor: string }) {
+  if (progress <= 0 || progress >= 100) return null
+
+  // Extract the main color from theme for glow
+  const glowColor = themeColor.includes('green') ? '#22c55e'
+    : themeColor.includes('amber') ? '#f59e0b'
+    : themeColor.includes('purple') ? '#a855f7'
+    : '#3b82f6'
+
+  return (
+    <div
+      className="leading-edge-glow"
+      style={{
+        left: `${progress}%`,
+        '--glow-color': glowColor,
+      } as React.CSSProperties}
+    />
+  )
+}
+
 // ─── Celebration Overlay ──────────────────────────────────────────────────────
 
 function CelebrationOverlay({ milestone, onClose }: { milestone: Milestone; onClose: () => void }) {
@@ -128,8 +187,29 @@ export const MilestoneProgress = memo(function MilestoneProgress({
 }: MilestoneProgressProps) {
   const { period } = useFilterStore()
   const trackRef = useRef<HTMLDivElement>(null)
+  const fillRef = useRef<HTMLDivElement>(null)
   const [celebration, setCelebration] = useState<Milestone | null>(null)
   const celebratedRef = useRef<Set<number>>(new Set())
+  const [sparkles, setSparkles] = useState<Sparkle[]>([])
+
+  // Regenerate sparkles when progress changes significantly
+  const regenerateSparkles = useCallback(() => {
+    if (fillRef.current) {
+      const width = fillRef.current.offsetWidth
+      if (width > 20) {
+        setSparkles(generateSparkles(8, width))
+      } else {
+        setSparkles([])
+      }
+    }
+  }, [])
+
+  // Regenerate sparkles periodically for continuous effect
+  useEffect(() => {
+    regenerateSparkles()
+    const interval = setInterval(regenerateSparkles, 3000)
+    return () => clearInterval(interval)
+  }, [regenerateSparkles, revenue])
 
   // Get milestones for current period
   const periodType = getPeriodType(period)
@@ -253,24 +333,45 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         {/* Progress Track */}
         <div
           ref={trackRef}
-          className="relative h-4 bg-slate-100 rounded-full shadow-inner"
+          className="relative h-4 bg-slate-100 rounded-full shadow-inner progress-track"
           style={{ overflow: 'visible' }}
         >
           {/* Fill with glow */}
           <div
-            className={`absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out ${metrics.themeColor} ${
-              metrics.nearMilestone ? 'shadow-lg ' + metrics.glowColor : ''
+            ref={fillRef}
+            className={`progress-fill absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out ${metrics.themeColor} ${
+              metrics.nearMilestone ? 'shadow-lg ' + metrics.glowColor + ' near-milestone' : ''
             }`}
             style={{
               width: `${metrics.progress}%`,
               boxShadow: metrics.progress > 0 ? `0 0 10px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.3)` : 'none'
             }}
           >
-            {/* Shine effect */}
+            {/* Static shine gradient */}
             <div className="absolute inset-0 rounded-full overflow-hidden">
               <div className="absolute inset-0 bg-gradient-to-b from-white/30 to-transparent h-1/2" />
             </div>
+
+            {/* Animated shimmer sweep */}
+            <div className="shimmer-sweep" />
+
+            {/* Sparkle particles */}
+            {metrics.progress > 5 && sparkles.map(sparkle => (
+              <SparkleParticle key={sparkle.id} sparkle={sparkle} />
+            ))}
+
+            {/* Ambient floating particles */}
+            {metrics.progress > 10 && (
+              <div className="floating-particles">
+                <div className="floating-particle" style={{ left: '20%', animationDelay: '0s' }} />
+                <div className="floating-particle" style={{ left: '50%', animationDelay: '0.5s' }} />
+                <div className="floating-particle" style={{ left: '80%', animationDelay: '1s' }} />
+              </div>
+            )}
           </div>
+
+          {/* Leading edge glow */}
+          <LeadingEdgeGlow progress={metrics.progress} themeColor={metrics.themeColor} />
 
           {/* Milestone Markers */}
           {milestones.map((m, index) => {
@@ -375,6 +476,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
 
       {/* Animation Styles */}
       <style>{`
+        /* ─── Base Animations ─────────────────────────────────────────────── */
         @keyframes fade-in {
           from { opacity: 0; }
           to { opacity: 1; }
@@ -386,6 +488,165 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         }
         .animate-fade-in { animation: fade-in 0.3s ease-out; }
         .animate-bounce-in { animation: bounce-in 0.5s ease-out; }
+
+        /* ─── Shimmer Sweep Effect ────────────────────────────────────────── */
+        @keyframes shimmer-sweep {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(200%); }
+        }
+        .shimmer-sweep {
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          overflow: hidden;
+        }
+        .shimmer-sweep::after {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 50%;
+          height: 100%;
+          background: linear-gradient(
+            90deg,
+            transparent 0%,
+            rgba(255, 255, 255, 0.4) 50%,
+            transparent 100%
+          );
+          animation: shimmer-sweep 2.5s ease-in-out infinite;
+        }
+
+        /* ─── Sparkle Particles ───────────────────────────────────────────── */
+        @keyframes sparkle {
+          0%, 100% {
+            opacity: 0;
+            transform: scale(0) rotate(0deg);
+          }
+          50% {
+            opacity: 1;
+            transform: scale(1) rotate(180deg);
+          }
+        }
+        @keyframes sparkle-flicker {
+          0%, 100% { opacity: 0.3; transform: scale(0.8); }
+          25% { opacity: 1; transform: scale(1.2); }
+          50% { opacity: 0.6; transform: scale(1); }
+          75% { opacity: 1; transform: scale(1.1); }
+        }
+        .sparkle-particle {
+          position: absolute;
+          background: radial-gradient(circle, #fff 0%, rgba(255,255,255,0) 70%);
+          border-radius: 50%;
+          pointer-events: none;
+          animation: sparkle-flicker 1.5s ease-in-out infinite;
+          box-shadow: 0 0 4px 1px rgba(255, 255, 255, 0.8);
+        }
+
+        /* ─── Floating Particles ──────────────────────────────────────────── */
+        @keyframes float-up {
+          0% {
+            opacity: 0;
+            transform: translateY(100%) scale(0);
+          }
+          20% {
+            opacity: 1;
+            transform: translateY(50%) scale(1);
+          }
+          100% {
+            opacity: 0;
+            transform: translateY(-150%) scale(0.5);
+          }
+        }
+        .floating-particles {
+          position: absolute;
+          inset: 0;
+          overflow: visible;
+          pointer-events: none;
+        }
+        .floating-particle {
+          position: absolute;
+          bottom: 0;
+          width: 4px;
+          height: 4px;
+          background: rgba(255, 255, 255, 0.9);
+          border-radius: 50%;
+          box-shadow: 0 0 6px 2px rgba(255, 255, 255, 0.6);
+          animation: float-up 2s ease-out infinite;
+        }
+
+        /* ─── Leading Edge Glow ───────────────────────────────────────────── */
+        @keyframes edge-pulse {
+          0%, 100% {
+            opacity: 0.7;
+            transform: translate(-50%, -50%) scale(1);
+          }
+          50% {
+            opacity: 1;
+            transform: translate(-50%, -50%) scale(1.3);
+          }
+        }
+        @keyframes edge-ring {
+          0% {
+            opacity: 0.8;
+            transform: translate(-50%, -50%) scale(0.8);
+          }
+          100% {
+            opacity: 0;
+            transform: translate(-50%, -50%) scale(2);
+          }
+        }
+        .leading-edge-glow {
+          position: absolute;
+          top: 50%;
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: var(--glow-color, #22c55e);
+          transform: translate(-50%, -50%);
+          animation: edge-pulse 1.5s ease-in-out infinite;
+          box-shadow:
+            0 0 8px 2px var(--glow-color, #22c55e),
+            0 0 16px 4px var(--glow-color, #22c55e);
+          z-index: 15;
+        }
+        .leading-edge-glow::before {
+          content: '';
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          width: 20px;
+          height: 20px;
+          border-radius: 50%;
+          border: 2px solid var(--glow-color, #22c55e);
+          transform: translate(-50%, -50%);
+          animation: edge-ring 1.5s ease-out infinite;
+        }
+
+        /* ─── Near Milestone Pulse ────────────────────────────────────────── */
+        @keyframes near-milestone-pulse {
+          0%, 100% {
+            box-shadow:
+              0 0 10px rgba(0,0,0,0.1),
+              inset 0 1px 0 rgba(255,255,255,0.3),
+              0 0 20px 2px rgba(245, 158, 11, 0.3);
+          }
+          50% {
+            box-shadow:
+              0 0 10px rgba(0,0,0,0.1),
+              inset 0 1px 0 rgba(255,255,255,0.3),
+              0 0 30px 6px rgba(245, 158, 11, 0.5);
+          }
+        }
+        .progress-fill.near-milestone {
+          animation: near-milestone-pulse 1.5s ease-in-out infinite;
+        }
+
+        /* ─── Track Background Pattern ────────────────────────────────────── */
+        .progress-track {
+          background:
+            linear-gradient(90deg, rgba(0,0,0,0.02) 0%, transparent 50%, rgba(0,0,0,0.02) 100%),
+            #f1f5f9;
+        }
       `}</style>
     </>
   )
