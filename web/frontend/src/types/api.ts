@@ -67,7 +67,14 @@ export interface CustomerInsightsResponse {
   }
   aovTrend: {
     labels: string[]
-    data: number[]
+    datasets: Array<{
+      label: string
+      data: number[]
+      borderColor?: string
+      backgroundColor?: string
+      fill?: boolean
+      tension?: number
+    }>
   }
   metrics: {
     newCustomers: number
