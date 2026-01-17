@@ -143,7 +143,7 @@ export const TopProductsByRevenueChart = memo(function TopProductsByRevenueChart
                 position="right"
                 fill={CHART_THEME.label}
                 fontSize={CHART_DIMENSIONS.fontSize.sm}
-                formatter={(value: number) => formatCurrency(value)}
+                formatter={(value) => formatCurrency(Number(value))}
               />
             </Bar>
           </BarChart>
