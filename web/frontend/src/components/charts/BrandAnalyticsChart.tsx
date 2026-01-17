@@ -91,7 +91,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
       error={error as Error | null}
       onRetry={refetch}
       isEmpty={isEmpty}
-      height="md"
+      height="xxl"
       ariaLabel="Bar charts showing top brands by revenue and quantity"
     >
       {/* Metrics */}
@@ -119,7 +119,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
         {/* Top Brands by Revenue */}
         <div>
           <h4 className="text-sm font-medium text-slate-400 mb-2">Top 10 by Revenue</h4>
-          <div style={{ height: CHART_DIMENSIONS.height.md }}>
+          <div style={{ height: CHART_DIMENSIONS.height.xxl }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
                 data={revenueData}
@@ -161,7 +161,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
         {/* Top Brands by Quantity */}
         <div>
           <h4 className="text-sm font-medium text-slate-400 mb-2">Top 10 by Quantity</h4>
-          <div style={{ height: CHART_DIMENSIONS.height.md }}>
+          <div style={{ height: CHART_DIMENSIONS.height.xxl }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
                 data={quantityData}
