@@ -99,10 +99,10 @@ export const TopProductsByRevenueChart = memo(function TopProductsByRevenueChart
       error={error as Error | null}
       onRetry={refetch}
       isEmpty={isEmpty}
-      height="xl"
+      height="xxl"
       ariaLabel="Horizontal bar chart showing top 10 products by revenue"
     >
-      <div style={{ height: CHART_DIMENSIONS.height.xl }}>
+      <div style={{ height: CHART_DIMENSIONS.height.xxl }}>
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
             data={chartData}

@@ -35,6 +35,7 @@ export const CHART_DIMENSIONS = {
     md: 256,
     lg: 288,
     xl: 320,
+    xxl: 420,  // For Top 10 product charts (10 bars × ~42px each)
   },
   /** Standard margins */
   margin: {

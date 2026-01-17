@@ -83,6 +83,7 @@ class DuckDBStore:
             grand_total DECIMAL(12, 2) NOT NULL,
             ordered_at TIMESTAMP WITH TIME ZONE,
             created_at TIMESTAMP WITH TIME ZONE,
+            updated_at TIMESTAMP WITH TIME ZONE,  -- For idempotent sync
             buyer_id INTEGER,
             manager_id INTEGER,
             synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -177,7 +178,23 @@ class DuckDBStore:
         CREATE INDEX IF NOT EXISTS idx_expenses_payment_date ON expenses(payment_date);
         """
         self._connection.execute(schema_sql)
+
+        # Migration: add updated_at column to existing orders table
+        await self._run_migrations()
+
         logger.info("DuckDB schema initialized")
+
+    async def _run_migrations(self) -> None:
+        """Run database migrations for schema changes."""
+        # Migration 1: Add updated_at column to orders table (for idempotent sync)
+        try:
+            self._connection.execute(
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE"
+            )
+            logger.debug("Migration: updated_at column added/verified")
+        except Exception as e:
+            # Column might already exist or ALTER TABLE not supported
+            logger.debug(f"Migration note: {e}")
 
     def _build_sales_type_filter(self, sales_type: str, table_alias: str = "o") -> str:
         """Build SQL clause for retail/b2b/all filtering based on manager_id.
@@ -224,7 +241,11 @@ class DuckDBStore:
 
     async def upsert_orders(self, orders: List[Dict[str, Any]]) -> int:
         """
-        Insert or update orders from API response.
+        Insert or update orders from API response (idempotent).
+
+        Only updates existing orders if the new updated_at is newer than
+        the existing one. This prevents stale API responses from overwriting
+        fresher data.
 
         Args:
             orders: List of order dicts from KeyCRM API
@@ -237,6 +258,8 @@ class DuckDBStore:
 
         async with self.connection() as conn:
             count = 0
+            skipped = 0
+
             for order_data in orders:
                 order = Order.from_api(order_data)
 
@@ -244,11 +267,33 @@ class DuckDBStore:
                 if not order.ordered_at:
                     continue
 
-                # Upsert order
+                new_updated_at = order.updated_at.isoformat() if order.updated_at else None
+
+                # Check if order exists and compare updated_at for idempotency
+                existing = conn.execute(
+                    "SELECT updated_at FROM orders WHERE id = ?",
+                    [order.id]
+                ).fetchone()
+
+                if existing and existing[0] and new_updated_at:
+                    # Both have updated_at - only update if new is strictly newer
+                    existing_updated_at = existing[0]
+                    if isinstance(existing_updated_at, str):
+                        # Handle string comparison for timestamps
+                        if new_updated_at <= existing_updated_at:
+                            skipped += 1
+                            continue
+                    else:
+                        # Handle datetime comparison
+                        if order.updated_at <= existing_updated_at:
+                            skipped += 1
+                            continue
+
+                # Upsert order (INSERT OR REPLACE)
                 conn.execute("""
                     INSERT OR REPLACE INTO orders
-                    (id, source_id, status_id, grand_total, ordered_at, created_at, buyer_id, manager_id, synced_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, synced_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """, [
                     order.id,
                     order.source_id,
@@ -256,6 +301,7 @@ class DuckDBStore:
                     order.grand_total,
                     order.ordered_at.isoformat() if order.ordered_at else None,
                     order.created_at.isoformat() if order.created_at else None,
+                    new_updated_at,
                     order.buyer.id if order.buyer else None,
                     order.manager.id if order.manager else None
                 ])
@@ -279,6 +325,8 @@ class DuckDBStore:
 
                 count += 1
 
+            if skipped > 0:
+                logger.debug(f"Skipped {skipped} orders (stale updated_at)")
             logger.info(f"Upserted {count} orders to DuckDB")
             return count
 

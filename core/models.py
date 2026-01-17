@@ -198,6 +198,7 @@ class Order:
     grand_total: float
     ordered_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None  # For idempotent sync
     buyer: Optional[Buyer] = None
     manager: Optional[Manager] = None
     products: List[OrderProduct] = field(default_factory=list)
@@ -223,6 +224,15 @@ class Order:
             except (ValueError, TypeError):
                 pass
 
+        updated_at = None
+        if data.get("updated_at"):
+            try:
+                updated_at = datetime.fromisoformat(
+                    data["updated_at"].replace("Z", "+00:00")
+                )
+            except (ValueError, TypeError):
+                pass
+
         # Parse status_id from either direct field or nested status object
         status_id = data.get("status_id")
         if status_id is None and data.get("status"):
@@ -240,6 +250,7 @@ class Order:
             grand_total=float(data.get("grand_total", 0)),
             ordered_at=ordered_at,
             created_at=created_at,
+            updated_at=updated_at,
             buyer=Buyer.from_api(data.get("buyer")),
             manager=Manager.from_api(data.get("manager")),
             products=products,

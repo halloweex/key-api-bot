@@ -18,6 +18,30 @@ logger = logging.getLogger(__name__)
 DEFAULT_TZ = ZoneInfo(DEFAULT_TIMEZONE)
 
 
+def _get_max_updated_at(orders: list) -> Optional[datetime]:
+    """
+    Extract max updated_at from a list of orders.
+
+    Used for checkpoint - ensures we use SOURCE timestamp, not now().
+    This prevents data loss when orders are updated during sync.
+    """
+    if not orders:
+        return None
+
+    max_updated = None
+    for order in orders:
+        updated_str = order.get("updated_at")
+        if updated_str:
+            try:
+                updated = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
+                if max_updated is None or updated > max_updated:
+                    max_updated = updated
+            except (ValueError, TypeError):
+                pass
+
+    return max_updated
+
+
 class SyncService:
     """
     Service for syncing KeyCRM data to DuckDB.
@@ -163,8 +187,10 @@ class SyncService:
                 stats["orders"] += order_count
                 stats["expenses"] += expense_count
 
-            await self.store.set_last_sync_time("orders")
-            logger.info(f"Full sync complete: {stats}")
+            # Use max(updated_at) from SOURCE data, not now()
+            max_updated = _get_max_updated_at(all_orders)
+            await self.store.set_last_sync_time("orders", max_updated)
+            logger.info(f"Full sync complete: {stats}, checkpoint: {max_updated}")
 
         except Exception as e:
             logger.error(f"Full sync error: {e}", exc_info=True)
@@ -207,8 +233,10 @@ class SyncService:
                 order_count, expense_count = await self._upsert_orders_with_expenses(orders)
                 stats["orders"] = order_count
                 stats["expenses"] = expense_count
-                await self.store.set_last_sync_time("orders")
-                logger.info(f"Incremental sync: {stats['orders']} orders, {stats['expenses']} expenses updated")
+                # Use max(updated_at) from SOURCE data, not now()
+                max_updated = _get_max_updated_at(orders)
+                await self.store.set_last_sync_time("orders", max_updated)
+                logger.info(f"Incremental sync: {stats['orders']} orders, {stats['expenses']} expenses, checkpoint: {max_updated}")
 
             # Sync products less frequently (every hour)
             if not last_products_sync or (datetime.now(DEFAULT_TZ) - last_products_sync).total_seconds() > 3600:
