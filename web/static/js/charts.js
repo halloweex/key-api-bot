@@ -856,10 +856,13 @@ async function loadTopProducts() {
         // Calculate max value for percentage threshold
         const maxProductQty = Math.max(...data.data);
 
+        // Use wrappedLabels (arrays) for multi-line display, fallback to labels
+        const chartLabels = data.wrappedLabels || data.labels;
+
         topProductsChart = new Chart(ctx, {
             type: 'bar',
             data: {
-                labels: data.labels,
+                labels: chartLabels,
                 datasets: [{
                     label: 'Quantity',
                     data: data.data,
@@ -1165,10 +1168,13 @@ async function loadProductPerformance() {
         // Calculate max value for percentage threshold
         const maxProductRevenue = Math.max(...data.topByRevenue.data);
 
+        // Use wrappedLabels (arrays) for multi-line display, fallback to labels
+        const revenueChartLabels = data.topByRevenue.wrappedLabels || data.topByRevenue.labels;
+
         topRevenueChart = new Chart(revenueCtx, {
             type: 'bar',
             data: {
-                labels: data.topByRevenue.labels,
+                labels: revenueChartLabels,
                 datasets: [{
                     label: 'Revenue',
                     data: data.topByRevenue.data,
