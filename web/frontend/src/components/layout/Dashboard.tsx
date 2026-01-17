@@ -3,7 +3,8 @@ import { SummaryCards } from '../cards'
 import { SkeletonChart } from '../ui'
 import {
   LazyRevenueTrendChart,
-  LazySalesBySourceChart,
+  LazyOrdersBySourceChart,
+  LazyRevenueBySourceChart,
   LazyTopProductsChart,
   LazyTopProductsByRevenueChart,
   LazyCategoryChart,
@@ -67,10 +68,15 @@ export const Dashboard = memo(function Dashboard() {
         <LazyRevenueTrendChart />
       </ChartSection>
 
-      {/* Sales by Source */}
-      <ChartSection>
-        <LazySalesBySourceChart />
-      </ChartSection>
+      {/* Orders & Revenue by Source - Side by Side */}
+      <GridSection>
+        <ChartSection>
+          <LazyOrdersBySourceChart />
+        </ChartSection>
+        <ChartSection>
+          <LazyRevenueBySourceChart />
+        </ChartSection>
+      </GridSection>
 
       {/* Charts Row 2 - Top Products (Quantity & Revenue) */}
       <GridSection>

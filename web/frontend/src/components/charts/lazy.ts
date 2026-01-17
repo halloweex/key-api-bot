@@ -15,6 +15,14 @@ export const LazySalesBySourceChart = lazy(() =>
   import('./SalesBySourceChart').then(m => ({ default: m.SalesBySourceChart }))
 )
 
+export const LazyOrdersBySourceChart = lazy(() =>
+  import('./OrdersBySourceChart').then(m => ({ default: m.OrdersBySourceChart }))
+)
+
+export const LazyRevenueBySourceChart = lazy(() =>
+  import('./RevenueBySourceChart').then(m => ({ default: m.RevenueBySourceChart }))
+)
+
 export const LazyTopProductsChart = lazy(() =>
   import('./TopProductsChart').then(m => ({ default: m.TopProductsChart }))
 )

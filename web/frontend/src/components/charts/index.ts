@@ -5,6 +5,8 @@ export * from './config'
 export { ChartContainer } from './ChartContainer'
 export { RevenueTrendChart } from './RevenueTrendChart'
 export { SalesBySourceChart } from './SalesBySourceChart'
+export { OrdersBySourceChart } from './OrdersBySourceChart'
+export { RevenueBySourceChart } from './RevenueBySourceChart'
 export { TopProductsChart } from './TopProductsChart'
 export { TopProductsByRevenueChart } from './TopProductsByRevenueChart'
 export { CategoryChart } from './CategoryChart'
@@ -16,6 +18,8 @@ export { ExpensesChart } from './ExpensesChart'
 export {
   LazyRevenueTrendChart,
   LazySalesBySourceChart,
+  LazyOrdersBySourceChart,
+  LazyRevenueBySourceChart,
   LazyTopProductsChart,
   LazyTopProductsByRevenueChart,
   LazyCategoryChart,
