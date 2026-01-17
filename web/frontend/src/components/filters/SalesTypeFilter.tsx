@@ -17,7 +17,7 @@ export function SalesTypeFilter() {
   }, [setSalesType])
 
   return (
-    <div className="flex items-center gap-1 bg-slate-700/50 rounded-lg p-1">
+    <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-1">
       {SALES_TYPES.map(({ value, label }) => (
         <Button
           key={value}

@@ -32,7 +32,7 @@ export function PeriodFilter() {
 
   return (
     <div className="flex items-center gap-2 flex-wrap">
-      <div className="flex items-center gap-1 bg-slate-700/50 rounded-lg p-1">
+      <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-1">
         {PERIODS.map(({ value, label }) => (
           <Button
             key={value}
