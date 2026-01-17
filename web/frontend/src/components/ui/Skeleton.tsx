@@ -5,7 +5,7 @@ interface SkeletonProps {
 export function Skeleton({ className = '' }: SkeletonProps) {
   return (
     <div
-      className={`animate-pulse bg-slate-200/70 rounded-lg ${className}`}
+      className={`animate-shimmer rounded-lg ${className}`}
     />
   )
 }
@@ -31,7 +31,9 @@ export function SkeletonChart() {
         <Skeleton className="h-5 w-40" />
       </div>
       <div className="p-5">
-        <Skeleton className="h-64 w-full rounded-lg" />
+        <div className="space-y-3">
+          <Skeleton className="h-64 w-full rounded-lg" />
+        </div>
       </div>
     </div>
   )

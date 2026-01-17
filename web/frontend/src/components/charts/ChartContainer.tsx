@@ -154,7 +154,7 @@ export const ChartContainer = memo(function ChartContainer({
   }
 
   return (
-    <Card className={className}>
+    <Card className={`animate-chart-in ${className}`}>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle>{title}</CardTitle>
         {action}
@@ -163,6 +163,7 @@ export const ChartContainer = memo(function ChartContainer({
         <figure
           role="img"
           aria-label={ariaLabel || `${title} chart`}
+          className="animate-chart-scale"
         >
           {isEmpty ? (
             <EmptyState message={emptyMessage} height={chartHeight} />

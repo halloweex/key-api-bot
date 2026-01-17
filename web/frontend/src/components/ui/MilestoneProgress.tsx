@@ -162,15 +162,18 @@ export const MilestoneProgress = memo(function MilestoneProgress({
       }
     }
 
-    // Determine theme color
-    let themeColor = 'bg-green-500' // default
+    // Determine theme color with gradients
+    let themeColor = 'bg-gradient-to-r from-green-400 to-green-500' // default
     let textColor = 'text-green-500'
+    let glowColor = 'shadow-green-500/50'
     if (allCompleted) {
-      themeColor = 'bg-purple-500'
+      themeColor = 'bg-gradient-to-r from-purple-400 via-purple-500 to-pink-500'
       textColor = 'text-purple-500'
+      glowColor = 'shadow-purple-500/50'
     } else if (currentIndex >= 0) {
-      themeColor = 'bg-amber-500'
+      themeColor = 'bg-gradient-to-r from-amber-400 to-orange-500'
       textColor = 'text-amber-500'
+      glowColor = 'shadow-amber-500/50'
     }
 
     return {
@@ -181,6 +184,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
       nearMilestone,
       themeColor,
       textColor,
+      glowColor,
     }
   }, [milestones, revenue])
 
@@ -227,27 +231,45 @@ export const MilestoneProgress = memo(function MilestoneProgress({
 
   return (
     <>
-      <div className={`bg-white rounded-lg border border-slate-200 shadow-sm p-4 ${className}`}>
+      <div className={`bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-card-hover)] transition-all duration-300 p-5 ${className}`}>
         {/* Header */}
-        <div className="flex justify-between items-center mb-3">
-          <span className="text-sm font-medium text-slate-600">{periodLabel}</span>
-          <span className={`text-sm font-bold ${metrics.textColor}`}>
-            {Math.round(metrics.progress)}%
-          </span>
+        <div className="flex justify-between items-center mb-4">
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${metrics.themeColor}`} />
+            <span className="text-sm font-semibold text-slate-700">{periodLabel}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className={`text-lg font-bold ${metrics.textColor}`}>
+              {Math.round(metrics.progress)}%
+            </span>
+            {metrics.nearMilestone && (
+              <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium animate-pulse">
+                Almost there!
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Progress Track */}
         <div
           ref={trackRef}
-          className="relative h-3 bg-slate-200 rounded-full overflow-visible"
+          className="relative h-4 bg-slate-100 rounded-full overflow-visible shadow-inner"
         >
-          {/* Fill */}
+          {/* Fill with glow */}
           <div
             className={`absolute inset-y-0 left-0 rounded-full transition-all duration-700 ease-out ${metrics.themeColor} ${
-              metrics.nearMilestone ? 'animate-pulse' : ''
+              metrics.nearMilestone ? 'shadow-lg ' + metrics.glowColor : ''
             }`}
-            style={{ width: `${metrics.progress}%` }}
-          />
+            style={{
+              width: `${metrics.progress}%`,
+              boxShadow: metrics.progress > 0 ? `0 0 10px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.3)` : 'none'
+            }}
+          >
+            {/* Shine effect */}
+            <div className="absolute inset-0 rounded-full overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-b from-white/30 to-transparent h-1/2" />
+            </div>
+          </div>
 
           {/* Milestone Markers */}
           {milestones.map((m, index) => {
@@ -255,33 +277,76 @@ export const MilestoneProgress = memo(function MilestoneProgress({
             const isReached = revenue >= m.amount
             const isNext = index === metrics.currentIndex + 1
 
-            // Tier colors
-            let markerColor = 'bg-blue-500 border-blue-400'
-            if (index === 0) markerColor = 'bg-amber-500 border-amber-400'
-            if (index === milestones.length - 1) markerColor = 'bg-purple-500 border-purple-400'
+            // Tier colors with gradients
+            let markerBg = 'bg-gradient-to-br from-blue-400 to-blue-600'
+            let markerBorder = 'border-blue-300'
+            if (index === 0) {
+              markerBg = 'bg-gradient-to-br from-amber-400 to-amber-600'
+              markerBorder = 'border-amber-300'
+            }
+            if (index === milestones.length - 1) {
+              markerBg = 'bg-gradient-to-br from-purple-400 to-purple-600'
+              markerBorder = 'border-purple-300'
+            }
 
             return (
               <div
                 key={m.amount}
-                className={`absolute top-1/2 -translate-y-1/2 w-4 h-4 rounded-full border-2 transition-all duration-300 ${markerColor} ${
-                  isReached ? 'scale-110 shadow-lg' : 'opacity-50'
-                } ${isNext ? 'ring-2 ring-slate-400/50 ring-offset-1 ring-offset-white' : ''}`}
+                className={`absolute top-1/2 w-5 h-5 rounded-full border-2 transition-all duration-300 cursor-pointer
+                  ${markerBg} ${markerBorder}
+                  ${isReached ? 'scale-110 shadow-lg ring-2 ring-white' : 'opacity-40 scale-90'}
+                  ${isNext ? 'animate-pulse ring-2 ring-offset-2 ring-offset-slate-100 ring-slate-400/50' : ''}
+                  hover:scale-125 hover:shadow-xl
+                `}
                 style={{ left: `${position}%`, transform: `translateX(-50%) translateY(-50%)` }}
-                title={formatAmount(m.amount)}
-              />
+                title={`${formatAmount(m.amount)} - ${m.message}`}
+              >
+                {isReached && (
+                  <svg className="w-3 h-3 text-white absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                )}
+              </div>
             )
           })}
         </div>
 
         {/* Labels */}
-        <div className="flex justify-between mt-2">
-          <span className={`text-sm font-medium ${metrics.textColor}`}>
-            {formatCurrency(revenue)}
-          </span>
-          <span className="text-sm text-slate-600">
-            {formatAmount(metrics.maxMilestone)}
-          </span>
+        <div className="flex justify-between mt-3">
+          <div>
+            <span className={`text-base font-bold ${metrics.textColor}`}>
+              {formatCurrency(revenue)}
+            </span>
+            <span className="text-xs text-slate-400 ml-1">current</span>
+          </div>
+          <div className="text-right">
+            <span className="text-base font-semibold text-slate-600">
+              {formatAmount(metrics.maxMilestone)}
+            </span>
+            <span className="text-xs text-slate-400 ml-1">goal</span>
+          </div>
         </div>
+
+        {/* Remaining amount */}
+        {!metrics.allCompleted && (
+          <div className="mt-3 pt-3 border-t border-slate-100">
+            <p className="text-xs text-slate-500 text-center">
+              <span className="font-medium text-slate-700">{formatCurrency(metrics.maxMilestone - revenue)}</span> remaining to reach goal
+            </p>
+          </div>
+        )}
+
+        {/* Completed state */}
+        {metrics.allCompleted && (
+          <div className="mt-3 pt-3 border-t border-slate-100">
+            <p className="text-xs text-center font-medium text-purple-600 flex items-center justify-center gap-1">
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+              </svg>
+              All milestones achieved!
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Celebration Overlay */}
