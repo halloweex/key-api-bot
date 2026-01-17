@@ -9,8 +9,6 @@ import {
   Tooltip,
   ResponsiveContainer,
   Legend,
-  Cell,
-  ReferenceLine,
 } from 'recharts'
 import { ChartContainer } from './ChartContainer'
 import {
@@ -37,7 +35,6 @@ interface ChartDataPoint {
   prevOrders: number
   change: number
   changePercent: number
-  cumulative: number
 }
 
 // ─── Period Labels ───────────────────────────────────────────────────────────
@@ -71,6 +68,7 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
   const data = payload[0]?.payload
   if (!data) return null
 
+  const hasComparison = data.prevRevenue > 0
   const isPositive = data.change >= 0
   const changeColor = isPositive ? CHART_THEME.success : CHART_THEME.danger
   const changeIcon = isPositive ? '↑' : '↓'
@@ -80,56 +78,82 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
       style={{
         ...TOOLTIP_STYLE,
         padding: '12px 16px',
-        minWidth: '200px',
+        minWidth: '220px',
       }}
     >
-      <p style={{ fontWeight: 600, marginBottom: '8px', color: CHART_THEME.text }}>
+      <p style={{ fontWeight: 600, marginBottom: '10px', color: CHART_THEME.text, fontSize: '13px' }}>
         {data.date}
       </p>
 
       {/* Current Period */}
-      <div style={{ marginBottom: '8px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: '6px',
+        paddingBottom: hasComparison ? '6px' : '0',
+        borderBottom: hasComparison ? `1px solid ${CHART_THEME.border}` : 'none'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{
+            width: '10px',
+            height: '10px',
+            borderRadius: '2px',
+            background: CHART_THEME.success
+          }} />
           <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
             {periodLabels.current}
           </span>
-          <span style={{ fontWeight: 600, color: CHART_THEME.primary }}>
-            {formatCurrency(data.revenue)}
-          </span>
         </div>
-        <div style={{ fontSize: '11px', color: CHART_THEME.muted }}>
-          {data.orders} orders
-        </div>
+        <span style={{ fontWeight: 600, color: CHART_THEME.success }}>
+          {formatCurrency(data.revenue)}
+        </span>
       </div>
 
       {/* Previous Period */}
-      {data.prevRevenue > 0 && (
-        <div style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: `1px solid ${CHART_THEME.border}` }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
-              {periodLabels.previous}
-            </span>
+      {hasComparison && (
+        <>
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: '8px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{
+                width: '10px',
+                height: '10px',
+                borderRadius: '2px',
+                background: CHART_THEME.muted,
+                border: `1px dashed ${CHART_THEME.axis}`
+              }} />
+              <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
+                {periodLabels.previous}
+              </span>
+            </div>
             <span style={{ fontWeight: 500, color: CHART_THEME.muted }}>
               {formatCurrency(data.prevRevenue)}
             </span>
           </div>
-          <div style={{ fontSize: '11px', color: CHART_THEME.muted }}>
-            {data.prevOrders} orders
-          </div>
-        </div>
-      )}
 
-      {/* Change */}
-      {data.prevRevenue > 0 && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>Change</span>
-          <span style={{ fontWeight: 600, color: changeColor }}>
-            {changeIcon} {Math.abs(data.changePercent).toFixed(1)}%
-            <span style={{ fontSize: '11px', marginLeft: '4px', opacity: 0.8 }}>
-              ({isPositive ? '+' : ''}{formatCurrency(data.change)})
+          {/* Change Indicator */}
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            background: isPositive ? 'rgba(22, 163, 74, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+            padding: '6px 8px',
+            borderRadius: '6px',
+            marginTop: '4px'
+          }}>
+            <span style={{ color: CHART_THEME.text, fontSize: '12px', fontWeight: 500 }}>
+              vs Previous
             </span>
-          </span>
-        </div>
+            <span style={{ fontWeight: 700, color: changeColor, fontSize: '13px' }}>
+              {changeIcon} {Math.abs(data.changePercent).toFixed(1)}%
+            </span>
+          </div>
+        </>
       )}
     </div>
   )
@@ -148,59 +172,48 @@ function CustomLegend({ periodLabels, hasComparison }: LegendProps) {
       display: 'flex',
       justifyContent: 'center',
       gap: '24px',
-      marginTop: '8px',
+      marginTop: '12px',
       fontSize: '12px',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
         <div style={{
-          width: '12px',
-          height: '12px',
+          width: '20px',
+          height: '3px',
           borderRadius: '2px',
-          background: CHART_THEME.primary,
+          background: CHART_THEME.success,
         }} />
-        <span style={{ color: CHART_THEME.text }}>{periodLabels.current}</span>
+        <span style={{ color: CHART_THEME.text, fontWeight: 500 }}>{periodLabels.current}</span>
       </div>
       {hasComparison && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <div style={{
-            width: '12px',
-            height: '12px',
-            borderRadius: '2px',
-            background: `${CHART_THEME.primary}40`,
-            border: `1px dashed ${CHART_THEME.primary}`,
+            width: '20px',
+            height: '0px',
+            borderTop: `2px dashed ${CHART_THEME.muted}`,
           }} />
           <span style={{ color: CHART_THEME.muted }}>{periodLabels.previous}</span>
         </div>
       )}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-        <div style={{
-          width: '16px',
-          height: '2px',
-          background: CHART_THEME.accent,
-        }} />
-        <span style={{ color: CHART_THEME.text }}>Cumulative</span>
-      </div>
     </div>
   )
 }
 
-// ─── Bar Shape with Gradient ─────────────────────────────────────────────────
+// ─── Gradient Definitions ────────────────────────────────────────────────────
 
 function GradientDefs() {
   return (
     <defs>
+      <linearGradient id="currentPeriodGradient" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="5%" stopColor={CHART_THEME.success} stopOpacity={0.3} />
+        <stop offset="95%" stopColor={CHART_THEME.success} stopOpacity={0.02} />
+      </linearGradient>
       <linearGradient id="currentBarGradient" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stopColor={CHART_THEME.primary} stopOpacity={1} />
-        <stop offset="100%" stopColor={CHART_THEME.primary} stopOpacity={0.7} />
+        <stop offset="0%" stopColor={CHART_THEME.success} stopOpacity={0.9} />
+        <stop offset="100%" stopColor={CHART_THEME.success} stopOpacity={0.6} />
       </linearGradient>
       <linearGradient id="prevBarGradient" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stopColor={CHART_THEME.primary} stopOpacity={0.35} />
-        <stop offset="100%" stopColor={CHART_THEME.primary} stopOpacity={0.15} />
-      </linearGradient>
-      <linearGradient id="cumulativeGradient" x1="0" y1="0" x2="1" y2="0">
-        <stop offset="0%" stopColor={CHART_THEME.accent} stopOpacity={0.3} />
-        <stop offset="50%" stopColor={CHART_THEME.accent} stopOpacity={1} />
-        <stop offset="100%" stopColor={CHART_THEME.accent} stopOpacity={0.3} />
+        <stop offset="0%" stopColor={CHART_THEME.muted} stopOpacity={0.5} />
+        <stop offset="100%" stopColor={CHART_THEME.muted} stopOpacity={0.25} />
       </linearGradient>
     </defs>
   )
@@ -214,14 +227,12 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
   const periodLabels = PERIOD_LABELS[period] || PERIOD_LABELS.custom
 
-  const { chartData, hasComparison, avgRevenue } = useMemo(() => {
+  const { chartData, hasComparison } = useMemo(() => {
     if (!data?.labels?.length) {
-      return { chartData: [], hasComparison: false, avgRevenue: 0 }
+      return { chartData: [], hasComparison: false }
     }
 
     const hasComp = (data.comparison?.revenue?.length ?? 0) > 0
-    let cumulative = 0
-    let totalRevenue = 0
 
     const processed = data.labels.map((label, index) => {
       const revenue = data.revenue?.[index] ?? 0
@@ -229,13 +240,10 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       const prevRevenue = data.comparison?.revenue?.[index] ?? 0
       const prevOrders = data.comparison?.orders?.[index] ?? 0
 
-      cumulative += revenue
-      totalRevenue += revenue
-
       const change = revenue - prevRevenue
       const changePercent = prevRevenue > 0 ? (change / prevRevenue) * 100 : 0
 
-      // Format short date for x-axis (e.g., "Jan 15" or "Mon")
+      // Format short date for x-axis
       const shortDate = label.length > 6 ? label.slice(0, 6) : label
 
       return {
@@ -247,16 +255,12 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
         prevOrders,
         change,
         changePercent,
-        cumulative,
       }
     })
-
-    const avg = totalRevenue / processed.length
 
     return {
       chartData: processed,
       hasComparison: hasComp,
-      avgRevenue: avg,
     }
   }, [data])
 
@@ -270,15 +274,15 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       onRetry={refetch}
       isEmpty={isEmpty}
       height="xl"
-      ariaLabel="Combo chart showing revenue comparison between current and previous period"
+      ariaLabel="Chart showing revenue comparison between current and previous period"
     >
-      <div style={{ height: 380 }}>
+      <div style={{ height: 350 }}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart
             data={chartData}
-            margin={{ top: 20, right: 30, left: 10, bottom: 20 }}
+            margin={{ top: 10, right: 20, left: 10, bottom: 10 }}
             barGap={2}
-            barCategoryGap="20%"
+            barCategoryGap="15%"
           >
             <GradientDefs />
             <CartesianGrid {...GRID_PROPS} vertical={false} />
@@ -286,28 +290,16 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
             <XAxis
               dataKey="shortDate"
               {...X_AXIS_PROPS}
-              interval={0}
-              angle={chartData.length > 10 ? -45 : 0}
-              textAnchor={chartData.length > 10 ? 'end' : 'middle'}
-              height={chartData.length > 10 ? 60 : 30}
+              interval={chartData.length > 14 ? Math.floor(chartData.length / 7) : 0}
+              angle={chartData.length > 20 ? -45 : 0}
+              textAnchor={chartData.length > 20 ? 'end' : 'middle'}
+              height={chartData.length > 20 ? 50 : 30}
             />
 
-            {/* Primary Y-axis for revenue */}
             <YAxis
-              yAxisId="revenue"
               {...Y_AXIS_PROPS}
               tickFormatter={formatAxisK}
               width={CHART_DIMENSIONS.yAxisWidth.sm}
-            />
-
-            {/* Secondary Y-axis for cumulative */}
-            <YAxis
-              yAxisId="cumulative"
-              orientation="right"
-              {...Y_AXIS_PROPS}
-              tickFormatter={formatAxisK}
-              width={CHART_DIMENSIONS.yAxisWidth.sm}
-              stroke={CHART_THEME.accent}
             />
 
             <Tooltip
@@ -315,68 +307,49 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               cursor={{ fill: 'rgba(0, 0, 0, 0.04)' }}
             />
 
-            {/* Average reference line */}
-            {avgRevenue > 0 && (
-              <ReferenceLine
-                yAxisId="revenue"
-                y={avgRevenue}
-                stroke={CHART_THEME.muted}
-                strokeDasharray="4 4"
-                strokeWidth={1}
-              >
-              </ReferenceLine>
-            )}
-
-            {/* Previous period bars (background) */}
+            {/* Previous period bars (background, lighter) */}
             {hasComparison && (
               <Bar
-                yAxisId="revenue"
                 dataKey="prevRevenue"
-                name="Previous"
+                name={periodLabels.previous}
                 fill="url(#prevBarGradient)"
                 radius={[4, 4, 0, 0]}
-                maxBarSize={40}
+                maxBarSize={35}
               />
             )}
 
-            {/* Current period bars (foreground) */}
+            {/* Current period bars (foreground, prominent) */}
             <Bar
-              yAxisId="revenue"
               dataKey="revenue"
-              name="Current"
+              name={periodLabels.current}
               fill="url(#currentBarGradient)"
               radius={[4, 4, 0, 0]}
-              maxBarSize={40}
-            >
-              {chartData.map((entry, index) => {
-                // Highlight bars that beat previous period
-                const beatsPrevious = entry.revenue > entry.prevRevenue
-                return (
-                  <Cell
-                    key={`cell-${index}`}
-                    fill={beatsPrevious && hasComparison ? `url(#currentBarGradient)` : `url(#currentBarGradient)`}
-                    stroke={beatsPrevious && hasComparison ? CHART_THEME.success : 'none'}
-                    strokeWidth={beatsPrevious && hasComparison ? 1 : 0}
-                  />
-                )
-              })}
-            </Bar>
+              maxBarSize={35}
+            />
 
-            {/* Cumulative trend line */}
+            {/* Previous period trend line (dashed) */}
+            {hasComparison && (
+              <Line
+                type="monotone"
+                dataKey="prevRevenue"
+                name={`${periodLabels.previous} Trend`}
+                stroke={CHART_THEME.muted}
+                strokeWidth={2}
+                strokeDasharray="5 5"
+                dot={false}
+                activeDot={{ r: 4, fill: CHART_THEME.muted, stroke: '#fff', strokeWidth: 2 }}
+              />
+            )}
+
+            {/* Current period trend line (solid) */}
             <Line
-              yAxisId="cumulative"
               type="monotone"
-              dataKey="cumulative"
-              name="Cumulative"
-              stroke={CHART_THEME.accent}
+              dataKey="revenue"
+              name={`${periodLabels.current} Trend`}
+              stroke={CHART_THEME.success}
               strokeWidth={2.5}
               dot={false}
-              activeDot={{
-                r: 5,
-                fill: CHART_THEME.accent,
-                stroke: '#fff',
-                strokeWidth: 2,
-              }}
+              activeDot={{ r: 5, fill: CHART_THEME.success, stroke: '#fff', strokeWidth: 2 }}
             />
 
             {/* Hide default legend, use custom */}

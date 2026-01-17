@@ -647,13 +647,26 @@ class DuckDBStore:
                     "borderDash": [5, 5]
                 })
 
-            # Return both formats: 'datasets' for v1, 'revenue'/'orders' for v2
-            return {
+            # Build comparison object for v2 frontend
+            comparison = None
+            if include_comparison and len(datasets) > 1:
+                prev_dataset = datasets[1]
+                comparison = {
+                    "labels": labels,  # Same labels, different time period
+                    "revenue": prev_dataset["data"],
+                    "orders": []  # Orders comparison not tracked separately
+                }
+
+            # Return both formats: 'datasets' for v1, 'revenue'/'orders'/'comparison' for v2
+            result = {
                 "labels": labels,
                 "revenue": data,
                 "orders": orders_data,
                 "datasets": datasets  # Keep for backwards compatibility
             }
+            if comparison:
+                result["comparison"] = comparison
+            return result
 
     async def get_sales_by_source(
         self,
