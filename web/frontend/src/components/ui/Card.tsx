@@ -3,11 +3,22 @@ import { type ReactNode } from 'react'
 interface CardProps {
   children: ReactNode
   className?: string
+  /** Enable hover shadow elevation effect */
+  interactive?: boolean
+  /** Apply elevated shadow by default */
+  elevated?: boolean
 }
 
-export function Card({ children, className = '' }: CardProps) {
+export function Card({ children, className = '', interactive = false, elevated = false }: CardProps) {
   return (
-    <div className={`bg-white rounded-lg border border-slate-200 shadow-sm ${className}`}>
+    <div
+      className={`
+        bg-white rounded-xl border border-slate-200/60
+        ${elevated ? 'shadow-[var(--shadow-md)]' : 'shadow-[var(--shadow-card)]'}
+        ${interactive ? 'hover:shadow-[var(--shadow-card-hover)] hover:border-slate-300/80 transition-all duration-200 cursor-pointer' : ''}
+        ${className}
+      `}
+    >
       {children}
     </div>
   )
@@ -20,7 +31,7 @@ interface CardHeaderProps {
 
 export function CardHeader({ children, className = '' }: CardHeaderProps) {
   return (
-    <div className={`px-4 py-3 border-b border-slate-200 ${className}`}>
+    <div className={`px-5 py-4 border-b border-slate-100 ${className}`}>
       {children}
     </div>
   )
@@ -33,7 +44,7 @@ interface CardTitleProps {
 
 export function CardTitle({ children, className = '' }: CardTitleProps) {
   return (
-    <h3 className={`text-lg font-semibold text-slate-900 ${className}`}>
+    <h3 className={`text-base font-semibold text-slate-800 tracking-tight ${className}`}>
       {children}
     </h3>
   )
@@ -46,7 +57,7 @@ interface CardContentProps {
 
 export function CardContent({ children, className = '' }: CardContentProps) {
   return (
-    <div className={`p-4 ${className}`}>
+    <div className={`p-5 ${className}`}>
       {children}
     </div>
   )

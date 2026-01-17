@@ -40,6 +40,16 @@ const variantStyles: Record<StatCardVariant, string> = {
   cyan: 'text-cyan-600',
 }
 
+// Gradient backgrounds for icon containers
+const iconBgStyles: Record<StatCardVariant, string> = {
+  blue: 'bg-gradient-to-br from-blue-500 to-blue-600 text-white',
+  green: 'bg-gradient-to-br from-green-500 to-green-600 text-white',
+  purple: 'bg-gradient-to-br from-purple-500 to-purple-600 text-white',
+  orange: 'bg-gradient-to-br from-orange-400 to-orange-500 text-white',
+  red: 'bg-gradient-to-br from-red-500 to-red-600 text-white',
+  cyan: 'bg-gradient-to-br from-cyan-500 to-cyan-600 text-white',
+}
+
 const trendStyles = {
   up: 'text-green-600',
   down: 'text-red-600',
@@ -82,47 +92,57 @@ export const StatCard = memo(function StatCard({
   const showTrend = trend !== undefined && trend !== 0 && trendValue !== undefined
 
   return (
-    <Card>
-      <CardContent className="py-3">
+    <Card interactive className="group">
+      <CardContent className="py-4">
         <article
           aria-label={ariaLabel || `${label}: ${formatter(value)}`}
-          className="flex flex-col"
+          className="flex items-start gap-4"
         >
-          {/* Header with label and optional icon */}
-          <div className="flex items-center justify-between mb-1">
-            <h3 className="text-sm text-slate-600 font-medium">{label}</h3>
-            {icon && (
-              <span className={`${variantStyles[variant]} opacity-60`} aria-hidden="true">
-                {icon}
-              </span>
-            )}
-          </div>
-
-          {/* Value with animation */}
-          <div className="flex items-baseline gap-2">
-            <AnimatedNumber
-              value={value}
-              formatter={formatter}
-              duration={animationDuration}
-              className={`text-2xl font-bold ${variantStyles[variant]}`}
-            />
-
-            {/* Trend indicator */}
-            {showTrend && (
-              <span
-                className={`flex items-center gap-0.5 text-xs ${trendStyles[trendKey]}`}
-                aria-label={`${trendKey === 'up' ? 'Increased' : 'Decreased'} by ${trendValue}%`}
-              >
-                {TrendIcon[trendKey]}
-                <span>{Math.abs(trendValue!).toFixed(1)}%</span>
-              </span>
-            )}
-          </div>
-
-          {/* Subtitle */}
-          {subtitle && (
-            <p className="text-xs text-slate-500 mt-1">{subtitle}</p>
+          {/* Icon with gradient background */}
+          {icon && (
+            <div
+              className={`
+                flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center
+                ${iconBgStyles[variant]}
+                shadow-sm group-hover:shadow-md transition-shadow duration-200
+              `}
+              aria-hidden="true"
+            >
+              {icon}
+            </div>
           )}
+
+          {/* Content */}
+          <div className="flex-1 min-w-0">
+            {/* Label */}
+            <h3 className="text-sm text-slate-500 font-medium mb-0.5">{label}</h3>
+
+            {/* Value with animation */}
+            <div className="flex items-baseline gap-2">
+              <AnimatedNumber
+                value={value}
+                formatter={formatter}
+                duration={animationDuration}
+                className={`text-2xl font-bold tracking-tight ${variantStyles[variant]}`}
+              />
+
+              {/* Trend indicator */}
+              {showTrend && (
+                <span
+                  className={`flex items-center gap-0.5 text-xs font-medium ${trendStyles[trendKey]}`}
+                  aria-label={`${trendKey === 'up' ? 'Increased' : 'Decreased'} by ${trendValue}%`}
+                >
+                  {TrendIcon[trendKey]}
+                  <span>{Math.abs(trendValue!).toFixed(1)}%</span>
+                </span>
+              )}
+            </div>
+
+            {/* Subtitle */}
+            {subtitle && (
+              <p className="text-xs text-slate-400 mt-1">{subtitle}</p>
+            )}
+          </div>
         </article>
       </CardContent>
     </Card>
@@ -134,10 +154,13 @@ export const StatCard = memo(function StatCard({
 export function StatCardSkeleton() {
   return (
     <Card>
-      <CardContent className="py-3">
-        <div className="animate-pulse">
-          <div className="h-4 w-20 bg-slate-200 rounded mb-2" />
-          <div className="h-8 w-28 bg-slate-200 rounded" />
+      <CardContent className="py-4">
+        <div className="animate-pulse flex items-start gap-4">
+          <div className="w-10 h-10 bg-slate-200 rounded-lg flex-shrink-0" />
+          <div className="flex-1">
+            <div className="h-4 w-20 bg-slate-200 rounded mb-2" />
+            <div className="h-7 w-28 bg-slate-200 rounded" />
+          </div>
         </div>
       </CardContent>
     </Card>

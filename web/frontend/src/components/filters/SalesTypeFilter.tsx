@@ -17,13 +17,14 @@ export function SalesTypeFilter() {
   }, [setSalesType])
 
   return (
-    <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-1">
+    <div className="flex items-center gap-0.5 bg-slate-100/80 rounded-xl p-1 border border-slate-200/60">
       {SALES_TYPES.map(({ value, label }) => (
         <Button
           key={value}
           size="sm"
           variant={salesType === value ? 'primary' : 'ghost'}
           onClick={() => handleChange(value)}
+          className={salesType === value ? 'shadow-sm' : ''}
         >
           {label}
         </Button>
