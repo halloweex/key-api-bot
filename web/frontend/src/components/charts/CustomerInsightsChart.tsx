@@ -77,9 +77,11 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
 
   const aovData = useMemo<AOVDataPoint[]>(() => {
     if (!data?.aovTrend?.labels?.length) return []
+    // API returns Chart.js format: datasets[0].data
+    const aovValues = data.aovTrend.datasets?.[0]?.data ?? []
     return data.aovTrend.labels.map((label, index) => ({
       date: label,
-      aov: data.aovTrend.data?.[index] ?? 0,
+      aov: aovValues[index] ?? 0,
     }))
   }, [data])
 
