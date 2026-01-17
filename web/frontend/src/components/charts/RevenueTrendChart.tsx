@@ -31,6 +31,8 @@ interface ChartDataPoint {
   date: string
   revenue: number
   orders: number
+  prevRevenue?: number
+  prevOrders?: number
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -44,9 +46,12 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       date: label,
       revenue: data.revenue?.[index] ?? 0,
       orders: data.orders?.[index] ?? 0,
+      prevRevenue: data.comparison?.revenue?.[index],
+      prevOrders: data.comparison?.orders?.[index],
     }))
   }, [data])
 
+  const hasComparison = data?.comparison?.revenue?.length ?? 0 > 0
   const isEmpty = !isLoading && chartData.length === 0
 
   return (
@@ -77,12 +82,16 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
             <Tooltip
               contentStyle={TOOLTIP_STYLE}
               labelStyle={TOOLTIP_LABEL_STYLE}
-              formatter={(value, name) => [
-                name === 'revenue' ? formatCurrency(Number(value) || 0) : Number(value) || 0,
-                name === 'revenue' ? 'Revenue' : 'Orders',
-              ]}
+              formatter={(value, name) => {
+                const numValue = Number(value) || 0
+                if (name === 'revenue' || name === 'prevRevenue') {
+                  return [formatCurrency(numValue), name === 'prevRevenue' ? 'Previous Revenue' : 'Revenue']
+                }
+                return [numValue, name === 'prevOrders' ? 'Previous Orders' : 'Orders']
+              }}
             />
             <Legend {...LEGEND_PROPS} />
+            {/* Current period lines */}
             <Line
               yAxisId="revenue"
               type="monotone"
@@ -101,6 +110,35 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               {...LINE_PROPS}
               activeDot={{ r: 4, fill: CHART_THEME.accent }}
             />
+            {/* Previous period lines (dashed) */}
+            {hasComparison && (
+              <>
+                <Line
+                  yAxisId="revenue"
+                  type="monotone"
+                  dataKey="prevRevenue"
+                  name="Previous Revenue"
+                  stroke={CHART_THEME.primary}
+                  strokeDasharray="5 5"
+                  strokeOpacity={0.5}
+                  strokeWidth={1.5}
+                  dot={false}
+                  activeDot={{ r: 3, fill: CHART_THEME.primary, fillOpacity: 0.5 }}
+                />
+                <Line
+                  yAxisId="orders"
+                  type="monotone"
+                  dataKey="prevOrders"
+                  name="Previous Orders"
+                  stroke={CHART_THEME.accent}
+                  strokeDasharray="5 5"
+                  strokeOpacity={0.5}
+                  strokeWidth={1.5}
+                  dot={false}
+                  activeDot={{ r: 3, fill: CHART_THEME.accent, fillOpacity: 0.5 }}
+                />
+              </>
+            )}
           </LineChart>
         </ResponsiveContainer>
       </div>

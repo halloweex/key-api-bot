@@ -253,7 +253,8 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         {/* Progress Track */}
         <div
           ref={trackRef}
-          className="relative h-4 bg-slate-100 rounded-full overflow-visible shadow-inner"
+          className="relative h-4 bg-slate-100 rounded-full shadow-inner"
+          style={{ overflow: 'visible' }}
         >
           {/* Fill with glow */}
           <div
@@ -292,20 +293,35 @@ export const MilestoneProgress = memo(function MilestoneProgress({
             return (
               <div
                 key={m.amount}
-                className={`absolute top-1/2 w-5 h-5 rounded-full border-2 transition-all duration-300 cursor-pointer
-                  ${markerBg} ${markerBorder}
-                  ${isReached ? 'scale-110 shadow-lg ring-2 ring-white' : 'opacity-40 scale-90'}
-                  ${isNext ? 'animate-pulse ring-2 ring-offset-2 ring-offset-slate-100 ring-slate-400/50' : ''}
-                  hover:scale-125 hover:shadow-xl
-                `}
-                style={{ left: `${position}%`, transform: `translateX(-50%) translateY(-50%)` }}
-                title={`${formatAmount(m.amount)} - ${m.message}`}
+                className="absolute"
+                style={{
+                  left: `${position}%`,
+                  top: '50%',
+                  transform: 'translate(-50%, -50%)',
+                  zIndex: isNext ? 20 : 10,
+                }}
               >
-                {isReached && (
-                  <svg className="w-3 h-3 text-white absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                  </svg>
-                )}
+                {/* Larger hit area for better interaction */}
+                <div
+                  className={`
+                    w-6 h-6 rounded-full border-2 transition-all duration-300 cursor-pointer
+                    flex items-center justify-center
+                    ${markerBg} ${markerBorder}
+                    ${isReached ? 'scale-110 shadow-lg ring-2 ring-white' : 'opacity-50 scale-90'}
+                    ${isNext ? 'animate-pulse ring-2 ring-offset-2 ring-offset-slate-100 ring-slate-400/50' : ''}
+                    hover:scale-150 hover:shadow-xl hover:opacity-100 hover:z-30
+                  `}
+                  title={`${formatAmount(m.amount)} - ${m.message}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Milestone: ${formatAmount(m.amount)}`}
+                >
+                  {isReached && (
+                    <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                    </svg>
+                  )}
+                </div>
               </div>
             )
           })}
