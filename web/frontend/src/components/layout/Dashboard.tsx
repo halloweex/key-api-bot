@@ -62,15 +62,15 @@ export const Dashboard = memo(function Dashboard() {
         <SummaryCards />
       </section>
 
-      {/* Charts Row 1 - Revenue & Source */}
-      <GridSection>
-        <ChartSection>
-          <LazyRevenueTrendChart />
-        </ChartSection>
-        <ChartSection>
-          <LazySalesBySourceChart />
-        </ChartSection>
-      </GridSection>
+      {/* Revenue Trend - Full Width */}
+      <ChartSection>
+        <LazyRevenueTrendChart />
+      </ChartSection>
+
+      {/* Sales by Source */}
+      <ChartSection>
+        <LazySalesBySourceChart />
+      </ChartSection>
 
       {/* Charts Row 2 - Top Products (Quantity & Revenue) */}
       <GridSection>
