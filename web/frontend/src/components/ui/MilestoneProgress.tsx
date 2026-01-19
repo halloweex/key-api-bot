@@ -41,8 +41,8 @@ const MILESTONES: Record<string, Milestone[]> = {
 // Map period to milestone type
 function getPeriodType(period: string): string | null {
   if (period === 'today' || period === 'yesterday') return 'daily'
-  if (period === 'week' || period === 'last_week') return 'weekly'
-  if (period === 'month' || period === 'last_month') return 'monthly'
+  if (period === 'week' || period === 'last_week' || period === 'last_7_days') return 'weekly'
+  if (period === 'month' || period === 'last_month' || period === 'last_28_days') return 'monthly'
   return null
 }
 
