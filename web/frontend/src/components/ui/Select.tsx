@@ -25,7 +25,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
           px-2 sm:px-3 py-1.5 sm:py-2 bg-white border border-slate-200 rounded-lg
           text-xs sm:text-sm text-slate-700 font-medium
           shadow-sm hover:border-slate-300
-          focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-400 focus:ring-offset-1
+          focus:outline-none focus:ring-2 focus:ring-purple-500/40 focus:border-purple-400 focus:ring-offset-1
           transition-all duration-200 cursor-pointer
           appearance-none bg-no-repeat bg-right
           min-w-0 max-w-[140px] sm:max-w-none truncate
