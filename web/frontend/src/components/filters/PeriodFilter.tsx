@@ -4,13 +4,18 @@ import { useFilterStore } from '../../store/filterStore'
 import { DateRangePicker } from './DateRangePicker'
 import type { Period } from '../../types/filters'
 
-const PERIODS: { value: Period; label: string }[] = [
-  { value: 'today', label: 'Today' },
-  { value: 'yesterday', label: 'Yesterday' },
-  { value: 'week', label: 'Week' },
-  { value: 'last_week', label: 'Last Week' },
-  { value: 'month', label: 'Month' },
-  { value: 'last_month', label: 'Last Month' },
+const PERIODS: { value: Period; label: string; group?: 'fixed' | 'calendar' | 'rolling' }[] = [
+  // Fixed periods
+  { value: 'today', label: 'Today', group: 'fixed' },
+  { value: 'yesterday', label: 'Yesterday', group: 'fixed' },
+  // Rolling periods (always have data)
+  { value: 'last_7_days', label: '7 Days', group: 'rolling' },
+  { value: 'last_28_days', label: '28 Days', group: 'rolling' },
+  // Calendar periods
+  { value: 'week', label: 'This Week', group: 'calendar' },
+  { value: 'last_week', label: 'Last Week', group: 'calendar' },
+  { value: 'month', label: 'This Month', group: 'calendar' },
+  { value: 'last_month', label: 'Last Month', group: 'calendar' },
 ]
 
 export function PeriodFilter() {

@@ -1,4 +1,4 @@
-import { useMemo, memo } from 'react'
+import { useMemo, memo, useState } from 'react'
 import {
   PieChart,
   Pie,
@@ -60,10 +60,53 @@ const MetricCard = memo(function MetricCard({ label, value, colorClass }: Metric
   )
 })
 
+// ─── Info Button ──────────────────────────────────────────────────────────────
+
+function InfoButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="ml-2 text-slate-400 hover:text-slate-300 transition-colors"
+      aria-label="How is this calculated?"
+    >
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H8c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z"/>
+      </svg>
+    </button>
+  )
+}
+
+// ─── Info Tooltip ─────────────────────────────────────────────────────────────
+
+function InfoTooltip({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="absolute top-8 left-0 z-10 bg-slate-800 border border-slate-600 rounded-lg shadow-xl p-4 max-w-xs">
+      <button
+        onClick={onClose}
+        className="absolute top-2 right-2 text-slate-400 hover:text-slate-200"
+        aria-label="Close"
+      >
+        ×
+      </button>
+      <h4 className="text-sm font-semibold text-slate-200 mb-2">How is this calculated?</h4>
+      <p className="text-xs text-slate-300 mb-2">
+        <strong className="text-blue-400">New Customers:</strong> Customers whose account was created during the selected period.
+      </p>
+      <p className="text-xs text-slate-300 mb-2">
+        <strong className="text-purple-400">Returning Customers:</strong> Customers whose account existed before the selected period started.
+      </p>
+      <p className="text-xs text-slate-300">
+        <strong className="text-green-400">Repeat Rate:</strong> Percentage of orders from returning customers.
+      </p>
+    </div>
+  )
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
   const { data, isLoading, error, refetch } = useCustomerInsights()
+  const [showInfo, setShowInfo] = useState(false)
 
   const pieData = useMemo<PieDataPoint[]>(() => {
     if (!data?.newVsReturning?.labels?.length) return []
@@ -101,7 +144,13 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* New vs Returning Pie Chart */}
         <div>
-          <h4 className="text-sm font-medium text-slate-400 mb-2">New vs Returning</h4>
+          <div className="relative">
+            <h4 className="text-sm font-medium text-slate-400 mb-2 flex items-center">
+              New vs Returning
+              <InfoButton onClick={() => setShowInfo(!showInfo)} />
+            </h4>
+            {showInfo && <InfoTooltip onClose={() => setShowInfo(false)} />}
+          </div>
           <div style={{ height: CHART_DIMENSIONS.height.sm }}>
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>

@@ -46,7 +46,9 @@ const PERIOD_LABELS: Record<string, { current: string; previous: string }> = {
   last_week: { current: 'Last Week', previous: 'Week Before' },
   month: { current: 'This Month', previous: 'Last Month' },
   last_month: { current: 'Last Month', previous: 'Month Before' },
-  custom: { current: 'Selected Period', previous: 'Previous Period' },
+  last_7_days: { current: 'Last 7 Days', previous: 'Previous 7 Days' },
+  last_28_days: { current: 'Last 28 Days', previous: 'Previous 28 Days' },
+  custom: { current: 'Selected', previous: 'Previous' },
 }
 
 // ─── Custom Tooltip ──────────────────────────────────────────────────────────
@@ -171,27 +173,30 @@ function CustomLegend({ periodLabels, hasComparison }: LegendProps) {
     <div style={{
       display: 'flex',
       justifyContent: 'center',
-      gap: '24px',
-      marginTop: '12px',
-      fontSize: '12px',
+      flexWrap: 'wrap',
+      gap: '12px',
+      paddingTop: '8px',
+      fontSize: '11px',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
         <div style={{
-          width: '20px',
+          width: '16px',
           height: '3px',
           borderRadius: '2px',
           background: CHART_THEME.primary,
+          flexShrink: 0,
         }} />
-        <span style={{ color: CHART_THEME.text, fontWeight: 500 }}>{periodLabels.current}</span>
+        <span style={{ color: CHART_THEME.text, fontWeight: 500, whiteSpace: 'nowrap' }}>{periodLabels.current}</span>
       </div>
       {hasComparison && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <div style={{
-            width: '20px',
+            width: '16px',
             height: '0px',
             borderTop: `2px dashed ${CHART_THEME.muted}`,
+            flexShrink: 0,
           }} />
-          <span style={{ color: CHART_THEME.muted }}>{periodLabels.previous}</span>
+          <span style={{ color: CHART_THEME.muted, whiteSpace: 'nowrap' }}>{periodLabels.previous}</span>
         </div>
       )}
     </div>
@@ -276,9 +281,10 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       height="xl"
       ariaLabel="Chart showing revenue comparison between current and previous period"
     >
-      <div style={{ height: 350 }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart
+      <div style={{ display: 'flex', flexDirection: 'column', height: 350 }}>
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart
             data={chartData}
             margin={{ top: 10, right: 20, left: 10, bottom: 10 }}
             barGap={2}
@@ -354,8 +360,9 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
             {/* Hide default legend, use custom */}
             <Legend content={() => null} />
-          </ComposedChart>
-        </ResponsiveContainer>
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
 
         {/* Custom Legend */}
         <CustomLegend periodLabels={periodLabels} hasComparison={hasComparison} />

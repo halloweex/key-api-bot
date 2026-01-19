@@ -103,6 +103,15 @@ def parse_period(
         first_of_last_month = last_of_last_month.replace(day=1)
         return DateRange(first_of_last_month, last_of_last_month)
 
+    # Rolling periods
+    elif period == "last_7_days":
+        start = today - timedelta(days=6)  # 7 days including today
+        return DateRange(start, today)
+
+    elif period == "last_28_days":
+        start = today - timedelta(days=27)  # 28 days including today
+        return DateRange(start, today)
+
     # Handle explicit dates
     if start_date and end_date:
         start = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -132,5 +141,7 @@ def get_period_label(period: str) -> str:
         "month": "This Month",
         "thismonth": "This Month",
         "last_month": "Last Month",
+        "last_7_days": "Last 7 Days",
+        "last_28_days": "Last 28 Days",
     }
     return labels.get(period, period.title() if period else "Today")

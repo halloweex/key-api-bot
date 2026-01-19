@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import type { FilterStore, Period, SalesType } from '../types/filters'
 
 const initialState = {
-  period: 'week' as Period,
+  period: 'last_28_days' as Period,
   startDate: null,
   endDate: null,
   salesType: 'retail' as SalesType,
