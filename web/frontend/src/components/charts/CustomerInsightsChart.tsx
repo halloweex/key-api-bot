@@ -60,14 +60,14 @@ const SummaryCard = memo(function SummaryCard({
   return (
     <div className={`rounded-xl p-4 ${bgClass}`}>
       <div className="flex items-start gap-3">
-        <div className={`p-2 rounded-lg ${colorClass} bg-white/10`}>
+        <div className={`p-2 rounded-lg ${colorClass} bg-white/20`}>
           {icon}
         </div>
         <div className="flex-1 min-w-0">
-          <p className="text-xs text-white/60 font-medium">{label}</p>
-          <p className={`text-xl font-bold ${colorClass}`}>{value}</p>
+          <p className="text-xs text-white font-medium">{label}</p>
+          <p className={`text-xl font-bold text-white`}>{value}</p>
           {subtitle && (
-            <p className="text-xs text-white/50 mt-0.5">{subtitle}</p>
+            <p className="text-xs text-white/80 mt-0.5">{subtitle}</p>
           )}
         </div>
       </div>
@@ -107,7 +107,7 @@ function InfoButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className="ml-2 text-slate-400 hover:text-slate-300 transition-colors"
+      className="ml-2 text-slate-500 hover:text-slate-700 transition-colors"
       aria-label="How is this calculated?"
     >
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
@@ -226,7 +226,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
         {/* New vs Returning Pie Chart */}
         <div>
           <div className="relative">
-            <h4 className="text-sm font-medium text-slate-300 mb-3 flex items-center">
+            <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center">
               New vs Returning Customers
               <InfoButton onClick={() => setShowCustomerInfo(!showCustomerInfo)} />
             </h4>
@@ -279,8 +279,8 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                     className="w-3 h-3 rounded-full"
                     style={{ backgroundColor: entry.color }}
                   />
-                  <span className="text-sm text-slate-300">
-                    {entry.name}: <span className="font-medium">{formatNumber(entry.value)}</span>
+                  <span className="text-sm text-slate-700">
+                    {entry.name}: <span className="font-semibold">{formatNumber(entry.value)}</span>
                     <span className="text-slate-500 ml-1">({percent}%)</span>
                   </span>
                 </div>
@@ -292,7 +292,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
         {/* AOV Trend Line Chart */}
         <div>
           <div className="relative">
-            <h4 className="text-sm font-medium text-slate-300 mb-3 flex items-center">
+            <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center">
               Average Order Value Trend
               <InfoButton onClick={() => setShowAovInfo(!showAovInfo)} />
             </h4>
@@ -344,8 +344,8 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
           {/* Average indicator */}
           {aovData.length > 0 && (
             <div className="flex justify-center mt-2">
-              <span className="text-xs text-slate-400">
-                Period Average: <span className="text-orange-400 font-medium">
+              <span className="text-sm text-slate-600">
+                Period Average: <span className="text-orange-600 font-semibold">
                   {formatCurrency(aovData.reduce((sum, d) => sum + d.aov, 0) / aovData.length)}
                 </span>
               </span>
