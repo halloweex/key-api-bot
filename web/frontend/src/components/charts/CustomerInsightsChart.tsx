@@ -76,9 +76,9 @@ function InfoButton({ onClick }: { onClick: () => void }) {
   )
 }
 
-// ─── Info Tooltip ─────────────────────────────────────────────────────────────
+// ─── Info Tooltips ────────────────────────────────────────────────────────────
 
-function InfoTooltip({ onClose }: { onClose: () => void }) {
+function CustomerInfoTooltip({ onClose }: { onClose: () => void }) {
   return (
     <div className="absolute top-8 left-0 z-10 bg-slate-800 border border-slate-600 rounded-lg shadow-xl p-4 max-w-xs">
       <button
@@ -102,11 +102,36 @@ function InfoTooltip({ onClose }: { onClose: () => void }) {
   )
 }
 
+function AOVInfoTooltip({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="absolute top-8 left-0 z-10 bg-slate-800 border border-slate-600 rounded-lg shadow-xl p-4 max-w-xs">
+      <button
+        onClick={onClose}
+        className="absolute top-2 right-2 text-slate-400 hover:text-slate-200"
+        aria-label="Close"
+      >
+        ×
+      </button>
+      <h4 className="text-sm font-semibold text-slate-200 mb-2">How is AOV calculated?</h4>
+      <p className="text-xs text-slate-300 mb-2">
+        <strong className="text-orange-400">AOV (Average Order Value):</strong> Total Revenue ÷ Number of Orders for each day.
+      </p>
+      <p className="text-xs text-slate-300 mb-2">
+        <strong className="text-blue-400">Revenue:</strong> Sum of product prices × quantities.
+      </p>
+      <p className="text-xs text-slate-300">
+        <strong className="text-slate-400">Excluded:</strong> Orders with return/cancel statuses are not counted.
+      </p>
+    </div>
+  )
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
   const { data, isLoading, error, refetch } = useCustomerInsights()
-  const [showInfo, setShowInfo] = useState(false)
+  const [showCustomerInfo, setShowCustomerInfo] = useState(false)
+  const [showAovInfo, setShowAovInfo] = useState(false)
 
   const pieData = useMemo<PieDataPoint[]>(() => {
     if (!data?.newVsReturning?.labels?.length) return []
@@ -147,9 +172,9 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
           <div className="relative">
             <h4 className="text-sm font-medium text-slate-400 mb-2 flex items-center">
               New vs Returning
-              <InfoButton onClick={() => setShowInfo(!showInfo)} />
+              <InfoButton onClick={() => setShowCustomerInfo(!showCustomerInfo)} />
             </h4>
-            {showInfo && <InfoTooltip onClose={() => setShowInfo(false)} />}
+            {showCustomerInfo && <CustomerInfoTooltip onClose={() => setShowCustomerInfo(false)} />}
           </div>
           <div style={{ height: CHART_DIMENSIONS.height.sm }}>
             <ResponsiveContainer width="100%" height="100%">
@@ -182,7 +207,13 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
 
         {/* AOV Trend Line Chart */}
         <div>
-          <h4 className="text-sm font-medium text-slate-400 mb-2">Average Order Value Trend</h4>
+          <div className="relative">
+            <h4 className="text-sm font-medium text-slate-400 mb-2 flex items-center">
+              Average Order Value Trend
+              <InfoButton onClick={() => setShowAovInfo(!showAovInfo)} />
+            </h4>
+            {showAovInfo && <AOVInfoTooltip onClose={() => setShowAovInfo(false)} />}
+          </div>
           <div style={{ height: CHART_DIMENSIONS.height.sm }}>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={aovData} margin={CHART_DIMENSIONS.margin.default}>

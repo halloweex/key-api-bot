@@ -9,7 +9,7 @@ Automated sales reporting system for KoreanStory e-commerce with interactive web
 
 ## Features
 
-### Web Dashboard
+### Web Dashboardad
 - **Revenue Analytics** - Daily/weekly/monthly trends with period comparison
 - **Sales by Source** - Instagram, Telegram, Shopify breakdown (bar + doughnut charts)
 - **Top Products** - By quantity and revenue (horizontal bar charts)
