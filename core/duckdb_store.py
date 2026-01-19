@@ -30,6 +30,25 @@ B2B_MANAGER_ID = 15
 # Retail manager IDs (exclude B2B/wholesale)
 RETAIL_MANAGER_IDS = [22, 4, 16]
 
+# Timezone for date extraction - KeyCRM stores timestamps in +04:00 (server time)
+# but UI displays in Kyiv timezone, so we convert for consistency
+DISPLAY_TIMEZONE = 'Europe/Kyiv'
+
+
+def _date_in_kyiv(column: str) -> str:
+    """Generate SQL for extracting date in Kyiv timezone.
+
+    KeyCRM API returns timestamps in +04:00 (server timezone), but the UI
+    displays dates in Kyiv timezone. This ensures dashboard matches KeyCRM UI.
+
+    Args:
+        column: The timestamp column (e.g., 'o.ordered_at')
+
+    Returns:
+        SQL expression for date extraction in Kyiv timezone
+    """
+    return f"DATE(timezone('{DISPLAY_TIMEZONE}', {column}))"
+
 
 class DuckDBStore:
     """
@@ -460,7 +479,7 @@ class DuckDBStore:
             params = [start_date, end_date]
 
             # Base query for valid orders
-            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?"]
+            where_clauses = [f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?"]
 
             # Add sales type filter (retail/b2b)
             where_clauses.append(self._build_sales_type_filter(sales_type))
@@ -534,7 +553,7 @@ class DuckDBStore:
             # Build filters
             params = [start_date, end_date]
             where_clauses = [
-                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
                 f"o.status_id NOT IN {return_statuses}",
                 self._build_sales_type_filter(sales_type)
             ]
@@ -559,13 +578,13 @@ class DuckDBStore:
             # Query daily revenue and order counts
             sql = f"""
                 SELECT
-                    DATE(o.ordered_at) as day,
+                    {_date_in_kyiv('o.ordered_at')} as day,
                     SUM(o.grand_total) as revenue,
                     COUNT(DISTINCT o.id) as order_count
                 FROM orders o
                 {joins}
                 WHERE {where_sql}
-                GROUP BY DATE(o.ordered_at)
+                GROUP BY {_date_in_kyiv('o.ordered_at')}
                 ORDER BY day
             """
 
@@ -602,7 +621,7 @@ class DuckDBStore:
 
                 prev_params = [prev_start, prev_end]
                 prev_where = [
-                    "DATE(o.ordered_at) BETWEEN ? AND ?",
+                    f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
                     f"o.status_id NOT IN {return_statuses}",
                     self._build_sales_type_filter(sales_type)
                 ]
@@ -620,10 +639,10 @@ class DuckDBStore:
                         prev_params.append(brand)
 
                 prev_sql = f"""
-                    SELECT DATE(o.ordered_at) as day, SUM(o.grand_total) as revenue
+                    SELECT {_date_in_kyiv('o.ordered_at')} as day, SUM(o.grand_total) as revenue
                     FROM orders o {joins}
                     WHERE {" AND ".join(prev_where)}
-                    GROUP BY DATE(o.ordered_at)
+                    GROUP BY {_date_in_kyiv('o.ordered_at')}
                     ORDER BY day
                 """
 
@@ -681,7 +700,7 @@ class DuckDBStore:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
             where_clauses = [
-                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
                 f"o.status_id NOT IN {return_statuses}",
                 self._build_sales_type_filter(sales_type)
             ]
@@ -749,7 +768,7 @@ class DuckDBStore:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
             where_clauses = [
-                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
                 f"o.status_id NOT IN {return_statuses}",
                 self._build_sales_type_filter(sales_type)
             ]
@@ -893,7 +912,7 @@ class DuckDBStore:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
             where_clauses = [
-                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
                 f"o.status_id NOT IN {return_statuses}",
                 self._build_sales_type_filter(sales_type)
             ]
@@ -956,13 +975,13 @@ class DuckDBStore:
             # AOV trend by day
             aov_sql = f"""
                 SELECT
-                    DATE(o.ordered_at) as day,
+                    {_date_in_kyiv('o.ordered_at')} as day,
                     AVG(o.grand_total) as avg_order_value,
                     COUNT(DISTINCT o.id) as orders
                 FROM orders o
                 {joins}
                 WHERE {where_sql}
-                GROUP BY DATE(o.ordered_at)
+                GROUP BY {_date_in_kyiv('o.ordered_at')}
                 ORDER BY day
             """
             aov_results = conn.execute(aov_sql, params).fetchall()
@@ -1020,7 +1039,7 @@ class DuckDBStore:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
             where_clauses = [
-                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
                 f"o.status_id NOT IN {return_statuses}",
                 self._build_sales_type_filter(sales_type)
             ]
@@ -1120,7 +1139,7 @@ class DuckDBStore:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
             where_clauses = [
-                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
                 f"o.status_id NOT IN {return_statuses}",
                 self._build_sales_type_filter(sales_type)
             ]
@@ -1182,7 +1201,7 @@ class DuckDBStore:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
             where_clauses = [
-                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
                 f"o.status_id NOT IN {return_statuses}",
                 self._build_sales_type_filter(sales_type)
             ]
@@ -1275,7 +1294,7 @@ class DuckDBStore:
         """Get expense summary for a date range."""
         async with self.connection() as conn:
             params = [start_date, end_date]
-            where_clauses = ["DATE(o.ordered_at) BETWEEN ? AND ?"]
+            where_clauses = [f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?"]
 
             # Add sales type filter
             where_clauses.append(self._build_sales_type_filter(sales_type))
@@ -1321,12 +1340,12 @@ class DuckDBStore:
             # Daily expense trend
             trend_sql = f"""
                 SELECT
-                    DATE(o.ordered_at) as day,
+                    {_date_in_kyiv('o.ordered_at')} as day,
                     SUM(e.amount) as total_expenses
                 FROM expenses e
                 JOIN orders o ON e.order_id = o.id
                 WHERE {where_sql}
-                GROUP BY DATE(o.ordered_at)
+                GROUP BY {_date_in_kyiv('o.ordered_at')}
                 ORDER BY day
             """
             trend_results = conn.execute(trend_sql, params).fetchall()
@@ -1390,7 +1409,7 @@ class DuckDBStore:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
             where_clauses = [
-                "DATE(o.ordered_at) BETWEEN ? AND ?",
+                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
                 f"o.status_id NOT IN {return_statuses}",
                 self._build_sales_type_filter(sales_type)
             ]
@@ -1404,13 +1423,13 @@ class DuckDBStore:
             # Daily revenue and expenses
             daily_sql = f"""
                 SELECT
-                    DATE(o.ordered_at) as day,
+                    {_date_in_kyiv('o.ordered_at')} as day,
                     SUM(o.grand_total) as revenue,
                     COALESCE(SUM(e.amount), 0) as expenses
                 FROM orders o
                 LEFT JOIN expenses e ON o.id = e.order_id
                 WHERE {where_sql}
-                GROUP BY DATE(o.ordered_at)
+                GROUP BY {_date_in_kyiv('o.ordered_at')}
                 ORDER BY day
             """
             results = conn.execute(daily_sql, params).fetchall()
