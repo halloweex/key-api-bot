@@ -139,37 +139,6 @@ function InfoTooltipContent({ onClose, title, children }: {
   )
 }
 
-// ─── Custom Pie Label ─────────────────────────────────────────────────────────
-
-const renderCustomLabel = (props: {
-  cx?: number
-  cy?: number
-  midAngle?: number
-  innerRadius?: number
-  outerRadius?: number
-  percent?: number
-  name?: string
-}) => {
-  const { cx = 0, cy = 0, midAngle = 0, innerRadius = 0, outerRadius = 0, percent = 0, name = '' } = props
-  const RADIAN = Math.PI / 180
-  const radius = innerRadius + (outerRadius - innerRadius) * 1.4
-  const x = cx + radius * Math.cos(-midAngle * RADIAN)
-  const y = cy + radius * Math.sin(-midAngle * RADIAN)
-
-  return (
-    <text
-      x={x}
-      y={y}
-      fill="#94a3b8"
-      textAnchor={x > cx ? 'start' : 'end'}
-      dominantBaseline="central"
-      fontSize={12}
-    >
-      {`${name} ${(percent * 100).toFixed(0)}%`}
-    </text>
-  )
-}
-
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
@@ -255,7 +224,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* New vs Returning Pie Chart */}
-        <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/50">
+        <div>
           <div className="relative">
             <h4 className="text-sm font-medium text-slate-300 mb-3 flex items-center">
               New vs Returning Customers
@@ -275,20 +244,18 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
               </InfoTooltipContent>
             )}
           </div>
-          <div style={{ height: 200 }}>
+          <div style={{ height: 180 }}>
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
                   data={pieData}
                   cx="50%"
                   cy="50%"
-                  innerRadius={50}
-                  outerRadius={80}
+                  innerRadius={45}
+                  outerRadius={75}
                   dataKey="value"
                   nameKey="name"
-                  label={renderCustomLabel}
                   {...PIE_PROPS}
-                  labelLine={false}
                 >
                   {pieData.map((entry, index) => (
                     <Cell key={`cell-${index}`} fill={entry.color} />
@@ -302,23 +269,28 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
             </ResponsiveContainer>
           </div>
           {/* Legend below chart */}
-          <div className="flex justify-center gap-6 mt-2">
-            {pieData.map((entry) => (
-              <div key={entry.name} className="flex items-center gap-2">
-                <div
-                  className="w-3 h-3 rounded-full"
-                  style={{ backgroundColor: entry.color }}
-                />
-                <span className="text-xs text-slate-400">
-                  {entry.name}: {formatNumber(entry.value)}
-                </span>
-              </div>
-            ))}
+          <div className="flex justify-center gap-6 mt-3">
+            {pieData.map((entry) => {
+              const total = pieData.reduce((sum, e) => sum + e.value, 0)
+              const percent = total > 0 ? ((entry.value / total) * 100).toFixed(0) : '0'
+              return (
+                <div key={entry.name} className="flex items-center gap-2">
+                  <div
+                    className="w-3 h-3 rounded-full"
+                    style={{ backgroundColor: entry.color }}
+                  />
+                  <span className="text-sm text-slate-300">
+                    {entry.name}: <span className="font-medium">{formatNumber(entry.value)}</span>
+                    <span className="text-slate-500 ml-1">({percent}%)</span>
+                  </span>
+                </div>
+              )
+            })}
           </div>
         </div>
 
         {/* AOV Trend Line Chart */}
-        <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/50">
+        <div>
           <div className="relative">
             <h4 className="text-sm font-medium text-slate-300 mb-3 flex items-center">
               Average Order Value Trend

@@ -1,10 +1,24 @@
 """
 Pytest configuration and shared fixtures.
 """
+import asyncio
 import pytest
 from datetime import date, datetime
 from typing import Dict, List, Any
 from unittest.mock import MagicMock
+
+
+@pytest.fixture(scope="function")
+def event_loop():
+    """Create a new event loop for each test function."""
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
+
+
+def pytest_configure(config):
+    """Register custom markers."""
+    config.addinivalue_line("markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')")
 
 
 @pytest.fixture
