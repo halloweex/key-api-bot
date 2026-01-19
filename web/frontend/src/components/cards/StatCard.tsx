@@ -96,7 +96,7 @@ export const StatCard = memo(function StatCard({
       <CardContent className="py-4">
         <article
           aria-label={ariaLabel || `${label}: ${formatter(value)}`}
-          className="flex items-start gap-4"
+          className={icon ? "flex items-start gap-4" : "text-center"}
         >
           {/* Icon with gradient background */}
           {icon && (
@@ -113,17 +113,17 @@ export const StatCard = memo(function StatCard({
           )}
 
           {/* Content */}
-          <div className="flex-1 min-w-0">
+          <div className={icon ? "flex-1 min-w-0" : ""}>
             {/* Label */}
-            <h3 className="text-sm text-slate-500 font-medium mb-0.5">{label}</h3>
+            <h3 className="text-xs sm:text-sm text-slate-500 font-medium mb-0.5">{label}</h3>
 
             {/* Value with animation */}
-            <div className="flex items-baseline gap-2">
+            <div className={icon ? "flex items-baseline gap-2" : "flex items-baseline justify-center gap-2"}>
               <AnimatedNumber
                 value={value}
                 formatter={formatter}
                 duration={animationDuration}
-                className={`text-2xl font-bold tracking-tight ${variantStyles[variant]}`}
+                className={`text-xl sm:text-2xl font-bold tracking-tight ${variantStyles[variant]}`}
               />
 
               {/* Trend indicator */}
@@ -140,7 +140,7 @@ export const StatCard = memo(function StatCard({
 
             {/* Subtitle */}
             {subtitle && (
-              <p className="text-xs text-slate-400 mt-1">{subtitle}</p>
+              <p className="text-[10px] sm:text-xs text-slate-400 mt-1">{subtitle}</p>
             )}
           </div>
         </article>

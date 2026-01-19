@@ -208,8 +208,8 @@ function GradientDefs() {
         <stop offset="95%" stopColor={CHART_THEME.primary} stopOpacity={0.02} />
       </linearGradient>
       <linearGradient id="currentBarGradient" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stopColor={CHART_THEME.primary} stopOpacity={0.9} />
-        <stop offset="100%" stopColor={CHART_THEME.primary} stopOpacity={0.6} />
+        <stop offset="0%" stopColor={CHART_THEME.primary} stopOpacity={1} />
+        <stop offset="100%" stopColor={CHART_THEME.primary} stopOpacity={0.85} />
       </linearGradient>
       <linearGradient id="prevBarGradient" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stopColor={CHART_THEME.muted} stopOpacity={0.5} />
