@@ -60,14 +60,14 @@ const SummaryCard = memo(function SummaryCard({
   return (
     <div className={`rounded-xl p-4 ${bgClass}`}>
       <div className="flex items-start gap-3">
-        <div className={`p-2 rounded-lg ${colorClass} bg-white/20`}>
+        <div className={`p-2 rounded-lg ${colorClass} bg-slate-800/10`}>
           {icon}
         </div>
         <div className="flex-1 min-w-0">
-          <p className="text-xs text-white font-medium">{label}</p>
-          <p className={`text-xl font-bold text-white`}>{value}</p>
+          <p className="text-xs text-slate-600 font-medium">{label}</p>
+          <p className={`text-xl font-bold ${colorClass}`}>{value}</p>
           {subtitle && (
-            <p className="text-xs text-white/80 mt-0.5">{subtitle}</p>
+            <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>
           )}
         </div>
       </div>
@@ -191,32 +191,32 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
             label="New Customers"
             value={formatNumber(metrics.newCustomers ?? 0)}
             subtitle={`${newPercent}% of total`}
-            colorClass="text-blue-400"
-            bgClass="bg-gradient-to-br from-blue-500/20 to-blue-600/10 border border-blue-500/20"
+            colorClass="text-blue-600"
+            bgClass="bg-gradient-to-br from-blue-100 to-blue-50 border border-blue-200"
           />
           <SummaryCard
             icon={<UserGroupIcon />}
             label="Returning Customers"
             value={formatNumber(metrics.returningCustomers ?? 0)}
             subtitle={`${returningPercent}% of total`}
-            colorClass="text-purple-400"
-            bgClass="bg-gradient-to-br from-purple-500/20 to-purple-600/10 border border-purple-500/20"
+            colorClass="text-purple-600"
+            bgClass="bg-gradient-to-br from-purple-100 to-purple-50 border border-purple-200"
           />
           <SummaryCard
             icon={<RefreshIcon />}
             label="Repeat Rate"
             value={formatPercent(metrics.repeatRate ?? 0)}
             subtitle="Orders from returning"
-            colorClass="text-green-400"
-            bgClass="bg-gradient-to-br from-green-500/20 to-green-600/10 border border-green-500/20"
+            colorClass="text-green-600"
+            bgClass="bg-gradient-to-br from-green-100 to-green-50 border border-green-200"
           />
           <SummaryCard
             icon={<CurrencyIcon />}
             label="Avg Order Value"
             value={formatCurrency(metrics.averageOrderValue ?? 0)}
             subtitle="Per order"
-            colorClass="text-orange-400"
-            bgClass="bg-gradient-to-br from-orange-500/20 to-orange-600/10 border border-orange-500/20"
+            colorClass="text-orange-600"
+            bgClass="bg-gradient-to-br from-orange-100 to-orange-50 border border-orange-200"
           />
         </div>
       )}
