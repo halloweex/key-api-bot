@@ -70,7 +70,7 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
 
   const hasComparison = data.prevRevenue > 0
   const isPositive = data.change >= 0
-  const changeColor = isPositive ? CHART_THEME.success : CHART_THEME.danger
+  const changeColor = isPositive ? CHART_THEME.primary : CHART_THEME.danger
   const changeIcon = isPositive ? '↑' : '↓'
 
   return (
@@ -99,13 +99,13 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
             width: '10px',
             height: '10px',
             borderRadius: '2px',
-            background: CHART_THEME.success
+            background: CHART_THEME.primary
           }} />
           <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
             {periodLabels.current}
           </span>
         </div>
-        <span style={{ fontWeight: 600, color: CHART_THEME.success }}>
+        <span style={{ fontWeight: 600, color: CHART_THEME.primary }}>
           {formatCurrency(data.revenue)}
         </span>
       </div>
@@ -141,7 +141,7 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
-            background: isPositive ? 'rgba(22, 163, 74, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+            background: isPositive ? 'rgba(37, 99, 235, 0.1)' : 'rgba(239, 68, 68, 0.1)',
             padding: '6px 8px',
             borderRadius: '6px',
             marginTop: '4px'
@@ -180,7 +180,7 @@ function CustomLegend({ periodLabels, hasComparison }: LegendProps) {
           width: '20px',
           height: '3px',
           borderRadius: '2px',
-          background: CHART_THEME.success,
+          background: CHART_THEME.primary,
         }} />
         <span style={{ color: CHART_THEME.text, fontWeight: 500 }}>{periodLabels.current}</span>
       </div>
@@ -204,12 +204,12 @@ function GradientDefs() {
   return (
     <defs>
       <linearGradient id="currentPeriodGradient" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="5%" stopColor={CHART_THEME.success} stopOpacity={0.3} />
-        <stop offset="95%" stopColor={CHART_THEME.success} stopOpacity={0.02} />
+        <stop offset="5%" stopColor={CHART_THEME.primary} stopOpacity={0.3} />
+        <stop offset="95%" stopColor={CHART_THEME.primary} stopOpacity={0.02} />
       </linearGradient>
       <linearGradient id="currentBarGradient" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stopColor={CHART_THEME.success} stopOpacity={0.9} />
-        <stop offset="100%" stopColor={CHART_THEME.success} stopOpacity={0.6} />
+        <stop offset="0%" stopColor={CHART_THEME.primary} stopOpacity={0.9} />
+        <stop offset="100%" stopColor={CHART_THEME.primary} stopOpacity={0.6} />
       </linearGradient>
       <linearGradient id="prevBarGradient" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stopColor={CHART_THEME.muted} stopOpacity={0.5} />
@@ -346,10 +346,10 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               type="monotone"
               dataKey="revenue"
               name={`${periodLabels.current} Trend`}
-              stroke={CHART_THEME.success}
+              stroke={CHART_THEME.primary}
               strokeWidth={2.5}
               dot={false}
-              activeDot={{ r: 5, fill: CHART_THEME.success, stroke: '#fff', strokeWidth: 2 }}
+              activeDot={{ r: 5, fill: CHART_THEME.primary, stroke: '#fff', strokeWidth: 2 }}
             />
 
             {/* Hide default legend, use custom */}

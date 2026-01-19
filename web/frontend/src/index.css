@@ -128,3 +128,20 @@ body {
 .animate-progress-glow {
   animation: progress-glow 2s ease-in-out infinite;
 }
+
+/* Hide scrollbar utility for mobile filter scrolling */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* Mobile-first responsive breakpoint for extra small screens */
+@media (max-width: 400px) {
+  .xs\:block {
+    display: block;
+  }
+}

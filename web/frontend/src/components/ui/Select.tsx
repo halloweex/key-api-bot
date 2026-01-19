@@ -22,12 +22,13 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
         value={value ?? ''}
         onChange={(e) => onChange(e.target.value || null)}
         className={`
-          px-3 py-2 bg-white border border-slate-200 rounded-lg
-          text-sm text-slate-700 font-medium
+          px-2 sm:px-3 py-1.5 sm:py-2 bg-white border border-slate-200 rounded-lg
+          text-xs sm:text-sm text-slate-700 font-medium
           shadow-sm hover:border-slate-300
           focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-400 focus:ring-offset-1
           transition-all duration-200 cursor-pointer
           appearance-none bg-no-repeat bg-right
+          min-w-0 max-w-[140px] sm:max-w-none truncate
           ${className}
         `}
         style={{

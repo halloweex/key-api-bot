@@ -6,15 +6,15 @@ import { BrandFilter } from './BrandFilter'
 
 export function FilterBar() {
   return (
-    <div className="flex flex-wrap items-center gap-4">
-      {/* Primary filters */}
-      <div className="flex items-center gap-4">
+    <div className="flex flex-col gap-3 sm:gap-4">
+      {/* Period filter - scrollable on mobile */}
+      <div className="overflow-x-auto -mx-3 px-3 sm:mx-0 sm:px-0 scrollbar-hide">
         <PeriodFilter />
-        <SalesTypeFilter />
       </div>
 
-      {/* Secondary filters */}
-      <div className="flex items-center gap-2">
+      {/* Other filters - wrap on mobile */}
+      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+        <SalesTypeFilter />
         <SourceFilter />
         <CategoryFilter />
         <BrandFilter />
