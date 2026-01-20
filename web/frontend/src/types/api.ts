@@ -196,9 +196,12 @@ export interface SetGoalResponse {
 export interface SmartGoalData extends GoalData {
   weeklyBreakdown?: Record<number, number>  // week 1-5 -> goal amount
   lastYearRevenue?: number
+  recent3MonthAvg?: number
+  yoyGoal?: number
+  recentGoal?: number
   growthRate?: number
   seasonalityIndex?: number
-  calculationMethod?: 'yoy_growth' | 'historical_avg' | 'fallback'
+  calculationMethod?: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'fallback'
 }
 
 export interface SmartGoalsResponse {
@@ -206,9 +209,12 @@ export interface SmartGoalsResponse {
   weekly: SmartGoalData & { weeklyBreakdown: Record<number, number> }
   monthly: SmartGoalData & {
     lastYearRevenue: number
+    recent3MonthAvg: number
+    yoyGoal: number
+    recentGoal: number
     growthRate: number
     seasonalityIndex: number
-    calculationMethod: 'yoy_growth' | 'historical_avg' | 'fallback'
+    calculationMethod: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'fallback'
   }
   metadata: {
     overallYoY: number
@@ -241,11 +247,14 @@ export interface GoalForecastResponse {
   monthly: {
     goal: number
     lastYearRevenue: number
+    recent3MonthAvg: number
     historicalAvg: number
+    yoyGoal: number
+    recentGoal: number
     growthRate: number
     seasonalityIndex: number
     confidence: 'high' | 'medium' | 'low'
-    calculationMethod: 'yoy_growth' | 'historical_avg' | 'fallback'
+    calculationMethod: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'fallback'
   }
   weekly: {
     goal: number

@@ -482,6 +482,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   const monthlyGoalData = goalsData?.monthly
   const growthRate = monthlyGoalData?.growthRate
   const lastYearRevenue = monthlyGoalData?.lastYearRevenue
+  const recent3MonthAvg = monthlyGoalData?.recent3MonthAvg
   const calculationMethod = monthlyGoalData?.calculationMethod
   const seasonalityIndex = monthlyGoalData?.seasonalityIndex
 
@@ -489,6 +490,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   const getMethodLabel = (method?: string): string => {
     switch (method) {
       case 'yoy_growth': return 'YoY Growth'
+      case 'recent_trend': return 'Recent Trend'
       case 'historical_avg': return 'Historical Avg'
       case 'fallback': return 'Default'
       default: return 'Auto'
@@ -520,8 +522,9 @@ export const MilestoneProgress = memo(function MilestoneProgress({
                 title={[
                   `Smart goal (${goalConfidence} confidence)`,
                   calculationMethod ? `Method: ${getMethodLabel(calculationMethod)}` : '',
-                  growthRate ? `Growth: ${(growthRate * 100).toFixed(0)}%` : '',
+                  recent3MonthAvg ? `Recent 3mo avg: ${formatAmount(recent3MonthAvg)}` : '',
                   lastYearRevenue ? `Last year: ${formatAmount(lastYearRevenue)}` : '',
+                  growthRate ? `Growth: ${(growthRate * 100).toFixed(0)}%` : '',
                   seasonalityIndex ? `Seasonality: ${seasonalityIndex.toFixed(2)}x` : '',
                 ].filter(Boolean).join('\n')}
               >

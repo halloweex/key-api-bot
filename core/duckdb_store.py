@@ -2228,19 +2228,58 @@ class DuckDBStore:
             last_year_result = conn.execute(last_year_sql, [target_year - 1, target_month]).fetchone()
             last_year_revenue = float(last_year_result[0] or 0) if last_year_result[0] else 0
 
-            # Calculate monthly goal
+            # Get recent 3-month average (last 3 complete months)
+            recent_avg_sql = f"""
+                WITH monthly_revenue AS (
+                    SELECT
+                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
+                        EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
+                        SUM(o.grand_total) as revenue
+                    FROM orders o
+                    WHERE o.status_id NOT IN {return_statuses}
+                        AND {sales_filter}
+                        AND {_date_in_kyiv('o.ordered_at')} < DATE_TRUNC('month', CURRENT_DATE)
+                    GROUP BY
+                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
+                        EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
+                    ORDER BY year DESC, month DESC
+                    LIMIT 3
+                )
+                SELECT AVG(revenue) as avg_revenue FROM monthly_revenue
+            """
+            recent_avg_result = conn.execute(recent_avg_sql).fetchone()
+            recent_3_month_avg = float(recent_avg_result[0] or 0) if recent_avg_result[0] else 0
+
+            # Calculate goals using both methods
+            yoy_goal = 0
+            recent_goal = 0
+            growth_rate = monthly_yoy if monthly_yoy > 0 else overall_yoy
+
+            # Method 1: YoY growth (last year same month × growth)
             if last_year_revenue > 0:
-                # Use last year + growth
-                growth_rate = monthly_yoy if monthly_yoy > 0 else overall_yoy
-                monthly_goal = last_year_revenue * (1 + growth_rate)
+                yoy_goal = last_year_revenue * (1 + growth_rate)
+
+            # Method 2: Recent baseline adjusted for seasonality
+            # recent_3_month_avg × seasonality_index
+            # seasonality_index < 1 means this month is typically below average
+            # seasonality_index > 1 means this month is typically above average
+            if recent_3_month_avg > 0 and seasonality_index > 0:
+                recent_goal = recent_3_month_avg * seasonality_index
+
+            # Take the MAX of both methods (never set goal below recent performance)
+            if yoy_goal > 0 and recent_goal > 0:
+                monthly_goal = max(yoy_goal, recent_goal)
+                calculation_method = "yoy_growth" if yoy_goal >= recent_goal else "recent_trend"
+            elif recent_goal > 0:
+                monthly_goal = recent_goal
+                calculation_method = "recent_trend"
+            elif yoy_goal > 0:
+                monthly_goal = yoy_goal
                 calculation_method = "yoy_growth"
             elif historical_avg > 0:
-                # Use historical average adjusted for seasonality
-                growth_rate = overall_yoy
                 monthly_goal = historical_avg * (1 + growth_rate)
                 calculation_method = "historical_avg"
             else:
-                # Fallback to default goals
                 monthly_goal = 3000000  # 3M UAH default
                 growth_rate = 0.10
                 calculation_method = "fallback"
@@ -2286,7 +2325,10 @@ class DuckDBStore:
                 "monthly": {
                     "goal": monthly_goal,
                     "lastYearRevenue": round(last_year_revenue, 2),
+                    "recent3MonthAvg": round(recent_3_month_avg, 2),
                     "historicalAvg": round(historical_avg, 2),
+                    "yoyGoal": round(yoy_goal, 2),
+                    "recentGoal": round(recent_goal, 2),
                     "growthRate": round(growth_rate, 4),
                     "seasonalityIndex": seasonality_index,
                     "confidence": confidence,
