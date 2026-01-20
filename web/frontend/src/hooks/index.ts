@@ -22,4 +22,16 @@ export {
   useExpenseTypes,
   useExpenseSummary,
   useProfitAnalysis,
+  // Goals
+  useGoals,
+  useGoalHistory,
+  useSetGoal,
+  useResetGoal,
+  // Smart Goals
+  useSmartGoals,
+  useSeasonality,
+  useGrowthMetrics,
+  useWeeklyPatterns,
+  useGoalForecast,
+  useRecalculateSeasonality,
 } from './useApi'

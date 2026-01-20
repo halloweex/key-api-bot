@@ -17,6 +17,13 @@ import type {
   Brand,
   ExpenseType,
   HealthResponse,
+  GoalsResponse,
+  GoalHistoryResponse,
+  SetGoalResponse,
+  SmartGoalsResponse,
+  SeasonalityIndex,
+  GrowthMetrics,
+  GoalForecastResponse,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -229,6 +236,88 @@ export const api = {
   // Health
   getHealth: (options?: FetchOptions) =>
     fetchApi<HealthResponse>('/health', undefined, options),
+
+  // Goals
+  getGoals: (salesType = 'retail', options?: FetchOptions) =>
+    fetchApi<GoalsResponse>('/goals', `sales_type=${salesType}`, options),
+
+  getGoalHistory: (
+    periodType: string,
+    weeksBack = 4,
+    salesType = 'retail',
+    options?: FetchOptions
+  ) =>
+    fetchApi<GoalHistoryResponse>(
+      '/goals/history',
+      `period_type=${periodType}&weeks_back=${weeksBack}&sales_type=${salesType}`,
+      options
+    ),
+
+  setGoal: async (
+    periodType: string,
+    amount: number,
+    growthFactor = 1.10
+  ): Promise<SetGoalResponse> => {
+    const url = `${API_BASE}/goals?period_type=${periodType}&amount=${amount}&growth_factor=${growthFactor}`
+    const response = await fetch(url, { method: 'POST' })
+
+    if (!response.ok) {
+      throw ApiError.fromResponse(response)
+    }
+
+    return response.json()
+  },
+
+  resetGoal: async (
+    periodType: string,
+    salesType = 'retail'
+  ): Promise<SetGoalResponse> => {
+    const url = `${API_BASE}/goals/${periodType}?sales_type=${salesType}`
+    const response = await fetch(url, { method: 'DELETE' })
+
+    if (!response.ok) {
+      throw ApiError.fromResponse(response)
+    }
+
+    return response.json()
+  },
+
+  // Smart Goals
+  getSmartGoals: (salesType = 'retail', options?: FetchOptions) =>
+    fetchApi<SmartGoalsResponse>('/goals/smart', `sales_type=${salesType}`, options),
+
+  getSeasonality: (salesType = 'retail', options?: FetchOptions) =>
+    fetchApi<Record<number, SeasonalityIndex>>('/goals/seasonality', `sales_type=${salesType}`, options),
+
+  getGrowthMetrics: (salesType = 'retail', options?: FetchOptions) =>
+    fetchApi<GrowthMetrics>('/goals/growth', `sales_type=${salesType}`, options),
+
+  getWeeklyPatterns: (salesType = 'retail', options?: FetchOptions) =>
+    fetchApi<Record<number, Record<number, number>>>('/goals/weekly-patterns', `sales_type=${salesType}`, options),
+
+  getGoalForecast: (
+    year: number,
+    month: number,
+    salesType = 'retail',
+    recalculate = false,
+    options?: FetchOptions
+  ) =>
+    fetchApi<GoalForecastResponse>(
+      '/goals/forecast',
+      `year=${year}&month=${month}&sales_type=${salesType}&recalculate=${recalculate}`,
+      options
+    ),
+
+  recalculateSeasonality: async (salesType = 'retail'): Promise<{ status: string; message: string; summary: { monthsCalculated: number; overallYoY: number; yearsAnalyzed: number } }> => {
+    const url = `${API_BASE}/goals/recalculate?sales_type=${salesType}`
+    const response = await fetch(url, { method: 'POST' })
+
+    if (!response.ok) {
+      throw ApiError.fromResponse(response)
+    }
+
+    return response.json()
+  },
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────

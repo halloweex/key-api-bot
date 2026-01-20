@@ -245,7 +245,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
   const periodLabels = PERIOD_LABELS[period] || PERIOD_LABELS.custom
 
-  const { chartData, hasComparison, maxRevenue } = useMemo(() => {
+  const { chartData, hasComparison } = useMemo(() => {
     if (!data?.labels?.length) {
       return { chartData: [], hasComparison: false, maxRevenue: 0 }
     }

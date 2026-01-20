@@ -154,3 +154,111 @@ export interface HealthResponse {
     db_size_mb?: number
   }
 }
+
+// ─── Goal Types ─────────────────────────────────────────────────────────────
+
+export interface GoalData {
+  amount: number
+  isCustom: boolean
+  suggestedAmount: number
+  basedOnAverage: number
+  trend: number
+  confidence: 'high' | 'medium' | 'low'
+}
+
+export interface GoalsResponse {
+  daily: GoalData
+  weekly: GoalData
+  monthly: GoalData
+}
+
+export interface GoalHistoryResponse {
+  periodType: string
+  average: number
+  min: number
+  max: number
+  periodCount: number
+  stdDev: number
+  trend: number
+  weeksAnalyzed: number
+}
+
+export interface SetGoalResponse {
+  periodType: string
+  amount: number
+  isCustom: boolean
+  calculatedGoal: number
+  growthFactor: number
+}
+
+// ─── Smart Goal Types ─────────────────────────────────────────────────────────
+
+export interface SmartGoalData extends GoalData {
+  weeklyBreakdown?: Record<number, number>  // week 1-5 -> goal amount
+  lastYearRevenue?: number
+  growthRate?: number
+  seasonalityIndex?: number
+  calculationMethod?: 'yoy_growth' | 'historical_avg' | 'fallback'
+}
+
+export interface SmartGoalsResponse {
+  daily: SmartGoalData
+  weekly: SmartGoalData & { weeklyBreakdown: Record<number, number> }
+  monthly: SmartGoalData & {
+    lastYearRevenue: number
+    growthRate: number
+    seasonalityIndex: number
+    calculationMethod: 'yoy_growth' | 'historical_avg' | 'fallback'
+  }
+  metadata: {
+    overallYoY: number
+    monthlyYoY: number
+    calculatedAt: string
+  }
+}
+
+export interface SeasonalityIndex {
+  month: number
+  avg_revenue: number
+  min_revenue: number
+  max_revenue: number
+  sample_size: number
+  std_dev: number
+  seasonality_index: number
+  confidence: 'high' | 'medium' | 'low'
+}
+
+export interface GrowthMetrics {
+  overall_yoy: number
+  monthly_yoy: Record<number, number>
+  yearly_data: Array<{ year: number; revenue: number }>
+  sample_size: number
+}
+
+export interface GoalForecastResponse {
+  targetYear: number
+  targetMonth: number
+  monthly: {
+    goal: number
+    lastYearRevenue: number
+    historicalAvg: number
+    growthRate: number
+    seasonalityIndex: number
+    confidence: 'high' | 'medium' | 'low'
+    calculationMethod: 'yoy_growth' | 'historical_avg' | 'fallback'
+  }
+  weekly: {
+    goal: number
+    breakdown: Record<number, number>
+    weights: Record<number, number>
+  }
+  daily: {
+    goal: number
+    daysInMonth: number
+  }
+  metadata: {
+    overallYoY: number
+    monthlyYoY: number
+    calculatedAt: string
+  }
+}

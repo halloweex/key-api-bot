@@ -406,3 +406,269 @@ async def get_profit_analysis(
         source_id=source_id,
         sales_type=sales_type
     )
+
+
+# ─── Goal Endpoints ─────────────────────────────────────────────────────────
+
+
+@router.get("/goals")
+@limiter.limit("60/minute")
+async def get_goals(
+    request: Request,
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Get revenue goals for daily, weekly, and monthly periods.
+
+    Returns both custom goals (if set) and auto-calculated suggestions based on
+    historical performance (average of last 4 weeks × 10% growth factor).
+
+    Response includes:
+    - amount: Current goal (custom or auto-calculated)
+    - isCustom: Whether goal was manually set
+    - suggestedAmount: System-calculated suggestion
+    - basedOnAverage: Historical average used for calculation
+    - trend: Recent performance trend (% change)
+    - confidence: Confidence level (high/medium/low) based on data availability
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.get_goals(sales_type)
+
+
+@router.get("/goals/history")
+@limiter.limit("30/minute")
+async def get_goal_history(
+    request: Request,
+    period_type: str = Query(..., description="Period type: daily, weekly, or monthly"),
+    weeks_back: int = Query(4, ge=1, le=12, description="Number of weeks of history to analyze"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Get historical revenue data used for goal calculations.
+
+    Returns statistics for the specified period type including:
+    - average: Average revenue per period
+    - min/max: Range of values
+    - trend: Recent vs older performance change (%)
+    - stdDev: Standard deviation (volatility)
+    """
+    if period_type not in ["daily", "weekly", "monthly"]:
+        raise HTTPException(status_code=400, detail="period_type must be: daily, weekly, or monthly")
+
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.get_historical_revenue(period_type, weeks_back, sales_type)
+
+
+@router.post("/goals")
+@limiter.limit("10/minute")
+async def set_goal(
+    request: Request,
+    period_type: str = Query(..., description="Period type: daily, weekly, or monthly"),
+    amount: float = Query(..., gt=0, description="Goal amount in UAH"),
+    growth_factor: float = Query(1.10, ge=1.0, le=2.0, description="Growth factor for future calculations")
+):
+    """
+    Set a custom revenue goal.
+
+    The goal will be marked as custom (manually set). To revert to auto-calculated
+    goals, use DELETE /api/goals/{period_type}.
+    """
+    if period_type not in ["daily", "weekly", "monthly"]:
+        raise HTTPException(status_code=400, detail="period_type must be: daily, weekly, or monthly")
+
+    store = await get_store()
+    return await store.set_goal(period_type, amount, is_custom=True, growth_factor=growth_factor)
+
+
+@router.delete("/goals/{period_type}")
+@limiter.limit("10/minute")
+async def reset_goal(
+    request: Request,
+    period_type: str,
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Reset a goal to auto-calculated value.
+
+    Removes the custom goal and reverts to using the system-calculated suggestion
+    based on historical performance.
+    """
+    if period_type not in ["daily", "weekly", "monthly"]:
+        raise HTTPException(status_code=400, detail="period_type must be: daily, weekly, or monthly")
+
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.reset_goal_to_auto(period_type, sales_type)
+
+
+@router.get("/goals/smart")
+@limiter.limit("30/minute")
+async def get_smart_goals(
+    request: Request,
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Get smart revenue goals using seasonality and YoY growth.
+
+    This is an enhanced goal calculation that considers:
+    - Same month last year as baseline
+    - Year-over-year growth rate
+    - Monthly seasonality patterns
+    - Weekly distribution within the month
+
+    Response includes:
+    - amount: Current goal (custom or smart-calculated)
+    - isCustom: Whether goal was manually set
+    - suggestedAmount: Smart-calculated suggestion
+    - lastYearRevenue: Same month last year revenue
+    - growthRate: Applied growth rate
+    - seasonalityIndex: Month's seasonality factor
+    - weeklyBreakdown: How goal distributes across weeks (for monthly)
+    - confidence: Calculation confidence (high/medium/low)
+    - calculationMethod: How the goal was calculated
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.get_smart_goals(sales_type)
+
+
+@router.get("/goals/seasonality")
+@limiter.limit("30/minute")
+async def get_seasonality_data(
+    request: Request,
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Get monthly seasonality indices.
+
+    Returns how each month performs relative to the annual average.
+    A seasonality index of 1.2 means the month is typically 20% above average.
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.calculate_seasonality_indices(sales_type)
+
+
+@router.get("/goals/growth")
+@limiter.limit("30/minute")
+async def get_growth_data(
+    request: Request,
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Get year-over-year growth metrics.
+
+    Returns:
+    - overall_yoy: Average YoY growth rate
+    - monthly_yoy: YoY growth for each month
+    - yearly_data: Revenue totals by year
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.calculate_yoy_growth(sales_type)
+
+
+@router.get("/goals/weekly-patterns")
+@limiter.limit("30/minute")
+async def get_weekly_patterns(
+    request: Request,
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Get weekly distribution patterns within months.
+
+    Returns how revenue typically distributes across weeks 1-5 of each month.
+    For example, week 1 might typically have 25% of monthly revenue.
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.calculate_weekly_patterns(sales_type)
+
+
+@router.post("/goals/recalculate")
+@limiter.limit("5/minute")
+async def recalculate_seasonality(
+    request: Request,
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Force recalculation of seasonality indices and growth metrics.
+
+    Use this after significant data changes or to update calculations
+    with the latest data.
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+
+    # Recalculate all indices
+    seasonality = await store.calculate_seasonality_indices(sales_type)
+    growth = await store.calculate_yoy_growth(sales_type)
+    weekly = await store.calculate_weekly_patterns(sales_type)
+
+    return {
+        "status": "success",
+        "message": "Seasonality indices and growth metrics recalculated",
+        "summary": {
+            "monthsCalculated": len(seasonality),
+            "overallYoY": growth.get("overall_yoy", 0),
+            "yearsAnalyzed": len(growth.get("yearly_data", []))
+        }
+    }
+
+
+@router.get("/goals/forecast")
+@limiter.limit("30/minute")
+async def get_goal_forecast(
+    request: Request,
+    year: int = Query(..., ge=2020, le=2030, description="Target year"),
+    month: int = Query(..., ge=1, le=12, description="Target month (1-12)"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all"),
+    recalculate: bool = Query(False, description="Force recalculation of indices")
+):
+    """
+    Generate smart goals for a specific future month.
+
+    Uses historical data, seasonality, and growth patterns to predict
+    optimal revenue goals for the target period.
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.generate_smart_goals(year, month, sales_type, recalculate)
