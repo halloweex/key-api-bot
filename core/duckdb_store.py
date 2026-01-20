@@ -1809,16 +1809,17 @@ class DuckDBStore:
         calculated = suggestions[period_type]["suggested"]
 
         async with self.connection() as conn:
+            now = datetime.now(DEFAULT_TZ)
             conn.execute("""
                 INSERT INTO revenue_goals (period_type, goal_amount, is_custom, calculated_goal, growth_factor, updated_at)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (period_type) DO UPDATE SET
                     goal_amount = excluded.goal_amount,
                     is_custom = excluded.is_custom,
                     calculated_goal = excluded.calculated_goal,
                     growth_factor = excluded.growth_factor,
-                    updated_at = CURRENT_TIMESTAMP
-            """, [period_type, amount, is_custom, calculated, growth_factor])
+                    updated_at = excluded.updated_at
+            """, [period_type, amount, is_custom, calculated, growth_factor, now])
 
         return {
             "periodType": period_type,
@@ -1935,11 +1936,12 @@ class DuckDBStore:
                 }
 
             # Store in database for caching
+            now = datetime.now(DEFAULT_TZ)
             for month, data in indices.items():
                 conn.execute("""
                     INSERT INTO seasonal_indices
                     (month, seasonality_index, sample_size, avg_revenue, min_revenue, max_revenue, confidence, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (month) DO UPDATE SET
                         seasonality_index = excluded.seasonality_index,
                         sample_size = excluded.sample_size,
@@ -1947,7 +1949,7 @@ class DuckDBStore:
                         min_revenue = excluded.min_revenue,
                         max_revenue = excluded.max_revenue,
                         confidence = excluded.confidence,
-                        updated_at = CURRENT_TIMESTAMP
+                        updated_at = excluded.updated_at
                 """, [
                     month,
                     data["seasonality_index"],
@@ -1955,7 +1957,8 @@ class DuckDBStore:
                     data["avg_revenue"],
                     data["min_revenue"],
                     data["max_revenue"],
-                    data["confidence"]
+                    data["confidence"],
+                    now
                 ])
 
             logger.info(f"Calculated seasonality indices for {len(indices)} months")
@@ -2035,25 +2038,26 @@ class DuckDBStore:
             # Store metrics
             min_date = conn.execute(f"SELECT MIN({_date_in_kyiv('ordered_at')}) FROM orders").fetchone()[0]
             max_date = conn.execute(f"SELECT MAX({_date_in_kyiv('ordered_at')}) FROM orders").fetchone()[0]
+            now = datetime.now(DEFAULT_TZ)
 
             conn.execute("""
                 INSERT INTO growth_metrics (metric_type, value, period_start, period_end, sample_size, updated_at)
-                VALUES ('yoy_overall', ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES ('yoy_overall', ?, ?, ?, ?, ?)
                 ON CONFLICT (metric_type) DO UPDATE SET
                     value = excluded.value,
                     period_start = excluded.period_start,
                     period_end = excluded.period_end,
                     sample_size = excluded.sample_size,
-                    updated_at = CURRENT_TIMESTAMP
-            """, [overall_yoy, min_date, max_date, len(yoy_rates)])
+                    updated_at = excluded.updated_at
+            """, [overall_yoy, min_date, max_date, len(yoy_rates), now])
 
             # Update seasonal_indices with monthly YoY
             for month, yoy in monthly_yoy.items():
                 conn.execute("""
                     UPDATE seasonal_indices
-                    SET yoy_growth = ?, updated_at = CURRENT_TIMESTAMP
+                    SET yoy_growth = ?, updated_at = ?
                     WHERE month = ?
-                """, [yoy, month])
+                """, [yoy, now, month])
 
             logger.info(f"Calculated YoY growth: {overall_yoy:.2%}")
             return {
@@ -2120,6 +2124,7 @@ class DuckDBStore:
             results = conn.execute(sql).fetchall()
 
             patterns = {}
+            now = datetime.now(DEFAULT_TZ)
             for row in results:
                 month = int(row[0])
                 week = int(row[1])
@@ -2133,12 +2138,12 @@ class DuckDBStore:
                 # Store in database
                 conn.execute("""
                     INSERT INTO weekly_patterns (month, week_of_month, weight, sample_size, updated_at)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT (month, week_of_month) DO UPDATE SET
                         weight = excluded.weight,
                         sample_size = excluded.sample_size,
-                        updated_at = CURRENT_TIMESTAMP
-                """, [month, week, weight, sample_size])
+                        updated_at = excluded.updated_at
+                """, [month, week, weight, sample_size, now])
 
             # Ensure all months have all 5 weeks (fill missing with equal distribution)
             for month in range(1, 13):
