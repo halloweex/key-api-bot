@@ -12,6 +12,8 @@ export interface StatCardProps {
   value: number
   /** Function to format the value for display */
   formatter: (value: number) => string
+  /** Optional icon to display on the left */
+  icon?: React.ReactNode
   /** Optional subtitle below the value */
   subtitle?: string
   /** Color variant for the value */
@@ -71,12 +73,24 @@ const TrendIcon = {
   ),
 } as const
 
+// ─── Icon Background Styles ───────────────────────────────────────────────────
+
+const iconBgStyles: Record<StatCardVariant, string> = {
+  blue: 'bg-blue-200/60',
+  green: 'bg-green-200/60',
+  purple: 'bg-purple-200/60',
+  orange: 'bg-orange-200/60',
+  red: 'bg-red-200/60',
+  cyan: 'bg-cyan-200/60',
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const StatCard = memo(function StatCard({
   label,
   value,
   formatter,
+  icon,
   subtitle,
   variant = 'blue',
   trend,
@@ -91,36 +105,45 @@ export const StatCard = memo(function StatCard({
     <div className={`rounded-xl p-4 border ${cardBgStyles[variant]} transition-all hover:shadow-md`}>
         <article
           aria-label={ariaLabel || `${label}: ${formatter(value)}`}
-          className="text-center"
+          className={icon ? "flex items-start gap-3" : "text-center"}
         >
-          {/* Label */}
-          <h3 className="text-xs text-slate-600 font-medium mb-1">{label}</h3>
+          {/* Icon */}
+          {icon && (
+            <div className={`p-2 lg:p-3 rounded-lg ${iconBgStyles[variant]} ${variantStyles[variant]} [&_svg]:w-5 [&_svg]:h-5 lg:[&_svg]:w-6 lg:[&_svg]:h-6`}>
+              {icon}
+            </div>
+          )}
 
-          {/* Value with animation */}
-          <div className="flex items-baseline justify-center gap-2">
-            <AnimatedNumber
-              value={value}
-              formatter={formatter}
-              duration={animationDuration}
-              className={`text-2xl font-bold tracking-tight ${variantStyles[variant]}`}
-            />
+          <div className={icon ? "flex-1 min-w-0" : ""}>
+            {/* Label */}
+            <h3 className="text-xs lg:text-sm text-slate-600 font-medium mb-1">{label}</h3>
 
-            {/* Trend indicator */}
-            {showTrend && (
-              <span
-                className={`flex items-center gap-0.5 text-xs font-medium ${trendStyles[trendKey]}`}
-                aria-label={`${trendKey === 'up' ? 'Increased' : 'Decreased'} by ${trendValue}%`}
-              >
-                {TrendIcon[trendKey]}
-                <span>{Math.abs(trendValue!).toFixed(1)}%</span>
-              </span>
+            {/* Value with animation */}
+            <div className={`flex items-baseline gap-2 ${icon ? "" : "justify-center"}`}>
+              <AnimatedNumber
+                value={value}
+                formatter={formatter}
+                duration={animationDuration}
+                className={`text-2xl lg:text-3xl font-bold tracking-tight ${variantStyles[variant]}`}
+              />
+
+              {/* Trend indicator */}
+              {showTrend && (
+                <span
+                  className={`flex items-center gap-0.5 text-xs font-medium ${trendStyles[trendKey]}`}
+                  aria-label={`${trendKey === 'up' ? 'Increased' : 'Decreased'} by ${trendValue}%`}
+                >
+                  {TrendIcon[trendKey]}
+                  <span>{Math.abs(trendValue!).toFixed(1)}%</span>
+                </span>
+              )}
+            </div>
+
+            {/* Subtitle */}
+            {subtitle && (
+              <p className="text-xs text-slate-500 mt-1">{subtitle}</p>
             )}
           </div>
-
-          {/* Subtitle */}
-          {subtitle && (
-            <p className="text-xs text-slate-500 mt-1">{subtitle}</p>
-          )}
         </article>
     </div>
   )
