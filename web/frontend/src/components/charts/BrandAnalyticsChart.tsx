@@ -7,6 +7,7 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
+  LabelList,
 } from 'recharts'
 import { ChartContainer } from './ChartContainer'
 import {
@@ -30,28 +31,79 @@ interface RevenueDataPoint {
   name: string
   fullName: string
   revenue: number
+  revenueLabel: string
 }
 
 interface QuantityDataPoint {
   name: string
   fullName: string
   quantity: number
+  quantityLabel: string
 }
+
+// ─── Label Formatters ─────────────────────────────────────────────────────────
+
+const formatShortCurrency = (value: number): string => {
+  if (value >= 1000000) {
+    return `₴${(value / 1000000).toFixed(1)}M`
+  }
+  if (value >= 1000) {
+    return `₴${(value / 1000).toFixed(0)}K`
+  }
+  return `₴${value}`
+}
+
+const formatShortNumber = (value: number): string => {
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(1)}K`
+  }
+  return String(value)
+}
+
+// ─── Icons ────────────────────────────────────────────────────────────────────
+
+const TagIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+  </svg>
+)
+
+const TrophyIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+  </svg>
+)
+
+const ChartPieIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" />
+  </svg>
+)
 
 // ─── Metric Card ─────────────────────────────────────────────────────────────
 
 interface MetricCardProps {
+  icon: React.ReactNode
   label: string
   value: string
   colorClass: string
   bgClass: string
+  iconBgClass: string
 }
 
-const MetricCard = memo(function MetricCard({ label, value, colorClass, bgClass }: MetricCardProps) {
+const MetricCard = memo(function MetricCard({ icon, label, value, colorClass, bgClass, iconBgClass }: MetricCardProps) {
   return (
     <div className={`rounded-xl p-4 border ${bgClass}`}>
-      <p className="text-xs text-slate-600 font-medium">{label}</p>
-      <p className={`text-xl font-bold truncate ${colorClass}`}>{value}</p>
+      <div className="flex items-start gap-3">
+        <div className={`p-2 lg:p-2.5 rounded-lg ${iconBgClass} ${colorClass}`}>
+          {icon}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-xs lg:text-sm text-slate-600 font-medium">{label}</p>
+          <p className={`text-xl lg:text-2xl font-bold truncate ${colorClass}`}>{value}</p>
+        </div>
+      </div>
     </div>
   )
 })
@@ -63,20 +115,28 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
 
   const revenueData = useMemo<RevenueDataPoint[]>(() => {
     if (!data?.topByRevenue?.labels?.length) return []
-    return data.topByRevenue.labels.map((label, index) => ({
-      name: truncateText(label, 15),
-      fullName: label || 'Unknown',
-      revenue: data.topByRevenue.data?.[index] ?? 0,
-    }))
+    return data.topByRevenue.labels.map((label, index) => {
+      const revenue = data.topByRevenue.data?.[index] ?? 0
+      return {
+        name: truncateText(label, 15),
+        fullName: label || 'Unknown',
+        revenue,
+        revenueLabel: formatShortCurrency(revenue),
+      }
+    })
   }, [data])
 
   const quantityData = useMemo<QuantityDataPoint[]>(() => {
     if (!data?.topByQuantity?.labels?.length) return []
-    return data.topByQuantity.labels.map((label, index) => ({
-      name: truncateText(label, 15),
-      fullName: label || 'Unknown',
-      quantity: data.topByQuantity.data?.[index] ?? 0,
-    }))
+    return data.topByQuantity.labels.map((label, index) => {
+      const quantity = data.topByQuantity.data?.[index] ?? 0
+      return {
+        name: truncateText(label, 15),
+        fullName: label || 'Unknown',
+        quantity,
+        quantityLabel: formatShortNumber(quantity),
+      }
+    })
   }, [data])
 
   const metrics = data?.metrics
@@ -96,22 +156,28 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
       {metrics && (
         <div className="grid grid-cols-3 gap-3 mb-4">
           <MetricCard
+            icon={<TagIcon />}
             label="Total Brands"
             value={formatNumber(metrics.totalBrands ?? 0)}
             colorClass="text-blue-600"
             bgClass="bg-gradient-to-br from-blue-100 to-blue-50 border-blue-200"
+            iconBgClass="bg-blue-200/60"
           />
           <MetricCard
+            icon={<TrophyIcon />}
             label="Top Brand"
             value={metrics.topBrand ?? 'N/A'}
             colorClass="text-purple-600"
             bgClass="bg-gradient-to-br from-purple-100 to-purple-50 border-purple-200"
+            iconBgClass="bg-purple-200/60"
           />
           <MetricCard
+            icon={<ChartPieIcon />}
             label="Top Brand Share"
             value={formatPercent(metrics.topBrandShare ?? 0)}
             colorClass="text-green-600"
             bgClass="bg-gradient-to-br from-green-100 to-green-50 border-green-200"
+            iconBgClass="bg-green-200/60"
           />
         </div>
       )}
@@ -125,7 +191,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
               <BarChart
                 data={revenueData}
                 layout="vertical"
-                margin={{ left: 10, right: 20 }}
+                margin={{ left: 10, right: 50 }}
               >
                 <CartesianGrid {...GRID_PROPS} horizontal={false} />
                 <XAxis
@@ -153,7 +219,17 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
                   dataKey="revenue"
                   fill={COLORS.primary}
                   {...BAR_PROPS}
-                />
+                >
+                  <LabelList
+                    dataKey="revenueLabel"
+                    position="right"
+                    style={{
+                      fill: CHART_THEME.text,
+                      fontSize: 10,
+                      fontWeight: 500,
+                    }}
+                  />
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -167,7 +243,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
               <BarChart
                 data={quantityData}
                 layout="vertical"
-                margin={{ left: 10, right: 20 }}
+                margin={{ left: 10, right: 45 }}
               >
                 <CartesianGrid {...GRID_PROPS} horizontal={false} />
                 <XAxis
@@ -194,7 +270,17 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
                   dataKey="quantity"
                   fill={CHART_THEME.accent}
                   {...BAR_PROPS}
-                />
+                >
+                  <LabelList
+                    dataKey="quantityLabel"
+                    position="right"
+                    style={{
+                      fill: CHART_THEME.text,
+                      fontSize: 10,
+                      fontWeight: 500,
+                    }}
+                  />
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>

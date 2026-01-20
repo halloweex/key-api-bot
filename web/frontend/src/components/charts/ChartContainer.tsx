@@ -19,8 +19,8 @@ interface ChartContainerProps {
   className?: string
   /** Action button/element in header */
   action?: ReactNode
-  /** Chart height preset */
-  height?: ChartHeight
+  /** Chart height preset or 'auto' for dynamic height */
+  height?: ChartHeight | 'auto'
   /** Accessible description */
   ariaLabel?: string
   /** Show when data is empty */
@@ -131,7 +131,7 @@ export const ChartContainer = memo(function ChartContainer({
   isEmpty = false,
   emptyMessage = 'No data available',
 }: ChartContainerProps) {
-  const chartHeight = CHART_DIMENSIONS.height[height]
+  const chartHeight = height === 'auto' ? CHART_DIMENSIONS.height.lg : CHART_DIMENSIONS.height[height]
 
   const handleRetry = useCallback(() => {
     onRetry?.()

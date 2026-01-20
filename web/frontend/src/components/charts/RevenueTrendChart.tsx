@@ -138,11 +138,9 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <div style={{
-                width: '12px',
-                height: '12px',
-                borderRadius: '3px',
-                background: CHART_THEME.muted,
-                opacity: 0.35,
+                width: '14px',
+                height: '0px',
+                borderTop: `2px dashed ${CHART_THEME.muted}`,
               }} />
               <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
                 {periodLabels.previous}
@@ -206,11 +204,9 @@ function CustomLegend({ periodLabels, hasComparison }: LegendProps) {
       {hasComparison && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <div style={{
-            width: '14px',
-            height: '14px',
-            borderRadius: '3px',
-            background: CHART_THEME.muted,
-            opacity: 0.35,
+            width: '16px',
+            height: '0px',
+            borderTop: `2px dashed ${CHART_THEME.muted}`,
             flexShrink: 0,
           }} />
           <span style={{ color: CHART_THEME.muted, whiteSpace: 'nowrap' }}>{periodLabels.previous}</span>
@@ -341,19 +337,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               cursor={{ fill: 'rgba(0, 0, 0, 0.04)' }}
             />
 
-            {/* Previous period bars (background, lighter) */}
-            {hasComparison && (
-              <Bar
-                dataKey="prevRevenue"
-                name={periodLabels.previous}
-                fill={CHART_THEME.muted}
-                fillOpacity={0.35}
-                radius={[4, 4, 0, 0]}
-                maxBarSize={50}
-              />
-            )}
-
-            {/* Current period bars (foreground, solid blue) */}
+            {/* Current period bars (solid blue) */}
             <Bar
               dataKey="revenue"
               name={periodLabels.current}

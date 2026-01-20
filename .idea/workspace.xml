@@ -6,6 +6,11 @@
   <component name="ChangeListManager">
     <list default="true" id="00033ac8-0ff0-4db9-8885-f829ba7bf2ad" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/BrandAnalyticsChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/BrandAnalyticsChart.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/CategoryChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/CategoryChart.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/ChartContainer.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/ChartContainer.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/OrdersBySourceChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/OrdersBySourceChart.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueBySourceChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueBySourceChart.tsx" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueTrendChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueTrendChart.tsx" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -281,7 +286,7 @@
       <workItem from="1768033818711" duration="2174000" />
       <workItem from="1768049467528" duration="304000" />
       <workItem from="1768049798317" duration="1059000" />
-      <workItem from="1768051049268" duration="125227000" />
+      <workItem from="1768051049268" duration="130414000" />
     </task>
     <servers />
   </component>
