@@ -1,5 +1,4 @@
-import { memo, type ReactNode } from 'react'
-import { Card, CardContent } from '../ui'
+import { memo } from 'react'
 import { AnimatedNumber } from '../ui/AnimatedNumber'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -17,8 +16,6 @@ export interface StatCardProps {
   subtitle?: string
   /** Color variant for the value */
   variant?: StatCardVariant
-  /** Optional icon to display */
-  icon?: ReactNode
   /** Optional trend indicator (-1 = down, 0 = neutral, 1 = up) */
   trend?: -1 | 0 | 1
   /** Trend percentage value */
@@ -40,14 +37,14 @@ const variantStyles: Record<StatCardVariant, string> = {
   cyan: 'text-cyan-600',
 }
 
-// Gradient backgrounds for icon containers
-const iconBgStyles: Record<StatCardVariant, string> = {
-  blue: 'bg-gradient-to-br from-blue-500 to-blue-600 text-white',
-  green: 'bg-gradient-to-br from-green-500 to-green-600 text-white',
-  purple: 'bg-gradient-to-br from-purple-500 to-purple-600 text-white',
-  orange: 'bg-gradient-to-br from-orange-400 to-orange-500 text-white',
-  red: 'bg-gradient-to-br from-red-500 to-red-600 text-white',
-  cyan: 'bg-gradient-to-br from-cyan-500 to-cyan-600 text-white',
+// Card background gradients (pastel)
+const cardBgStyles: Record<StatCardVariant, string> = {
+  blue: 'bg-gradient-to-br from-blue-100 to-blue-50 border-blue-200',
+  green: 'bg-gradient-to-br from-green-100 to-green-50 border-green-200',
+  purple: 'bg-gradient-to-br from-purple-100 to-purple-50 border-purple-200',
+  orange: 'bg-gradient-to-br from-orange-100 to-orange-50 border-orange-200',
+  red: 'bg-gradient-to-br from-red-100 to-red-50 border-red-200',
+  cyan: 'bg-gradient-to-br from-cyan-100 to-cyan-50 border-cyan-200',
 }
 
 const trendStyles = {
@@ -82,7 +79,6 @@ export const StatCard = memo(function StatCard({
   formatter,
   subtitle,
   variant = 'blue',
-  icon,
   trend,
   trendValue,
   animationDuration = 500,
@@ -92,60 +88,41 @@ export const StatCard = memo(function StatCard({
   const showTrend = trend !== undefined && trend !== 0 && trendValue !== undefined
 
   return (
-    <Card interactive className="group">
-      <CardContent className="py-4">
+    <div className={`rounded-xl p-4 border ${cardBgStyles[variant]} transition-all hover:shadow-md`}>
         <article
           aria-label={ariaLabel || `${label}: ${formatter(value)}`}
-          className={icon ? "flex items-start gap-4" : "text-center"}
+          className="text-center"
         >
-          {/* Icon with gradient background */}
-          {icon && (
-            <div
-              className={`
-                flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center
-                ${iconBgStyles[variant]}
-                shadow-sm group-hover:shadow-md transition-shadow duration-200
-              `}
-              aria-hidden="true"
-            >
-              {icon}
-            </div>
-          )}
+          {/* Label */}
+          <h3 className="text-xs text-slate-600 font-medium mb-1">{label}</h3>
 
-          {/* Content */}
-          <div className={icon ? "flex-1 min-w-0" : ""}>
-            {/* Label */}
-            <h3 className="text-xs sm:text-sm text-slate-500 font-medium mb-0.5">{label}</h3>
+          {/* Value with animation */}
+          <div className="flex items-baseline justify-center gap-2">
+            <AnimatedNumber
+              value={value}
+              formatter={formatter}
+              duration={animationDuration}
+              className={`text-2xl font-bold tracking-tight ${variantStyles[variant]}`}
+            />
 
-            {/* Value with animation */}
-            <div className={icon ? "flex items-baseline gap-2" : "flex items-baseline justify-center gap-2"}>
-              <AnimatedNumber
-                value={value}
-                formatter={formatter}
-                duration={animationDuration}
-                className={`text-xl sm:text-2xl font-bold tracking-tight ${variantStyles[variant]}`}
-              />
-
-              {/* Trend indicator */}
-              {showTrend && (
-                <span
-                  className={`flex items-center gap-0.5 text-xs font-medium ${trendStyles[trendKey]}`}
-                  aria-label={`${trendKey === 'up' ? 'Increased' : 'Decreased'} by ${trendValue}%`}
-                >
-                  {TrendIcon[trendKey]}
-                  <span>{Math.abs(trendValue!).toFixed(1)}%</span>
-                </span>
-              )}
-            </div>
-
-            {/* Subtitle */}
-            {subtitle && (
-              <p className="text-[10px] sm:text-xs text-slate-400 mt-1">{subtitle}</p>
+            {/* Trend indicator */}
+            {showTrend && (
+              <span
+                className={`flex items-center gap-0.5 text-xs font-medium ${trendStyles[trendKey]}`}
+                aria-label={`${trendKey === 'up' ? 'Increased' : 'Decreased'} by ${trendValue}%`}
+              >
+                {TrendIcon[trendKey]}
+                <span>{Math.abs(trendValue!).toFixed(1)}%</span>
+              </span>
             )}
           </div>
+
+          {/* Subtitle */}
+          {subtitle && (
+            <p className="text-xs text-slate-500 mt-1">{subtitle}</p>
+          )}
         </article>
-      </CardContent>
-    </Card>
+    </div>
   )
 })
 
@@ -153,16 +130,11 @@ export const StatCard = memo(function StatCard({
 
 export function StatCardSkeleton() {
   return (
-    <Card>
-      <CardContent className="py-4">
-        <div className="animate-pulse flex items-start gap-4">
-          <div className="w-10 h-10 bg-slate-200 rounded-lg flex-shrink-0" />
-          <div className="flex-1">
-            <div className="h-4 w-20 bg-slate-200 rounded mb-2" />
-            <div className="h-7 w-28 bg-slate-200 rounded" />
-          </div>
-        </div>
-      </CardContent>
-    </Card>
+    <div className="rounded-xl p-4 border bg-gradient-to-br from-slate-100 to-slate-50 border-slate-200">
+      <div className="animate-pulse text-center">
+        <div className="h-3 w-16 bg-slate-200 rounded mx-auto mb-2" />
+        <div className="h-7 w-24 bg-slate-200 rounded mx-auto" />
+      </div>
+    </div>
   )
 }

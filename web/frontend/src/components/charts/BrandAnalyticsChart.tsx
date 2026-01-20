@@ -9,7 +9,6 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { ChartContainer } from './ChartContainer'
-import { Card, CardContent } from '../ui'
 import {
   CHART_THEME,
   CHART_DIMENSIONS,
@@ -45,16 +44,15 @@ interface MetricCardProps {
   label: string
   value: string
   colorClass: string
+  bgClass: string
 }
 
-const MetricCard = memo(function MetricCard({ label, value, colorClass }: MetricCardProps) {
+const MetricCard = memo(function MetricCard({ label, value, colorClass, bgClass }: MetricCardProps) {
   return (
-    <Card className="bg-slate-700/50">
-      <CardContent className="py-2 px-3">
-        <p className="text-xs text-slate-400">{label}</p>
-        <p className={`text-lg font-semibold truncate ${colorClass}`}>{value}</p>
-      </CardContent>
-    </Card>
+    <div className={`rounded-xl p-4 border ${bgClass}`}>
+      <p className="text-xs text-slate-600 font-medium">{label}</p>
+      <p className={`text-xl font-bold truncate ${colorClass}`}>{value}</p>
+    </div>
   )
 })
 
@@ -100,17 +98,20 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
           <MetricCard
             label="Total Brands"
             value={formatNumber(metrics.totalBrands ?? 0)}
-            colorClass="text-blue-400"
+            colorClass="text-blue-600"
+            bgClass="bg-gradient-to-br from-blue-100 to-blue-50 border-blue-200"
           />
           <MetricCard
             label="Top Brand"
             value={metrics.topBrand ?? 'N/A'}
-            colorClass="text-purple-400"
+            colorClass="text-purple-600"
+            bgClass="bg-gradient-to-br from-purple-100 to-purple-50 border-purple-200"
           />
           <MetricCard
             label="Top Brand Share"
             value={formatPercent(metrics.topBrandShare ?? 0)}
-            colorClass="text-green-400"
+            colorClass="text-green-600"
+            bgClass="bg-gradient-to-br from-green-100 to-green-50 border-green-200"
           />
         </div>
       )}
@@ -118,7 +119,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Top Brands by Revenue */}
         <div>
-          <h4 className="text-sm font-medium text-slate-400 mb-2">Top 10 by Revenue</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">Top 10 by Revenue</h4>
           <div style={{ height: CHART_DIMENSIONS.height.xxl }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
@@ -160,7 +161,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
 
         {/* Top Brands by Quantity */}
         <div>
-          <h4 className="text-sm font-medium text-slate-400 mb-2">Top 10 by Quantity</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">Top 10 by Quantity</h4>
           <div style={{ height: CHART_DIMENSIONS.height.xxl }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
