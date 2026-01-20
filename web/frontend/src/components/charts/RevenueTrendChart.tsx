@@ -9,6 +9,7 @@ import {
   Tooltip,
   ResponsiveContainer,
   Legend,
+  LabelList,
 } from 'recharts'
 import { ChartContainer } from './ChartContainer'
 import {
@@ -35,6 +36,20 @@ interface ChartDataPoint {
   prevOrders: number
   change: number
   changePercent: number
+  isPeak: boolean
+  peakLabel: string
+}
+
+// ─── Label Formatter ──────────────────────────────────────────────────────────
+
+const formatShortCurrency = (value: number): string => {
+  if (value >= 1000000) {
+    return `₴${(value / 1000000).toFixed(1)}M`
+  }
+  if (value >= 1000) {
+    return `₴${(value / 1000).toFixed(0)}K`
+  }
+  return `₴${value}`
 }
 
 // ─── Period Labels ───────────────────────────────────────────────────────────
@@ -98,10 +113,10 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <div style={{
-            width: '10px',
-            height: '10px',
-            borderRadius: '2px',
-            background: CHART_THEME.primary
+            width: '12px',
+            height: '12px',
+            borderRadius: '3px',
+            background: CHART_THEME.primary,
           }} />
           <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
             {periodLabels.current}
@@ -123,11 +138,11 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <div style={{
-                width: '10px',
-                height: '10px',
-                borderRadius: '2px',
+                width: '12px',
+                height: '12px',
+                borderRadius: '3px',
                 background: CHART_THEME.muted,
-                border: `1px dashed ${CHART_THEME.axis}`
+                opacity: 0.35,
               }} />
               <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
                 {periodLabels.previous}
@@ -174,15 +189,15 @@ function CustomLegend({ periodLabels, hasComparison }: LegendProps) {
       display: 'flex',
       justifyContent: 'center',
       flexWrap: 'wrap',
-      gap: '12px',
+      gap: '16px',
       paddingTop: '8px',
-      fontSize: '11px',
+      fontSize: '12px',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
         <div style={{
-          width: '16px',
-          height: '3px',
-          borderRadius: '2px',
+          width: '14px',
+          height: '14px',
+          borderRadius: '3px',
           background: CHART_THEME.primary,
           flexShrink: 0,
         }} />
@@ -191,9 +206,11 @@ function CustomLegend({ periodLabels, hasComparison }: LegendProps) {
       {hasComparison && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <div style={{
-            width: '16px',
-            height: '0px',
-            borderTop: `2px dashed ${CHART_THEME.muted}`,
+            width: '14px',
+            height: '14px',
+            borderRadius: '3px',
+            background: CHART_THEME.muted,
+            opacity: 0.35,
             flexShrink: 0,
           }} />
           <span style={{ color: CHART_THEME.muted, whiteSpace: 'nowrap' }}>{periodLabels.previous}</span>
@@ -232,12 +249,16 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
   const periodLabels = PERIOD_LABELS[period] || PERIOD_LABELS.custom
 
-  const { chartData, hasComparison } = useMemo(() => {
+  const { chartData, hasComparison, maxRevenue } = useMemo(() => {
     if (!data?.labels?.length) {
-      return { chartData: [], hasComparison: false }
+      return { chartData: [], hasComparison: false, maxRevenue: 0 }
     }
 
     const hasComp = (data.comparison?.revenue?.length ?? 0) > 0
+
+    // Find max revenue for peak detection
+    const revenues = data.revenue ?? []
+    const maxRev = Math.max(...revenues, 0)
 
     const processed = data.labels.map((label, index) => {
       const revenue = data.revenue?.[index] ?? 0
@@ -251,6 +272,9 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       // Format short date for x-axis
       const shortDate = label.length > 6 ? label.slice(0, 6) : label
 
+      // Mark as peak if it's the maximum value (or within 5% of max for multiple peaks)
+      const isPeak = revenue > 0 && revenue >= maxRev * 0.95
+
       return {
         date: label,
         shortDate,
@@ -260,12 +284,15 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
         prevOrders,
         change,
         changePercent,
+        isPeak,
+        peakLabel: isPeak ? formatShortCurrency(revenue) : '',
       }
     })
 
     return {
       chartData: processed,
       hasComparison: hasComp,
+      maxRevenue: maxRev,
     }
   }, [data])
 
@@ -286,9 +313,9 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart
             data={chartData}
-            margin={{ top: 10, right: 20, left: 10, bottom: 10 }}
-            barGap={2}
-            barCategoryGap="15%"
+            margin={{ top: 25, right: 20, left: 10, bottom: 10 }}
+            barGap={0}
+            barCategoryGap="8%"
           >
             <GradientDefs />
             <CartesianGrid {...GRID_PROPS} vertical={false} />
@@ -306,6 +333,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               {...Y_AXIS_PROPS}
               tickFormatter={formatAxisK}
               width={CHART_DIMENSIONS.yAxisWidth.sm}
+              domain={[0, (dataMax: number) => Math.ceil(dataMax * 1.15 / 1000) * 1000]}
             />
 
             <Tooltip
@@ -318,20 +346,32 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               <Bar
                 dataKey="prevRevenue"
                 name={periodLabels.previous}
-                fill="url(#prevBarGradient)"
+                fill={CHART_THEME.muted}
+                fillOpacity={0.35}
                 radius={[4, 4, 0, 0]}
-                maxBarSize={35}
+                maxBarSize={50}
               />
             )}
 
-            {/* Current period bars (foreground, prominent) */}
+            {/* Current period bars (foreground, solid blue) */}
             <Bar
               dataKey="revenue"
               name={periodLabels.current}
-              fill="url(#currentBarGradient)"
+              fill={CHART_THEME.primary}
               radius={[4, 4, 0, 0]}
-              maxBarSize={35}
-            />
+              maxBarSize={50}
+            >
+              {/* Peak value labels */}
+              <LabelList
+                dataKey="peakLabel"
+                position="top"
+                style={{
+                  fill: CHART_THEME.primary,
+                  fontSize: 11,
+                  fontWeight: 600,
+                }}
+              />
+            </Bar>
 
             {/* Previous period trend line (dashed) */}
             {hasComparison && (
@@ -352,7 +392,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               type="monotone"
               dataKey="revenue"
               name={`${periodLabels.current} Trend`}
-              stroke={CHART_THEME.primary}
+              stroke="#1d4ed8"
               strokeWidth={2.5}
               dot={false}
               activeDot={{ r: 5, fill: CHART_THEME.primary, stroke: '#fff', strokeWidth: 2 }}
