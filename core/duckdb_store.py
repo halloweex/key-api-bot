@@ -1869,19 +1869,21 @@ class DuckDBStore:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             sales_filter = self._build_sales_type_filter(sales_type)
 
-            # Get monthly revenue totals for all available history
+            # Get monthly revenue totals for all available history (only complete months with 25+ days)
             sql = f"""
                 WITH monthly_data AS (
                     SELECT
                         EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
                         EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
-                        SUM(o.grand_total) as revenue
+                        SUM(o.grand_total) as revenue,
+                        COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
                     FROM orders o
                     WHERE o.status_id NOT IN {return_statuses}
                         AND {sales_filter}
                     GROUP BY
                         EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
                         EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
+                    HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
                 ),
                 monthly_stats AS (
                     SELECT
@@ -2237,13 +2239,14 @@ class DuckDBStore:
             last_year_result = conn.execute(last_year_sql, [target_year - 1, target_month]).fetchone()
             last_year_revenue = float(last_year_result[0] or 0) if last_year_result[0] else 0
 
-            # Get recent 3-month average (last 3 complete months)
+            # Get recent 3-month average (last 3 complete months with at least 25 days of data)
             recent_avg_sql = f"""
                 WITH monthly_revenue AS (
                     SELECT
                         EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
                         EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
-                        SUM(o.grand_total) as revenue
+                        SUM(o.grand_total) as revenue,
+                        COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
                     FROM orders o
                     WHERE o.status_id NOT IN {return_statuses}
                         AND {sales_filter}
@@ -2251,6 +2254,7 @@ class DuckDBStore:
                     GROUP BY
                         EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
                         EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
+                    HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
                     ORDER BY year DESC, month DESC
                     LIMIT 3
                 )
