@@ -28,7 +28,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
           focus:outline-none focus:ring-2 focus:ring-purple-500/40 focus:border-purple-400 focus:ring-offset-1
           transition-all duration-200 cursor-pointer
           appearance-none bg-no-repeat bg-right
-          min-w-0 max-w-[140px] sm:max-w-none truncate
+          min-w-0 w-full sm:w-auto sm:max-w-[180px] truncate
           ${className}
         `}
         style={{

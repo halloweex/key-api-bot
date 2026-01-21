@@ -96,8 +96,9 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
     <div
       style={{
         ...TOOLTIP_STYLE,
-        padding: '12px 16px',
-        minWidth: '220px',
+        padding: '10px 12px',
+        minWidth: '180px',
+        maxWidth: '280px',
       }}
     >
       <p style={{ fontWeight: 600, marginBottom: '10px', color: CHART_THEME.text, fontSize: '13px' }}>
@@ -358,12 +359,13 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       height="xl"
       ariaLabel="Chart showing revenue comparison between current and previous period"
     >
-      <div style={{ display: 'flex', flexDirection: 'column', height: 350 }}>
+      <div className="flex flex-col h-[280px] sm:h-[320px] lg:h-[350px]">
         <div style={{ flex: 1, minHeight: 0 }}>
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart
             data={chartData}
             margin={{ top: 25, right: 20, left: 10, bottom: 10 }}
+
             barGap={0}
             barCategoryGap="8%"
           >

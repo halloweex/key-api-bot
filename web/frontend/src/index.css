@@ -144,4 +144,15 @@ body {
   .xs\:block {
     display: block;
   }
+
+  .xs\:hidden {
+    display: none;
+  }
+}
+
+/* Ultra-narrow screens - single column grid */
+@media (max-width: 359px) {
+  .mobile-single-col {
+    grid-template-columns: 1fr !important;
+  }
 }

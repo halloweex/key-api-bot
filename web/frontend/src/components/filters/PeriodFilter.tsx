@@ -36,15 +36,15 @@ export function PeriodFilter() {
   }, [])
 
   return (
-    <div className="flex items-center gap-2 sm:gap-3">
-      <div className="flex items-center gap-0.5 bg-slate-100/80 rounded-xl p-1 border border-slate-200/60 flex-shrink-0">
+    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3">
+      <div className="flex items-center gap-0.5 bg-slate-100/80 rounded-lg sm:rounded-xl p-0.5 sm:p-1 border border-slate-200/60 flex-shrink-0 overflow-x-auto scrollbar-hide">
         {PERIODS.map(({ value, label }) => (
           <Button
             key={value}
             size="sm"
             variant={period === value ? 'primary' : 'ghost'}
             onClick={() => handlePeriodChange(value)}
-            className={`${period === value ? 'shadow-sm' : ''} whitespace-nowrap text-xs sm:text-sm px-2 sm:px-3`}
+            className={`${period === value ? 'shadow-sm' : ''} whitespace-nowrap text-[10px] sm:text-xs md:text-sm px-1.5 sm:px-2 md:px-3 py-1 sm:py-1.5`}
           >
             {label}
           </Button>
@@ -53,7 +53,7 @@ export function PeriodFilter() {
           size="sm"
           variant={period === 'custom' ? 'primary' : 'ghost'}
           onClick={handleCustomClick}
-          className={`${period === 'custom' ? 'shadow-sm' : ''} whitespace-nowrap text-xs sm:text-sm px-2 sm:px-3`}
+          className={`${period === 'custom' ? 'shadow-sm' : ''} whitespace-nowrap text-[10px] sm:text-xs md:text-sm px-1.5 sm:px-2 md:px-3 py-1 sm:py-1.5`}
         >
           Custom
         </Button>

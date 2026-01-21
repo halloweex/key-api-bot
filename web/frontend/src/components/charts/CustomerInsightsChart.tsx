@@ -244,7 +244,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
               </InfoTooltipContent>
             )}
           </div>
-          <div style={{ height: 180 }}>
+          <div className="h-[160px] sm:h-[180px]">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
@@ -310,7 +310,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
               </InfoTooltipContent>
             )}
           </div>
-          <div style={{ height: 200 }}>
+          <div className="h-[180px] sm:h-[200px]">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={aovData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
                 <CartesianGrid {...GRID_PROPS} />

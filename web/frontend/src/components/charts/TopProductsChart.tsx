@@ -72,7 +72,7 @@ export const TopProductsChart = memo(function TopProductsChart() {
   const chartData = useMemo<ChartDataPoint[]>(() => {
     if (!data?.labels?.length) return []
     return data.labels.map((label, index) => {
-      const lines = wrapText(label, 18)
+      const lines = wrapText(label, 14)
       return {
         name: lines.join(' '),  // Use joined text as unique key
         lines,
@@ -102,7 +102,7 @@ export const TopProductsChart = memo(function TopProductsChart() {
       height="xxl"
       ariaLabel="Horizontal bar chart showing top 10 products by quantity sold"
     >
-      <div style={{ height: CHART_DIMENSIONS.height.xxl }}>
+      <div className="h-[320px] sm:h-[380px] lg:h-[420px]">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
             data={chartData}
@@ -115,7 +115,7 @@ export const TopProductsChart = memo(function TopProductsChart() {
               type="category"
               dataKey="name"
               {...Y_AXIS_PROPS}
-              width={180}
+              width={120}
               tick={(props) => <CustomYAxisTick {...props} tickData={tickData} />}
             />
             <Tooltip

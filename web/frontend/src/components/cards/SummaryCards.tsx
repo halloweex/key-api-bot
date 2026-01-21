@@ -187,7 +187,7 @@ export function SummaryCards() {
       {/* Summary Cards Grid */}
       <section
         aria-label="Summary statistics"
-        className="grid grid-cols-2 lg:grid-cols-4 gap-4"
+        className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4 mobile-single-col"
       >
         {isLoading && <LoadingState />}
 
