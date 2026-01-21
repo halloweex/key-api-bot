@@ -4,7 +4,7 @@ Page routes for serving HTML templates and React SPA.
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from web.config import TEMPLATES_DIR, STATIC_V2_DIR, VERSION
@@ -14,11 +14,19 @@ router = APIRouter(tags=["pages"])
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
-# ─── V1 Dashboard (Jinja2 Templates) ──────────────────────────────────────────
+# ─── Root Redirect to V2 Dashboard ────────────────────────────────────────────
 
-@router.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request):
-    """Serve the main dashboard page (protected)."""
+@router.get("/")
+async def root_redirect():
+    """Redirect root to v2 dashboard."""
+    return RedirectResponse(url="/v2", status_code=302)
+
+
+# ─── V1 Dashboard (Jinja2 Templates) - Legacy ─────────────────────────────────
+
+@router.get("/v1", response_class=HTMLResponse)
+async def dashboard_v1(request: Request):
+    """Serve the legacy v1 dashboard page (protected)."""
     # Check authentication
     redirect = require_auth(request)
     if redirect:
