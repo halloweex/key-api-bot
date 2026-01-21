@@ -2196,9 +2196,9 @@ class DuckDBStore:
                 await self.calculate_yoy_growth(sales_type)
                 await self.calculate_weekly_patterns(sales_type)
 
-            # Cap growth rate to reasonable maximum (35%)
+            # Cap growth rate to reasonable maximum (20%)
             # Used as default when no historical data available
-            MAX_GROWTH_RATE = 0.35
+            MAX_GROWTH_RATE = 0.20
 
             # Get seasonality index for target month
             seasonality_result = conn.execute("""
