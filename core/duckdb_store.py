@@ -2419,6 +2419,12 @@ class DuckDBStore:
 
     # ─── Stats Methods ────────────────────────────────────────────────────────
 
+    async def get_latest_order_time(self) -> Optional[datetime]:
+        """Get the latest order updated_at timestamp for sync checkpoint."""
+        async with self.connection() as conn:
+            result = conn.execute("SELECT MAX(updated_at) FROM orders").fetchone()
+            return result[0] if result and result[0] else None
+
     async def get_stats(self) -> Dict[str, Any]:
         """Get database statistics."""
         async with self.connection() as conn:

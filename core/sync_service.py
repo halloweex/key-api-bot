@@ -168,44 +168,41 @@ class SyncService:
             await self.store.set_last_sync_time("products")
 
             # Sync orders with expenses - in chunks to avoid pagination limit (100 pages × 50 = 5000 orders max)
+            # IMPORTANT: Save each chunk immediately to preserve progress on timeout/crash
             logger.info("Syncing orders...")
             final_end_date = datetime.now(DEFAULT_TZ) + timedelta(days=1)
             chunk_days = 90  # Sync in 3-month chunks to stay under 5000 orders per chunk
+            chunk_num = 0
 
-            all_orders = []
             current_start = datetime.now(DEFAULT_TZ) - timedelta(days=days_back)
 
             while current_start < final_end_date:
+                chunk_num += 1
                 current_end = min(current_start + timedelta(days=chunk_days), final_end_date)
-                logger.info(f"Fetching orders from {current_start.strftime('%Y-%m-%d')} to {current_end.strftime('%Y-%m-%d')}...")
+                logger.info(f"Chunk {chunk_num}: Fetching orders from {current_start.strftime('%Y-%m-%d')} to {current_end.strftime('%Y-%m-%d')}...")
 
                 chunk_orders = await self._fetch_orders_with_date_filter(
                     client,
                     current_start.strftime('%Y-%m-%d'),
                     current_end.strftime('%Y-%m-%d')
                 )
-                all_orders.extend(chunk_orders)
-                logger.info(f"  Got {len(chunk_orders)} orders in this chunk")
+                logger.info(f"  Chunk {chunk_num}: Got {len(chunk_orders)} orders, saving to DB...")
+
+                # Save chunk immediately to preserve progress
+                if chunk_orders:
+                    order_count, expense_count = await self._upsert_orders_with_expenses(chunk_orders)
+                    stats["orders"] += order_count
+                    stats["expenses"] += expense_count
+                    logger.info(f"  Chunk {chunk_num}: Saved {order_count} orders, {expense_count} expenses")
 
                 current_start = current_end
 
-            # Deduplicate by order ID (in case of overlaps)
-            orders_by_id = {o["id"]: o for o in all_orders}
-            all_orders = list(orders_by_id.values())
-            logger.info(f"Total unique orders: {len(all_orders)}")
+            logger.info(f"All chunks complete. Total: {stats['orders']} orders, {stats['expenses']} expenses")
 
-            # Batch insert in chunks of 500 to avoid memory issues
-            batch_size = 500
-            for i in range(0, len(all_orders), batch_size):
-                batch = all_orders[i:i + batch_size]
-                order_count, expense_count = await self._upsert_orders_with_expenses(batch)
-                stats["orders"] += order_count
-                stats["expenses"] += expense_count
-
-            # Use max(updated_at) from SOURCE data, not now()
-            max_updated = _get_max_updated_at(all_orders)
-            await self.store.set_last_sync_time("orders", max_updated)
-            logger.info(f"Full sync complete: {stats}, checkpoint: {max_updated}")
+            # Update sync checkpoint with latest order timestamp
+            last_order_time = await self.store.get_latest_order_time()
+            await self.store.set_last_sync_time("orders", last_order_time)
+            logger.info(f"Full sync complete: {stats}, checkpoint: {last_order_time}")
 
         except Exception as e:
             logger.error(f"Full sync error: {e}", exc_info=True)
