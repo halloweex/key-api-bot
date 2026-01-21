@@ -1,7 +1,7 @@
 import { memo, useMemo, useEffect, useRef, useState, useCallback } from 'react'
 import { useFilterStore } from '../../store/filterStore'
 import { formatCurrency } from '../../utils/formatters'
-import { useSmartGoals } from '../../hooks'
+import { useSmartGoals, useRevenueTrend } from '../../hooks'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -320,6 +320,44 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   // Fetch smart goals from API (with seasonality and weekly breakdown)
   const { data: goalsData, isLoading: isLoadingGoals } = useSmartGoals()
 
+  // Fetch revenue trend data to calculate current month revenue for last_28_days
+  const { data: trendData } = useRevenueTrend()
+
+  // Calculate current month revenue from trend data when viewing last_28_days
+  const currentMonthRevenue = useMemo(() => {
+    // Only needed for last_28_days period
+    if (period !== 'last_28_days' || !trendData?.labels?.length) {
+      return revenue
+    }
+
+    // Get current month (1-indexed to match date format "dd.mm")
+    const currentMonth = new Date().getMonth() + 1
+
+    // Sum revenue only for current month days
+    let monthRevenue = 0
+    trendData.labels.forEach((label: string, index: number) => {
+      // Parse month from "dd.mm" format (e.g., "21.01" for January 21st)
+      const parts = label.split('.')
+      if (parts.length >= 2) {
+        const labelMonth = parseInt(parts[1], 10)
+        if (labelMonth === currentMonth) {
+          monthRevenue += trendData.revenue?.[index] ?? 0
+        }
+      }
+    })
+
+    return monthRevenue > 0 ? monthRevenue : revenue
+  }, [period, trendData, revenue])
+
+  // Calculate the excluded previous month revenue for display
+  const excludedPrevMonthRevenue = useMemo(() => {
+    if (period !== 'last_28_days') return 0
+    return revenue - currentMonthRevenue
+  }, [period, revenue, currentMonthRevenue])
+
+  // Use current month revenue for the effective revenue in calculations
+  const effectiveRevenue = currentMonthRevenue
+
   // Regenerate sparkles when progress changes significantly
   const regenerateSparkles = useCallback(() => {
     if (fillRef.current) {
@@ -381,13 +419,13 @@ export const MilestoneProgress = memo(function MilestoneProgress({
     if (!milestones || milestones.length === 0) return null
 
     const maxMilestone = milestones[milestones.length - 1].amount
-    const progress = Math.min((revenue / maxMilestone) * 100, 100)
-    const allCompleted = revenue >= maxMilestone
+    const progress = Math.min((effectiveRevenue / maxMilestone) * 100, 100)
+    const allCompleted = effectiveRevenue >= maxMilestone
 
     // Find current milestone index (highest reached)
     let currentIndex = -1
     for (let i = milestones.length - 1; i >= 0; i--) {
-      if (revenue >= milestones[i].amount) {
+      if (effectiveRevenue >= milestones[i].amount) {
         currentIndex = i
         break
       }
@@ -396,7 +434,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
     // Check if near a milestone (within 10%)
     let nearMilestone = false
     for (const m of milestones) {
-      const percentTo = (revenue / m.amount) * 100
+      const percentTo = (effectiveRevenue / m.amount) * 100
       if (percentTo >= 90 && percentTo < 100) {
         nearMilestone = true
         break
@@ -427,14 +465,14 @@ export const MilestoneProgress = memo(function MilestoneProgress({
       textColor,
       glowColor,
     }
-  }, [milestones, revenue])
+  }, [milestones, effectiveRevenue])
 
   // Trigger particles and celebrations
   useEffect(() => {
     if (!milestones || !trackRef.current || !metrics) return
 
     milestones.forEach((m, index) => {
-      if (revenue >= m.amount && !celebratedRef.current.has(m.amount)) {
+      if (effectiveRevenue >= m.amount && !celebratedRef.current.has(m.amount)) {
         celebratedRef.current.add(m.amount)
 
         // Trigger particles
@@ -449,12 +487,12 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         }, index * 300)
 
         // Show celebration for highest new milestone
-        if (index === milestones.length - 1 || revenue < milestones[index + 1]?.amount) {
+        if (index === milestones.length - 1 || effectiveRevenue < milestones[index + 1]?.amount) {
           setTimeout(() => setCelebration(m), 500)
         }
       }
     })
-  }, [milestones, revenue, metrics])
+  }, [milestones, effectiveRevenue, metrics])
 
   // Reset celebrations when period changes
   useEffect(() => {
@@ -605,7 +643,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
           {/* Milestone Markers */}
           {milestones.map((m, index) => {
             const position = (m.amount / metrics.maxMilestone) * 100
-            const isReached = revenue >= m.amount
+            const isReached = effectiveRevenue >= m.amount
             const isNext = index === metrics.currentIndex + 1
 
             // Tier colors with gradients
@@ -661,9 +699,15 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         <div className="flex justify-between mt-3">
           <div>
             <span className={`text-base font-bold ${metrics.textColor}`}>
-              {formatCurrency(revenue)}
+              {formatCurrency(effectiveRevenue)}
             </span>
             <span className="text-xs text-slate-400 ml-1">current</span>
+            {/* Show note about excluded previous month revenue */}
+            {excludedPrevMonthRevenue > 0 && (
+              <span className="text-xs text-slate-400 ml-1" title={`${formatCurrency(excludedPrevMonthRevenue)} from previous month excluded`}>
+                (this month only)
+              </span>
+            )}
           </div>
           <div className="text-right">
             <span className="text-base font-semibold text-slate-600">
@@ -673,11 +717,23 @@ export const MilestoneProgress = memo(function MilestoneProgress({
           </div>
         </div>
 
+        {/* Note about excluded previous month revenue */}
+        {excludedPrevMonthRevenue > 0 && (
+          <div className="mt-2 px-2 py-1.5 bg-slate-50 rounded text-xs text-slate-500 flex items-center gap-1.5">
+            <svg className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>
+              <span className="font-medium text-slate-600">{formatCurrency(excludedPrevMonthRevenue)}</span> from previous month not included in goal progress
+            </span>
+          </div>
+        )}
+
         {/* Remaining amount */}
         {!metrics.allCompleted && (
           <div className="mt-3 pt-3 border-t border-slate-100">
             <p className="text-xs text-slate-500 text-center">
-              <span className="font-medium text-slate-700">{formatCurrency(metrics.maxMilestone - revenue)}</span> remaining to reach goal
+              <span className="font-medium text-slate-700">{formatCurrency(metrics.maxMilestone - effectiveRevenue)}</span> remaining to reach goal
             </p>
           </div>
         )}
@@ -701,14 +757,14 @@ export const MilestoneProgress = memo(function MilestoneProgress({
               <span className="text-slate-500">vs. Same month last year</span>
               <span className="font-medium text-slate-700">
                 {formatAmount(lastYearRevenue)}
-                {revenue > lastYearRevenue && (
+                {effectiveRevenue > lastYearRevenue && (
                   <span className="text-emerald-600 ml-1">
-                    (+{(((revenue - lastYearRevenue) / lastYearRevenue) * 100).toFixed(0)}%)
+                    (+{(((effectiveRevenue - lastYearRevenue) / lastYearRevenue) * 100).toFixed(0)}%)
                   </span>
                 )}
-                {revenue < lastYearRevenue && revenue > 0 && (
+                {effectiveRevenue < lastYearRevenue && effectiveRevenue > 0 && (
                   <span className="text-amber-600 ml-1">
-                    ({(((revenue - lastYearRevenue) / lastYearRevenue) * 100).toFixed(0)}%)
+                    ({(((effectiveRevenue - lastYearRevenue) / lastYearRevenue) * 100).toFixed(0)}%)
                   </span>
                 )}
               </span>

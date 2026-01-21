@@ -10,6 +10,7 @@ import {
   ResponsiveContainer,
   Legend,
   LabelList,
+  Cell,
 } from 'recharts'
 import { ChartContainer } from './ChartContainer'
 import {
@@ -38,6 +39,7 @@ interface ChartDataPoint {
   changePercent: number
   isPeak: boolean
   peakLabel: string
+  isCurrentMonth: boolean
 }
 
 // ─── Label Formatter ──────────────────────────────────────────────────────────
@@ -179,9 +181,13 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
 interface LegendProps {
   periodLabels: { current: string; previous: string }
   hasComparison: boolean
+  hasPrevMonthDays: boolean
 }
 
-function CustomLegend({ periodLabels, hasComparison }: LegendProps) {
+function CustomLegend({ periodLabels, hasComparison, hasPrevMonthDays }: LegendProps) {
+  // Get current month name for legend
+  const currentMonthName = new Date().toLocaleString('en', { month: 'short' })
+
   return (
     <div style={{
       display: 'flex',
@@ -191,6 +197,7 @@ function CustomLegend({ periodLabels, hasComparison }: LegendProps) {
       paddingTop: '8px',
       fontSize: '12px',
     }}>
+      {/* Current month indicator */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
         <div style={{
           width: '14px',
@@ -199,8 +206,24 @@ function CustomLegend({ periodLabels, hasComparison }: LegendProps) {
           background: CHART_THEME.primary,
           flexShrink: 0,
         }} />
-        <span style={{ color: CHART_THEME.text, fontWeight: 500, whiteSpace: 'nowrap' }}>{periodLabels.current}</span>
+        <span style={{ color: CHART_THEME.text, fontWeight: 500, whiteSpace: 'nowrap' }}>
+          {hasPrevMonthDays ? `${currentMonthName} (current month)` : periodLabels.current}
+        </span>
       </div>
+      {/* Previous month indicator - only show when there are prev month days */}
+      {hasPrevMonthDays && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <div style={{
+            width: '14px',
+            height: '14px',
+            borderRadius: '3px',
+            background: PREV_MONTH_BAR_COLOR,
+            flexShrink: 0,
+          }} />
+          <span style={{ color: CHART_THEME.muted, whiteSpace: 'nowrap' }}>Previous month</span>
+        </div>
+      )}
+      {/* Comparison period indicator */}
       {hasComparison && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <div style={{
@@ -218,6 +241,9 @@ function CustomLegend({ periodLabels, hasComparison }: LegendProps) {
 
 // ─── Gradient Definitions ────────────────────────────────────────────────────
 
+// Previous month bar color (lighter/muted version of primary)
+const PREV_MONTH_BAR_COLOR = '#93c5fd' // Light blue (tailwind blue-300)
+
 function GradientDefs() {
   return (
     <defs>
@@ -233,6 +259,10 @@ function GradientDefs() {
         <stop offset="0%" stopColor={CHART_THEME.muted} stopOpacity={0.5} />
         <stop offset="100%" stopColor={CHART_THEME.muted} stopOpacity={0.25} />
       </linearGradient>
+      <linearGradient id="prevMonthBarGradient" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor={PREV_MONTH_BAR_COLOR} stopOpacity={0.9} />
+        <stop offset="100%" stopColor={PREV_MONTH_BAR_COLOR} stopOpacity={0.7} />
+      </linearGradient>
     </defs>
   )
 }
@@ -245,9 +275,9 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
   const periodLabels = PERIOD_LABELS[period] || PERIOD_LABELS.custom
 
-  const { chartData, hasComparison } = useMemo(() => {
+  const { chartData, hasComparison, hasPrevMonthDays } = useMemo(() => {
     if (!data?.labels?.length) {
-      return { chartData: [], hasComparison: false, maxRevenue: 0 }
+      return { chartData: [], hasComparison: false, maxRevenue: 0, hasPrevMonthDays: false }
     }
 
     const hasComp = (data.comparison?.revenue?.length ?? 0) > 0
@@ -255,6 +285,12 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
     // Find max revenue for peak detection
     const revenues = data.revenue ?? []
     const maxRev = Math.max(...revenues, 0)
+
+    // Get current month for comparison (only relevant for last_28_days)
+    // Month is 1-indexed in the date format (01 = January)
+    const currentMonth = new Date().getMonth() + 1
+
+    let prevMonthCount = 0
 
     const processed = data.labels.map((label, index) => {
       const revenue = data.revenue?.[index] ?? 0
@@ -271,6 +307,22 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       // Mark as peak if it's the maximum value (or within 5% of max for multiple peaks)
       const isPeak = revenue > 0 && revenue >= maxRev * 0.95
 
+      // Parse month from label (format: "dd.mm" like "21.01" for January 21st)
+      // Check if this date is in current month
+      let isCurrentMonth = true
+      if (period === 'last_28_days') {
+        // Extract month from "dd.mm" format
+        const parts = label.split('.')
+        if (parts.length >= 2) {
+          const labelMonth = parseInt(parts[1], 10)
+          // Check if the label is from current month
+          if (labelMonth !== currentMonth) {
+            isCurrentMonth = false
+            prevMonthCount++
+          }
+        }
+      }
+
       return {
         date: label,
         shortDate,
@@ -282,6 +334,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
         changePercent,
         isPeak,
         peakLabel: isPeak ? formatShortCurrency(revenue) : '',
+        isCurrentMonth,
       }
     })
 
@@ -289,8 +342,9 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       chartData: processed,
       hasComparison: hasComp,
       maxRevenue: maxRev,
+      hasPrevMonthDays: prevMonthCount > 0,
     }
-  }, [data])
+  }, [data, period])
 
   const isEmpty = !isLoading && chartData.length === 0
 
@@ -337,7 +391,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               cursor={{ fill: 'rgba(0, 0, 0, 0.04)' }}
             />
 
-            {/* Current period bars (solid blue) */}
+            {/* Current period bars - different color for previous month days */}
             <Bar
               dataKey="revenue"
               name={periodLabels.current}
@@ -345,6 +399,13 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               radius={[4, 4, 0, 0]}
               maxBarSize={50}
             >
+              {/* Conditional coloring for last_28_days period */}
+              {chartData.map((entry, index) => (
+                <Cell
+                  key={`cell-${index}`}
+                  fill={entry.isCurrentMonth ? CHART_THEME.primary : PREV_MONTH_BAR_COLOR}
+                />
+              ))}
               {/* Peak value labels */}
               <LabelList
                 dataKey="peakLabel"
@@ -389,7 +450,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
         </div>
 
         {/* Custom Legend */}
-        <CustomLegend periodLabels={periodLabels} hasComparison={hasComparison} />
+        <CustomLegend periodLabels={periodLabels} hasComparison={hasComparison} hasPrevMonthDays={hasPrevMonthDays} />
       </div>
     </ChartContainer>
   )
