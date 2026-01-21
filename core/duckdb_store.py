@@ -2258,7 +2258,12 @@ class DuckDBStore:
             # Calculate goals using both methods
             yoy_goal = 0
             recent_goal = 0
-            growth_rate = monthly_yoy if monthly_yoy > 0 else overall_yoy
+
+            # Cap growth rate to reasonable maximum (20%)
+            # Early-stage businesses may have 100%+ YoY growth, but goals should be achievable
+            MAX_GROWTH_RATE = 0.20  # 20% max growth target
+            raw_growth_rate = monthly_yoy if monthly_yoy > 0 else overall_yoy
+            growth_rate = min(raw_growth_rate, MAX_GROWTH_RATE)
 
             # Method 1: YoY growth (last year same month × growth)
             if last_year_revenue > 0:
