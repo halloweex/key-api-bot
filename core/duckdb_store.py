@@ -2194,6 +2194,10 @@ class DuckDBStore:
                 await self.calculate_yoy_growth(sales_type)
                 await self.calculate_weekly_patterns(sales_type)
 
+            # Cap growth rate to reasonable maximum (35%)
+            # Used as default when no historical data available
+            MAX_GROWTH_RATE = 0.35
+
             # Get seasonality index for target month
             seasonality_result = conn.execute("""
                 SELECT seasonality_index, avg_revenue, yoy_growth, confidence
@@ -2204,19 +2208,19 @@ class DuckDBStore:
             if seasonality_result:
                 seasonality_index = float(seasonality_result[0] or 1.0)
                 historical_avg = float(seasonality_result[1] or 0)
-                monthly_yoy = float(seasonality_result[2] or 0.10)
+                monthly_yoy = float(seasonality_result[2] or MAX_GROWTH_RATE)
                 confidence = seasonality_result[3] or "low"
             else:
                 seasonality_index = 1.0
                 historical_avg = 0
-                monthly_yoy = 0.10
+                monthly_yoy = MAX_GROWTH_RATE
                 confidence = "low"
 
             # Get overall YoY growth
             yoy_result = conn.execute("""
                 SELECT value FROM growth_metrics WHERE metric_type = 'yoy_overall'
             """).fetchone()
-            overall_yoy = float(yoy_result[0] or 0.10) if yoy_result else 0.10
+            overall_yoy = float(yoy_result[0] or MAX_GROWTH_RATE) if yoy_result else MAX_GROWTH_RATE
 
             # Get last year's same month revenue
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
@@ -2259,9 +2263,7 @@ class DuckDBStore:
             yoy_goal = 0
             recent_goal = 0
 
-            # Cap growth rate to reasonable maximum (35%)
-            # Early-stage businesses may have 100%+ YoY growth, but goals should be achievable
-            MAX_GROWTH_RATE = 0.35  # 35% max growth target
+            # Apply growth rate cap
             raw_growth_rate = monthly_yoy if monthly_yoy > 0 else overall_yoy
             growth_rate = min(raw_growth_rate, MAX_GROWTH_RATE)
 
@@ -2291,7 +2293,7 @@ class DuckDBStore:
                 calculation_method = "historical_avg"
             else:
                 monthly_goal = 3000000  # 3M UAH default
-                growth_rate = 0.10
+                growth_rate = MAX_GROWTH_RATE
                 calculation_method = "fallback"
 
             # Round to nice number
