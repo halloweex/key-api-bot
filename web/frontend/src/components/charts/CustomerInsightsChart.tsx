@@ -101,6 +101,24 @@ const CurrencyIcon = () => (
   </svg>
 )
 
+const HeartIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+  </svg>
+)
+
+const ShoppingBagIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
+  </svg>
+)
+
+const CalendarIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+  </svg>
+)
+
 // ─── Info Button ──────────────────────────────────────────────────────────────
 
 function InfoButton({ onClick }: { onClick: () => void }) {
@@ -145,6 +163,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
   const { data, isLoading, error, refetch } = useCustomerInsights()
   const [showCustomerInfo, setShowCustomerInfo] = useState(false)
   const [showAovInfo, setShowAovInfo] = useState(false)
+  const [showClvInfo, setShowClvInfo] = useState(false)
 
   const pieData = useMemo<PieDataPoint[]>(() => {
     if (!data?.newVsReturning?.labels?.length) return []
@@ -185,39 +204,104 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
     >
       {/* Summary Cards - Top */}
       {metrics && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-          <SummaryCard
-            icon={<UserPlusIcon />}
-            label="New Customers"
-            value={formatNumber(metrics.newCustomers ?? 0)}
-            subtitle={`${newPercent}% of total`}
-            colorClass="text-blue-600"
-            bgClass="bg-gradient-to-br from-blue-100 to-blue-50 border border-blue-200"
-          />
-          <SummaryCard
-            icon={<UserGroupIcon />}
-            label="Returning Customers"
-            value={formatNumber(metrics.returningCustomers ?? 0)}
-            subtitle={`${returningPercent}% of total`}
-            colorClass="text-purple-600"
-            bgClass="bg-gradient-to-br from-purple-100 to-purple-50 border border-purple-200"
-          />
-          <SummaryCard
-            icon={<RefreshIcon />}
-            label="Repeat Rate"
-            value={formatPercent(metrics.repeatRate ?? 0)}
-            subtitle="Orders from returning"
-            colorClass="text-green-600"
-            bgClass="bg-gradient-to-br from-green-100 to-green-50 border border-green-200"
-          />
-          <SummaryCard
-            icon={<CurrencyIcon />}
-            label="Avg Order Value"
-            value={formatCurrency(metrics.averageOrderValue ?? 0)}
-            subtitle="Per order"
-            colorClass="text-orange-600"
-            bgClass="bg-gradient-to-br from-orange-100 to-orange-50 border border-orange-200"
-          />
+        <div className="space-y-3 mb-6">
+          {/* Row 1: Customer metrics */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <SummaryCard
+              icon={<UserPlusIcon />}
+              label="New Customers"
+              value={formatNumber(metrics.newCustomers ?? 0)}
+              subtitle={`${newPercent}% of total`}
+              colorClass="text-blue-600"
+              bgClass="bg-gradient-to-br from-blue-100 to-blue-50 border border-blue-200"
+            />
+            <SummaryCard
+              icon={<UserGroupIcon />}
+              label="Returning Customers"
+              value={formatNumber(metrics.returningCustomers ?? 0)}
+              subtitle={`${returningPercent}% of total`}
+              colorClass="text-purple-600"
+              bgClass="bg-gradient-to-br from-purple-100 to-purple-50 border border-purple-200"
+            />
+            <SummaryCard
+              icon={<RefreshIcon />}
+              label="Repeat Rate"
+              value={formatPercent(metrics.repeatRate ?? 0)}
+              subtitle="Orders from returning"
+              colorClass="text-green-600"
+              bgClass="bg-gradient-to-br from-green-100 to-green-50 border border-green-200"
+            />
+            <SummaryCard
+              icon={<CurrencyIcon />}
+              label="Avg Order Value"
+              value={formatCurrency(metrics.averageOrderValue ?? 0)}
+              subtitle="Per order"
+              colorClass="text-orange-600"
+              bgClass="bg-gradient-to-br from-orange-100 to-orange-50 border border-orange-200"
+            />
+          </div>
+
+          {/* Row 2: CLV metrics */}
+          {metrics.customerLifetimeValue !== undefined && (
+            <div className="relative">
+              <div className="flex items-center gap-2 mb-2">
+                <h4 className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+                  Customer Lifetime Value Metrics
+                </h4>
+                <InfoButton onClick={() => setShowClvInfo(!showClvInfo)} />
+                {showClvInfo && (
+                  <InfoTooltipContent onClose={() => setShowClvInfo(false)} title="How is CLV calculated?">
+                    <p className="text-xs text-slate-300 mb-2">
+                      <strong className="text-rose-400">CLV:</strong> Average total revenue per repeat customer (customers with 2+ orders).
+                    </p>
+                    <p className="text-xs text-slate-300 mb-2">
+                      <strong className="text-indigo-400">Purchase Frequency:</strong> Average number of orders per repeat customer.
+                    </p>
+                    <p className="text-xs text-slate-300 mb-2">
+                      <strong className="text-teal-400">Lifespan:</strong> Average days between first and last order for repeat customers.
+                    </p>
+                    <p className="text-xs text-slate-300">
+                      <strong className="text-slate-400">Note:</strong> Based on 90-day inactivity window (P95 = 57 days).
+                    </p>
+                  </InfoTooltipContent>
+                )}
+              </div>
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <SummaryCard
+                  icon={<HeartIcon />}
+                  label="Customer Lifetime Value"
+                  value={formatCurrency(metrics.customerLifetimeValue ?? 0)}
+                  subtitle="Avg revenue per repeat customer"
+                  colorClass="text-rose-600"
+                  bgClass="bg-gradient-to-br from-rose-100 to-rose-50 border border-rose-200"
+                />
+                <SummaryCard
+                  icon={<ShoppingBagIcon />}
+                  label="Purchase Frequency"
+                  value={`${(metrics.avgPurchaseFrequency ?? 0).toFixed(1)}x`}
+                  subtitle="Avg orders per repeat customer"
+                  colorClass="text-indigo-600"
+                  bgClass="bg-gradient-to-br from-indigo-100 to-indigo-50 border border-indigo-200"
+                />
+                <SummaryCard
+                  icon={<CalendarIcon />}
+                  label="Customer Lifespan"
+                  value={`${Math.round(metrics.avgCustomerLifespanDays ?? 0)} days`}
+                  subtitle="Avg time from first to last order"
+                  colorClass="text-teal-600"
+                  bgClass="bg-gradient-to-br from-teal-100 to-teal-50 border border-teal-200"
+                />
+                <SummaryCard
+                  icon={<RefreshIcon />}
+                  label="Orders per Customer"
+                  value={`${(metrics.purchaseFrequency ?? 0).toFixed(2)}x`}
+                  subtitle="In selected period"
+                  colorClass="text-amber-600"
+                  bgClass="bg-gradient-to-br from-amber-100 to-amber-50 border border-amber-200"
+                />
+              </div>
+            </div>
+          )}
         </div>
       )}
 

@@ -77,10 +77,17 @@ export interface CustomerInsightsResponse {
     }>
   }
   metrics: {
+    totalCustomers?: number
     newCustomers: number
     returningCustomers: number
+    totalOrders?: number
     repeatRate: number
     averageOrderValue: number
+    // CLV metrics
+    customerLifetimeValue?: number
+    avgPurchaseFrequency?: number
+    avgCustomerLifespanDays?: number
+    purchaseFrequency?: number
   }
 }
 

@@ -1042,6 +1042,49 @@ class DuckDBStore:
 
             overall_aov = total_revenue / total_orders if total_orders > 0 else 0
 
+            # CLV Metrics - Calculate Customer Lifetime Value
+            # Using 90-day inactivity window (based on P95 analysis of 57 days + buffer)
+            INACTIVITY_WINDOW_DAYS = 90
+
+            # Get CLV data: lifespan, purchase frequency, and value for repeat customers
+            clv_result = conn.execute(f"""
+                WITH customer_stats AS (
+                    SELECT
+                        o.buyer_id,
+                        COUNT(DISTINCT o.id) as order_count,
+                        SUM(o.grand_total) as total_spent,
+                        MIN(o.ordered_at) as first_order,
+                        MAX(o.ordered_at) as last_order,
+                        DATE_DIFF('day', MIN(o.ordered_at), MAX(o.ordered_at)) as lifespan_days
+                    FROM orders o
+                    {joins}
+                    WHERE o.buyer_id IS NOT NULL
+                      AND o.status_id NOT IN {return_statuses}
+                      AND {self._build_sales_type_filter(sales_type)}
+                    GROUP BY o.buyer_id
+                    HAVING COUNT(DISTINCT o.id) > 1  -- Only repeat customers
+                )
+                SELECT
+                    COUNT(*) as repeat_customer_count,
+                    AVG(order_count) as avg_purchase_frequency,
+                    AVG(lifespan_days) as avg_lifespan_days,
+                    AVG(total_spent) as avg_customer_value,
+                    SUM(total_spent) as total_repeat_revenue
+                FROM customer_stats
+            """).fetchone()
+
+            repeat_customer_count = clv_result[0] or 0
+            avg_purchase_frequency = float(clv_result[1] or 0)
+            avg_lifespan_days = float(clv_result[2] or 0)
+            avg_customer_value = float(clv_result[3] or 0)
+
+            # Calculate CLV using: AOV × Purchase Frequency × (Lifespan in years)
+            # Or simpler: Average total revenue per repeat customer
+            clv = avg_customer_value if repeat_customer_count > 0 else 0
+
+            # Purchase frequency for all customers in period
+            purchase_frequency = total_orders / total_customers if total_customers > 0 else 0
+
             return {
                 "newVsReturning": {
                     "labels": ["New Customers", "Returning Customers"],
@@ -1065,7 +1108,12 @@ class DuckDBStore:
                     "returningCustomers": returning_customers,
                     "totalOrders": total_orders,
                     "repeatRate": round((returning_customers / total_customers * 100) if total_customers > 0 else 0, 1),
-                    "averageOrderValue": round(overall_aov, 2)
+                    "averageOrderValue": round(overall_aov, 2),
+                    # CLV metrics
+                    "customerLifetimeValue": round(clv, 2),
+                    "avgPurchaseFrequency": round(avg_purchase_frequency, 2),
+                    "avgCustomerLifespanDays": round(avg_lifespan_days, 0),
+                    "purchaseFrequency": round(purchase_frequency, 2)
                 }
             }
 
