@@ -304,6 +304,41 @@ function generateMilestonesFromGoals(input: SmartGoalInput): Milestone[] {
   }]
 }
 
+// ─── Info Button (click-based, matching CustomerInsights style) ───────────────
+
+function InfoButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="ml-2 text-slate-400 hover:text-slate-600 transition-colors"
+      aria-label="Goal calculation details"
+    >
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H8c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z"/>
+      </svg>
+    </button>
+  )
+}
+
+function InfoTooltipContent({ onClose, children }: {
+  onClose: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <div className="absolute top-8 left-0 z-50 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-4 min-w-[220px] max-w-[300px]">
+      <button
+        onClick={onClose}
+        className="absolute top-2 right-2 text-slate-400 hover:text-slate-200 text-lg leading-none"
+        aria-label="Close"
+      >
+        ×
+      </button>
+      <h4 className="text-sm font-semibold text-slate-200 mb-2">Goal Calculation</h4>
+      {children}
+    </div>
+  )
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export const MilestoneProgress = memo(function MilestoneProgress({
@@ -314,6 +349,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   const trackRef = useRef<HTMLDivElement>(null)
   const fillRef = useRef<HTMLDivElement>(null)
   const [celebration, setCelebration] = useState<Milestone | null>(null)
+  const [showGoalInfo, setShowGoalInfo] = useState(false)
   const celebratedRef = useRef<Set<number>>(new Set())
   const [sparkles, setSparkles] = useState<Sparkle[]>([])
   const isInitialMountRef = useRef(true)
@@ -568,7 +604,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
       <div className={`bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-card-hover)] transition-all duration-300 p-5 ${className}`}>
         {/* Header */}
         <div className="flex justify-between items-center mb-4">
-          <div className="flex items-center gap-2">
+          <div className="relative flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${metrics.themeColor}`} />
             <span className="text-sm font-semibold text-slate-700">{periodLabel}</span>
             {/* Custom goal indicator */}
@@ -577,59 +613,41 @@ export const MilestoneProgress = memo(function MilestoneProgress({
                 Custom
               </span>
             )}
-            {/* Info icon with tooltip for auto-calculated goals */}
+            {/* Info button for auto-calculated goals (click-based) */}
             {!isCustomGoal && !isLoadingGoals && (growthRate || recent3MonthAvg || lastYearRevenue) && (
-              <div className="relative group">
-                <button
-                  type="button"
-                  className="w-5 h-5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-700 flex items-center justify-center transition-colors"
-                  aria-label="Goal calculation details"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </button>
-                {/* Tooltip */}
-                <div className="absolute left-0 top-full mt-2 z-50 hidden group-hover:block">
-                  <div className="bg-slate-800 text-white text-xs rounded-lg shadow-lg p-3 min-w-[200px] max-w-[280px]">
-                    <div className="font-semibold mb-2 text-slate-200">Goal Calculation</div>
-                    <div className="space-y-1.5">
-                      {growthRate !== undefined && growthRate > 0 && (
-                        <div className="flex justify-between">
-                          <span className="text-slate-400">YoY Growth:</span>
-                          <span className="text-emerald-400 font-medium">+{(growthRate * 100).toFixed(0)}%</span>
-                        </div>
-                      )}
-                      {recent3MonthAvg && recent3MonthAvg > 0 && (
-                        <div className="flex justify-between">
-                          <span className="text-slate-400">Recent 3mo avg:</span>
-                          <span className="text-white font-medium">{formatAmount(recent3MonthAvg)}</span>
-                        </div>
-                      )}
-                      {lastYearRevenue && lastYearRevenue > 0 && (
-                        <div className="flex justify-between">
-                          <span className="text-slate-400">Last year same month:</span>
-                          <span className="text-white font-medium">{formatAmount(lastYearRevenue)}</span>
-                        </div>
-                      )}
-                      {seasonalityIndex && (
-                        <div className="flex justify-between">
-                          <span className="text-slate-400">Seasonality index:</span>
-                          <span className="text-white font-medium">{seasonalityIndex.toFixed(2)}x</span>
-                        </div>
-                      )}
-                      {calculationMethod && (
-                        <div className="flex justify-between pt-1.5 mt-1.5 border-t border-slate-600">
-                          <span className="text-slate-400">Method:</span>
-                          <span className="text-slate-300">{getMethodLabel(calculationMethod)}</span>
-                        </div>
-                      )}
-                    </div>
-                    {/* Arrow */}
-                    <div className="absolute -top-1.5 left-4 w-3 h-3 bg-slate-800 rotate-45" />
-                  </div>
+              <InfoButton onClick={() => setShowGoalInfo(!showGoalInfo)} />
+            )}
+            {/* Click-based tooltip */}
+            {showGoalInfo && (
+              <InfoTooltipContent onClose={() => setShowGoalInfo(false)}>
+                <div className="space-y-2">
+                  {growthRate !== undefined && growthRate > 0 && (
+                    <p className="text-xs text-slate-300">
+                      <strong className="text-emerald-400">YoY Growth:</strong> +{(growthRate * 100).toFixed(0)}%
+                    </p>
+                  )}
+                  {recent3MonthAvg && recent3MonthAvg > 0 && (
+                    <p className="text-xs text-slate-300">
+                      <strong className="text-blue-400">Recent 3mo avg:</strong> {formatAmount(recent3MonthAvg)}
+                    </p>
+                  )}
+                  {lastYearRevenue && lastYearRevenue > 0 && (
+                    <p className="text-xs text-slate-300">
+                      <strong className="text-purple-400">Last year same month:</strong> {formatAmount(lastYearRevenue)}
+                    </p>
+                  )}
+                  {seasonalityIndex && (
+                    <p className="text-xs text-slate-300">
+                      <strong className="text-orange-400">Seasonality:</strong> {seasonalityIndex.toFixed(2)}x
+                    </p>
+                  )}
+                  {calculationMethod && (
+                    <p className="text-xs text-slate-400 pt-1 mt-1 border-t border-slate-600">
+                      Method: {getMethodLabel(calculationMethod)}
+                    </p>
+                  )}
                 </div>
-              </div>
+              </InfoTooltipContent>
             )}
             {/* Loading indicator */}
             {isLoadingGoals && (

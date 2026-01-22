@@ -107,7 +107,7 @@ function InfoButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className="ml-2 text-slate-500 hover:text-slate-700 transition-colors"
+      className="ml-2 text-slate-400 hover:text-slate-600 transition-colors"
       aria-label="How is this calculated?"
     >
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
@@ -125,7 +125,7 @@ function InfoTooltipContent({ onClose, title, children }: {
   children: React.ReactNode
 }) {
   return (
-    <div className="absolute top-8 left-0 z-10 bg-slate-800 border border-slate-600 rounded-lg shadow-xl p-4 max-w-xs">
+    <div className="absolute top-8 left-0 z-50 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-4 min-w-[220px] max-w-[300px]">
       <button
         onClick={onClose}
         className="absolute top-2 right-2 text-slate-400 hover:text-slate-200 text-lg leading-none"
