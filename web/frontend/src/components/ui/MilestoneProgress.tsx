@@ -700,13 +700,16 @@ export const MilestoneProgress = memo(function MilestoneProgress({
             const isNext = index === metrics.currentIndex + 1
 
             // Tier colors with gradients
+            // Unreached = blue, Reached = amber/orange, Final goal = purple
             let markerBg = 'bg-gradient-to-br from-blue-400 to-blue-600'
             let markerBorder = 'border-blue-300'
-            if (index === 0) {
+            if (isReached) {
+              // Reached milestone - amber/orange
               markerBg = 'bg-gradient-to-br from-amber-400 to-amber-600'
               markerBorder = 'border-amber-300'
             }
             if (index === milestones.length - 1) {
+              // Final goal marker - purple (whether reached or not)
               markerBg = 'bg-gradient-to-br from-purple-400 to-purple-600'
               markerBorder = 'border-purple-300'
             }
