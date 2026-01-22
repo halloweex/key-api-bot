@@ -1043,8 +1043,8 @@ class DuckDBStore:
             overall_aov = total_revenue / total_orders if total_orders > 0 else 0
 
             # CLV Metrics - Calculate Customer Lifetime Value
-            # Using 90-day inactivity window (based on P95 analysis of 57 days + buffer)
-            INACTIVITY_WINDOW_DAYS = 90
+            # Using 240-day inactivity window (based on P95 analysis of 232 days from production data)
+            INACTIVITY_WINDOW_DAYS = 240
 
             # Get CLV data: lifespan, purchase frequency, and value for repeat customers
             clv_result = conn.execute(f"""
