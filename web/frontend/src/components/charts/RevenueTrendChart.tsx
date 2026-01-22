@@ -15,12 +15,10 @@ import {
 import { ChartContainer } from './ChartContainer'
 import {
   CHART_THEME,
-  CHART_DIMENSIONS,
   TOOLTIP_STYLE,
   GRID_PROPS,
   X_AXIS_PROPS,
   Y_AXIS_PROPS,
-  formatAxisK,
 } from './config'
 import { useRevenueTrend } from '../../hooks'
 import { useFilterStore } from '../../store/filterStore'
@@ -359,12 +357,12 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       height="xl"
       ariaLabel="Chart showing revenue comparison between current and previous period"
     >
-      <div className="flex flex-col h-[280px] sm:h-[320px] lg:h-[350px]">
+      <div className="flex flex-col h-[350px] sm:h-[400px] lg:h-[450px]">
         <div style={{ flex: 1, minHeight: 0 }}>
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart
             data={chartData}
-            margin={{ top: 25, right: 20, left: 10, bottom: 10 }}
+            margin={{ top: 25, right: 15, left: 5, bottom: 10 }}
 
             barGap={0}
             barCategoryGap="8%"
@@ -383,8 +381,8 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
             <YAxis
               {...Y_AXIS_PROPS}
-              tickFormatter={formatAxisK}
-              width={CHART_DIMENSIONS.yAxisWidth.sm}
+              hide={true}
+              width={0}
               domain={[0, (dataMax: number) => Math.ceil(dataMax * 1.15 / 1000) * 1000]}
             />
 

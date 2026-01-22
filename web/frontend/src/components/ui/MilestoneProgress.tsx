@@ -316,6 +316,8 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   const [celebration, setCelebration] = useState<Milestone | null>(null)
   const celebratedRef = useRef<Set<number>>(new Set())
   const [sparkles, setSparkles] = useState<Sparkle[]>([])
+  const isInitialMountRef = useRef(true)
+  const prevRevenueRef = useRef<number>(0)
 
   // Fetch smart goals from API (with seasonality and weekly breakdown)
   const { data: goalsData, isLoading: isLoadingGoals } = useSmartGoals()
@@ -467,12 +469,37 @@ export const MilestoneProgress = memo(function MilestoneProgress({
     }
   }, [milestones, effectiveRevenue])
 
-  // Trigger particles and celebrations
+  // Trigger particles and celebrations (only when revenue increases, not on initial load)
   useEffect(() => {
     if (!milestones || !trackRef.current || !metrics) return
 
+    const prevRevenue = prevRevenueRef.current
+    const isInitialMount = isInitialMountRef.current
+
+    // On initial mount, just mark already-reached milestones as celebrated (no animation)
+    if (isInitialMount) {
+      milestones.forEach((m) => {
+        if (effectiveRevenue >= m.amount) {
+          celebratedRef.current.add(m.amount)
+        }
+      })
+      isInitialMountRef.current = false
+      prevRevenueRef.current = effectiveRevenue
+      return
+    }
+
+    // Only celebrate if revenue actually increased
+    if (effectiveRevenue <= prevRevenue) {
+      prevRevenueRef.current = effectiveRevenue
+      return
+    }
+
     milestones.forEach((m, index) => {
-      if (effectiveRevenue >= m.amount && !celebratedRef.current.has(m.amount)) {
+      // Only celebrate milestones that were just crossed (not previously reached)
+      const wasReached = prevRevenue >= m.amount
+      const isNowReached = effectiveRevenue >= m.amount
+
+      if (isNowReached && !wasReached && !celebratedRef.current.has(m.amount)) {
         celebratedRef.current.add(m.amount)
 
         // Trigger particles
@@ -492,6 +519,8 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         }
       }
     })
+
+    prevRevenueRef.current = effectiveRevenue
   }, [milestones, effectiveRevenue, metrics])
 
   // Reset celebrations when period changes
@@ -514,7 +543,6 @@ export const MilestoneProgress = memo(function MilestoneProgress({
     : periodType === 'monthly' ? goalsData?.monthly
     : null
   const isCustomGoal = currentGoalData?.isCustom ?? false
-  const goalConfidence = currentGoalData?.confidence
 
   // Get monthly-specific data for tooltip
   const monthlyGoalData = goalsData?.monthly
@@ -549,34 +577,59 @@ export const MilestoneProgress = memo(function MilestoneProgress({
                 Custom
               </span>
             )}
-            {/* Auto-calculated indicator with confidence and method */}
-            {!isCustomGoal && goalConfidence && (
-              <span
-                className={`text-[10px] px-1.5 py-0.5 rounded font-medium cursor-help ${
-                  goalConfidence === 'high' ? 'bg-green-100 text-green-600' :
-                  goalConfidence === 'medium' ? 'bg-amber-100 text-amber-600' :
-                  'bg-slate-100 text-slate-500'
-                }`}
-                title={[
-                  `Smart goal (${goalConfidence} confidence)`,
-                  calculationMethod ? `Method: ${getMethodLabel(calculationMethod)}` : '',
-                  recent3MonthAvg ? `Recent 3mo avg: ${formatAmount(recent3MonthAvg)}` : '',
-                  lastYearRevenue ? `Last year: ${formatAmount(lastYearRevenue)}` : '',
-                  growthRate ? `Growth: ${(growthRate * 100).toFixed(0)}%` : '',
-                  seasonalityIndex ? `Seasonality: ${seasonalityIndex.toFixed(2)}x` : '',
-                ].filter(Boolean).join('\n')}
-              >
-                {getMethodLabel(calculationMethod)}
-              </span>
-            )}
-            {/* Growth rate badge (for monthly) */}
-            {!isCustomGoal && periodType === 'monthly' && growthRate && growthRate > 0 && (
-              <span
-                className="text-[10px] bg-emerald-100 text-emerald-600 px-1.5 py-0.5 rounded font-medium"
-                title={`Projected ${(growthRate * 100).toFixed(0)}% growth from last year`}
-              >
-                +{(growthRate * 100).toFixed(0)}%
-              </span>
+            {/* Info icon with tooltip for auto-calculated goals */}
+            {!isCustomGoal && !isLoadingGoals && (growthRate || recent3MonthAvg || lastYearRevenue) && (
+              <div className="relative group">
+                <button
+                  type="button"
+                  className="w-5 h-5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-700 flex items-center justify-center transition-colors"
+                  aria-label="Goal calculation details"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </button>
+                {/* Tooltip */}
+                <div className="absolute left-0 top-full mt-2 z-50 hidden group-hover:block">
+                  <div className="bg-slate-800 text-white text-xs rounded-lg shadow-lg p-3 min-w-[200px] max-w-[280px]">
+                    <div className="font-semibold mb-2 text-slate-200">Goal Calculation</div>
+                    <div className="space-y-1.5">
+                      {growthRate !== undefined && growthRate > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">YoY Growth:</span>
+                          <span className="text-emerald-400 font-medium">+{(growthRate * 100).toFixed(0)}%</span>
+                        </div>
+                      )}
+                      {recent3MonthAvg && recent3MonthAvg > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Recent 3mo avg:</span>
+                          <span className="text-white font-medium">{formatAmount(recent3MonthAvg)}</span>
+                        </div>
+                      )}
+                      {lastYearRevenue && lastYearRevenue > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Last year same month:</span>
+                          <span className="text-white font-medium">{formatAmount(lastYearRevenue)}</span>
+                        </div>
+                      )}
+                      {seasonalityIndex && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Seasonality index:</span>
+                          <span className="text-white font-medium">{seasonalityIndex.toFixed(2)}x</span>
+                        </div>
+                      )}
+                      {calculationMethod && (
+                        <div className="flex justify-between pt-1.5 mt-1.5 border-t border-slate-600">
+                          <span className="text-slate-400">Method:</span>
+                          <span className="text-slate-300">{getMethodLabel(calculationMethod)}</span>
+                        </div>
+                      )}
+                    </div>
+                    {/* Arrow */}
+                    <div className="absolute -top-1.5 left-4 w-3 h-3 bg-slate-800 rotate-45" />
+                  </div>
+                </div>
+              </div>
             )}
             {/* Loading indicator */}
             {isLoadingGoals && (

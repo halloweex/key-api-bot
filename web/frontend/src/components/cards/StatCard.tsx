@@ -119,12 +119,12 @@ export const StatCard = memo(function StatCard({
             <h3 className="text-xs lg:text-sm text-slate-600 font-medium mb-1">{label}</h3>
 
             {/* Value with animation */}
-            <div className={`flex items-baseline gap-2 ${icon ? "" : "justify-center"}`}>
+            <div className={`flex items-baseline gap-2 ${icon ? "" : "justify-center"} min-w-0`}>
               <AnimatedNumber
                 value={value}
                 formatter={formatter}
                 duration={animationDuration}
-                className={`text-2xl lg:text-3xl font-bold tracking-tight ${variantStyles[variant]}`}
+                className={`text-lg sm:text-xl lg:text-2xl font-bold tracking-tight truncate ${variantStyles[variant]}`}
               />
 
               {/* Trend indicator */}

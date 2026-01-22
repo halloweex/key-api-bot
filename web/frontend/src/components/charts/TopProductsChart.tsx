@@ -16,7 +16,6 @@ import {
   TOOLTIP_STYLE,
   TOOLTIP_LABEL_STYLE,
   GRID_PROPS,
-  X_AXIS_PROPS,
   Y_AXIS_PROPS,
   BAR_PROPS,
   wrapText,
@@ -102,7 +101,7 @@ export const TopProductsChart = memo(function TopProductsChart() {
       height="xxl"
       ariaLabel="Horizontal bar chart showing top 10 products by quantity sold"
     >
-      <div className="h-[320px] sm:h-[380px] lg:h-[420px]">
+      <div className="h-[380px] sm:h-[400px] lg:h-[420px]">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
             data={chartData}
@@ -110,12 +109,12 @@ export const TopProductsChart = memo(function TopProductsChart() {
             margin={CHART_DIMENSIONS.margin.withRightLabel}
           >
             <CartesianGrid {...GRID_PROPS} horizontal={false} />
-            <XAxis type="number" {...X_AXIS_PROPS} />
+            <XAxis type="number" hide={true} />
             <YAxis
               type="category"
               dataKey="name"
               {...Y_AXIS_PROPS}
-              width={120}
+              width={100}
               tick={(props) => <CustomYAxisTick {...props} tickData={tickData} />}
             />
             <Tooltip

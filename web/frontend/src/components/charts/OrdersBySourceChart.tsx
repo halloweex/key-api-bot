@@ -16,7 +16,6 @@ import {
   CHART_DIMENSIONS,
   TOOLTIP_STYLE,
   GRID_PROPS,
-  X_AXIS_PROPS,
   Y_AXIS_PROPS,
   BAR_PROPS,
 } from './config'
@@ -162,7 +161,7 @@ export const OrdersBySourceChart = memo(function OrdersBySourceChart() {
             <CartesianGrid {...GRID_PROPS} horizontal={false} />
             <XAxis
               type="number"
-              {...X_AXIS_PROPS}
+              hide={true}
             />
             <YAxis
               type="category"

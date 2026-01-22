@@ -12,8 +12,8 @@ export function FilterBar() {
         <PeriodFilter />
       </div>
 
-      {/* Other filters - wrap on mobile */}
-      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+      {/* Other filters - 2-column grid on mobile, flex on larger screens */}
+      <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-3">
         <SalesTypeFilter />
         <SourceFilter />
         <CategoryFilter />

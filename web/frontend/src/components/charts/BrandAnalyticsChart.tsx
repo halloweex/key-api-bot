@@ -15,10 +15,8 @@ import {
   CHART_DIMENSIONS,
   TOOLTIP_STYLE,
   GRID_PROPS,
-  X_AXIS_PROPS,
   Y_AXIS_PROPS,
   BAR_PROPS,
-  formatAxisK,
   truncateText,
 } from './config'
 import { useBrandAnalytics } from '../../hooks'
@@ -154,7 +152,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
     >
       {/* Metrics */}
       {metrics && (
-        <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3 mb-4">
           <MetricCard
             icon={<TagIcon />}
             label="Total Brands"
@@ -196,9 +194,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
                 <CartesianGrid {...GRID_PROPS} horizontal={false} />
                 <XAxis
                   type="number"
-                  {...X_AXIS_PROPS}
-                  fontSize={CHART_DIMENSIONS.fontSize.xs}
-                  tickFormatter={formatAxisK}
+                  hide={true}
                 />
                 <YAxis
                   type="category"
@@ -248,8 +244,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
                 <CartesianGrid {...GRID_PROPS} horizontal={false} />
                 <XAxis
                   type="number"
-                  {...X_AXIS_PROPS}
-                  fontSize={CHART_DIMENSIONS.fontSize.xs}
+                  hide={true}
                 />
                 <YAxis
                   type="category"

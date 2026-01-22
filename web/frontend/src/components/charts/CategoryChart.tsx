@@ -15,10 +15,8 @@ import {
   CHART_THEME,
   TOOLTIP_STYLE,
   GRID_PROPS,
-  X_AXIS_PROPS,
   Y_AXIS_PROPS,
   BAR_PROPS,
-  formatAxisK,
   truncateText,
 } from './config'
 import { useProductPerformance, useCategoryBreakdown } from '../../hooks'
@@ -264,19 +262,18 @@ export const CategoryChart = memo(function CategoryChart() {
           <BarChart
             data={chartData}
             layout="vertical"
-            margin={{ left: 10, right: 90, top: 5, bottom: 5 }}
+            margin={{ left: 10, right: 80, top: 5, bottom: 5 }}
           >
             <CartesianGrid {...GRID_PROPS} horizontal={false} />
             <XAxis
               type="number"
-              {...X_AXIS_PROPS}
-              tickFormatter={formatAxisK}
+              hide={true}
             />
             <YAxis
               type="category"
               dataKey="name"
               {...Y_AXIS_PROPS}
-              width={120}
+              width={100}
               tick={{ fontSize: 11 }}
             />
             <Tooltip
