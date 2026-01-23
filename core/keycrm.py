@@ -260,6 +260,17 @@ class KeyCRMClient:
         return await self._request("GET", "order-status")
 
     # ═══════════════════════════════════════════════════════════════════════════
+    # USER/MANAGER METHODS
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    async def get_users(
+        self,
+        params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Get users/managers from KeyCRM."""
+        return await self._request("GET", "users", params=params)
+
+    # ═══════════════════════════════════════════════════════════════════════════
     # SEARCH METHODS
     # ═══════════════════════════════════════════════════════════════════════════
 

@@ -7,7 +7,8 @@
     <list default="true" id="00033ac8-0ff0-4db9-8885-f829ba7bf2ad" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/core/duckdb_store.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/duckdb_store.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/CustomerInsightsChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/CustomerInsightsChart.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/keycrm.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/keycrm.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/sync_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/sync_service.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -289,7 +290,7 @@
       <workItem from="1768033818711" duration="2174000" />
       <workItem from="1768049467528" duration="304000" />
       <workItem from="1768049798317" duration="1059000" />
-      <workItem from="1768051049268" duration="199003000" />
+      <workItem from="1768051049268" duration="201576000" />
     </task>
     <servers />
   </component>

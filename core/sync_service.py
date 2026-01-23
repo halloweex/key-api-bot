@@ -127,6 +127,33 @@ class SyncService:
 
         return order_count, expense_count
 
+    async def sync_managers(self) -> int:
+        """
+        Sync managers/users from KeyCRM API.
+
+        Returns:
+            Number of managers synced
+        """
+        logger.info("Syncing managers...")
+        try:
+            client = await get_async_client()
+            managers = []
+
+            async for batch in client.paginate("users", page_size=50):
+                managers.extend(batch)
+
+            count = await self.store.upsert_managers(managers)
+
+            # Update manager order statistics
+            await self.store.update_manager_stats()
+            await self.store.set_last_sync_time("managers")
+
+            logger.info(f"Synced {count} managers from KeyCRM")
+            return count
+        except Exception as e:
+            logger.error(f"Manager sync error: {e}")
+            return 0
+
     async def full_sync(self, days_back: int = 365) -> dict:
         """
         Perform full sync of all data from KeyCRM.
@@ -138,10 +165,13 @@ class SyncService:
             Dict with sync statistics
         """
         logger.info(f"Starting full sync (last {days_back} days)...")
-        stats = {"orders": 0, "products": 0, "categories": 0, "expense_types": 0, "expenses": 0}
+        stats = {"orders": 0, "products": 0, "categories": 0, "expense_types": 0, "expenses": 0, "managers": 0}
 
         try:
             client = await get_async_client()
+
+            # Sync managers first (needed for retail/b2b filtering)
+            stats["managers"] = await self.sync_managers()
 
             # Sync categories first
             logger.info("Syncing categories...")
@@ -217,7 +247,7 @@ class SyncService:
         Returns:
             Dict with sync statistics
         """
-        stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0}
+        stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0, "managers": 0}
 
         try:
             client = await get_async_client()
@@ -258,6 +288,11 @@ class SyncService:
                     products.extend(batch)
                 stats["products"] = await self.store.upsert_products(products)
                 await self.store.set_last_sync_time("products")
+
+            # Sync managers daily (86400 seconds = 24 hours)
+            last_managers_sync = await self.store.get_last_sync_time("managers")
+            if not last_managers_sync or (datetime.now(DEFAULT_TZ) - last_managers_sync).total_seconds() > 86400:
+                stats["managers"] = await self.sync_managers()
 
         except Exception as e:
             logger.error(f"Incremental sync error: {e}", exc_info=True)

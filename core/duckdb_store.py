@@ -226,6 +226,19 @@ class DuckDBStore:
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Managers/Users table (synced from KeyCRM)
+        CREATE TABLE IF NOT EXISTS managers (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR NOT NULL,
+            email VARCHAR,
+            status VARCHAR,                       -- 'active', 'blocked', 'pending'
+            is_retail BOOLEAN DEFAULT FALSE,      -- TRUE for retail managers, FALSE for B2B
+            first_order_date DATE,                -- Calculated from orders
+            last_order_date DATE,                 -- Calculated from orders
+            order_count INTEGER DEFAULT 0,        -- Total orders handled
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- Indexes for common queries
         CREATE INDEX IF NOT EXISTS idx_orders_ordered_at ON orders(ordered_at);
         CREATE INDEX IF NOT EXISTS idx_orders_source_id ON orders(source_id);
@@ -239,6 +252,7 @@ class DuckDBStore:
         CREATE INDEX IF NOT EXISTS idx_expenses_order_id ON expenses(order_id);
         CREATE INDEX IF NOT EXISTS idx_expenses_expense_type_id ON expenses(expense_type_id);
         CREATE INDEX IF NOT EXISTS idx_expenses_payment_date ON expenses(payment_date);
+        CREATE INDEX IF NOT EXISTS idx_managers_is_retail ON managers(is_retail);
         """
         self._connection.execute(schema_sql)
 
@@ -262,6 +276,8 @@ class DuckDBStore:
     def _build_sales_type_filter(self, sales_type: str, table_alias: str = "o") -> str:
         """Build SQL clause for retail/b2b/all filtering based on manager_id.
 
+        Uses managers table if populated, otherwise falls back to hardcoded RETAIL_MANAGER_IDS.
+
         Args:
             sales_type: 'retail', 'b2b', or 'all'
             table_alias: Table alias for orders table (default 'o')
@@ -276,9 +292,15 @@ class DuckDBStore:
             # B2B = only Olga D (manager_id = 15)
             return f"{table_alias}.manager_id = {B2B_MANAGER_ID}"
         else:
-            # Retail = specific managers (22, 4, 16) + Shopify orders (NULL manager)
+            # Retail = managers marked as retail + Shopify orders (NULL manager)
+            # Uses managers table with fallback to hardcoded IDs if table is empty
             manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
-            return f"({table_alias}.manager_id IS NULL OR {table_alias}.manager_id IN ({manager_list}))"
+            return f"""(
+                {table_alias}.manager_id IS NULL
+                OR {table_alias}.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE)
+                OR (NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
+                    AND {table_alias}.manager_id IN ({manager_list}))
+            )"""
 
     # ─── Sync Methods ─────────────────────────────────────────────────────────
 
@@ -505,6 +527,124 @@ class DuckDBStore:
                 count += 1
 
             return count
+
+    async def upsert_managers(self, managers: List[Dict[str, Any]]) -> int:
+        """Insert or update managers from KeyCRM API response.
+
+        Args:
+            managers: List of manager/user dicts from KeyCRM API
+
+        Returns:
+            Number of managers upserted
+        """
+        if not managers:
+            return 0
+
+        async with self.connection() as conn:
+            count = 0
+            for mgr in managers:
+                conn.execute("""
+                    INSERT OR REPLACE INTO managers
+                    (id, name, email, status, is_retail, synced_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, [
+                    mgr.get("id"),
+                    mgr.get("name") or mgr.get("full_name", "Unknown"),
+                    mgr.get("email"),
+                    mgr.get("status"),  # 'active', 'blocked', 'pending'
+                    mgr.get("id") in RETAIL_MANAGER_IDS  # Set is_retail based on known IDs
+                ])
+                count += 1
+
+            logger.info(f"Upserted {count} managers to DuckDB")
+            return count
+
+    async def update_manager_stats(self) -> int:
+        """Update manager order statistics from orders table.
+
+        Updates first_order_date, last_order_date, and order_count for all managers.
+
+        Returns:
+            Number of managers updated
+        """
+        async with self.connection() as conn:
+            # Update stats for managers who have orders
+            result = conn.execute("""
+                UPDATE managers m
+                SET
+                    first_order_date = stats.first_order,
+                    last_order_date = stats.last_order,
+                    order_count = stats.order_cnt
+                FROM (
+                    SELECT
+                        manager_id,
+                        MIN(DATE(ordered_at)) as first_order,
+                        MAX(DATE(ordered_at)) as last_order,
+                        COUNT(*) as order_cnt
+                    FROM orders
+                    WHERE manager_id IS NOT NULL
+                    GROUP BY manager_id
+                ) stats
+                WHERE m.id = stats.manager_id
+            """)
+            count = result.fetchone()
+            logger.info(f"Updated manager statistics")
+            return count[0] if count else 0
+
+    async def get_retail_manager_ids(self) -> List[int]:
+        """Get list of retail manager IDs from managers table.
+
+        Returns:
+            List of manager IDs where is_retail = TRUE
+        """
+        async with self.connection() as conn:
+            result = conn.execute(
+                "SELECT id FROM managers WHERE is_retail = TRUE"
+            ).fetchall()
+            return [row[0] for row in result]
+
+    async def set_manager_retail_status(self, manager_id: int, is_retail: bool) -> None:
+        """Update retail status for a specific manager.
+
+        Args:
+            manager_id: Manager ID to update
+            is_retail: TRUE for retail, FALSE for B2B/other
+        """
+        async with self.connection() as conn:
+            conn.execute(
+                "UPDATE managers SET is_retail = ? WHERE id = ?",
+                [is_retail, manager_id]
+            )
+            logger.info(f"Manager {manager_id} retail status set to {is_retail}")
+
+    async def get_all_managers(self) -> List[Dict[str, Any]]:
+        """Get all managers with their statistics.
+
+        Returns:
+            List of manager dicts with id, name, status, is_retail, order_count, etc.
+        """
+        async with self.connection() as conn:
+            result = conn.execute("""
+                SELECT
+                    id, name, email, status, is_retail,
+                    first_order_date, last_order_date, order_count, synced_at
+                FROM managers
+                ORDER BY order_count DESC NULLS LAST, name
+            """).fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "email": row[2],
+                    "status": row[3],
+                    "is_retail": row[4],
+                    "first_order_date": row[5],
+                    "last_order_date": row[6],
+                    "order_count": row[7],
+                    "synced_at": row[8],
+                }
+                for row in result
+            ]
 
     # ─── Query Methods ────────────────────────────────────────────────────────
 
