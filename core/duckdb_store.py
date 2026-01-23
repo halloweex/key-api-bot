@@ -253,6 +253,12 @@ class DuckDBStore:
         CREATE INDEX IF NOT EXISTS idx_expenses_expense_type_id ON expenses(expense_type_id);
         CREATE INDEX IF NOT EXISTS idx_expenses_payment_date ON expenses(payment_date);
         CREATE INDEX IF NOT EXISTS idx_managers_is_retail ON managers(is_retail);
+
+        -- Composite indexes for common aggregate queries (performance optimization)
+        CREATE INDEX IF NOT EXISTS idx_orders_source_date ON orders(source_id, ordered_at);
+        CREATE INDEX IF NOT EXISTS idx_orders_status_date ON orders(status_id, ordered_at);
+        CREATE INDEX IF NOT EXISTS idx_orders_manager_date ON orders(manager_id, ordered_at);
+        CREATE INDEX IF NOT EXISTS idx_orders_buyer_date ON orders(buyer_id, ordered_at);
         """
         self._connection.execute(schema_sql)
 

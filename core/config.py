@@ -206,3 +206,48 @@ CACHE_TTL_SECONDS = config.cache.ttl_seconds
 def is_admin(user_id: int) -> bool:
     """Check if user is an admin (backwards compatibility)."""
     return config.bot.is_admin(user_id)
+
+
+class ConfigurationError(Exception):
+    """Raised when required configuration is missing or invalid."""
+    pass
+
+
+def validate_config(require_bot: bool = False, require_api: bool = True) -> None:
+    """
+    Validate that all required configuration is present.
+
+    Call this on application startup to fail fast with clear error messages
+    instead of cryptic runtime failures.
+
+    Args:
+        require_bot: If True, validate bot token (for bot service)
+        require_api: If True, validate API key (for web service)
+
+    Raises:
+        ConfigurationError: If required configuration is missing
+    """
+    errors = []
+
+    # Always required
+    if require_api and not config.api.key:
+        errors.append("KEYCRM_API_KEY is required but not set")
+
+    if require_bot and not config.bot.token:
+        errors.append("BOT_TOKEN is required but not set")
+
+    # Validate API key format (should be a reasonable length)
+    if config.api.key and len(config.api.key) < 20:
+        errors.append("KEYCRM_API_KEY appears to be invalid (too short)")
+
+    # Validate bot token format (should contain colon)
+    if config.bot.token and ":" not in config.bot.token:
+        errors.append("BOT_TOKEN appears to be invalid (expected format: 123456:ABC-DEF...)")
+
+    # Validate admin IDs if bot is required
+    if require_bot and not config.bot.admin_user_ids:
+        errors.append("ADMIN_USER_IDS is required but not set (comma-separated Telegram user IDs)")
+
+    if errors:
+        error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        raise ConfigurationError(error_msg)

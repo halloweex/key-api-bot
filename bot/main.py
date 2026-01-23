@@ -20,6 +20,7 @@ from bot.api_client import KeyCRMClient
 from bot.services import ReportService
 from bot import handlers
 from bot import database
+from core.config import validate_config, ConfigurationError
 
 # Configure logging
 logging.basicConfig(
@@ -123,15 +124,12 @@ def create_conversation_handler() -> ConversationHandler:
 
 def main() -> None:
     """Start the bot."""
-    # Validate configuration
-    if not BOT_TOKEN:
-        logger.error("No BOT_TOKEN found in environment variables")
-        logger.error("Please set the BOT_TOKEN environment variable or add it to your .env file")
-        return
-
-    if not KEYCRM_API_KEY:
-        logger.error("No KEYCRM_API_KEY found in environment variables")
-        logger.error("Please set the KEYCRM_API_KEY environment variable or add it to your .env file")
+    # Validate configuration early - fail fast with clear errors
+    try:
+        validate_config(require_bot=True, require_api=True)
+        logger.info("Configuration validated")
+    except ConfigurationError as e:
+        logger.critical(f"Configuration error:\n{e}")
         return
 
     logger.info("Starting KeyCRM Telegram bot (Refactored Version)...")

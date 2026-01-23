@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from core.keycrm import get_async_client
 from core.duckdb_store import get_store, DuckDBStore
+from core.exceptions import KeyCRMError, KeyCRMConnectionError, KeyCRMAPIError
 from bot.config import DEFAULT_TIMEZONE
 
 logger = logging.getLogger(__name__)
@@ -102,7 +103,8 @@ class SyncService:
                 async for batch in client.paginate("order", params=params, page_size=50):
                     for order in batch:
                         orders_by_id[order["id"]] = order  # Overwrites with latest data
-            except Exception as e:
+            except KeyCRMError as e:
+                # filter[updated_between] may not be supported - fall back gracefully
                 logger.warning(f"filter[updated_between] failed: {e}")
 
         updated_count = len(orders_by_id) - created_count
@@ -150,7 +152,13 @@ class SyncService:
 
             logger.info(f"Synced {count} managers from KeyCRM")
             return count
-        except Exception as e:
+        except KeyCRMConnectionError as e:
+            logger.warning(f"Manager sync connection error (will retry): {e}")
+            return 0
+        except KeyCRMAPIError as e:
+            logger.error(f"Manager sync API error: {e}")
+            return 0
+        except KeyCRMError as e:
             logger.error(f"Manager sync error: {e}")
             return 0
 
@@ -234,7 +242,13 @@ class SyncService:
             await self.store.set_last_sync_time("orders", last_order_time)
             logger.info(f"Full sync complete: {stats}, checkpoint: {last_order_time}")
 
-        except Exception as e:
+        except KeyCRMConnectionError as e:
+            logger.error(f"Full sync connection error: {e}", exc_info=True)
+            raise
+        except KeyCRMAPIError as e:
+            logger.error(f"Full sync API error (status={e.status_code}): {e}", exc_info=True)
+            raise
+        except KeyCRMError as e:
             logger.error(f"Full sync error: {e}", exc_info=True)
             raise
 
@@ -294,7 +308,11 @@ class SyncService:
             if not last_managers_sync or (datetime.now(DEFAULT_TZ) - last_managers_sync).total_seconds() > 86400:
                 stats["managers"] = await self.sync_managers()
 
-        except Exception as e:
+        except KeyCRMConnectionError as e:
+            logger.warning(f"Incremental sync connection error (will retry): {e}")
+        except KeyCRMAPIError as e:
+            logger.error(f"Incremental sync API error: {e}", exc_info=True)
+        except KeyCRMError as e:
             logger.error(f"Incremental sync error: {e}", exc_info=True)
 
         return stats
@@ -326,7 +344,9 @@ class SyncService:
                 stats["expenses"] = expense_count
                 logger.debug(f"Today sync: {stats['orders']} orders, {stats['expenses']} expenses")
 
-        except Exception as e:
+        except KeyCRMConnectionError as e:
+            logger.debug(f"Today sync connection error (will retry): {e}")
+        except KeyCRMError as e:
             logger.error(f"Today sync error: {e}")
 
         return stats
@@ -345,8 +365,10 @@ class SyncService:
             while not self._stop_sync:
                 try:
                     await self.sync_today()
-                except Exception as e:
-                    logger.error(f"Background sync error: {e}")
+                except KeyCRMConnectionError as e:
+                    logger.debug(f"Background sync connection error (will retry): {e}")
+                except KeyCRMError as e:
+                    logger.warning(f"Background sync error: {e}")
 
                 # Wait for next cycle
                 for _ in range(interval_seconds):

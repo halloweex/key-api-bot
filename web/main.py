@@ -16,6 +16,7 @@ from web.routes import api, pages, auth
 from bot.database import init_database
 from core.duckdb_store import get_store, close_store
 from core.sync_service import init_and_sync, get_sync_service
+from core.config import validate_config, ConfigurationError
 
 # Configure logging
 logging.basicConfig(
@@ -69,7 +70,15 @@ app.include_router(api.router, prefix="/api")
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("KoreanStory Dashboard started")
+    logger.info("KoreanStory Dashboard starting...")
+
+    # Validate configuration early - fail fast with clear errors
+    try:
+        validate_config(require_bot=False, require_api=True)
+        logger.info("Configuration validated")
+    except ConfigurationError as e:
+        logger.critical(f"Configuration error: {e}")
+        raise SystemExit(1)
 
     # Initialize SQLite database (for bot operations)
     init_database()
