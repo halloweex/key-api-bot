@@ -28,7 +28,8 @@ DEFAULT_TZ = ZoneInfo(DEFAULT_TIMEZONE)
 B2B_MANAGER_ID = 15
 
 # Retail manager IDs (exclude B2B/wholesale)
-RETAIL_MANAGER_IDS = [22, 4, 16]
+# Retail manager IDs (including historical managers who left: 8, 11, 17, 19)
+RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]
 
 # Timezone for date extraction - KeyCRM stores timestamps in +04:00 (server time)
 # but UI displays in Kyiv timezone, so we convert for consistency
@@ -1043,8 +1044,8 @@ class DuckDBStore:
             overall_aov = total_revenue / total_orders if total_orders > 0 else 0
 
             # CLV Metrics - Calculate Customer Lifetime Value
-            # Using 240-day inactivity window (based on P95 analysis of 232 days from production data)
-            INACTIVITY_WINDOW_DAYS = 240
+            # Using 250-day inactivity window (P95=243 days from production analysis)
+            INACTIVITY_WINDOW_DAYS = 250
 
             # Get CLV data: lifespan, purchase frequency, and value for repeat customers
             clv_result = conn.execute(f"""

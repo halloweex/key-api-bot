@@ -261,7 +261,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                       <strong className="text-teal-400">Lifespan:</strong> Average days between first and last order for repeat customers.
                     </p>
                     <p className="text-xs text-slate-300">
-                      <strong className="text-slate-400">Note:</strong> Based on 240-day inactivity window (P95 = 232 days).
+                      <strong className="text-slate-400">Note:</strong> Based on 250-day inactivity window (P95 = 243 days).
                     </p>
                   </InfoTooltipContent>
                 )}

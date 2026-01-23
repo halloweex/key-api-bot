@@ -75,7 +75,7 @@ def analyze_all_gaps(conn: duckdb.DuckDBPyConnection) -> list:
         FROM orders
         WHERE buyer_id IS NOT NULL
           AND status_id NOT IN (19, 22, 21, 23)  -- Exclude returns
-          AND (manager_id IN (22, 4, 16) OR (manager_id IS NULL AND source_id = 4))  -- Retail only
+          AND (manager_id IN (4, 8, 11, 16, 17, 19, 22) OR (manager_id IS NULL AND source_id = 4))  -- Retail only
     ),
     purchase_gaps AS (
         SELECT
@@ -103,7 +103,7 @@ def analyze_first_to_second_gap(conn: duckdb.DuckDBPyConnection) -> list:
         FROM orders
         WHERE buyer_id IS NOT NULL
           AND status_id NOT IN (19, 22, 21, 23)
-          AND (manager_id IN (22, 4, 16) OR (manager_id IS NULL AND source_id = 4))
+          AND (manager_id IN (4, 8, 11, 16, 17, 19, 22) OR (manager_id IS NULL AND source_id = 4))
     )
     SELECT DATE_DIFF('day', o1.ordered_at, o2.ordered_at) as gap
     FROM numbered o1
@@ -125,7 +125,7 @@ def get_customer_stats(conn: duckdb.DuckDBPyConnection) -> dict:
         FROM orders
         WHERE buyer_id IS NOT NULL
           AND status_id NOT IN (19, 22, 21, 23)
-          AND (manager_id IN (22, 4, 16) OR (manager_id IS NULL AND source_id = 4))
+          AND (manager_id IN (4, 8, 11, 16, 17, 19, 22) OR (manager_id IS NULL AND source_id = 4))
         GROUP BY buyer_id
     )
     SELECT
