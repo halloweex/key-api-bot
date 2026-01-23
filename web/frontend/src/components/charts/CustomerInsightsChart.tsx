@@ -125,7 +125,7 @@ function InfoButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className="ml-2 text-slate-400 hover:text-slate-600 transition-colors"
+      className="text-slate-400 hover:text-slate-600 transition-colors"
       aria-label="How is this calculated?"
     >
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
@@ -194,7 +194,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
 
   return (
     <ChartContainer
-      title="Customer Insights"
+      title="Customer Lifetime Value Metrics"
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
@@ -244,7 +244,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
           {/* Row 2: CLV metrics */}
           {metrics.customerLifetimeValue !== undefined && (
             <div className="relative">
-              <div className="flex items-center gap-2 mb-2">
+              <div className="flex items-center gap-1.5 mb-2">
                 <h4 className="text-xs font-medium text-slate-500 uppercase tracking-wide">
                   Customer Lifetime Value Metrics
                 </h4>
@@ -310,7 +310,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
         {/* New vs Returning Pie Chart */}
         <div>
           <div className="relative">
-            <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center">
+            <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
               New vs Returning Customers
               <InfoButton onClick={() => setShowCustomerInfo(!showCustomerInfo)} />
             </h4>
@@ -376,7 +376,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
         {/* AOV Trend Line Chart */}
         <div>
           <div className="relative">
-            <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center">
+            <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
               Average Order Value Trend
               <InfoButton onClick={() => setShowAovInfo(!showAovInfo)} />
             </h4>

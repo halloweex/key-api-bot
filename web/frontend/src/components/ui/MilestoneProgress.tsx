@@ -310,7 +310,7 @@ function InfoButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className="ml-2 text-slate-400 hover:text-slate-600 transition-colors"
+      className="text-slate-400 hover:text-slate-600 transition-colors"
       aria-label="Goal calculation details"
     >
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
@@ -604,7 +604,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
       <div className={`bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-card-hover)] transition-all duration-300 p-5 ${className}`}>
         {/* Header */}
         <div className="flex justify-between items-center mb-4">
-          <div className="relative flex items-center gap-2">
+          <div className="relative flex items-center gap-1.5">
             <div className={`w-2 h-2 rounded-full ${metrics.themeColor}`} />
             <span className="text-sm font-semibold text-slate-700">{periodLabel}</span>
             {/* Custom goal indicator */}

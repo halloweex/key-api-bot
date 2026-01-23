@@ -272,7 +272,7 @@ function InfoButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className="ml-2 text-slate-400 hover:text-slate-600 transition-colors"
+      className="text-slate-400 hover:text-slate-600 transition-colors"
       aria-label="Chart information"
     >
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
