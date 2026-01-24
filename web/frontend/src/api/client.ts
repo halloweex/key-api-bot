@@ -136,17 +136,24 @@ async function fetchWithTimeout(
 
 /**
  * Combines multiple AbortSignals into one.
- * The combined signal aborts when any of the input signals abort.
+ * Uses native AbortSignal.any() for proper cleanup (no memory leaks).
  */
 function combineSignals(...signals: AbortSignal[]): AbortSignal {
+  // Use native AbortSignal.any() if available (modern browsers)
+  // This properly handles cleanup when signals are no longer needed
+  if ('any' in AbortSignal) {
+    return AbortSignal.any(signals)
+  }
+
+  // Fallback for older browsers (Safari < 17.4, Firefox < 124)
   const controller = new AbortController()
 
   for (const signal of signals) {
     if (signal.aborted) {
-      controller.abort()
+      controller.abort(signal.reason)
       break
     }
-    signal.addEventListener('abort', () => controller.abort(), { once: true })
+    signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
   }
 
   return controller.signal

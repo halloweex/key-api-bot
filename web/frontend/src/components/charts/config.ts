@@ -115,6 +115,29 @@ export const PIE_PROPS = {
   labelLine: false,
 } as const
 
+/** Label list styles - reusable objects to avoid recreating on each render */
+export const LABEL_STYLE = {
+  default: {
+    fill: CHART_THEME.text,
+    fontSize: 10,
+    fontWeight: 500,
+  } as CSSProperties,
+  small: {
+    fill: CHART_THEME.text,
+    fontSize: 9,
+    fontWeight: 500,
+  } as CSSProperties,
+} as const
+
+/** Container height styles - avoid recreating style objects in JSX */
+export const HEIGHT_STYLE = {
+  sm: { height: CHART_DIMENSIONS.height.sm } as CSSProperties,
+  md: { height: CHART_DIMENSIONS.height.md } as CSSProperties,
+  lg: { height: CHART_DIMENSIONS.height.lg } as CSSProperties,
+  xl: { height: CHART_DIMENSIONS.height.xl } as CSSProperties,
+  xxl: { height: CHART_DIMENSIONS.height.xxl } as CSSProperties,
+} as const
+
 // ─── Formatters ──────────────────────────────────────────────────────────────
 
 /** Format large numbers as "Xk" */

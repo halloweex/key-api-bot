@@ -17,8 +17,77 @@ import {
   GRID_PROPS,
   Y_AXIS_PROPS,
   BAR_PROPS,
+  LABEL_STYLE,
   truncateText,
 } from './config'
+import type { CSSProperties } from 'react'
+
+// ─── Tooltip Styles ───────────────────────────────────────────────────────────
+
+const TOOLTIP_CONTAINER_STYLE: CSSProperties = {
+  ...TOOLTIP_STYLE,
+  padding: '12px 16px',
+  minWidth: '180px',
+}
+
+const TOOLTIP_HEADER_STYLE: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '8px',
+  marginBottom: '8px',
+  paddingBottom: '8px',
+  borderBottom: `1px solid ${CHART_THEME.border}`,
+}
+
+const TOOLTIP_ROW_STYLE: CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  marginBottom: '4px',
+}
+
+const TOOLTIP_ROW_LAST_STYLE: CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+}
+
+const TOOLTIP_LABEL_SMALL: CSSProperties = {
+  color: CHART_THEME.muted,
+  fontSize: '12px',
+}
+
+const TOOLTIP_VALUE_STYLE: CSSProperties = {
+  fontWeight: 600,
+  color: CHART_THEME.text,
+  fontSize: '13px',
+}
+
+const TOOLTIP_HINT_CONTAINER: CSSProperties = {
+  marginTop: '8px',
+  paddingTop: '8px',
+  borderTop: `1px solid ${CHART_THEME.border}`,
+  textAlign: 'center',
+}
+
+const TOOLTIP_HINT_TEXT: CSSProperties = {
+  color: CHART_THEME.muted,
+  fontSize: '11px',
+  fontStyle: 'italic',
+}
+
+const COLOR_INDICATOR_STYLE: CSSProperties = {
+  width: '12px',
+  height: '12px',
+  borderRadius: '3px',
+  flexShrink: 0,
+}
+
+const CATEGORY_NAME_STYLE: CSSProperties = {
+  fontWeight: 600,
+  color: CHART_THEME.text,
+  fontSize: '13px',
+}
 import { useProductPerformance, useCategoryBreakdown } from '../../hooks'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
 import { CATEGORY_COLORS } from '../../utils/colors'
@@ -64,80 +133,35 @@ function CustomTooltip({ active, payload, isSubcategory }: TooltipProps) {
   if (!data) return null
 
   return (
-    <div
-      style={{
-        ...TOOLTIP_STYLE,
-        padding: '12px 16px',
-        minWidth: '180px',
-      }}
-    >
+    <div style={TOOLTIP_CONTAINER_STYLE}>
       {/* Category name with color indicator */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '8px',
-        marginBottom: '8px',
-        paddingBottom: '8px',
-        borderBottom: `1px solid ${CHART_THEME.border}`,
-      }}>
-        <div style={{
-          width: '12px',
-          height: '12px',
-          borderRadius: '3px',
-          background: data.color,
-          flexShrink: 0,
-        }} />
-        <span style={{
-          fontWeight: 600,
-          color: CHART_THEME.text,
-          fontSize: '13px',
-        }}>
+      <div style={TOOLTIP_HEADER_STYLE}>
+        <div style={{ ...COLOR_INDICATOR_STYLE, background: data.color }} />
+        <span style={CATEGORY_NAME_STYLE}>
           {data.fullName}
         </span>
       </div>
 
       {/* Revenue */}
-      <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        marginBottom: '4px',
-      }}>
-        <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>Revenue</span>
-        <span style={{ fontWeight: 600, color: CHART_THEME.text, fontSize: '13px' }}>
+      <div style={TOOLTIP_ROW_STYLE}>
+        <span style={TOOLTIP_LABEL_SMALL}>Revenue</span>
+        <span style={TOOLTIP_VALUE_STYLE}>
           {formatCurrency(data.value)}
         </span>
       </div>
 
       {/* Percentage */}
-      <div style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-      }}>
-        <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>Share</span>
-        <span style={{
-          fontWeight: 600,
-          color: data.color,
-          fontSize: '13px',
-        }}>
+      <div style={TOOLTIP_ROW_LAST_STYLE}>
+        <span style={TOOLTIP_LABEL_SMALL}>Share</span>
+        <span style={{ ...TOOLTIP_VALUE_STYLE, color: data.color }}>
           {data.percent.toFixed(1)}%
         </span>
       </div>
 
       {/* Drill-down hint for parent categories */}
       {!isSubcategory && (
-        <div style={{
-          marginTop: '8px',
-          paddingTop: '8px',
-          borderTop: `1px solid ${CHART_THEME.border}`,
-          textAlign: 'center',
-        }}>
-          <span style={{
-            color: CHART_THEME.muted,
-            fontSize: '11px',
-            fontStyle: 'italic',
-          }}>
+        <div style={TOOLTIP_HINT_CONTAINER}>
+          <span style={TOOLTIP_HINT_TEXT}>
             Click to see subcategories
           </span>
         </div>
@@ -283,7 +307,10 @@ export const CategoryChart = memo(function CategoryChart() {
             <Bar
               dataKey="value"
               {...BAR_PROPS}
-              onClick={(data) => handleBarClick(data as unknown as ChartDataPoint)}
+              onClick={(_data, index) => {
+                const item = chartData[index]
+                if (item) handleBarClick(item)
+              }}
               style={{ cursor: selectedCategory ? 'default' : 'pointer' }}
             >
               {chartData.map((entry, index) => (
@@ -292,11 +319,7 @@ export const CategoryChart = memo(function CategoryChart() {
               <LabelList
                 dataKey="label"
                 position="right"
-                style={{
-                  fill: CHART_THEME.text,
-                  fontSize: 10,
-                  fontWeight: 500,
-                }}
+                style={LABEL_STYLE.default}
               />
             </Bar>
           </BarChart>

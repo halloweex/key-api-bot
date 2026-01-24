@@ -12,11 +12,13 @@ import {
 import { ChartContainer } from './ChartContainer'
 import {
   CHART_THEME,
-  CHART_DIMENSIONS,
   TOOLTIP_STYLE,
   GRID_PROPS,
   Y_AXIS_PROPS,
   BAR_PROPS,
+  LABEL_STYLE,
+  HEIGHT_STYLE,
+  CHART_DIMENSIONS,
   truncateText,
 } from './config'
 import { useBrandAnalytics } from '../../hooks'
@@ -164,7 +166,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
         {/* Top Brands by Revenue */}
         <div>
           <h4 className="text-sm font-semibold text-slate-700 mb-2">Top 10 by Revenue</h4>
-          <div style={{ height: CHART_DIMENSIONS.height.xxl }}>
+          <div style={HEIGHT_STYLE.xxl}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
                 data={revenueData}
@@ -199,11 +201,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
                   <LabelList
                     dataKey="revenueLabel"
                     position="right"
-                    style={{
-                      fill: CHART_THEME.text,
-                      fontSize: 10,
-                      fontWeight: 500,
-                    }}
+                    style={LABEL_STYLE.default}
                   />
                 </Bar>
               </BarChart>
@@ -214,7 +212,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
         {/* Top Brands by Quantity */}
         <div>
           <h4 className="text-sm font-semibold text-slate-700 mb-2">Top 10 by Quantity</h4>
-          <div style={{ height: CHART_DIMENSIONS.height.xxl }}>
+          <div style={HEIGHT_STYLE.xxl}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
                 data={quantityData}
@@ -249,11 +247,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
                   <LabelList
                     dataKey="quantityLabel"
                     position="right"
-                    style={{
-                      fill: CHART_THEME.text,
-                      fontSize: 10,
-                      fontWeight: 500,
-                    }}
+                    style={LABEL_STYLE.default}
                   />
                 </Bar>
               </BarChart>

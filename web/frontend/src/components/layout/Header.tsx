@@ -1,6 +1,16 @@
+import { useQuery } from '@tanstack/react-query'
 import { FilterBar } from '../filters'
+import { api } from '../../api/client'
+import type { HealthResponse } from '../../types/api'
 
 export function Header() {
+  const { data: health } = useQuery<HealthResponse>({
+    queryKey: ['health'],
+    queryFn: () => api.getHealth(),
+    staleTime: 5 * 60 * 1000, // 5 minutes
+    refetchOnWindowFocus: false,
+  })
+
   return (
     <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200/60 px-3 sm:px-6 py-3 sm:py-4">
       <div className="flex flex-col gap-3 sm:gap-4 max-w-[1800px] mx-auto">
@@ -27,6 +37,11 @@ export function Header() {
               <p className="text-[10px] sm:text-xs text-slate-500 hidden xs:block">Sales & Performance</p>
             </div>
           </div>
+          {health?.version && (
+            <span className="text-[10px] sm:text-xs text-slate-400 font-medium">
+              v{health.version}
+            </span>
+          )}
         </div>
 
         {/* Filters row */}
