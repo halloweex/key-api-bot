@@ -30,6 +30,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     return (
       <button
         ref={ref}
+        aria-pressed={active !== undefined ? active : undefined}
         className={`
           inline-flex items-center justify-center
           font-medium rounded-lg

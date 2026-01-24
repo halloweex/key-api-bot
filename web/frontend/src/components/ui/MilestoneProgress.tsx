@@ -346,6 +346,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   className = ''
 }: MilestoneProgressProps) {
   const { period } = useFilterStore()
+  const containerRef = useRef<HTMLDivElement>(null)
   const trackRef = useRef<HTMLDivElement>(null)
   const fillRef = useRef<HTMLDivElement>(null)
   const [celebration, setCelebration] = useState<Milestone | null>(null)
@@ -354,6 +355,20 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   const [sparkles, setSparkles] = useState<Sparkle[]>([])
   const isInitialMountRef = useRef(true)
   const prevRevenueRef = useRef<number>(0)
+  const [isVisible, setIsVisible] = useState(false)
+
+  // Intersection Observer to detect visibility
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    const observer = new IntersectionObserver(
+      ([entry]) => setIsVisible(entry.isIntersecting),
+      { threshold: 0.1 }
+    )
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [])
 
   // Fetch smart goals from API (with seasonality and weekly breakdown)
   const { data: goalsData, isLoading: isLoadingGoals } = useSmartGoals()
@@ -408,12 +423,13 @@ export const MilestoneProgress = memo(function MilestoneProgress({
     }
   }, [])
 
-  // Regenerate sparkles periodically for continuous effect
+  // Regenerate sparkles periodically for continuous effect (only when visible)
   useEffect(() => {
+    if (!isVisible) return
     regenerateSparkles()
     const interval = setInterval(regenerateSparkles, 3000)
     return () => clearInterval(interval)
-  }, [regenerateSparkles, revenue])
+  }, [regenerateSparkles, revenue, isVisible])
 
   // Get period type
   const periodType = getPeriodType(period)
@@ -564,6 +580,25 @@ export const MilestoneProgress = memo(function MilestoneProgress({
     celebratedRef.current.clear()
   }, [period])
 
+  // Show skeleton while loading goals
+  if (isLoadingGoals && periodType) {
+    return (
+      <div className={`bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] p-5 ${className}`}>
+        <div className="animate-pulse">
+          <div className="flex items-center justify-between mb-4">
+            <div className="h-5 bg-slate-200 rounded w-24" />
+            <div className="h-4 bg-slate-200 rounded w-32" />
+          </div>
+          <div className="h-3 bg-slate-200 rounded-full w-full mb-3" />
+          <div className="flex justify-between">
+            <div className="h-3 bg-slate-200 rounded w-16" />
+            <div className="h-3 bg-slate-200 rounded w-16" />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   // Don't render for custom periods or if no milestones
   if (!periodType || !milestones || milestones.length === 0 || !metrics) {
     return null
@@ -601,7 +636,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
 
   return (
     <>
-      <div className={`bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-card-hover)] transition-all duration-300 p-5 ${className}`}>
+      <div ref={containerRef} className={`bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-card-hover)] transition-all duration-300 p-5 ${className}`}>
         {/* Header */}
         <div className="flex justify-between items-center mb-4">
           <div className="relative flex items-center gap-1.5">

@@ -9,7 +9,7 @@ export function CategoryFilter() {
 
   // Find selected category to determine if it's a parent
   const selectedParentId = useMemo(() => {
-    if (!categoryId || !categories) return null
+    if (!categoryId || !categories?.length) return null
     const isParent = categories.some(c => c.id === categoryId)
     return isParent ? categoryId : null
   }, [categoryId, categories])
@@ -55,7 +55,7 @@ export function CategoryFilter() {
 
   // Determine current child selection
   const currentChildId = useMemo(() => {
-    if (!categoryId || !childCategories) return null
+    if (!categoryId || !childCategories?.length) return null
     const isChild = childCategories.some(c => c.id === categoryId)
     return isChild ? categoryId : null
   }, [categoryId, childCategories])

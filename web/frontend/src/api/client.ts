@@ -176,6 +176,54 @@ async function fetchApi<T>(
   }
 }
 
+async function fetchApiMutation<T>(
+  endpoint: string,
+  method: 'POST' | 'DELETE',
+  options?: FetchOptions
+): Promise<T> {
+  const { timeout = DEFAULT_TIMEOUT, signal: externalSignal } = options || {}
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeout)
+
+  const signal = externalSignal
+    ? combineSignals(externalSignal, controller.signal)
+    : controller.signal
+
+  try {
+    const response = await fetch(`${API_BASE}${endpoint}`, { method, signal })
+    clearTimeout(timeoutId)
+
+    if (!response.ok) {
+      throw ApiError.fromResponse(response)
+    }
+
+    return await response.json()
+  } catch (error) {
+    clearTimeout(timeoutId)
+
+    if (error instanceof ApiError) {
+      throw error
+    }
+
+    if (error instanceof Error) {
+      if (error.name === 'AbortError') {
+        if (controller.signal.aborted && !externalSignal?.aborted) {
+          throw new TimeoutError(timeout)
+        }
+        throw error
+      }
+
+      throw new NetworkError(
+        navigator.onLine ? 'Unable to connect to server' : 'No internet connection',
+        navigator.onLine ? 'CONNECTION_FAILED' : 'OFFLINE'
+      )
+    }
+
+    throw error
+  }
+}
+
 // ─── API Client ──────────────────────────────────────────────────────────────
 
 export const api = {
@@ -253,34 +301,28 @@ export const api = {
       options
     ),
 
-  setGoal: async (
+  setGoal: (
     periodType: string,
     amount: number,
-    growthFactor = 1.10
-  ): Promise<SetGoalResponse> => {
-    const url = `${API_BASE}/goals?period_type=${periodType}&amount=${amount}&growth_factor=${growthFactor}`
-    const response = await fetch(url, { method: 'POST' })
+    growthFactor = 1.10,
+    options?: FetchOptions
+  ): Promise<SetGoalResponse> =>
+    fetchApiMutation<SetGoalResponse>(
+      `/goals?period_type=${periodType}&amount=${amount}&growth_factor=${growthFactor}`,
+      'POST',
+      options
+    ),
 
-    if (!response.ok) {
-      throw ApiError.fromResponse(response)
-    }
-
-    return response.json()
-  },
-
-  resetGoal: async (
+  resetGoal: (
     periodType: string,
-    salesType = 'retail'
-  ): Promise<SetGoalResponse> => {
-    const url = `${API_BASE}/goals/${periodType}?sales_type=${salesType}`
-    const response = await fetch(url, { method: 'DELETE' })
-
-    if (!response.ok) {
-      throw ApiError.fromResponse(response)
-    }
-
-    return response.json()
-  },
+    salesType = 'retail',
+    options?: FetchOptions
+  ): Promise<SetGoalResponse> =>
+    fetchApiMutation<SetGoalResponse>(
+      `/goals/${periodType}?sales_type=${salesType}`,
+      'DELETE',
+      options
+    ),
 
   // Smart Goals
   getSmartGoals: (salesType = 'retail', options?: FetchOptions) =>
@@ -308,16 +350,15 @@ export const api = {
       options
     ),
 
-  recalculateSeasonality: async (salesType = 'retail'): Promise<{ status: string; message: string; summary: { monthsCalculated: number; overallYoY: number; yearsAnalyzed: number } }> => {
-    const url = `${API_BASE}/goals/recalculate?sales_type=${salesType}`
-    const response = await fetch(url, { method: 'POST' })
-
-    if (!response.ok) {
-      throw ApiError.fromResponse(response)
-    }
-
-    return response.json()
-  },
+  recalculateSeasonality: (
+    salesType = 'retail',
+    options?: FetchOptions
+  ): Promise<{ status: string; message: string; summary: { monthsCalculated: number; overallYoY: number; yearsAnalyzed: number } }> =>
+    fetchApiMutation(
+      `/goals/recalculate?sales_type=${salesType}`,
+      'POST',
+      options
+    ),
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────

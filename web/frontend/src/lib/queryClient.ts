@@ -8,13 +8,23 @@ import { ApiError, NetworkError, TimeoutError } from '../api/client'
 // ─── Error Handler ───────────────────────────────────────────────────────────
 
 function handleQueryError(error: unknown): void {
-  // Log errors for debugging (could send to monitoring service)
-  if (import.meta.env.DEV) {
-    console.error('[Query Error]', error)
+  // Build structured error info for logging
+  const errorInfo = {
+    timestamp: new Date().toISOString(),
+    type: error instanceof Error ? error.name : 'Unknown',
+    message: error instanceof Error ? error.message : String(error),
+    status: error instanceof ApiError ? error.status : undefined,
+    code: error instanceof ApiError ? error.code :
+          error instanceof NetworkError ? error.code : undefined,
   }
 
-  // Could integrate with toast notifications here
-  // toast.error(getErrorMessage(error))
+  // Log in development with full details
+  if (import.meta.env.DEV) {
+    console.error('[Query Error]', errorInfo, error)
+  } else {
+    // In production, log structured error (could be sent to monitoring service)
+    console.error('[API Error]', JSON.stringify(errorInfo))
+  }
 }
 
 // ─── Retry Logic ─────────────────────────────────────────────────────────────

@@ -1,6 +1,10 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import { useQueryParams, useFilterStore } from '../store/filterStore'
+import type { FilterStore } from '../types/filters'
+
+// Stable selector to prevent unnecessary re-renders
+const selectSalesType = (s: FilterStore) => s.salesType
 import type {
   SummaryResponse,
   RevenueTrendResponse,
@@ -26,7 +30,7 @@ import type {
 export const queryKeys = {
   // Goals
   goals: (salesType: string) => ['goals', salesType] as const,
-  goalHistory: (periodType: string, salesType: string) => ['goalHistory', periodType, salesType] as const,
+  goalHistory: (periodType: string, weeksBack: number, salesType: string) => ['goalHistory', periodType, weeksBack, salesType] as const,
   smartGoals: (salesType: string) => ['smartGoals', salesType] as const,
   seasonality: (salesType: string) => ['seasonality', salesType] as const,
   growthMetrics: (salesType: string) => ['growthMetrics', salesType] as const,
@@ -192,7 +196,7 @@ export function useProfitAnalysis() {
 // ─── Goals ─────────────────────────────────────────────────────────────────
 
 export function useGoals() {
-  const salesType = useFilterStore((s) => s.salesType)
+  const salesType = useFilterStore(selectSalesType)
 
   return useQuery<GoalsResponse>({
     queryKey: queryKeys.goals(salesType),
@@ -202,10 +206,10 @@ export function useGoals() {
 }
 
 export function useGoalHistory(periodType: string, weeksBack = 4) {
-  const salesType = useFilterStore((s) => s.salesType)
+  const salesType = useFilterStore(selectSalesType)
 
   return useQuery<GoalHistoryResponse>({
-    queryKey: queryKeys.goalHistory(periodType, salesType),
+    queryKey: queryKeys.goalHistory(periodType, weeksBack, salesType),
     queryFn: () => api.getGoalHistory(periodType, weeksBack, salesType),
     staleTime: 5 * 60 * 1000,
   })
@@ -213,7 +217,7 @@ export function useGoalHistory(periodType: string, weeksBack = 4) {
 
 export function useSetGoal() {
   const queryClient = useQueryClient()
-  const salesType = useFilterStore((s) => s.salesType)
+  const salesType = useFilterStore(selectSalesType)
 
   return useMutation({
     mutationFn: ({ periodType, amount, growthFactor = 1.10 }: {
@@ -230,7 +234,7 @@ export function useSetGoal() {
 
 export function useResetGoal() {
   const queryClient = useQueryClient()
-  const salesType = useFilterStore((s) => s.salesType)
+  const salesType = useFilterStore(selectSalesType)
 
   return useMutation({
     mutationFn: (periodType: string) => api.resetGoal(periodType, salesType),
@@ -244,7 +248,7 @@ export function useResetGoal() {
 // ─── Smart Goals ────────────────────────────────────────────────────────────
 
 export function useSmartGoals() {
-  const salesType = useFilterStore((s) => s.salesType)
+  const salesType = useFilterStore(selectSalesType)
 
   return useQuery<SmartGoalsResponse>({
     queryKey: queryKeys.smartGoals(salesType),
@@ -254,7 +258,7 @@ export function useSmartGoals() {
 }
 
 export function useSeasonality() {
-  const salesType = useFilterStore((s) => s.salesType)
+  const salesType = useFilterStore(selectSalesType)
 
   return useQuery<Record<number, SeasonalityIndex>>({
     queryKey: queryKeys.seasonality(salesType),
@@ -264,7 +268,7 @@ export function useSeasonality() {
 }
 
 export function useGrowthMetrics() {
-  const salesType = useFilterStore((s) => s.salesType)
+  const salesType = useFilterStore(selectSalesType)
 
   return useQuery<GrowthMetrics>({
     queryKey: queryKeys.growthMetrics(salesType),
@@ -274,7 +278,7 @@ export function useGrowthMetrics() {
 }
 
 export function useWeeklyPatterns() {
-  const salesType = useFilterStore((s) => s.salesType)
+  const salesType = useFilterStore(selectSalesType)
 
   return useQuery<Record<number, Record<number, number>>>({
     queryKey: queryKeys.weeklyPatterns(salesType),
@@ -284,7 +288,7 @@ export function useWeeklyPatterns() {
 }
 
 export function useGoalForecast(year: number, month: number) {
-  const salesType = useFilterStore((s) => s.salesType)
+  const salesType = useFilterStore(selectSalesType)
 
   return useQuery<GoalForecastResponse>({
     queryKey: queryKeys.goalForecast(year, month, salesType),
@@ -296,7 +300,7 @@ export function useGoalForecast(year: number, month: number) {
 
 export function useRecalculateSeasonality() {
   const queryClient = useQueryClient()
-  const salesType = useFilterStore((s) => s.salesType)
+  const salesType = useFilterStore(selectSalesType)
 
   return useMutation({
     mutationFn: () => api.recalculateSeasonality(salesType),
