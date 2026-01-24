@@ -53,6 +53,34 @@ const GridSection = memo(function GridSection({ children }: GridSectionProps) {
   )
 })
 
+// ─── Coming Soon Overlay ──────────────────────────────────────────────────────
+
+interface ComingSoonProps {
+  children: React.ReactNode
+  message?: string
+}
+
+const ComingSoon = memo(function ComingSoon({
+  children,
+  message = "In Development"
+}: ComingSoonProps) {
+  return (
+    <div className="relative">
+      <div className="blur-sm pointer-events-none select-none opacity-80">
+        {children}
+      </div>
+      <div className="absolute inset-0 flex items-center justify-center">
+        <div className="bg-slate-800/90 text-white px-6 py-3 rounded-xl shadow-lg flex items-center gap-3">
+          <svg className="w-5 h-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="font-medium">{message}</span>
+        </div>
+      </div>
+    </div>
+  )
+})
+
 // ─── Dashboard Component ─────────────────────────────────────────────────────
 
 export const Dashboard = memo(function Dashboard() {
@@ -108,10 +136,12 @@ export const Dashboard = memo(function Dashboard() {
         <ROICalculator />
       </section>
 
-      {/* Expenses & Profit - Full Width */}
-      <ChartSection>
-        <LazyExpensesChart />
-      </ChartSection>
+      {/* Expenses & Profit - Full Width (Coming Soon) */}
+      <ComingSoon message="Expenses — Coming soon">
+        <ChartSection>
+          <LazyExpensesChart />
+        </ChartSection>
+      </ComingSoon>
     </main>
   )
 })

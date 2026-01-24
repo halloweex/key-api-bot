@@ -241,27 +241,24 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
             />
           </div>
 
-          {/* Row 2: CLV metrics */}
+          {/* Row 2: Repeat Customer Behavior */}
           {metrics.customerLifetimeValue !== undefined && (
             <div className="relative">
               <div className="flex items-center gap-1.5 mb-2">
                 <h4 className="text-xs font-medium text-slate-500 uppercase tracking-wide">
-                  Customer Lifetime Value Metrics
+                  Repeat Customer Behavior
                 </h4>
                 <InfoButton onClick={() => setShowClvInfo(!showClvInfo)} />
                 {showClvInfo && (
-                  <InfoTooltipContent onClose={() => setShowClvInfo(false)} title="How is CLV calculated?">
+                  <InfoTooltipContent onClose={() => setShowClvInfo(false)} title="Repeat Customer Metrics">
                     <p className="text-xs text-slate-300 mb-2">
-                      <strong className="text-rose-400">CLV:</strong> Average total revenue per repeat customer (customers with 2+ orders).
+                      <strong className="text-rose-400">CLV:</strong> Average total revenue per repeat customer.
                     </p>
                     <p className="text-xs text-slate-300 mb-2">
-                      <strong className="text-indigo-400">Purchase Frequency:</strong> Average number of orders per repeat customer.
-                    </p>
-                    <p className="text-xs text-slate-300 mb-2">
-                      <strong className="text-teal-400">Lifespan:</strong> Average days between first and last order for repeat customers.
+                      <strong className="text-indigo-400">Purchase Frequency:</strong> Avg orders per repeat customer.
                     </p>
                     <p className="text-xs text-slate-300">
-                      <strong className="text-slate-400">Note:</strong> Based on 250-day inactivity window (P95 = 243 days).
+                      <strong className="text-teal-400">Lifespan:</strong> Avg days between first and last order.
                     </p>
                   </InfoTooltipContent>
                 )}
@@ -302,6 +299,43 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
               </div>
             </div>
           )}
+
+          {/* Row 3: All-Time Metrics */}
+          {metrics.totalCustomersAllTime !== undefined && (
+            <div className="relative">
+              <div className="flex items-center gap-1.5 mb-2">
+                <h4 className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+                  All-Time
+                </h4>
+              </div>
+              <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                <SummaryCard
+                  icon={<UserGroupIcon />}
+                  label="Total Customers"
+                  value={formatNumber(metrics.totalCustomersAllTime ?? 0)}
+                  subtitle="Unique customers"
+                  colorClass="text-cyan-600"
+                  bgClass="bg-gradient-to-br from-cyan-100 to-cyan-50 border border-cyan-200"
+                />
+                <SummaryCard
+                  icon={<RefreshIcon />}
+                  label="True Repeat Rate"
+                  value={formatPercent(metrics.trueRepeatRate ?? 0)}
+                  subtitle={`${formatNumber(metrics.repeatCustomersAllTime ?? 0)} repeat customers`}
+                  colorClass="text-green-600"
+                  bgClass="bg-gradient-to-br from-green-100 to-green-50 border border-green-200"
+                />
+                <SummaryCard
+                  icon={<ShoppingBagIcon />}
+                  label="Orders per Customer"
+                  value={`${(metrics.avgOrdersPerCustomer ?? 0).toFixed(2)}x`}
+                  subtitle="Average"
+                  colorClass="text-amber-600"
+                  bgClass="bg-gradient-to-br from-amber-100 to-amber-50 border border-amber-200"
+                />
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -311,19 +345,19 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
         <div>
           <div className="relative">
             <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
-              New vs Returning Customers
+              Customers in Period (New vs Returning)
               <InfoButton onClick={() => setShowCustomerInfo(!showCustomerInfo)} />
             </h4>
             {showCustomerInfo && (
-              <InfoTooltipContent onClose={() => setShowCustomerInfo(false)} title="How is this calculated?">
+              <InfoTooltipContent onClose={() => setShowCustomerInfo(false)} title="Period-Based Customer Split">
                 <p className="text-xs text-slate-300 mb-2">
-                  <strong className="text-blue-400">New:</strong> Account created during selected period.
+                  <strong className="text-blue-400">New:</strong> First order was in selected period.
                 </p>
                 <p className="text-xs text-slate-300 mb-2">
-                  <strong className="text-purple-400">Returning:</strong> Account existed before period started.
+                  <strong className="text-purple-400">Returning:</strong> Had orders before selected period.
                 </p>
                 <p className="text-xs text-slate-300">
-                  <strong className="text-green-400">Repeat Rate:</strong> % of orders from returning customers.
+                  <strong className="text-slate-400">Note:</strong> Shows customers who ordered in this period only.
                 </p>
               </InfoTooltipContent>
             )}

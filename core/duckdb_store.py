@@ -1232,6 +1232,30 @@ class DuckDBStore:
             # Purchase frequency for all customers in period
             purchase_frequency = total_orders / total_customers if total_customers > 0 else 0
 
+            # All-time customer metrics (true repeat rate)
+            alltime_result = conn.execute(f"""
+                WITH customer_orders AS (
+                    SELECT
+                        o.buyer_id,
+                        COUNT(DISTINCT o.id) as order_count
+                    FROM orders o
+                    WHERE o.buyer_id IS NOT NULL
+                      AND o.status_id NOT IN {return_statuses}
+                      AND {self._build_sales_type_filter(sales_type)}
+                    GROUP BY o.buyer_id
+                )
+                SELECT
+                    COUNT(*) as total_customers,
+                    SUM(CASE WHEN order_count >= 2 THEN 1 ELSE 0 END) as repeat_customers,
+                    AVG(order_count) as avg_orders_per_customer
+                FROM customer_orders
+            """).fetchone()
+
+            alltime_total_customers = alltime_result[0] or 0
+            alltime_repeat_customers = alltime_result[1] or 0
+            alltime_avg_orders = float(alltime_result[2] or 0)
+            true_repeat_rate = (alltime_repeat_customers / alltime_total_customers * 100) if alltime_total_customers > 0 else 0
+
             return {
                 "newVsReturning": {
                     "labels": ["New Customers", "Returning Customers"],
@@ -1260,7 +1284,12 @@ class DuckDBStore:
                     "customerLifetimeValue": round(clv, 2),
                     "avgPurchaseFrequency": round(avg_purchase_frequency, 2),
                     "avgCustomerLifespanDays": round(avg_lifespan_days, 0),
-                    "purchaseFrequency": round(purchase_frequency, 2)
+                    "purchaseFrequency": round(purchase_frequency, 2),
+                    # All-time metrics
+                    "totalCustomersAllTime": alltime_total_customers,
+                    "repeatCustomersAllTime": alltime_repeat_customers,
+                    "trueRepeatRate": round(true_repeat_rate, 1),
+                    "avgOrdersPerCustomer": round(alltime_avg_orders, 2)
                 }
             }
 

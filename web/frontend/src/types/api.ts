@@ -88,6 +88,11 @@ export interface CustomerInsightsResponse {
     avgPurchaseFrequency?: number
     avgCustomerLifespanDays?: number
     purchaseFrequency?: number
+    // All-time metrics
+    totalCustomersAllTime?: number
+    repeatCustomersAllTime?: number
+    trueRepeatRate?: number
+    avgOrdersPerCustomer?: number
   }
 }
 

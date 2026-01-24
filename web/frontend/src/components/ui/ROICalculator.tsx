@@ -68,6 +68,18 @@ export function ROICalculator() {
     }
   }, [])
 
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>) => {
+    e.preventDefault()
+    const pastedText = e.clipboardData.getData('text')
+    // Clean pasted value: remove everything except digits and decimal point
+    const cleaned = pastedText.replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1')
+    if (cleaned) {
+      setInputValue(cleaned)
+      const numValue = parseFloat(cleaned) || 0
+      setExpenses(numValue)
+    }
+  }, [])
+
   // Calculate metrics
   const metrics = useMemo(() => {
     if (!summary) {
@@ -140,6 +152,7 @@ export function ROICalculator() {
               inputMode="decimal"
               value={inputValue}
               onChange={handleInputChange}
+              onPaste={handlePaste}
               placeholder="0"
               className="w-full sm:w-64 pl-8 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-slate-800"
               disabled={isLoading}
