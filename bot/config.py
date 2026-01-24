@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─── Version ───────────────────────────────────────────────────────────────
-VERSION = "1.2.0"
+VERSION = "2.0.1"
 
 # ─── Environment Variables ──────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")

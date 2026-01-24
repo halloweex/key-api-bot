@@ -171,7 +171,7 @@ class MilestoneConfig:
 class AppConfig:
     """Main application configuration."""
 
-    version: str = "1.2.0"
+    version: str = "2.0.1"
     api: APIConfig = field(default_factory=APIConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     bot: BotConfig = field(default_factory=BotConfig)
