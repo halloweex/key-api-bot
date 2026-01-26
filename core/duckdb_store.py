@@ -173,9 +173,9 @@ class DuckDBStore:
             status VARCHAR,
             payment_date TIMESTAMP WITH TIME ZONE,
             created_at TIMESTAMP WITH TIME ZONE,
-            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (order_id) REFERENCES orders(id),
-            FOREIGN KEY (expense_type_id) REFERENCES expense_types(id)
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            -- FK removed due to DuckDB UPDATE/DELETE bug with foreign keys
+            -- See: https://github.com/duckdb/duckdb/issues/4023
         );
 
         -- Sync metadata
@@ -282,42 +282,120 @@ class DuckDBStore:
             logger.debug(f"Migration note: {e}")
 
         # Migration 2: Recreate order_products without FK constraint (DuckDB FK bug workaround)
-        # Check if table has FK constraint by trying to detect it
         try:
-            # Test if FK constraint exists by checking constraint info
-            has_fk = self._connection.execute("""
-                SELECT COUNT(*) FROM duckdb_constraints()
-                WHERE table_name = 'order_products' AND constraint_type = 'FOREIGN KEY'
-            """).fetchone()[0] > 0
+            # Check if FK constraint exists
+            has_fk = False
+            try:
+                result = self._connection.execute("""
+                    SELECT COUNT(*) FROM duckdb_constraints()
+                    WHERE table_name = 'order_products' AND constraint_type = 'FOREIGN KEY'
+                """).fetchone()
+                has_fk = result[0] > 0 if result else False
+            except Exception:
+                # duckdb_constraints() might not be available, check by trying a test delete
+                # If FK exists, we need to remove it
+                logger.debug("duckdb_constraints() not available, checking FK via schema")
+                # Alternative: check if REFERENCES exists in table definition
+                try:
+                    schema = self._connection.execute("""
+                        SELECT sql FROM sqlite_master WHERE type='table' AND name='order_products'
+                    """).fetchone()
+                    if schema and 'REFERENCES' in str(schema[0]).upper():
+                        has_fk = True
+                except Exception:
+                    # Try pragma approach
+                    try:
+                        fk_list = self._connection.execute("PRAGMA foreign_key_list('order_products')").fetchall()
+                        has_fk = len(fk_list) > 0
+                    except Exception:
+                        pass
 
             if has_fk:
-                logger.info("Migration: Recreating order_products without FK constraint...")
-                # Backup data
-                self._connection.execute("""
-                    CREATE TABLE order_products_backup AS SELECT * FROM order_products
-                """)
-                # Drop old table
-                self._connection.execute("DROP TABLE order_products")
-                # Create new table without FK
-                self._connection.execute("""
-                    CREATE TABLE order_products (
-                        id INTEGER PRIMARY KEY,
-                        order_id INTEGER NOT NULL,
-                        product_id INTEGER,
-                        name VARCHAR NOT NULL,
-                        quantity INTEGER NOT NULL,
-                        price_sold DECIMAL(12, 2) NOT NULL
-                    )
-                """)
-                # Restore data
-                self._connection.execute("""
-                    INSERT INTO order_products SELECT * FROM order_products_backup
-                """)
-                # Drop backup
-                self._connection.execute("DROP TABLE order_products_backup")
-                logger.info("Migration: order_products FK constraint removed")
+                logger.info("Migration: Removing FK constraint from order_products...")
+                self._connection.execute("BEGIN TRANSACTION")
+                try:
+                    # Backup data
+                    self._connection.execute("""
+                        CREATE TABLE order_products_backup AS SELECT * FROM order_products
+                    """)
+                    # Drop old table
+                    self._connection.execute("DROP TABLE order_products")
+                    # Create new table without FK
+                    self._connection.execute("""
+                        CREATE TABLE order_products (
+                            id INTEGER PRIMARY KEY,
+                            order_id INTEGER NOT NULL,
+                            product_id INTEGER,
+                            name VARCHAR NOT NULL,
+                            quantity INTEGER NOT NULL,
+                            price_sold DECIMAL(12, 2) NOT NULL
+                        )
+                    """)
+                    # Restore data
+                    self._connection.execute("""
+                        INSERT INTO order_products SELECT * FROM order_products_backup
+                    """)
+                    # Drop backup
+                    self._connection.execute("DROP TABLE order_products_backup")
+                    self._connection.execute("COMMIT")
+                    logger.info("Migration: order_products FK constraint removed successfully")
+                except Exception as e:
+                    self._connection.execute("ROLLBACK")
+                    logger.error(f"Migration failed (FK removal), rolling back: {e}")
+                    raise
         except Exception as e:
-            logger.debug(f"Migration note (FK removal): {e}")
+            logger.error(f"Migration error (order_products FK removal): {e}")
+
+        # Migration 3: Remove FK from expenses table (same DuckDB bug)
+        try:
+            has_fk = False
+            try:
+                result = self._connection.execute("""
+                    SELECT COUNT(*) FROM duckdb_constraints()
+                    WHERE table_name = 'expenses' AND constraint_type = 'FOREIGN KEY'
+                """).fetchone()
+                has_fk = result[0] > 0 if result else False
+            except Exception:
+                # Fallback: check via PRAGMA
+                try:
+                    fk_list = self._connection.execute("PRAGMA foreign_key_list('expenses')").fetchall()
+                    has_fk = len(fk_list) > 0
+                except Exception:
+                    pass
+
+            if has_fk:
+                logger.info("Migration: Removing FK constraint from expenses...")
+                self._connection.execute("BEGIN TRANSACTION")
+                try:
+                    self._connection.execute("""
+                        CREATE TABLE expenses_backup AS SELECT * FROM expenses
+                    """)
+                    self._connection.execute("DROP TABLE expenses")
+                    self._connection.execute("""
+                        CREATE TABLE expenses (
+                            id INTEGER PRIMARY KEY,
+                            order_id INTEGER NOT NULL,
+                            expense_type_id INTEGER,
+                            amount DECIMAL(12, 2) NOT NULL,
+                            description VARCHAR,
+                            status VARCHAR,
+                            payment_date TIMESTAMP WITH TIME ZONE,
+                            created_at TIMESTAMP WITH TIME ZONE,
+                            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    self._connection.execute("""
+                        INSERT INTO expenses SELECT * FROM expenses_backup
+                    """)
+                    self._connection.execute("DROP TABLE expenses_backup")
+                    self._connection.execute("COMMIT")
+                    logger.info("Migration: expenses FK constraint removed successfully")
+                except Exception as e:
+                    self._connection.execute("ROLLBACK")
+                    logger.error(f"Migration failed (expenses FK removal), rolling back: {e}")
+                    raise
+        except Exception as e:
+            logger.error(f"Migration error (expenses FK removal): {e}")
 
     def _build_sales_type_filter(self, sales_type: str, table_alias: str = "o") -> str:
         """Build SQL clause for retail/b2b/all filtering based on manager_id.
