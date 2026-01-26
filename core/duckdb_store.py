@@ -548,10 +548,10 @@ class DuckDBStore:
                     WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.id = stg.id)
                 """)
 
-                # 5. Insert new products in batch
+                # 5. Insert new products in batch (use OR REPLACE to handle ID collisions from schema change)
                 if product_rows:
                     conn.executemany("""
-                        INSERT INTO order_products (id, order_id, product_id, name, quantity, price_sold)
+                        INSERT OR REPLACE INTO order_products (id, order_id, product_id, name, quantity, price_sold)
                         VALUES (?, ?, ?, ?, ?, ?)
                     """, [
                         (p["id"], p["order_id"], p["product_id"], p["name"], p["quantity"], p["price_sold"])
