@@ -649,7 +649,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
               </span>
             )}
             {/* Info button for auto-calculated goals (click-based) */}
-            {!isCustomGoal && !isLoadingGoals && (growthRate || recent3MonthAvg || lastYearRevenue) && (
+            {!isLoadingGoals && (excludedPrevMonthRevenue > 0 || (!isCustomGoal && (growthRate || recent3MonthAvg || lastYearRevenue))) && (
               <InfoButton onClick={() => setShowGoalInfo(!showGoalInfo)} />
             )}
             {/* Click-based tooltip */}
@@ -679,6 +679,11 @@ export const MilestoneProgress = memo(function MilestoneProgress({
                   {calculationMethod && (
                     <p className="text-xs text-slate-400 pt-1 mt-1 border-t border-slate-600">
                       Method: {getMethodLabel(calculationMethod)}
+                    </p>
+                  )}
+                  {excludedPrevMonthRevenue > 0 && (
+                    <p className="text-xs text-slate-300 pt-1 mt-1 border-t border-slate-600">
+                      <strong className="text-amber-400">{formatCurrency(excludedPrevMonthRevenue)}</strong> from previous month not included
                     </p>
                   )}
                 </div>
@@ -825,18 +830,6 @@ export const MilestoneProgress = memo(function MilestoneProgress({
             <span className="text-xs text-slate-400 ml-1">goal</span>
           </div>
         </div>
-
-        {/* Note about excluded previous month revenue */}
-        {excludedPrevMonthRevenue > 0 && (
-          <div className="mt-2 px-2 py-1.5 bg-slate-50 rounded text-xs text-slate-500 flex items-center gap-1.5">
-            <svg className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span>
-              <span className="font-medium text-slate-600">{formatCurrency(excludedPrevMonthRevenue)}</span> from previous month not included in goal progress
-            </span>
-          </div>
-        )}
 
         {/* Remaining amount */}
         {!metrics.allCompleted && (

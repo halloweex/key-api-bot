@@ -19,6 +19,7 @@ slowapi>=0.1.9
 
 # DuckDB analytics
 duckdb>=1.1.0
+pandas>=2.0.0
 
 # Testing
 pytest>=8.0.0

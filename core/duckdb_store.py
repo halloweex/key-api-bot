@@ -13,6 +13,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from zoneinfo import ZoneInfo
 
 import duckdb
+import pandas as pd
 
 from core.models import Order, SourceId, OrderStatus
 from bot.config import DEFAULT_TIMEZONE, TELEGRAM_MANAGER_IDS
@@ -116,8 +117,9 @@ class DuckDBStore:
             product_id INTEGER,
             name VARCHAR NOT NULL,
             quantity INTEGER NOT NULL,
-            price_sold DECIMAL(12, 2) NOT NULL,
-            FOREIGN KEY (order_id) REFERENCES orders(id)
+            price_sold DECIMAL(12, 2) NOT NULL
+            -- FK removed due to DuckDB UPDATE/DELETE bug with foreign keys
+            -- See: https://github.com/duckdb/duckdb/issues/4023
         );
 
         -- Products catalog
@@ -279,6 +281,44 @@ class DuckDBStore:
             # Column might already exist or ALTER TABLE not supported
             logger.debug(f"Migration note: {e}")
 
+        # Migration 2: Recreate order_products without FK constraint (DuckDB FK bug workaround)
+        # Check if table has FK constraint by trying to detect it
+        try:
+            # Test if FK constraint exists by checking constraint info
+            has_fk = self._connection.execute("""
+                SELECT COUNT(*) FROM duckdb_constraints()
+                WHERE table_name = 'order_products' AND constraint_type = 'FOREIGN KEY'
+            """).fetchone()[0] > 0
+
+            if has_fk:
+                logger.info("Migration: Recreating order_products without FK constraint...")
+                # Backup data
+                self._connection.execute("""
+                    CREATE TABLE order_products_backup AS SELECT * FROM order_products
+                """)
+                # Drop old table
+                self._connection.execute("DROP TABLE order_products")
+                # Create new table without FK
+                self._connection.execute("""
+                    CREATE TABLE order_products (
+                        id INTEGER PRIMARY KEY,
+                        order_id INTEGER NOT NULL,
+                        product_id INTEGER,
+                        name VARCHAR NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        price_sold DECIMAL(12, 2) NOT NULL
+                    )
+                """)
+                # Restore data
+                self._connection.execute("""
+                    INSERT INTO order_products SELECT * FROM order_products_backup
+                """)
+                # Drop backup
+                self._connection.execute("DROP TABLE order_products_backup")
+                logger.info("Migration: order_products FK constraint removed")
+        except Exception as e:
+            logger.debug(f"Migration note (FK removal): {e}")
+
     def _build_sales_type_filter(self, sales_type: str, table_alias: str = "o") -> str:
         """Build SQL clause for retail/b2b/all filtering based on manager_id.
 
@@ -334,6 +374,7 @@ class DuckDBStore:
         """
         Insert or update orders from API response (idempotent).
 
+        Uses DataFrame bulk insert for performance (~10-100x faster than row-by-row).
         Only updates existing orders if the new updated_at is newer than
         the existing one. This prevents stale API responses from overwriting
         fresher data.
@@ -347,79 +388,108 @@ class DuckDBStore:
         if not orders:
             return 0
 
+        # Parse orders and build DataFrames
+        order_rows = []
+        product_rows = []
+
+        for order_data in orders:
+            order = Order.from_api(order_data)
+
+            # Skip invalid orders
+            if not order.ordered_at:
+                continue
+
+            order_rows.append({
+                "id": order.id,
+                "source_id": order.source_id,
+                "status_id": order.status_id,
+                "grand_total": float(order.grand_total),
+                "ordered_at": order.ordered_at,  # Keep as datetime
+                "created_at": order.created_at,  # Keep as datetime
+                "updated_at": order.updated_at,  # Keep as datetime
+                "buyer_id": order.buyer.id if order.buyer else None,
+                "manager_id": order.manager.id if order.manager else None,
+            })
+
+            # Build product rows
+            # ID generation: order_id * 1000 + position (supports up to 1000 products/order, order IDs up to ~2M)
+            for i, prod in enumerate(order.products):
+                product_rows.append({
+                    "id": order.id * 1000 + i,
+                    "order_id": order.id,
+                    "product_id": prod.product_id,
+                    "name": prod.name,
+                    "quantity": prod.quantity,
+                    "price_sold": float(prod.price_sold),
+                })
+
+        if not order_rows:
+            return 0
+
+        # Create DataFrame for orders (products use executemany for simplicity)
+        orders_df = pd.DataFrame(order_rows)
+
+        # Convert datetime columns to proper pandas datetime type for DuckDB
+        for col in ["ordered_at", "created_at", "updated_at"]:
+            orders_df[col] = pd.to_datetime(orders_df[col], utc=True)
+
+        # Get order IDs for use in queries (avoids DuckDB FK bug with subqueries)
+        order_ids = orders_df["id"].tolist()
+
         async with self.connection() as conn:
-            count = 0
-            skipped = 0
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                # Register DataFrame as view
+                conn.register("stg_orders", orders_df)
 
-            for order_data in orders:
-                order = Order.from_api(order_data)
+                # 1. Delete existing products using explicit ID list
+                if order_ids:
+                    placeholders = ",".join("?" * len(order_ids))
+                    conn.execute(f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids)
 
-                # Skip invalid orders
-                if not order.ordered_at:
-                    continue
+                # 2. Find orders that need to be updated (staging has newer data)
+                orders_to_update = conn.execute("""
+                    SELECT o.id FROM orders o
+                    JOIN stg_orders stg ON o.id = stg.id
+                    WHERE stg.updated_at > o.updated_at
+                       OR o.updated_at IS NULL
+                       OR stg.updated_at IS NULL
+                """).fetchall()
+                update_ids = [row[0] for row in orders_to_update]
 
-                new_updated_at = order.updated_at.isoformat() if order.updated_at else None
+                # 3. Delete orders that will be re-inserted with updated data
+                if update_ids:
+                    placeholders = ",".join("?" * len(update_ids))
+                    conn.execute(f"DELETE FROM orders WHERE id IN ({placeholders})", update_ids)
 
-                # Check if order exists and compare updated_at for idempotency
-                existing = conn.execute(
-                    "SELECT updated_at FROM orders WHERE id = ?",
-                    [order.id]
-                ).fetchone()
-
-                if existing and existing[0] and new_updated_at:
-                    # Both have updated_at - only update if new is strictly newer
-                    existing_updated_at = existing[0]
-                    if isinstance(existing_updated_at, str):
-                        # Handle string comparison for timestamps
-                        if new_updated_at <= existing_updated_at:
-                            skipped += 1
-                            continue
-                    else:
-                        # Handle datetime comparison
-                        if order.updated_at <= existing_updated_at:
-                            skipped += 1
-                            continue
-
-                # Upsert order (INSERT OR REPLACE)
+                # 4. Insert all orders from staging (new ones + updated ones that were deleted)
                 conn.execute("""
-                    INSERT OR REPLACE INTO orders
-                    (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, synced_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, [
-                    order.id,
-                    order.source_id,
-                    order.status_id,
-                    order.grand_total,
-                    order.ordered_at.isoformat() if order.ordered_at else None,
-                    order.created_at.isoformat() if order.created_at else None,
-                    new_updated_at,
-                    order.buyer.id if order.buyer else None,
-                    order.manager.id if order.manager else None
-                ])
+                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, synced_at)
+                    SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, now()
+                    FROM stg_orders stg
+                    WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.id = stg.id)
+                """)
 
-                # Delete existing products for this order
-                conn.execute("DELETE FROM order_products WHERE order_id = ?", [order.id])
-
-                # Insert order products
-                for i, prod in enumerate(order.products):
-                    conn.execute("""
+                # 5. Insert new products in batch
+                if product_rows:
+                    conn.executemany("""
                         INSERT INTO order_products (id, order_id, product_id, name, quantity, price_sold)
                         VALUES (?, ?, ?, ?, ?, ?)
                     """, [
-                        order.id * 10000 + i,  # Generate unique ID
-                        order.id,
-                        prod.product_id,
-                        prod.name,
-                        prod.quantity,
-                        prod.price_sold
+                        (p["id"], p["order_id"], p["product_id"], p["name"], p["quantity"], p["price_sold"])
+                        for p in product_rows
                     ])
 
-                count += 1
+                conn.unregister("stg_orders")
+                conn.execute("COMMIT")
 
-            if skipped > 0:
-                logger.debug(f"Skipped {skipped} orders (stale updated_at)")
-            logger.info(f"Upserted {count} orders to DuckDB")
-            return count
+                count = len(order_rows)
+                logger.info(f"Upserted {count} orders to DuckDB (DataFrame bulk insert)")
+                return count
+
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     async def upsert_products(self, products: List[Dict[str, Any]]) -> int:
         """Insert or update products from API response."""
@@ -427,32 +497,39 @@ class DuckDBStore:
             return 0
 
         async with self.connection() as conn:
-            count = 0
-            for prod_data in products:
-                # Extract brand from custom_fields
-                brand = None
-                for cf in prod_data.get("custom_fields", []):
-                    if cf.get("uuid") == "CT_1001" or cf.get("name") == "Brand":
-                        values = cf.get("value", [])
-                        if values and isinstance(values, list):
-                            brand = values[0]
-                        break
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                count = 0
+                for prod_data in products:
+                    # Extract brand from custom_fields
+                    brand = None
+                    for cf in prod_data.get("custom_fields", []):
+                        if cf.get("uuid") == "CT_1001" or cf.get("name") == "Brand":
+                            values = cf.get("value", [])
+                            if values and isinstance(values, list):
+                                brand = values[0]
+                            break
 
-                conn.execute("""
-                    INSERT OR REPLACE INTO products (id, name, category_id, brand, sku, price, synced_at)
-                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, [
-                    prod_data.get("id"),
-                    prod_data.get("name", "Unknown"),
-                    prod_data.get("category_id"),
-                    brand,
-                    prod_data.get("sku"),
-                    prod_data.get("min_price") or prod_data.get("price")
-                ])
-                count += 1
+                    conn.execute("""
+                        INSERT OR REPLACE INTO products (id, name, category_id, brand, sku, price, synced_at)
+                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, [
+                        prod_data.get("id"),
+                        prod_data.get("name", "Unknown"),
+                        prod_data.get("category_id"),
+                        brand,
+                        prod_data.get("sku"),
+                        prod_data.get("min_price") or prod_data.get("price")
+                    ])
+                    count += 1
 
-            logger.info(f"Upserted {count} products to DuckDB")
-            return count
+                conn.execute("COMMIT")
+                logger.info(f"Upserted {count} products to DuckDB")
+                return count
+
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     async def upsert_categories(self, categories: List[Dict[str, Any]]) -> int:
         """Insert or update categories from API response."""
@@ -460,20 +537,27 @@ class DuckDBStore:
             return 0
 
         async with self.connection() as conn:
-            count = 0
-            for cat_data in categories:
-                conn.execute("""
-                    INSERT OR REPLACE INTO categories (id, name, parent_id, synced_at)
-                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                """, [
-                    cat_data.get("id"),
-                    cat_data.get("name", "Unknown"),
-                    cat_data.get("parent_id")
-                ])
-                count += 1
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                count = 0
+                for cat_data in categories:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO categories (id, name, parent_id, synced_at)
+                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    """, [
+                        cat_data.get("id"),
+                        cat_data.get("name", "Unknown"),
+                        cat_data.get("parent_id")
+                    ])
+                    count += 1
 
-            logger.info(f"Upserted {count} categories to DuckDB")
-            return count
+                conn.execute("COMMIT")
+                logger.info(f"Upserted {count} categories to DuckDB")
+                return count
+
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     async def upsert_expense_types(self, expense_types: List[Dict[str, Any]]) -> int:
         """Insert or update expense types from API response."""
@@ -481,32 +565,39 @@ class DuckDBStore:
             return 0
 
         async with self.connection() as conn:
-            count = 0
-            for et in expense_types:
-                name = et.get("name", "Unknown")
-                alias = et.get("alias")
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                count = 0
+                for et in expense_types:
+                    name = et.get("name", "Unknown")
+                    alias = et.get("alias")
 
-                # Clean up localization keys (e.g., "dictionaries.expense_types.delivery" -> "Delivery")
-                if name.startswith("dictionaries.expense_types."):
-                    # Use alias as display name, formatted nicely
-                    if alias:
-                        name = alias.replace("_", " ").title()
-                    else:
-                        name = name.replace("dictionaries.expense_types.", "").replace("_", " ").title()
+                    # Clean up localization keys (e.g., "dictionaries.expense_types.delivery" -> "Delivery")
+                    if name.startswith("dictionaries.expense_types."):
+                        # Use alias as display name, formatted nicely
+                        if alias:
+                            name = alias.replace("_", " ").title()
+                        else:
+                            name = name.replace("dictionaries.expense_types.", "").replace("_", " ").title()
 
-                conn.execute("""
-                    INSERT OR REPLACE INTO expense_types (id, name, alias, is_active, synced_at)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, [
-                    et.get("id"),
-                    name,
-                    alias,
-                    et.get("is_active", True)
-                ])
-                count += 1
+                    conn.execute("""
+                        INSERT OR REPLACE INTO expense_types (id, name, alias, is_active, synced_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, [
+                        et.get("id"),
+                        name,
+                        alias,
+                        et.get("is_active", True)
+                    ])
+                    count += 1
 
-            logger.info(f"Upserted {count} expense types to DuckDB")
-            return count
+                conn.execute("COMMIT")
+                logger.info(f"Upserted {count} expense types to DuckDB")
+                return count
+
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     async def upsert_expenses(self, order_id: int, expenses: List[Dict[str, Any]]) -> int:
         """Insert or update expenses for an order."""
@@ -514,25 +605,32 @@ class DuckDBStore:
             return 0
 
         async with self.connection() as conn:
-            count = 0
-            for exp in expenses:
-                conn.execute("""
-                    INSERT OR REPLACE INTO expenses
-                    (id, order_id, expense_type_id, amount, description, status, payment_date, created_at, synced_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, [
-                    exp.get("id"),
-                    order_id,
-                    exp.get("expense_type_id"),
-                    exp.get("amount", 0),
-                    exp.get("description"),
-                    exp.get("status"),
-                    exp.get("payment_date"),
-                    exp.get("created_at")
-                ])
-                count += 1
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                count = 0
+                for exp in expenses:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO expenses
+                        (id, order_id, expense_type_id, amount, description, status, payment_date, created_at, synced_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, [
+                        exp.get("id"),
+                        order_id,
+                        exp.get("expense_type_id"),
+                        exp.get("amount", 0),
+                        exp.get("description"),
+                        exp.get("status"),
+                        exp.get("payment_date"),
+                        exp.get("created_at")
+                    ])
+                    count += 1
 
-            return count
+                conn.execute("COMMIT")
+                return count
+
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     async def upsert_managers(self, managers: List[Dict[str, Any]]) -> int:
         """Insert or update managers from KeyCRM API response.
@@ -547,23 +645,30 @@ class DuckDBStore:
             return 0
 
         async with self.connection() as conn:
-            count = 0
-            for mgr in managers:
-                conn.execute("""
-                    INSERT OR REPLACE INTO managers
-                    (id, name, email, status, is_retail, synced_at)
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, [
-                    mgr.get("id"),
-                    mgr.get("name") or mgr.get("full_name", "Unknown"),
-                    mgr.get("email"),
-                    mgr.get("status"),  # 'active', 'blocked', 'pending'
-                    mgr.get("id") in RETAIL_MANAGER_IDS  # Set is_retail based on known IDs
-                ])
-                count += 1
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                count = 0
+                for mgr in managers:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO managers
+                        (id, name, email, status, is_retail, synced_at)
+                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, [
+                        mgr.get("id"),
+                        mgr.get("name") or mgr.get("full_name", "Unknown"),
+                        mgr.get("email"),
+                        mgr.get("status"),  # 'active', 'blocked', 'pending'
+                        mgr.get("id") in RETAIL_MANAGER_IDS  # Set is_retail based on known IDs
+                    ])
+                    count += 1
 
-            logger.info(f"Upserted {count} managers to DuckDB")
-            return count
+                conn.execute("COMMIT")
+                logger.info(f"Upserted {count} managers to DuckDB")
+                return count
+
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     async def update_manager_stats(self) -> int:
         """Update manager order statistics from orders table.
