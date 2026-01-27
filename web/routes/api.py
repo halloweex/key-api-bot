@@ -726,12 +726,19 @@ async def get_inventory_trend(
     Shows how stock value and quantity change daily or monthly.
     Useful for tracking inventory health and identifying trends.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     # Validate granularity
     if granularity not in ("daily", "monthly"):
         granularity = "daily"
 
-    store = await get_store()
-    return await store.get_inventory_trend(days, granularity)
+    try:
+        store = await get_store()
+        return await store.get_inventory_trend(days, granularity)
+    except Exception as e:
+        logger.error(f"Inventory trend error: {e}", exc_info=True)
+        raise
 
 
 @router.get("/stocks/dead")
