@@ -27,6 +27,9 @@ import type {
   StockSummaryResponse,
   InventoryTrendResponse,
   DeadStockAnalysisResponse,
+  InventoryAnalysisResponse,
+  StockAction,
+  RestockAlert,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -379,6 +382,16 @@ export const api = {
 
   getDeadStockAnalysis: (options?: FetchOptions) =>
     fetchApi<DeadStockAnalysisResponse>('/stocks/dead', undefined, options),
+
+  // V2 Inventory Analysis (view-based)
+  getInventoryAnalysis: (options?: FetchOptions) =>
+    fetchApi<InventoryAnalysisResponse>('/stocks/analysis', undefined, options),
+
+  getStockActions: (options?: FetchOptions) =>
+    fetchApi<StockAction[]>('/stocks/actions', undefined, options),
+
+  getRestockAlerts: (options?: FetchOptions) =>
+    fetchApi<RestockAlert[]>('/stocks/alerts', undefined, options),
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────

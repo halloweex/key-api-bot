@@ -38,4 +38,8 @@ export {
   useStockSummary,
   useInventoryTrend,
   useDeadStockAnalysis,
+  // V2 Inventory Analysis
+  useInventoryAnalysis,
+  useStockActions,
+  useRestockAlerts,
 } from './useApi'

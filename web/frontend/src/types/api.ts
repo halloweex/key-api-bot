@@ -397,3 +397,84 @@ export interface DeadStockAnalysisResponse {
     minimumSampleSize: number
   }
 }
+
+// ─── V2 Inventory Analysis Types ─────────────────────────────────────────────
+
+export interface AgingBucket {
+  bucket: string
+  skuCount: number
+  units: number
+  value: number
+}
+
+export interface CategoryVelocity {
+  categoryId: number | null
+  categoryName: string
+  sampleSize: number
+  p50: number | null
+  p75: number | null
+  p90: number | null
+  thresholdDays: number
+}
+
+export interface InventoryAnalysisItem {
+  id: number
+  sku: string
+  name: string | null
+  brand: string | null
+  categoryName: string | null
+  quantity: number
+  value: number
+  price: number
+  daysSinceSale: number | null
+  daysInStock: number | null
+  thresholdDays: number
+  status: 'healthy' | 'at_risk' | 'dead_stock' | 'never_sold'
+}
+
+export interface InventoryAnalysisResponse {
+  summary: {
+    healthy: DeadStockStatusSummary
+    atRisk: DeadStockStatusSummary
+    deadStock: DeadStockStatusSummary
+    neverSold: DeadStockStatusSummary
+    total: {
+      skuCount: number
+      quantity: number
+      value: number
+    }
+  }
+  agingBuckets: AgingBucket[]
+  categoryThresholds: CategoryVelocity[]
+  items: InventoryAnalysisItem[]
+  methodology: {
+    description: string
+    minimumThreshold: number
+    defaultThreshold: number
+    atRiskMultiplier: number
+  }
+}
+
+export interface StockAction {
+  offerId: number
+  sku: string
+  name: string | null
+  brand: string | null
+  categoryName: string | null
+  units: number
+  value: number
+  daysSinceSale: number | null
+  daysInStock: number | null
+  status: string
+  action: string
+}
+
+export interface RestockAlert {
+  offerId: number
+  sku: string
+  name: string | null
+  brand: string | null
+  unitsLeft: number
+  daysSinceSale: number | null
+  alertLevel: 'OUT_OF_STOCK' | 'CRITICAL' | 'LOW'
+}

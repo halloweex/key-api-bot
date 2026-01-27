@@ -27,6 +27,9 @@ import type {
   StockSummaryResponse,
   InventoryTrendResponse,
   DeadStockAnalysisResponse,
+  InventoryAnalysisResponse,
+  StockAction,
+  RestockAlert,
 } from '../types/api'
 
 // Query key factory for consistent cache keys
@@ -57,6 +60,10 @@ export const queryKeys = {
   stockSummary: (limit: number) => ['stockSummary', limit] as const,
   inventoryTrend: (days: number, granularity: string) => ['inventoryTrend', days, granularity] as const,
   deadStockAnalysis: () => ['deadStockAnalysis'] as const,
+  // V2 inventory analysis
+  inventoryAnalysis: () => ['inventoryAnalysis'] as const,
+  stockActions: () => ['stockActions'] as const,
+  restockAlerts: () => ['restockAlerts'] as const,
 }
 
 // ─── Summary ────────────────────────────────────────────────────────────────
@@ -344,5 +351,30 @@ export function useDeadStockAnalysis() {
     queryKey: queryKeys.deadStockAnalysis(),
     queryFn: () => api.getDeadStockAnalysis(),
     staleTime: 10 * 60 * 1000, // 10 minutes - less volatile data
+  })
+}
+
+// V2 Inventory Analysis (view-based)
+export function useInventoryAnalysis() {
+  return useQuery<InventoryAnalysisResponse>({
+    queryKey: queryKeys.inventoryAnalysis(),
+    queryFn: () => api.getInventoryAnalysis(),
+    staleTime: 10 * 60 * 1000,
+  })
+}
+
+export function useStockActions() {
+  return useQuery<StockAction[]>({
+    queryKey: queryKeys.stockActions(),
+    queryFn: () => api.getStockActions(),
+    staleTime: 10 * 60 * 1000,
+  })
+}
+
+export function useRestockAlerts() {
+  return useQuery<RestockAlert[]>({
+    queryKey: queryKeys.restockAlerts(),
+    queryFn: () => api.getRestockAlerts(),
+    staleTime: 5 * 60 * 1000,
   })
 }
