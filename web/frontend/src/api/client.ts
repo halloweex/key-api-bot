@@ -24,6 +24,7 @@ import type {
   SeasonalityIndex,
   GrowthMetrics,
   GoalForecastResponse,
+  StockSummaryResponse,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -366,6 +367,10 @@ export const api = {
       'POST',
       options
     ),
+
+  // Stocks
+  getStockSummary: (limit = 20, options?: FetchOptions) =>
+    fetchApi<StockSummaryResponse>('/stocks/summary', `limit=${limit}`, options),
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────

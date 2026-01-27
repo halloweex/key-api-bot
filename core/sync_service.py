@@ -162,6 +162,33 @@ class SyncService:
             logger.error(f"Manager sync error: {e}")
             return 0
 
+    async def sync_stocks(self) -> int:
+        """
+        Sync offer stocks from KeyCRM API.
+
+        Returns:
+            Number of stocks synced
+        """
+        logger.info("Syncing offer stocks...")
+        try:
+            client = await get_async_client()
+            stocks = await client.fetch_all_stocks()
+
+            count = await self.store.upsert_stocks(stocks)
+            await self.store.set_last_sync_time("stocks")
+
+            logger.info(f"Synced {count} offer stocks from KeyCRM")
+            return count
+        except KeyCRMConnectionError as e:
+            logger.warning(f"Stock sync connection error (will retry): {e}")
+            return 0
+        except KeyCRMAPIError as e:
+            logger.error(f"Stock sync API error: {e}")
+            return 0
+        except KeyCRMError as e:
+            logger.error(f"Stock sync error: {e}")
+            return 0
+
     async def full_sync(self, days_back: int = 365) -> dict:
         """
         Perform full sync of all data from KeyCRM.
@@ -261,7 +288,7 @@ class SyncService:
         Returns:
             Dict with sync statistics
         """
-        stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0, "managers": 0}
+        stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0, "managers": 0, "stocks": 0}
 
         try:
             client = await get_async_client()
@@ -307,6 +334,13 @@ class SyncService:
             last_managers_sync = await self.store.get_last_sync_time("managers")
             if not last_managers_sync or (datetime.now(DEFAULT_TZ) - last_managers_sync).total_seconds() > 86400:
                 stats["managers"] = await self.sync_managers()
+
+            # Sync stocks hourly (same frequency as products)
+            last_stocks_sync = await self.store.get_last_sync_time("stocks")
+            if not last_stocks_sync or (datetime.now(DEFAULT_TZ) - last_stocks_sync).total_seconds() > 3600:
+                stats["stocks"] = await self.sync_stocks()
+                # Record daily inventory snapshot (for average inventory calculation)
+                await self.store.record_inventory_snapshot()
 
         except KeyCRMConnectionError as e:
             logger.warning(f"Incremental sync connection error (will retry): {e}")

@@ -178,6 +178,28 @@ class DuckDBStore:
             -- See: https://github.com/duckdb/duckdb/issues/4023
         );
 
+        -- Offer stocks (inventory levels)
+        CREATE TABLE IF NOT EXISTS offer_stocks (
+            id INTEGER PRIMARY KEY,              -- offer_id from KeyCRM
+            sku VARCHAR,
+            price DECIMAL(12, 2),
+            purchased_price DECIMAL(12, 2),
+            quantity INTEGER DEFAULT 0,
+            reserve INTEGER DEFAULT 0,
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Inventory history (daily snapshots for average calculation)
+        CREATE TABLE IF NOT EXISTS inventory_history (
+            date DATE NOT NULL,
+            total_quantity INTEGER NOT NULL,
+            total_value DECIMAL(14, 2) NOT NULL,
+            total_reserve INTEGER DEFAULT 0,
+            sku_count INTEGER DEFAULT 0,
+            recorded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (date)
+        );
+
         -- Sync metadata
         CREATE TABLE IF NOT EXISTS sync_metadata (
             key VARCHAR PRIMARY KEY,
@@ -747,6 +769,274 @@ class DuckDBStore:
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+
+    async def upsert_stocks(self, stocks: List[Dict[str, Any]]) -> int:
+        """Insert or update offer stocks from KeyCRM API response.
+
+        Args:
+            stocks: List of stock dicts from KeyCRM API (offers/stocks endpoint)
+
+        Returns:
+            Number of stocks upserted
+        """
+        if not stocks:
+            return 0
+
+        async with self.connection() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                count = 0
+                for stock in stocks:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO offer_stocks
+                        (id, sku, price, purchased_price, quantity, reserve, synced_at)
+                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, [
+                        stock.get("id"),
+                        stock.get("sku"),
+                        stock.get("price"),
+                        stock.get("purchased_price"),
+                        stock.get("quantity", 0),
+                        stock.get("reserve", 0),
+                    ])
+                    count += 1
+
+                conn.execute("COMMIT")
+                logger.info(f"Upserted {count} offer stocks to DuckDB")
+                return count
+
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
+    async def get_stock_summary(self, limit: int = 20) -> Dict[str, Any]:
+        """Get stock summary for dashboard display.
+
+        Returns:
+            Dict with total stats and top items by quantity and low stock alerts
+        """
+        async with self.connection() as conn:
+            # Overall stats
+            stats = conn.execute("""
+                SELECT
+                    COUNT(*) as total_offers,
+                    COUNT(*) FILTER (WHERE quantity > 0) as in_stock_count,
+                    COUNT(*) FILTER (WHERE quantity = 0) as out_of_stock_count,
+                    COUNT(*) FILTER (WHERE quantity > 0 AND quantity <= 5) as low_stock_count,
+                    SUM(quantity) as total_quantity,
+                    SUM(reserve) as total_reserve,
+                    SUM(quantity * price) as total_value
+                FROM offer_stocks
+            """).fetchone()
+
+            # Top items by quantity (with product names)
+            top_by_qty = conn.execute(f"""
+                SELECT os.sku, os.quantity, os.reserve, os.price, p.name
+                FROM offer_stocks os
+                LEFT JOIN products p ON os.id = p.id
+                WHERE os.quantity > 0
+                ORDER BY os.quantity DESC
+                LIMIT {limit}
+            """).fetchall()
+
+            # Low stock items (1-5 units, excluding 0)
+            low_stock = conn.execute("""
+                SELECT os.sku, os.quantity, os.reserve, os.price, p.name
+                FROM offer_stocks os
+                LEFT JOIN products p ON os.id = p.id
+                WHERE os.quantity > 0 AND os.quantity <= 5
+                ORDER BY os.quantity ASC
+                LIMIT 20
+            """).fetchall()
+
+            # Out of stock items
+            out_of_stock = conn.execute("""
+                SELECT os.sku, os.price, p.name
+                FROM offer_stocks os
+                LEFT JOIN products p ON os.id = p.id
+                WHERE os.quantity = 0
+                ORDER BY os.price DESC
+                LIMIT 20
+            """).fetchall()
+
+            # Last sync time
+            last_sync = conn.execute("""
+                SELECT value FROM sync_metadata WHERE key = 'stocks_last_sync'
+            """).fetchone()
+
+            # Get average inventory (30 days)
+            avg_inv = conn.execute("""
+                WITH period_data AS (
+                    SELECT
+                        total_quantity,
+                        total_value,
+                        ROW_NUMBER() OVER (ORDER BY date ASC) as rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY date DESC) as rn_desc
+                    FROM inventory_history
+                    WHERE date >= CURRENT_DATE - INTERVAL 30 DAY
+                )
+                SELECT
+                    MAX(CASE WHEN rn_asc = 1 THEN total_quantity END) as beginning_qty,
+                    MAX(CASE WHEN rn_asc = 1 THEN total_value END) as beginning_value,
+                    MAX(CASE WHEN rn_desc = 1 THEN total_quantity END) as ending_qty,
+                    MAX(CASE WHEN rn_desc = 1 THEN total_value END) as ending_value,
+                    COUNT(*) as data_points
+                FROM period_data
+            """).fetchone()
+
+            # Calculate average inventory
+            if avg_inv and avg_inv[0] and avg_inv[2]:
+                avg_quantity = (avg_inv[0] + avg_inv[2]) / 2
+                avg_value = ((avg_inv[1] or 0) + (avg_inv[3] or 0)) / 2
+                avg_data_points = avg_inv[4]
+            else:
+                avg_quantity = stats[4] or 0  # Use current as fallback
+                avg_value = float(stats[6] or 0)
+                avg_data_points = 0
+
+            return {
+                "summary": {
+                    "totalOffers": stats[0] or 0,
+                    "inStockCount": stats[1] or 0,
+                    "outOfStockCount": stats[2] or 0,
+                    "lowStockCount": stats[3] or 0,
+                    "totalQuantity": stats[4] or 0,
+                    "totalReserve": stats[5] or 0,
+                    "totalValue": float(stats[6] or 0),
+                    "averageQuantity": round(avg_quantity),
+                    "averageValue": round(avg_value, 2),
+                    "avgDataPoints": avg_data_points,
+                },
+                "topByQuantity": [
+                    {"sku": r[0], "quantity": r[1], "reserve": r[2], "price": float(r[3] or 0), "name": r[4]}
+                    for r in top_by_qty
+                ],
+                "lowStock": [
+                    {"sku": r[0], "quantity": r[1], "reserve": r[2], "price": float(r[3] or 0), "name": r[4]}
+                    for r in low_stock
+                ],
+                "outOfStock": [
+                    {"sku": r[0], "price": float(r[1] or 0), "name": r[2]}
+                    for r in out_of_stock
+                ],
+                "lastSync": last_sync[0] if last_sync else None,
+            }
+
+    async def record_inventory_snapshot(self) -> bool:
+        """Record daily inventory snapshot for average calculation.
+
+        Only records one snapshot per day. Returns True if recorded, False if already exists.
+        """
+        async with self.connection() as conn:
+            today = conn.execute("SELECT CURRENT_DATE").fetchone()[0]
+
+            # Check if already recorded today
+            exists = conn.execute(
+                "SELECT 1 FROM inventory_history WHERE date = ?", [today]
+            ).fetchone()
+
+            if exists:
+                return False
+
+            # Record snapshot
+            conn.execute("""
+                INSERT INTO inventory_history (date, total_quantity, total_value, total_reserve, sku_count)
+                SELECT
+                    CURRENT_DATE,
+                    COALESCE(SUM(quantity), 0),
+                    COALESCE(SUM(quantity * price), 0),
+                    COALESCE(SUM(reserve), 0),
+                    COUNT(*)
+                FROM offer_stocks
+            """)
+            logger.info(f"Recorded inventory snapshot for {today}")
+            return True
+
+    async def get_average_inventory(self, days: int = 30) -> Dict[str, Any]:
+        """Calculate average inventory over a period.
+
+        Uses formula: (Beginning Inventory + Ending Inventory) / 2
+        Also provides daily average if more data points available.
+
+        Args:
+            days: Number of days to look back (default 30)
+
+        Returns:
+            Dict with average inventory metrics
+        """
+        async with self.connection() as conn:
+            # Get beginning and ending inventory for the period
+            result = conn.execute("""
+                WITH period_data AS (
+                    SELECT
+                        date,
+                        total_quantity,
+                        total_value,
+                        ROW_NUMBER() OVER (ORDER BY date ASC) as rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY date DESC) as rn_desc
+                    FROM inventory_history
+                    WHERE date >= CURRENT_DATE - INTERVAL ? DAY
+                )
+                SELECT
+                    -- Beginning inventory (oldest in period)
+                    MAX(CASE WHEN rn_asc = 1 THEN total_quantity END) as beginning_qty,
+                    MAX(CASE WHEN rn_asc = 1 THEN total_value END) as beginning_value,
+                    MAX(CASE WHEN rn_asc = 1 THEN date END) as beginning_date,
+                    -- Ending inventory (most recent)
+                    MAX(CASE WHEN rn_desc = 1 THEN total_quantity END) as ending_qty,
+                    MAX(CASE WHEN rn_desc = 1 THEN total_value END) as ending_value,
+                    MAX(CASE WHEN rn_desc = 1 THEN date END) as ending_date,
+                    -- Daily averages
+                    AVG(total_quantity) as avg_daily_qty,
+                    AVG(total_value) as avg_daily_value,
+                    COUNT(*) as data_points
+                FROM period_data
+            """, [days]).fetchone()
+
+            if not result or not result[0]:
+                # No historical data, use current snapshot
+                current = conn.execute("""
+                    SELECT
+                        COALESCE(SUM(quantity), 0),
+                        COALESCE(SUM(quantity * price), 0)
+                    FROM offer_stocks
+                """).fetchone()
+
+                return {
+                    "averageQuantity": current[0] or 0,
+                    "averageValue": float(current[1] or 0),
+                    "beginningQuantity": None,
+                    "endingQuantity": current[0] or 0,
+                    "beginningValue": None,
+                    "endingValue": float(current[1] or 0),
+                    "dataPoints": 0,
+                    "periodDays": days,
+                    "message": "No historical data yet. Average based on current snapshot.",
+                }
+
+            beginning_qty = result[0] or 0
+            beginning_value = float(result[1] or 0)
+            ending_qty = result[3] or 0
+            ending_value = float(result[4] or 0)
+
+            # Calculate averages using (Beginning + Ending) / 2
+            avg_qty = (beginning_qty + ending_qty) / 2
+            avg_value = (beginning_value + ending_value) / 2
+
+            return {
+                "averageQuantity": round(avg_qty),
+                "averageValue": round(avg_value, 2),
+                "beginningQuantity": beginning_qty,
+                "beginningValue": beginning_value,
+                "beginningDate": str(result[2]) if result[2] else None,
+                "endingQuantity": ending_qty,
+                "endingValue": ending_value,
+                "endingDate": str(result[5]) if result[5] else None,
+                "dailyAverageQuantity": round(float(result[6] or 0)),
+                "dailyAverageValue": round(float(result[7] or 0), 2),
+                "dataPoints": result[8] or 0,
+                "periodDays": days,
+            }
 
     async def update_manager_stats(self) -> int:
         """Update manager order statistics from orders table.

@@ -271,6 +271,17 @@ class KeyCRMClient:
         return await self._request("GET", "users", params=params)
 
     # ═══════════════════════════════════════════════════════════════════════════
+    # STOCK METHODS
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    async def get_stocks(
+        self,
+        params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Get offer stocks from KeyCRM."""
+        return await self._request("GET", "offers/stocks", params=params)
+
+    # ═══════════════════════════════════════════════════════════════════════════
     # SEARCH METHODS
     # ═══════════════════════════════════════════════════════════════════════════
 
@@ -476,6 +487,23 @@ class KeyCRMClient:
         """
         raw_products = await self.fetch_all("products", params, max_pages=max_pages)
         return [Product.from_api(data) for data in raw_products]
+
+    async def fetch_all_stocks(
+        self,
+        params: Optional[Dict[str, Any]] = None,
+        max_pages: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch all offer stocks.
+
+        Args:
+            params: Query params for filtering
+            max_pages: Maximum pages to fetch
+
+        Returns:
+            List of stock dicts with id, sku, price, purchased_price, quantity, reserve
+        """
+        return await self.fetch_all("offers/stocks", params, max_pages=max_pages)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

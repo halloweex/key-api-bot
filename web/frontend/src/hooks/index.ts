@@ -34,4 +34,6 @@ export {
   useWeeklyPatterns,
   useGoalForecast,
   useRecalculateSeasonality,
+  // Stock
+  useStockSummary,
 } from './useApi'

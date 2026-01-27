@@ -46,3 +46,7 @@ export const LazyBrandAnalyticsChart = lazy(() =>
 export const LazyExpensesChart = lazy(() =>
   import('./ExpensesChart').then(m => ({ default: m.ExpensesChart }))
 )
+
+export const LazyStockSummaryChart = lazy(() =>
+  import('./StockSummaryChart').then(m => ({ default: m.StockSummaryChart }))
+)

@@ -24,6 +24,7 @@ import type {
   SeasonalityIndex,
   GrowthMetrics,
   GoalForecastResponse,
+  StockSummaryResponse,
 } from '../types/api'
 
 // Query key factory for consistent cache keys
@@ -51,6 +52,7 @@ export const queryKeys = {
   categoryBreakdown: (parent: string, params: string) => ['categoryBreakdown', parent, params] as const,
   brands: () => ['brands'] as const,
   expenseTypes: () => ['expenseTypes'] as const,
+  stockSummary: (limit: number) => ['stockSummary', limit] as const,
 }
 
 // ─── Summary ────────────────────────────────────────────────────────────────
@@ -312,5 +314,15 @@ export function useRecalculateSeasonality() {
       queryClient.invalidateQueries({ queryKey: queryKeys.growthMetrics(salesType) })
       queryClient.invalidateQueries({ queryKey: queryKeys.weeklyPatterns(salesType) })
     },
+  })
+}
+
+// ─── Stock ───────────────────────────────────────────────────────────────────
+
+export function useStockSummary(limit = 20) {
+  return useQuery<StockSummaryResponse>({
+    queryKey: queryKeys.stockSummary(limit),
+    queryFn: () => api.getStockSummary(limit),
+    staleTime: 5 * 60 * 1000, // 5 minutes
   })
 }

@@ -283,3 +283,37 @@ export interface GoalForecastResponse {
     calculatedAt: string
   }
 }
+
+// Stock types
+export interface StockItem {
+  sku: string
+  quantity: number
+  reserve: number
+  price: number
+  name: string | null
+}
+
+export interface OutOfStockItem {
+  sku: string
+  price: number
+  name: string | null
+}
+
+export interface StockSummaryResponse {
+  summary: {
+    totalOffers: number
+    inStockCount: number
+    outOfStockCount: number
+    lowStockCount: number
+    totalQuantity: number
+    totalReserve: number
+    totalValue: number
+    averageQuantity: number
+    averageValue: number
+    avgDataPoints: number
+  }
+  topByQuantity: StockItem[]
+  lowStock: StockItem[]
+  outOfStock: OutOfStockItem[]
+  lastSync: string | null
+}

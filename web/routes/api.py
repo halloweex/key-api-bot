@@ -672,3 +672,42 @@ async def get_goal_forecast(
 
     store = await get_store()
     return await store.generate_smart_goals(year, month, sales_type, recalculate)
+
+
+# ─── Stock Endpoints ──────────────────────────────────────────────────────────
+
+
+@router.get("/stocks/summary")
+@limiter.limit("30/minute")
+async def get_stock_summary(
+    request: Request,
+    limit: int = Query(20, ge=5, le=50, description="Number of items to return in lists")
+):
+    """
+    Get stock summary for dashboard display.
+    
+    Returns:
+    - summary: Overall stock statistics (totals, counts)
+    - topByQuantity: Top items by stock quantity
+    - lowStock: Items with low stock (1-5 units)
+    - outOfStock: Items currently out of stock
+    """
+    store = await get_store()
+    return await store.get_stock_summary(limit)
+
+
+
+@router.get("/stocks/average")
+@limiter.limit("30/minute")
+async def get_average_inventory(
+    request: Request,
+    days: int = Query(30, ge=7, le=365, description="Number of days to calculate average over")
+):
+    """
+    Get average inventory using formula: (Beginning + Ending) / 2
+    
+    Returns beginning and ending inventory values for the period,
+    calculated average, and daily averages if multiple data points exist.
+    """
+    store = await get_store()
+    return await store.get_average_inventory(days)

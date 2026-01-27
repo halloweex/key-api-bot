@@ -11,6 +11,7 @@ import {
   LazyCustomerInsightsChart,
   LazyBrandAnalyticsChart,
   LazyExpensesChart,
+  LazyStockSummaryChart,
 } from '../charts/lazy'
 
 // ─── Chart Loading Fallback ──────────────────────────────────────────────────
@@ -129,6 +130,11 @@ export const Dashboard = memo(function Dashboard() {
       {/* Brand Analytics - Full Width */}
       <ChartSection>
         <LazyBrandAnalyticsChart />
+      </ChartSection>
+
+      {/* Stock Summary - Full Width */}
+      <ChartSection>
+        <LazyStockSummaryChart />
       </ChartSection>
 
       {/* ROI Calculator */}
