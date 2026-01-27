@@ -162,6 +162,36 @@ class SyncService:
             logger.error(f"Manager sync error: {e}")
             return 0
 
+    async def sync_offers(self) -> int:
+        """
+        Sync offers (product variations) from KeyCRM API.
+
+        Offers link offer_id to product_id, enabling proper joins
+        between offer_stocks and products tables.
+
+        Returns:
+            Number of offers synced
+        """
+        logger.info("Syncing offers...")
+        try:
+            client = await get_async_client()
+            offers = await client.fetch_all_offers()
+
+            count = await self.store.upsert_offers(offers)
+            await self.store.set_last_sync_time("offers")
+
+            logger.info(f"Synced {count} offers from KeyCRM")
+            return count
+        except KeyCRMConnectionError as e:
+            logger.warning(f"Offers sync connection error (will retry): {e}")
+            return 0
+        except KeyCRMAPIError as e:
+            logger.error(f"Offers sync API error: {e}")
+            return 0
+        except KeyCRMError as e:
+            logger.error(f"Offers sync error: {e}")
+            return 0
+
     async def sync_stocks(self) -> int:
         """
         Sync offer stocks from KeyCRM API.
@@ -200,7 +230,7 @@ class SyncService:
             Dict with sync statistics
         """
         logger.info(f"Starting full sync (last {days_back} days)...")
-        stats = {"orders": 0, "products": 0, "categories": 0, "expense_types": 0, "expenses": 0, "managers": 0}
+        stats = {"orders": 0, "products": 0, "categories": 0, "expense_types": 0, "expenses": 0, "managers": 0, "offers": 0, "stocks": 0}
 
         try:
             client = await get_async_client()
@@ -264,6 +294,12 @@ class SyncService:
 
             logger.info(f"All chunks complete. Total: {stats['orders']} orders, {stats['expenses']} expenses")
 
+            # Sync offers (needed for proper stock-to-product linking)
+            stats["offers"] = await self.sync_offers()
+
+            # Sync stocks
+            stats["stocks"] = await self.sync_stocks()
+
             # Update sync checkpoint with latest order timestamp
             last_order_time = await self.store.get_latest_order_time()
             await self.store.set_last_sync_time("orders", last_order_time)
@@ -288,7 +324,7 @@ class SyncService:
         Returns:
             Dict with sync statistics
         """
-        stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0, "managers": 0, "stocks": 0}
+        stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0, "managers": 0, "offers": 0, "stocks": 0}
 
         try:
             client = await get_async_client()
@@ -334,6 +370,11 @@ class SyncService:
             last_managers_sync = await self.store.get_last_sync_time("managers")
             if not last_managers_sync or (datetime.now(DEFAULT_TZ) - last_managers_sync).total_seconds() > 86400:
                 stats["managers"] = await self.sync_managers()
+
+            # Sync offers hourly (needed for proper stock-to-product linking)
+            last_offers_sync = await self.store.get_last_sync_time("offers")
+            if not last_offers_sync or (datetime.now(DEFAULT_TZ) - last_offers_sync).total_seconds() > 3600:
+                stats["offers"] = await self.sync_offers()
 
             # Sync stocks hourly (same frequency as products)
             last_stocks_sync = await self.store.get_last_sync_time("stocks")

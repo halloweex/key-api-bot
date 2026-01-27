@@ -274,6 +274,17 @@ class KeyCRMClient:
     # STOCK METHODS
     # ═══════════════════════════════════════════════════════════════════════════
 
+    async def get_offers(
+        self,
+        params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Get offers (product variations) from KeyCRM.
+
+        Each offer links offer_id to product_id, enabling proper joins
+        between offer_stocks and products tables.
+        """
+        return await self._request("GET", "offers", params=params)
+
     async def get_stocks(
         self,
         params: Optional[Dict[str, Any]] = None
@@ -487,6 +498,26 @@ class KeyCRMClient:
         """
         raw_products = await self.fetch_all("products", params, max_pages=max_pages)
         return [Product.from_api(data) for data in raw_products]
+
+    async def fetch_all_offers(
+        self,
+        params: Optional[Dict[str, Any]] = None,
+        max_pages: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch all offers (product variations).
+
+        Offers link offer_id to product_id, enabling proper joins
+        between offer_stocks and products tables.
+
+        Args:
+            params: Query params for filtering
+            max_pages: Maximum pages to fetch
+
+        Returns:
+            List of offer dicts with id, product_id, sku
+        """
+        return await self.fetch_all("offers", params, max_pages=max_pages)
 
     async def fetch_all_stocks(
         self,

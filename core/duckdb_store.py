@@ -178,6 +178,14 @@ class DuckDBStore:
             -- See: https://github.com/duckdb/duckdb/issues/4023
         );
 
+        -- Offers (product variations - links offer_id to product_id)
+        CREATE TABLE IF NOT EXISTS offers (
+            id INTEGER PRIMARY KEY,              -- offer_id from KeyCRM
+            product_id INTEGER NOT NULL,         -- links to products.id
+            sku VARCHAR,
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- Offer stocks (inventory levels)
         CREATE TABLE IF NOT EXISTS offer_stocks (
             id INTEGER PRIMARY KEY,              -- offer_id from KeyCRM
@@ -770,6 +778,44 @@ class DuckDBStore:
                 conn.execute("ROLLBACK")
                 raise
 
+    async def upsert_offers(self, offers: List[Dict[str, Any]]) -> int:
+        """Insert or update offers from KeyCRM API response.
+
+        Offers link offer_id to product_id, enabling proper joins between
+        offer_stocks and products tables.
+
+        Args:
+            offers: List of offer dicts from KeyCRM API (/offers endpoint)
+
+        Returns:
+            Number of offers upserted
+        """
+        if not offers:
+            return 0
+
+        async with self.connection() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                count = 0
+                for offer in offers:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO offers (id, product_id, sku, synced_at)
+                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    """, [
+                        offer.get("id"),
+                        offer.get("product_id"),
+                        offer.get("sku"),
+                    ])
+                    count += 1
+
+                conn.execute("COMMIT")
+                logger.info(f"Upserted {count} offers to DuckDB")
+                return count
+
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
     async def upsert_stocks(self, stocks: List[Dict[str, Any]]) -> int:
         """Insert or update offer stocks from KeyCRM API response.
 
@@ -830,11 +876,12 @@ class DuckDBStore:
                 FROM offer_stocks
             """).fetchone()
 
-            # Top items by quantity (with product names)
+            # Top items by quantity (with product names via offers table)
             top_by_qty = conn.execute(f"""
                 SELECT os.sku, os.quantity, os.reserve, os.price, p.name
                 FROM offer_stocks os
-                LEFT JOIN products p ON os.id = p.id
+                LEFT JOIN offers o ON os.id = o.id
+                LEFT JOIN products p ON o.product_id = p.id
                 WHERE os.quantity > 0
                 ORDER BY os.quantity DESC
                 LIMIT {limit}
@@ -844,7 +891,8 @@ class DuckDBStore:
             low_stock = conn.execute("""
                 SELECT os.sku, os.quantity, os.reserve, os.price, p.name
                 FROM offer_stocks os
-                LEFT JOIN products p ON os.id = p.id
+                LEFT JOIN offers o ON os.id = o.id
+                LEFT JOIN products p ON o.product_id = p.id
                 WHERE os.quantity > 0 AND os.quantity <= 5
                 ORDER BY os.quantity ASC
                 LIMIT 20
@@ -854,7 +902,8 @@ class DuckDBStore:
             out_of_stock = conn.execute("""
                 SELECT os.sku, os.price, p.name
                 FROM offer_stocks os
-                LEFT JOIN products p ON os.id = p.id
+                LEFT JOIN offers o ON os.id = o.id
+                LEFT JOIN products p ON o.product_id = p.id
                 WHERE os.quantity = 0
                 ORDER BY os.price DESC
                 LIMIT 20
@@ -1265,9 +1314,10 @@ class DuckDBStore:
                         CURRENT_DATE - pls.last_sale_date as days_since_sale,
                         COALESCE(ct.threshold_days, 180) as category_threshold
                     FROM offer_stocks os
-                    LEFT JOIN products p ON os.id = p.id
+                    LEFT JOIN offers o ON os.id = o.id
+                    LEFT JOIN products p ON o.product_id = p.id
                     LEFT JOIN categories c ON p.category_id = c.id
-                    LEFT JOIN product_last_sale pls ON os.id = pls.product_id
+                    LEFT JOIN product_last_sale pls ON o.product_id = pls.product_id
                     LEFT JOIN category_thresholds ct ON p.category_id = ct.category_id
                     WHERE os.quantity - os.reserve > 0  -- Has available stock
                 )
@@ -1338,8 +1388,9 @@ class DuckDBStore:
                             ELSE 'healthy'
                         END as status
                     FROM offer_stocks os
-                    LEFT JOIN products p ON os.id = p.id
-                    LEFT JOIN product_last_sale pls ON os.id = pls.product_id
+                    LEFT JOIN offers o ON os.id = o.id
+                    LEFT JOIN products p ON o.product_id = p.id
+                    LEFT JOIN product_last_sale pls ON o.product_id = pls.product_id
                     LEFT JOIN category_thresholds ct ON p.category_id = ct.category_id
                     WHERE os.quantity - os.reserve > 0
                 )
