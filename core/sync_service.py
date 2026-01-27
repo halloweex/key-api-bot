@@ -300,6 +300,12 @@ class SyncService:
             # Sync stocks
             stats["stocks"] = await self.sync_stocks()
 
+            # Refresh Layer 1: sku_inventory_status
+            await self.store.refresh_sku_inventory_status()
+
+            # Record Layer 2: daily per-SKU snapshot
+            await self.store.record_sku_inventory_snapshot()
+
             # Update sync checkpoint with latest order timestamp
             last_order_time = await self.store.get_latest_order_time()
             await self.store.set_last_sync_time("orders", last_order_time)
@@ -380,7 +386,14 @@ class SyncService:
             last_stocks_sync = await self.store.get_last_sync_time("stocks")
             if not last_stocks_sync or (datetime.now(DEFAULT_TZ) - last_stocks_sync).total_seconds() > 3600:
                 stats["stocks"] = await self.sync_stocks()
-                # Record daily inventory snapshot (for average inventory calculation)
+
+                # Refresh Layer 1: sku_inventory_status (denormalized current state)
+                await self.store.refresh_sku_inventory_status()
+
+                # Record Layer 2: daily per-SKU snapshot
+                await self.store.record_sku_inventory_snapshot()
+
+                # Legacy: Record aggregated inventory snapshot
                 await self.store.record_inventory_snapshot()
 
         except KeyCRMConnectionError as e:
@@ -497,6 +510,11 @@ async def init_and_sync(full_sync_days: int = 365) -> None:
         # Do incremental sync
         sync_service = await get_sync_service()
         await sync_service.incremental_sync()
+
+    # Ensure sku_inventory_status is populated (Layer 1)
+    sku_count = await store.refresh_sku_inventory_status()
+    if sku_count > 0:
+        logger.info(f"Initialized sku_inventory_status: {sku_count} SKUs")
 
     # Start background sync
     sync_service = await get_sync_service()

@@ -197,7 +197,8 @@ class DuckDBStore:
             synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
-        -- Inventory history (daily snapshots for average calculation)
+        -- Inventory history (daily snapshots for average calculation) - DEPRECATED
+        -- Kept for backwards compatibility, will be replaced by inventory_sku_history
         CREATE TABLE IF NOT EXISTS inventory_history (
             date DATE NOT NULL,
             total_quantity INTEGER NOT NULL,
@@ -207,6 +208,53 @@ class DuckDBStore:
             recorded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (date)
         );
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- LAYER 1: SKU Inventory Status (current state per SKU)
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS sku_inventory_status (
+            offer_id INTEGER PRIMARY KEY,
+            product_id INTEGER NOT NULL,
+            sku VARCHAR NOT NULL,
+
+            -- Product info (denormalized for query performance)
+            name VARCHAR,
+            brand VARCHAR,
+            category_id INTEGER,
+
+            -- Stock levels (from API)
+            quantity INTEGER NOT NULL DEFAULT 0,
+            reserve INTEGER NOT NULL DEFAULT 0,
+            price DECIMAL(12, 2) NOT NULL DEFAULT 0,
+            purchased_price DECIMAL(12, 2),
+
+            -- Timestamps
+            last_sale_date DATE,
+            first_seen_at DATE NOT NULL DEFAULT CURRENT_DATE,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sku_status_category
+            ON sku_inventory_status(category_id);
+        CREATE INDEX IF NOT EXISTS idx_sku_status_brand
+            ON sku_inventory_status(brand);
+        CREATE INDEX IF NOT EXISTS idx_sku_status_quantity
+            ON sku_inventory_status(quantity);
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- LAYER 2: SKU Inventory History (daily per-SKU snapshots)
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS inventory_sku_history (
+            date DATE NOT NULL,
+            offer_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            reserve INTEGER NOT NULL,
+            price DECIMAL(12, 2) NOT NULL,
+            PRIMARY KEY (date, offer_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sku_history_offer
+            ON inventory_sku_history(offer_id, date DESC);
 
         -- Sync metadata
         CREATE TABLE IF NOT EXISTS sync_metadata (
@@ -293,6 +341,9 @@ class DuckDBStore:
         CREATE INDEX IF NOT EXISTS idx_orders_buyer_date ON orders(buyer_id, ordered_at);
         """
         self._connection.execute(schema_sql)
+
+        # Create analytics views (Layer 3 & 4)
+        await self._create_inventory_views()
 
         # Migration: add updated_at column to existing orders table
         await self._run_migrations()
@@ -426,6 +477,153 @@ class DuckDBStore:
                     raise
         except Exception as e:
             logger.error(f"Migration error (expenses FK removal): {e}")
+
+    async def _create_inventory_views(self) -> None:
+        """Create Layer 3 & 4 analytics views for inventory."""
+        views_sql = """
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- LAYER 3: Analytics Views
+        -- ═══════════════════════════════════════════════════════════════════════
+
+        -- View: Current SKU analysis (adds calculated fields)
+        CREATE OR REPLACE VIEW v_sku_analysis AS
+        SELECT
+            s.*,
+            c.name as category_name,
+            s.quantity - s.reserve as available,
+            s.quantity * s.price as stock_value,
+            (s.quantity - s.reserve) * s.price as available_value,
+            CURRENT_DATE - s.last_sale_date as days_since_sale,
+            CURRENT_DATE - s.first_seen_at as days_in_stock
+        FROM sku_inventory_status s
+        LEFT JOIN categories c ON s.category_id = c.id;
+
+        -- View: Category velocity (for dynamic thresholds)
+        CREATE OR REPLACE VIEW v_category_velocity AS
+        SELECT
+            category_id,
+            category_name,
+            COUNT(*) as sample_size,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY days_since_sale) as p50,
+            PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY days_since_sale) as p75,
+            PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY days_since_sale) as p90,
+            LEAST(GREATEST(
+                PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY days_since_sale),
+                90
+            ), 365) as threshold_days
+        FROM v_sku_analysis
+        WHERE last_sale_date IS NOT NULL AND quantity > 0
+        GROUP BY category_id, category_name
+        HAVING COUNT(*) >= 5;
+
+        -- View: SKU status with dead stock classification
+        CREATE OR REPLACE VIEW v_sku_status AS
+        SELECT
+            s.*,
+            COALESCE(cv.threshold_days, 180) as threshold_days,
+            CASE
+                WHEN s.last_sale_date IS NULL THEN 'never_sold'
+                WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) THEN 'dead_stock'
+                WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) * 0.7 THEN 'at_risk'
+                ELSE 'healthy'
+            END as status
+        FROM v_sku_analysis s
+        LEFT JOIN v_category_velocity cv ON s.category_id = cv.category_id
+        WHERE s.quantity > 0;
+
+        -- View: Summary by status
+        CREATE OR REPLACE VIEW v_inventory_summary AS
+        SELECT
+            status,
+            COUNT(*) as sku_count,
+            SUM(available) as total_units,
+            SUM(available_value) as total_value,
+            ROUND(100.0 * SUM(available_value) /
+                NULLIF(SUM(SUM(available_value)) OVER (), 0), 1) as value_pct
+        FROM v_sku_status
+        GROUP BY status;
+
+        -- View: Aging buckets
+        CREATE OR REPLACE VIEW v_aging_buckets AS
+        SELECT
+            CASE
+                WHEN days_since_sale IS NULL THEN '6. Never sold'
+                WHEN days_since_sale <= 30 THEN '1. 0-30 days'
+                WHEN days_since_sale <= 90 THEN '2. 31-90 days'
+                WHEN days_since_sale <= 180 THEN '3. 91-180 days'
+                WHEN days_since_sale <= 365 THEN '4. 181-365 days'
+                ELSE '5. 365+ days'
+            END as bucket,
+            COUNT(*) as sku_count,
+            SUM(available) as units,
+            SUM(available_value) as value
+        FROM v_sku_analysis
+        WHERE quantity > 0
+        GROUP BY bucket
+        ORDER BY bucket;
+
+        -- View: Daily inventory trend (from history)
+        CREATE OR REPLACE VIEW v_inventory_trend AS
+        SELECT
+            date,
+            COUNT(*) as sku_count,
+            SUM(quantity) as total_quantity,
+            SUM(quantity - reserve) as available,
+            SUM(quantity * price) as total_value
+        FROM inventory_sku_history
+        GROUP BY date
+        ORDER BY date;
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- LAYER 4: Action Views
+        -- ═══════════════════════════════════════════════════════════════════════
+
+        -- View: Actionable recommendations
+        CREATE OR REPLACE VIEW v_recommended_actions AS
+        SELECT
+            offer_id,
+            sku,
+            name,
+            brand,
+            category_name,
+            available as units,
+            available_value as value,
+            days_since_sale,
+            days_in_stock,
+            status,
+            CASE
+                WHEN status = 'never_sold' AND days_in_stock > 180 THEN 'Return to supplier'
+                WHEN status = 'never_sold' AND days_in_stock > 90 THEN 'Deep discount (70%+)'
+                WHEN status = 'dead_stock' AND available_value > 10000 THEN 'Discount 50%'
+                WHEN status = 'dead_stock' THEN 'Bundle with bestsellers'
+                WHEN status = 'at_risk' THEN 'Promote / Feature'
+                ELSE NULL
+            END as action
+        FROM v_sku_status
+        WHERE status != 'healthy'
+        ORDER BY available_value DESC;
+
+        -- View: Low stock alerts
+        CREATE OR REPLACE VIEW v_restock_alerts AS
+        SELECT
+            offer_id,
+            sku,
+            name,
+            brand,
+            available as units_left,
+            days_since_sale,
+            CASE
+                WHEN available = 0 THEN 'OUT_OF_STOCK'
+                WHEN available <= 3 THEN 'CRITICAL'
+                WHEN available <= 10 THEN 'LOW'
+            END as alert_level
+        FROM v_sku_analysis
+        WHERE available <= 10
+          AND (days_since_sale IS NULL OR days_since_sale <= 90)
+        ORDER BY available ASC;
+        """
+        self._connection.execute(views_sql)
+        logger.info("Inventory analytics views created")
 
     def _build_sales_type_filter(self, sales_type: str, table_alias: str = "o") -> str:
         """Build SQL clause for retail/b2b/all filtering based on manager_id.
@@ -854,6 +1052,90 @@ class DuckDBStore:
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+
+    async def refresh_sku_inventory_status(self) -> int:
+        """Refresh Layer 1: sku_inventory_status from source tables.
+
+        Combines data from offer_stocks, offers, products, and orders to create
+        a denormalized view of current inventory with last sale dates.
+
+        Returns:
+            Number of SKUs in the refreshed table
+        """
+        async with self.connection() as conn:
+            # Calculate last sale date per product (using offer_id from order_products)
+            # Then merge with stock data
+            conn.execute("""
+                INSERT OR REPLACE INTO sku_inventory_status
+                SELECT
+                    os.id as offer_id,
+                    COALESCE(o.product_id, 0) as product_id,
+                    COALESCE(os.sku, CAST(os.id AS VARCHAR)) as sku,
+                    p.name,
+                    p.brand,
+                    p.category_id,
+                    os.quantity,
+                    os.reserve,
+                    COALESCE(os.price, 0) as price,
+                    os.purchased_price,
+                    pls.last_sale_date,
+                    COALESCE(
+                        (SELECT first_seen_at FROM sku_inventory_status WHERE offer_id = os.id),
+                        CURRENT_DATE
+                    ) as first_seen_at,
+                    CURRENT_TIMESTAMP as updated_at
+                FROM offer_stocks os
+                LEFT JOIN offers o ON os.id = o.id
+                LEFT JOIN products p ON o.product_id = p.id
+                LEFT JOIN (
+                    SELECT
+                        op.product_id,
+                        MAX(DATE(ord.ordered_at AT TIME ZONE 'Europe/Kyiv')) as last_sale_date
+                    FROM order_products op
+                    JOIN orders ord ON op.order_id = ord.id
+                    WHERE ord.status_id NOT IN (19, 22, 21, 23)
+                    GROUP BY op.product_id
+                ) pls ON o.product_id = pls.product_id
+            """)
+
+            count = conn.execute("SELECT COUNT(*) FROM sku_inventory_status").fetchone()[0]
+            logger.info(f"Refreshed sku_inventory_status: {count} SKUs")
+            return count
+
+    async def record_sku_inventory_snapshot(self) -> bool:
+        """Record Layer 2: daily per-SKU snapshot.
+
+        Only records one snapshot per day. Returns True if recorded, False if already exists.
+        """
+        async with self.connection() as conn:
+            today = date.today()
+
+            # Check if already recorded today
+            exists = conn.execute(
+                "SELECT 1 FROM inventory_sku_history WHERE date = ? LIMIT 1", [today]
+            ).fetchone()
+
+            if exists:
+                return False
+
+            # Record snapshot from current sku_inventory_status
+            conn.execute("""
+                INSERT INTO inventory_sku_history (date, offer_id, quantity, reserve, price)
+                SELECT
+                    CURRENT_DATE,
+                    offer_id,
+                    quantity,
+                    reserve,
+                    price
+                FROM sku_inventory_status
+                WHERE quantity > 0
+            """)
+
+            count = conn.execute(
+                "SELECT COUNT(*) FROM inventory_sku_history WHERE date = ?", [today]
+            ).fetchone()[0]
+            logger.info(f"Recorded SKU inventory snapshot: {count} SKUs for {today}")
+            return True
 
     async def get_stock_summary(self, limit: int = 20) -> Dict[str, Any]:
         """Get stock summary for dashboard display.
@@ -3594,6 +3876,165 @@ class DuckDBStore:
                 },
                 "db_size_mb": round(self.db_path.stat().st_size / 1024 / 1024, 2) if self.db_path.exists() else 0
             }
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # VIEW-BASED QUERIES (Layer 3 & 4)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    async def get_inventory_summary_v2(self) -> Dict[str, Any]:
+        """Get inventory summary using Layer 3 views.
+
+        Returns:
+            Dict with summary by status, aging buckets, and category velocity
+        """
+        async with self.connection() as conn:
+            # Summary by status
+            summary = conn.execute("SELECT * FROM v_inventory_summary").fetchall()
+            summary_dict = {}
+            for row in summary:
+                status, sku_count, units, value, pct = row
+                summary_dict[status] = {
+                    "skuCount": sku_count,
+                    "quantity": units or 0,
+                    "value": float(value or 0),
+                    "valuePercent": float(pct or 0),
+                }
+
+            # Total
+            total = conn.execute("""
+                SELECT COUNT(*), SUM(available), SUM(available_value)
+                FROM v_sku_status
+            """).fetchone()
+
+            # Aging buckets
+            aging = conn.execute("SELECT * FROM v_aging_buckets").fetchall()
+            aging_buckets = [
+                {"bucket": row[0], "skuCount": row[1], "units": row[2], "value": float(row[3] or 0)}
+                for row in aging
+            ]
+
+            # Category velocity
+            velocity = conn.execute("SELECT * FROM v_category_velocity").fetchall()
+            category_thresholds = [
+                {
+                    "categoryId": row[0],
+                    "categoryName": row[1] or "Uncategorized",
+                    "sampleSize": row[2],
+                    "p50": int(row[3]) if row[3] else None,
+                    "p75": int(row[4]) if row[4] else None,
+                    "p90": int(row[5]) if row[5] else None,
+                    "thresholdDays": int(row[6]) if row[6] else 180,
+                }
+                for row in velocity
+            ]
+
+            return {
+                "summary": {
+                    "healthy": summary_dict.get("healthy", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
+                    "atRisk": summary_dict.get("at_risk", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
+                    "deadStock": summary_dict.get("dead_stock", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
+                    "neverSold": summary_dict.get("never_sold", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
+                    "total": {
+                        "skuCount": total[0] or 0,
+                        "quantity": total[1] or 0,
+                        "value": float(total[2] or 0),
+                    },
+                },
+                "agingBuckets": aging_buckets,
+                "categoryThresholds": category_thresholds,
+            }
+
+    async def get_dead_stock_items_v2(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get dead stock and at-risk items using Layer 3 views.
+
+        Returns:
+            List of items with status != healthy
+        """
+        async with self.connection() as conn:
+            items = conn.execute(f"""
+                SELECT
+                    offer_id, sku, name, brand, category_name,
+                    available, available_value, price,
+                    days_since_sale, days_in_stock, threshold_days, status
+                FROM v_sku_status
+                WHERE status != 'healthy'
+                ORDER BY available_value DESC
+                LIMIT {limit}
+            """).fetchall()
+
+            return [
+                {
+                    "id": row[0],
+                    "sku": row[1],
+                    "name": row[2],
+                    "brand": row[3],
+                    "categoryName": row[4],
+                    "quantity": row[5],
+                    "value": float(row[6] or 0),
+                    "price": float(row[7] or 0),
+                    "daysSinceSale": row[8],
+                    "daysInStock": row[9],
+                    "thresholdDays": row[10],
+                    "status": row[11],
+                }
+                for row in items
+            ]
+
+    async def get_recommended_actions(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get recommended actions for dead stock using Layer 4 view.
+
+        Returns:
+            List of items with recommended actions
+        """
+        async with self.connection() as conn:
+            items = conn.execute(f"""
+                SELECT * FROM v_recommended_actions
+                WHERE action IS NOT NULL
+                LIMIT {limit}
+            """).fetchall()
+
+            return [
+                {
+                    "offerId": row[0],
+                    "sku": row[1],
+                    "name": row[2],
+                    "brand": row[3],
+                    "categoryName": row[4],
+                    "units": row[5],
+                    "value": float(row[6] or 0),
+                    "daysSinceSale": row[7],
+                    "daysInStock": row[8],
+                    "status": row[9],
+                    "action": row[10],
+                }
+                for row in items
+            ]
+
+    async def get_restock_alerts(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get low stock alerts using Layer 4 view.
+
+        Returns:
+            List of items that need restocking
+        """
+        async with self.connection() as conn:
+            items = conn.execute(f"""
+                SELECT * FROM v_restock_alerts
+                WHERE alert_level IS NOT NULL
+                LIMIT {limit}
+            """).fetchall()
+
+            return [
+                {
+                    "offerId": row[0],
+                    "sku": row[1],
+                    "name": row[2],
+                    "brand": row[3],
+                    "unitsLeft": row[4],
+                    "daysSinceSale": row[5],
+                    "alertLevel": row[6],
+                }
+                for row in items
+            ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

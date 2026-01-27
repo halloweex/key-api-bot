@@ -761,3 +761,63 @@ async def get_dead_stock_analysis(request: Request):
     """
     store = await get_store()
     return await store.get_dead_stock_analysis()
+
+
+# ─── V2 Endpoints (View-based) ────────────────────────────────────────────────
+
+@router.get("/stocks/analysis")
+@limiter.limit("30/minute")
+async def get_inventory_analysis(request: Request):
+    """
+    Get comprehensive inventory analysis using Layer 3 views.
+
+    Uses pre-computed sku_inventory_status table for fast queries.
+    Returns summary by status, aging distribution, and category thresholds.
+    """
+    store = await get_store()
+    summary = await store.get_inventory_summary_v2()
+    items = await store.get_dead_stock_items_v2(limit=100)
+
+    return {
+        **summary,
+        "items": items,
+        "methodology": {
+            "description": "Dynamic thresholds per category using P75, minimum 90 days, maximum 365 days",
+            "minimumThreshold": 90,
+            "defaultThreshold": 180,
+            "atRiskMultiplier": 0.7,
+        },
+    }
+
+
+@router.get("/stocks/actions")
+@limiter.limit("30/minute")
+async def get_stock_actions(request: Request):
+    """
+    Get recommended actions for dead stock items.
+
+    Uses Layer 4 view to provide actionable recommendations:
+    - Return to supplier
+    - Deep discount
+    - Bundle with bestsellers
+    - Promote / Feature
+    """
+    store = await get_store()
+    return await store.get_recommended_actions(limit=50)
+
+
+@router.get("/stocks/alerts")
+@limiter.limit("30/minute")
+async def get_stock_alerts(request: Request):
+    """
+    Get low stock alerts for items that need restocking.
+
+    Returns items with:
+    - OUT_OF_STOCK: 0 units
+    - CRITICAL: 1-3 units
+    - LOW: 4-10 units
+
+    Only includes healthy/fast-moving items (not dead stock).
+    """
+    store = await get_store()
+    return await store.get_restock_alerts(limit=50)
