@@ -39,7 +39,7 @@ function StockSummaryChartComponent() {
               bgColor="bg-red-50"
             />
             <StatCard
-              label="Total Units"
+              label="Available"
               value={formatNumber(data.summary.totalQuantity)}
               subValue={`${formatNumber(data.summary.totalReserve)} reserved`}
               color="text-blue-600"
@@ -53,7 +53,12 @@ function StockSummaryChartComponent() {
               <div className="text-lg font-semibold text-slate-700">
                 {formatCurrency(data.summary.totalValue)}
               </div>
-              <div className="text-xs text-slate-500">Current Stock Value</div>
+              <div className="text-xs text-slate-500">Stock Value</div>
+              {data.summary.reserveValue > 0 && (
+                <div className="text-xs text-slate-400 mt-0.5">
+                  {formatCurrency(data.summary.reserveValue)} reserved
+                </div>
+              )}
             </div>
             <div className="text-center py-2 bg-purple-50 rounded-lg">
               <div className="text-lg font-semibold text-purple-700">

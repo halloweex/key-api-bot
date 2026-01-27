@@ -25,6 +25,8 @@ import type {
   GrowthMetrics,
   GoalForecastResponse,
   StockSummaryResponse,
+  InventoryTrendResponse,
+  DeadStockAnalysisResponse,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -371,6 +373,12 @@ export const api = {
   // Stocks
   getStockSummary: (limit = 20, options?: FetchOptions) =>
     fetchApi<StockSummaryResponse>('/stocks/summary', `limit=${limit}`, options),
+
+  getInventoryTrend: (days = 90, granularity: 'daily' | 'monthly' = 'daily', options?: FetchOptions) =>
+    fetchApi<InventoryTrendResponse>('/stocks/trend', `days=${days}&granularity=${granularity}`, options),
+
+  getDeadStockAnalysis: (options?: FetchOptions) =>
+    fetchApi<DeadStockAnalysisResponse>('/stocks/dead', undefined, options),
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────

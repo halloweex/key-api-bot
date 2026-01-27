@@ -50,3 +50,11 @@ export const LazyExpensesChart = lazy(() =>
 export const LazyStockSummaryChart = lazy(() =>
   import('./StockSummaryChart').then(m => ({ default: m.StockSummaryChart }))
 )
+
+export const LazyDeadStockChart = lazy(() =>
+  import('./DeadStockChart').then(m => ({ default: m.DeadStockChart }))
+)
+
+export const LazyInventoryTrendChart = lazy(() =>
+  import('./InventoryTrendChart').then(m => ({ default: m.InventoryTrendChart }))
+)

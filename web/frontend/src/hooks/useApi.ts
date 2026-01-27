@@ -25,6 +25,8 @@ import type {
   GrowthMetrics,
   GoalForecastResponse,
   StockSummaryResponse,
+  InventoryTrendResponse,
+  DeadStockAnalysisResponse,
 } from '../types/api'
 
 // Query key factory for consistent cache keys
@@ -53,6 +55,8 @@ export const queryKeys = {
   brands: () => ['brands'] as const,
   expenseTypes: () => ['expenseTypes'] as const,
   stockSummary: (limit: number) => ['stockSummary', limit] as const,
+  inventoryTrend: (days: number, granularity: string) => ['inventoryTrend', days, granularity] as const,
+  deadStockAnalysis: () => ['deadStockAnalysis'] as const,
 }
 
 // ─── Summary ────────────────────────────────────────────────────────────────
@@ -324,5 +328,21 @@ export function useStockSummary(limit = 20) {
     queryKey: queryKeys.stockSummary(limit),
     queryFn: () => api.getStockSummary(limit),
     staleTime: 5 * 60 * 1000, // 5 minutes
+  })
+}
+
+export function useInventoryTrend(days = 90, granularity: 'daily' | 'monthly' = 'daily') {
+  return useQuery<InventoryTrendResponse>({
+    queryKey: queryKeys.inventoryTrend(days, granularity),
+    queryFn: () => api.getInventoryTrend(days, granularity),
+    staleTime: 10 * 60 * 1000, // 10 minutes
+  })
+}
+
+export function useDeadStockAnalysis() {
+  return useQuery<DeadStockAnalysisResponse>({
+    queryKey: queryKeys.deadStockAnalysis(),
+    queryFn: () => api.getDeadStockAnalysis(),
+    staleTime: 10 * 60 * 1000, // 10 minutes - less volatile data
   })
 }

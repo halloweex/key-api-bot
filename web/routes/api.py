@@ -711,3 +711,42 @@ async def get_average_inventory(
     """
     store = await get_store()
     return await store.get_average_inventory(days)
+
+
+@router.get("/stocks/trend")
+@limiter.limit("30/minute")
+async def get_inventory_trend(
+    request: Request,
+    days: int = Query(90, ge=7, le=365, description="Number of days to look back"),
+    granularity: str = Query("daily", pattern="^(daily|monthly)$", description="Data granularity")
+):
+    """
+    Get inventory trend over time for charting stock changes.
+
+    Shows how stock value and quantity change daily or monthly.
+    Useful for tracking inventory health and identifying trends.
+    """
+    store = await get_store()
+    return await store.get_inventory_trend(days, granularity)
+
+
+@router.get("/stocks/dead")
+@limiter.limit("30/minute")
+async def get_dead_stock_analysis(request: Request):
+    """
+    Analyze dead stock using dynamic category-based thresholds.
+
+    Methodology:
+    - Calculates sales velocity per category (median days between sales)
+    - Dynamic threshold: Q3 + 1.5×IQR per category (standard outlier detection)
+    - Minimum threshold: 90 days
+    - Default threshold for categories with <5 products: 180 days
+
+    Returns:
+    - summary: Breakdown by status (healthy, atRisk, deadStock, neverSold)
+    - categoryThresholds: Calculated thresholds per category
+    - items: Top 100 dead/at-risk items sorted by value
+    - methodology: Explanation of calculation method
+    """
+    store = await get_store()
+    return await store.get_dead_stock_analysis()

@@ -308,6 +308,7 @@ export interface StockSummaryResponse {
     totalQuantity: number
     totalReserve: number
     totalValue: number
+    reserveValue: number
     averageQuantity: number
     averageValue: number
     avgDataPoints: number
@@ -316,4 +317,83 @@ export interface StockSummaryResponse {
   lowStock: StockItem[]
   outOfStock: OutOfStockItem[]
   lastSync: string | null
+}
+
+// Inventory Trend types
+export interface InventoryTrendResponse {
+  labels: string[]
+  quantity: number[]
+  value: number[]
+  reserve: number[]
+  skuCount?: number[]
+  valueChange?: number[]
+  granularity: 'daily' | 'monthly'
+  periodDays: number
+  dataPoints: number
+  summary?: {
+    startValue: number
+    endValue: number
+    change: number
+    changePercent: number
+    minValue: number
+    maxValue: number
+  }
+}
+
+// Dead Stock Analysis types
+export interface DeadStockStatusSummary {
+  skuCount: number
+  quantity: number
+  value: number
+  valuePercent: number
+}
+
+export interface CategoryThreshold {
+  categoryId: number | null
+  categoryName: string
+  productsWithSales: number
+  medianDays: number
+  q1Days: number | null
+  q3Days: number | null
+  avgDays: number | null
+  thresholdDays: number
+}
+
+export interface DeadStockItem {
+  id: number
+  sku: string
+  quantity: number
+  price: number
+  value: number
+  name: string | null
+  brand: string | null
+  categoryId: number | null
+  categoryName: string | null
+  lastSaleDate: string | null
+  daysSinceSale: number | null
+  categoryThreshold: number
+  status: 'healthy' | 'at_risk' | 'dead_stock' | 'never_sold'
+}
+
+export interface DeadStockAnalysisResponse {
+  summary: {
+    healthy: DeadStockStatusSummary
+    atRisk: DeadStockStatusSummary
+    deadStock: DeadStockStatusSummary
+    neverSold: DeadStockStatusSummary
+    total: {
+      skuCount: number
+      quantity: number
+      value: number
+    }
+  }
+  categoryThresholds: CategoryThreshold[]
+  items: DeadStockItem[]
+  methodology: {
+    description: string
+    minimumThreshold: number
+    defaultThreshold: number
+    atRiskMultiplier: number
+    minimumSampleSize: number
+  }
 }

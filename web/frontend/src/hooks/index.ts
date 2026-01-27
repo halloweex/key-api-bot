@@ -36,4 +36,6 @@ export {
   useRecalculateSeasonality,
   // Stock
   useStockSummary,
+  useInventoryTrend,
+  useDeadStockAnalysis,
 } from './useApi'
