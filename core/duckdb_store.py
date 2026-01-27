@@ -1057,7 +1057,7 @@ class DuckDBStore:
         async with self.connection() as conn:
             if granularity == "monthly":
                 # Monthly aggregation
-                result = conn.execute("""
+                result = conn.execute(f"""
                     SELECT
                         DATE_TRUNC('month', date) as period,
                         AVG(total_quantity) as avg_quantity,
@@ -1069,10 +1069,10 @@ class DuckDBStore:
                         MAX(total_value) as max_value,
                         COUNT(*) as data_points
                     FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL ? DAY
+                    WHERE date >= CURRENT_DATE - INTERVAL '{days} days'
                     GROUP BY DATE_TRUNC('month', date)
                     ORDER BY period
-                """, [days]).fetchall()
+                """).fetchall()
 
                 labels = [row[0].strftime('%b %Y') for row in result if row[0]]
                 quantities = [round(row[1] or 0) for row in result]
@@ -1090,7 +1090,7 @@ class DuckDBStore:
                 }
             else:
                 # Daily data
-                result = conn.execute("""
+                result = conn.execute(f"""
                     SELECT
                         date,
                         total_quantity,
@@ -1098,9 +1098,9 @@ class DuckDBStore:
                         total_reserve,
                         sku_count
                     FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL ? DAY
+                    WHERE date >= CURRENT_DATE - INTERVAL '{days} days'
                     ORDER BY date
-                """, [days]).fetchall()
+                """).fetchall()
 
                 labels = [row[0].strftime('%d %b') for row in result if row[0]]
                 quantities = [row[1] or 0 for row in result]
