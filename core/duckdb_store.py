@@ -1074,10 +1074,10 @@ class DuckDBStore:
                     ORDER BY period
                 """, [days]).fetchall()
 
-                labels = [row[0].strftime('%b %Y') for row in result]
-                quantities = [round(row[1]) for row in result]
-                values = [round(float(row[2]), 2) for row in result]
-                reserves = [round(row[3]) for row in result]
+                labels = [row[0].strftime('%b %Y') for row in result if row[0]]
+                quantities = [round(row[1] or 0) for row in result]
+                values = [round(float(row[2] or 0), 2) for row in result]
+                reserves = [round(row[3] or 0) for row in result]
 
                 return {
                     "labels": labels,
@@ -1102,11 +1102,11 @@ class DuckDBStore:
                     ORDER BY date
                 """, [days]).fetchall()
 
-                labels = [row[0].strftime('%d %b') for row in result]
-                quantities = [row[1] for row in result]
-                values = [float(row[2]) for row in result]
-                reserves = [row[3] for row in result]
-                sku_counts = [row[4] for row in result]
+                labels = [row[0].strftime('%d %b') for row in result if row[0]]
+                quantities = [row[1] or 0 for row in result]
+                values = [float(row[2] or 0) for row in result]
+                reserves = [row[3] or 0 for row in result]
+                sku_counts = [row[4] or 0 for row in result]
 
                 # Calculate changes
                 changes = []

@@ -718,7 +718,7 @@ async def get_average_inventory(
 async def get_inventory_trend(
     request: Request,
     days: int = Query(90, ge=7, le=365, description="Number of days to look back"),
-    granularity: str = Query("daily", pattern="^(daily|monthly)$", description="Data granularity")
+    granularity: str = Query("daily", description="Data granularity: daily or monthly")
 ):
     """
     Get inventory trend over time for charting stock changes.
@@ -726,6 +726,10 @@ async def get_inventory_trend(
     Shows how stock value and quantity change daily or monthly.
     Useful for tracking inventory health and identifying trends.
     """
+    # Validate granularity
+    if granularity not in ("daily", "monthly"):
+        granularity = "daily"
+
     store = await get_store()
     return await store.get_inventory_trend(days, granularity)
 
