@@ -340,65 +340,14 @@ export interface InventoryTrendResponse {
   }
 }
 
-// Dead Stock Analysis types
+// ─── V2 Inventory Analysis Types ─────────────────────────────────────────────
+
 export interface DeadStockStatusSummary {
   skuCount: number
   quantity: number
   value: number
   valuePercent: number
 }
-
-export interface CategoryThreshold {
-  categoryId: number | null
-  categoryName: string
-  productsWithSales: number
-  medianDays: number
-  q1Days: number | null
-  q3Days: number | null
-  avgDays: number | null
-  thresholdDays: number
-}
-
-export interface DeadStockItem {
-  id: number
-  sku: string
-  quantity: number
-  price: number
-  value: number
-  name: string | null
-  brand: string | null
-  categoryId: number | null
-  categoryName: string | null
-  lastSaleDate: string | null
-  daysSinceSale: number | null
-  categoryThreshold: number
-  status: 'healthy' | 'at_risk' | 'dead_stock' | 'never_sold'
-}
-
-export interface DeadStockAnalysisResponse {
-  summary: {
-    healthy: DeadStockStatusSummary
-    atRisk: DeadStockStatusSummary
-    deadStock: DeadStockStatusSummary
-    neverSold: DeadStockStatusSummary
-    total: {
-      skuCount: number
-      quantity: number
-      value: number
-    }
-  }
-  categoryThresholds: CategoryThreshold[]
-  items: DeadStockItem[]
-  methodology: {
-    description: string
-    minimumThreshold: number
-    defaultThreshold: number
-    atRiskMultiplier: number
-    minimumSampleSize: number
-  }
-}
-
-// ─── V2 Inventory Analysis Types ─────────────────────────────────────────────
 
 export interface AgingBucket {
   bucket: string

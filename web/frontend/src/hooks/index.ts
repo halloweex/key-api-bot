@@ -37,7 +37,6 @@ export {
   // Stock
   useStockSummary,
   useInventoryTrend,
-  useDeadStockAnalysis,
   // V2 Inventory Analysis
   useInventoryAnalysis,
   useStockActions,

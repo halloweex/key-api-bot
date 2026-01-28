@@ -741,28 +741,6 @@ async def get_inventory_trend(
         raise
 
 
-@router.get("/stocks/dead")
-@limiter.limit("30/minute")
-async def get_dead_stock_analysis(request: Request):
-    """
-    Analyze dead stock using dynamic category-based thresholds.
-
-    Methodology:
-    - Calculates sales velocity per category (median days between sales)
-    - Dynamic threshold: Q3 + 1.5×IQR per category (standard outlier detection)
-    - Minimum threshold: 90 days
-    - Default threshold for categories with <5 products: 180 days
-
-    Returns:
-    - summary: Breakdown by status (healthy, atRisk, deadStock, neverSold)
-    - categoryThresholds: Calculated thresholds per category
-    - items: Top 100 dead/at-risk items sorted by value
-    - methodology: Explanation of calculation method
-    """
-    store = await get_store()
-    return await store.get_dead_stock_analysis()
-
-
 # ─── V2 Endpoints (View-based) ────────────────────────────────────────────────
 
 @router.get("/stocks/analysis")

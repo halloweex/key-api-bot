@@ -17,7 +17,7 @@ function StockSummaryChartComponent() {
       ariaLabel="Stock levels summary"
     >
       {data && (
-        <div className="space-y-4">
+        <div className="space-y-4 min-h-[420px]">
           {/* Summary Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <StatCard
@@ -86,7 +86,7 @@ function StockSummaryChartComponent() {
                   </svg>
                   Low Stock ({data.lowStock.length})
                 </h4>
-                <div className="space-y-1 max-h-40 overflow-y-auto">
+                <div className="space-y-1 max-h-64 overflow-y-auto">
                   {data.lowStock.slice(0, 10).map((item) => (
                     <div
                       key={item.sku}
@@ -114,7 +114,7 @@ function StockSummaryChartComponent() {
               <h4 className="text-sm font-medium text-slate-700 mb-2">
                 Top by Quantity
               </h4>
-              <div className="space-y-1 max-h-40 overflow-y-auto">
+              <div className="space-y-1 max-h-64 overflow-y-auto">
                 {data.topByQuantity.slice(0, 10).map((item, index) => (
                   <div
                     key={item.sku}

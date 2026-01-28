@@ -1144,17 +1144,20 @@ class DuckDBStore:
             Dict with total stats and top items by quantity and low stock alerts
         """
         async with self.connection() as conn:
-            # Overall stats (using sale/retail price)
+            # Overall stats
+            # Note: available = MAX(0, quantity - reserve) to match KeyCRM display
             stats = conn.execute("""
                 SELECT
                     COUNT(*) as total_offers,
                     COUNT(*) FILTER (WHERE quantity > 0) as in_stock_count,
                     COUNT(*) FILTER (WHERE quantity = 0) as out_of_stock_count,
                     COUNT(*) FILTER (WHERE quantity > 0 AND quantity <= 5) as low_stock_count,
-                    SUM(quantity - reserve) as available_quantity,
+                    SUM(GREATEST(0, quantity - reserve)) as available_quantity,
                     SUM(reserve) as total_reserve,
-                    SUM(quantity * price) as total_value,
-                    SUM(reserve * price) as reserve_value
+                    SUM(GREATEST(0, quantity - reserve) * price) as available_value_sale,
+                    SUM(reserve * price) as reserve_value_sale,
+                    SUM(GREATEST(0, quantity - reserve) * COALESCE(purchased_price, 0)) as available_value_cost,
+                    SUM(reserve * COALESCE(purchased_price, 0)) as reserve_value_cost
                 FROM offer_stocks
             """).fetchone()
 
@@ -1234,8 +1237,10 @@ class DuckDBStore:
                     "lowStockCount": stats[3] or 0,
                     "totalQuantity": stats[4] or 0,
                     "totalReserve": stats[5] or 0,
-                    "totalValue": float(stats[6] or 0),
-                    "reserveValue": float(stats[7] or 0),
+                    "totalValue": float(stats[6] or 0),  # Sale price
+                    "reserveValue": float(stats[7] or 0),  # Sale price
+                    "costValue": float(stats[8] or 0),  # Purchase/cost price
+                    "reserveCostValue": float(stats[9] or 0),  # Purchase/cost price
                     "averageQuantity": round(avg_quantity),
                     "averageValue": round(avg_value, 2),
                     "avgDataPoints": avg_data_points,
@@ -1466,296 +1471,6 @@ class DuckDBStore:
                         "maxValue": max(values) if values else 0,
                     } if values else None,
                 }
-
-    async def get_dead_stock_analysis(self) -> Dict[str, Any]:
-        """Analyze dead stock using dynamic category-based thresholds.
-
-        Methodology:
-        1. Calculate sales velocity per category (median days between sales)
-        2. Calculate dynamic threshold: median + 1.5×IQR per category
-        3. Identify products not sold beyond their category threshold
-        4. Fallback threshold of 180 days for categories with insufficient data
-
-        Returns:
-            Dict with dead stock analysis, category thresholds, and items at risk
-        """
-        async with self.connection() as conn:
-            # Step 1: Calculate category-level sales velocity statistics
-            # Using median and IQR for robust threshold calculation
-            category_stats = conn.execute("""
-                WITH product_sales AS (
-                    -- Get all sales with dates per product
-                    SELECT
-                        p.id as product_id,
-                        p.category_id,
-                        c.name as category_name,
-                        DATE(o.ordered_at AT TIME ZONE 'Europe/Kyiv') as sale_date
-                    FROM order_products op
-                    JOIN orders o ON op.order_id = o.id
-                    JOIN products p ON op.product_id = p.id
-                    LEFT JOIN categories c ON p.category_id = c.id
-                    WHERE o.status_id NOT IN (19, 22, 21, 23)  -- Exclude returns
-                ),
-                product_last_sale AS (
-                    -- Last sale date per product
-                    SELECT
-                        product_id,
-                        category_id,
-                        category_name,
-                        MAX(sale_date) as last_sale_date,
-                        CURRENT_DATE - MAX(sale_date) as days_since_sale
-                    FROM product_sales
-                    GROUP BY product_id, category_id, category_name
-                ),
-                category_velocity AS (
-                    -- Calculate percentiles per category for threshold
-                    SELECT
-                        category_id,
-                        category_name,
-                        COUNT(*) as products_with_sales,
-                        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_since_sale) as median_days,
-                        PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY days_since_sale) as q1,
-                        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY days_since_sale) as q3,
-                        AVG(days_since_sale) as avg_days,
-                        MAX(days_since_sale) as max_days
-                    FROM product_last_sale
-                    GROUP BY category_id, category_name
-                    HAVING COUNT(*) >= 5  -- Need minimum sample size
-                )
-                SELECT
-                    category_id,
-                    category_name,
-                    products_with_sales,
-                    ROUND(median_days) as median_days,
-                    ROUND(q1) as q1_days,
-                    ROUND(q3) as q3_days,
-                    ROUND(avg_days) as avg_days,
-                    -- Dynamic threshold: Q3 + 1.5×IQR, capped at 365 days max
-                    ROUND(LEAST(GREATEST(q3 + 1.5 * (q3 - q1), 90), 365)) as threshold_days
-                FROM category_velocity
-                ORDER BY products_with_sales DESC
-            """).fetchall()
-
-            # Build category threshold lookup
-            category_thresholds = {}
-            for row in category_stats:
-                category_thresholds[row[0]] = {
-                    "categoryId": row[0],
-                    "categoryName": row[1] or "Uncategorized",
-                    "productsWithSales": row[2],
-                    "medianDays": int(row[3]) if row[3] else 90,
-                    "q1Days": int(row[4]) if row[4] else None,
-                    "q3Days": int(row[5]) if row[5] else None,
-                    "avgDays": int(row[6]) if row[6] else None,
-                    "thresholdDays": int(row[7]) if row[7] else 180,
-                }
-
-            # Default threshold for categories without enough data
-            DEFAULT_THRESHOLD = 180
-
-            # Step 2: Identify dead stock items
-            dead_stock_items = conn.execute("""
-                WITH product_last_sale AS (
-                    SELECT
-                        op.product_id,
-                        MAX(DATE(o.ordered_at AT TIME ZONE 'Europe/Kyiv')) as last_sale_date
-                    FROM order_products op
-                    JOIN orders o ON op.order_id = o.id
-                    WHERE o.status_id NOT IN (19, 22, 21, 23)
-                    GROUP BY op.product_id
-                ),
-                category_thresholds AS (
-                    SELECT
-                        category_id,
-                        -- Q3 + 1.5×IQR threshold, capped at 365 days
-                        LEAST(GREATEST(
-                            PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY CURRENT_DATE - last_sale_date)
-                            + 1.5 * (
-                                PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY CURRENT_DATE - last_sale_date)
-                                - PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY CURRENT_DATE - last_sale_date)
-                            ),
-                            90
-                        ), 365) as threshold_days
-                    FROM product_last_sale pls
-                    JOIN products p ON pls.product_id = p.id
-                    GROUP BY category_id
-                    HAVING COUNT(*) >= 5
-                ),
-                stock_analysis AS (
-                    SELECT
-                        os.id,
-                        os.sku,
-                        os.quantity - os.reserve as available_qty,
-                        os.price,
-                        (os.quantity - os.reserve) * os.price as stock_value,
-                        p.name as product_name,
-                        p.brand as product_brand,
-                        p.category_id,
-                        c.name as category_name,
-                        pls.last_sale_date,
-                        CURRENT_DATE - pls.last_sale_date as days_since_sale,
-                        COALESCE(ct.threshold_days, 180) as category_threshold
-                    FROM offer_stocks os
-                    LEFT JOIN offers o ON os.id = o.id
-                    LEFT JOIN products p ON o.product_id = p.id
-                    LEFT JOIN categories c ON p.category_id = c.id
-                    LEFT JOIN product_last_sale pls ON o.product_id = pls.product_id
-                    LEFT JOIN category_thresholds ct ON p.category_id = ct.category_id
-                    WHERE os.quantity - os.reserve > 0  -- Has available stock
-                )
-                SELECT
-                    id,
-                    sku,
-                    available_qty,
-                    price,
-                    stock_value,
-                    product_name,
-                    product_brand,
-                    category_id,
-                    category_name,
-                    last_sale_date,
-                    days_since_sale,
-                    category_threshold,
-                    CASE
-                        WHEN last_sale_date IS NULL THEN 'never_sold'
-                        WHEN days_since_sale > category_threshold THEN 'dead_stock'
-                        WHEN days_since_sale > category_threshold * 0.7 THEN 'at_risk'
-                        ELSE 'healthy'
-                    END as status
-                FROM stock_analysis
-                WHERE last_sale_date IS NULL
-                   OR days_since_sale > category_threshold * 0.7
-                ORDER BY
-                    CASE WHEN last_sale_date IS NULL THEN 0 ELSE 1 END,
-                    stock_value DESC
-            """).fetchall()
-
-            # Step 3: Calculate summary metrics
-            summary = conn.execute("""
-                WITH product_last_sale AS (
-                    SELECT
-                        op.product_id,
-                        MAX(DATE(o.ordered_at AT TIME ZONE 'Europe/Kyiv')) as last_sale_date
-                    FROM order_products op
-                    JOIN orders o ON op.order_id = o.id
-                    WHERE o.status_id NOT IN (19, 22, 21, 23)
-                    GROUP BY op.product_id
-                ),
-                category_thresholds AS (
-                    SELECT
-                        category_id,
-                        -- Q3 + 1.5×IQR threshold, capped at 365 days
-                        LEAST(GREATEST(
-                            PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY CURRENT_DATE - last_sale_date)
-                            + 1.5 * (
-                                PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY CURRENT_DATE - last_sale_date)
-                                - PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY CURRENT_DATE - last_sale_date)
-                            ),
-                            90
-                        ), 365) as threshold_days
-                    FROM product_last_sale pls
-                    JOIN products p ON pls.product_id = p.id
-                    GROUP BY category_id
-                    HAVING COUNT(*) >= 5
-                ),
-                stock_status AS (
-                    SELECT
-                        os.id,
-                        os.quantity - os.reserve as available_qty,
-                        (os.quantity - os.reserve) * os.price as stock_value,
-                        CASE
-                            WHEN pls.last_sale_date IS NULL THEN 'never_sold'
-                            WHEN CURRENT_DATE - pls.last_sale_date > COALESCE(ct.threshold_days, 180) THEN 'dead_stock'
-                            WHEN CURRENT_DATE - pls.last_sale_date > COALESCE(ct.threshold_days, 180) * 0.7 THEN 'at_risk'
-                            ELSE 'healthy'
-                        END as status
-                    FROM offer_stocks os
-                    LEFT JOIN offers o ON os.id = o.id
-                    LEFT JOIN products p ON o.product_id = p.id
-                    LEFT JOIN product_last_sale pls ON o.product_id = pls.product_id
-                    LEFT JOIN category_thresholds ct ON p.category_id = ct.category_id
-                    WHERE os.quantity - os.reserve > 0
-                )
-                SELECT
-                    COUNT(*) FILTER (WHERE status = 'healthy') as healthy_count,
-                    SUM(available_qty) FILTER (WHERE status = 'healthy') as healthy_qty,
-                    SUM(stock_value) FILTER (WHERE status = 'healthy') as healthy_value,
-                    COUNT(*) FILTER (WHERE status = 'at_risk') as at_risk_count,
-                    SUM(available_qty) FILTER (WHERE status = 'at_risk') as at_risk_qty,
-                    SUM(stock_value) FILTER (WHERE status = 'at_risk') as at_risk_value,
-                    COUNT(*) FILTER (WHERE status = 'dead_stock') as dead_count,
-                    SUM(available_qty) FILTER (WHERE status = 'dead_stock') as dead_qty,
-                    SUM(stock_value) FILTER (WHERE status = 'dead_stock') as dead_value,
-                    COUNT(*) FILTER (WHERE status = 'never_sold') as never_sold_count,
-                    SUM(available_qty) FILTER (WHERE status = 'never_sold') as never_sold_qty,
-                    SUM(stock_value) FILTER (WHERE status = 'never_sold') as never_sold_value,
-                    COUNT(*) as total_skus,
-                    SUM(available_qty) as total_qty,
-                    SUM(stock_value) as total_value
-                FROM stock_status
-            """).fetchone()
-
-            total_value = float(summary[14] or 0)
-
-            return {
-                "summary": {
-                    "healthy": {
-                        "skuCount": summary[0] or 0,
-                        "quantity": summary[1] or 0,
-                        "value": float(summary[2] or 0),
-                        "valuePercent": round(float(summary[2] or 0) / total_value * 100, 1) if total_value > 0 else 0,
-                    },
-                    "atRisk": {
-                        "skuCount": summary[3] or 0,
-                        "quantity": summary[4] or 0,
-                        "value": float(summary[5] or 0),
-                        "valuePercent": round(float(summary[5] or 0) / total_value * 100, 1) if total_value > 0 else 0,
-                    },
-                    "deadStock": {
-                        "skuCount": summary[6] or 0,
-                        "quantity": summary[7] or 0,
-                        "value": float(summary[8] or 0),
-                        "valuePercent": round(float(summary[8] or 0) / total_value * 100, 1) if total_value > 0 else 0,
-                    },
-                    "neverSold": {
-                        "skuCount": summary[9] or 0,
-                        "quantity": summary[10] or 0,
-                        "value": float(summary[11] or 0),
-                        "valuePercent": round(float(summary[11] or 0) / total_value * 100, 1) if total_value > 0 else 0,
-                    },
-                    "total": {
-                        "skuCount": summary[12] or 0,
-                        "quantity": summary[13] or 0,
-                        "value": total_value,
-                    },
-                },
-                "categoryThresholds": list(category_thresholds.values()),
-                "items": [
-                    {
-                        "id": row[0],
-                        "sku": row[1],
-                        "quantity": row[2],
-                        "price": float(row[3] or 0),
-                        "value": float(row[4] or 0),
-                        "name": row[5],
-                        "brand": row[6],
-                        "categoryId": row[7],
-                        "categoryName": row[8],
-                        "lastSaleDate": str(row[9]) if row[9] else None,
-                        "daysSinceSale": row[10],
-                        "categoryThreshold": int(row[11]) if row[11] else DEFAULT_THRESHOLD,
-                        "status": row[12],
-                    }
-                    for row in dead_stock_items[:100]  # Limit to top 100
-                ],
-                "methodology": {
-                    "description": "Dynamic thresholds calculated per category using Q3 + 1.5×IQR method",
-                    "minimumThreshold": 90,
-                    "defaultThreshold": DEFAULT_THRESHOLD,
-                    "atRiskMultiplier": 0.7,
-                    "minimumSampleSize": 5,
-                },
-            }
 
     async def update_manager_stats(self) -> int:
         """Update manager order statistics from orders table.

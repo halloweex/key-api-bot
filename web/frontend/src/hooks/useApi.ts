@@ -26,7 +26,6 @@ import type {
   GoalForecastResponse,
   StockSummaryResponse,
   InventoryTrendResponse,
-  DeadStockAnalysisResponse,
   InventoryAnalysisResponse,
   StockAction,
   RestockAlert,
@@ -59,7 +58,6 @@ export const queryKeys = {
   expenseTypes: () => ['expenseTypes'] as const,
   stockSummary: (limit: number) => ['stockSummary', limit] as const,
   inventoryTrend: (days: number, granularity: string) => ['inventoryTrend', days, granularity] as const,
-  deadStockAnalysis: () => ['deadStockAnalysis'] as const,
   // V2 inventory analysis
   inventoryAnalysis: () => ['inventoryAnalysis'] as const,
   stockActions: () => ['stockActions'] as const,
@@ -343,14 +341,6 @@ export function useInventoryTrend(days = 90, granularity: 'daily' | 'monthly' = 
     queryKey: queryKeys.inventoryTrend(days, granularity),
     queryFn: () => api.getInventoryTrend(days, granularity),
     staleTime: 10 * 60 * 1000, // 10 minutes
-  })
-}
-
-export function useDeadStockAnalysis() {
-  return useQuery<DeadStockAnalysisResponse>({
-    queryKey: queryKeys.deadStockAnalysis(),
-    queryFn: () => api.getDeadStockAnalysis(),
-    staleTime: 10 * 60 * 1000, // 10 minutes - less volatile data
   })
 }
 

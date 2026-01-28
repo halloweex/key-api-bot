@@ -26,7 +26,6 @@ import type {
   GoalForecastResponse,
   StockSummaryResponse,
   InventoryTrendResponse,
-  DeadStockAnalysisResponse,
   InventoryAnalysisResponse,
   StockAction,
   RestockAlert,
@@ -379,9 +378,6 @@ export const api = {
 
   getInventoryTrend: (days = 90, granularity: 'daily' | 'monthly' = 'daily', options?: FetchOptions) =>
     fetchApi<InventoryTrendResponse>('/stocks/trend', `days=${days}&granularity=${granularity}`, options),
-
-  getDeadStockAnalysis: (options?: FetchOptions) =>
-    fetchApi<DeadStockAnalysisResponse>('/stocks/dead', undefined, options),
 
   // V2 Inventory Analysis (view-based)
   getInventoryAnalysis: (options?: FetchOptions) =>
