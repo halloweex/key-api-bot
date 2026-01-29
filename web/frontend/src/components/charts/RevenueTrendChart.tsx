@@ -491,17 +491,6 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               />
             )}
 
-            {/* Current period trend line (solid) */}
-            <Line
-              type="monotone"
-              dataKey="revenue"
-              name={`${periodLabels.current} Trend`}
-              stroke="#1d4ed8"
-              strokeWidth={2.5}
-              dot={false}
-              activeDot={{ r: 5, fill: CHART_THEME.primary, stroke: '#fff', strokeWidth: 2 }}
-            />
-
             {/* Hide default legend, use custom */}
             <Legend content={() => null} />
             </ComposedChart>
