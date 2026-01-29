@@ -344,7 +344,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
   const { chartData, hasComparison, hasPrevMonthDays } = useMemo(() => {
     if (!data?.labels?.length) {
-      return { chartData: [], hasComparison: false, maxRevenue: 0, hasPrevMonthDays: false }
+      return { chartData: [], hasComparison: false, hasPrevMonthDays: false }
     }
 
     const hasComp = (data.comparison?.revenue?.length ?? 0) > 0
@@ -415,7 +415,6 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
     return {
       chartData: processed,
       hasComparison: hasComp,
-      maxRevenue: maxRev,
       hasPrevMonthDays: prevMonthCount > 0,
     }
   }, [data, period])
