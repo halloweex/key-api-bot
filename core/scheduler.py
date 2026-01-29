@@ -215,10 +215,13 @@ class BackgroundScheduler:
         )
         self._job_history[job_id] = []
 
-        # Get next run time
-        job = self._scheduler.get_job(job_id)
-        if job and job.next_run_time:
-            self._job_info[job_id].next_run = job.next_run_time
+        # Get next run time (may not be available until scheduler starts)
+        try:
+            job = self._scheduler.get_job(job_id)
+            if job and hasattr(job, 'next_run_time') and job.next_run_time:
+                self._job_info[job_id].next_run = job.next_run_time
+        except Exception:
+            pass  # next_run_time will be updated when scheduler starts
 
     # ═══════════════════════════════════════════════════════════════════════════
     # JOB IMPLEMENTATIONS
