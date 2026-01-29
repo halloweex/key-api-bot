@@ -312,7 +312,8 @@ async def get_revenue_trend(
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
     brand: Optional[str] = Query(None, description="Filter by brand name"),
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all"),
+    compare_type: Optional[str] = Query("previous_period", description="Comparison type: previous_period, year_ago, month_ago")
 ):
     """Get revenue trend data for line chart."""
     try:
@@ -321,12 +322,16 @@ async def get_revenue_trend(
         validate_category_id(category_id)
         brand = validate_brand_name(brand)
         sales_type = validate_sales_type(sales_type)
+        # Validate compare_type
+        if compare_type not in ("previous_period", "year_ago", "month_ago"):
+            compare_type = "previous_period"
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_revenue_trend(
-        start, end, category_id=category_id, brand=brand, source_id=source_id, sales_type=sales_type
+        start, end, category_id=category_id, brand=brand, source_id=source_id,
+        sales_type=sales_type, compare_type=compare_type
     )
 
 

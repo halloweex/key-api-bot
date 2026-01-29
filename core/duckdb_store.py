@@ -1777,7 +1777,8 @@ class DuckDBStore:
         category_id: Optional[int] = None,
         brand: Optional[str] = None,
         include_comparison: bool = True,
-        sales_type: str = "retail"
+        sales_type: str = "retail",
+        compare_type: str = "previous_period"
     ) -> Dict[str, Any]:
         """Get daily revenue trend for chart."""
         async with self.connection() as conn:
@@ -1849,8 +1850,22 @@ class DuckDBStore:
             # Add previous period comparison
             if include_comparison:
                 period_days = (end_date - start_date).days + 1
-                prev_end = start_date - timedelta(days=1)
-                prev_start = prev_end - timedelta(days=period_days - 1)
+
+                # Calculate comparison period based on compare_type
+                if compare_type == "year_ago":
+                    # Same dates, one year ago
+                    from dateutil.relativedelta import relativedelta
+                    prev_start = start_date - relativedelta(years=1)
+                    prev_end = end_date - relativedelta(years=1)
+                elif compare_type == "month_ago":
+                    # Same dates, one month ago
+                    from dateutil.relativedelta import relativedelta
+                    prev_start = start_date - relativedelta(months=1)
+                    prev_end = end_date - relativedelta(months=1)
+                else:
+                    # Default: previous_period (immediately before current)
+                    prev_end = start_date - timedelta(days=1)
+                    prev_start = prev_end - timedelta(days=period_days - 1)
 
                 prev_params = [prev_start, prev_end]
                 prev_where = [
@@ -1903,10 +1918,25 @@ class DuckDBStore:
             comparison = None
             if include_comparison and len(datasets) > 1:
                 prev_dataset = datasets[1]
+                # Calculate totals for growth delta
+                current_total = sum(data)
+                prev_total = sum(prev_dataset["data"])
+                growth_percent = ((current_total - prev_total) / prev_total * 100) if prev_total > 0 else 0
+
                 comparison = {
                     "labels": labels,  # Same labels, different time period
                     "revenue": prev_dataset["data"],
-                    "orders": []  # Orders comparison not tracked separately
+                    "orders": [],  # Orders comparison not tracked separately
+                    "period": {
+                        "start": prev_start.isoformat(),
+                        "end": prev_end.isoformat(),
+                        "type": compare_type
+                    },
+                    "totals": {
+                        "current": round(current_total, 2),
+                        "previous": round(prev_total, 2),
+                        "growth_percent": round(growth_percent, 1)
+                    }
                 }
 
             # Return both formats: 'datasets' for v1, 'revenue'/'orders'/'comparison' for v2

@@ -77,12 +77,17 @@ export function useSummary() {
 
 // ─── Revenue ────────────────────────────────────────────────────────────────
 
-export function useRevenueTrend() {
+export function useRevenueTrend(compareType: string = 'previous_period') {
   const queryParams = useQueryParams()
 
+  // Append compare_type to query params
+  const fullParams = compareType !== 'previous_period'
+    ? `${queryParams}&compare_type=${compareType}`
+    : queryParams
+
   return useQuery<RevenueTrendResponse>({
-    queryKey: queryKeys.revenueTrend(queryParams),
-    queryFn: () => api.getRevenueTrend(queryParams),
+    queryKey: [...queryKeys.revenueTrend(queryParams), compareType],
+    queryFn: () => api.getRevenueTrend(fullParams),
   })
 }
 

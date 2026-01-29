@@ -37,7 +37,8 @@ async def get_revenue_trend(
     category_id: Optional[int] = None,
     brand: Optional[str] = None,
     source_id: Optional[int] = None,
-    sales_type: str = "retail"
+    sales_type: str = "retail",
+    compare_type: str = "previous_period"
 ) -> Dict[str, Any]:
     """Get revenue data over time for line chart."""
     start, end = _parse_dates(start_date, end_date)
@@ -48,7 +49,8 @@ async def get_revenue_trend(
         category_id=category_id,
         brand=brand,
         include_comparison=include_comparison,
-        sales_type=sales_type
+        sales_type=sales_type,
+        compare_type=compare_type
     )
 
 

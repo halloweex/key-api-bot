@@ -10,6 +10,8 @@ export interface SummaryResponse {
   endDate: string
 }
 
+export type CompareType = 'previous_period' | 'year_ago' | 'month_ago'
+
 export interface RevenueTrendResponse {
   labels: string[]
   revenue: number[]
@@ -18,6 +20,16 @@ export interface RevenueTrendResponse {
     labels: string[]
     revenue: number[]
     orders: number[]
+    period?: {
+      start: string
+      end: string
+      type: CompareType
+    }
+    totals?: {
+      current: number
+      previous: number
+      growth_percent: number
+    }
   }
 }
 

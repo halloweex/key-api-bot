@@ -301,14 +301,28 @@ function InfoTooltipContent({ onClose, children }: {
   )
 }
 
+// ─── Compare Type Labels ──────────────────────────────────────────────────────
+
+type CompareType = 'previous_period' | 'year_ago' | 'month_ago'
+
+const COMPARE_TYPE_OPTIONS: { value: CompareType; label: string; shortLabel: string }[] = [
+  { value: 'previous_period', label: 'Previous Period', shortLabel: 'Prev Period' },
+  { value: 'year_ago', label: 'Same Period Last Year', shortLabel: 'Last Year' },
+  { value: 'month_ago', label: 'Same Period Last Month', shortLabel: 'Last Month' },
+]
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const RevenueTrendChart = memo(function RevenueTrendChart() {
-  const { data, isLoading, error, refetch } = useRevenueTrend()
+  const [compareType, setCompareType] = useState<CompareType>('previous_period')
+  const { data, isLoading, error, refetch } = useRevenueTrend(compareType)
   const { period } = useFilterStore()
   const [showInfo, setShowInfo] = useState(false)
 
   const periodLabels = PERIOD_LABELS[period] || PERIOD_LABELS.custom
+
+  // Get growth data from comparison
+  const growthData = data?.comparison?.totals
 
   const { chartData, hasComparison, hasPrevMonthDays } = useMemo(() => {
     if (!data?.labels?.length) {
@@ -393,26 +407,56 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       height="xl"
       ariaLabel="Chart showing revenue comparison between current and previous period"
       action={
-        <div className="relative">
-          <InfoButton onClick={() => setShowInfo(!showInfo)} />
-          {showInfo && (
-            <InfoTooltipContent onClose={() => setShowInfo(false)}>
-              <div className="space-y-2">
-                <p className="text-xs text-slate-300">
-                  <strong className="text-blue-400">Bars:</strong> Daily revenue for selected period.
-                </p>
-                <p className="text-xs text-slate-300">
-                  <strong className="text-slate-400">Dashed line:</strong> Previous period comparison.
-                </p>
-                <p className="text-xs text-slate-300">
-                  <strong className="text-emerald-400">Peak labels:</strong> Highest revenue days.
-                </p>
-                <p className="text-xs text-slate-300">
-                  <strong className="text-purple-400">Light blue bars:</strong> Days from previous month (last 28 days view).
-                </p>
-              </div>
-            </InfoTooltipContent>
+        <div className="flex items-center gap-3">
+          {/* Growth Delta Badge */}
+          {growthData && !isLoading && (
+            <div
+              className={`px-2.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1 ${
+                growthData.growth_percent >= 0
+                  ? 'bg-emerald-100 text-emerald-700'
+                  : 'bg-red-100 text-red-700'
+              }`}
+            >
+              <span>{growthData.growth_percent >= 0 ? '↑' : '↓'}</span>
+              <span>{Math.abs(growthData.growth_percent).toFixed(1)}%</span>
+            </div>
           )}
+
+          {/* Compare Type Selector */}
+          <select
+            value={compareType}
+            onChange={(e) => setCompareType(e.target.value as CompareType)}
+            className="text-xs bg-slate-100 border-0 rounded-lg px-2.5 py-1.5 text-slate-600 font-medium cursor-pointer hover:bg-slate-200 transition-colors focus:ring-2 focus:ring-blue-500 focus:outline-none"
+          >
+            {COMPARE_TYPE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                vs {opt.shortLabel}
+              </option>
+            ))}
+          </select>
+
+          {/* Info Button */}
+          <div className="relative">
+            <InfoButton onClick={() => setShowInfo(!showInfo)} />
+            {showInfo && (
+              <InfoTooltipContent onClose={() => setShowInfo(false)}>
+                <div className="space-y-2">
+                  <p className="text-xs text-slate-300">
+                    <strong className="text-blue-400">Bars:</strong> Daily revenue for selected period.
+                  </p>
+                  <p className="text-xs text-slate-300">
+                    <strong className="text-slate-400">Dashed line:</strong> Comparison period.
+                  </p>
+                  <p className="text-xs text-slate-300">
+                    <strong className="text-emerald-400">Peak labels:</strong> Highest revenue days.
+                  </p>
+                  <p className="text-xs text-slate-300">
+                    <strong className="text-purple-400">Light blue bars:</strong> Days from previous month (last 28 days view).
+                  </p>
+                </div>
+              </InfoTooltipContent>
+            )}
+          </div>
         </div>
       }
     >
