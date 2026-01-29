@@ -958,6 +958,20 @@ async def get_inventory_analysis(request: Request):
     }
 
 
+@router.post("/stocks/snapshot/refresh")
+@limiter.limit("5/minute")
+async def refresh_inventory_snapshot(request: Request):
+    """
+    Force refresh today's inventory snapshot.
+
+    Deletes existing snapshot for today and re-records with current data.
+    Use this after fixing snapshot formula or to update with latest stock data.
+    """
+    store = await get_store()
+    result = await store.record_inventory_snapshot(force=True)
+    return {"success": result, "message": "Inventory snapshot refreshed" if result else "Failed to refresh"}
+
+
 @router.get("/stocks/actions")
 @limiter.limit("30/minute")
 async def get_stock_actions(request: Request):

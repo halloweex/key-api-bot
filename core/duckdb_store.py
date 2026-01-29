@@ -1389,10 +1389,13 @@ class DuckDBStore:
                 "lastSync": last_sync[0] if last_sync else None,
             }
 
-    async def record_inventory_snapshot(self) -> bool:
+    async def record_inventory_snapshot(self, force: bool = False) -> bool:
         """Record daily inventory snapshot for average calculation.
 
         Only records one snapshot per day. Returns True if recorded, False if already exists.
+
+        Args:
+            force: If True, delete existing snapshot and re-record
         """
         async with self.connection() as conn:
             today = conn.execute("SELECT CURRENT_DATE").fetchone()[0]
@@ -1403,7 +1406,11 @@ class DuckDBStore:
             ).fetchone()
 
             if exists:
-                return False
+                if force:
+                    conn.execute("DELETE FROM inventory_history WHERE date = ?", [today])
+                    logger.info(f"Deleted existing inventory snapshot for {today}")
+                else:
+                    return False
 
             # Record snapshot (using total quantity and sale price, same as KeyCRM)
             conn.execute("""
