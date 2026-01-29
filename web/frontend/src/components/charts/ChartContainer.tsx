@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, memo } from 'react'
-import { Card, CardHeader, CardTitle, CardContent, SkeletonChart } from '../ui'
+import { Card, CardHeader, CardTitle, CardContent, SkeletonChart, ApiErrorState } from '../ui'
 import { CHART_DIMENSIONS, type ChartHeight } from './config'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -31,53 +31,28 @@ interface ChartContainerProps {
 
 // ─── Subcomponents ───────────────────────────────────────────────────────────
 
-interface ErrorStateProps {
+interface ErrorStateWrapperProps {
   title: string
+  error: Error | null
   onRetry?: () => void
-  height: number
 }
 
-const ErrorState = memo(function ErrorState({ title, onRetry, height }: ErrorStateProps) {
+const ErrorStateWrapper = memo(function ErrorStateWrapper({
+  title,
+  error,
+  onRetry
+}: ErrorStateWrapperProps) {
   return (
     <Card>
       <CardHeader>
         <CardTitle>{title}</CardTitle>
       </CardHeader>
       <CardContent>
-        <div
-          role="alert"
-          className="flex flex-col items-center justify-center gap-4"
-          style={{ height }}
-        >
-          <div className="w-12 h-12 rounded-full bg-red-50 flex items-center justify-center">
-            <svg
-              className="w-6 h-6 text-red-500"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              aria-hidden="true"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={1.5}
-                d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
-            </svg>
-          </div>
-          <div className="text-center">
-            <p className="text-slate-700 text-sm font-medium">Failed to load data</p>
-            <p className="text-slate-500 text-xs mt-1">Please try again later</p>
-          </div>
-          {onRetry && (
-            <button
-              onClick={onRetry}
-              className="text-sm text-blue-600 hover:text-blue-700 font-medium px-4 py-2 rounded-lg hover:bg-blue-50 transition-colors"
-            >
-              Try again
-            </button>
-          )}
-        </div>
+        <ApiErrorState
+          error={error}
+          onRetry={onRetry}
+          title={`Failed to load ${title.toLowerCase()}`}
+        />
       </CardContent>
     </Card>
   )
@@ -145,10 +120,10 @@ export const ChartContainer = memo(function ChartContainer({
   // Error state with retry
   if (error) {
     return (
-      <ErrorState
+      <ErrorStateWrapper
         title={title}
+        error={error}
         onRetry={onRetry ? handleRetry : undefined}
-        height={chartHeight}
       />
     )
   }

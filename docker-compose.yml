@@ -43,6 +43,7 @@ services:
       - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/error.html:/etc/nginx/html/error.html:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       - web

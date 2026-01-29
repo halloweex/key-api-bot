@@ -60,8 +60,9 @@ export class ApiError extends Error {
       404: 'Resource not found',
       429: 'Too many requests, please slow down',
       500: 'Server error, please try again',
-      502: 'Server temporarily unavailable',
-      503: 'Service unavailable',
+      502: 'Server is restarting, please wait...',
+      503: 'Service temporarily unavailable',
+      504: 'Server is taking too long to respond',
     }
 
     const message = messages[status] || `API error: ${response.statusText}`
