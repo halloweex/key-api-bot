@@ -1412,13 +1412,13 @@ class DuckDBStore:
                 else:
                     return False
 
-            # Record snapshot (using total quantity and sale price, same as KeyCRM)
+            # Record snapshot (using available quantity = quantity - reserve, same as KeyCRM)
             conn.execute("""
                 INSERT INTO inventory_history (date, total_quantity, total_value, total_reserve, sku_count)
                 SELECT
                     CURRENT_DATE,
-                    COALESCE(SUM(quantity), 0),
-                    COALESCE(SUM(quantity * price), 0),
+                    COALESCE(SUM(quantity - reserve), 0),
+                    COALESCE(SUM((quantity - reserve) * price), 0),
                     COALESCE(SUM(reserve), 0),
                     COUNT(*)
                 FROM offer_stocks
