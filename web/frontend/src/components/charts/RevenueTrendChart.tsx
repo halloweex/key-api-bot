@@ -311,6 +311,18 @@ const COMPARE_TYPE_OPTIONS: { value: CompareType; label: string; shortLabel: str
   { value: 'month_ago', label: 'Same Period Last Month', shortLabel: 'Last Month' },
 ]
 
+// Get comparison label based on compare type
+const getComparisonLabel = (compareType: CompareType, basePeriodLabel: string): string => {
+  switch (compareType) {
+    case 'year_ago':
+      return 'Last Year'
+    case 'month_ago':
+      return 'Last Month'
+    default:
+      return basePeriodLabel
+  }
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const RevenueTrendChart = memo(function RevenueTrendChart() {
@@ -319,7 +331,13 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
   const { period } = useFilterStore()
   const [showInfo, setShowInfo] = useState(false)
 
-  const periodLabels = PERIOD_LABELS[period] || PERIOD_LABELS.custom
+  const basePeriodLabels = PERIOD_LABELS[period] || PERIOD_LABELS.custom
+
+  // Create dynamic period labels based on compare type
+  const periodLabels = useMemo(() => ({
+    current: basePeriodLabels.current,
+    previous: getComparisonLabel(compareType, basePeriodLabels.previous)
+  }), [basePeriodLabels, compareType])
 
   // Get growth data from comparison
   const growthData = data?.comparison?.totals
