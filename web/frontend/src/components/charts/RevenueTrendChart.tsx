@@ -306,9 +306,9 @@ function InfoTooltipContent({ onClose, children }: {
 type CompareType = 'previous_period' | 'year_ago' | 'month_ago'
 
 const COMPARE_TYPE_OPTIONS: { value: CompareType; label: string; shortLabel: string }[] = [
-  { value: 'previous_period', label: 'Previous Period', shortLabel: 'Prev Period' },
   { value: 'year_ago', label: 'Same Period Last Year', shortLabel: 'Last Year' },
   { value: 'month_ago', label: 'Same Period Last Month', shortLabel: 'Last Month' },
+  { value: 'previous_period', label: 'Previous Period', shortLabel: 'Prev Period' },
 ]
 
 // Get comparison label based on compare type
@@ -326,7 +326,7 @@ const getComparisonLabel = (compareType: CompareType, basePeriodLabel: string): 
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const RevenueTrendChart = memo(function RevenueTrendChart() {
-  const [compareType, setCompareType] = useState<CompareType>('previous_period')
+  const [compareType, setCompareType] = useState<CompareType>('year_ago')
   const { data, isLoading, error, refetch } = useRevenueTrend(compareType)
   const { period } = useFilterStore()
   const [showInfo, setShowInfo] = useState(false)
