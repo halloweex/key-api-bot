@@ -455,7 +455,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
           >
             {COMPARE_TYPE_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>
-                {opt.shortLabel}
+                vs {opt.shortLabel}
               </option>
             ))}
           </select>
