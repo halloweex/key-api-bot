@@ -306,9 +306,9 @@ function InfoTooltipContent({ onClose, children }: {
 type CompareType = 'previous_period' | 'year_ago' | 'month_ago'
 
 const COMPARE_TYPE_OPTIONS: { value: CompareType; label: string; shortLabel: string }[] = [
-  { value: 'year_ago', label: 'Year over Year', shortLabel: 'YoY' },
-  { value: 'month_ago', label: 'Month over Month', shortLabel: 'MoM' },
-  { value: 'previous_period', label: 'Prior Period', shortLabel: 'Prior' },
+  { value: 'year_ago', label: 'Year over Year', shortLabel: 'Year ago' },
+  { value: 'month_ago', label: 'Month over Month', shortLabel: 'Month ago' },
+  { value: 'previous_period', label: 'Prior Period', shortLabel: 'Previous' },
 ]
 
 // Get comparison label based on compare type
@@ -463,13 +463,13 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
                     <strong className="text-blue-400">Bars:</strong> Daily revenue for selected period.
                   </p>
                   <p className="text-xs text-slate-300">
-                    <strong className="text-slate-400">Dashed line:</strong> Comparison period.
+                    <strong className="text-slate-400">Dashed line:</strong> Comparison period (Year ago, Month ago, or Previous).
                   </p>
                   <p className="text-xs text-slate-300">
-                    <strong className="text-emerald-400">Peak labels:</strong> Highest revenue days.
+                    <strong className="text-emerald-400">Growth badge:</strong> Total revenue change vs comparison period.
                   </p>
                   <p className="text-xs text-slate-300">
-                    <strong className="text-purple-400">Light blue bars:</strong> Days from previous month (last 28 days view).
+                    <strong className="text-amber-400">Peak labels:</strong> Highest revenue days.
                   </p>
                 </div>
               </InfoTooltipContent>
