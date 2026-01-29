@@ -32,7 +32,7 @@ COPY bot/ ./bot/
 COPY core/ ./core/
 
 # Copy web application (excluding frontend source)
-COPY web/__init__.py web/config.py web/main.py ./web/
+COPY web/__init__.py web/config.py web/main.py web/schemas.py web/middleware.py ./web/
 COPY web/routes/ ./web/routes/
 COPY web/services/ ./web/services/
 COPY web/static/ ./web/static/
