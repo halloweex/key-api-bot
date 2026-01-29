@@ -349,9 +349,16 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
     const hasComp = (data.comparison?.revenue?.length ?? 0) > 0
 
-    // Find max revenue for peak detection
+    // Find top 5 peak indices for labels
     const revenues = data.revenue ?? []
-    const maxRev = Math.max(...revenues, 0)
+    const revenueWithIndex = revenues.map((rev, idx) => ({ rev, idx }))
+    const topPeakIndices = new Set(
+      revenueWithIndex
+        .filter(item => item.rev > 0)
+        .sort((a, b) => b.rev - a.rev)
+        .slice(0, 5)
+        .map(item => item.idx)
+    )
 
     // Get current month for comparison (only relevant for last_28_days)
     // Month is 1-indexed in the date format (01 = January)
@@ -371,8 +378,8 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       // Format short date for x-axis
       const shortDate = label.length > 6 ? label.slice(0, 6) : label
 
-      // Mark as peak if it's the maximum value (or within 5% of max for multiple peaks)
-      const isPeak = revenue > 0 && revenue >= maxRev * 0.95
+      // Mark as peak if it's in top 5 revenues
+      const isPeak = topPeakIndices.has(index)
 
       // Parse month from label (format: "dd.mm" like "21.01" for January 21st)
       // Check if this date is in current month
@@ -469,7 +476,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
                     <strong className="text-emerald-400">Growth badge:</strong> Total revenue change vs comparison period.
                   </p>
                   <p className="text-xs text-slate-300">
-                    <strong className="text-amber-400">Peak labels:</strong> Highest revenue days.
+                    <strong className="text-amber-400">Peak labels:</strong> Top 5 revenue days.
                   </p>
                 </div>
               </InfoTooltipContent>
