@@ -5,30 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="00033ac8-0ff0-4db9-8885-f829ba7bf2ad" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/dataSources.local.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/dataSources.local.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/bot/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/bot/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/bot/api_client.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/bot/handlers.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/bot/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/bot/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/bot/services.py" beforeDir="false" afterPath="$PROJECT_DIR$/bot/services.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/cache.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/cache.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/duckdb_store.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/duckdb_store.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/exceptions.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/exceptions.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/keycrm.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/keycrm.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/sync_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/sync_service.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/unit/test_models.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/unit/test_models.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/OrdersBySourceChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/OrdersBySourceChart.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueBySourceChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueBySourceChart.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/SalesBySourceChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/SalesBySourceChart.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/hooks/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/hooks/index.ts" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/routes/api.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/routes/api.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/routes/auth.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/routes/auth.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/services/brand_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/services/brand_service.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/services/category_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/services/category_service.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -314,7 +291,7 @@
       <workItem from="1769678640075" duration="124000" />
       <workItem from="1769678798867" duration="12000" />
       <workItem from="1769680433341" duration="313000" />
-      <workItem from="1769680767522" duration="2993000" />
+      <workItem from="1769680767522" duration="13048000" />
     </task>
     <servers />
   </component>
