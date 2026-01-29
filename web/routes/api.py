@@ -7,13 +7,14 @@ All endpoints are rate-limited to prevent abuse:
 - Data-heavy endpoints (revenue, summary, etc.): 30 requests/minute
 """
 import time
-from fastapi import APIRouter, Query, Request, HTTPException
-from typing import Optional
+from fastapi import APIRouter, Query, Request, HTTPException, Depends
+from typing import Optional, List
 
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from web.services import dashboard_service
+from web.routes.auth import require_admin
 from core.duckdb_store import get_store
 from web.config import VERSION
 from core.validators import (
@@ -25,6 +26,20 @@ from core.validators import (
     validate_sales_type
 )
 from core.exceptions import ValidationError
+from core.observability import get_correlation_id, metrics, Timer
+from web.schemas import (
+    HealthResponse,
+    SummaryStatsResponse,
+    RevenueTrendResponse,
+    SalesBySourceResponse,
+    TopProductsResponse,
+    BrandAnalyticsResponse,
+    CustomerInsightsResponse,
+    CategoryResponse,
+    BrandResponse,
+    MetricsResponse,
+    JobsResponse,
+)
 
 router = APIRouter(tags=["api"])
 
@@ -37,17 +52,20 @@ limiter = Limiter(key_func=get_remote_address)
 
 # ─── Health Check ────────────────────────────────────────────────────────────
 
-@router.get("/health")
+@router.get("/health", response_model=HealthResponse)
 @limiter.limit("60/minute")
 async def health_check(request: Request):
     """Health check endpoint for Docker/load balancer monitoring."""
     uptime_seconds = int(time.time() - _start_time)
 
-    # Get DuckDB stats
+    # Get DuckDB stats with latency measurement
+    db_latency_ms = None
     try:
-        store = await get_store()
-        duckdb_stats = await store.get_stats()
+        with Timer("health_check_db") as timer:
+            store = await get_store()
+            duckdb_stats = await store.get_stats()
         duckdb_status = "connected"
+        db_latency_ms = round(timer.elapsed_ms, 2)
     except Exception as e:
         duckdb_stats = None
         duckdb_status = f"error: {e}"
@@ -56,8 +74,10 @@ async def health_check(request: Request):
         "status": "healthy" if duckdb_stats else "degraded",
         "version": VERSION,
         "uptime_seconds": uptime_seconds,
+        "correlation_id": get_correlation_id(),
         "duckdb": {
             "status": duckdb_status,
+            "latency_ms": db_latency_ms,
             **(duckdb_stats or {})
         }
     }
@@ -83,7 +103,11 @@ async def get_duckdb_stats(request: Request):
 
 @router.post("/duckdb/resync")
 @limiter.limit("1/minute")
-async def trigger_resync(request: Request, days: int = 365):
+async def trigger_resync(
+    request: Request,
+    days: int = 365,
+    admin: dict = Depends(require_admin)
+):
     """
     Force a complete resync of orders from KeyCRM API.
 
@@ -91,6 +115,7 @@ async def trigger_resync(request: Request, days: int = 365):
     This clears all order data and performs a fresh sync.
 
     WARNING: This operation can take several minutes for large datasets.
+    Requires admin authentication.
     """
     from core.sync_service import force_resync
 
@@ -105,9 +130,149 @@ async def trigger_resync(request: Request, days: int = 365):
         raise HTTPException(status_code=500, detail=f"Resync failed: {str(e)}")
 
 
+@router.get("/metrics", response_model=MetricsResponse)
+@limiter.limit("60/minute")
+async def get_metrics(request: Request):
+    """
+    Get application metrics.
+
+    Returns request counts, error counts, and timing statistics.
+    """
+    return {
+        "uptime_seconds": int(time.time() - _start_time),
+        "correlation_id": get_correlation_id(),
+        **metrics.get_stats()
+    }
+
+
+@router.get("/cache/stats")
+@limiter.limit("60/minute")
+async def get_cache_stats(request: Request):
+    """
+    Get Redis cache statistics.
+
+    Returns cache hits, misses, hit rate, and connection status.
+    """
+    from core.cache import cache
+    return cache.get_stats()
+
+
+@router.post("/cache/invalidate")
+@limiter.limit("10/minute")
+async def invalidate_cache(
+    request: Request,
+    pattern: str = Query(..., description="Cache key pattern to invalidate (e.g., 'summary:*')"),
+    admin: dict = Depends(require_admin)
+):
+    """
+    Manually invalidate cache by pattern.
+
+    Requires admin authentication.
+    """
+    from core.cache import cache
+
+    if not cache.is_connected:
+        raise HTTPException(status_code=503, detail="Cache not connected")
+
+    deleted = await cache.invalidate_pattern(pattern)
+    return {
+        "status": "success",
+        "pattern": pattern,
+        "keys_deleted": deleted,
+    }
+
+
+@router.get("/jobs", response_model=JobsResponse)
+@limiter.limit("60/minute")
+async def get_jobs(request: Request):
+    """
+    Get background job scheduler status.
+
+    Returns list of registered jobs with their schedules, last run times,
+    and execution history.
+    """
+    from core.scheduler import get_scheduler
+
+    scheduler = get_scheduler()
+    if scheduler is None:
+        return {
+            "status": "not_running",
+            "jobs": [],
+            "history": []
+        }
+
+    return {
+        "status": "running",
+        "jobs": scheduler.get_jobs(),
+        "history": scheduler.get_history(limit=20)
+    }
+
+
+@router.get("/events")
+@limiter.limit("60/minute")
+async def get_events(
+    request: Request,
+    event_type: Optional[str] = Query(None, description="Filter by event type"),
+    limit: int = Query(20, ge=1, le=100, description="Number of events to return"),
+):
+    """
+    Get recent event history.
+
+    Returns list of sync events with timestamps and data.
+    Useful for debugging and monitoring sync operations.
+    """
+    from core.events import events, SyncEvent
+
+    # Convert string to SyncEvent if provided
+    filter_type = None
+    if event_type:
+        try:
+            filter_type = SyncEvent(event_type)
+        except ValueError:
+            # Try matching by name
+            for et in SyncEvent:
+                if et.name.lower() == event_type.lower():
+                    filter_type = et
+                    break
+
+    return {
+        "events": events.get_history(event_type=filter_type, limit=limit),
+        "handlers": events.get_handlers(),
+    }
+
+
+@router.post("/jobs/{job_id}/trigger")
+@limiter.limit("5/minute")
+async def trigger_job(
+    request: Request,
+    job_id: str,
+    admin: dict = Depends(require_admin)
+):
+    """
+    Manually trigger a background job.
+
+    Requires admin authentication.
+    """
+    from core.scheduler import get_scheduler
+
+    scheduler = get_scheduler()
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="Scheduler not running")
+
+    result = await scheduler.trigger_job(job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+
+    return {
+        "status": "triggered",
+        "job_id": job_id,
+        "result": result
+    }
+
+
 # ─── Lightweight Endpoints (60/minute) ─────────────────────────────────────────
 
-@router.get("/categories")
+@router.get("/categories", response_model=List[CategoryResponse])
 @limiter.limit("60/minute")
 async def get_categories(request: Request):
     """Get list of root categories for filter dropdown."""
@@ -115,7 +280,7 @@ async def get_categories(request: Request):
     return await store.get_categories()
 
 
-@router.get("/categories/{parent_id}/children")
+@router.get("/categories/{parent_id}/children", response_model=List[CategoryResponse])
 @limiter.limit("60/minute")
 async def get_child_categories(request: Request, parent_id: int):
     """Get child categories for a parent category."""
@@ -127,7 +292,7 @@ async def get_child_categories(request: Request, parent_id: int):
     return await store.get_child_categories(parent_id)
 
 
-@router.get("/brands")
+@router.get("/brands", response_model=List[BrandResponse])
 @limiter.limit("60/minute")
 async def get_brands(request: Request):
     """Get list of brands for filter dropdown."""
@@ -232,6 +397,8 @@ async def get_summary(
     sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
 ):
     """Get summary statistics for dashboard cards."""
+    from core.cache import cache
+
     try:
         validate_period(period)
         validate_source_id(source_id)
@@ -242,7 +409,24 @@ async def get_summary(
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return await dashboard_service.get_summary_stats(start, end, category_id, brand=brand, source_id=source_id, sales_type=sales_type)
+
+    # Build cache key from parameters
+    cache_key = f"summary:{start}:{end}:{source_id}:{category_id}:{brand}:{sales_type}"
+
+    # Try cache first (60 second TTL for summary data)
+    cached = await cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Fetch from database
+    result = await dashboard_service.get_summary_stats(
+        start, end, category_id, brand=brand, source_id=source_id, sales_type=sales_type
+    )
+
+    # Cache the result
+    await cache.set(cache_key, result, ttl=60)
+
+    return result
 
 
 @router.get("/customers/insights")
@@ -475,13 +659,15 @@ async def set_goal(
     request: Request,
     period_type: str = Query(..., description="Period type: daily, weekly, or monthly"),
     amount: float = Query(..., gt=0, description="Goal amount in UAH"),
-    growth_factor: float = Query(1.10, ge=1.0, le=2.0, description="Growth factor for future calculations")
+    growth_factor: float = Query(1.10, ge=1.0, le=2.0, description="Growth factor for future calculations"),
+    admin: dict = Depends(require_admin)
 ):
     """
     Set a custom revenue goal.
 
     The goal will be marked as custom (manually set). To revert to auto-calculated
     goals, use DELETE /api/goals/{period_type}.
+    Requires admin authentication.
     """
     if period_type not in ["daily", "weekly", "monthly"]:
         raise HTTPException(status_code=400, detail="period_type must be: daily, weekly, or monthly")
@@ -495,13 +681,15 @@ async def set_goal(
 async def reset_goal(
     request: Request,
     period_type: str,
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all"),
+    admin: dict = Depends(require_admin)
 ):
     """
     Reset a goal to auto-calculated value.
 
     Removes the custom goal and reverts to using the system-calculated suggestion
     based on historical performance.
+    Requires admin authentication.
     """
     if period_type not in ["daily", "weekly", "monthly"]:
         raise HTTPException(status_code=400, detail="period_type must be: daily, weekly, or monthly")
@@ -619,13 +807,15 @@ async def get_weekly_patterns(
 @limiter.limit("5/minute")
 async def recalculate_seasonality(
     request: Request,
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all"),
+    admin: dict = Depends(require_admin)
 ):
     """
     Force recalculation of seasonality indices and growth metrics.
 
     Use this after significant data changes or to update calculations
     with the latest data.
+    Requires admin authentication.
     """
     try:
         sales_type = validate_sales_type(sales_type)

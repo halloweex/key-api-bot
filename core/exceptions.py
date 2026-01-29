@@ -87,3 +87,26 @@ class ValidationError(Exception):
         if self.value is not None:
             return f"{self.field}: {self.message} (got: {self.value!r})"
         return f"{self.field}: {self.message}"
+
+
+class QueryTimeoutError(Exception):
+    """
+    Database query exceeded timeout.
+
+    Indicates a long-running query that should be investigated:
+    - Missing index
+    - Too much data being scanned
+    - Complex join/aggregation
+    """
+
+    def __init__(self, query: str, timeout: float, details: str = None):
+        self.query = query[:200] + "..." if len(query) > 200 else query
+        self.timeout = timeout
+        self.details = details
+        message = f"Query timed out after {timeout}s"
+        if details:
+            message = f"{message}: {details}"
+        super().__init__(message)
+
+    def __str__(self) -> str:
+        return f"QueryTimeoutError: Query timed out after {self.timeout}s - {self.query}"

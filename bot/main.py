@@ -16,7 +16,7 @@ from telegram.ext import (
 )
 
 from bot.config import BOT_TOKEN, KEYCRM_API_KEY, ConversationState
-from bot.api_client import KeyCRMClient
+from core.keycrm import SyncKeyCRMClient as KeyCRMClient
 from bot.services import ReportService
 from bot import handlers
 from bot import database

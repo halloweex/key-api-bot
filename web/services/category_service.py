@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 _categories_cache: Dict[int, Dict[str, Any]] = {}
 _product_category_cache: Dict[int, int] = {}  # product_id -> category_id
 _cache_lock = asyncio.Lock()
+_load_lock = asyncio.Lock()  # Dedicated lock for loading to prevent concurrent fetches
+_categories_load_lock = asyncio.Lock()  # Separate lock for categories loading
 _last_cache_update: float = 0
 _last_products_update: float = 0
 CACHE_TTL = 3600  # 1 hour
@@ -69,26 +71,51 @@ async def warm_product_cache() -> None:
     """Pre-load all product categories into cache."""
     global _product_category_cache, _products_loaded, _last_products_update
 
+    # Quick check without load lock
     async with _cache_lock:
         if _products_loaded and time.time() - _last_products_update < CACHE_TTL:
             return
 
-    product_categories = await fetch_all_products_categories()
+    # Only one coroutine fetches at a time
+    async with _load_lock:
+        # Double-check after acquiring load lock
+        async with _cache_lock:
+            if _products_loaded and time.time() - _last_products_update < CACHE_TTL:
+                return
 
-    async with _cache_lock:
-        _product_category_cache.update(product_categories)
-        _products_loaded = True
-        _last_products_update = time.time()
+        # Fetch outside cache lock (but inside load lock)
+        product_categories = await fetch_all_products_categories()
+
+        # Update cache
+        async with _cache_lock:
+            _product_category_cache.update(product_categories)
+            _products_loaded = True
+            _last_products_update = time.time()
 
 
 async def get_categories() -> Dict[int, Dict[str, Any]]:
     """Get cached categories, refreshing if needed."""
     global _categories_cache, _last_cache_update
 
+    # Quick check without load lock
     async with _cache_lock:
-        if time.time() - _last_cache_update > CACHE_TTL or not _categories_cache:
-            logger.info("Refreshing categories cache (async)...")
-            _categories_cache = await fetch_all_categories()
+        if time.time() - _last_cache_update <= CACHE_TTL and _categories_cache:
+            return _categories_cache
+
+    # Only one coroutine fetches at a time
+    async with _categories_load_lock:
+        # Double-check after acquiring load lock
+        async with _cache_lock:
+            if time.time() - _last_cache_update <= CACHE_TTL and _categories_cache:
+                return _categories_cache
+
+        # Fetch outside cache lock (but inside load lock)
+        logger.info("Refreshing categories cache (async)...")
+        categories = await fetch_all_categories()
+
+        # Update cache
+        async with _cache_lock:
+            _categories_cache = categories
             _last_cache_update = time.time()
             logger.info(f"Cached {len(_categories_cache)} categories")
 

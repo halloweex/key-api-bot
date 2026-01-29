@@ -17,8 +17,13 @@ import pandas as pd
 
 from core.models import Order, SourceId, OrderStatus
 from bot.config import DEFAULT_TIMEZONE, TELEGRAM_MANAGER_IDS
+from core.exceptions import QueryTimeoutError
 
 logger = logging.getLogger(__name__)
+
+# Query timeout settings
+DEFAULT_QUERY_TIMEOUT = 30.0  # seconds
+LONG_QUERY_TIMEOUT = 120.0   # for sync operations
 
 # Database configuration
 DB_DIR = Path(__file__).parent.parent / "data"
@@ -92,6 +97,130 @@ class DuckDBStore:
         if self._connection is None:
             await self.connect()
         yield self._connection
+
+    # ─── Query Execution with Timeout ────────────────────────────────────────
+
+    async def _execute_with_timeout(
+        self,
+        query: str,
+        params: list = None,
+        timeout: float = DEFAULT_QUERY_TIMEOUT,
+    ) -> None:
+        """
+        Execute a query with timeout (for INSERT/UPDATE/DELETE).
+
+        Args:
+            query: SQL query string
+            params: Query parameters
+            timeout: Timeout in seconds
+
+        Raises:
+            QueryTimeoutError: If query exceeds timeout
+        """
+        async with self.connection() as conn:
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(conn.execute, query, params or []),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                raise QueryTimeoutError(query, timeout, "Execute failed")
+
+    async def _fetch_one(
+        self,
+        query: str,
+        params: list = None,
+        timeout: float = DEFAULT_QUERY_TIMEOUT,
+    ) -> Optional[tuple]:
+        """
+        Execute query and fetch one result with timeout.
+
+        Args:
+            query: SQL query string
+            params: Query parameters
+            timeout: Timeout in seconds
+
+        Returns:
+            Single row tuple or None
+
+        Raises:
+            QueryTimeoutError: If query exceeds timeout
+        """
+        async with self.connection() as conn:
+            try:
+                def _run():
+                    return conn.execute(query, params or []).fetchone()
+
+                return await asyncio.wait_for(
+                    asyncio.to_thread(_run),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                raise QueryTimeoutError(query, timeout, "Fetch one failed")
+
+    async def _fetch_all(
+        self,
+        query: str,
+        params: list = None,
+        timeout: float = DEFAULT_QUERY_TIMEOUT,
+    ) -> List[tuple]:
+        """
+        Execute query and fetch all results with timeout.
+
+        Args:
+            query: SQL query string
+            params: Query parameters
+            timeout: Timeout in seconds
+
+        Returns:
+            List of row tuples
+
+        Raises:
+            QueryTimeoutError: If query exceeds timeout
+        """
+        async with self.connection() as conn:
+            try:
+                def _run():
+                    return conn.execute(query, params or []).fetchall()
+
+                return await asyncio.wait_for(
+                    asyncio.to_thread(_run),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                raise QueryTimeoutError(query, timeout, "Fetch all failed")
+
+    async def _fetch_df(
+        self,
+        query: str,
+        params: list = None,
+        timeout: float = DEFAULT_QUERY_TIMEOUT,
+    ) -> "pd.DataFrame":
+        """
+        Execute query and return DataFrame with timeout.
+
+        Args:
+            query: SQL query string
+            params: Query parameters
+            timeout: Timeout in seconds
+
+        Returns:
+            pandas DataFrame
+
+        Raises:
+            QueryTimeoutError: If query exceeds timeout
+        """
+        async with self.connection() as conn:
+            try:
+                def _run():
+                    return conn.execute(query, params or []).fetchdf()
+
+                return await asyncio.wait_for(
+                    asyncio.to_thread(_run),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                raise QueryTimeoutError(query, timeout, "Fetch DataFrame failed")
 
     async def _init_schema(self) -> None:
         """Create database schema if not exists."""

@@ -3,11 +3,12 @@ Authentication routes for Telegram Login.
 """
 import os
 import logging
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Request, Response, HTTPException, Depends
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
+from core.config import config
 from web.services.auth_service import (
     verify_telegram_auth,
     verify_webapp_auth,
@@ -17,8 +18,10 @@ from web.services.auth_service import (
 
 logger = logging.getLogger(__name__)
 
-# Secret key for signing sessions (use BOT_TOKEN as secret)
-SECRET_KEY = os.getenv("BOT_TOKEN", "fallback-secret-key-change-me")
+# Secret key for signing sessions (prefer DASHBOARD_SECRET_KEY, fallback to BOT_TOKEN)
+SECRET_KEY = config.web.secret_key or config.bot.token
+if not SECRET_KEY:
+    raise RuntimeError("DASHBOARD_SECRET_KEY or BOT_TOKEN must be set")
 session_serializer = URLSafeTimedSerializer(SECRET_KEY)
 
 router = APIRouter(tags=["auth"])
@@ -215,3 +218,19 @@ def require_auth(request: Request) -> RedirectResponse | None:
     if not user:
         return RedirectResponse(url="/login", status_code=302)
     return None
+
+
+async def require_admin(request: Request) -> dict:
+    """
+    FastAPI dependency for admin-only endpoints.
+
+    Returns user data if authenticated and admin, raises HTTPException otherwise.
+    """
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    if not config.bot.is_admin(user.get('user_id')):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    return user

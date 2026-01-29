@@ -2,19 +2,33 @@
 Sync service for keeping DuckDB in sync with KeyCRM API.
 
 Handles incremental synchronization of orders, products, and categories.
+
+Features:
+- Full sync: Initial load of all historical data (in 90-day chunks)
+- Incremental sync: Only fetch new/updated records
+- Background sync: Periodic updates running in the background
+- Observability: Correlation IDs and timing metrics
 """
 import asyncio
-import logging
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
 
 from core.keycrm import get_async_client
 from core.duckdb_store import get_store, DuckDBStore
 from core.exceptions import KeyCRMError, KeyCRMConnectionError, KeyCRMAPIError
+from core.observability import get_logger, Timer, correlation_context
+from core.events import (
+    events,
+    SyncEvent,
+    emit_sync_started,
+    emit_sync_completed,
+    emit_sync_failed,
+    emit_orders_synced,
+)
 from bot.config import DEFAULT_TIMEZONE
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 DEFAULT_TZ = ZoneInfo(DEFAULT_TIMEZONE)
 
@@ -219,7 +233,7 @@ class SyncService:
             logger.error(f"Stock sync error: {e}")
             return 0
 
-    async def full_sync(self, days_back: int = 365) -> dict:
+    async def full_sync(self, days_back: int = 365) -> Dict[str, Any]:
         """
         Perform full sync of all data from KeyCRM.
 
@@ -229,7 +243,12 @@ class SyncService:
         Returns:
             Dict with sync statistics
         """
-        logger.info(f"Starting full sync (last {days_back} days)...")
+        with correlation_context() as corr_id:
+            logger.info(
+                f"Starting full sync (last {days_back} days)",
+                extra={"days_back": days_back, "sync_type": "full"}
+            )
+
         stats = {"orders": 0, "products": 0, "categories": 0, "expense_types": 0, "expenses": 0, "managers": 0, "offers": 0, "stocks": 0}
 
         try:
@@ -323,14 +342,20 @@ class SyncService:
 
         return stats
 
-    async def incremental_sync(self) -> dict:
+    async def incremental_sync(self) -> Dict[str, Any]:
         """
         Perform incremental sync - only fetch new/updated data since last sync.
 
         Returns:
             Dict with sync statistics
         """
+        import time
+        start_time = time.perf_counter()
         stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0, "managers": 0, "offers": 0, "stocks": 0}
+        error_occurred = None
+
+        # Emit sync started event
+        await emit_sync_started("incremental")
 
         try:
             client = await get_async_client()
@@ -363,6 +388,13 @@ class SyncService:
                 await self.store.set_last_sync_time("orders", max_updated)
                 logger.info(f"Incremental sync: {stats['orders']} orders, {stats['expenses']} expenses, checkpoint: {max_updated}")
 
+                # Emit orders synced event
+                await events.emit(SyncEvent.ORDERS_SYNCED, {
+                    "count": order_count,
+                    "expenses": expense_count,
+                    "checkpoint": max_updated.isoformat() if max_updated else None,
+                })
+
             # Sync products less frequently (every hour)
             if not last_products_sync or (datetime.now(DEFAULT_TZ) - last_products_sync).total_seconds() > 3600:
                 logger.info("Syncing products (hourly)...")
@@ -371,6 +403,9 @@ class SyncService:
                     products.extend(batch)
                 stats["products"] = await self.store.upsert_products(products)
                 await self.store.set_last_sync_time("products")
+
+                # Emit products synced event
+                await events.emit(SyncEvent.PRODUCTS_SYNCED, {"count": stats["products"]})
 
             # Sync managers daily (86400 seconds = 24 hours)
             last_managers_sync = await self.store.get_last_sync_time("managers")
@@ -396,16 +431,35 @@ class SyncService:
                 # Legacy: Record aggregated inventory snapshot
                 await self.store.record_inventory_snapshot()
 
+                # Emit inventory updated event
+                await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
+
         except KeyCRMConnectionError as e:
+            error_occurred = str(e)
             logger.warning(f"Incremental sync connection error (will retry): {e}")
         except KeyCRMAPIError as e:
+            error_occurred = str(e)
             logger.error(f"Incremental sync API error: {e}", exc_info=True)
         except KeyCRMError as e:
+            error_occurred = str(e)
             logger.error(f"Incremental sync error: {e}", exc_info=True)
+        finally:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            total_records = sum(stats.values())
+            logger.info(
+                "Incremental sync completed",
+                extra={"duration_ms": round(elapsed_ms, 2), "stats": stats}
+            )
+
+            # Emit sync completed or failed event
+            if error_occurred:
+                await emit_sync_failed("incremental", error_occurred, stats=stats, duration_ms=elapsed_ms)
+            else:
+                await emit_sync_completed("incremental", elapsed_ms, total_records, stats=stats)
 
         return stats
 
-    async def sync_today(self) -> dict:
+    async def sync_today(self) -> Dict[str, Any]:
         """
         Sync only today's orders for real-time dashboard.
 
@@ -516,9 +570,12 @@ async def init_and_sync(full_sync_days: int = 365) -> None:
     if sku_count > 0:
         logger.info(f"Initialized sku_inventory_status: {sku_count} SKUs")
 
-    # Start background sync
-    sync_service = await get_sync_service()
-    await sync_service.start_background_sync(interval_seconds=60)
+    # Note: Background sync is now handled by APScheduler (core/scheduler.py)
+    # The scheduler runs incremental_sync every 60 seconds, plus other jobs:
+    # - full_sync_weekly: Sunday 2 AM
+    # - inventory_snapshot: daily 1 AM
+    # - manager_stats: daily 3 AM
+    # - seasonality_calc: Monday 4 AM
 
 
 async def force_resync(days_back: int = 365) -> dict:

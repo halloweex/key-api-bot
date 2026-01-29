@@ -215,7 +215,7 @@ class TestProduct:
             "name": "Test Product",
             "category_id": 5,
             "custom_fields": [
-                {"name": "Бренд", "value": "TestBrand"},
+                {"name": "Brand", "value": ["TestBrand"]},
             ],
         }
         product = Product.from_api(data)
@@ -224,6 +224,20 @@ class TestProduct:
         assert product.name == "Test Product"
         assert product.category_id == 5
         assert product.brand == "TestBrand"
+
+    def test_from_api_with_brand_uuid(self):
+        """from_api should extract brand using CT_1001 uuid."""
+        data = {
+            "id": 101,
+            "name": "Test Product 2",
+            "category_id": 5,
+            "custom_fields": [
+                {"uuid": "CT_1001", "value": ["AnotherBrand"]},
+            ],
+        }
+        product = Product.from_api(data)
+
+        assert product.brand == "AnotherBrand"
 
     def test_from_api_no_brand(self):
         """from_api should handle missing brand."""

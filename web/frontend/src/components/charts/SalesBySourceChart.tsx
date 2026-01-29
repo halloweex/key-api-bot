@@ -1,4 +1,4 @@
-import { useMemo, memo } from 'react'
+import { memo } from 'react'
 import {
   BarChart,
   Bar,
@@ -12,9 +12,9 @@ import {
   Cell,
 } from 'recharts'
 import { ChartContainer } from './ChartContainer'
+import { SourceChartTooltip } from './SourceChartTooltip'
 import {
   CHART_DIMENSIONS,
-  TOOLTIP_STYLE,
   GRID_PROPS,
   X_AXIS_PROPS,
   Y_AXIS_PROPS,
@@ -23,47 +23,19 @@ import {
   formatAxisK,
   formatPieLabel,
 } from './config'
-import { useSalesBySource } from '../../hooks'
+import { useSourceChartData } from '../../hooks'
 import { formatCurrency } from '../../utils/formatters'
-import { SOURCE_COLORS } from '../../utils/colors'
-
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-interface ChartDataPoint {
-  name: string
-  revenue: number
-  orders: number
-  color: string
-  [key: string]: string | number  // Recharts compatibility
-}
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const SalesBySourceChart = memo(function SalesBySourceChart() {
-  const { data, isLoading, error, refetch } = useSalesBySource()
-
-  const chartData = useMemo<ChartDataPoint[]>(() => {
-    if (!data?.labels?.length) return []
-    return data.labels.map((label, index) => ({
-      name: label,
-      revenue: data.revenue?.[index] ?? 0,
-      orders: data.orders?.[index] ?? 0,
-      color: data.backgroundColor?.[index] ?? SOURCE_COLORS[index % 3] ?? '#2563EB',
-    }))
-  }, [data])
-
-  const totalRevenue = useMemo(
-    () => chartData.reduce((sum, item) => sum + item.revenue, 0),
-    [chartData]
-  )
-
-  const isEmpty = !isLoading && chartData.length === 0
+  const { chartData, totalRevenue, isEmpty, isLoading, error, refetch } = useSourceChartData()
 
   return (
     <ChartContainer
       title="Sales by Source"
       isLoading={isLoading}
-      error={error as Error | null}
+      error={error}
       onRetry={refetch}
       isEmpty={isEmpty}
       height="md"
@@ -91,9 +63,8 @@ export const SalesBySourceChart = memo(function SalesBySourceChart() {
                 width={CHART_DIMENSIONS.yAxisWidth.md}
               />
               <Tooltip
-                contentStyle={TOOLTIP_STYLE}
-                labelStyle={{ color: '#F3F4F6' }}
-                formatter={(value) => [formatCurrency(Number(value) || 0), 'Revenue']}
+                content={<SourceChartTooltip showRevenue showOrders={false} />}
+                cursor={{ fill: 'rgba(0, 0, 0, 0.04)' }}
               />
               <Bar dataKey="revenue" {...BAR_PROPS}>
                 {chartData.map((entry, index) => (
@@ -126,8 +97,7 @@ export const SalesBySourceChart = memo(function SalesBySourceChart() {
                 ))}
               </Pie>
               <Tooltip
-                contentStyle={TOOLTIP_STYLE}
-                formatter={(value) => [formatCurrency(Number(value) || 0), 'Revenue']}
+                content={<SourceChartTooltip showRevenue indicatorShape="circle" />}
               />
             </PieChart>
           </ResponsiveContainer>

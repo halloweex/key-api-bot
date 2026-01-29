@@ -71,6 +71,9 @@ class WebConfig:
     dashboard_url: str = field(
         default_factory=lambda: os.getenv("DASHBOARD_URL", "http://108.130.86.30")
     )
+    secret_key: str = field(
+        default_factory=lambda: os.getenv("DASHBOARD_SECRET_KEY", "")
+    )
     host: str = "0.0.0.0"
     port: int = 8080
 

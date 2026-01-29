@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 _brands_cache: Set[str] = set()
 _product_brand_cache: Dict[int, str] = {}  # product_id -> brand name
 _cache_lock = asyncio.Lock()
+_load_lock = asyncio.Lock()  # Dedicated lock for loading to prevent concurrent fetches
 _last_cache_update: float = 0
 _brands_loaded = False
 CACHE_TTL = 3600  # 1 hour
@@ -63,17 +64,27 @@ async def warm_brand_cache() -> None:
     """Pre-load all product brands into cache."""
     global _brands_cache, _product_brand_cache, _brands_loaded, _last_cache_update
 
+    # Quick check without load lock
     async with _cache_lock:
         if _brands_loaded and time.time() - _last_cache_update < CACHE_TTL:
             return
 
-    brands, product_brands = await fetch_all_products_with_brands()
+    # Only one coroutine fetches at a time
+    async with _load_lock:
+        # Double-check after acquiring load lock
+        async with _cache_lock:
+            if _brands_loaded and time.time() - _last_cache_update < CACHE_TTL:
+                return
 
-    async with _cache_lock:
-        _brands_cache = brands
-        _product_brand_cache = product_brands
-        _brands_loaded = True
-        _last_cache_update = time.time()
+        # Fetch outside cache lock (but inside load lock)
+        brands, product_brands = await fetch_all_products_with_brands()
+
+        # Update cache
+        async with _cache_lock:
+            _brands_cache = brands
+            _product_brand_cache = product_brands
+            _brands_loaded = True
+            _last_cache_update = time.time()
 
 
 async def get_brands() -> List[str]:

@@ -1,7 +1,7 @@
 """
 FastAPI web application for KeyCRM Dashboard.
 """
-import logging
+import os
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import ORJSONResponse, JSONResponse
@@ -13,17 +13,22 @@ from slowapi.errors import RateLimitExceeded
 
 from web.config import STATIC_DIR, STATIC_V2_DIR, VERSION
 from web.routes import api, pages, auth
+from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
 from bot.database import init_database
 from core.duckdb_store import get_store, close_store
 from core.sync_service import init_and_sync, get_sync_service
 from core.config import validate_config, ConfigurationError
+from core.observability import setup_logging, get_logger
+from core.scheduler import start_scheduler, stop_scheduler
+from core.events import events, SyncEvent
+from core.cache import cache, register_cache_invalidation_handlers
 
-# Configure logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# Configure structured logging
+# Use JSON format in production (LOG_FORMAT=json), human-readable otherwise
+log_format = os.getenv("LOG_FORMAT", "text")
+log_level = os.getenv("LOG_LEVEL", "INFO")
+setup_logging(level=log_level, json_format=(log_format == "json"))
+logger = get_logger(__name__)
 
 # Rate limiter configuration
 limiter = Limiter(key_func=get_remote_address)
@@ -51,6 +56,13 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
             "retry_after": exc.detail
         }
     )
+
+# Add request logging middleware (adds correlation IDs and timing)
+app.add_middleware(RequestLoggingMiddleware)
+
+# Add request timeout middleware (prevents long-running requests)
+# Must be AFTER logging so correlation_id is set when timeout fires
+app.add_middleware(RequestTimeoutMiddleware)
 
 # Add Gzip compression (min 500 bytes to compress)
 app.add_middleware(GZipMiddleware, minimum_size=500)
@@ -100,12 +112,76 @@ async def startup_event():
         logger.error(f"DuckDB initialization failed: {e}", exc_info=True)
         raise  # Fail fast - DuckDB is required
 
+    # Start background job scheduler (replaces old asyncio background sync)
+    try:
+        await start_scheduler()
+        logger.info("Background job scheduler started")
+    except Exception as e:
+        logger.error(f"Scheduler initialization failed: {e}", exc_info=True)
+        # Non-fatal - dashboard can work without scheduler
+
+    # Register event handlers for sync events
+    _register_event_handlers()
+    logger.info("Event handlers registered")
+
+    # Initialize Redis cache (non-fatal if unavailable)
+    try:
+        if await cache.connect():
+            register_cache_invalidation_handlers()
+            logger.info("Redis cache connected")
+        else:
+            logger.info("Redis cache not available, running without cache")
+    except Exception as e:
+        logger.warning(f"Redis cache initialization failed: {e}")
+
     logger.info("Dashboard ready - all queries use DuckDB")
+
+
+def _register_event_handlers():
+    """Register handlers for sync events."""
+
+    @events.on(SyncEvent.ORDERS_SYNCED)
+    async def on_orders_synced(data: dict):
+        """Log orders synced and potentially invalidate caches."""
+        count = data.get("count", 0)
+        if count > 0:
+            logger.debug(f"Orders synced: {count} orders")
+            # Future: Invalidate dashboard cache here
+            # await cache.invalidate_pattern("dashboard:*")
+
+    @events.on(SyncEvent.PRODUCTS_SYNCED)
+    async def on_products_synced(data: dict):
+        """Log products synced."""
+        count = data.get("count", 0)
+        if count > 0:
+            logger.debug(f"Products synced: {count} products")
+
+    @events.on(SyncEvent.SYNC_FAILED)
+    async def on_sync_failed(data: dict):
+        """Log sync failures for monitoring."""
+        sync_type = data.get("sync_type", "unknown")
+        error = data.get("error", "unknown error")
+        logger.warning(f"Sync failed: {sync_type} - {error}")
+        # Future: Send alert to admin
+        # await notify_admin(f"Sync failed: {error}")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    # Stop background sync and close DuckDB
+    # Stop scheduler first (graceful shutdown of background jobs)
+    try:
+        stop_scheduler()
+        logger.info("Scheduler stopped")
+    except Exception as e:
+        logger.warning(f"Error stopping scheduler: {e}")
+
+    # Disconnect Redis cache
+    try:
+        await cache.disconnect()
+    except Exception as e:
+        logger.warning(f"Error disconnecting Redis: {e}")
+
+    # Stop legacy background sync (if running) and close DuckDB
     try:
         sync_service = await get_sync_service()
         sync_service.stop_background_sync()

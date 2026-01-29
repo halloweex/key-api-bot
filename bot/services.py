@@ -37,7 +37,7 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Optional, Any
 from zoneinfo import ZoneInfo
 
-from bot.api_client import KeyCRMClient
+from core.keycrm import SyncKeyCRMClient as KeyCRMClient
 from bot.config import (
     SOURCE_MAPPING,
     DEFAULT_TIMEZONE,

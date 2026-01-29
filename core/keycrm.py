@@ -3,9 +3,14 @@ Unified async HTTP client for KeyCRM API.
 
 Provides a single async-first client for both bot and web services.
 Supports connection pooling, parallel pagination, and proper error handling.
+
+Features:
+- Connection pooling with httpx
+- Exponential backoff retry (3 attempts)
+- Circuit breaker (opens after 5 failures in 60s)
+- Request correlation IDs for tracing
 """
 import asyncio
-import logging
 import os
 from typing import Dict, List, Any, Optional, AsyncGenerator
 from contextlib import asynccontextmanager
@@ -14,14 +19,39 @@ import httpx
 
 from core.exceptions import KeyCRMAPIError, KeyCRMConnectionError, KeyCRMDataError
 from core.models import Order, Product, Category, Buyer
+from core.observability import get_logger, get_correlation_id, Timer
+from core.resilience import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitOpenError,
+    RetryConfig,
+    retry_with_backoff,
+)
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Configuration
 KEYCRM_BASE_URL = os.getenv("KEYCRM_BASE_URL", "https://openapi.keycrm.app/v1")
 KEYCRM_API_KEY = os.getenv("KEYCRM_API_KEY", "")
 REQUEST_TIMEOUT = 30.0
 MAX_CONCURRENT_REQUESTS = 5
+
+# Resilience configuration
+RETRY_CONFIG = RetryConfig(
+    max_attempts=3,
+    base_delay=1.0,
+    max_delay=30.0,
+    exponential_base=2.0
+)
+
+CIRCUIT_BREAKER_CONFIG = CircuitBreakerConfig(
+    failure_threshold=5,
+    recovery_timeout=60.0,
+    half_open_requests=1
+)
+
+# Global circuit breaker instance
+_circuit_breaker = CircuitBreaker(config=CIRCUIT_BREAKER_CONFIG)
 
 
 class KeyCRMClient:
@@ -105,7 +135,7 @@ class KeyCRMClient:
         json: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Make HTTP request to KeyCRM API.
+        Make HTTP request to KeyCRM API with retry and circuit breaker.
 
         Args:
             method: HTTP method (GET, POST, PUT, DELETE)
@@ -119,24 +149,65 @@ class KeyCRMClient:
         Raises:
             KeyCRMConnectionError: Network/timeout errors
             KeyCRMAPIError: API returned error response
+            CircuitOpenError: Circuit breaker is open
         """
+        # Check circuit breaker
+        if not await _circuit_breaker.can_execute():
+            raise CircuitOpenError(
+                f"Circuit breaker is open, request to {endpoint} rejected"
+            )
+
+        try:
+            # Use retry with exponential backoff
+            result = await retry_with_backoff(
+                self._do_request,
+                method, endpoint, params, json,
+                config=RETRY_CONFIG,
+                retryable_exceptions=(KeyCRMConnectionError, httpx.RequestError),
+            )
+            await _circuit_breaker.record_success()
+            return result
+
+        except (KeyCRMAPIError, KeyCRMConnectionError) as e:
+            await _circuit_breaker.record_failure()
+            raise
+
+    async def _do_request(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a single HTTP request (called by retry wrapper)."""
         if not self._client:
             await self.connect()
 
         url = f"{self.base_url}/{endpoint}"
 
+        # Add correlation ID to request headers
+        request_headers = {}
+        correlation_id = get_correlation_id()
+        if correlation_id:
+            request_headers["X-Request-ID"] = correlation_id
+
         try:
-            response = await self._client.request(
-                method=method,
-                url=url,
-                params=params,
-                json=json,
-            )
+            with Timer(f"keycrm_{endpoint}", logger) as timer:
+                response = await self._client.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    json=json,
+                    headers=request_headers if request_headers else None,
+                )
 
             # Handle HTTP errors
             if response.status_code >= 400:
                 error_text = response.text[:500]
-                logger.error(f"API error {response.status_code}: {error_text}")
+                logger.error(
+                    f"API error {response.status_code}: {error_text}",
+                    extra={"endpoint": endpoint, "status_code": response.status_code}
+                )
                 raise KeyCRMAPIError(
                     f"API returned {response.status_code}",
                     status_code=response.status_code,
@@ -148,14 +219,20 @@ class KeyCRMClient:
             return {"status": "success"}
 
         except httpx.TimeoutException as e:
-            logger.error(f"Request timeout: {method} {endpoint}")
+            logger.error(
+                f"Request timeout: {method} {endpoint}",
+                extra={"endpoint": endpoint, "timeout": self.timeout}
+            )
             raise KeyCRMConnectionError(
                 f"Request timeout after {self.timeout}s",
                 retry_after=5
             ) from e
 
         except httpx.RequestError as e:
-            logger.error(f"Request failed: {method} {endpoint} - {e}")
+            logger.error(
+                f"Request failed: {method} {endpoint} - {e}",
+                extra={"endpoint": endpoint, "error": str(e)}
+            )
             raise KeyCRMConnectionError(str(e)) from e
 
     # ═══════════════════════════════════════════════════════════════════════════
