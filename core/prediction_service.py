@@ -83,7 +83,7 @@ FEATURE_COLUMNS = [
 ]
 
 
-def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, float]]:
+def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any]]:
     """Train LightGBM model on historical data. Returns (model, metrics).
 
     Runs in a thread pool to avoid blocking the event loop.
@@ -104,11 +104,13 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, float]]:
 
     X = train_data[FEATURE_COLUMNS].values
     y = train_data['revenue'].values
+    dates = train_data['date'].values
 
     # Time-series split: last 60 days for validation
     split_idx = len(X) - 60
     X_train, X_val = X[:split_idx], X[split_idx:]
     y_train, y_val = y[:split_idx], y[split_idx:]
+    dates_val = dates[split_idx:]
 
     train_set = lgb.Dataset(X_train, label=y_train, feature_name=FEATURE_COLUMNS)
     val_set = lgb.Dataset(X_val, label=y_val, reference=train_set)
@@ -138,7 +140,30 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, float]]:
     # WAPE: sum(|actual - predicted|) / sum(actual) — robust to low-revenue days
     wape = float(np.sum(np.abs(y_val - val_pred)) / np.sum(y_val)) * 100 if np.sum(y_val) > 0 else 0.0
 
-    metrics = {'mae': round(mae, 2), 'mape': round(mape, 2), 'wape': round(wape, 2)}
+    # Per-day validation breakdown
+    days_of_week = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    daily_breakdown = []
+    for i in range(len(y_val)):
+        actual = float(y_val[i])
+        pred = float(val_pred[i])
+        error = abs(actual - pred)
+        ape = (error / actual * 100) if actual > 0 else 0
+        dt = pd.Timestamp(dates_val[i])
+        daily_breakdown.append({
+            'date': dt.strftime('%Y-%m-%d'),
+            'dow': days_of_week[dt.dayofweek],
+            'actual': round(actual, 0),
+            'predicted': round(pred, 0),
+            'error': round(error, 0),
+            'ape': round(ape, 1),
+        })
+
+    metrics = {
+        'mae': round(mae, 2),
+        'mape': round(mape, 2),
+        'wape': round(wape, 2),
+        'validation_days': daily_breakdown,
+    }
     logger.info(f"Model trained: MAE={mae:.0f}, MAPE={mape:.1f}%, WAPE={wape:.1f}%, "
                 f"rows={len(train_data)}, best_iter={model.best_iteration}")
 
@@ -201,6 +226,361 @@ def _predict_future(
     return predictions
 
 
+def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """Compute MAE, WAPE, R², and directional accuracy."""
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+    total_actual = float(np.sum(y_true))
+    wape = float(np.sum(np.abs(y_true - y_pred)) / total_actual * 100) if total_actual > 0 else 0.0
+    # R²
+    ss_res = float(np.sum((y_true - y_pred) ** 2))
+    ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
+    r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    # Directional accuracy: did we predict correct direction of change from previous day?
+    if len(y_true) >= 2:
+        actual_dir = np.diff(y_true) >= 0
+        pred_dir = np.diff(y_pred) >= 0
+        directional_accuracy = float(np.mean(actual_dir == pred_dir) * 100)
+    else:
+        directional_accuracy = 0.0
+    return {
+        "mae": round(mae, 2),
+        "wape": round(wape, 2),
+        "r_squared": round(r_squared, 4),
+        "directional_accuracy": round(directional_accuracy, 2),
+    }
+
+
+def _compute_baselines(
+    test_df: pd.DataFrame,
+    full_df: pd.DataFrame,
+) -> Dict[str, Dict[str, Any]]:
+    """Compute 4 baseline predictions and their metrics.
+
+    test_df must have 'date' and 'revenue' columns.
+    full_df is all historical data (sorted by date) up to and including test period.
+    Returns dict of baseline_name -> {predictions: np.ndarray, metrics: dict}.
+    """
+    test_dates = test_df['date'].values
+    test_actual = test_df['revenue'].values
+    full = full_df.set_index('date')
+
+    baselines: Dict[str, Dict[str, Any]] = {}
+
+    for name in ['naive_7d', 'moving_avg_28d', 'same_day_last_year', 'weekday_avg_12w']:
+        preds = np.full(len(test_dates), np.nan)
+
+        for i, dt in enumerate(test_dates):
+            dt_ts = pd.Timestamp(dt)
+
+            if name == 'naive_7d':
+                lookup = dt_ts - pd.Timedelta(days=7)
+                if lookup in full.index:
+                    preds[i] = full.loc[lookup, 'revenue']
+
+            elif name == 'moving_avg_28d':
+                prior = full[full.index < dt_ts].tail(28)
+                if len(prior) >= 7:
+                    preds[i] = prior['revenue'].mean()
+
+            elif name == 'same_day_last_year':
+                lookup = dt_ts - pd.Timedelta(days=365)
+                if lookup in full.index:
+                    preds[i] = full.loc[lookup, 'revenue']
+
+            elif name == 'weekday_avg_12w':
+                target_dow = dt_ts.dayofweek
+                cutoff = dt_ts - pd.Timedelta(weeks=12)
+                candidates = full[
+                    (full.index >= cutoff)
+                    & (full.index < dt_ts)
+                    & (full.index.dayofweek == target_dow)
+                ]
+                if len(candidates) >= 3:
+                    preds[i] = candidates['revenue'].mean()
+
+        # Mask valid entries for metric calculation
+        valid = ~np.isnan(preds)
+        if valid.sum() > 0:
+            y_t = test_actual[valid]
+            y_p = preds[valid]
+            m = {
+                "mae": round(float(np.mean(np.abs(y_t - y_p))), 2),
+                "wape": round(float(np.sum(np.abs(y_t - y_p)) / np.sum(y_t) * 100), 2) if np.sum(y_t) > 0 else 0.0,
+                "coverage": int(valid.sum()),
+            }
+        else:
+            m = {"mae": None, "wape": None, "coverage": 0}
+
+        baselines[name] = {"predictions": preds, "metrics": m}
+
+    return baselines
+
+
+def _run_evaluation(df: pd.DataFrame) -> Dict[str, Any]:
+    """Run walk-forward cross-validation with baselines and feature importance.
+
+    df must have 'date' and 'revenue' columns, sorted by date.
+    Excludes today's (potentially incomplete) row.
+    Uses last 6 complete calendar months as test folds.
+    """
+    import lightgbm as lgb
+
+    df = df.copy()
+    df['date'] = pd.to_datetime(df['date'])
+    df = df.sort_values('date').reset_index(drop=True)
+
+    # Exclude today's incomplete data
+    today = pd.Timestamp(date.today())
+    df = df[df['date'] < today].reset_index(drop=True)
+
+    if len(df) < 120:
+        raise ValueError(f"Not enough data for evaluation: {len(df)} days (need >= 120)")
+
+    # Determine last 6 complete calendar months as test folds
+    last_date = df['date'].max()
+    folds = []
+    cursor = last_date.replace(day=1)  # first day of last data month
+    # If last_date is not the last day of its month, this month is incomplete — skip it
+    last_day_of_month = cursor + pd.offsets.MonthEnd(0)
+    if last_date < last_day_of_month:
+        cursor = cursor - pd.DateOffset(months=1)
+
+    for _ in range(6):
+        fold_start = cursor
+        fold_end = cursor + pd.offsets.MonthEnd(0)
+        fold_mask = (df['date'] >= fold_start) & (df['date'] <= fold_end)
+        if fold_mask.sum() >= 20:  # at least 20 days in the month
+            folds.append((fold_start, fold_end))
+        cursor = cursor - pd.DateOffset(months=1)
+
+    folds.reverse()  # chronological order
+
+    if len(folds) < 3:
+        raise ValueError(f"Only {len(folds)} valid folds found (need >= 3)")
+
+    # LightGBM params (same as production)
+    lgb_params = {
+        'objective': 'regression',
+        'metric': 'mae',
+        'num_leaves': 31,
+        'learning_rate': 0.05,
+        'n_jobs': 1,
+        'verbose': -1,
+        'seed': 42,
+    }
+
+    fold_results = []
+    all_lgbm_preds = []
+    all_actuals = []
+    all_residuals = []  # (date, actual, pred, error)
+    feature_importances = np.zeros(len(FEATURE_COLUMNS))
+    n_folds_with_importance = 0
+
+    for fold_idx, (fold_start, fold_end) in enumerate(folds):
+        # Split: train = everything before fold_start, test = fold month
+        train_mask = df['date'] < fold_start
+        test_mask = (df['date'] >= fold_start) & (df['date'] <= fold_end)
+
+        train_df = df[train_mask].copy()
+        test_df = df[test_mask].copy()
+
+        if len(train_df) < 60 or len(test_df) < 20:
+            continue
+
+        # Build features for train set
+        featured_train = _build_features(train_df)
+        featured_train = featured_train.dropna(subset=[c for c in FEATURE_COLUMNS if c != 'yoy_ratio'])
+        featured_train = featured_train.copy()
+        featured_train['yoy_ratio'] = featured_train['yoy_ratio'].fillna(1.0)
+
+        if len(featured_train) < 60:
+            continue
+
+        X_full_train = featured_train[FEATURE_COLUMNS].values
+        y_full_train = featured_train['revenue'].values
+
+        # Internal early-stopping split: last 30 days of training data
+        es_split = max(len(X_full_train) - 30, int(len(X_full_train) * 0.8))
+        X_tr, X_es = X_full_train[:es_split], X_full_train[es_split:]
+        y_tr, y_es = y_full_train[:es_split], y_full_train[es_split:]
+
+        train_set = lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURE_COLUMNS)
+        es_set = lgb.Dataset(X_es, label=y_es, reference=train_set)
+
+        model = lgb.train(
+            lgb_params,
+            train_set,
+            num_boost_round=500,
+            valid_sets=[es_set],
+            callbacks=[lgb.early_stopping(50, verbose=False)],
+        )
+
+        # Accumulate feature importance (gain-based)
+        importance = model.feature_importance(importance_type='gain')
+        feature_importances += importance
+        n_folds_with_importance += 1
+
+        # Predict test set: build features on train + test combined
+        combined = pd.concat([train_df, test_df], ignore_index=True).sort_values('date').reset_index(drop=True)
+        featured_combined = _build_features(combined)
+        featured_combined = featured_combined.copy()
+        featured_combined['yoy_ratio'] = featured_combined['yoy_ratio'].fillna(1.0)
+
+        test_featured = featured_combined[featured_combined['date'] >= fold_start].copy()
+        # Fill remaining NaN in features with 0
+        X_test = test_featured[FEATURE_COLUMNS].fillna(0).values
+        y_test = test_featured['revenue'].values
+        test_dates = test_featured['date'].values
+
+        lgbm_preds = model.predict(X_test)
+        lgbm_preds = np.maximum(lgbm_preds, 0)
+
+        # LightGBM metrics for this fold
+        lgbm_metrics = _compute_metrics(y_test, lgbm_preds)
+
+        # Baselines for this fold
+        baseline_results = _compute_baselines(test_featured[['date', 'revenue']], df[df['date'] <= fold_end])
+        baseline_fold_metrics = {
+            name: data['metrics'] for name, data in baseline_results.items()
+        }
+
+        fold_results.append({
+            "fold": fold_idx + 1,
+            "period": f"{fold_start.strftime('%Y-%m-%d')} to {fold_end.strftime('%Y-%m-%d')}",
+            "test_days": len(y_test),
+            "lgbm": lgbm_metrics,
+            "baselines": baseline_fold_metrics,
+        })
+
+        # Collect for aggregate metrics
+        all_lgbm_preds.extend(lgbm_preds.tolist())
+        all_actuals.extend(y_test.tolist())
+
+        for i in range(len(y_test)):
+            dt = pd.Timestamp(test_dates[i])
+            all_residuals.append({
+                'date': dt,
+                'actual': float(y_test[i]),
+                'predicted': float(lgbm_preds[i]),
+                'error': float(lgbm_preds[i] - y_test[i]),
+            })
+
+    if not fold_results:
+        raise ValueError("No valid folds could be evaluated")
+
+    # ── Aggregate metrics ──
+    all_actuals_arr = np.array(all_actuals)
+    all_preds_arr = np.array(all_lgbm_preds)
+    agg_lgbm = _compute_metrics(all_actuals_arr, all_preds_arr)
+
+    # Aggregate baselines across all folds
+    agg_baselines: Dict[str, Dict[str, float]] = {}
+    for name in ['naive_7d', 'moving_avg_28d', 'same_day_last_year', 'weekday_avg_12w']:
+        fold_maes = [f['baselines'][name]['mae'] for f in fold_results if f['baselines'][name]['mae'] is not None]
+        fold_wapes = [f['baselines'][name]['wape'] for f in fold_results if f['baselines'][name]['wape'] is not None]
+        if fold_maes:
+            agg_baselines[name] = {
+                "mae": round(float(np.mean(fold_maes)), 2),
+                "wape": round(float(np.mean(fold_wapes)), 2),
+            }
+        else:
+            agg_baselines[name] = {"mae": None, "wape": None}
+
+    # Find best baseline
+    valid_baselines = {k: v for k, v in agg_baselines.items() if v['wape'] is not None}
+    if valid_baselines:
+        best_baseline_name = min(valid_baselines, key=lambda k: valid_baselines[k]['wape'])
+        best_baseline_wape = valid_baselines[best_baseline_name]['wape']
+    else:
+        best_baseline_name = "none"
+        best_baseline_wape = 0.0
+
+    improvement = round(best_baseline_wape - agg_lgbm['wape'], 2)
+
+    # Verdict
+    if improvement > 0:
+        verdict = f"Model outperforms best baseline ({best_baseline_name}) by {improvement}% WAPE"
+    elif improvement == 0:
+        verdict = f"Model performs on par with best baseline ({best_baseline_name})"
+    else:
+        verdict = f"Model underperforms best baseline ({best_baseline_name}) by {abs(improvement)}% WAPE"
+
+    # ── Feature importance ──
+    if n_folds_with_importance > 0:
+        avg_importance = feature_importances / n_folds_with_importance
+        importance_list = sorted(
+            [
+                {"feature": FEATURE_COLUMNS[i], "gain": round(float(avg_importance[i]), 2), "rank": 0}
+                for i in range(len(FEATURE_COLUMNS))
+            ],
+            key=lambda x: x['gain'],
+            reverse=True,
+        )
+        for rank, item in enumerate(importance_list, 1):
+            item['rank'] = rank
+    else:
+        importance_list = []
+
+    # ── Residual analysis ──
+    dow_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+    residuals_by_dow: Dict[str, Dict[str, Any]] = {}
+    for dow_idx, dow_name in enumerate(dow_names):
+        entries = [r for r in all_residuals if r['date'].dayofweek == dow_idx]
+        if entries:
+            errors = np.array([e['error'] for e in entries])
+            actuals = np.array([e['actual'] for e in entries])
+            abs_errors = np.abs(errors)
+            total_actual = np.sum(actuals)
+            residuals_by_dow[dow_name] = {
+                "mean_error": round(float(np.mean(errors)), 2),
+                "wape": round(float(np.sum(abs_errors) / total_actual * 100), 2) if total_actual > 0 else 0.0,
+                "count": len(entries),
+            }
+
+    residuals_by_month: Dict[str, Dict[str, Any]] = {}
+    for month_idx, month_name in enumerate(month_names, 1):
+        entries = [r for r in all_residuals if r['date'].month == month_idx]
+        if entries:
+            errors = np.array([e['error'] for e in entries])
+            actuals = np.array([e['actual'] for e in entries])
+            abs_errors = np.abs(errors)
+            total_actual = np.sum(actuals)
+            residuals_by_month[month_name] = {
+                "mean_error": round(float(np.mean(errors)), 2),
+                "wape": round(float(np.sum(abs_errors) / total_actual * 100), 2) if total_actual > 0 else 0.0,
+                "count": len(entries),
+            }
+
+    # ── Data info ──
+    date_min = df['date'].min().strftime('%Y-%m-%d')
+    date_max = df['date'].max().strftime('%Y-%m-%d')
+
+    return {
+        "summary": {
+            "lgbm_wape": agg_lgbm['wape'],
+            "lgbm_mae": agg_lgbm['mae'],
+            "best_baseline_wape": best_baseline_wape,
+            "best_baseline_name": best_baseline_name,
+            "improvement_over_baseline": improvement,
+            "r_squared": agg_lgbm['r_squared'],
+            "directional_accuracy": agg_lgbm['directional_accuracy'],
+            "total_test_days": len(all_actuals),
+            "num_folds": len(fold_results),
+            "verdict": verdict,
+        },
+        "cross_validation": {"folds": fold_results},
+        "feature_importance": importance_list,
+        "residuals_by_dow": residuals_by_dow,
+        "residuals_by_month": residuals_by_month,
+        "data_info": {
+            "total_days": len(df),
+            "date_range": f"{date_min} to {date_max}",
+        },
+    }
+
+
 class PredictionService:
     """Revenue prediction service using LightGBM."""
 
@@ -217,6 +597,27 @@ class PredictionService:
     @property
     def metrics(self) -> Dict[str, float]:
         return self._metrics
+
+    async def evaluate(self, sales_type: str = "retail") -> Dict[str, Any]:
+        """Run walk-forward CV evaluation with baselines.
+
+        Excludes today's incomplete data, uses last 6 complete months as folds.
+        Returns detailed metrics, feature importance, and residual analysis.
+        """
+        from core.duckdb_store import get_store
+        store = await get_store()
+
+        df = await self._query_daily_revenue(store, sales_type, days_back=780)
+        if df.empty or len(df) < 120:
+            return {"status": "insufficient_data", "rows": len(df)}
+
+        logger.info(f"Running evaluation on {len(df)} days of data (sales_type={sales_type})")
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(_executor, _run_evaluation, df)
+
+        result["data_info"]["sales_type"] = sales_type
+        return result
 
     async def train(self, sales_type: str = "retail") -> Dict[str, Any]:
         """Train model on historical daily revenue data from DuckDB."""

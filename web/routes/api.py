@@ -383,6 +383,29 @@ async def train_revenue_forecast(
     return result
 
 
+@router.get("/revenue/forecast/evaluate")
+@limiter.limit("5/hour")
+async def evaluate_revenue_forecast(
+    request: Request,
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
+):
+    """Run walk-forward cross-validation to evaluate the revenue prediction model.
+
+    Returns detailed metrics including WAPE, MAE, R², directional accuracy,
+    comparison with 4 baseline models, feature importance, and residual analysis
+    by day-of-week and month.
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    from core.prediction_service import get_prediction_service
+    service = get_prediction_service()
+    result = await service.evaluate(sales_type)
+    return result
+
+
 @router.get("/sales/by-source")
 @limiter.limit("30/minute")
 async def get_sales_by_source(

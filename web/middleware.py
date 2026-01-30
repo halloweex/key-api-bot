@@ -35,6 +35,7 @@ SLOW_ENDPOINTS = {
     "/api/goals/recalculate",
     "/api/stocks/analysis",
     "/api/revenue/forecast/train",
+    "/api/revenue/forecast/evaluate",
 }
 
 
