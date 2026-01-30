@@ -317,7 +317,7 @@ function InfoTooltipContent({ onClose, children }: {
   children: React.ReactNode
 }) {
   return (
-    <div className="absolute top-8 right-0 z-50 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-4 min-w-[220px] max-w-[300px]">
+    <div className="absolute top-8 left-0 z-50 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-4 min-w-[220px] max-w-[300px]">
       <button
         onClick={onClose}
         className="absolute top-2 right-2 text-slate-400 hover:text-slate-200 text-lg leading-none"
