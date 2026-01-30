@@ -34,6 +34,7 @@ SLOW_ENDPOINTS = {
     "/api/duckdb/resync",
     "/api/goals/recalculate",
     "/api/stocks/analysis",
+    "/api/revenue/forecast/train",
 }
 
 

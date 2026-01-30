@@ -185,6 +185,17 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Revenue prediction model training (daily at 3:30 AM)
+        self._add_job(
+            job_id="revenue_prediction_train",
+            name="Revenue Prediction",
+            description="Train LightGBM model and generate revenue forecasts",
+            func=self._run_revenue_prediction,
+            trigger=CronTrigger(hour=3, minute=30),
+            max_instances=1,
+            coalesce=True,
+        )
+
         logger.info(f"Registered {len(self._job_info)} background jobs")
 
     def _add_job(
@@ -297,6 +308,22 @@ class BackgroundScheduler:
             logger.info(
                 "Manager stats job complete",
                 extra=result
+            )
+            return result
+
+    async def _run_revenue_prediction(self) -> Dict[str, Any]:
+        """Train revenue prediction model and generate forecasts."""
+        with correlation_context() as corr_id:
+            logger.info("Starting revenue prediction training job")
+
+            from core.prediction_service import get_prediction_service
+            service = get_prediction_service()
+
+            result = await service.train(sales_type="retail")
+
+            logger.info(
+                "Revenue prediction job complete",
+                extra={"result": result}
             )
             return result
 

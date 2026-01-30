@@ -12,6 +12,27 @@ export interface SummaryResponse {
 
 export type CompareType = 'previous_period' | 'year_ago' | 'month_ago'
 
+export interface RevenueForecastDaily {
+  date: string
+  predicted_revenue: number
+  model_mae: number
+  model_mape: number
+}
+
+export interface RevenueForecast {
+  actual_to_date: number
+  predicted_remaining: number
+  predicted_total: number
+  daily_predictions: RevenueForecastDaily[]
+  model_metrics: {
+    mae: number
+    mape: number
+  }
+  last_trained: string | null
+  month_start: string
+  month_end: string
+}
+
 export interface RevenueTrendResponse {
   labels: string[]
   revenue: number[]
@@ -31,6 +52,7 @@ export interface RevenueTrendResponse {
       growth_percent: number
     }
   }
+  forecast?: RevenueForecast
 }
 
 export interface SalesBySourceResponse {

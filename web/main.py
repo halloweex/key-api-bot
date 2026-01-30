@@ -1,6 +1,7 @@
 """
 FastAPI web application for KeyCRM Dashboard.
 """
+import asyncio
 import os
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
@@ -124,6 +125,18 @@ async def startup_event():
     _register_event_handlers()
     logger.info("Event handlers registered")
 
+    # Train revenue prediction model in background (non-blocking)
+    try:
+        from core.prediction_service import get_prediction_service
+        prediction_service = get_prediction_service()
+        if not prediction_service.is_ready:
+            asyncio.create_task(_train_prediction_model())
+            logger.info("Revenue prediction model training scheduled")
+        else:
+            logger.info("Revenue prediction model loaded from disk")
+    except Exception as e:
+        logger.warning(f"Prediction service initialization skipped: {e}")
+
     # Initialize Redis cache (non-fatal if unavailable)
     try:
         if await cache.connect():
@@ -135,6 +148,19 @@ async def startup_event():
         logger.warning(f"Redis cache initialization failed: {e}")
 
     logger.info("Dashboard ready - all queries use DuckDB")
+
+
+async def _train_prediction_model():
+    """Train revenue prediction model in background after startup."""
+    # Wait for DuckDB to be fully ready with data
+    await asyncio.sleep(10)
+    try:
+        from core.prediction_service import get_prediction_service
+        service = get_prediction_service()
+        result = await service.train(sales_type="retail")
+        logger.info(f"Prediction model training result: {result.get('status')}")
+    except Exception as e:
+        logger.warning(f"Background prediction training failed: {e}")
 
 
 def _register_event_handlers():

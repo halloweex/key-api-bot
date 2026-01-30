@@ -79,14 +79,21 @@ export function useSummary() {
 
 export function useRevenueTrend(compareType: string = 'previous_period') {
   const queryParams = useQueryParams()
+  const { period, sourceId, categoryId, brand } = useFilterStore()
 
   // Append compare_type to query params
-  const fullParams = compareType !== 'previous_period'
+  let fullParams = compareType !== 'previous_period'
     ? `${queryParams}&compare_type=${compareType}`
     : queryParams
 
+  // Include forecast when viewing current month with no filters
+  const wantsForecast = period === 'month' && !sourceId && !categoryId && !brand
+  if (wantsForecast) {
+    fullParams += '&include_forecast=true'
+  }
+
   return useQuery<RevenueTrendResponse>({
-    queryKey: [...queryKeys.revenueTrend(queryParams), compareType],
+    queryKey: [...queryKeys.revenueTrend(queryParams), compareType, wantsForecast],
     queryFn: () => api.getRevenueTrend(fullParams),
   })
 }

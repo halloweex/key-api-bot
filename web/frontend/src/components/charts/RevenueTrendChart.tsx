@@ -30,6 +30,7 @@ interface ChartDataPoint {
   date: string
   shortDate: string
   revenue: number
+  forecastRevenue: number
   orders: number
   prevRevenue: number
   prevOrders: number
@@ -38,6 +39,7 @@ interface ChartDataPoint {
   isPeak: boolean
   peakLabel: string
   isCurrentMonth: boolean
+  isForecast: boolean
 }
 
 // ─── Label Formatter ──────────────────────────────────────────────────────────
@@ -85,6 +87,7 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
   const data = payload[0]?.payload
   if (!data) return null
 
+  const displayRevenue = data.isForecast ? data.forecastRevenue : data.revenue
   const hasComparison = data.prevRevenue > 0
   const isPositive = data.change >= 0
   const changeColor = isPositive ? CHART_THEME.primary : CHART_THEME.danger
@@ -101,6 +104,11 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
     >
       <p style={{ fontWeight: 600, marginBottom: '10px', color: CHART_THEME.text, fontSize: '13px' }}>
         {data.date}
+        {data.isForecast && (
+          <span style={{ color: CHART_THEME.muted, fontWeight: 400, fontSize: '11px', marginLeft: '6px' }}>
+            (predicted)
+          </span>
+        )}
       </p>
 
       {/* Current Period */}
@@ -117,19 +125,19 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
             width: '12px',
             height: '12px',
             borderRadius: '3px',
-            background: CHART_THEME.primary,
+            background: data.isForecast ? FORECAST_BAR_COLOR : CHART_THEME.primary,
           }} />
           <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
-            {periodLabels.current}
+            {data.isForecast ? 'Predicted' : periodLabels.current}
           </span>
         </div>
-        <span style={{ fontWeight: 600, color: CHART_THEME.primary }}>
-          {formatCurrency(data.revenue)}
+        <span style={{ fontWeight: 600, color: data.isForecast ? FORECAST_BAR_COLOR : CHART_THEME.primary }}>
+          {formatCurrency(displayRevenue)}
         </span>
       </div>
 
       {/* Previous Period */}
-      {hasComparison && (
+      {hasComparison && !data.isForecast && (
         <>
           <div style={{
             display: 'flex',
@@ -181,9 +189,10 @@ interface LegendProps {
   periodLabels: { current: string; previous: string }
   hasComparison: boolean
   hasPrevMonthDays: boolean
+  hasForecast: boolean
 }
 
-function CustomLegend({ periodLabels, hasComparison, hasPrevMonthDays }: LegendProps) {
+function CustomLegend({ periodLabels, hasComparison, hasPrevMonthDays, hasForecast }: LegendProps) {
   // Get current month name for legend
   const currentMonthName = new Date().toLocaleString('en', { month: 'short' })
 
@@ -222,6 +231,20 @@ function CustomLegend({ periodLabels, hasComparison, hasPrevMonthDays }: LegendP
           <span style={{ color: CHART_THEME.muted, whiteSpace: 'nowrap' }}>Previous month</span>
         </div>
       )}
+      {/* Forecast indicator */}
+      {hasForecast && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <div style={{
+            width: '14px',
+            height: '14px',
+            borderRadius: '3px',
+            background: FORECAST_BAR_COLOR,
+            opacity: 0.7,
+            flexShrink: 0,
+          }} />
+          <span style={{ color: CHART_THEME.muted, whiteSpace: 'nowrap' }}>Predicted</span>
+        </div>
+      )}
       {/* Comparison period indicator */}
       {hasComparison && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -243,6 +266,9 @@ function CustomLegend({ periodLabels, hasComparison, hasPrevMonthDays }: LegendP
 // Previous month bar color (lighter/muted version of primary)
 const PREV_MONTH_BAR_COLOR = '#93c5fd' // Light blue (tailwind blue-300)
 
+// Forecast bar color (same blue family, lighter)
+const FORECAST_BAR_COLOR = '#60a5fa' // tailwind blue-400
+
 function GradientDefs() {
   return (
     <defs>
@@ -261,6 +287,10 @@ function GradientDefs() {
       <linearGradient id="prevMonthBarGradient" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stopColor={PREV_MONTH_BAR_COLOR} stopOpacity={0.9} />
         <stop offset="100%" stopColor={PREV_MONTH_BAR_COLOR} stopOpacity={0.7} />
+      </linearGradient>
+      <linearGradient id="forecastBarGradient" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor={FORECAST_BAR_COLOR} stopOpacity={0.45} />
+        <stop offset="100%" stopColor={FORECAST_BAR_COLOR} stopOpacity={0.25} />
       </linearGradient>
     </defs>
   )
@@ -342,9 +372,12 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
   // Get growth data from comparison
   const growthData = data?.comparison?.totals
 
-  const { chartData, hasComparison, hasPrevMonthDays } = useMemo(() => {
+  // Forecast data
+  const forecast = data?.forecast
+
+  const { chartData, hasComparison, hasPrevMonthDays, hasForecast } = useMemo(() => {
     if (!data?.labels?.length) {
-      return { chartData: [], hasComparison: false, hasPrevMonthDays: false }
+      return { chartData: [], hasComparison: false, hasPrevMonthDays: false, hasForecast: false }
     }
 
     const hasComp = (data.comparison?.revenue?.length ?? 0) > 0
@@ -366,7 +399,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
     let prevMonthCount = 0
 
-    const processed = data.labels.map((label, index) => {
+    const processed: ChartDataPoint[] = data.labels.map((label, index) => {
       const revenue = data.revenue?.[index] ?? 0
       const orders = data.orders?.[index] ?? 0
       const prevRevenue = data.comparison?.revenue?.[index] ?? 0
@@ -401,6 +434,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
         date: label,
         shortDate,
         revenue,
+        forecastRevenue: 0,
         orders,
         prevRevenue,
         prevOrders,
@@ -409,15 +443,47 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
         isPeak,
         peakLabel: isPeak ? formatShortCurrency(revenue) : '',
         isCurrentMonth,
+        isForecast: false,
       }
     })
+
+    // Append forecast days if available
+    let forecastAppended = false
+    if (forecast?.daily_predictions?.length) {
+      for (const pred of forecast.daily_predictions) {
+        // Parse date to get dd.mm format (matching the label format)
+        const parts = pred.date.split('-') // "2026-01-30"
+        if (parts.length === 3) {
+          const label = `${parts[2]}.${parts[1]}` // "30.01"
+          const shortDate = label
+
+          processed.push({
+            date: label,
+            shortDate,
+            revenue: 0,
+            forecastRevenue: Math.round(pred.predicted_revenue),
+            orders: 0,
+            prevRevenue: 0,
+            prevOrders: 0,
+            change: 0,
+            changePercent: 0,
+            isPeak: false,
+            peakLabel: '',
+            isCurrentMonth: true,
+            isForecast: true,
+          })
+          forecastAppended = true
+        }
+      }
+    }
 
     return {
       chartData: processed,
       hasComparison: hasComp,
       hasPrevMonthDays: prevMonthCount > 0,
+      hasForecast: forecastAppended,
     }
-  }, [data, period])
+  }, [data, period, forecast])
 
   const isEmpty = !isLoading && chartData.length === 0
 
@@ -432,6 +498,14 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       ariaLabel="Chart showing revenue comparison between current and previous period"
       action={
         <div className="flex items-center gap-3">
+          {/* Forecast Predicted Total Badge */}
+          {forecast && !isLoading && (
+            <div className="px-2.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1 bg-blue-50 text-blue-600 border border-blue-200">
+              <span>Predicted:</span>
+              <span>{formatShortCurrency(forecast.predicted_total)}</span>
+            </div>
+          )}
+
           {/* Growth Delta Badge */}
           {growthData && !isLoading && (
             <div
@@ -468,6 +542,11 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
                   <p className="text-xs text-slate-300">
                     <strong className="text-blue-400">Bars:</strong> Daily revenue for selected period.
                   </p>
+                  {hasForecast && (
+                    <p className="text-xs text-slate-300">
+                      <strong style={{ color: FORECAST_BAR_COLOR }}>Lighter bars:</strong> ML-predicted revenue for remaining days.
+                    </p>
+                  )}
                   <p className="text-xs text-slate-300">
                     <strong className="text-slate-400">Dashed line:</strong> Comparison period (Year ago, Month ago, or Previous).
                   </p>
@@ -545,6 +624,17 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               />
             </Bar>
 
+            {/* Forecast bars (separate dataKey, rendered on top of revenue=0 days) */}
+            {hasForecast && (
+              <Bar
+                dataKey="forecastRevenue"
+                name="Predicted"
+                fill="url(#forecastBarGradient)"
+                radius={[4, 4, 0, 0]}
+                maxBarSize={50}
+              />
+            )}
+
             {/* Previous period trend line (dashed) */}
             {hasComparison && (
               <Line
@@ -566,7 +656,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
         </div>
 
         {/* Custom Legend */}
-        <CustomLegend periodLabels={periodLabels} hasComparison={hasComparison} hasPrevMonthDays={hasPrevMonthDays} />
+        <CustomLegend periodLabels={periodLabels} hasComparison={hasComparison} hasPrevMonthDays={hasPrevMonthDays} hasForecast={hasForecast} />
       </div>
     </ChartContainer>
   )

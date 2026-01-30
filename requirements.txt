@@ -24,6 +24,11 @@ pandas>=2.0.0
 # Job scheduling
 apscheduler>=3.10.0
 
+# ML prediction
+lightgbm>=4.0.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
 # Caching
 redis>=5.0.0
 

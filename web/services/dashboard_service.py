@@ -54,6 +54,17 @@ async def get_revenue_trend(
     )
 
 
+async def get_forecast_data(sales_type: str = "retail") -> Optional[Dict[str, Any]]:
+    """Get ML revenue forecast for the current month."""
+    try:
+        from core.prediction_service import get_prediction_service
+        service = get_prediction_service()
+        return await service.get_forecast(sales_type)
+    except Exception as e:
+        logger.warning(f"Forecast data unavailable: {e}")
+        return None
+
+
 async def get_sales_by_source(
     start_date: str,
     end_date: str,

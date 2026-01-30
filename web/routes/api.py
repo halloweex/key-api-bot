@@ -313,7 +313,8 @@ async def get_revenue_trend(
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
     brand: Optional[str] = Query(None, description="Filter by brand name"),
     sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all"),
-    compare_type: Optional[str] = Query("previous_period", description="Comparison type: previous_period, year_ago, month_ago")
+    compare_type: Optional[str] = Query("previous_period", description="Comparison type: previous_period, year_ago, month_ago"),
+    include_forecast: Optional[bool] = Query(False, description="Include ML forecast for remaining month days"),
 ):
     """Get revenue trend data for line chart."""
     try:
@@ -329,10 +330,57 @@ async def get_revenue_trend(
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    return await dashboard_service.get_revenue_trend(
+    result = await dashboard_service.get_revenue_trend(
         start, end, category_id=category_id, brand=brand, source_id=source_id,
         sales_type=sales_type, compare_type=compare_type
     )
+
+    # Attach forecast data when requested (only for month period with no filters)
+    if include_forecast and period == "month" and not category_id and not brand and not source_id:
+        try:
+            forecast = await dashboard_service.get_forecast_data(sales_type)
+            if forecast:
+                result["forecast"] = forecast
+        except Exception:
+            pass  # Graceful degradation
+
+    return result
+
+
+@router.get("/revenue/forecast")
+@limiter.limit("30/minute")
+async def get_revenue_forecast(
+    request: Request,
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
+):
+    """Get ML revenue forecast for the current month."""
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    forecast = await dashboard_service.get_forecast_data(sales_type)
+    if not forecast:
+        return {"status": "unavailable", "message": "Forecast not available yet"}
+    return forecast
+
+
+@router.post("/revenue/forecast/train")
+@limiter.limit("5/hour")
+async def train_revenue_forecast(
+    request: Request,
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
+):
+    """Manually trigger revenue prediction model training."""
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    from core.prediction_service import get_prediction_service
+    service = get_prediction_service()
+    result = await service.train(sales_type)
+    return result
 
 
 @router.get("/sales/by-source")
