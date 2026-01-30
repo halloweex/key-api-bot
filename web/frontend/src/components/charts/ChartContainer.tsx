@@ -134,8 +134,10 @@ export const ChartContainer = memo(function ChartContainer({
   return (
     <Card className={`animate-chart-in ${className}`}>
       <CardHeader className="flex flex-row items-center gap-1.5">
-        <CardTitle>{title}</CardTitle>
-        {titleExtra}
+        <div className="flex items-center gap-1">
+          <CardTitle>{title}</CardTitle>
+          {titleExtra}
+        </div>
         {action}
       </CardHeader>
       <CardContent>
