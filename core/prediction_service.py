@@ -135,9 +135,11 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, float]]:
     val_pred = model.predict(X_val)
     mae = float(mean_absolute_error(y_val, val_pred))
     mape = float(mean_absolute_percentage_error(y_val, val_pred)) * 100
+    # WAPE: sum(|actual - predicted|) / sum(actual) — robust to low-revenue days
+    wape = float(np.sum(np.abs(y_val - val_pred)) / np.sum(y_val)) * 100 if np.sum(y_val) > 0 else 0.0
 
-    metrics = {'mae': round(mae, 2), 'mape': round(mape, 2)}
-    logger.info(f"Model trained: MAE={mae:.0f}, MAPE={mape:.1f}%, "
+    metrics = {'mae': round(mae, 2), 'mape': round(mape, 2), 'wape': round(wape, 2)}
+    logger.info(f"Model trained: MAE={mae:.0f}, MAPE={mape:.1f}%, WAPE={wape:.1f}%, "
                 f"rows={len(train_data)}, best_iter={model.best_iteration}")
 
     return model, metrics
