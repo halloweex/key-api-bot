@@ -3,7 +3,7 @@ import { useMemo } from 'react'
 import type { FilterStore, Period, SalesType } from '../types/filters'
 
 const initialState = {
-  period: 'last_28_days' as Period,
+  period: 'month' as Period,
   startDate: null,
   endDate: null,
   salesType: 'retail' as SalesType,

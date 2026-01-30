@@ -37,7 +37,6 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
           type="date"
           value={end}
           onChange={(e) => setEnd(e.target.value)}
-          max={today}
           className="flex-1 min-w-0 px-2 sm:px-3 py-1.5 text-xs sm:text-sm bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
       </div>
