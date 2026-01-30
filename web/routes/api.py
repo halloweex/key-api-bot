@@ -336,16 +336,14 @@ async def get_revenue_trend(
     )
 
     # Attach forecast data when requested (no filters applied)
-    from datetime import date as _date, datetime as _datetime
+    from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
     has_future = end > _date.today().isoformat()
     allow_forecast = period == "month" or has_future
     if include_forecast and allow_forecast and not category_id and not brand and not source_id:
         try:
             if period == "month":
-                # Current month: use stored predictions
                 forecast = await dashboard_service.get_forecast_data(sales_type)
             else:
-                # Custom range with future dates: generate on-the-fly
                 from core.prediction_service import get_prediction_service
                 service = get_prediction_service()
                 forecast = await service.predict_range(
@@ -355,6 +353,31 @@ async def get_revenue_trend(
                 )
             if forecast:
                 result["forecast"] = forecast
+
+                # Extend comparison data to cover forecast dates
+                # so the tooltip can show last year's revenue for predicted days
+                preds = forecast.get("daily_predictions", [])
+                comparison = result.get("comparison")
+                if preds and comparison:
+                    existing_labels = set(result.get("labels", []))
+                    extra_dates = []
+                    for p in preds:
+                        parts = p["date"].split("-")
+                        label = f"{parts[2]}.{parts[1]}"
+                        if label not in existing_labels:
+                            extra_dates.append(_datetime.strptime(p["date"], "%Y-%m-%d").date())
+
+                    if extra_dates:
+                        comp_type = comparison.get("period", {}).get("type", compare_type)
+                        extra_comp = await dashboard_service.get_comparison_for_dates(
+                            extra_dates, comp_type, sales_type=sales_type,
+                        )
+                        for d in extra_dates:
+                            label = d.strftime("%d.%m")
+                            result["labels"].append(label)
+                            result["revenue"].append(0)
+                            result["orders"].append(0)
+                            comparison["revenue"].append(round(extra_comp.get(d, 0), 2))
         except Exception:
             pass  # Graceful degradation
 

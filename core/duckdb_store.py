@@ -4010,6 +4010,40 @@ class DuckDBStore:
         ]
 
 
+    async def get_daily_revenue_for_dates(
+        self,
+        dates: list,
+        sales_type: str = "retail",
+    ) -> Dict[date, float]:
+        """Get daily revenue for a list of specific dates.
+
+        Returns dict mapping date -> revenue total.
+        Used for extending comparison data to cover forecast dates.
+        """
+        if not dates:
+            return {}
+
+        sales_filter = self._build_sales_type_filter(sales_type)
+        return_statuses = (19, 22, 21, 23)
+        placeholders = ", ".join(["?"] * len(dates))
+        date_strs = [d.isoformat() for d in dates]
+
+        async with self.connection() as conn:
+            rows = conn.execute(
+                f"""SELECT {_date_in_kyiv('o.ordered_at')} as day,
+                           SUM(o.grand_total) as revenue
+                    FROM orders o
+                    WHERE {_date_in_kyiv('o.ordered_at')} IN ({placeholders})
+                      AND o.status_id NOT IN {return_statuses}
+                      AND o.source_id IN (1, 2, 4)
+                      AND {sales_filter}
+                    GROUP BY day""",
+                date_strs,
+            ).fetchall()
+
+        return {row[0]: float(row[1]) for row in rows}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SINGLETON INSTANCE
 # ═══════════════════════════════════════════════════════════════════════════════

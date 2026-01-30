@@ -65,6 +65,45 @@ async def get_forecast_data(sales_type: str = "retail") -> Optional[Dict[str, An
         return None
 
 
+async def get_comparison_for_dates(
+    dates: list,
+    compare_type: str = "year_ago",
+    sales_type: str = "retail",
+) -> Dict[date, float]:
+    """Get comparison revenue for specific dates.
+
+    Returns dict mapping each date to its comparison-period revenue.
+    E.g. for year_ago, date 2026-02-01 maps to revenue on 2025-02-01.
+    """
+    from dateutil.relativedelta import relativedelta
+
+    if not dates:
+        return {}
+
+    # Compute comparison dates
+    comp_dates = []
+    date_map = {}  # comp_date -> original_date
+    for d in dates:
+        if compare_type == "year_ago":
+            cd = d - relativedelta(years=1)
+        elif compare_type == "month_ago":
+            cd = d - relativedelta(months=1)
+        else:
+            # previous_period: shift by len(dates) days back
+            cd = d - relativedelta(days=len(dates))
+        comp_dates.append(cd)
+        date_map[cd] = d
+
+    if not comp_dates:
+        return {}
+
+    store = await get_store()
+    revenue_by_date = await store.get_daily_revenue_for_dates(comp_dates, sales_type)
+
+    # Map back to original dates
+    return {date_map[cd]: revenue_by_date.get(cd, 0) for cd in comp_dates}
+
+
 async def get_sales_by_source(
     start_date: str,
     end_date: str,
