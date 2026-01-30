@@ -508,10 +508,10 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       height="xl"
       ariaLabel="Chart showing revenue comparison between current and previous period"
       action={
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-1.5 sm:gap-3 flex-wrap justify-end">
           {/* Forecast Predicted Total Badge */}
           {forecast && !isLoading && (
-            <div className="px-2.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1 bg-blue-50 text-blue-600 border border-blue-200">
+            <div className="px-1.5 sm:px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-semibold flex items-center gap-1 bg-blue-50 text-blue-600 border border-blue-200">
               <span>Predicted:</span>
               <span>{formatShortCurrency(forecast.predicted_total)}</span>
             </div>
@@ -520,7 +520,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
           {/* Growth Delta Badge */}
           {growthData && !isLoading && (
             <div
-              className={`px-2.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1 ${
+              className={`px-1.5 sm:px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-semibold flex items-center gap-1 ${
                 growthData.growth_percent >= 0
                   ? 'bg-emerald-100 text-emerald-700'
                   : 'bg-red-100 text-red-700'
@@ -535,7 +535,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
           <select
             value={compareType}
             onChange={(e) => setCompareType(e.target.value as CompareType)}
-            className="text-xs bg-slate-100 border-0 rounded-lg px-2.5 py-1.5 text-slate-600 font-medium cursor-pointer hover:bg-slate-200 transition-colors focus:ring-2 focus:ring-blue-500 focus:outline-none"
+            className="text-[10px] sm:text-xs bg-slate-100 border-0 rounded-lg px-1.5 sm:px-2.5 py-1.5 text-slate-600 font-medium cursor-pointer hover:bg-slate-200 transition-colors focus:ring-2 focus:ring-blue-500 focus:outline-none"
           >
             {COMPARE_TYPE_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>
@@ -545,7 +545,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
           </select>
 
           {/* Info Button */}
-          <div className="relative">
+          <div className="relative flex-shrink-0">
             <InfoButton onClick={() => setShowInfo(!showInfo)} />
             {showInfo && (
               <InfoTooltipContent onClose={() => setShowInfo(false)}>
