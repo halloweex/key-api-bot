@@ -86,8 +86,10 @@ export function useRevenueTrend(compareType: string = 'previous_period') {
     ? `${queryParams}&compare_type=${compareType}`
     : queryParams
 
-  // Include forecast when viewing current month with no filters
-  const wantsForecast = period === 'month' && !sourceId && !categoryId && !brand
+  // Include forecast when viewing current month or custom range with future dates
+  const { endDate } = useFilterStore()
+  const hasFutureDates = period === 'custom' && endDate && endDate > new Date().toISOString().split('T')[0]
+  const wantsForecast = (period === 'month' || hasFutureDates) && !sourceId && !categoryId && !brand
   if (wantsForecast) {
     fullParams += '&include_forecast=true'
   }
@@ -96,6 +98,20 @@ export function useRevenueTrend(compareType: string = 'previous_period') {
     queryKey: [...queryKeys.revenueTrend(queryParams), compareType, wantsForecast],
     queryFn: () => api.getRevenueTrend(fullParams),
   })
+}
+
+// ─── Forecast ──────────────────────────────────────────────────────────────
+
+export function useMaxForecastDate() {
+  const salesType = useFilterStore(selectSalesType)
+
+  const { data } = useQuery({
+    queryKey: ['maxForecastDate', salesType],
+    queryFn: () => api.getRevenueForecast(salesType),
+    staleTime: 10 * 60 * 1000,
+  })
+
+  return data?.forecast_end ?? data?.month_end ?? null
 }
 
 // ─── Sales ──────────────────────────────────────────────────────────────────

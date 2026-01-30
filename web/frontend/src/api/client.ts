@@ -5,6 +5,7 @@
 import type {
   SummaryResponse,
   RevenueTrendResponse,
+  RevenueForecast,
   SalesBySourceResponse,
   TopProductsResponse,
   ProductPerformanceResponse,
@@ -247,6 +248,9 @@ export const api = {
   // Revenue
   getRevenueTrend: (params: string, options?: FetchOptions) =>
     fetchApi<RevenueTrendResponse>('/revenue/trend', params, options),
+
+  getRevenueForecast: (salesType: string, options?: FetchOptions) =>
+    fetchApi<RevenueForecast>('/revenue/forecast', `sales_type=${salesType}`, options),
 
   // Sales
   getSalesBySource: (params: string, options?: FetchOptions) =>

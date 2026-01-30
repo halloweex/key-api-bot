@@ -31,6 +31,7 @@ export interface RevenueForecast {
   last_trained: string | null
   month_start: string
   month_end: string
+  forecast_end?: string
 }
 
 export interface RevenueTrendResponse {

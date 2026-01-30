@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react'
 import { Button } from '../ui'
 import { useFilterStore } from '../../store/filterStore'
+import { useMaxForecastDate } from '../../hooks'
 
 interface DateRangePickerProps {
   onClose?: () => void
@@ -8,11 +9,15 @@ interface DateRangePickerProps {
 
 export function DateRangePicker({ onClose }: DateRangePickerProps) {
   const { startDate, endDate, setCustomDates } = useFilterStore()
+  const maxForecastDate = useMaxForecastDate()
 
   // Initialize with current values or today
   const today = new Date().toISOString().split('T')[0]
   const [start, setStart] = useState(startDate || today)
   const [end, setEnd] = useState(endDate || today)
+
+  // Max end date: last prediction date or today if forecast unavailable
+  const maxEndDate = maxForecastDate || today
 
   const handleApply = useCallback(() => {
     if (start && end) {
@@ -37,6 +42,7 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
           type="date"
           value={end}
           onChange={(e) => setEnd(e.target.value)}
+          max={maxEndDate}
           className="flex-1 min-w-0 px-2 sm:px-3 py-1.5 text-xs sm:text-sm bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
       </div>

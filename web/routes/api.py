@@ -335,10 +335,24 @@ async def get_revenue_trend(
         sales_type=sales_type, compare_type=compare_type
     )
 
-    # Attach forecast data when requested (only for month period with no filters)
-    if include_forecast and period == "month" and not category_id and not brand and not source_id:
+    # Attach forecast data when requested (no filters applied)
+    from datetime import date as _date, datetime as _datetime
+    has_future = end > _date.today().isoformat()
+    allow_forecast = period == "month" or has_future
+    if include_forecast and allow_forecast and not category_id and not brand and not source_id:
         try:
-            forecast = await dashboard_service.get_forecast_data(sales_type)
+            if period == "month":
+                # Current month: use stored predictions
+                forecast = await dashboard_service.get_forecast_data(sales_type)
+            else:
+                # Custom range with future dates: generate on-the-fly
+                from core.prediction_service import get_prediction_service
+                service = get_prediction_service()
+                forecast = await service.predict_range(
+                    _datetime.strptime(start, "%Y-%m-%d").date(),
+                    _datetime.strptime(end, "%Y-%m-%d").date(),
+                    sales_type,
+                )
             if forecast:
                 result["forecast"] = forecast
         except Exception:

@@ -23,6 +23,9 @@ MODEL_PATH = MODEL_DIR / "revenue_model.joblib"
 # Thread pool for CPU-bound training
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ml-train")
 
+# How far ahead to predict (days)
+FORECAST_HORIZON_DAYS = 60
+
 
 def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Engineer features from a DataFrame with 'date' and 'revenue' columns.
@@ -619,6 +622,54 @@ class PredictionService:
         result["data_info"]["sales_type"] = sales_type
         return result
 
+    async def predict_range(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "retail",
+    ) -> Optional[Dict[str, Any]]:
+        """Generate predictions for an arbitrary future date range on-the-fly.
+
+        Returns forecast dict compatible with get_forecast() response,
+        or None if model is not ready or no future dates in range.
+        """
+        if not self.is_ready:
+            return None
+
+        today = date.today()
+        # Only predict dates after today
+        pred_start = max(start_date, today + timedelta(days=1))
+        if pred_start > end_date:
+            return None
+
+        future_dates = []
+        d = pred_start
+        while d <= end_date:
+            future_dates.append(d)
+            d += timedelta(days=1)
+
+        if not future_dates:
+            return None
+
+        from core.duckdb_store import get_store
+        store = await get_store()
+        historical_df = await self._query_daily_revenue(store, sales_type, days_back=780)
+
+        loop = asyncio.get_event_loop()
+        predictions = await loop.run_in_executor(
+            _executor, _predict_future, self._model, historical_df, future_dates
+        )
+
+        predicted_total = sum(p['predicted_revenue'] for p in predictions)
+
+        return {
+            "predicted_remaining": round(predicted_total, 2),
+            "predicted_total": round(predicted_total, 2),
+            "daily_predictions": predictions,
+            "model_metrics": self._metrics,
+            "last_trained": self._last_trained,
+        }
+
     async def train(self, sales_type: str = "retail") -> Dict[str, Any]:
         """Train model on historical daily revenue data from DuckDB."""
         if self._training:
@@ -672,7 +723,7 @@ class PredictionService:
         historical_df: Optional[pd.DataFrame] = None,
         sales_type: str = "retail",
     ) -> List[Dict[str, Any]]:
-        """Predict revenue for remaining days of the current month."""
+        """Predict revenue for the next 60 days."""
         if not self.is_ready:
             return []
 
@@ -682,21 +733,16 @@ class PredictionService:
         if historical_df is None:
             historical_df = await self._query_daily_revenue(store, sales_type, days_back=780)
 
-        # Calculate remaining days in current month
         today = date.today()
-        if today.month == 12:
-            month_end = date(today.year + 1, 1, 1) - timedelta(days=1)
-        else:
-            month_end = date(today.year, today.month + 1, 1) - timedelta(days=1)
+        forecast_end = today + timedelta(days=FORECAST_HORIZON_DAYS)
 
         future_dates = []
         d = today + timedelta(days=1)
-        while d <= month_end:
+        while d <= forecast_end:
             future_dates.append(d)
             d += timedelta(days=1)
 
         if not future_dates:
-            logger.info("No remaining days to predict (end of month)")
             return []
 
         # Run prediction in thread pool
@@ -714,7 +760,7 @@ class PredictionService:
         return predictions
 
     async def get_forecast(self, sales_type: str = "retail") -> Optional[Dict[str, Any]]:
-        """Get stored forecast data for the current month."""
+        """Get stored forecast data (up to 60 days ahead)."""
         from core.duckdb_store import get_store
         store = await get_store()
 
@@ -724,14 +770,15 @@ class PredictionService:
             month_end = date(today.year + 1, 1, 1) - timedelta(days=1)
         else:
             month_end = date(today.year, today.month + 1, 1) - timedelta(days=1)
+        forecast_end = today + timedelta(days=FORECAST_HORIZON_DAYS)
 
-        # Get actual revenue to date
+        # Get actual revenue for current month to date
         actual_to_date = await self._get_actual_month_revenue(store, sales_type, month_start, today)
 
-        # Get stored predictions
+        # Get stored predictions (up to 60 days)
         predictions = await store.get_predictions(
             start_date=today + timedelta(days=1),
-            end_date=month_end,
+            end_date=forecast_end,
             sales_type=sales_type,
         )
 
@@ -758,6 +805,7 @@ class PredictionService:
             "last_trained": self._last_trained,
             "month_start": month_start.isoformat(),
             "month_end": month_end.isoformat(),
+            "forecast_end": forecast_end.isoformat(),
         }
 
     async def _query_daily_revenue(

@@ -4,6 +4,7 @@ export {
   // Summary & Revenue
   useSummary,
   useRevenueTrend,
+  useMaxForecastDate,
   // Sales
   useSalesBySource,
   // Products

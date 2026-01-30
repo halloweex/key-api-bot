@@ -447,31 +447,42 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       }
     })
 
-    // Append forecast days if available
+    // Merge or append forecast days if available
     let forecastAppended = false
     if (forecast?.daily_predictions?.length) {
+      // Build a lookup of existing labels for merging
+      const labelIndex = new Map<string, number>()
+      processed.forEach((p, idx) => labelIndex.set(p.date, idx))
+
       for (const pred of forecast.daily_predictions) {
         // Parse date to get dd.mm format (matching the label format)
         const parts = pred.date.split('-') // "2026-01-30"
         if (parts.length === 3) {
           const label = `${parts[2]}.${parts[1]}` // "30.01"
-          const shortDate = label
+          const existingIdx = labelIndex.get(label)
 
-          processed.push({
-            date: label,
-            shortDate,
-            revenue: 0,
-            forecastRevenue: Math.round(pred.predicted_revenue),
-            orders: 0,
-            prevRevenue: 0,
-            prevOrders: 0,
-            change: 0,
-            changePercent: 0,
-            isPeak: false,
-            peakLabel: '',
-            isCurrentMonth: true,
-            isForecast: true,
-          })
+          if (existingIdx !== undefined && processed[existingIdx].revenue === 0) {
+            // Merge into existing zero-revenue data point
+            processed[existingIdx].forecastRevenue = Math.round(pred.predicted_revenue)
+            processed[existingIdx].isForecast = true
+          } else if (existingIdx === undefined) {
+            // Append as new data point (date not in main data)
+            processed.push({
+              date: label,
+              shortDate: label,
+              revenue: 0,
+              forecastRevenue: Math.round(pred.predicted_revenue),
+              orders: 0,
+              prevRevenue: 0,
+              prevOrders: 0,
+              change: 0,
+              changePercent: 0,
+              isPeak: false,
+              peakLabel: '',
+              isCurrentMonth: true,
+              isForecast: true,
+            })
+          }
           forecastAppended = true
         }
       }
@@ -601,6 +612,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
             <Bar
               dataKey="revenue"
               name={periodLabels.current}
+              stackId="revenue"
               fill={CHART_THEME.primary}
               radius={[4, 4, 0, 0]}
               maxBarSize={50}
@@ -624,11 +636,12 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               />
             </Bar>
 
-            {/* Forecast bars (separate dataKey, rendered on top of revenue=0 days) */}
+            {/* Forecast bars — stacked on revenue so they don't halve bar width */}
             {hasForecast && (
               <Bar
                 dataKey="forecastRevenue"
                 name="Predicted"
+                stackId="revenue"
                 fill="url(#forecastBarGradient)"
                 radius={[4, 4, 0, 0]}
                 maxBarSize={50}
