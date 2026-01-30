@@ -86,10 +86,11 @@ export function useRevenueTrend(compareType: string = 'previous_period') {
     ? `${queryParams}&compare_type=${compareType}`
     : queryParams
 
-  // Include forecast when viewing current month or custom range with future dates
+  // Include forecast for periods that contain future days
   const { endDate } = useFilterStore()
   const hasFutureDates = period === 'custom' && endDate && endDate > new Date().toISOString().split('T')[0]
-  const wantsForecast = (period === 'month' || hasFutureDates) && !sourceId && !categoryId && !brand
+  const isCurrentPeriod = period === 'month' || period === 'week'
+  const wantsForecast = (isCurrentPeriod || hasFutureDates) && !sourceId && !categoryId && !brand
   if (wantsForecast) {
     fullParams += '&include_forecast=true'
   }

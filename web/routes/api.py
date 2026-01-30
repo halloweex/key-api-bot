@@ -337,12 +337,20 @@ async def get_revenue_trend(
 
     # Attach forecast data when requested (no filters applied)
     from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
-    has_future = end > _date.today().isoformat()
-    allow_forecast = period == "month" or has_future
+    today = _date.today()
+    has_future = end > today.isoformat()
+    is_current_period = period in ("month", "week")
+    allow_forecast = is_current_period or has_future
     if include_forecast and allow_forecast and not category_id and not brand and not source_id:
         try:
             if period == "month":
                 forecast = await dashboard_service.get_forecast_data(sales_type)
+            elif period == "week":
+                # Predict remaining days of the week (tomorrow..Sunday)
+                from core.prediction_service import get_prediction_service
+                service = get_prediction_service()
+                end_of_week = today + _timedelta(days=6 - today.weekday())
+                forecast = await service.predict_range(today, end_of_week, sales_type)
             else:
                 from core.prediction_service import get_prediction_service
                 service = get_prediction_service()
