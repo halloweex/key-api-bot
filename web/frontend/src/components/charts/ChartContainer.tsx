@@ -7,6 +7,8 @@ import { CHART_DIMENSIONS, type ChartHeight } from './config'
 interface ChartContainerProps {
   /** Chart title displayed in header */
   title: string
+  /** Extra element rendered next to title (e.g. info button) */
+  titleExtra?: ReactNode
   /** Chart content */
   children: ReactNode
   /** Loading state */
@@ -95,6 +97,7 @@ const EmptyState = memo(function EmptyState({ message, height }: EmptyStateProps
 
 export const ChartContainer = memo(function ChartContainer({
   title,
+  titleExtra,
   children,
   isLoading = false,
   error = null,
@@ -132,6 +135,7 @@ export const ChartContainer = memo(function ChartContainer({
     <Card className={`animate-chart-in ${className}`}>
       <CardHeader className="flex flex-row items-center gap-1.5">
         <CardTitle>{title}</CardTitle>
+        {titleExtra}
         {action}
       </CardHeader>
       <CardContent>

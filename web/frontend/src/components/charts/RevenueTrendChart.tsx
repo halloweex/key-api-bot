@@ -501,6 +501,34 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
   return (
     <ChartContainer
       title="Revenue Trend"
+      titleExtra={
+        <div className="relative flex-shrink-0">
+          <InfoButton onClick={() => setShowInfo(!showInfo)} />
+          {showInfo && (
+            <InfoTooltipContent onClose={() => setShowInfo(false)}>
+              <div className="space-y-2">
+                <p className="text-xs text-slate-300">
+                  <strong className="text-blue-400">Bars:</strong> Daily revenue for selected period.
+                </p>
+                {hasForecast && (
+                  <p className="text-xs text-slate-300">
+                    <strong style={{ color: FORECAST_BAR_COLOR }}>Lighter bars:</strong> ML-predicted revenue for remaining days.
+                  </p>
+                )}
+                <p className="text-xs text-slate-300">
+                  <strong className="text-slate-400">Dashed line:</strong> Comparison period (Year ago, Month ago, or Previous).
+                </p>
+                <p className="text-xs text-slate-300">
+                  <strong className="text-emerald-400">Growth badge:</strong> Total revenue change vs comparison period.
+                </p>
+                <p className="text-xs text-slate-300">
+                  <strong className="text-amber-400">Peak labels:</strong> Top 5 revenue days.
+                </p>
+              </div>
+            </InfoTooltipContent>
+          )}
+        </div>
+      }
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
@@ -544,33 +572,6 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
             ))}
           </select>
 
-          {/* Info Button */}
-          <div className="relative flex-shrink-0">
-            <InfoButton onClick={() => setShowInfo(!showInfo)} />
-            {showInfo && (
-              <InfoTooltipContent onClose={() => setShowInfo(false)}>
-                <div className="space-y-2">
-                  <p className="text-xs text-slate-300">
-                    <strong className="text-blue-400">Bars:</strong> Daily revenue for selected period.
-                  </p>
-                  {hasForecast && (
-                    <p className="text-xs text-slate-300">
-                      <strong style={{ color: FORECAST_BAR_COLOR }}>Lighter bars:</strong> ML-predicted revenue for remaining days.
-                    </p>
-                  )}
-                  <p className="text-xs text-slate-300">
-                    <strong className="text-slate-400">Dashed line:</strong> Comparison period (Year ago, Month ago, or Previous).
-                  </p>
-                  <p className="text-xs text-slate-300">
-                    <strong className="text-emerald-400">Growth badge:</strong> Total revenue change vs comparison period.
-                  </p>
-                  <p className="text-xs text-slate-300">
-                    <strong className="text-amber-400">Peak labels:</strong> Top 5 revenue days.
-                  </p>
-                </div>
-              </InfoTooltipContent>
-            )}
-          </div>
         </div>
       }
     >
