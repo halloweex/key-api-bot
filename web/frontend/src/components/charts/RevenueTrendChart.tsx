@@ -137,7 +137,7 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
       </div>
 
       {/* Previous Period */}
-      {hasComparison && !data.isForecast && (
+      {hasComparison && data.prevRevenue > 0 && (
         <>
           <div style={{
             display: 'flex',
