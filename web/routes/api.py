@@ -345,6 +345,17 @@ async def get_revenue_trend(
         try:
             if period == "month":
                 forecast = await dashboard_service.get_forecast_data(sales_type)
+                # Cap predictions to current month only
+                if forecast and forecast.get("daily_predictions"):
+                    month_end = forecast.get("month_end", "")
+                    forecast["daily_predictions"] = [
+                        p for p in forecast["daily_predictions"]
+                        if p["date"] <= month_end
+                    ]
+                    forecast["predicted_remaining"] = sum(
+                        p["predicted_revenue"] for p in forecast["daily_predictions"]
+                    )
+                    forecast["predicted_total"] = forecast.get("actual_to_date", 0) + forecast["predicted_remaining"]
             elif period == "week":
                 # Predict remaining days of the week (tomorrow..Sunday)
                 from core.prediction_service import get_prediction_service
