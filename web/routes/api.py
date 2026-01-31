@@ -370,7 +370,7 @@ async def get_revenue_trend(
                     _datetime.strptime(end, "%Y-%m-%d").date(),
                     sales_type,
                 )
-            if forecast:
+            if forecast and forecast.get("daily_predictions"):
                 result["forecast"] = forecast
 
                 # Extend comparison data to cover forecast dates
