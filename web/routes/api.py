@@ -439,6 +439,28 @@ async def train_revenue_forecast(
     return result
 
 
+@router.post("/revenue/forecast/tune")
+@limiter.limit("2/hour")
+async def tune_revenue_forecast(
+    request: Request,
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
+):
+    """Run hyperparameter grid search to find optimal LightGBM parameters.
+
+    Tests 72 parameter combinations across walk-forward CV folds.
+    Saves best params to data/lgbm_best_params.json for use by train/evaluate.
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    from core.prediction_service import get_prediction_service
+    service = get_prediction_service()
+    result = await service.tune(sales_type)
+    return result
+
+
 @router.get("/revenue/forecast/evaluate")
 @limiter.limit("5/hour")
 async def evaluate_revenue_forecast(

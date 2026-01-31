@@ -27,7 +27,7 @@ logger = get_logger(__name__)
 
 # Request timeout settings (seconds)
 DEFAULT_REQUEST_TIMEOUT = 30.0
-SLOW_ENDPOINT_TIMEOUT = 60.0  # For heavy analytics endpoints
+SLOW_ENDPOINT_TIMEOUT = 300.0  # For heavy analytics endpoints (tune can take minutes)
 
 # Endpoints that get extended timeout
 SLOW_ENDPOINTS = {
@@ -36,6 +36,7 @@ SLOW_ENDPOINTS = {
     "/api/stocks/analysis",
     "/api/revenue/forecast/train",
     "/api/revenue/forecast/evaluate",
+    "/api/revenue/forecast/tune",
 }
 
 
