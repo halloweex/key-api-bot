@@ -637,8 +637,8 @@ class PredictionService:
             return None
 
         today = date.today()
-        # Only predict dates after today
-        pred_start = max(start_date, today + timedelta(days=1))
+        # Include today (partial day) for stacked actual + remaining
+        pred_start = max(start_date, today)
         if pred_start > end_date:
             return None
 
@@ -736,8 +736,9 @@ class PredictionService:
         today = date.today()
         forecast_end = today + timedelta(days=FORECAST_HORIZON_DAYS)
 
+        # Include today (partial day) so the chart can show actual + remaining
         future_dates = []
-        d = today + timedelta(days=1)
+        d = today
         while d <= forecast_end:
             future_dates.append(d)
             d += timedelta(days=1)

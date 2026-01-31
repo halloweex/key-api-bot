@@ -40,6 +40,8 @@ interface ChartDataPoint {
   peakLabel: string
   isCurrentMonth: boolean
   isForecast: boolean
+  /** Full-day predicted revenue (for today: actual + remaining) */
+  fullDayForecast?: number
 }
 
 // ─── Label Formatter ──────────────────────────────────────────────────────────
@@ -87,6 +89,7 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
   const data = payload[0]?.payload
   if (!data) return null
 
+  const isPartialDay = data.revenue > 0 && (data.fullDayForecast ?? 0) > 0
   const displayRevenue = data.isForecast ? data.forecastRevenue : data.revenue
   const hasComparison = data.prevRevenue > 0
   const isPositive = data.change >= 0
@@ -109,16 +112,21 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
             (predicted)
           </span>
         )}
+        {isPartialDay && (
+          <span style={{ color: CHART_THEME.muted, fontWeight: 400, fontSize: '11px', marginLeft: '6px' }}>
+            (today)
+          </span>
+        )}
       </p>
 
-      {/* Current Period */}
+      {/* Current Period — actual revenue */}
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'center',
         marginBottom: '6px',
-        paddingBottom: hasComparison ? '6px' : '0',
-        borderBottom: hasComparison ? `1px solid ${CHART_THEME.border}` : 'none'
+        paddingBottom: (hasComparison || isPartialDay) ? '6px' : '0',
+        borderBottom: (hasComparison || isPartialDay) ? `1px solid ${CHART_THEME.border}` : 'none'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <div style={{
@@ -128,13 +136,40 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
             background: data.isForecast ? FORECAST_BAR_COLOR : CHART_THEME.primary,
           }} />
           <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
-            {data.isForecast ? 'Predicted' : periodLabels.current}
+            {data.isForecast ? 'Predicted' : isPartialDay ? 'Actual so far' : periodLabels.current}
           </span>
         </div>
         <span style={{ fontWeight: 600, color: data.isForecast ? FORECAST_BAR_COLOR : CHART_THEME.primary }}>
           {formatCurrency(displayRevenue)}
         </span>
       </div>
+
+      {/* Full-day prediction for today (partial day) */}
+      {isPartialDay && (
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: '6px',
+          paddingBottom: hasComparison ? '6px' : '0',
+          borderBottom: hasComparison ? `1px solid ${CHART_THEME.border}` : 'none'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{
+              width: '12px',
+              height: '12px',
+              borderRadius: '3px',
+              background: FORECAST_BAR_COLOR,
+            }} />
+            <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
+              Predicted total
+            </span>
+          </div>
+          <span style={{ fontWeight: 600, color: FORECAST_BAR_COLOR }}>
+            {formatCurrency(data.fullDayForecast!)}
+          </span>
+        </div>
+      )}
 
       {/* Previous Period */}
       {hasComparison && data.prevRevenue > 0 && (
@@ -461,10 +496,16 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
           const label = `${parts[2]}.${parts[1]}` // "30.01"
           const existingIdx = labelIndex.get(label)
 
-          if (existingIdx !== undefined && processed[existingIdx].revenue === 0) {
-            // Merge into existing zero-revenue data point
-            processed[existingIdx].forecastRevenue = Math.round(pred.predicted_revenue)
-            processed[existingIdx].isForecast = true
+          if (existingIdx !== undefined) {
+            const actual = processed[existingIdx].revenue
+            const predicted = Math.round(pred.predicted_revenue)
+            // Stacked: show remaining predicted on top of actual
+            const remaining = Math.max(0, predicted - actual)
+            if (actual === 0 || remaining > 0) {
+              processed[existingIdx].forecastRevenue = actual === 0 ? predicted : remaining
+              processed[existingIdx].isForecast = actual === 0
+              processed[existingIdx].fullDayForecast = predicted
+            }
           } else if (existingIdx === undefined) {
             // Append as new data point (date not in main data)
             processed.push({
