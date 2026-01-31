@@ -74,6 +74,9 @@ def _get_holiday_features(dates: pd.Series) -> pd.DataFrame:
             date(year, 2, 14),   # Valentine's Day
             date(year, 3, 8),    # Women's Day
             date(year, 11, 11),  # Singles' Day (11.11)
+            date(year, 12, 14),  # Second Owner's Birthday (discount day)
+            date(year, 12, 26),  # LaLa Recipe brand day
+            date(year, 12, 27),  # LaLa Recipe brand day
             bf,                  # Black Friday
             cm,                  # Cyber Monday
         }
