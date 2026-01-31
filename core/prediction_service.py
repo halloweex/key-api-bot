@@ -6,6 +6,7 @@ Runs nightly via scheduler, stores predictions in DuckDB.
 """
 import asyncio
 import logging
+from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
@@ -27,15 +28,116 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ml-train")
 FORECAST_HORIZON_DAYS = 60
 
 
+def _get_holiday_features(dates: pd.Series) -> pd.DataFrame:
+    """Compute holiday/event features for a series of dates.
+
+    Returns DataFrame with columns:
+    - is_holiday: 1 if public holiday (typically low-sales day)
+    - is_high_sales_event: 1 if high-sales event (promotions, gifting)
+    - days_to_nearest_event: distance to nearest event (capped at 14)
+    - bf_countdown: 30→0 countdown during 30 days before Black Friday, 31 outside
+    """
+
+    # Orthodox Easter lookup (moves each year)
+    _ORTHODOX_EASTER = {
+        2023: date(2023, 4, 16), 2024: date(2024, 5, 5),
+        2025: date(2025, 4, 20), 2026: date(2026, 4, 12),
+        2027: date(2027, 5, 2),  2028: date(2028, 4, 16),
+        2029: date(2029, 4, 8),  2030: date(2030, 4, 28),
+    }
+
+    def _black_friday(year: int) -> date:
+        """Last Friday of November."""
+        nov_last = date(year, 11, monthrange(year, 11)[1])
+        offset = (nov_last.weekday() - 4) % 7  # Friday = 4
+        return nov_last - timedelta(days=offset)
+
+    def _build_events_for_year(year: int):
+        """Return (holidays_set, high_sales_set, all_events_list) for a year."""
+        holidays = {
+            date(year, 1, 1),    # New Year
+            date(year, 1, 7),    # Orthodox Christmas
+            date(year, 5, 1),    # Labour Day
+            date(year, 5, 9),    # Victory Day
+            date(year, 6, 28),   # Constitution Day
+            date(year, 8, 24),   # Independence Day
+            date(year, 10, 14),  # Defender's Day
+            date(year, 12, 25),  # Catholic Christmas
+        }
+        if year in _ORTHODOX_EASTER:
+            holidays.add(_ORTHODOX_EASTER[year])
+
+        bf = _black_friday(year)
+        cm = bf + timedelta(days=3)  # Cyber Monday
+        high_sales = {
+            date(year, 1, 22),   # Owner's Birthday
+            date(year, 2, 14),   # Valentine's Day
+            date(year, 3, 8),    # Women's Day
+            date(year, 11, 11),  # Singles' Day (11.11)
+            bf,                  # Black Friday
+            cm,                  # Cyber Monday
+        }
+        # Pre-New Year rush: Dec 20–30
+        for day in range(20, 31):
+            high_sales.add(date(year, 12, day))
+
+        return holidays, high_sales, bf
+
+    # Collect events across all years in the data
+    dt = pd.to_datetime(dates)
+    years = sorted(dt.dt.year.unique())
+
+    all_holidays: set[date] = set()
+    all_high_sales: set[date] = set()
+    all_events: list[date] = []
+    bf_dates: dict[int, date] = {}
+
+    for y in years:
+        h, hs, bf = _build_events_for_year(y)
+        all_holidays |= h
+        all_high_sales |= hs
+        all_events.extend(h | hs)
+        bf_dates[y] = bf
+
+    all_events_sorted = np.array(sorted(set(all_events)), dtype='datetime64[D]')
+
+    # Vectorised computation
+    dates_np = dt.values.astype('datetime64[D]')
+    is_holiday = np.array([d.date() in all_holidays if hasattr(d, 'date') else False
+                           for d in pd.to_datetime(dates_np)], dtype=int)
+    is_high = np.array([d.date() in all_high_sales if hasattr(d, 'date') else False
+                        for d in pd.to_datetime(dates_np)], dtype=int)
+
+    # days_to_nearest_event: min absolute distance, capped at 14
+    days_dist = np.abs(dates_np[:, None].astype('int64') - all_events_sorted[None, :].astype('int64'))
+    days_to_nearest = np.minimum(days_dist.min(axis=1), 14)
+
+    # bf_countdown: 30→0 during 30 days before Black Friday, 31 outside
+    bf_countdown = np.full(len(dates_np), 31, dtype=int)
+    for y, bf in bf_dates.items():
+        bf_np = np.datetime64(bf, 'D')
+        diff = (bf_np.astype('int64') - dates_np.astype('int64'))  # days until BF
+        mask = (diff >= 0) & (diff <= 30)
+        bf_countdown[mask] = diff[mask]
+
+    return pd.DataFrame({
+        'is_holiday': is_holiday,
+        'is_high_sales_event': is_high,
+        'days_to_nearest_event': days_to_nearest,
+        'bf_countdown': bf_countdown,
+    }, index=dates.index)
+
+
 def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Engineer features from a DataFrame with 'date' and 'revenue' columns.
 
-    Creates 20 features:
+    Creates 24 features:
     - Calendar: day_of_week, month, day_of_month, is_weekend, week_of_year, quarter
     - Cyclical: month_sin, month_cos, dow_sin, dow_cos
     - Lags: 1d, 7d, 14d, 28d, 365d
     - Rolling: mean_7d, mean_14d, mean_28d, std_7d
     - Trend: yoy_ratio, linear trend index
+    - Events: is_holiday, is_high_sales_event, days_to_nearest_event, bf_countdown
     """
     df = df.copy()
     df['date'] = pd.to_datetime(df['date'])
@@ -74,6 +176,11 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     # Linear trend index
     df['trend_index'] = np.arange(len(df))
 
+    # Holiday / event features
+    holiday_df = _get_holiday_features(df['date'])
+    for col in holiday_df.columns:
+        df[col] = holiday_df[col].values
+
     return df
 
 
@@ -83,6 +190,7 @@ FEATURE_COLUMNS = [
     'lag_1d', 'lag_7d', 'lag_14d', 'lag_28d', 'lag_365d',
     'rolling_mean_7d', 'rolling_mean_14d', 'rolling_mean_28d', 'rolling_std_7d',
     'yoy_ratio', 'trend_index',
+    'is_holiday', 'is_high_sales_event', 'days_to_nearest_event', 'bf_countdown',
 ]
 
 
