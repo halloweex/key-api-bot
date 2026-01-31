@@ -776,9 +776,9 @@ class PredictionService:
         # Get actual revenue for current month to date
         actual_to_date = await self._get_actual_month_revenue(store, sales_type, month_start, today)
 
-        # Get stored predictions (up to 60 days)
+        # Get stored predictions (today + future, up to 60 days)
         predictions = await store.get_predictions(
-            start_date=today + timedelta(days=1),
+            start_date=today,
             end_date=forecast_end,
             sales_type=sales_type,
         )
