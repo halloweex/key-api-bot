@@ -325,6 +325,9 @@ class SyncService:
             # Record Layer 2: daily per-SKU snapshot
             await self.store.record_sku_inventory_snapshot()
 
+            # Refresh warehouse layers (Silver → Gold)
+            await self.store.refresh_warehouse_layers(trigger="full_sync")
+
             # Update sync checkpoint with latest order timestamp
             last_order_time = await self.store.get_latest_order_time()
             await self.store.set_last_sync_time("orders", last_order_time)
@@ -434,6 +437,9 @@ class SyncService:
                 # Emit inventory updated event
                 await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
 
+            # Refresh warehouse layers (Silver → Gold) after all syncs
+            await self.store.refresh_warehouse_layers(trigger="incremental_sync")
+
         except KeyCRMConnectionError as e:
             error_occurred = str(e)
             logger.warning(f"Incremental sync connection error (will retry): {e}")
@@ -485,6 +491,9 @@ class SyncService:
                 stats["orders"] = order_count
                 stats["expenses"] = expense_count
                 logger.debug(f"Today sync: {stats['orders']} orders, {stats['expenses']} expenses")
+
+                # Refresh warehouse layers (Silver → Gold)
+                await self.store.refresh_warehouse_layers(trigger="sync_today")
 
         except KeyCRMConnectionError as e:
             logger.debug(f"Today sync connection error (will retry): {e}")
@@ -569,6 +578,10 @@ async def init_and_sync(full_sync_days: int = 365) -> None:
     sku_count = await store.refresh_sku_inventory_status()
     if sku_count > 0:
         logger.info(f"Initialized sku_inventory_status: {sku_count} SKUs")
+
+    # Ensure warehouse layers (Silver/Gold) are populated
+    wh_result = await store.refresh_warehouse_layers(trigger="startup")
+    logger.info(f"Warehouse layers initialized: silver={wh_result.get('silver_rows', 0)}, gold_rev={wh_result.get('gold_revenue_rows', 0)}")
 
     # Note: Background sync is now handled by APScheduler (core/scheduler.py)
     # The scheduler runs incremental_sync every 60 seconds, plus other jobs:

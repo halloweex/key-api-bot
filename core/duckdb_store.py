@@ -459,6 +459,88 @@ class DuckDBStore:
             synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- SILVER LAYER: Enriched orders (one row per order)
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS silver_orders (
+            id INTEGER PRIMARY KEY,
+            source_id INTEGER NOT NULL,
+            status_id INTEGER NOT NULL,
+            grand_total DECIMAL(12, 2) NOT NULL,
+            ordered_at TIMESTAMP WITH TIME ZONE,
+            buyer_id INTEGER,
+            manager_id INTEGER,
+            order_date DATE NOT NULL,
+            is_return BOOLEAN NOT NULL,
+            sales_type VARCHAR NOT NULL,
+            is_active_source BOOLEAN NOT NULL,
+            source_name VARCHAR NOT NULL,
+            is_new_customer BOOLEAN NOT NULL DEFAULT FALSE,
+            buyer_first_order_date DATE
+        );
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- GOLD LAYER: Pre-aggregated daily revenue (one row per date+sales_type)
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS gold_daily_revenue (
+            date DATE NOT NULL,
+            sales_type VARCHAR NOT NULL,
+            revenue DECIMAL(14, 2) NOT NULL DEFAULT 0,
+            orders_count INTEGER NOT NULL DEFAULT 0,
+            unique_customers INTEGER NOT NULL DEFAULT 0,
+            new_customers INTEGER NOT NULL DEFAULT 0,
+            returning_customers INTEGER NOT NULL DEFAULT 0,
+            instagram_revenue DECIMAL(14, 2) NOT NULL DEFAULT 0,
+            telegram_revenue DECIMAL(14, 2) NOT NULL DEFAULT 0,
+            shopify_revenue DECIMAL(14, 2) NOT NULL DEFAULT 0,
+            instagram_orders INTEGER NOT NULL DEFAULT 0,
+            telegram_orders INTEGER NOT NULL DEFAULT 0,
+            shopify_orders INTEGER NOT NULL DEFAULT 0,
+            returns_count INTEGER NOT NULL DEFAULT 0,
+            returns_revenue DECIMAL(14, 2) NOT NULL DEFAULT 0,
+            avg_order_value DECIMAL(12, 2) NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, sales_type)
+        );
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- GOLD LAYER: Pre-aggregated daily products
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS gold_daily_products (
+            date DATE NOT NULL,
+            sales_type VARCHAR NOT NULL,
+            source_id INTEGER NOT NULL,
+            product_id INTEGER,
+            product_name VARCHAR NOT NULL,
+            brand VARCHAR,
+            category_id INTEGER,
+            category_name VARCHAR,
+            parent_category_name VARCHAR,
+            quantity_sold INTEGER NOT NULL DEFAULT 0,
+            product_revenue DECIMAL(14, 2) NOT NULL DEFAULT 0,
+            order_count INTEGER NOT NULL DEFAULT 0
+        );
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- WAREHOUSE REFRESH AUDIT LOG
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE SEQUENCE IF NOT EXISTS warehouse_refresh_seq START 1;
+
+        CREATE TABLE IF NOT EXISTS warehouse_refreshes (
+            id INTEGER PRIMARY KEY DEFAULT (nextval('warehouse_refresh_seq')),
+            refreshed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            trigger VARCHAR NOT NULL,
+            duration_ms DECIMAL(10, 2),
+            bronze_orders INTEGER,
+            silver_rows INTEGER,
+            gold_revenue_rows INTEGER,
+            gold_products_rows INTEGER,
+            silver_revenue_checksum DECIMAL(14, 2),
+            gold_revenue_checksum DECIMAL(14, 2),
+            checksum_match BOOLEAN,
+            validation_passed BOOLEAN,
+            error VARCHAR
+        );
+
         -- Indexes for common queries
         CREATE INDEX IF NOT EXISTS idx_orders_ordered_at ON orders(ordered_at);
         CREATE INDEX IF NOT EXISTS idx_orders_source_id ON orders(source_id);
@@ -479,6 +561,17 @@ class DuckDBStore:
         CREATE INDEX IF NOT EXISTS idx_orders_status_date ON orders(status_id, ordered_at);
         CREATE INDEX IF NOT EXISTS idx_orders_manager_date ON orders(manager_id, ordered_at);
         CREATE INDEX IF NOT EXISTS idx_orders_buyer_date ON orders(buyer_id, ordered_at);
+
+        -- Silver/Gold layer indexes
+        CREATE INDEX IF NOT EXISTS idx_silver_order_date ON silver_orders(order_date);
+        CREATE INDEX IF NOT EXISTS idx_silver_sales_type ON silver_orders(sales_type, order_date);
+        CREATE INDEX IF NOT EXISTS idx_silver_buyer ON silver_orders(buyer_id);
+        CREATE INDEX IF NOT EXISTS idx_gold_rev_date ON gold_daily_revenue(date, sales_type);
+        CREATE INDEX IF NOT EXISTS idx_gold_prod_date ON gold_daily_products(date, sales_type);
+        CREATE INDEX IF NOT EXISTS idx_gold_prod_product ON gold_daily_products(product_id);
+        CREATE INDEX IF NOT EXISTS idx_gold_prod_brand ON gold_daily_products(brand);
+        CREATE INDEX IF NOT EXISTS idx_gold_prod_category ON gold_daily_products(category_id);
+        CREATE INDEX IF NOT EXISTS idx_warehouse_refreshes_at ON warehouse_refreshes(refreshed_at);
         """
         self._connection.execute(schema_sql)
 
@@ -793,6 +886,281 @@ class DuckDBStore:
                 OR (NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
                     AND {table_alias}.manager_id IN ({manager_list}))
             )"""
+
+    # ─── Warehouse Layer Refresh ─────────────────────────────────────────────
+
+    async def refresh_warehouse_layers(self, trigger: str = "manual") -> Dict[str, Any]:
+        """Rebuild Silver and Gold warehouse layers from Bronze tables.
+
+        Atomically rebuilds silver_orders, gold_daily_revenue, and gold_daily_products
+        using CREATE OR REPLACE TABLE. Validates checksums and logs to warehouse_refreshes.
+
+        Args:
+            trigger: What triggered the refresh (incremental_sync, full_sync, sync_today, manual)
+
+        Returns:
+            Dict with refresh stats and validation results
+        """
+        import time
+        start_time = time.perf_counter()
+        error_msg = None
+
+        try:
+            async with self.connection() as conn:
+                # Build the retail manager filter SQL for use inside CASE
+                manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
+                retail_filter = f"""
+                    WHEN o.manager_id IS NULL THEN 'retail'
+                    WHEN o.manager_id = {B2B_MANAGER_ID} THEN 'b2b'
+                    WHEN o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'
+                    WHEN NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
+                         AND o.manager_id IN ({manager_list}) THEN 'retail'
+                    ELSE 'other'
+                """
+
+                # ── Silver: one row per order with derived fields ──
+                conn.execute(f"""
+                    CREATE OR REPLACE TABLE silver_orders AS
+                    SELECT
+                        o.id,
+                        o.source_id,
+                        o.status_id,
+                        o.grand_total,
+                        o.ordered_at,
+                        o.buyer_id,
+                        o.manager_id,
+                        {_date_in_kyiv('o.ordered_at')} AS order_date,
+                        o.status_id IN {tuple(int(s) for s in OrderStatus.return_statuses())} AS is_return,
+                        CASE {retail_filter} END AS sales_type,
+                        o.source_id IN (1, 2, 4) AS is_active_source,
+                        CASE o.source_id
+                            WHEN 1 THEN 'Instagram'
+                            WHEN 2 THEN 'Telegram'
+                            WHEN 4 THEN 'Shopify'
+                            ELSE 'Other'
+                        END AS source_name,
+                        CASE
+                            WHEN o.buyer_id IS NOT NULL
+                                 AND {_date_in_kyiv('o.ordered_at')} = fo.first_order_date
+                            THEN TRUE ELSE FALSE
+                        END AS is_new_customer,
+                        fo.first_order_date AS buyer_first_order_date
+                    FROM orders o
+                    LEFT JOIN (
+                        SELECT
+                            buyer_id,
+                            MIN({_date_in_kyiv('ordered_at')}) AS first_order_date
+                        FROM orders
+                        WHERE buyer_id IS NOT NULL
+                          AND source_id IN (1, 2, 4)
+                          AND status_id NOT IN {tuple(int(s) for s in OrderStatus.return_statuses())}
+                        GROUP BY buyer_id
+                    ) fo ON o.buyer_id = fo.buyer_id
+                """)
+
+                # ── Gold: daily revenue aggregated by (date, sales_type) ──
+                conn.execute("""
+                    CREATE OR REPLACE TABLE gold_daily_revenue AS
+                    SELECT
+                        order_date AS date,
+                        sales_type,
+                        COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0) AS revenue,
+                        COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) AS orders_count,
+                        COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN buyer_id END) AS unique_customers,
+                        COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND is_new_customer THEN buyer_id END) AS new_customers,
+                        COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END) AS returning_customers,
+                        COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 1 THEN grand_total END), 0) AS instagram_revenue,
+                        COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 2 THEN grand_total END), 0) AS telegram_revenue,
+                        COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 4 THEN grand_total END), 0) AS shopify_revenue,
+                        COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 1 THEN id END) AS instagram_orders,
+                        COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 2 THEN id END) AS telegram_orders,
+                        COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 4 THEN id END) AS shopify_orders,
+                        COUNT(DISTINCT CASE WHEN is_return AND is_active_source THEN id END) AS returns_count,
+                        COALESCE(SUM(CASE WHEN is_return AND is_active_source THEN grand_total END), 0) AS returns_revenue,
+                        CASE
+                            WHEN COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) > 0
+                            THEN COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0)
+                                 / COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END)
+                            ELSE 0
+                        END AS avg_order_value
+                    FROM silver_orders
+                    WHERE order_date IS NOT NULL
+                    GROUP BY order_date, sales_type
+                    ORDER BY order_date, sales_type
+                """)
+
+                # ── Gold: daily products aggregated by (date, sales_type, product, source) ──
+                conn.execute(f"""
+                    CREATE OR REPLACE TABLE gold_daily_products AS
+                    SELECT
+                        s.order_date AS date,
+                        s.sales_type,
+                        s.source_id,
+                        op.product_id,
+                        op.name AS product_name,
+                        p.brand,
+                        p.category_id,
+                        c.name AS category_name,
+                        parent_c.name AS parent_category_name,
+                        SUM(op.quantity) AS quantity_sold,
+                        SUM(op.price_sold * op.quantity) AS product_revenue,
+                        COUNT(DISTINCT s.id) AS order_count
+                    FROM silver_orders s
+                    JOIN order_products op ON s.id = op.order_id
+                    LEFT JOIN products p ON op.product_id = p.id
+                    LEFT JOIN categories c ON p.category_id = c.id
+                    LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
+                    WHERE NOT s.is_return
+                      AND s.is_active_source
+                      AND s.order_date IS NOT NULL
+                    GROUP BY
+                        s.order_date, s.sales_type, s.source_id,
+                        op.product_id, op.name, p.brand, p.category_id,
+                        c.name, parent_c.name
+                """)
+
+                # ── Recreate indexes (CREATE OR REPLACE TABLE drops them) ──
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_order_date ON silver_orders(order_date)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_sales_type ON silver_orders(sales_type, order_date)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_buyer ON silver_orders(buyer_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_rev_date ON gold_daily_revenue(date, sales_type)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_date ON gold_daily_products(date, sales_type)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_product ON gold_daily_products(product_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_brand ON gold_daily_products(brand)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_category ON gold_daily_products(category_id)")
+
+                # ── Validation checksums ──
+                checksums = conn.execute("""
+                    SELECT
+                        (SELECT COUNT(*) FROM orders) AS bronze_orders,
+                        (SELECT COUNT(*) FROM silver_orders) AS silver_rows,
+                        (SELECT COUNT(*) FROM gold_daily_revenue) AS gold_revenue_rows,
+                        (SELECT COUNT(*) FROM gold_daily_products) AS gold_products_rows,
+                        (SELECT COALESCE(SUM(grand_total), 0) FROM silver_orders
+                         WHERE NOT is_return AND is_active_source) AS silver_revenue,
+                        (SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue) AS gold_revenue
+                """).fetchone()
+
+                bronze_orders = checksums[0]
+                silver_rows = checksums[1]
+                gold_revenue_rows = checksums[2]
+                gold_products_rows = checksums[3]
+                silver_revenue = float(checksums[4])
+                gold_revenue = float(checksums[5])
+
+                checksum_match = abs(silver_revenue - gold_revenue) < 0.01
+                row_count_match = bronze_orders == silver_rows
+                validation_passed = checksum_match and row_count_match
+
+                if not validation_passed:
+                    logger.warning(
+                        f"Warehouse validation failed: "
+                        f"rows={bronze_orders}→{silver_rows} (match={row_count_match}), "
+                        f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match})"
+                    )
+
+                duration_ms = (time.perf_counter() - start_time) * 1000
+
+                # ── Audit log ──
+                conn.execute("""
+                    INSERT INTO warehouse_refreshes
+                        (refreshed_at, trigger, duration_ms, bronze_orders, silver_rows,
+                         gold_revenue_rows, gold_products_rows, silver_revenue_checksum,
+                         gold_revenue_checksum, checksum_match, validation_passed, error)
+                    VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, [
+                    trigger, round(duration_ms, 2),
+                    bronze_orders, silver_rows, gold_revenue_rows, gold_products_rows,
+                    round(silver_revenue, 2), round(gold_revenue, 2),
+                    checksum_match, validation_passed, None
+                ])
+
+                logger.info(
+                    f"Warehouse layers refreshed ({trigger}): "
+                    f"silver={silver_rows}, gold_rev={gold_revenue_rows}, "
+                    f"gold_prod={gold_products_rows}, "
+                    f"duration={duration_ms:.0f}ms, valid={validation_passed}"
+                )
+
+                return {
+                    "status": "success",
+                    "trigger": trigger,
+                    "duration_ms": round(duration_ms, 2),
+                    "bronze_orders": bronze_orders,
+                    "silver_rows": silver_rows,
+                    "gold_revenue_rows": gold_revenue_rows,
+                    "gold_products_rows": gold_products_rows,
+                    "checksum_match": checksum_match,
+                    "validation_passed": validation_passed,
+                }
+
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            error_msg = str(e)
+            logger.error(f"Warehouse refresh failed ({trigger}): {e}", exc_info=True)
+
+            # Log failure to audit table
+            try:
+                async with self.connection() as conn:
+                    conn.execute("""
+                        INSERT INTO warehouse_refreshes
+                            (refreshed_at, trigger, duration_ms, validation_passed, error)
+                        VALUES (CURRENT_TIMESTAMP, ?, ?, FALSE, ?)
+                    """, [trigger, round(duration_ms, 2), error_msg])
+            except Exception:
+                pass
+
+            return {
+                "status": "error",
+                "trigger": trigger,
+                "duration_ms": round(duration_ms, 2),
+                "error": error_msg,
+            }
+
+    async def get_warehouse_status(self) -> Dict[str, Any]:
+        """Get warehouse layer status for admin monitoring."""
+        async with self.connection() as conn:
+            # Last refresh info
+            last = conn.execute("""
+                SELECT refreshed_at, trigger, duration_ms, bronze_orders, silver_rows,
+                       gold_revenue_rows, gold_products_rows, checksum_match, validation_passed
+                FROM warehouse_refreshes
+                ORDER BY id DESC
+                LIMIT 1
+            """).fetchone()
+
+            # Count refreshes in last hour
+            recent_count = conn.execute("""
+                SELECT COUNT(*) FROM warehouse_refreshes
+                WHERE refreshed_at > CURRENT_TIMESTAMP - INTERVAL '1 hour'
+            """).fetchone()
+
+            if last:
+                return {
+                    "last_refresh": last[0].isoformat() if last[0] else None,
+                    "last_trigger": last[1],
+                    "last_duration_ms": float(last[2]) if last[2] else None,
+                    "bronze_orders": last[3],
+                    "silver_rows": last[4],
+                    "gold_revenue_rows": last[5],
+                    "gold_products_rows": last[6],
+                    "checksum_match": last[7],
+                    "validation_passed": last[8],
+                    "recent_refreshes": recent_count[0] if recent_count else 0,
+                }
+            else:
+                return {
+                    "last_refresh": None,
+                    "last_trigger": None,
+                    "last_duration_ms": None,
+                    "bronze_orders": 0,
+                    "silver_rows": 0,
+                    "gold_revenue_rows": 0,
+                    "gold_products_rows": 0,
+                    "checksum_match": None,
+                    "validation_passed": None,
+                    "recent_refreshes": 0,
+                }
 
     # ─── Sync Methods ─────────────────────────────────────────────────────────
 
@@ -1717,57 +2085,104 @@ class DuckDBStore:
         brand: Optional[str] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """Get summary statistics for a date range."""
+        """Get summary statistics for a date range (from Gold/Silver layers)."""
         async with self.connection() as conn:
-            # Build query with filters
-            params = [start_date, end_date]
-
-            # Base query for valid orders
-            where_clauses = [f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?"]
-
-            # Add sales type filter (retail/b2b)
-            where_clauses.append(self._build_sales_type_filter(sales_type))
-
-            # Exclude returns for main stats (convert enums to int values)
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-
-            if source_id:
-                where_clauses.append("o.source_id = ?")
-                params.append(source_id)
-
-            # Category/brand filtering requires join with order_products
-            joins = ""
             if category_id or brand:
-                joins = "JOIN order_products op ON o.id = op.order_id JOIN products p ON op.product_id = p.id"
+                # Use Silver layer with JOINs for correct distinct order counts
+                # (gold_daily_products can't deduplicate orders with multiple matching products)
+                params = [start_date, end_date]
+                where_clauses = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+
+                if sales_type != "all":
+                    where_clauses.append("s.sales_type = ?")
+                    params.append(sales_type)
+
+                if source_id:
+                    where_clauses.append("s.source_id = ?")
+                    params.append(source_id)
+
+                cat_ids = None
                 if category_id:
-                    # Get category and children
                     cat_ids = await self._get_category_with_children(conn, category_id)
                     where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
                     params.extend(cat_ids)
+
                 if brand:
                     where_clauses.append("LOWER(p.brand) = LOWER(?)")
                     params.append(brand)
 
-            where_sql = " AND ".join(where_clauses)
+                where_sql = " AND ".join(where_clauses)
 
-            # Main stats query
-            stats_sql = f"""
-                SELECT
-                    COUNT(DISTINCT CASE WHEN o.status_id NOT IN {return_statuses} THEN o.id END) as total_orders,
-                    COALESCE(SUM(CASE WHEN o.status_id NOT IN {return_statuses} THEN o.grand_total END), 0) as total_revenue,
-                    COUNT(DISTINCT CASE WHEN o.status_id IN {return_statuses} THEN o.id END) as total_returns,
-                    COALESCE(SUM(CASE WHEN o.status_id IN {return_statuses} THEN o.grand_total END), 0) as returns_revenue
-                FROM orders o
-                {joins}
-                WHERE {where_sql}
-            """
+                # Query Silver + order_products + products for correct distinct counts
+                result = conn.execute(f"""
+                    SELECT
+                        COUNT(DISTINCT s.id) as total_orders,
+                        COALESCE(SUM(op.price_sold * op.quantity), 0) as total_revenue
+                    FROM silver_orders s
+                    JOIN order_products op ON s.id = op.order_id
+                    LEFT JOIN products p ON op.product_id = p.id
+                    WHERE {where_sql}
+                """, params).fetchone()
 
-            result = conn.execute(stats_sql, params).fetchone()
+                total_orders = int(result[0] or 0)
+                total_revenue = float(result[1] or 0)
 
-            total_orders = result[0] or 0
-            total_revenue = float(result[1] or 0)
-            total_returns = result[2] or 0
-            returns_revenue = float(result[3] or 0)
+                # Returns from gold_daily_revenue (returns aren't product-specific)
+                ret_params = [start_date, end_date]
+                ret_where = ["date BETWEEN ? AND ?"]
+                if sales_type != "all":
+                    ret_where.append("sales_type = ?")
+                    ret_params.append(sales_type)
+                ret_result = conn.execute(f"""
+                    SELECT COALESCE(SUM(returns_count), 0), COALESCE(SUM(returns_revenue), 0)
+                    FROM gold_daily_revenue
+                    WHERE {" AND ".join(ret_where)}
+                """, ret_params).fetchone()
+                total_returns = int(ret_result[0])
+                returns_revenue = float(ret_result[1])
+            else:
+                # Use gold_daily_revenue for non-product queries
+                params = [start_date, end_date]
+                where_clauses = ["date BETWEEN ? AND ?"]
+
+                if sales_type != "all":
+                    where_clauses.append("sales_type = ?")
+                    params.append(sales_type)
+
+                where_sql = " AND ".join(where_clauses)
+
+                if source_id:
+                    # Source-specific: sum per-source columns
+                    source_col_map = {1: "instagram", 2: "telegram", 4: "shopify"}
+                    src_name = source_col_map.get(source_id)
+                    if src_name:
+                        result = conn.execute(f"""
+                            SELECT
+                                SUM({src_name}_orders) as total_orders,
+                                SUM({src_name}_revenue) as total_revenue,
+                                SUM(returns_count) as total_returns,
+                                SUM(returns_revenue) as returns_revenue
+                            FROM gold_daily_revenue
+                            WHERE {where_sql}
+                        """, params).fetchone()
+                    else:
+                        result = (0, 0, 0, 0)
+                else:
+                    result = conn.execute(f"""
+                        SELECT
+                            SUM(orders_count) as total_orders,
+                            SUM(revenue) as total_revenue,
+                            SUM(returns_count) as total_returns,
+                            SUM(returns_revenue) as returns_revenue
+                        FROM gold_daily_revenue
+                        WHERE {where_sql}
+                    """, params).fetchone()
+
+                total_orders = int(result[0] or 0)
+                total_revenue = float(result[1] or 0)
+                total_returns = int(result[2] or 0)
+                returns_revenue = float(result[3] or 0)
+
             avg_check = total_revenue / total_orders if total_orders > 0 else 0
 
             return {
@@ -1780,6 +2195,94 @@ class DuckDBStore:
                 "endDate": end_date.isoformat()
             }
 
+    def _build_gold_revenue_query(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "retail",
+        source_id: Optional[int] = None,
+    ) -> Tuple[str, list]:
+        """Build a query against gold_daily_revenue for a date range.
+
+        Returns (sql, params) tuple that SELECTs day, revenue, order_count.
+        """
+        params = [start_date, end_date]
+        where_clauses = ["date BETWEEN ? AND ?"]
+
+        if sales_type != "all":
+            where_clauses.append("sales_type = ?")
+            params.append(sales_type)
+
+        where_sql = " AND ".join(where_clauses)
+
+        if source_id:
+            source_col_map = {1: "instagram", 2: "telegram", 4: "shopify"}
+            src = source_col_map.get(source_id)
+            if src:
+                sql = f"""
+                    SELECT date AS day, {src}_revenue AS revenue, {src}_orders AS order_count
+                    FROM gold_daily_revenue
+                    WHERE {where_sql}
+                    ORDER BY date
+                """
+            else:
+                sql = f"SELECT NULL::DATE, 0, 0 WHERE FALSE"
+        else:
+            sql = f"""
+                SELECT date AS day, revenue, orders_count AS order_count
+                FROM gold_daily_revenue
+                WHERE {where_sql}
+                ORDER BY date
+            """
+        return sql, params
+
+    def _build_silver_products_revenue_query(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "retail",
+        source_id: Optional[int] = None,
+        category_ids: Optional[List[int]] = None,
+        brand: Optional[str] = None,
+    ) -> Tuple[str, list]:
+        """Build a query against Silver layer for revenue trend with product filters.
+
+        Uses silver_orders + order_products JOIN for correct distinct order counts.
+        Returns (sql, params) that SELECTs day, revenue, order_count.
+        """
+        params: list = [start_date, end_date]
+        where_clauses = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+
+        if sales_type != "all":
+            where_clauses.append("s.sales_type = ?")
+            params.append(sales_type)
+
+        if source_id:
+            where_clauses.append("s.source_id = ?")
+            params.append(source_id)
+
+        if category_ids:
+            where_clauses.append(f"p.category_id IN ({','.join('?' * len(category_ids))})")
+            params.extend(category_ids)
+
+        if brand:
+            where_clauses.append("LOWER(p.brand) = LOWER(?)")
+            params.append(brand)
+
+        where_sql = " AND ".join(where_clauses)
+        sql = f"""
+            SELECT s.order_date AS day,
+                   COALESCE(SUM(op.price_sold * op.quantity), 0) AS revenue,
+                   COUNT(DISTINCT s.id) AS order_count
+            FROM silver_orders s
+            JOIN order_products op ON s.id = op.order_id
+            LEFT JOIN products p ON op.product_id = p.id
+            WHERE {where_sql}
+            GROUP BY s.order_date
+            ORDER BY s.order_date
+        """
+        return sql, params
+
     async def get_revenue_trend(
         self,
         start_date: date,
@@ -1791,47 +2294,22 @@ class DuckDBStore:
         sales_type: str = "retail",
         compare_type: str = "previous_period"
     ) -> Dict[str, Any]:
-        """Get daily revenue trend for chart."""
+        """Get daily revenue trend for chart (from Gold layer)."""
         async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+            cat_ids = None
+            if category_id:
+                cat_ids = await self._get_category_with_children(conn, category_id)
 
-            # Build filters
-            params = [start_date, end_date]
-            where_clauses = [
-                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
-                f"o.status_id NOT IN {return_statuses}",
-                self._build_sales_type_filter(sales_type)
-            ]
+            use_products = bool(category_id or brand)
 
-            joins = ""
-            if source_id:
-                where_clauses.append("o.source_id = ?")
-                params.append(source_id)
-
-            if category_id or brand:
-                joins = "JOIN order_products op ON o.id = op.order_id JOIN products p ON op.product_id = p.id"
-                if category_id:
-                    cat_ids = await self._get_category_with_children(conn, category_id)
-                    where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
-                    params.extend(cat_ids)
-                if brand:
-                    where_clauses.append("LOWER(p.brand) = LOWER(?)")
-                    params.append(brand)
-
-            where_sql = " AND ".join(where_clauses)
-
-            # Query daily revenue and order counts
-            sql = f"""
-                SELECT
-                    {_date_in_kyiv('o.ordered_at')} as day,
-                    SUM(o.grand_total) as revenue,
-                    COUNT(DISTINCT o.id) as order_count
-                FROM orders o
-                {joins}
-                WHERE {where_sql}
-                GROUP BY {_date_in_kyiv('o.ordered_at')}
-                ORDER BY day
-            """
+            if use_products:
+                sql, params = self._build_silver_products_revenue_query(
+                    start_date, end_date, sales_type, source_id, cat_ids, brand
+                )
+            else:
+                sql, params = self._build_gold_revenue_query(
+                    start_date, end_date, sales_type, source_id
+                )
 
             results = conn.execute(sql, params).fetchall()
             daily_data = {row[0]: (float(row[1]), int(row[2])) for row in results}
@@ -1862,49 +2340,28 @@ class DuckDBStore:
             if include_comparison:
                 period_days = (end_date - start_date).days + 1
 
-                # Calculate comparison period based on compare_type
                 if compare_type == "year_ago":
-                    # Same dates, one year ago
                     from dateutil.relativedelta import relativedelta
                     prev_start = start_date - relativedelta(years=1)
                     prev_end = end_date - relativedelta(years=1)
                 elif compare_type == "month_ago":
-                    # Same dates, one month ago
                     from dateutil.relativedelta import relativedelta
                     prev_start = start_date - relativedelta(months=1)
                     prev_end = end_date - relativedelta(months=1)
                 else:
-                    # Default: previous_period (immediately before current)
                     prev_end = start_date - timedelta(days=1)
                     prev_start = prev_end - timedelta(days=period_days - 1)
 
-                prev_params = [prev_start, prev_end]
-                prev_where = [
-                    f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
-                    f"o.status_id NOT IN {return_statuses}",
-                    self._build_sales_type_filter(sales_type)
-                ]
+                if use_products:
+                    prev_sql, prev_params = self._build_silver_products_revenue_query(
+                        prev_start, prev_end, sales_type, source_id, cat_ids, brand
+                    )
+                else:
+                    prev_sql, prev_params = self._build_gold_revenue_query(
+                        prev_start, prev_end, sales_type, source_id
+                    )
 
-                if source_id:
-                    prev_where.append("o.source_id = ?")
-                    prev_params.append(source_id)
-
-                if category_id or brand:
-                    if category_id:
-                        prev_where.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
-                        prev_params.extend(cat_ids)
-                    if brand:
-                        prev_where.append("LOWER(p.brand) = LOWER(?)")
-                        prev_params.append(brand)
-
-                prev_sql = f"""
-                    SELECT {_date_in_kyiv('o.ordered_at')} as day, SUM(o.grand_total) as revenue
-                    FROM orders o {joins}
-                    WHERE {" AND ".join(prev_where)}
-                    GROUP BY {_date_in_kyiv('o.ordered_at')}
-                    ORDER BY day
-                """
-
+                # Only need day + revenue for comparison
                 prev_results = conn.execute(prev_sql, prev_params).fetchall()
                 prev_daily = {row[0]: float(row[1]) for row in prev_results}
 
@@ -1929,15 +2386,14 @@ class DuckDBStore:
             comparison = None
             if include_comparison and len(datasets) > 1:
                 prev_dataset = datasets[1]
-                # Calculate totals for growth delta
                 current_total = sum(data)
                 prev_total = sum(prev_dataset["data"])
                 growth_percent = ((current_total - prev_total) / prev_total * 100) if prev_total > 0 else 0
 
                 comparison = {
-                    "labels": labels,  # Same labels, different time period
+                    "labels": labels,
                     "revenue": prev_dataset["data"],
-                    "orders": [],  # Orders comparison not tracked separately
+                    "orders": [],
                     "period": {
                         "start": prev_start.isoformat(),
                         "end": prev_end.isoformat(),
@@ -1950,12 +2406,11 @@ class DuckDBStore:
                     }
                 }
 
-            # Return both formats: 'datasets' for v1, 'revenue'/'orders'/'comparison' for v2
             result = {
                 "labels": labels,
                 "revenue": data,
                 "orders": orders_data,
-                "datasets": datasets  # Keep for backwards compatibility
+                "datasets": datasets
             }
             if comparison:
                 result["comparison"] = comparison
@@ -1969,56 +2424,86 @@ class DuckDBStore:
         brand: Optional[str] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """Get sales breakdown by source."""
+        """Get sales breakdown by source (from Gold/Silver layers)."""
         async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            params = [start_date, end_date]
-            where_clauses = [
-                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
-                f"o.status_id NOT IN {return_statuses}",
-                self._build_sales_type_filter(sales_type)
-            ]
+            source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
+            source_colors = {1: "#7C3AED", 2: "#2563EB", 4: "#eb4200"}
 
-            joins = ""
             if category_id or brand:
-                joins = "JOIN order_products op ON o.id = op.order_id JOIN products p ON op.product_id = p.id"
+                # Use Silver layer with JOINs for correct distinct order counts
+                params = [start_date, end_date]
+                where_clauses = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+
+                if sales_type != "all":
+                    where_clauses.append("s.sales_type = ?")
+                    params.append(sales_type)
+
                 if category_id:
                     cat_ids = await self._get_category_with_children(conn, category_id)
                     where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
                     params.extend(cat_ids)
+
                 if brand:
                     where_clauses.append("LOWER(p.brand) = LOWER(?)")
                     params.append(brand)
 
-            sql = f"""
-                SELECT
-                    o.source_id,
-                    COUNT(DISTINCT o.id) as orders,
-                    SUM(o.grand_total) as revenue
-                FROM orders o
-                {joins}
-                WHERE {" AND ".join(where_clauses)}
-                GROUP BY o.source_id
-                ORDER BY revenue DESC
-            """
+                where_sql = " AND ".join(where_clauses)
 
-            results = conn.execute(sql, params).fetchall()
+                results = conn.execute(f"""
+                    SELECT s.source_id,
+                           COUNT(DISTINCT s.id) as orders,
+                           COALESCE(SUM(op.price_sold * op.quantity), 0) as revenue
+                    FROM silver_orders s
+                    JOIN order_products op ON s.id = op.order_id
+                    LEFT JOIN products p ON op.product_id = p.id
+                    WHERE {where_sql}
+                    GROUP BY s.source_id
+                    ORDER BY revenue DESC
+                """, params).fetchall()
 
-            source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
-            source_colors = {1: "#7C3AED", 2: "#2563EB", 4: "#eb4200"}
+                labels = []
+                orders = []
+                revenue = []
+                colors = []
+                for row in results:
+                    sid = row[0]
+                    if sid in source_names:
+                        labels.append(source_names[sid])
+                        orders.append(int(row[1]))
+                        revenue.append(round(float(row[2]), 2))
+                        colors.append(source_colors.get(sid, "#999999"))
+            else:
+                # Use gold_daily_revenue per-source columns
+                params = [start_date, end_date]
+                where_clauses = ["date BETWEEN ? AND ?"]
 
-            labels = []
-            orders = []
-            revenue = []
-            colors = []
+                if sales_type != "all":
+                    where_clauses.append("sales_type = ?")
+                    params.append(sales_type)
 
-            for row in results:
-                sid = row[0]
-                if sid in source_names:  # Only include active sources
-                    labels.append(source_names[sid])
-                    orders.append(row[1])
-                    revenue.append(round(float(row[2]), 2))
-                    colors.append(source_colors.get(sid, "#999999"))
+                where_sql = " AND ".join(where_clauses)
+
+                result = conn.execute(f"""
+                    SELECT
+                        SUM(instagram_orders) as ig_orders, SUM(instagram_revenue) as ig_rev,
+                        SUM(telegram_orders) as tg_orders, SUM(telegram_revenue) as tg_rev,
+                        SUM(shopify_orders) as sh_orders, SUM(shopify_revenue) as sh_rev
+                    FROM gold_daily_revenue
+                    WHERE {where_sql}
+                """, params).fetchone()
+
+                # Build source list sorted by revenue desc
+                source_data = [
+                    (1, "Instagram", int(result[0] or 0), float(result[1] or 0)),
+                    (2, "Telegram", int(result[2] or 0), float(result[3] or 0)),
+                    (4, "Shopify", int(result[4] or 0), float(result[5] or 0)),
+                ]
+                source_data.sort(key=lambda x: x[3], reverse=True)
+
+                labels = [s[1] for s in source_data if s[3] > 0 or s[2] > 0]
+                orders = [s[2] for s in source_data if s[3] > 0 or s[2] > 0]
+                revenue = [round(s[3], 2) for s in source_data if s[3] > 0 or s[2] > 0]
+                colors = [source_colors[s[0]] for s in source_data if s[3] > 0 or s[2] > 0]
 
             return {
                 "labels": labels,
@@ -2037,56 +2522,51 @@ class DuckDBStore:
         limit: int = 10,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """Get top products by quantity."""
+        """Get top products by quantity (from Gold layer)."""
         async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
-            where_clauses = [
-                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
-                f"o.status_id NOT IN {return_statuses}",
-                self._build_sales_type_filter(sales_type)
-            ]
+            where_clauses = ["g.date BETWEEN ? AND ?"]
+
+            if sales_type != "all":
+                where_clauses.append("g.sales_type = ?")
+                params.append(sales_type)
 
             if source_id:
-                where_clauses.append("o.source_id = ?")
+                where_clauses.append("g.source_id = ?")
                 params.append(source_id)
-
-            joins = "JOIN order_products op ON o.id = op.order_id LEFT JOIN products p ON op.product_id = p.id"
 
             if category_id:
                 cat_ids = await self._get_category_with_children(conn, category_id)
-                where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                where_clauses.append(f"g.category_id IN ({','.join('?' * len(cat_ids))})")
                 params.extend(cat_ids)
 
             if brand:
-                where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                where_clauses.append("LOWER(g.brand) = LOWER(?)")
                 params.append(brand)
 
             params.append(limit)
+            where_sql = " AND ".join(where_clauses)
 
-            sql = f"""
+            results = conn.execute(f"""
                 SELECT
-                    op.name,
-                    SUM(op.quantity) as total_qty
-                FROM orders o
-                {joins}
-                WHERE {" AND ".join(where_clauses)}
-                GROUP BY op.name
+                    g.product_name,
+                    SUM(g.quantity_sold) as total_qty
+                FROM gold_daily_products g
+                WHERE {where_sql}
+                GROUP BY g.product_name
                 ORDER BY total_qty DESC
                 LIMIT ?
-            """
-
-            results = conn.execute(sql, params).fetchall()
+            """, params).fetchall()
 
             raw_labels = [row[0] or "Unknown" for row in results]
             labels = [self._wrap_label(row[0]) for row in results]
-            data = [row[1] for row in results]
+            data = [int(row[1]) for row in results]
             total = sum(data) if data else 1
             percentages = [round(d / total * 100, 1) for d in data]
 
             return {
-                "labels": raw_labels,  # Plain strings for v2 React frontend
-                "wrappedLabels": labels,  # Wrapped arrays for v1 Chart.js
+                "labels": raw_labels,
+                "wrappedLabels": labels,
                 "data": data,
                 "percentages": percentages,
                 "backgroundColor": "#2563EB"
@@ -2181,159 +2661,108 @@ class DuckDBStore:
         brand: Optional[str] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """Get customer insights: new vs returning, AOV trend."""
+        """Get customer insights: new vs returning, AOV trend (from Gold/Silver layers)."""
         async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+            # ── Base metrics from gold_daily_revenue ──
             params = [start_date, end_date]
-            where_clauses = [
-                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
-                f"o.status_id NOT IN {return_statuses}",
-                self._build_sales_type_filter(sales_type)
-            ]
+            where_clauses = ["date BETWEEN ? AND ?"]
 
-            joins = ""
-            if source_id:
-                where_clauses.append("o.source_id = ?")
-                params.append(source_id)
-
-            if brand:
-                joins = "JOIN order_products op ON o.id = op.order_id JOIN products p ON op.product_id = p.id"
-                where_clauses.append("LOWER(p.brand) = LOWER(?)")
-                params.append(brand)
+            if sales_type != "all":
+                where_clauses.append("sales_type = ?")
+                params.append(sales_type)
 
             where_sql = " AND ".join(where_clauses)
 
-            # New vs returning customers (based on buyer creation date)
-            customer_sql = f"""
+            gold_result = conn.execute(f"""
                 SELECT
-                    COUNT(DISTINCT CASE WHEN DATE(o.created_at) >= ? THEN o.buyer_id END) as new_customers,
-                    COUNT(DISTINCT CASE WHEN DATE(o.created_at) < ? THEN o.buyer_id END) as returning_customers,
-                    COUNT(DISTINCT o.id) as total_orders
-                FROM orders o
-                {joins}
-                WHERE {where_sql} AND o.buyer_id IS NOT NULL
-            """
-            customer_params = [start_date] + params + [start_date]
-            # Simplified: use order created_at as proxy for customer newness
-            customer_result = conn.execute(f"""
-                SELECT
-                    COUNT(DISTINCT o.buyer_id) as total_customers,
-                    COUNT(DISTINCT o.id) as total_orders,
-                    SUM(o.grand_total) as total_revenue
-                FROM orders o
-                {joins}
-                WHERE {where_sql} AND o.buyer_id IS NOT NULL
+                    SUM(unique_customers) as total_customers,
+                    SUM(orders_count) as total_orders,
+                    SUM(revenue) as total_revenue,
+                    SUM(new_customers) as new_customers,
+                    SUM(returning_customers) as returning_customers
+                FROM gold_daily_revenue
+                WHERE {where_sql}
             """, params).fetchone()
 
-            total_customers = customer_result[0] or 0
-            total_orders = customer_result[1] or 0
-            total_revenue = float(customer_result[2] or 0)
+            total_customers = int(gold_result[0] or 0)
+            total_orders = int(gold_result[1] or 0)
+            total_revenue = float(gold_result[2] or 0)
+            new_customers = int(gold_result[3] or 0)
+            returning_customers = int(gold_result[4] or 0)
 
-            # Estimate new vs returning (buyers whose first order in DB is in this period)
-            new_customers_result = conn.execute(f"""
-                WITH first_orders AS (
-                    SELECT buyer_id, MIN(DATE(ordered_at)) as first_order_date
-                    FROM orders
-                    WHERE buyer_id IS NOT NULL
-                    GROUP BY buyer_id
-                )
-                SELECT COUNT(DISTINCT o.buyer_id)
-                FROM orders o
-                {joins}
-                JOIN first_orders fo ON o.buyer_id = fo.buyer_id
-                WHERE {where_sql} AND fo.first_order_date >= ?
-            """, params + [start_date]).fetchone()
-            new_customers = new_customers_result[0] or 0
-            returning_customers = total_customers - new_customers
-
-            # AOV trend by day
-            aov_sql = f"""
-                SELECT
-                    {_date_in_kyiv('o.ordered_at')} as day,
-                    AVG(o.grand_total) as avg_order_value,
-                    COUNT(DISTINCT o.id) as orders
-                FROM orders o
-                {joins}
+            # AOV trend from gold_daily_revenue
+            aov_results = conn.execute(f"""
+                SELECT date,
+                       CASE WHEN orders_count > 0 THEN revenue / orders_count ELSE 0 END as aov
+                FROM gold_daily_revenue
                 WHERE {where_sql}
-                GROUP BY {_date_in_kyiv('o.ordered_at')}
-                ORDER BY day
-            """
-            aov_results = conn.execute(aov_sql, params).fetchall()
-            aov_by_day = {row[0]: {"aov": float(row[1]), "orders": row[2]} for row in aov_results}
+                ORDER BY date
+            """, params).fetchall()
+            aov_by_day = {row[0]: float(row[1]) for row in aov_results}
 
-            # Build AOV trend data
             labels = []
             aov_data = []
             current = start_date
             while current <= end_date:
                 labels.append(current.strftime("%d.%m"))
-                day_data = aov_by_day.get(current, {"aov": 0, "orders": 0})
-                aov_data.append(round(day_data["aov"], 2))
+                aov_data.append(round(aov_by_day.get(current, 0), 2))
                 current += timedelta(days=1)
 
             overall_aov = total_revenue / total_orders if total_orders > 0 else 0
 
-            # CLV Metrics - Calculate Customer Lifetime Value
-            # Using 250-day inactivity window (P95=243 days from production analysis)
-            INACTIVITY_WINDOW_DAYS = 250
+            # ── CLV metrics from silver_orders (need per-buyer aggregation) ──
+            sales_where = "s.sales_type = ?" if sales_type != "all" else "1=1"
+            clv_params = [sales_type] if sales_type != "all" else []
 
-            # Get CLV data: lifespan, purchase frequency, and value for repeat customers
             clv_result = conn.execute(f"""
                 WITH customer_stats AS (
                     SELECT
-                        o.buyer_id,
-                        COUNT(DISTINCT o.id) as order_count,
-                        SUM(o.grand_total) as total_spent,
-                        MIN(o.ordered_at) as first_order,
-                        MAX(o.ordered_at) as last_order,
-                        DATE_DIFF('day', MIN(o.ordered_at), MAX(o.ordered_at)) as lifespan_days
-                    FROM orders o
-                    {joins}
-                    WHERE o.buyer_id IS NOT NULL
-                      AND o.status_id NOT IN {return_statuses}
-                      AND {self._build_sales_type_filter(sales_type)}
-                    GROUP BY o.buyer_id
-                    HAVING COUNT(DISTINCT o.id) > 1  -- Only repeat customers
+                        s.buyer_id,
+                        COUNT(DISTINCT s.id) as order_count,
+                        SUM(s.grand_total) as total_spent,
+                        DATE_DIFF('day', MIN(s.ordered_at), MAX(s.ordered_at)) as lifespan_days
+                    FROM silver_orders s
+                    WHERE s.buyer_id IS NOT NULL
+                      AND NOT s.is_return
+                      AND s.is_active_source
+                      AND {sales_where}
+                    GROUP BY s.buyer_id
+                    HAVING COUNT(DISTINCT s.id) > 1
                 )
                 SELECT
                     COUNT(*) as repeat_customer_count,
                     AVG(order_count) as avg_purchase_frequency,
                     AVG(lifespan_days) as avg_lifespan_days,
-                    AVG(total_spent) as avg_customer_value,
-                    SUM(total_spent) as total_repeat_revenue
+                    AVG(total_spent) as avg_customer_value
                 FROM customer_stats
-            """).fetchone()
+            """, clv_params).fetchone()
 
             repeat_customer_count = clv_result[0] or 0
             avg_purchase_frequency = float(clv_result[1] or 0)
             avg_lifespan_days = float(clv_result[2] or 0)
             avg_customer_value = float(clv_result[3] or 0)
-
-            # Calculate CLV using: AOV × Purchase Frequency × (Lifespan in years)
-            # Or simpler: Average total revenue per repeat customer
             clv = avg_customer_value if repeat_customer_count > 0 else 0
-
-            # Purchase frequency for all customers in period
             purchase_frequency = total_orders / total_customers if total_customers > 0 else 0
 
-            # All-time customer metrics (true repeat rate)
+            # All-time repeat rate from silver_orders
             alltime_result = conn.execute(f"""
                 WITH customer_orders AS (
                     SELECT
-                        o.buyer_id,
-                        COUNT(DISTINCT o.id) as order_count
-                    FROM orders o
-                    WHERE o.buyer_id IS NOT NULL
-                      AND o.status_id NOT IN {return_statuses}
-                      AND {self._build_sales_type_filter(sales_type)}
-                    GROUP BY o.buyer_id
+                        s.buyer_id,
+                        COUNT(DISTINCT s.id) as order_count
+                    FROM silver_orders s
+                    WHERE s.buyer_id IS NOT NULL
+                      AND NOT s.is_return
+                      AND s.is_active_source
+                      AND {sales_where}
+                    GROUP BY s.buyer_id
                 )
                 SELECT
                     COUNT(*) as total_customers,
                     SUM(CASE WHEN order_count >= 2 THEN 1 ELSE 0 END) as repeat_customers,
                     AVG(order_count) as avg_orders_per_customer
                 FROM customer_orders
-            """).fetchone()
+            """, clv_params).fetchone()
 
             alltime_total_customers = alltime_result[0] or 0
             alltime_repeat_customers = alltime_result[1] or 0
@@ -2364,12 +2793,10 @@ class DuckDBStore:
                     "totalOrders": total_orders,
                     "repeatRate": round((returning_customers / total_customers * 100) if total_customers > 0 else 0, 1),
                     "averageOrderValue": round(overall_aov, 2),
-                    # CLV metrics
                     "customerLifetimeValue": round(clv, 2),
                     "avgPurchaseFrequency": round(avg_purchase_frequency, 2),
                     "avgCustomerLifespanDays": round(avg_lifespan_days, 0),
                     "purchaseFrequency": round(purchase_frequency, 2),
-                    # All-time metrics
                     "totalCustomersAllTime": alltime_total_customers,
                     "repeatCustomersAllTime": alltime_repeat_customers,
                     "trueRepeatRate": round(true_repeat_rate, 1),
@@ -2385,85 +2812,68 @@ class DuckDBStore:
         brand: Optional[str] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """Get product performance: top by revenue, category breakdown."""
+        """Get product performance: top by revenue, category breakdown (from Gold layer)."""
         async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
-            where_clauses = [
-                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
-                f"o.status_id NOT IN {return_statuses}",
-                self._build_sales_type_filter(sales_type)
-            ]
+            where_clauses = ["g.date BETWEEN ? AND ?"]
+
+            if sales_type != "all":
+                where_clauses.append("g.sales_type = ?")
+                params.append(sales_type)
 
             if source_id:
-                where_clauses.append("o.source_id = ?")
+                where_clauses.append("g.source_id = ?")
                 params.append(source_id)
 
-            brand_filter = ""
             if brand:
-                brand_filter = "AND LOWER(p.brand) = LOWER(?)"
+                where_clauses.append("LOWER(g.brand) = LOWER(?)")
                 params.append(brand)
 
             where_sql = " AND ".join(where_clauses)
 
             # Top products by revenue
-            top_revenue_sql = f"""
+            top_results = conn.execute(f"""
                 SELECT
-                    op.name,
-                    SUM(op.price_sold * op.quantity) as revenue,
-                    SUM(op.quantity) as quantity
-                FROM orders o
-                JOIN order_products op ON o.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
-                WHERE {where_sql} {brand_filter}
-                GROUP BY op.name
+                    g.product_name,
+                    SUM(g.product_revenue) as revenue,
+                    SUM(g.quantity_sold) as quantity
+                FROM gold_daily_products g
+                WHERE {where_sql}
+                GROUP BY g.product_name
                 ORDER BY revenue DESC
                 LIMIT 10
-            """
-            top_results = conn.execute(top_revenue_sql, params).fetchall()
+            """, params).fetchall()
 
             top_by_revenue = {
-                "labels": [row[0] or "Unknown" for row in top_results],  # Plain strings for v2
-                "wrappedLabels": [self._wrap_label(row[0]) for row in top_results],  # For v1
+                "labels": [row[0] or "Unknown" for row in top_results],
+                "wrappedLabels": [self._wrap_label(row[0]) for row in top_results],
                 "data": [round(float(row[1]), 2) for row in top_results],
-                "quantities": [row[2] for row in top_results],
+                "quantities": [int(row[2]) for row in top_results],
                 "backgroundColor": "#16A34A"
             }
 
-            # Category breakdown
-            cat_params = [start_date, end_date]
-            if source_id:
-                cat_params.append(source_id)
-            if brand:
-                cat_params.append(brand)
-
-            # Use parent category (root) for grouping, fall back to direct category if no parent
-            category_sql = f"""
+            # Category breakdown (use parent_category_name, fall back to category_name)
+            cat_results = conn.execute(f"""
                 SELECT
-                    COALESCE(parent_c.name, c.name, 'Other') as category_name,
-                    SUM(op.price_sold * op.quantity) as revenue,
-                    SUM(op.quantity) as quantity
-                FROM orders o
-                JOIN order_products op ON o.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
-                LEFT JOIN categories c ON p.category_id = c.id
-                LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
-                WHERE {where_sql} {brand_filter}
-                GROUP BY COALESCE(parent_c.name, c.name, 'Other')
+                    COALESCE(g.parent_category_name, g.category_name, 'Other') as category_name,
+                    SUM(g.product_revenue) as revenue,
+                    SUM(g.quantity_sold) as quantity
+                FROM gold_daily_products g
+                WHERE {where_sql}
+                GROUP BY COALESCE(g.parent_category_name, g.category_name, 'Other')
                 ORDER BY revenue DESC
-            """
-            cat_results = conn.execute(category_sql, params).fetchall()
+            """, params).fetchall()
 
             category_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4"]
             category_breakdown = {
                 "labels": [row[0] for row in cat_results],
                 "revenue": [round(float(row[1]), 2) for row in cat_results],
-                "quantity": [row[2] for row in cat_results],
+                "quantity": [int(row[2]) for row in cat_results],
                 "backgroundColor": category_colors[:len(cat_results)]
             }
 
             total_revenue = sum(float(row[1]) for row in top_results) if top_results else 0
-            total_quantity = sum(row[2] for row in top_results) if top_results else 0
+            total_quantity = sum(int(row[2]) for row in top_results) if top_results else 0
 
             return {
                 "topByRevenue": top_by_revenue,
@@ -2547,37 +2957,33 @@ class DuckDBStore:
         source_id: Optional[int] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """Get brand analytics: top brands by revenue and quantity."""
+        """Get brand analytics: top brands by revenue and quantity (from Gold layer)."""
         async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
-            where_clauses = [
-                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
-                f"o.status_id NOT IN {return_statuses}",
-                self._build_sales_type_filter(sales_type)
-            ]
+            where_clauses = ["g.date BETWEEN ? AND ?"]
+
+            if sales_type != "all":
+                where_clauses.append("g.sales_type = ?")
+                params.append(sales_type)
 
             if source_id:
-                where_clauses.append("o.source_id = ?")
+                where_clauses.append("g.source_id = ?")
                 params.append(source_id)
 
             where_sql = " AND ".join(where_clauses)
 
-            # Brand stats
-            brand_sql = f"""
+            # Brand stats from gold_daily_products
+            brand_results = conn.execute(f"""
                 SELECT
-                    COALESCE(p.brand, 'Unknown') as brand_name,
-                    SUM(op.price_sold * op.quantity) as revenue,
-                    SUM(op.quantity) as quantity,
-                    COUNT(DISTINCT o.id) as orders
-                FROM orders o
-                JOIN order_products op ON o.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
+                    COALESCE(g.brand, 'Unknown') as brand_name,
+                    SUM(g.product_revenue) as revenue,
+                    SUM(g.quantity_sold) as quantity,
+                    SUM(g.order_count) as orders
+                FROM gold_daily_products g
                 WHERE {where_sql}
-                GROUP BY COALESCE(p.brand, 'Unknown')
+                GROUP BY COALESCE(g.brand, 'Unknown')
                 ORDER BY revenue DESC
-            """
-            brand_results = conn.execute(brand_sql, params).fetchall()
+            """, params).fetchall()
 
             brand_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4", "#14B8A6", "#EF4444"]
 
@@ -2586,8 +2992,8 @@ class DuckDBStore:
             top_brands_revenue = {
                 "labels": [row[0] for row in top_by_revenue],
                 "data": [round(float(row[1]), 2) for row in top_by_revenue],
-                "quantities": [row[2] for row in top_by_revenue],
-                "orders": [row[3] for row in top_by_revenue],
+                "quantities": [int(row[2]) for row in top_by_revenue],
+                "orders": [int(row[3]) for row in top_by_revenue],
                 "backgroundColor": brand_colors[:len(top_by_revenue)]
             }
 
@@ -2595,13 +3001,13 @@ class DuckDBStore:
             sorted_by_qty = sorted(brand_results, key=lambda x: x[2], reverse=True)[:10]
             top_brands_quantity = {
                 "labels": [row[0] for row in sorted_by_qty],
-                "data": [row[2] for row in sorted_by_qty],
+                "data": [int(row[2]) for row in sorted_by_qty],
                 "revenue": [round(float(row[1]), 2) for row in sorted_by_qty],
                 "backgroundColor": brand_colors[:len(sorted_by_qty)]
             }
 
             total_revenue = sum(float(row[1]) for row in brand_results)
-            total_quantity = sum(row[2] for row in brand_results)
+            total_quantity = sum(int(row[2]) for row in brand_results)
             unique_brands = len([b for b in brand_results if b[0] != "Unknown"])
 
             top_brand = brand_results[0][0] if brand_results else "N/A"

@@ -1249,68 +1249,49 @@ class PredictionService:
     async def _query_daily_revenue(
         self, store: Any, sales_type: str, days_back: int
     ) -> pd.DataFrame:
-        """Query daily revenue from DuckDB orders table."""
-        from core.models import OrderStatus
-
-        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-        sales_filter = store._build_sales_type_filter(sales_type)
-        # CTE uses unaliased table — need filter without "o." prefix
-        sales_filter_no_alias = store._build_sales_type_filter(sales_type, table_alias="orders")
-
+        """Query daily revenue from Gold layer (pre-aggregated)."""
         start_date = date.today() - timedelta(days=days_back)
+
+        sales_filter = "sales_type = ?" if sales_type != "all" else "1=1"
+        params = [start_date]
+        if sales_type != "all":
+            params.append(sales_type)
 
         async with store.connection() as conn:
             result = conn.execute(f"""
-                WITH first_orders AS (
-                    SELECT buyer_id, MIN(DATE(timezone('Europe/Kyiv', ordered_at))) as first_date
-                    FROM orders
-                    WHERE buyer_id IS NOT NULL
-                      AND source_id IN (1, 2, 4)
-                      AND status_id NOT IN {return_statuses}
-                      AND {sales_filter_no_alias}
-                    GROUP BY buyer_id
-                )
                 SELECT
-                    DATE(timezone('Europe/Kyiv', o.ordered_at)) as date,
-                    COALESCE(SUM(o.grand_total), 0) as revenue,
-                    COALESCE(SUM(CASE WHEN o.source_id = 1 THEN o.grand_total ELSE 0 END), 0) as instagram_revenue,
-                    COALESCE(SUM(CASE WHEN o.source_id = 2 THEN o.grand_total ELSE 0 END), 0) as telegram_revenue,
-                    COALESCE(SUM(CASE WHEN o.source_id = 4 THEN o.grand_total ELSE 0 END), 0) as shopify_revenue,
-                    COUNT(DISTINCT o.id) as orders_count,
-                    COUNT(DISTINCT o.buyer_id) as unique_customers,
-                    COUNT(DISTINCT CASE WHEN fo.first_date = DATE(timezone('Europe/Kyiv', o.ordered_at))
-                                        THEN o.buyer_id END) as new_customers
-                FROM orders o
-                LEFT JOIN first_orders fo ON o.buyer_id = fo.buyer_id
-                WHERE o.ordered_at >= ?
-                  AND o.source_id IN (1, 2, 4)
-                  AND o.status_id NOT IN {return_statuses}
+                    date,
+                    revenue,
+                    instagram_revenue,
+                    telegram_revenue,
+                    shopify_revenue,
+                    orders_count,
+                    unique_customers,
+                    new_customers
+                FROM gold_daily_revenue
+                WHERE date >= ?
                   AND {sales_filter}
-                GROUP BY DATE(timezone('Europe/Kyiv', o.ordered_at))
                 ORDER BY date
-            """, [start_date.isoformat()]).fetchdf()
+            """, params).fetchdf()
 
         return result
 
     async def _get_actual_month_revenue(
         self, store: Any, sales_type: str, month_start: date, up_to: date
     ) -> float:
-        """Get actual revenue from month start to given date."""
-        from core.models import OrderStatus
-
-        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-        sales_filter = store._build_sales_type_filter(sales_type)
+        """Get actual revenue from month start to given date (from Gold layer)."""
+        sales_filter = "sales_type = ?" if sales_type != "all" else "1=1"
+        params = [month_start, up_to]
+        if sales_type != "all":
+            params.append(sales_type)
 
         async with store.connection() as conn:
             result = conn.execute(f"""
-                SELECT COALESCE(SUM(o.grand_total), 0) as revenue
-                FROM orders o
-                WHERE DATE(timezone('Europe/Kyiv', o.ordered_at)) >= ?
-                  AND DATE(timezone('Europe/Kyiv', o.ordered_at)) <= ?
-                  AND o.source_id IN (1, 2, 4)
-                  AND o.status_id NOT IN {return_statuses}
+                SELECT COALESCE(SUM(revenue), 0) as revenue
+                FROM gold_daily_revenue
+                WHERE date >= ? AND date <= ?
                   AND {sales_filter}
-            """, [month_start.isoformat(), up_to.isoformat()]).fetchone()
+            """, params).fetchone()
 
         return float(result[0]) if result else 0.0
 

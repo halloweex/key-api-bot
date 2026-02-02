@@ -130,6 +130,29 @@ async def trigger_resync(
         raise HTTPException(status_code=500, detail=f"Resync failed: {str(e)}")
 
 
+@router.get("/warehouse/status")
+@limiter.limit("60/minute")
+async def get_warehouse_status(request: Request):
+    """Get warehouse layer (Silver/Gold) status and last refresh info."""
+    store = await get_store()
+    return await store.get_warehouse_status()
+
+
+@router.post("/warehouse/refresh")
+@limiter.limit("5/minute")
+async def refresh_warehouse(
+    request: Request,
+    admin: dict = Depends(require_admin)
+):
+    """Manually trigger warehouse layer refresh (Silver → Gold).
+
+    Requires admin authentication.
+    """
+    store = await get_store()
+    result = await store.refresh_warehouse_layers(trigger="manual")
+    return result
+
+
 @router.get("/metrics", response_model=MetricsResponse)
 @limiter.limit("60/minute")
 async def get_metrics(request: Request):
