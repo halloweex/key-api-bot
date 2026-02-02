@@ -12,6 +12,9 @@ services:
       - ./data:/app/data
     mem_limit: 512m
     cpus: 0.5
+    # Enable remote debugging with debugwand (Python 3.14 sys.remote_exec)
+    cap_add:
+      - SYS_PTRACE
 
   web:
     image: halloweex/keycrm-web:latest
@@ -27,6 +30,9 @@ services:
       - "8080"
     mem_limit: 1g
     cpus: 1.0
+    # Enable remote debugging with debugwand (Python 3.14 sys.remote_exec)
+    cap_add:
+      - SYS_PTRACE
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health', timeout=5)"]
       interval: 30s

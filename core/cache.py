@@ -26,6 +26,7 @@ Usage:
 """
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 from dataclasses import dataclass
@@ -309,7 +310,7 @@ class RedisCache:
             return value
 
         # Compute value
-        if asyncio.iscoroutinefunction(factory):
+        if inspect.iscoroutinefunction(factory):
             value = await factory()
         else:
             value = factory()

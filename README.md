@@ -4,7 +4,7 @@ Automated sales reporting system for KoreanStory e-commerce with interactive web
 
 ![Dashboard](https://img.shields.io/badge/Dashboard-FastAPI-009688?style=flat-square)
 ![Bot](https://img.shields.io/badge/Bot-Telegram-26A5E4?style=flat-square)
-![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square)
+![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square)
 ![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED?style=flat-square)
 
 ## Features
@@ -30,7 +30,7 @@ Automated sales reporting system for KoreanStory e-commerce with interactive web
 
 | Component | Technology |
 |-----------|------------|
-| **Backend** | Python 3.12, FastAPI, Uvicorn |
+| **Backend** | Python 3.14, FastAPI, Uvicorn |
 | **Bot** | python-telegram-bot v22 |
 | **Database** | DuckDB (analytics), SQLite (bot auth) |
 | **Charts** | Chart.js + chartjs-plugin-datalabels |
@@ -82,7 +82,7 @@ key-api-bot/
 ## Quick Start
 
 ### Prerequisites
-- Python 3.12+
+- Python 3.14+
 - Docker & Docker Compose
 - KeyCRM API key
 - Telegram Bot Token

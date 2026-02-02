@@ -21,7 +21,7 @@ import uuid
 import functools
 from contextvars import ContextVar
 from typing import Optional, Any, Dict, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Context variable for request correlation ID
 _correlation_id: ContextVar[Optional[str]] = ContextVar("correlation_id", default=None)
@@ -84,7 +84,7 @@ class StructuredFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         log_entry = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
