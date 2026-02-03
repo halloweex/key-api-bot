@@ -80,11 +80,8 @@ class DuckDBStore:
         async with self._lock:
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
-                # Limit memory usage for small EC2 instances (t3.micro = 1GB RAM)
-                self._connection.execute("SET memory_limit = '512MB'")
-                self._connection.execute("SET threads = 2")
                 await self._init_schema()
-                logger.info(f"DuckDB connected: {self.db_path} (memory_limit=512MB)")
+                logger.info(f"DuckDB connected: {self.db_path}")
 
     async def close(self) -> None:
         """Close database connection."""

@@ -73,8 +73,6 @@ class SyncService:
         self._stop_sync = False
         # Track if ordered_between filter is supported
         self._use_ordered_between: Optional[bool] = None
-        # Lock to prevent concurrent syncs (memory optimization for small instances)
-        self._sync_lock = asyncio.Lock()
 
     async def _fetch_orders_with_date_filter(
         self,
@@ -354,11 +352,6 @@ class SyncService:
         Returns:
             Dict with sync statistics
         """
-        # Skip if another sync is running (memory optimization)
-        if self._sync_lock.locked():
-            logger.debug("Skipping incremental sync - another sync is running")
-            return {"orders": 0, "skipped": True}
-
         import time
         start_time = time.perf_counter()
         stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0, "managers": 0, "offers": 0, "stocks": 0}
@@ -509,7 +502,7 @@ class SyncService:
 
         return stats
 
-    async def refresh_order_statuses(self, days_back: int = 14) -> Dict[str, Any]:
+    async def refresh_order_statuses(self, days_back: int = 30) -> Dict[str, Any]:
         """
         Re-fetch recent orders to catch status changes.
 
@@ -518,55 +511,49 @@ class SyncService:
         This method re-fetches orders by created_between to refresh all statuses.
 
         Args:
-            days_back: Number of days to look back (default 14, reduced for memory)
+            days_back: Number of days to look back (default 30)
 
         Returns:
             Dict with sync statistics
         """
-        # Use lock to prevent concurrent syncs (memory optimization)
-        if self._sync_lock.locked():
-            logger.info("Skipping status refresh - another sync is running")
-            return {"orders": 0, "skipped": True, "reason": "sync_in_progress"}
+        stats = {"orders": 0, "expenses": 0, "days_back": days_back}
 
-        async with self._sync_lock:
-            stats = {"orders": 0, "expenses": 0, "days_back": days_back}
+        try:
+            client = await get_async_client()
+            start_date = datetime.now(DEFAULT_TZ) - timedelta(days=days_back)
+            end_date = datetime.now(DEFAULT_TZ) + timedelta(days=1)
 
-            try:
-                client = await get_async_client()
-                start_date = datetime.now(DEFAULT_TZ) - timedelta(days=days_back)
-                end_date = datetime.now(DEFAULT_TZ) + timedelta(days=1)
+            logger.info(f"Refreshing order statuses for last {days_back} days...")
 
-                logger.info(f"Refreshing order statuses for last {days_back} days...")
+            # Fetch by created_between ONLY (not updated_between)
+            # This ensures we get ALL orders regardless of their updated_at
+            orders_by_id = {}
+            params = {
+                "include": "products.offer,manager,buyer,expenses",
+                "filter[created_between]": f"{start_date.strftime('%Y-%m-%d')}, {end_date.strftime('%Y-%m-%d')}",
+            }
 
-                # Fetch by created_between ONLY (not updated_between)
-                # This ensures we get ALL orders regardless of their updated_at
-                orders_by_id = {}
-                params = {
-                    "include": "products.offer,manager,buyer,expenses",
-                    "filter[created_between]": f"{start_date.strftime('%Y-%m-%d')}, {end_date.strftime('%Y-%m-%d')}",
-                }
+            async for batch in client.paginate("order", params=params, page_size=50):
+                for order in batch:
+                    orders_by_id[order["id"]] = order
 
-                async for batch in client.paginate("order", params=params, page_size=50):
-                    for order in batch:
-                        orders_by_id[order["id"]] = order
+            orders = list(orders_by_id.values())
 
-                orders = list(orders_by_id.values())
+            if orders:
+                order_count, expense_count = await self._upsert_orders_with_expenses(orders)
+                stats["orders"] = order_count
+                stats["expenses"] = expense_count
+                logger.info(f"Status refresh: updated {order_count} orders, {expense_count} expenses")
 
-                if orders:
-                    order_count, expense_count = await self._upsert_orders_with_expenses(orders)
-                    stats["orders"] = order_count
-                    stats["expenses"] = expense_count
-                    logger.info(f"Status refresh: updated {order_count} orders, {expense_count} expenses")
+                # Refresh warehouse layers (Silver → Gold)
+                await self.store.refresh_warehouse_layers(trigger="status_refresh")
 
-                    # Refresh warehouse layers (Silver → Gold)
-                    await self.store.refresh_warehouse_layers(trigger="status_refresh")
+        except KeyCRMConnectionError as e:
+            logger.warning(f"Status refresh connection error (will retry): {e}")
+        except KeyCRMError as e:
+            logger.error(f"Status refresh error: {e}")
 
-            except KeyCRMConnectionError as e:
-                logger.warning(f"Status refresh connection error (will retry): {e}")
-            except KeyCRMError as e:
-                logger.error(f"Status refresh error: {e}")
-
-            return stats
+        return stats
 
     async def start_background_sync(self, interval_seconds: int = 60) -> None:
         """
