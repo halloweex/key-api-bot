@@ -6,14 +6,7 @@
   <component name="ChangeListManager">
     <list default="true" id="00033ac8-0ff0-4db9-8885-f829ba7bf2ad" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/prediction_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/prediction_service.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/api/client.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/api/client.ts" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueTrendChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueTrendChart.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/filters/DateRangePicker.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/filters/DateRangePicker.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/hooks/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/hooks/index.ts" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/hooks/useApi.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/hooks/useApi.ts" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/types/api.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/types/api.ts" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/routes/api.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/routes/api.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -69,7 +62,7 @@
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
     &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;settings.sync&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable&quot;,
     &quot;ts.external.directory.path&quot;: &quot;/Users/vladislav/PycharmProjects/key-api-bot/web/frontend/node_modules/typescript/lib&quot;,
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   },
@@ -299,7 +292,7 @@
       <workItem from="1769678640075" duration="124000" />
       <workItem from="1769678798867" duration="12000" />
       <workItem from="1769680433341" duration="313000" />
-      <workItem from="1769680767522" duration="29663000" />
+      <workItem from="1769680767522" duration="82382000" />
     </task>
     <servers />
   </component>

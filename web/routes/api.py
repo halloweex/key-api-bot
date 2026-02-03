@@ -224,10 +224,31 @@ async def get_jobs(request: Request):
             "history": []
         }
 
+    # Collect recent history from all jobs
+    all_history = []
+    jobs = scheduler.get_jobs()
+    job_names = {j["id"]: j["name"] for j in jobs}
+
+    for job in jobs:
+        job_history = scheduler.get_job_history(job["id"], limit=5)
+        for h in job_history:
+            all_history.append({
+                "job_id": job["id"],
+                "job_name": job_names.get(job["id"], job["id"]),
+                "started_at": h.get("started_at") or "",
+                "completed_at": h.get("finished_at"),
+                "duration_ms": h.get("duration_ms"),
+                "status": h.get("status", "unknown"),
+                "error": h.get("error"),
+                "result": None,  # Not storing result in history
+            })
+    # Sort by started_at descending
+    all_history.sort(key=lambda x: x.get("started_at") or "", reverse=True)
+
     return {
         "status": "running",
-        "jobs": scheduler.get_jobs(),
-        "history": scheduler.get_history(limit=20)
+        "jobs": jobs,
+        "history": all_history[:20]
     }
 
 

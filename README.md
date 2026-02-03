@@ -275,5 +275,5 @@ Private repository - KoreanStory internal use only.
 ## Support
 
 - **Dashboard**: http://34.252.178.223
-- **Repository**: https://github.com/halloweex/key-api-bot
+- **Repository**: https://github.com/hсalloweex/key-api-bot
 - **Docker Hub**: https://hub.docker.com/u/halloweex

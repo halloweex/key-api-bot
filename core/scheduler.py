@@ -196,6 +196,19 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Order status refresh (daily at 5 AM)
+        # KeyCRM doesn't update updated_at when status changes, so we need to
+        # periodically re-fetch recent orders to catch status changes (like cancellations)
+        self._add_job(
+            job_id="order_status_refresh",
+            name="Order Status Refresh",
+            description="Re-fetch recent orders to catch status changes (KeyCRM workaround)",
+            func=self._run_order_status_refresh,
+            trigger=CronTrigger(hour=5, minute=0),
+            max_instances=1,
+            coalesce=True,
+        )
+
         logger.info(f"Registered {len(self._job_info)} background jobs")
 
     def _add_job(
@@ -357,6 +370,27 @@ class BackgroundScheduler:
             )
             return result
 
+    async def _run_order_status_refresh(self) -> Dict[str, Any]:
+        """
+        Re-fetch recent orders to catch status changes.
+
+        KeyCRM doesn't update updated_at when order status changes (e.g., cancellations),
+        so the incremental sync misses these. This job re-fetches the last 30 days
+        of orders to ensure all status changes are captured.
+        """
+        with correlation_context() as corr_id:
+            logger.info("Starting order status refresh job")
+
+            from core.sync_service import get_sync_service
+            sync_service = await get_sync_service()
+            stats = await sync_service.refresh_order_statuses(days_back=30)
+
+            logger.info(
+                "Order status refresh job complete",
+                extra={"stats": stats}
+            )
+            return stats
+
     # ═══════════════════════════════════════════════════════════════════════════
     # EVENT HANDLERS
     # ═══════════════════════════════════════════════════════════════════════════
@@ -468,10 +502,17 @@ class BackgroundScheduler:
         """Get list of all jobs with their status."""
         jobs = []
         for job_id, info in self._job_info.items():
+            # Get trigger description from APScheduler job
+            trigger_desc = ""
+            job = self._scheduler.get_job(job_id) if self._scheduler else None
+            if job and job.trigger:
+                trigger_desc = str(job.trigger)
+
             jobs.append({
                 "id": info.id,
                 "name": info.name,
                 "description": info.description,
+                "trigger": trigger_desc,
                 "next_run": info.next_run.isoformat() if info.next_run else None,
                 "last_run": info.last_run.isoformat() if info.last_run else None,
                 "last_status": info.last_status.value if info.last_status else None,
@@ -509,6 +550,11 @@ class BackgroundScheduler:
         job.modify(next_run_time=datetime.now(SCHEDULER_TIMEZONE))
 
         return {"status": "triggered", "job_id": job_id}
+
+    # Alias for API compatibility
+    async def trigger_job(self, job_id: str) -> Dict[str, Any]:
+        """Alias for run_job_now (API compatibility)."""
+        return await self.run_job_now(job_id)
 
     def pause_job(self, job_id: str) -> None:
         """Pause a job."""
