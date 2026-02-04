@@ -4,12 +4,12 @@ Automated sales reporting system for KoreanStory e-commerce with interactive web
 
 ![Dashboard](https://img.shields.io/badge/Dashboard-FastAPI-009688?style=flat-square)
 ![Bot](https://img.shields.io/badge/Bot-Telegram-26A5E4?style=flat-square)
-![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square)
 ![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED?style=flat-square)
 
 ## Features
 
-### Web Dashboardad
+### Web Dashboard
 - **Revenue Analytics** - Daily/weekly/monthly trends with period comparison
 - **Sales by Source** - Instagram, Telegram, Shopify breakdown (bar + doughnut charts)
 - **Top Products** - By quantity and revenue (horizontal bar charts)
@@ -30,13 +30,13 @@ Automated sales reporting system for KoreanStory e-commerce with interactive web
 
 | Component | Technology |
 |-----------|------------|
-| **Backend** | Python 3.14, FastAPI, Uvicorn |
+| **Backend** | Python 3.12, FastAPI, Uvicorn |
 | **Bot** | python-telegram-bot v22 |
 | **Database** | DuckDB (analytics), SQLite (bot auth) |
 | **Charts** | Chart.js + chartjs-plugin-datalabels |
 | **API** | KeyCRM OpenAPI |
 | **Proxy** | Nginx |
-| **Deploy** | Docker, GitHub Actions, AWS EC2 |
+| **Deploy** | Docker, GitHub Actions, Hetzner Cloud |
 
 ## Project Structure
 
@@ -82,7 +82,7 @@ key-api-bot/
 ## Quick Start
 
 ### Prerequisites
-- Python 3.14+
+- Python 3.12+
 - Docker & Docker Compose
 - KeyCRM API key
 - Telegram Bot Token
@@ -209,9 +209,9 @@ Revenue milestones trigger confetti animations:
 ### GitHub Actions (CI/CD)
 
 Push to `main` branch triggers automatic deployment:
-1. Builds Docker images (bot + web)
+1. Builds Docker images for ARM64 (bot + web)
 2. Pushes to Docker Hub
-3. SSH to EC2 and pulls latest images
+3. SSH to Hetzner and pulls latest images
 4. Restarts containers
 
 ### Required Secrets
@@ -219,17 +219,17 @@ Push to `main` branch triggers automatic deployment:
 ```
 DOCKER_USERNAME
 DOCKER_PASSWORD
-EC2_HOST
-EC2_USER
-EC2_SSH_KEY
+HETZNER_HOST
+HETZNER_USER
+HETZNER_SSH_KEY
 ```
 
 ### Manual Deployment
 
 ```bash
-ssh -i keycrm_key.pem ec2-user@your-ec2-ip
-cd key-api-bot
-docker-compose pull && docker-compose up -d
+ssh root@89.167.20.30
+cd /opt/key-api-bot
+docker compose pull && docker compose up -d
 ```
 
 ## Architecture
@@ -274,6 +274,6 @@ Private repository - KoreanStory internal use only.
 
 ## Support
 
-- **Dashboard**: http://34.252.178.223
-- **Repository**: https://github.com/hсalloweex/key-api-bot
+- **Dashboard**: https://ksanalytics.duckdns.org
+- **Repository**: https://github.com/halloweex/key-api-bot
 - **Docker Hub**: https://hub.docker.com/u/halloweex
