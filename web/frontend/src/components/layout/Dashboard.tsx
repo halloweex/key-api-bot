@@ -9,6 +9,7 @@ import {
   LazyTopProductsByRevenueChart,
   LazyCategoryChart,
   LazyCustomerInsightsChart,
+  LazyCohortRetentionChart,
   LazyBrandAnalyticsChart,
   LazyExpensesChart,
   LazyStockSummaryChart,
@@ -127,6 +128,11 @@ export const Dashboard = memo(function Dashboard() {
       {/* Customer Insights - Full Width */}
       <ChartSection>
         <LazyCustomerInsightsChart />
+      </ChartSection>
+
+      {/* Cohort Retention Analysis - Full Width */}
+      <ChartSection>
+        <LazyCohortRetentionChart />
       </ChartSection>
 
       {/* Brand Analytics - Full Width */}

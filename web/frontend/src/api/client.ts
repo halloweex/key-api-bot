@@ -10,6 +10,7 @@ import type {
   TopProductsResponse,
   ProductPerformanceResponse,
   CustomerInsightsResponse,
+  CohortRetentionResponse,
   BrandAnalyticsResponse,
   ExpenseSummaryResponse,
   ProfitAnalysisResponse,
@@ -280,6 +281,18 @@ export const api = {
   // Customers
   getCustomerInsights: (params: string, options?: FetchOptions) =>
     fetchApi<CustomerInsightsResponse>('/customers/insights', params, options),
+
+  getCohortRetention: (
+    monthsBack = 12,
+    retentionMonths = 6,
+    salesType = 'retail',
+    options?: FetchOptions
+  ) =>
+    fetchApi<CohortRetentionResponse>(
+      '/customers/cohort-retention',
+      `months_back=${monthsBack}&retention_months=${retentionMonths}&sales_type=${salesType}`,
+      options
+    ),
 
   // Brands
   getBrands: (options?: FetchOptions) =>

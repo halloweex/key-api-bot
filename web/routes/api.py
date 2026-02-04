@@ -651,6 +651,33 @@ async def get_customer_insights(
     return await dashboard_service.get_customer_insights(start, end, brand=brand, source_id=source_id, sales_type=sales_type)
 
 
+@router.get("/customers/cohort-retention")
+@limiter.limit("30/minute")
+async def get_cohort_retention(
+    request: Request,
+    months_back: int = Query(12, ge=3, le=24, description="Number of months of cohorts to analyze"),
+    retention_months: int = Query(6, ge=1, le=12, description="Number of retention months to track"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Get cohort retention analysis.
+
+    Shows what percentage of customers from each monthly cohort
+    returned to make purchases in subsequent months.
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.get_cohort_retention(
+        months_back=months_back,
+        retention_months=retention_months,
+        sales_type=sales_type
+    )
+
+
 @router.get("/products/performance")
 @limiter.limit("30/minute")
 async def get_product_performance(

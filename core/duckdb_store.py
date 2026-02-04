@@ -2804,6 +2804,135 @@ class DuckDBStore:
                 }
             }
 
+    async def get_cohort_retention(
+        self,
+        months_back: int = 12,
+        retention_months: int = 6,
+        sales_type: str = "retail"
+    ) -> Dict[str, Any]:
+        """
+        Get cohort retention analysis.
+
+        Shows what percentage of customers from each cohort (first purchase month)
+        returned to make purchases in subsequent months.
+
+        Args:
+            months_back: How many months of cohorts to analyze
+            retention_months: How many months of retention to track (M0 to Mn)
+            sales_type: Filter by sales type (retail/b2b/all)
+
+        Returns:
+            Dict with cohorts, retention matrix, and summary metrics
+        """
+        async with self.connection() as conn:
+            # Build sales type filter
+            sales_type_filter = ""
+            if sales_type == "retail":
+                sales_type_filter = f"""
+                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
+                         OR (o.manager_id IS NULL AND o.source_id = 4))
+                """
+            elif sales_type == "b2b":
+                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+
+            query = f"""
+            WITH customer_cohorts AS (
+                -- Get each customer's first order month (their cohort)
+                SELECT
+                    o.buyer_id,
+                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
+                FROM silver_orders o
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  {sales_type_filter}
+                GROUP BY o.buyer_id
+            ),
+            customer_orders AS (
+                -- Get all order months per customer
+                SELECT DISTINCT
+                    o.buyer_id,
+                    c.cohort_month,
+                    DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date)) AS months_since
+                FROM silver_orders o
+                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
+                WHERE NOT o.is_return
+                  {sales_type_filter}
+            ),
+            cohort_sizes AS (
+                SELECT cohort_month, COUNT(DISTINCT buyer_id) AS size
+                FROM customer_cohorts
+                GROUP BY cohort_month
+            ),
+            retention_data AS (
+                SELECT
+                    r.cohort_month,
+                    r.months_since,
+                    COUNT(DISTINCT r.buyer_id) AS retained_customers
+                FROM customer_orders r
+                WHERE r.months_since <= ?
+                GROUP BY r.cohort_month, r.months_since
+            )
+            SELECT
+                strftime(r.cohort_month, '%Y-%m') as cohort,
+                s.size as cohort_size,
+                r.months_since as month_number,
+                r.retained_customers,
+                ROUND(100.0 * r.retained_customers / s.size, 1) as retention_pct
+            FROM retention_data r
+            JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
+            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{months_back} months'
+            ORDER BY r.cohort_month DESC, r.months_since
+            """
+
+            rows = conn.execute(query, [retention_months]).fetchall()
+
+            # Build cohort data structure
+            cohorts = {}
+            for cohort, size, month_num, retained, pct in rows:
+                if cohort not in cohorts:
+                    cohorts[cohort] = {
+                        "size": size,
+                        "retention": {}
+                    }
+                cohorts[cohort]["retention"][month_num] = {
+                    "count": retained,
+                    "percent": pct
+                }
+
+            # Calculate summary metrics
+            total_cohort_size = sum(c["size"] for c in cohorts.values())
+
+            # Average retention by month
+            avg_retention = {}
+            for m in range(retention_months + 1):
+                values = [
+                    c["retention"].get(m, {}).get("percent", 0)
+                    for c in cohorts.values()
+                    if m in c.get("retention", {})
+                ]
+                if values:
+                    avg_retention[m] = round(sum(values) / len(values), 1)
+
+            return {
+                "cohorts": [
+                    {
+                        "month": cohort,
+                        "size": data["size"],
+                        "retention": [
+                            data["retention"].get(m, {}).get("percent", None)
+                            for m in range(retention_months + 1)
+                        ]
+                    }
+                    for cohort, data in sorted(cohorts.items(), reverse=True)
+                ],
+                "retentionMonths": retention_months,
+                "summary": {
+                    "totalCohorts": len(cohorts),
+                    "totalCustomers": total_cohort_size,
+                    "avgRetention": avg_retention
+                }
+            }
+
     async def get_product_performance(
         self,
         start_date: date,

@@ -39,6 +39,10 @@ export const LazyCustomerInsightsChart = lazy(() =>
   import('./CustomerInsightsChart').then(m => ({ default: m.CustomerInsightsChart }))
 )
 
+export const LazyCohortRetentionChart = lazy(() =>
+  import('./CohortRetentionChart').then(m => ({ default: m.CohortRetentionChart }))
+)
+
 export const LazyBrandAnalyticsChart = lazy(() =>
   import('./BrandAnalyticsChart').then(m => ({ default: m.BrandAnalyticsChart }))
 )

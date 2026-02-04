@@ -12,6 +12,7 @@ import type {
   TopProductsResponse,
   ProductPerformanceResponse,
   CustomerInsightsResponse,
+  CohortRetentionResponse,
   BrandAnalyticsResponse,
   ExpenseSummaryResponse,
   ProfitAnalysisResponse,
@@ -48,6 +49,8 @@ export const queryKeys = {
   topProducts: (params: string) => ['topProducts', params] as const,
   productPerformance: (params: string) => ['productPerformance', params] as const,
   customerInsights: (params: string) => ['customerInsights', params] as const,
+  cohortRetention: (monthsBack: number, retentionMonths: number, salesType: string) =>
+    ['cohortRetention', monthsBack, retentionMonths, salesType] as const,
   brandAnalytics: (params: string) => ['brandAnalytics', params] as const,
   expenseSummary: (params: string) => ['expenseSummary', params] as const,
   profitAnalysis: (params: string) => ['profitAnalysis', params] as const,
@@ -183,6 +186,19 @@ export function useCustomerInsights() {
   return useQuery<CustomerInsightsResponse>({
     queryKey: queryKeys.customerInsights(queryParams),
     queryFn: () => api.getCustomerInsights(queryParams),
+  })
+}
+
+export function useCohortRetention(
+  monthsBack = 12,
+  retentionMonths = 6
+) {
+  const salesType = useFilterStore(selectSalesType)
+
+  return useQuery<CohortRetentionResponse>({
+    queryKey: queryKeys.cohortRetention(monthsBack, retentionMonths, salesType),
+    queryFn: () => api.getCohortRetention(monthsBack, retentionMonths, salesType),
+    staleTime: 5 * 60 * 1000, // 5 minutes - cohort data doesn't change often
   })
 }
 

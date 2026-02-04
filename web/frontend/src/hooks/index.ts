@@ -16,6 +16,7 @@ export {
   useCategoryBreakdown,
   // Customers
   useCustomerInsights,
+  useCohortRetention,
   // Brands
   useBrands,
   useBrandAnalytics,

@@ -462,3 +462,21 @@ export interface RestockAlert {
   daysSinceSale: number | null
   alertLevel: 'OUT_OF_STOCK' | 'CRITICAL' | 'LOW'
 }
+
+// ─── Cohort Retention Types ─────────────────────────────────────────────────
+
+export interface CohortData {
+  month: string
+  size: number
+  retention: (number | null)[]
+}
+
+export interface CohortRetentionResponse {
+  cohorts: CohortData[]
+  retentionMonths: number
+  summary: {
+    totalCohorts: number
+    totalCustomers: number
+    avgRetention: Record<number, number>
+  }
+}
