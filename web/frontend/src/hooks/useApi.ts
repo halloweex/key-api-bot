@@ -12,7 +12,10 @@ import type {
   TopProductsResponse,
   ProductPerformanceResponse,
   CustomerInsightsResponse,
-  CohortRetentionResponse,
+  EnhancedCohortRetentionResponse,
+  PurchaseTimingResponse,
+  CohortLTVResponse,
+  AtRiskResponse,
   BrandAnalyticsResponse,
   ExpenseSummaryResponse,
   ProfitAnalysisResponse,
@@ -49,8 +52,14 @@ export const queryKeys = {
   topProducts: (params: string) => ['topProducts', params] as const,
   productPerformance: (params: string) => ['productPerformance', params] as const,
   customerInsights: (params: string) => ['customerInsights', params] as const,
-  cohortRetention: (monthsBack: number, retentionMonths: number, salesType: string) =>
-    ['cohortRetention', monthsBack, retentionMonths, salesType] as const,
+  cohortRetention: (monthsBack: number, retentionMonths: number, salesType: string, includeRevenue: boolean) =>
+    ['cohortRetention', monthsBack, retentionMonths, salesType, includeRevenue] as const,
+  purchaseTiming: (monthsBack: number, salesType: string) =>
+    ['purchaseTiming', monthsBack, salesType] as const,
+  cohortLTV: (monthsBack: number, salesType: string) =>
+    ['cohortLTV', monthsBack, salesType] as const,
+  atRiskCustomers: (daysThreshold: number, salesType: string) =>
+    ['atRiskCustomers', daysThreshold, salesType] as const,
   brandAnalytics: (params: string) => ['brandAnalytics', params] as const,
   expenseSummary: (params: string) => ['expenseSummary', params] as const,
   profitAnalysis: (params: string) => ['profitAnalysis', params] as const,
@@ -191,14 +200,45 @@ export function useCustomerInsights() {
 
 export function useCohortRetention(
   monthsBack = 12,
-  retentionMonths = 6
+  retentionMonths = 6,
+  includeRevenue = true
 ) {
   const salesType = useFilterStore(selectSalesType)
 
-  return useQuery<CohortRetentionResponse>({
-    queryKey: queryKeys.cohortRetention(monthsBack, retentionMonths, salesType),
-    queryFn: () => api.getCohortRetention(monthsBack, retentionMonths, salesType),
+  return useQuery<EnhancedCohortRetentionResponse>({
+    queryKey: queryKeys.cohortRetention(monthsBack, retentionMonths, salesType, includeRevenue),
+    queryFn: () => api.getCohortRetention(monthsBack, retentionMonths, salesType, includeRevenue),
     staleTime: 5 * 60 * 1000, // 5 minutes - cohort data doesn't change often
+  })
+}
+
+export function usePurchaseTiming(monthsBack = 12) {
+  const salesType = useFilterStore(selectSalesType)
+
+  return useQuery<PurchaseTimingResponse>({
+    queryKey: queryKeys.purchaseTiming(monthsBack, salesType),
+    queryFn: () => api.getPurchaseTiming(monthsBack, salesType),
+    staleTime: 5 * 60 * 1000,
+  })
+}
+
+export function useCohortLTV(monthsBack = 12) {
+  const salesType = useFilterStore(selectSalesType)
+
+  return useQuery<CohortLTVResponse>({
+    queryKey: queryKeys.cohortLTV(monthsBack, salesType),
+    queryFn: () => api.getCohortLTV(monthsBack, salesType),
+    staleTime: 5 * 60 * 1000,
+  })
+}
+
+export function useAtRiskCustomers(daysThreshold = 90) {
+  const salesType = useFilterStore(selectSalesType)
+
+  return useQuery<AtRiskResponse>({
+    queryKey: queryKeys.atRiskCustomers(daysThreshold, salesType),
+    queryFn: () => api.getAtRiskCustomers(daysThreshold, salesType),
+    staleTime: 5 * 60 * 1000,
   })
 }
 

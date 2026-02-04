@@ -17,6 +17,9 @@ export {
   // Customers
   useCustomerInsights,
   useCohortRetention,
+  usePurchaseTiming,
+  useCohortLTV,
+  useAtRiskCustomers,
   // Brands
   useBrands,
   useBrandAnalytics,

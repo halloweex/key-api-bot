@@ -32,6 +32,7 @@ SLOW_ENDPOINT_TIMEOUT = 300.0  # For heavy analytics endpoints (tune can take mi
 # Endpoints that get extended timeout
 SLOW_ENDPOINTS = {
     "/api/duckdb/resync",
+    "/api/duckdb/refresh-statuses",
     "/api/goals/recalculate",
     "/api/stocks/analysis",
     "/api/revenue/forecast/train",

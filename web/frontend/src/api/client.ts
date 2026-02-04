@@ -10,7 +10,10 @@ import type {
   TopProductsResponse,
   ProductPerformanceResponse,
   CustomerInsightsResponse,
-  CohortRetentionResponse,
+  EnhancedCohortRetentionResponse,
+  PurchaseTimingResponse,
+  CohortLTVResponse,
+  AtRiskResponse,
   BrandAnalyticsResponse,
   ExpenseSummaryResponse,
   ProfitAnalysisResponse,
@@ -286,11 +289,45 @@ export const api = {
     monthsBack = 12,
     retentionMonths = 6,
     salesType = 'retail',
+    includeRevenue = true,
     options?: FetchOptions
   ) =>
-    fetchApi<CohortRetentionResponse>(
+    fetchApi<EnhancedCohortRetentionResponse>(
       '/customers/cohort-retention',
-      `months_back=${monthsBack}&retention_months=${retentionMonths}&sales_type=${salesType}`,
+      `months_back=${monthsBack}&retention_months=${retentionMonths}&sales_type=${salesType}&include_revenue=${includeRevenue}`,
+      options
+    ),
+
+  getPurchaseTiming: (
+    monthsBack = 12,
+    salesType = 'retail',
+    options?: FetchOptions
+  ) =>
+    fetchApi<PurchaseTimingResponse>(
+      '/customers/purchase-timing',
+      `months_back=${monthsBack}&sales_type=${salesType}`,
+      options
+    ),
+
+  getCohortLTV: (
+    monthsBack = 12,
+    salesType = 'retail',
+    options?: FetchOptions
+  ) =>
+    fetchApi<CohortLTVResponse>(
+      '/customers/cohort-ltv',
+      `months_back=${monthsBack}&sales_type=${salesType}`,
+      options
+    ),
+
+  getAtRiskCustomers: (
+    daysThreshold = 90,
+    salesType = 'retail',
+    options?: FetchOptions
+  ) =>
+    fetchApi<AtRiskResponse>(
+      '/customers/at-risk',
+      `days_threshold=${daysThreshold}&sales_type=${salesType}`,
       options
     ),
 

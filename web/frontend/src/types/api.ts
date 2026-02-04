@@ -480,3 +480,78 @@ export interface CohortRetentionResponse {
     avgRetention: Record<number, number>
   }
 }
+
+// Enhanced cohort data with revenue tracking
+export interface EnhancedCohortData {
+  month: string
+  size: number
+  retention: (number | null)[]         // customer retention %
+  revenueRetention: (number | null)[]  // revenue retention %
+  revenue: (number | null)[]           // absolute revenue per month
+}
+
+export interface EnhancedCohortRetentionResponse {
+  cohorts: EnhancedCohortData[]
+  retentionMonths: number
+  summary: {
+    totalCohorts: number
+    totalCustomers: number
+    avgCustomerRetention: Record<number, number>
+    avgRevenueRetention: Record<number, number> | null
+    totalRevenue: number | null
+  }
+}
+
+// Days to second purchase (purchase timing)
+export interface PurchaseTimingBucket {
+  bucket: string  // "0-30", "31-60", etc.
+  customers: number
+  avgDays: number
+  percentage: number
+}
+
+export interface PurchaseTimingResponse {
+  buckets: PurchaseTimingBucket[]
+  summary: {
+    totalRepeatCustomers: number
+    medianDays: number | null
+    avgDays: number | null
+  }
+}
+
+// Cohort LTV (lifetime value)
+export interface CohortLTVData {
+  month: string
+  customerCount: number
+  cumulativeRevenue: number[]  // cumulative by month index (M0-M12)
+  avgLTV: number
+}
+
+export interface CohortLTVResponse {
+  cohorts: CohortLTVData[]
+  summary: {
+    avgLTV: number
+    bestCohort: string | null
+    bestCohortLTV: number
+  }
+}
+
+// At-risk customers
+export interface AtRiskCohort {
+  cohort: string
+  totalCustomers: number
+  atRiskCount: number
+  atRiskPct: number
+  atRiskRevenue: number
+  avgOrdersAtRisk: number
+}
+
+export interface AtRiskResponse {
+  cohorts: AtRiskCohort[]
+  daysThreshold: number
+  summary: {
+    totalAtRisk: number
+    totalCustomers: number
+    overallAtRiskPct: number
+  }
+}

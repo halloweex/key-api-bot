@@ -130,6 +130,50 @@ async def trigger_resync(
         raise HTTPException(status_code=500, detail=f"Resync failed: {str(e)}")
 
 
+@router.post("/duckdb/refresh-statuses")
+@limiter.limit("10/hour")
+async def refresh_order_statuses(
+    request: Request,
+    days: int = Query(30, ge=1, le=90, description="Days to look back for status changes"),
+    background: bool = Query(True, description="Run in background (recommended)"),
+):
+    """
+    Refresh order statuses from KeyCRM API.
+
+    KeyCRM does NOT update `updated_at` when order status changes, so incremental
+    sync misses status updates (like orders marked as returns). This endpoint
+    re-fetches recent orders to catch these changes.
+
+    Use this when you notice discrepancies in order counts or revenue.
+    """
+    import asyncio
+    from core.sync_service import get_sync_service
+
+    async def run_refresh():
+        sync_service = await get_sync_service()
+        return await sync_service.refresh_order_statuses(days_back=days)
+
+    if background:
+        # Run in background task
+        asyncio.create_task(run_refresh())
+        return {
+            "status": "started",
+            "message": f"Status refresh started in background - checking last {days} days",
+            "note": "Check /api/jobs for progress or wait ~60 seconds and verify data"
+        }
+
+    # Synchronous mode (may timeout for large datasets)
+    try:
+        stats = await run_refresh()
+        return {
+            "status": "success",
+            "message": f"Status refresh complete - checked last {days} days",
+            "stats": stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Status refresh failed: {str(e)}")
+
+
 @router.get("/warehouse/status")
 @limiter.limit("60/minute")
 async def get_warehouse_status(request: Request):
@@ -657,13 +701,19 @@ async def get_cohort_retention(
     request: Request,
     months_back: int = Query(12, ge=3, le=24, description="Number of months of cohorts to analyze"),
     retention_months: int = Query(6, ge=1, le=12, description="Number of retention months to track"),
-    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all"),
+    include_revenue: bool = Query(True, description="Include revenue retention metrics")
 ):
     """
     Get cohort retention analysis.
 
     Shows what percentage of customers from each monthly cohort
     returned to make purchases in subsequent months.
+
+    When include_revenue=True (default), also includes:
+    - Revenue retention % per month
+    - Absolute revenue per cohort per month
+    - Average revenue retention summary
     """
     try:
         sales_type = validate_sales_type(sales_type)
@@ -671,9 +721,106 @@ async def get_cohort_retention(
         raise HTTPException(status_code=400, detail=str(e))
 
     store = await get_store()
+    if include_revenue:
+        return await store.get_enhanced_cohort_retention(
+            months_back=months_back,
+            retention_months=retention_months,
+            sales_type=sales_type,
+            include_revenue=True
+        )
     return await store.get_cohort_retention(
         months_back=months_back,
         retention_months=retention_months,
+        sales_type=sales_type
+    )
+
+
+@router.get("/customers/purchase-timing")
+@limiter.limit("30/minute")
+async def get_purchase_timing(
+    request: Request,
+    months_back: int = Query(12, ge=3, le=24, description="Number of months of first-time customers to analyze"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Get days-to-second-purchase analysis.
+
+    Analyzes how long it takes customers to make their second purchase
+    after their first order. Groups into time buckets (0-30 days, 31-60 days, etc.).
+
+    Useful for:
+    - Understanding product repurchase cycles
+    - Timing re-engagement campaigns
+    - Setting up email automation triggers
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.get_days_to_second_purchase(
+        months_back=months_back,
+        sales_type=sales_type
+    )
+
+
+@router.get("/customers/cohort-ltv")
+@limiter.limit("30/minute")
+async def get_cohort_ltv(
+    request: Request,
+    months_back: int = Query(12, ge=3, le=24, description="Number of months of cohorts to analyze"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Get cumulative lifetime value by cohort.
+
+    Shows how much revenue each cohort has generated over time,
+    with cumulative totals per month since first purchase.
+
+    Returns:
+    - cumulativeRevenue: Array of cumulative revenue from M0 to M12
+    - avgLTV: Average lifetime value per customer in cohort
+    - Summary with best performing cohort
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.get_cohort_ltv(
+        months_back=months_back,
+        sales_type=sales_type
+    )
+
+
+@router.get("/customers/at-risk")
+@limiter.limit("30/minute")
+async def get_at_risk_customers(
+    request: Request,
+    days_threshold: int = Query(90, ge=30, le=365, description="Days since last purchase to consider at-risk"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all")
+):
+    """
+    Get at-risk customers by cohort.
+
+    Identifies customers who haven't purchased in the specified number of days,
+    grouped by their acquisition cohort.
+
+    Useful for:
+    - Identifying churn risk
+    - Targeting re-engagement campaigns
+    - Understanding which cohorts have higher churn rates
+    """
+    try:
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    store = await get_store()
+    return await store.get_at_risk_customers(
+        days_threshold=days_threshold,
         sales_type=sales_type
     )
 

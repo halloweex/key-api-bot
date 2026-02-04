@@ -1184,7 +1184,7 @@ class DuckDBStore:
                 VALUES (?, ?, CURRENT_TIMESTAMP)
             """, [f"last_sync_{key}", timestamp.isoformat()])
 
-    async def upsert_orders(self, orders: List[Dict[str, Any]]) -> int:
+    async def upsert_orders(self, orders: List[Dict[str, Any]], force_update: bool = False) -> int:
         """
         Insert or update orders from API response (idempotent).
 
@@ -1195,6 +1195,9 @@ class DuckDBStore:
 
         Args:
             orders: List of order dicts from KeyCRM API
+            force_update: If True, update all orders regardless of updated_at timestamp.
+                         Use this for status refresh since KeyCRM doesn't update
+                         updated_at when status changes.
 
         Returns:
             Number of orders upserted
@@ -1261,14 +1264,24 @@ class DuckDBStore:
                     placeholders = ",".join("?" * len(order_ids))
                     conn.execute(f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids)
 
-                # 2. Find orders that need to be updated (staging has newer data)
-                orders_to_update = conn.execute("""
-                    SELECT o.id FROM orders o
-                    JOIN stg_orders stg ON o.id = stg.id
-                    WHERE stg.updated_at > o.updated_at
-                       OR o.updated_at IS NULL
-                       OR stg.updated_at IS NULL
-                """).fetchall()
+                # 2. Find orders that need to be updated
+                if force_update:
+                    # Force update: update ALL existing orders (for status refresh)
+                    # KeyCRM doesn't update updated_at when status changes, so we must
+                    # force-update to catch status changes like orders marked as returns
+                    orders_to_update = conn.execute("""
+                        SELECT o.id FROM orders o
+                        JOIN stg_orders stg ON o.id = stg.id
+                    """).fetchall()
+                else:
+                    # Normal update: only update if staging has newer data
+                    orders_to_update = conn.execute("""
+                        SELECT o.id FROM orders o
+                        JOIN stg_orders stg ON o.id = stg.id
+                        WHERE stg.updated_at > o.updated_at
+                           OR o.updated_at IS NULL
+                           OR stg.updated_at IS NULL
+                    """).fetchall()
                 update_ids = [row[0] for row in orders_to_update]
 
                 # 3. Delete orders that will be re-inserted with updated data
@@ -2930,6 +2943,519 @@ class DuckDBStore:
                     "totalCohorts": len(cohorts),
                     "totalCustomers": total_cohort_size,
                     "avgRetention": avg_retention
+                }
+            }
+
+    async def get_enhanced_cohort_retention(
+        self,
+        months_back: int = 12,
+        retention_months: int = 6,
+        sales_type: str = "retail",
+        include_revenue: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Get enhanced cohort retention analysis with revenue tracking.
+
+        Shows customer retention percentages AND revenue retention for each cohort.
+
+        Args:
+            months_back: How many months of cohorts to analyze
+            retention_months: How many months of retention to track (M0 to Mn)
+            sales_type: Filter by sales type (retail/b2b/all)
+            include_revenue: Include revenue retention metrics
+
+        Returns:
+            Dict with cohorts, customer retention, revenue retention, and summary
+        """
+        async with self.connection() as conn:
+            # Build sales type filter
+            sales_type_filter = ""
+            if sales_type == "retail":
+                sales_type_filter = f"""
+                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
+                         OR (o.manager_id IS NULL AND o.source_id = 4))
+                """
+            elif sales_type == "b2b":
+                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+
+            query = f"""
+            WITH customer_cohorts AS (
+                -- Get each customer's first order month and first order value
+                SELECT
+                    o.buyer_id,
+                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month,
+                    SUM(CASE WHEN DATE_TRUNC('month', o.order_date) = DATE_TRUNC('month', MIN(o.order_date) OVER (PARTITION BY o.buyer_id))
+                             THEN o.grand_total ELSE 0 END) AS first_month_revenue
+                FROM silver_orders o
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  {sales_type_filter}
+                GROUP BY o.buyer_id
+            ),
+            customer_orders AS (
+                -- Get all order months per customer with revenue
+                SELECT
+                    o.buyer_id,
+                    c.cohort_month,
+                    DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date)) AS months_since,
+                    o.grand_total AS revenue
+                FROM silver_orders o
+                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
+                WHERE NOT o.is_return
+                  {sales_type_filter}
+            ),
+            cohort_sizes AS (
+                SELECT
+                    cohort_month,
+                    COUNT(DISTINCT buyer_id) AS size,
+                    SUM(first_month_revenue) AS m0_revenue
+                FROM customer_cohorts
+                GROUP BY cohort_month
+            ),
+            retention_data AS (
+                SELECT
+                    r.cohort_month,
+                    r.months_since,
+                    COUNT(DISTINCT r.buyer_id) AS retained_customers,
+                    SUM(r.revenue) AS period_revenue
+                FROM customer_orders r
+                WHERE r.months_since <= ?
+                GROUP BY r.cohort_month, r.months_since
+            )
+            SELECT
+                strftime(r.cohort_month, '%Y-%m') as cohort,
+                s.size as cohort_size,
+                s.m0_revenue,
+                r.months_since as month_number,
+                r.retained_customers,
+                ROUND(100.0 * r.retained_customers / s.size, 1) as retention_pct,
+                r.period_revenue,
+                ROUND(100.0 * r.period_revenue / NULLIF(s.m0_revenue, 0), 1) as revenue_retention_pct
+            FROM retention_data r
+            JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
+            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{months_back} months'
+            ORDER BY r.cohort_month DESC, r.months_since
+            """
+
+            rows = conn.execute(query, [retention_months]).fetchall()
+
+            # Build cohort data structure
+            cohorts = {}
+            for cohort, size, m0_rev, month_num, retained, pct, rev, rev_pct in rows:
+                if cohort not in cohorts:
+                    cohorts[cohort] = {
+                        "size": size,
+                        "m0_revenue": m0_rev or 0,
+                        "retention": {},
+                        "revenue_retention": {},
+                        "revenue": {}
+                    }
+                cohorts[cohort]["retention"][month_num] = pct
+                cohorts[cohort]["revenue_retention"][month_num] = rev_pct
+                cohorts[cohort]["revenue"][month_num] = rev or 0
+
+            # Calculate summary metrics
+            total_cohort_size = sum(c["size"] for c in cohorts.values())
+            total_revenue = sum(c["m0_revenue"] for c in cohorts.values())
+
+            # Average retention by month (customer and revenue)
+            avg_customer_retention = {}
+            avg_revenue_retention = {}
+            for m in range(retention_months + 1):
+                cust_values = [
+                    c["retention"].get(m)
+                    for c in cohorts.values()
+                    if c["retention"].get(m) is not None
+                ]
+                rev_values = [
+                    c["revenue_retention"].get(m)
+                    for c in cohorts.values()
+                    if c["revenue_retention"].get(m) is not None
+                ]
+                if cust_values:
+                    avg_customer_retention[m] = round(sum(cust_values) / len(cust_values), 1)
+                if rev_values:
+                    avg_revenue_retention[m] = round(sum(rev_values) / len(rev_values), 1)
+
+            return {
+                "cohorts": [
+                    {
+                        "month": cohort,
+                        "size": data["size"],
+                        "retention": [
+                            data["retention"].get(m)
+                            for m in range(retention_months + 1)
+                        ],
+                        "revenueRetention": [
+                            data["revenue_retention"].get(m)
+                            for m in range(retention_months + 1)
+                        ] if include_revenue else None,
+                        "revenue": [
+                            round(data["revenue"].get(m, 0), 2)
+                            for m in range(retention_months + 1)
+                        ] if include_revenue else None
+                    }
+                    for cohort, data in sorted(cohorts.items(), reverse=True)
+                ],
+                "retentionMonths": retention_months,
+                "summary": {
+                    "totalCohorts": len(cohorts),
+                    "totalCustomers": total_cohort_size,
+                    "avgCustomerRetention": avg_customer_retention,
+                    "avgRevenueRetention": avg_revenue_retention if include_revenue else None,
+                    "totalRevenue": round(total_revenue, 2) if include_revenue else None
+                }
+            }
+
+    async def get_days_to_second_purchase(
+        self,
+        months_back: int = 12,
+        sales_type: str = "retail"
+    ) -> Dict[str, Any]:
+        """
+        Analyze time between first and second purchase.
+
+        Groups customers into buckets based on how many days it took them
+        to make their second purchase. Useful for understanding repurchase cycles.
+
+        Args:
+            months_back: How many months of first-time customers to analyze
+            sales_type: Filter by sales type (retail/b2b/all)
+
+        Returns:
+            Dict with buckets, customer counts, and summary statistics
+        """
+        async with self.connection() as conn:
+            # Build sales type filter
+            sales_type_filter = ""
+            if sales_type == "retail":
+                sales_type_filter = f"""
+                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
+                         OR (o.manager_id IS NULL AND o.source_id = 4))
+                """
+            elif sales_type == "b2b":
+                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+
+            query = f"""
+            WITH customer_orders_ranked AS (
+                SELECT
+                    o.buyer_id,
+                    o.order_date,
+                    ROW_NUMBER() OVER (PARTITION BY o.buyer_id ORDER BY o.order_date) AS order_num
+                FROM silver_orders o
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  {sales_type_filter}
+            ),
+            second_purchase AS (
+                SELECT
+                    c1.buyer_id,
+                    c1.order_date AS first_order,
+                    c2.order_date AS second_order,
+                    DATEDIFF('day', c1.order_date, c2.order_date) AS days_to_second
+                FROM customer_orders_ranked c1
+                JOIN customer_orders_ranked c2
+                    ON c1.buyer_id = c2.buyer_id
+                    AND c1.order_num = 1
+                    AND c2.order_num = 2
+                WHERE c1.order_date >= CURRENT_DATE - INTERVAL '{months_back} months'
+            ),
+            bucketed AS (
+                SELECT
+                    days_to_second,
+                    CASE
+                        WHEN days_to_second <= 30 THEN '0-30'
+                        WHEN days_to_second <= 60 THEN '31-60'
+                        WHEN days_to_second <= 90 THEN '61-90'
+                        WHEN days_to_second <= 120 THEN '91-120'
+                        WHEN days_to_second <= 180 THEN '121-180'
+                        ELSE '180+'
+                    END AS bucket,
+                    CASE
+                        WHEN days_to_second <= 30 THEN 1
+                        WHEN days_to_second <= 60 THEN 2
+                        WHEN days_to_second <= 90 THEN 3
+                        WHEN days_to_second <= 120 THEN 4
+                        WHEN days_to_second <= 180 THEN 5
+                        ELSE 6
+                    END AS bucket_order
+                FROM second_purchase
+            )
+            SELECT
+                bucket,
+                COUNT(*) AS customers,
+                ROUND(AVG(days_to_second), 1) AS avg_days
+            FROM bucketed
+            GROUP BY bucket, bucket_order
+            ORDER BY bucket_order
+            """
+
+            rows = conn.execute(query).fetchall()
+
+            # Calculate totals and percentages
+            total_repeat = sum(row[1] for row in rows)
+            buckets = []
+            for bucket, customers, avg_days in rows:
+                buckets.append({
+                    "bucket": bucket,
+                    "customers": customers,
+                    "avgDays": avg_days,
+                    "percentage": round(100.0 * customers / total_repeat, 1) if total_repeat > 0 else 0
+                })
+
+            # Get median
+            median_query = f"""
+            WITH customer_orders_ranked AS (
+                SELECT
+                    o.buyer_id,
+                    o.order_date,
+                    ROW_NUMBER() OVER (PARTITION BY o.buyer_id ORDER BY o.order_date) AS order_num
+                FROM silver_orders o
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  {sales_type_filter}
+            ),
+            second_purchase AS (
+                SELECT
+                    DATEDIFF('day', c1.order_date, c2.order_date) AS days_to_second
+                FROM customer_orders_ranked c1
+                JOIN customer_orders_ranked c2
+                    ON c1.buyer_id = c2.buyer_id
+                    AND c1.order_num = 1
+                    AND c2.order_num = 2
+                WHERE c1.order_date >= CURRENT_DATE - INTERVAL '{months_back} months'
+            )
+            SELECT
+                MEDIAN(days_to_second) AS median_days,
+                AVG(days_to_second) AS avg_days
+            FROM second_purchase
+            """
+            stats = conn.execute(median_query).fetchone()
+            median_days = stats[0] if stats else None
+            avg_days_overall = stats[1] if stats else None
+
+            return {
+                "buckets": buckets,
+                "summary": {
+                    "totalRepeatCustomers": total_repeat,
+                    "medianDays": round(median_days, 1) if median_days else None,
+                    "avgDays": round(avg_days_overall, 1) if avg_days_overall else None
+                }
+            }
+
+    async def get_cohort_ltv(
+        self,
+        months_back: int = 12,
+        sales_type: str = "retail"
+    ) -> Dict[str, Any]:
+        """
+        Get cumulative lifetime value by cohort.
+
+        Shows how much revenue each cohort has generated over time,
+        with cumulative totals per month since first purchase.
+
+        Args:
+            months_back: How many months of cohorts to analyze
+            sales_type: Filter by sales type (retail/b2b/all)
+
+        Returns:
+            Dict with cohort LTV data and summary statistics
+        """
+        async with self.connection() as conn:
+            # Build sales type filter
+            sales_type_filter = ""
+            if sales_type == "retail":
+                sales_type_filter = f"""
+                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
+                         OR (o.manager_id IS NULL AND o.source_id = 4))
+                """
+            elif sales_type == "b2b":
+                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+
+            query = f"""
+            WITH customer_cohorts AS (
+                SELECT
+                    o.buyer_id,
+                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
+                FROM silver_orders o
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  {sales_type_filter}
+                GROUP BY o.buyer_id
+            ),
+            customer_revenue AS (
+                SELECT
+                    o.buyer_id,
+                    c.cohort_month,
+                    DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date)) AS months_since,
+                    SUM(o.grand_total) AS revenue
+                FROM silver_orders o
+                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
+                WHERE NOT o.is_return
+                  {sales_type_filter}
+                GROUP BY o.buyer_id, c.cohort_month, DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date))
+            ),
+            cohort_monthly AS (
+                SELECT
+                    cohort_month,
+                    months_since,
+                    SUM(revenue) AS total_revenue,
+                    COUNT(DISTINCT buyer_id) AS active_customers
+                FROM customer_revenue
+                WHERE months_since <= 12
+                GROUP BY cohort_month, months_since
+            ),
+            cohort_sizes AS (
+                SELECT cohort_month, COUNT(DISTINCT buyer_id) AS cohort_size
+                FROM customer_cohorts
+                GROUP BY cohort_month
+            )
+            SELECT
+                strftime(cm.cohort_month, '%Y-%m') AS cohort,
+                cs.cohort_size,
+                cm.months_since,
+                cm.total_revenue,
+                cm.active_customers
+            FROM cohort_monthly cm
+            JOIN cohort_sizes cs ON cm.cohort_month = cs.cohort_month
+            WHERE cm.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{months_back} months'
+            ORDER BY cm.cohort_month DESC, cm.months_since
+            """
+
+            rows = conn.execute(query).fetchall()
+
+            # Build cohort LTV structure with cumulative revenue
+            cohorts = {}
+            for cohort, size, months_since, revenue, active in rows:
+                if cohort not in cohorts:
+                    cohorts[cohort] = {
+                        "size": size,
+                        "monthly_revenue": {},
+                        "cumulative": []
+                    }
+                cohorts[cohort]["monthly_revenue"][months_since] = revenue or 0
+
+            # Calculate cumulative revenue for each cohort
+            for cohort_data in cohorts.values():
+                cumulative = 0
+                cumulative_list = []
+                for m in range(13):  # M0 to M12
+                    cumulative += cohort_data["monthly_revenue"].get(m, 0)
+                    cumulative_list.append(round(cumulative, 2))
+                cohort_data["cumulative"] = cumulative_list
+
+            # Calculate average LTV
+            all_ltv = [
+                c["cumulative"][-1] / c["size"] if c["size"] > 0 else 0
+                for c in cohorts.values()
+            ]
+            avg_ltv = round(sum(all_ltv) / len(all_ltv), 2) if all_ltv else 0
+
+            # Find best cohort
+            best_cohort = max(
+                cohorts.items(),
+                key=lambda x: x[1]["cumulative"][-1] / x[1]["size"] if x[1]["size"] > 0 else 0,
+                default=(None, {"cumulative": [0], "size": 1})
+            )
+
+            return {
+                "cohorts": [
+                    {
+                        "month": cohort,
+                        "customerCount": data["size"],
+                        "cumulativeRevenue": data["cumulative"],
+                        "avgLTV": round(data["cumulative"][-1] / data["size"], 2) if data["size"] > 0 else 0
+                    }
+                    for cohort, data in sorted(cohorts.items(), reverse=True)
+                ],
+                "summary": {
+                    "avgLTV": avg_ltv,
+                    "bestCohort": best_cohort[0],
+                    "bestCohortLTV": round(best_cohort[1]["cumulative"][-1] / best_cohort[1]["size"], 2) if best_cohort[1]["size"] > 0 else 0
+                }
+            }
+
+    async def get_at_risk_customers(
+        self,
+        days_threshold: int = 90,
+        sales_type: str = "retail"
+    ) -> Dict[str, Any]:
+        """
+        Identify at-risk customers who haven't purchased recently.
+
+        Segments customers by their cohort and identifies those who haven't
+        made a purchase in the specified number of days.
+
+        Args:
+            days_threshold: Days since last purchase to consider "at risk"
+            sales_type: Filter by sales type (retail/b2b/all)
+
+        Returns:
+            Dict with at-risk counts by cohort and summary statistics
+        """
+        async with self.connection() as conn:
+            # Build sales type filter
+            sales_type_filter = ""
+            if sales_type == "retail":
+                sales_type_filter = f"""
+                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
+                         OR (o.manager_id IS NULL AND o.source_id = 4))
+                """
+            elif sales_type == "b2b":
+                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+
+            query = f"""
+            WITH customer_activity AS (
+                SELECT
+                    o.buyer_id,
+                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month,
+                    MAX(o.order_date) AS last_order_date,
+                    DATEDIFF('day', MAX(o.order_date), CURRENT_DATE) AS days_since_last,
+                    COUNT(*) AS total_orders,
+                    SUM(o.grand_total) AS total_revenue
+                FROM silver_orders o
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  {sales_type_filter}
+                GROUP BY o.buyer_id
+            )
+            SELECT
+                strftime(cohort_month, '%Y-%m') AS cohort,
+                COUNT(*) AS total_customers,
+                COUNT(*) FILTER (WHERE days_since_last > ?) AS at_risk_count,
+                ROUND(100.0 * COUNT(*) FILTER (WHERE days_since_last > ?) / COUNT(*), 1) AS at_risk_pct,
+                SUM(total_revenue) FILTER (WHERE days_since_last > ?) AS at_risk_revenue,
+                AVG(total_orders) FILTER (WHERE days_since_last > ?) AS avg_orders_at_risk
+            FROM customer_activity
+            WHERE cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '12 months'
+            GROUP BY cohort_month
+            ORDER BY cohort_month DESC
+            """
+
+            rows = conn.execute(query, [days_threshold, days_threshold, days_threshold, days_threshold]).fetchall()
+
+            cohorts = []
+            total_at_risk = 0
+            total_customers = 0
+            for cohort, total, at_risk, pct, revenue, avg_orders in rows:
+                cohorts.append({
+                    "cohort": cohort,
+                    "totalCustomers": total,
+                    "atRiskCount": at_risk,
+                    "atRiskPct": pct,
+                    "atRiskRevenue": round(revenue, 2) if revenue else 0,
+                    "avgOrdersAtRisk": round(avg_orders, 1) if avg_orders else 0
+                })
+                total_at_risk += at_risk
+                total_customers += total
+
+            return {
+                "cohorts": cohorts,
+                "daysThreshold": days_threshold,
+                "summary": {
+                    "totalAtRisk": total_at_risk,
+                    "totalCustomers": total_customers,
+                    "overallAtRiskPct": round(100.0 * total_at_risk / total_customers, 1) if total_customers > 0 else 0
                 }
             }
 

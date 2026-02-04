@@ -127,13 +127,19 @@ class SyncService:
 
         return list(orders_by_id.values())
 
-    async def _upsert_orders_with_expenses(self, orders: list) -> tuple:
+    async def _upsert_orders_with_expenses(self, orders: list, force_update: bool = False) -> tuple:
         """Upsert orders and their expenses.
+
+        Args:
+            orders: List of order dicts from API
+            force_update: If True, force update all orders regardless of updated_at.
+                         Use for status refresh since KeyCRM doesn't update updated_at
+                         when order status changes.
 
         Returns:
             Tuple of (order_count, expense_count)
         """
-        order_count = await self.store.upsert_orders(orders)
+        order_count = await self.store.upsert_orders(orders, force_update=force_update)
         expense_count = 0
 
         for order in orders:
@@ -540,10 +546,14 @@ class SyncService:
             orders = list(orders_by_id.values())
 
             if orders:
-                order_count, expense_count = await self._upsert_orders_with_expenses(orders)
+                # Use force_update=True because KeyCRM doesn't update updated_at on status changes
+                # Without this, orders with changed status but same updated_at won't be updated
+                order_count, expense_count = await self._upsert_orders_with_expenses(
+                    orders, force_update=True
+                )
                 stats["orders"] = order_count
                 stats["expenses"] = expense_count
-                logger.info(f"Status refresh: updated {order_count} orders, {expense_count} expenses")
+                logger.info(f"Status refresh: force-updated {order_count} orders, {expense_count} expenses")
 
                 # Refresh warehouse layers (Silver → Gold)
                 await self.store.refresh_warehouse_layers(trigger="status_refresh")
