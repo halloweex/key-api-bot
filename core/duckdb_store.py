@@ -2979,18 +2979,28 @@ class DuckDBStore:
                 sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
 
             query = f"""
-            WITH customer_cohorts AS (
-                -- Get each customer's first order month and first order value
+            WITH customer_first_order AS (
+                -- Get each customer's first order month (cohort)
                 SELECT
                     o.buyer_id,
-                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month,
-                    SUM(CASE WHEN DATE_TRUNC('month', o.order_date) = DATE_TRUNC('month', MIN(o.order_date) OVER (PARTITION BY o.buyer_id))
-                             THEN o.grand_total ELSE 0 END) AS first_month_revenue
+                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
                 FROM silver_orders o
                 WHERE o.buyer_id IS NOT NULL
                   AND NOT o.is_return
                   {sales_type_filter}
                 GROUP BY o.buyer_id
+            ),
+            customer_cohorts AS (
+                -- Add first month revenue per customer
+                SELECT
+                    c.buyer_id,
+                    c.cohort_month,
+                    COALESCE(SUM(o.grand_total), 0) AS first_month_revenue
+                FROM customer_first_order c
+                LEFT JOIN silver_orders o ON c.buyer_id = o.buyer_id
+                    AND DATE_TRUNC('month', o.order_date) = c.cohort_month
+                    AND NOT o.is_return
+                GROUP BY c.buyer_id, c.cohort_month
             ),
             customer_orders AS (
                 -- Get all order months per customer with revenue

@@ -289,11 +289,49 @@ async def get_jobs(request: Request):
     # Sort by started_at descending
     all_history.sort(key=lambda x: x.get("started_at") or "", reverse=True)
 
+    # Get adaptive sync stats
+    from core.sync_service import get_sync_service
+    try:
+        sync_service = await get_sync_service()
+        sync_stats = sync_service.get_sync_stats()
+    except Exception:
+        sync_stats = None
+
     return {
         "status": "running",
         "jobs": jobs,
-        "history": all_history[:20]
+        "history": all_history[:20],
+        "adaptive_sync": sync_stats,
     }
+
+
+@router.get("/sync/stats")
+@limiter.limit("60/minute")
+async def get_sync_stats(request: Request):
+    """
+    Get adaptive sync statistics.
+
+    Shows current backoff state, consecutive empty syncs, and effective interval.
+    Useful for monitoring sync efficiency.
+    """
+    from core.sync_service import get_sync_service
+
+    try:
+        sync_service = await get_sync_service()
+        stats = sync_service.get_sync_stats()
+        return {
+            "status": "ok",
+            **stats,
+            "config": {
+                "base_interval_seconds": sync_service.BACKOFF_BASE_SECONDS,
+                "max_interval_seconds": sync_service.BACKOFF_MAX_SECONDS,
+                "backoff_multiplier": sync_service.BACKOFF_MULTIPLIER,
+                "off_hours": f"{sync_service.OFF_HOURS_START}:00 - {sync_service.OFF_HOURS_END}:00",
+                "off_hours_interval_seconds": sync_service.OFF_HOURS_INTERVAL,
+            }
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 @router.get("/events")

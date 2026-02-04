@@ -65,7 +65,16 @@ class SyncService:
     - Full sync: Initial load of all historical data
     - Incremental sync: Only fetch new/updated records
     - Background sync: Periodic updates in the background
+    - Adaptive sync: Exponential backoff when no new orders
     """
+
+    # Adaptive sync configuration
+    BACKOFF_BASE_SECONDS = 60       # Base interval
+    BACKOFF_MAX_SECONDS = 300       # Max interval (5 minutes)
+    BACKOFF_MULTIPLIER = 2          # Exponential multiplier
+    OFF_HOURS_START = 23            # 11 PM Kyiv
+    OFF_HOURS_END = 7               # 7 AM Kyiv
+    OFF_HOURS_INTERVAL = 300        # 5 min during off-hours
 
     def __init__(self, store: DuckDBStore):
         self.store = store
@@ -73,6 +82,81 @@ class SyncService:
         self._stop_sync = False
         # Track if ordered_between filter is supported
         self._use_ordered_between: Optional[bool] = None
+
+        # Adaptive sync state
+        self._consecutive_empty_syncs = 0
+        self._last_sync_time: Optional[datetime] = None
+        self._last_orders_found = 0
+        self._current_backoff_seconds = self.BACKOFF_BASE_SECONDS
+
+    def _is_off_hours(self) -> bool:
+        """Check if current time is during off-hours (low activity period)."""
+        now = datetime.now(DEFAULT_TZ)
+        hour = now.hour
+        # Off-hours: 11 PM to 7 AM
+        return hour >= self.OFF_HOURS_START or hour < self.OFF_HOURS_END
+
+    def _should_skip_sync(self) -> tuple[bool, str]:
+        """
+        Determine if sync should be skipped based on adaptive backoff.
+
+        Returns:
+            Tuple of (should_skip, reason)
+        """
+        if self._last_sync_time is None:
+            return False, ""
+
+        now = datetime.now(DEFAULT_TZ)
+        elapsed = (now - self._last_sync_time).total_seconds()
+
+        # During off-hours, use longer interval
+        if self._is_off_hours():
+            if elapsed < self.OFF_HOURS_INTERVAL:
+                remaining = int(self.OFF_HOURS_INTERVAL - elapsed)
+                return True, f"off-hours mode, next sync in {remaining}s"
+
+        # Use adaptive backoff based on consecutive empty syncs
+        if elapsed < self._current_backoff_seconds:
+            remaining = int(self._current_backoff_seconds - elapsed)
+            return True, f"backoff active ({self._current_backoff_seconds}s interval), next in {remaining}s"
+
+        return False, ""
+
+    def _update_backoff(self, orders_found: int) -> None:
+        """Update backoff state based on sync results."""
+        if orders_found > 0:
+            # Reset backoff when orders are found
+            if self._consecutive_empty_syncs > 0:
+                logger.info(f"Adaptive sync: backoff reset (found {orders_found} orders)")
+            self._consecutive_empty_syncs = 0
+            self._current_backoff_seconds = self.BACKOFF_BASE_SECONDS
+        else:
+            # Increase backoff exponentially
+            self._consecutive_empty_syncs += 1
+            new_backoff = min(
+                self.BACKOFF_BASE_SECONDS * (self.BACKOFF_MULTIPLIER ** self._consecutive_empty_syncs),
+                self.BACKOFF_MAX_SECONDS
+            )
+            if new_backoff != self._current_backoff_seconds:
+                self._current_backoff_seconds = int(new_backoff)
+                logger.info(
+                    f"Adaptive sync: backoff increased to {self._current_backoff_seconds}s "
+                    f"({self._consecutive_empty_syncs} empty syncs)"
+                )
+
+        self._last_orders_found = orders_found
+        self._last_sync_time = datetime.now(DEFAULT_TZ)
+
+    def get_sync_stats(self) -> Dict[str, Any]:
+        """Get current adaptive sync statistics."""
+        return {
+            "consecutive_empty_syncs": self._consecutive_empty_syncs,
+            "current_backoff_seconds": self._current_backoff_seconds,
+            "last_orders_found": self._last_orders_found,
+            "last_sync_time": self._last_sync_time.isoformat() if self._last_sync_time else None,
+            "is_off_hours": self._is_off_hours(),
+            "effective_interval": self.OFF_HOURS_INTERVAL if self._is_off_hours() else self._current_backoff_seconds,
+        }
 
     async def _fetch_orders_with_date_filter(
         self,
@@ -355,10 +439,22 @@ class SyncService:
         """
         Perform incremental sync - only fetch new/updated data since last sync.
 
+        Uses adaptive backoff to reduce API calls during quiet periods:
+        - Exponential backoff (60s → 120s → 240s → 300s) when no new orders
+        - Extended intervals (5 min) during off-hours (11 PM - 7 AM Kyiv)
+        - Instant reset to 60s when new orders are found
+
         Returns:
-            Dict with sync statistics
+            Dict with sync statistics (includes "skipped" key if sync was skipped)
         """
         import time
+
+        # Check if we should skip this sync cycle (adaptive backoff)
+        should_skip, skip_reason = self._should_skip_sync()
+        if should_skip:
+            logger.info(f"Adaptive sync: skipped ({skip_reason})")
+            return {"skipped": True, "reason": skip_reason}
+
         start_time = time.perf_counter()
         stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0, "managers": 0, "offers": 0, "stocks": 0}
         error_occurred = None
@@ -446,8 +542,13 @@ class SyncService:
             # Refresh warehouse layers (Silver → Gold) after all syncs
             await self.store.refresh_warehouse_layers(trigger="incremental_sync")
 
+            # Update adaptive backoff based on orders found
+            self._update_backoff(stats["orders"])
+
         except KeyCRMConnectionError as e:
             error_occurred = str(e)
+            # On connection error, don't increase backoff (might be temporary)
+            self._last_sync_time = datetime.now(DEFAULT_TZ)
             logger.warning(f"Incremental sync connection error (will retry): {e}")
         except KeyCRMAPIError as e:
             error_occurred = str(e)
