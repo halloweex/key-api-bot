@@ -108,8 +108,11 @@ export const StatCard = memo(function StatCard({
     <div className={`rounded-xl p-4 border ${cardBgStyles[variant]} transition-all hover:shadow-md ${clickable ? 'relative' : ''}`}>
         {/* Clickable indicator */}
         {clickable && (
-          <div className="absolute top-2 right-2 text-slate-400">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="absolute top-2 right-2 flex items-center gap-1 group/hint cursor-pointer">
+            <span className="bg-orange-500 hover:bg-orange-600 text-white text-xs px-2 py-0.5 rounded-full shadow-sm transition-all duration-200 hover:scale-105 animate-pulse hover:animate-none">
+              Click me
+            </span>
+            <svg className="w-4 h-4 text-orange-400 transition-transform duration-200 group-hover/hint:translate-y-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
             </svg>
           </div>
@@ -154,6 +157,7 @@ export const StatCard = memo(function StatCard({
             {subtitle && (
               <p className="text-xs text-slate-500 mt-1">{subtitle}</p>
             )}
+
           </div>
         </article>
     </div>
