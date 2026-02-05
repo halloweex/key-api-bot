@@ -731,13 +731,17 @@ async def get_returns(
     start, end = dashboard_service.parse_period(period, start_date, end_date)
 
     store = await get_store()
-    returns = await store.get_return_orders(start, end, sales_type, limit)
+    # Convert strings to date objects for the store method
+    from datetime import datetime as _dt
+    start_dt = _dt.strptime(start, "%Y-%m-%d").date()
+    end_dt = _dt.strptime(end, "%Y-%m-%d").date()
+    returns = await store.get_return_orders(start_dt, end_dt, sales_type, limit)
 
     return {
         "returns": returns,
         "count": len(returns),
-        "startDate": start.isoformat(),
-        "endDate": end.isoformat()
+        "startDate": start,
+        "endDate": end
     }
 
 
