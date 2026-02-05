@@ -7,6 +7,7 @@ import type { FilterStore } from '../types/filters'
 const selectSalesType = (s: FilterStore) => s.salesType
 import type {
   SummaryResponse,
+  ReturnsResponse,
   RevenueTrendResponse,
   SalesBySourceResponse,
   TopProductsResponse,
@@ -47,6 +48,7 @@ export const queryKeys = {
   goalForecast: (year: number, month: number, salesType: string) => ['goalForecast', year, month, salesType] as const,
   // Data
   summary: (params: string) => ['summary', params] as const,
+  returns: (params: string) => ['returns', params] as const,
   revenueTrend: (params: string) => ['revenueTrend', params] as const,
   salesBySource: (params: string) => ['salesBySource', params] as const,
   topProducts: (params: string) => ['topProducts', params] as const,
@@ -93,6 +95,19 @@ export function useSummary() {
     queryKey: queryKeys.summary(queryParams),
     queryFn: () => api.getSummary(queryParams),
     staleTime: CACHE_TTL.REALTIME,
+  })
+}
+
+// ─── Returns ────────────────────────────────────────────────────────────────
+
+export function useReturns(enabled = false) {
+  const queryParams = useQueryParams()
+
+  return useQuery<ReturnsResponse>({
+    queryKey: queryKeys.returns(queryParams),
+    queryFn: () => api.getReturns(queryParams),
+    staleTime: CACHE_TTL.REALTIME,
+    enabled, // Only fetch when dropdown is open
   })
 }
 

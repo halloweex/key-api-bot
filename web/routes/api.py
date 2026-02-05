@@ -709,6 +709,38 @@ async def get_summary(
     return result
 
 
+@router.get("/returns")
+@limiter.limit("30/minute")
+async def get_returns(
+    request: Request,
+    period: Optional[str] = Query(None, description="Shortcut: today, yesterday, week, month"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all"),
+    limit: int = Query(50, ge=1, le=100, description="Maximum number of returns to fetch")
+):
+    """Get list of return orders for a date range."""
+    from core.duckdb_store import get_store
+
+    try:
+        validate_period(period)
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+
+    store = await get_store()
+    returns = await store.get_return_orders(start, end, sales_type, limit)
+
+    return {
+        "returns": returns,
+        "count": len(returns),
+        "startDate": start.isoformat(),
+        "endDate": end.isoformat()
+    }
+
+
 @router.get("/customers/insights")
 @limiter.limit("30/minute")
 async def get_customer_insights(

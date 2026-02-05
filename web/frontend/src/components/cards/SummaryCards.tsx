@@ -1,9 +1,9 @@
-import { useMemo, useCallback, type ReactNode } from 'react'
+import { useMemo, useCallback, useState, useRef, useEffect, type ReactNode } from 'react'
 import { StatCard, StatCardSkeleton, type StatCardVariant } from './StatCard'
 import { MilestoneProgress } from '../ui'
-import { useSummary } from '../../hooks'
+import { useSummary, useReturns } from '../../hooks'
 import { formatCurrency, formatNumber, formatPercent } from '../../utils/formatters'
-import type { SummaryResponse } from '../../types/api'
+import type { SummaryResponse, ReturnOrder } from '../../types/api'
 import {
   ShoppingCartIcon,
   CurrencyIcon,
@@ -55,24 +55,147 @@ const CARD_CONFIGS: CardConfig[] = [
     formatter: formatCurrency,
     ariaLabel: (data) => `Average check: ${formatCurrency(data.avgCheck)}`,
   },
-  {
-    id: 'returns',
-    label: 'Returns',
-    variant: 'orange',
-    icon: <ArrowUturnLeftIcon />,
-    getValue: (data) => data.totalReturns,
-    formatter: formatNumber,
-    getSubtitle: (data) => {
-      const rate = data.totalOrders > 0
-        ? (data.totalReturns / (data.totalOrders + data.totalReturns)) * 100
-        : 0
-      return rate > 0 ? `${formatPercent(rate)} return rate` : undefined
-    },
-    ariaLabel: (data) => `Returns: ${formatNumber(data.totalReturns)}`,
-  },
 ]
 
-const SKELETON_COUNT = CARD_CONFIGS.length
+const SKELETON_COUNT = CARD_CONFIGS.length + 1 // +1 for returns card
+
+// ─── Status Badge Colors ─────────────────────────────────────────────────────
+
+const STATUS_COLORS: Record<number, string> = {
+  19: 'bg-red-100 text-red-700',      // Returned
+  21: 'bg-orange-100 text-orange-700', // Partially Returned
+  22: 'bg-slate-100 text-slate-700',   // Cancelled
+  23: 'bg-purple-100 text-purple-700', // Refunded
+}
+
+// ─── Returns Card with Dropdown ──────────────────────────────────────────────
+
+interface ReturnsCardProps {
+  data: SummaryResponse
+}
+
+function ReturnsCard({ data }: ReturnsCardProps) {
+  const [isOpen, setIsOpen] = useState(false)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+  const { data: returnsData, isLoading } = useReturns(isOpen)
+
+  const returnRate = data.totalOrders > 0
+    ? (data.totalReturns / (data.totalOrders + data.totalReturns)) * 100
+    : 0
+
+  // Close on click outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false)
+      }
+    }
+    if (isOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isOpen])
+
+  // Close on escape
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsOpen(false)
+    }
+    if (isOpen) {
+      document.addEventListener('keydown', handleEscape)
+    }
+    return () => document.removeEventListener('keydown', handleEscape)
+  }, [isOpen])
+
+  const handleClick = useCallback(() => {
+    if (data.totalReturns > 0) {
+      setIsOpen((prev) => !prev)
+    }
+  }, [data.totalReturns])
+
+  return (
+    <div ref={dropdownRef} className="relative">
+      <button
+        onClick={handleClick}
+        disabled={data.totalReturns === 0}
+        className={`w-full text-left transition-all ${
+          data.totalReturns > 0
+            ? 'cursor-pointer hover:ring-2 hover:ring-orange-300 rounded-xl'
+            : 'cursor-default'
+        }`}
+        aria-expanded={isOpen}
+        aria-haspopup="true"
+      >
+        <StatCard
+          label="Returns"
+          value={data.totalReturns}
+          formatter={formatNumber}
+          variant="orange"
+          icon={<ArrowUturnLeftIcon />}
+          subtitle={returnRate > 0 ? `${formatPercent(returnRate)} return rate` : undefined}
+          ariaLabel={`Returns: ${formatNumber(data.totalReturns)}`}
+          clickable={data.totalReturns > 0}
+        />
+      </button>
+
+      {/* Dropdown */}
+      {isOpen && (
+        <div className="absolute top-full left-0 right-0 mt-2 z-50 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden max-h-80 overflow-y-auto">
+          <div className="sticky top-0 bg-white border-b border-slate-100 px-4 py-2">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-slate-700">
+                Return Orders ({data.totalReturns})
+              </span>
+              <button
+                onClick={() => setIsOpen(false)}
+                className="text-slate-400 hover:text-slate-600 p-1"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          {isLoading ? (
+            <div className="p-4 text-center text-slate-500 text-sm">
+              Loading returns...
+            </div>
+          ) : returnsData?.returns?.length ? (
+            <div className="divide-y divide-slate-100">
+              {returnsData.returns.map((order: ReturnOrder) => (
+                <div key={order.id} className="px-4 py-3 hover:bg-slate-50 transition-colors">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-slate-800">#{order.id}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLORS[order.statusId] || 'bg-slate-100 text-slate-600'}`}>
+                          {order.statusName}
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5">
+                        {order.date} · {order.source}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-medium text-slate-800">
+                        {formatCurrency(order.amount)}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="p-4 text-center text-slate-500 text-sm">
+              No return orders found
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 // ─── Error Component ─────────────────────────────────────────────────────────
 
@@ -178,7 +301,12 @@ export function SummaryCards() {
           />
         )}
 
-        {!isLoading && !error && data && renderedCards}
+        {!isLoading && !error && data && (
+          <>
+            {renderedCards}
+            <ReturnsCard data={data} />
+          </>
+        )}
       </section>
     </div>
   )

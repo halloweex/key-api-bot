@@ -26,6 +26,8 @@ export interface StatCardProps {
   animationDuration?: number
   /** Accessible description for screen readers */
   ariaLabel?: string
+  /** Show clickable indicator */
+  clickable?: boolean
 }
 
 // ─── Styling ─────────────────────────────────────────────────────────────────
@@ -97,12 +99,21 @@ export const StatCard = memo(function StatCard({
   trendValue,
   animationDuration = 500,
   ariaLabel,
+  clickable = false,
 }: StatCardProps) {
   const trendKey = trend === 1 ? 'up' : trend === -1 ? 'down' : 'neutral'
   const showTrend = trend !== undefined && trend !== 0 && trendValue !== undefined
 
   return (
-    <div className={`rounded-xl p-4 border ${cardBgStyles[variant]} transition-all hover:shadow-md`}>
+    <div className={`rounded-xl p-4 border ${cardBgStyles[variant]} transition-all hover:shadow-md ${clickable ? 'relative' : ''}`}>
+        {/* Clickable indicator */}
+        {clickable && (
+          <div className="absolute top-2 right-2 text-slate-400">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+        )}
         <article
           aria-label={ariaLabel || `${label}: ${formatter(value)}`}
           className={icon ? "flex items-start gap-3" : "text-center"}

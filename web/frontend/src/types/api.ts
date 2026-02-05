@@ -10,6 +10,23 @@ export interface SummaryResponse {
   endDate: string
 }
 
+export interface ReturnOrder {
+  id: number
+  date: string
+  amount: number
+  statusId: number
+  statusName: string
+  source: string
+  buyerId: number | null
+}
+
+export interface ReturnsResponse {
+  returns: ReturnOrder[]
+  count: number
+  startDate: string
+  endDate: string
+}
+
 export type CompareType = 'previous_period' | 'year_ago' | 'month_ago'
 
 export interface RevenueForecastDaily {

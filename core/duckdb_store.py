@@ -2220,6 +2220,67 @@ class DuckDBStore:
                 "endDate": end_date.isoformat()
             }
 
+    async def get_return_orders(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "retail",
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get list of return orders for a date range.
+
+        Returns list of orders with id, date, amount, status, source.
+        """
+        # Status ID to name mapping for returns
+        STATUS_NAMES = {
+            19: "Returned",
+            21: "Partially Returned",
+            22: "Cancelled",
+            23: "Refunded",
+        }
+
+        async with self.connection() as conn:
+            params: list = [start_date, end_date]
+            where_clauses = [
+                "s.order_date BETWEEN ? AND ?",
+                "s.is_return = TRUE",
+                "s.is_active_source = TRUE"
+            ]
+
+            if sales_type != "all":
+                where_clauses.append("s.sales_type = ?")
+                params.append(sales_type)
+
+            where_sql = " AND ".join(where_clauses)
+            params.append(limit)
+
+            result = conn.execute(f"""
+                SELECT
+                    s.id,
+                    s.order_date,
+                    s.grand_total,
+                    s.status_id,
+                    s.source_name,
+                    s.buyer_id
+                FROM silver_orders s
+                WHERE {where_sql}
+                ORDER BY s.order_date DESC, s.id DESC
+                LIMIT ?
+            """, params).fetchall()
+
+            return [
+                {
+                    "id": row[0],
+                    "date": row[1].isoformat() if row[1] else None,
+                    "amount": float(row[2] or 0),
+                    "statusId": row[3],
+                    "statusName": STATUS_NAMES.get(row[3], f"Status {row[3]}"),
+                    "source": row[4],
+                    "buyerId": row[5],
+                }
+                for row in result
+            ]
+
     def _build_gold_revenue_query(
         self,
         start_date: date,

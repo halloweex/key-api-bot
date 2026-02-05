@@ -4,6 +4,7 @@
 
 import type {
   SummaryResponse,
+  ReturnsResponse,
   RevenueTrendResponse,
   RevenueForecast,
   SalesBySourceResponse,
@@ -248,6 +249,10 @@ export const api = {
   // Summary
   getSummary: (params: string, options?: FetchOptions) =>
     fetchApi<SummaryResponse>('/summary', params, options),
+
+  // Returns
+  getReturns: (params: string, options?: FetchOptions) =>
+    fetchApi<ReturnsResponse>('/returns', params, options),
 
   // Revenue
   getRevenueTrend: (params: string, options?: FetchOptions) =>
