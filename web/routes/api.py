@@ -197,6 +197,31 @@ async def refresh_warehouse(
     return result
 
 
+@router.post("/duckdb/sync-buyers")
+@limiter.limit("120/minute")
+async def sync_buyers(
+    request: Request,
+    limit: int = Query(100, ge=1, le=500, description="Maximum buyers to sync"),
+):
+    """
+    Manually sync missing buyers from KeyCRM.
+
+    Fetches buyer details for orders that have buyer_id but no buyer record.
+    """
+    from core.sync_service import get_sync_service
+
+    try:
+        sync_service = await get_sync_service()
+        count = await sync_service.sync_missing_buyers(limit=limit)
+        return {
+            "status": "success",
+            "message": f"Synced {count} buyers from KeyCRM",
+            "buyers_synced": count
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Buyer sync failed: {str(e)}")
+
+
 @router.get("/metrics", response_model=MetricsResponse)
 @limiter.limit("60/minute")
 async def get_metrics(request: Request):
@@ -210,6 +235,37 @@ async def get_metrics(request: Request):
         "correlation_id": get_correlation_id(),
         **metrics.get_stats()
     }
+
+
+@router.get("/buyers/stats")
+@limiter.limit("60/minute")
+async def get_buyer_stats(request: Request):
+    """Get buyer sync statistics."""
+    store = await get_store()
+    async with store.connection() as conn:
+        orders_buyers = conn.execute("""
+            SELECT COUNT(DISTINCT buyer_id) FROM orders WHERE buyer_id IS NOT NULL
+        """).fetchone()[0]
+
+        silver_buyers = conn.execute("""
+            SELECT COUNT(DISTINCT buyer_id) FROM silver_orders WHERE buyer_id IS NOT NULL
+        """).fetchone()[0]
+
+        synced = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+
+        missing = conn.execute("""
+            SELECT COUNT(DISTINCT s.buyer_id)
+            FROM silver_orders s
+            LEFT JOIN buyers b ON s.buyer_id = b.id
+            WHERE s.buyer_id IS NOT NULL AND b.id IS NULL
+        """).fetchone()[0]
+
+        return {
+            "unique_in_orders": orders_buyers,
+            "unique_in_silver_orders": silver_buyers,
+            "synced_to_buyers_table": synced,
+            "missing": missing
+        }
 
 
 @router.get("/cache/stats")

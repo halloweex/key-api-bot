@@ -18,6 +18,10 @@ export interface ReturnOrder {
   statusName: string
   source: string
   buyerId: number | null
+  buyerName: string | null
+  buyerPhone: string | null
+  managerId: number | null
+  managerName: string | null
 }
 
 export interface ReturnsResponse {

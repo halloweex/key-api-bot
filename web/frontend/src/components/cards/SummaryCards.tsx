@@ -175,6 +175,8 @@ function ReturnsCard({ data }: ReturnsCardProps) {
                       </div>
                       <div className="text-xs text-slate-500 mt-0.5">
                         {order.date} · {order.source}
+                        {order.buyerName && <span className="ml-1">· {order.buyerName}</span>}
+                        {order.managerName && <span className="ml-1 text-slate-400">({order.managerName})</span>}
                       </div>
                     </div>
                     <div className="text-right">

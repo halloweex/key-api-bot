@@ -613,6 +613,44 @@ class KeyCRMClient:
         """
         return await self.fetch_all("offers/stocks", params, max_pages=max_pages)
 
+    async def fetch_buyers_by_ids(
+        self,
+        buyer_ids: List[int],
+        batch_size: int = 10,
+    ) -> List[Buyer]:
+        """
+        Fetch multiple buyers by their IDs.
+
+        Args:
+            buyer_ids: List of buyer IDs to fetch
+            batch_size: Number of concurrent requests
+
+        Returns:
+            List of Buyer objects (skips failed/not found)
+        """
+        if not buyer_ids:
+            return []
+
+        buyers = []
+        unique_ids = list(set(buyer_ids))
+
+        # Fetch in batches to avoid overwhelming the API
+        for i in range(0, len(unique_ids), batch_size):
+            batch = unique_ids[i:i + batch_size]
+            tasks = [self.get_customer(bid) for bid in batch]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in results:
+                if isinstance(result, Exception):
+                    continue  # Skip failed requests
+                if result and isinstance(result, dict):
+                    buyer = Buyer.from_api(result)
+                    if buyer:
+                        buyers.append(buyer)
+
+        return buyers
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SYNC WRAPPER (for backwards compatibility)

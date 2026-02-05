@@ -266,6 +266,51 @@ class SyncService:
             logger.error(f"Manager sync error: {e}")
             return 0
 
+    async def sync_missing_buyers(self, limit: int = 100) -> int:
+        """
+        Sync buyers that are referenced in orders but not yet in buyers table.
+
+        Fetches buyer details from KeyCRM API for orders that have buyer_id
+        but no corresponding buyer record.
+
+        Args:
+            limit: Maximum number of buyers to sync per call
+
+        Returns:
+            Number of buyers synced
+        """
+        logger.info("Syncing missing buyers...")
+        try:
+            # Get buyer IDs from orders that don't have buyer records
+            missing_ids = await self.store.get_missing_buyer_ids(limit)
+
+            if not missing_ids:
+                logger.info("No missing buyers to sync")
+                await self.store.set_last_sync_time("buyers")
+                return 0
+
+            logger.info(f"Fetching {len(missing_ids)} missing buyers from KeyCRM...")
+            client = await get_async_client()
+            buyers = await client.fetch_buyers_by_ids(missing_ids)
+
+            if buyers:
+                count = await self.store.upsert_buyers(buyers)
+                await self.store.set_last_sync_time("buyers")
+                logger.info(f"Synced {count} buyers from KeyCRM")
+                return count
+
+            await self.store.set_last_sync_time("buyers")
+            return 0
+        except KeyCRMConnectionError as e:
+            logger.warning(f"Buyer sync connection error (will retry): {e}")
+            return 0
+        except KeyCRMAPIError as e:
+            logger.error(f"Buyer sync API error: {e}")
+            return 0
+        except KeyCRMError as e:
+            logger.error(f"Buyer sync error: {e}")
+            return 0
+
     async def sync_offers(self) -> int:
         """
         Sync offers (product variations) from KeyCRM API.
@@ -456,7 +501,7 @@ class SyncService:
             return {"skipped": True, "reason": skip_reason}
 
         start_time = time.perf_counter()
-        stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0, "managers": 0, "offers": 0, "stocks": 0}
+        stats = {"orders": 0, "products": 0, "categories": 0, "expenses": 0, "managers": 0, "buyers": 0, "offers": 0, "stocks": 0}
         error_occurred = None
 
         # Emit sync started event
@@ -516,6 +561,11 @@ class SyncService:
             last_managers_sync = await self.store.get_last_sync_time("managers")
             if not last_managers_sync or (datetime.now(DEFAULT_TZ) - last_managers_sync).total_seconds() > 86400:
                 stats["managers"] = await self.sync_managers()
+
+            # Sync missing buyers (fetch buyer details for orders that don't have them)
+            last_buyers_sync = await self.store.get_last_sync_time("buyers")
+            if not last_buyers_sync or (datetime.now(DEFAULT_TZ) - last_buyers_sync).total_seconds() > 3600:
+                stats["buyers"] = await self.sync_missing_buyers()
 
             # Sync offers hourly (needed for proper stock-to-product linking)
             last_offers_sync = await self.store.get_last_sync_time("offers")

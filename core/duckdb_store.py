@@ -459,6 +459,58 @@ class DuckDBStore:
             synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Buyers/Customers table (synced from KeyCRM)
+        CREATE TABLE IF NOT EXISTS buyers (
+            -- Core
+            id INTEGER PRIMARY KEY,
+            full_name VARCHAR NOT NULL,
+            birthday DATE,
+            note TEXT,
+
+            -- Primary contact (indexed for quick lookup)
+            phone VARCHAR,
+            email VARCHAR,
+
+            -- Relationships
+            manager_id INTEGER,
+            company_id INTEGER,
+            company_name VARCHAR,
+
+            -- Geographic
+            city VARCHAR,
+            region VARCHAR,
+
+            -- Loyalty (denormalized)
+            loyalty_program_name VARCHAR,
+            loyalty_level_name VARCHAR,
+            loyalty_discount DECIMAL(5,2) DEFAULT 0,
+            loyalty_amount DECIMAL(12,2) DEFAULT 0,
+
+            -- Timestamps
+            created_at TIMESTAMP WITH TIME ZONE,
+            updated_at TIMESTAMP WITH TIME ZONE,
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_buyers_phone ON buyers(phone);
+        CREATE INDEX IF NOT EXISTS idx_buyers_email ON buyers(email);
+        CREATE INDEX IF NOT EXISTS idx_buyers_manager ON buyers(manager_id);
+        CREATE INDEX IF NOT EXISTS idx_buyers_city ON buyers(city);
+
+        -- Buyer contacts (normalized 1:N for all phones/emails)
+        CREATE SEQUENCE IF NOT EXISTS seq_buyer_contacts_id START 1;
+        CREATE TABLE IF NOT EXISTS buyer_contacts (
+            id INTEGER PRIMARY KEY DEFAULT nextval('seq_buyer_contacts_id'),
+            buyer_id INTEGER NOT NULL,
+            contact_type VARCHAR NOT NULL,          -- 'phone' or 'email'
+            value VARCHAR NOT NULL,
+            is_primary BOOLEAN DEFAULT FALSE,
+            UNIQUE(buyer_id, contact_type, value)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_buyer_contacts_buyer ON buyer_contacts(buyer_id);
+        CREATE INDEX IF NOT EXISTS idx_buyer_contacts_value ON buyer_contacts(value);
+
         -- ═══════════════════════════════════════════════════════════════════════
         -- SILVER LAYER: Enriched orders (one row per order)
         -- ═══════════════════════════════════════════════════════════════════════
@@ -1509,6 +1561,124 @@ class DuckDBStore:
                 conn.execute("ROLLBACK")
                 raise
 
+    async def upsert_buyers(self, buyers: List["Buyer"]) -> int:
+        """Insert or update buyers from KeyCRM API.
+
+        Args:
+            buyers: List of Buyer objects
+
+        Returns:
+            Number of buyers upserted
+        """
+        from core.models import Buyer
+        if not buyers:
+            return 0
+
+        async with self.connection() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                count = 0
+                contacts_count = 0
+
+                for buyer in buyers:
+                    # Upsert buyer record
+                    conn.execute("""
+                        INSERT OR REPLACE INTO buyers
+                        (id, full_name, birthday, note, phone, email,
+                         manager_id, company_id, company_name, city, region,
+                         loyalty_program_name, loyalty_level_name, loyalty_discount, loyalty_amount,
+                         created_at, updated_at, synced_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, [
+                        buyer.id,
+                        buyer.full_name,
+                        buyer.birthday,
+                        buyer.note,
+                        buyer.phone,
+                        buyer.email,
+                        buyer.manager_id,
+                        buyer.company_id,
+                        buyer.company_name,
+                        buyer.city,
+                        buyer.region,
+                        buyer.loyalty_program_name,
+                        buyer.loyalty_level_name,
+                        buyer.loyalty_discount,
+                        buyer.loyalty_amount,
+                        buyer.created_at,
+                        buyer.updated_at,
+                    ])
+                    count += 1
+
+                    # Upsert contacts (phones and emails)
+                    # First, remove existing contacts for this buyer
+                    conn.execute("DELETE FROM buyer_contacts WHERE buyer_id = ?", [buyer.id])
+
+                    # Insert all phones
+                    if buyer.phones:
+                        for i, phone in enumerate(buyer.phones):
+                            if phone:  # Skip empty values
+                                conn.execute("""
+                                    INSERT INTO buyer_contacts (buyer_id, contact_type, value, is_primary)
+                                    VALUES (?, 'phone', ?, ?)
+                                    ON CONFLICT (buyer_id, contact_type, value) DO NOTHING
+                                """, [buyer.id, phone, i == 0])
+                                contacts_count += 1
+
+                    # Insert all emails
+                    if buyer.emails:
+                        for i, email in enumerate(buyer.emails):
+                            if email:  # Skip empty values
+                                conn.execute("""
+                                    INSERT INTO buyer_contacts (buyer_id, contact_type, value, is_primary)
+                                    VALUES (?, 'email', ?, ?)
+                                    ON CONFLICT (buyer_id, contact_type, value) DO NOTHING
+                                """, [buyer.id, email, i == 0])
+                                contacts_count += 1
+
+                conn.execute("COMMIT")
+                logger.info(f"Upserted {count} buyers, {contacts_count} contacts to DuckDB")
+                return count
+
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
+    async def get_missing_buyer_ids(self, limit: int = 100) -> List[int]:
+        """Get buyer IDs from orders that need syncing.
+
+        Includes buyers that:
+        - Are not in the buyers table at all
+        - Are in the buyers table but have NULL full_name (incomplete sync)
+
+        Prioritizes return orders to ensure return buyers are synced first.
+
+        Args:
+            limit: Maximum number of IDs to return
+
+        Returns:
+            List of buyer IDs that need to be synced
+        """
+        async with self.connection() as conn:
+            # Use silver_orders which has is_return flag, prioritize returns
+            # Also include buyers with NULL full_name (need re-sync)
+            # Use subquery to properly handle DISTINCT with ORDER BY
+            result = conn.execute("""
+                SELECT buyer_id FROM (
+                    SELECT s.buyer_id,
+                           MAX(CASE WHEN s.is_return THEN 1 ELSE 0 END) as has_return,
+                           MAX(s.order_date) as latest_order
+                    FROM silver_orders s
+                    LEFT JOIN buyers b ON s.buyer_id = b.id
+                    WHERE s.buyer_id IS NOT NULL
+                      AND (b.id IS NULL OR b.full_name IS NULL OR b.full_name = '')
+                    GROUP BY s.buyer_id
+                ) sub
+                ORDER BY has_return DESC, latest_order DESC
+                LIMIT ?
+            """, [limit]).fetchall()
+            return [row[0] for row in result]
+
     async def upsert_offers(self, offers: List[Dict[str, Any]]) -> int:
         """Insert or update offers from KeyCRM API response.
 
@@ -2261,8 +2431,14 @@ class DuckDBStore:
                     s.grand_total,
                     s.status_id,
                     s.source_name,
-                    s.buyer_id
+                    s.buyer_id,
+                    b.full_name AS buyer_name,
+                    b.phone AS buyer_phone,
+                    s.manager_id,
+                    m.name AS manager_name
                 FROM silver_orders s
+                LEFT JOIN buyers b ON s.buyer_id = b.id
+                LEFT JOIN managers m ON s.manager_id = m.id
                 WHERE {where_sql}
                 ORDER BY s.order_date DESC, s.id DESC
                 LIMIT ?
@@ -2277,6 +2453,10 @@ class DuckDBStore:
                     "statusName": STATUS_NAMES.get(row[3], f"Status {row[3]}"),
                     "source": row[4],
                     "buyerId": row[5],
+                    "buyerName": row[6],
+                    "buyerPhone": row[7],
+                    "managerId": row[8],
+                    "managerName": row[9],
                 }
                 for row in result
             ]
@@ -4896,6 +5076,8 @@ class DuckDBStore:
             categories_count = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
             expenses_count = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
             expense_types_count = conn.execute("SELECT COUNT(*) FROM expense_types").fetchone()[0]
+            buyers_count = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+            buyer_contacts_count = conn.execute("SELECT COUNT(*) FROM buyer_contacts").fetchone()[0]
 
             min_date = conn.execute("SELECT MIN(DATE(ordered_at)) FROM orders").fetchone()[0]
             max_date = conn.execute("SELECT MAX(DATE(ordered_at)) FROM orders").fetchone()[0]
@@ -4904,6 +5086,8 @@ class DuckDBStore:
                 "orders": orders_count,
                 "products": products_count,
                 "categories": categories_count,
+                "buyers": buyers_count,
+                "buyer_contacts": buyer_contacts_count,
                 "expenses": expenses_count,
                 "expense_types": expense_types_count,
                 "date_range": {

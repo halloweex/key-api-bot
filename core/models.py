@@ -82,12 +82,38 @@ class OrderStatus(IntEnum):
 @dataclass
 class Buyer:
     """Customer/buyer from KeyCRM."""
+    # Core
     id: int
-    created_at: Optional[datetime] = None
+    full_name: Optional[str] = None
+    birthday: Optional[str] = None  # Date string YYYY-MM-DD
+    note: Optional[str] = None
+
+    # Primary contact
     phone: Optional[str] = None
     email: Optional[str] = None
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
+
+    # All contacts (for buyer_contacts table)
+    phones: Optional[List[str]] = None
+    emails: Optional[List[str]] = None
+
+    # Relationships
+    manager_id: Optional[int] = None
+    company_id: Optional[int] = None
+    company_name: Optional[str] = None
+
+    # Geographic
+    city: Optional[str] = None
+    region: Optional[str] = None
+
+    # Loyalty
+    loyalty_program_name: Optional[str] = None
+    loyalty_level_name: Optional[str] = None
+    loyalty_discount: float = 0.0
+    loyalty_amount: float = 0.0
+
+    # Timestamps
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     @classmethod
     def from_api(cls, data: Optional[Dict[str, Any]]) -> Optional["Buyer"]:
@@ -95,29 +121,90 @@ class Buyer:
         if not data:
             return None
 
+        # Parse timestamps
         created_at = None
         if data.get("created_at"):
             try:
                 created_at = datetime.fromisoformat(
-                    data["created_at"].replace("Z", "+00:00")
+                    data["created_at"].replace("Z", "+00:00").replace(" ", "T")
                 )
             except (ValueError, TypeError):
                 pass
 
+        updated_at = None
+        if data.get("updated_at"):
+            try:
+                updated_at = datetime.fromisoformat(
+                    data["updated_at"].replace("Z", "+00:00").replace(" ", "T")
+                )
+            except (ValueError, TypeError):
+                pass
+
+        # Handle phone/email as arrays or strings
+        phones = data.get("phone", [])
+        if isinstance(phones, str):
+            phones = [phones] if phones else []
+        emails = data.get("email", [])
+        if isinstance(emails, str):
+            emails = [emails] if emails else []
+
+        # Extract company info
+        company = data.get("company") or {}
+        company_id = company.get("id") if isinstance(company, dict) else None
+        company_name = company.get("name") if isinstance(company, dict) else None
+
+        # Extract manager info
+        manager = data.get("manager") or {}
+        manager_id = manager.get("id") if isinstance(manager, dict) else data.get("manager_id")
+
+        # Extract shipping for city/region (use first address)
+        shipping = data.get("shipping", [])
+        city = None
+        region = None
+        if shipping and isinstance(shipping, list) and len(shipping) > 0:
+            first_addr = shipping[0]
+            city = first_addr.get("city")
+            region = first_addr.get("region")
+
+        # Extract loyalty info (use first/active program)
+        loyalty = data.get("loyalty", [])
+        loyalty_program_name = None
+        loyalty_level_name = None
+        loyalty_discount = 0.0
+        loyalty_amount = 0.0
+        if loyalty and isinstance(loyalty, list) and len(loyalty) > 0:
+            first_loyalty = loyalty[0]
+            loyalty_program_name = first_loyalty.get("loyalty_program_name")
+            loyalty_level_name = first_loyalty.get("loyalty_program_level_name")
+            loyalty_discount = float(first_loyalty.get("discount") or 0)
+            loyalty_amount = float(first_loyalty.get("amount") or 0)
+
         return cls(
             id=data.get("id", 0),
+            full_name=data.get("full_name") or "Unknown",
+            birthday=data.get("birthday"),
+            note=data.get("note"),
+            phone=phones[0] if phones else None,
+            email=emails[0] if emails else None,
+            phones=phones or None,
+            emails=emails or None,
+            manager_id=manager_id,
+            company_id=company_id,
+            company_name=company_name,
+            city=city,
+            region=region,
+            loyalty_program_name=loyalty_program_name,
+            loyalty_level_name=loyalty_level_name,
+            loyalty_discount=loyalty_discount,
+            loyalty_amount=loyalty_amount,
             created_at=created_at,
-            phone=data.get("phone"),
-            email=data.get("email"),
-            first_name=data.get("first_name"),
-            last_name=data.get("last_name"),
+            updated_at=updated_at,
         )
 
     @property
-    def full_name(self) -> str:
-        """Get buyer's full name."""
-        parts = [self.first_name, self.last_name]
-        return " ".join(p for p in parts if p) or "Unknown"
+    def display_name(self) -> str:
+        """Get buyer's display name."""
+        return self.full_name or "Unknown"
 
     def is_returning(self, period_start: datetime) -> bool:
         """Check if buyer existed before the given period start."""
