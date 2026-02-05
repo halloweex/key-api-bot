@@ -185,13 +185,15 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
-        # Job: Revenue prediction model training (daily at 3:30 AM)
+        # Job: Revenue prediction model training (2x weekly: Mon & Thu at 3:30 AM)
+        # Training daily is overkill - model quality doesn't improve with daily retraining
+        # and consumes unnecessary CPU. 2x weekly keeps model fresh with historical patterns.
         self._add_job(
             job_id="revenue_prediction_train",
             name="Revenue Prediction",
             description="Train LightGBM model and generate revenue forecasts",
             func=self._run_revenue_prediction,
-            trigger=CronTrigger(hour=3, minute=30),
+            trigger=CronTrigger(day_of_week="mon,thu", hour=3, minute=30),
             max_instances=1,
             coalesce=True,
         )

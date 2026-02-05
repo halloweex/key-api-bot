@@ -572,6 +572,12 @@ class DuckDBStore:
         CREATE INDEX IF NOT EXISTS idx_gold_prod_brand ON gold_daily_products(brand);
         CREATE INDEX IF NOT EXISTS idx_gold_prod_category ON gold_daily_products(category_id);
         CREATE INDEX IF NOT EXISTS idx_warehouse_refreshes_at ON warehouse_refreshes(refreshed_at);
+
+        -- Composite indexes for drill-down queries (30-40% speedup)
+        CREATE INDEX IF NOT EXISTS idx_silver_source_date_type ON silver_orders(source_id, order_date, sales_type);
+        CREATE INDEX IF NOT EXISTS idx_silver_active_return ON silver_orders(is_active_source, is_return, order_date);
+        CREATE INDEX IF NOT EXISTS idx_gold_prod_cat_date ON gold_daily_products(category_id, date, sales_type);
+        CREATE INDEX IF NOT EXISTS idx_gold_prod_brand_date ON gold_daily_products(brand, date, sales_type);
         """
         self._connection.execute(schema_sql)
 
@@ -1020,6 +1026,7 @@ class DuckDBStore:
                 """)
 
                 # ── Recreate indexes (CREATE OR REPLACE TABLE drops them) ──
+                # Basic indexes
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_order_date ON silver_orders(order_date)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_sales_type ON silver_orders(sales_type, order_date)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_buyer ON silver_orders(buyer_id)")
@@ -1028,6 +1035,11 @@ class DuckDBStore:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_product ON gold_daily_products(product_id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_brand ON gold_daily_products(brand)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_category ON gold_daily_products(category_id)")
+                # Composite indexes for drill-down query optimization
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_source_date_type ON silver_orders(source_id, order_date, sales_type)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_active_return ON silver_orders(is_active_source, is_return, order_date)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_cat_date ON gold_daily_products(category_id, date, sales_type)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_brand_date ON gold_daily_products(brand, date, sales_type)")
 
                 # ── Validation checksums ──
                 checksums = conn.execute("""

@@ -10,7 +10,7 @@ import calendar
 import threading
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
@@ -1197,13 +1197,7 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 @authorized
 async def reply_keyboard_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle '📈 Dashboard' button from reply keyboard."""
-    keyboard = [[InlineKeyboardButton("📈 Open Dashboard", url=DASHBOARD_URL)]]
-    await update.message.reply_text(
-        f"📈 <b>Sales Dashboard</b>\n\n"
-        f"View interactive charts and analytics:",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    return await dashboard_command(update, context)
 
 
 @authorized
@@ -1459,23 +1453,17 @@ async def auth_request_again(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ADMIN USER MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════
 
-async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show list of approved and frozen users for admin management."""
-    user = update.effective_user
+def _build_user_list_ui() -> Tuple[str, List[List[InlineKeyboardButton]]]:
+    """Build user list message and keyboard for admin management.
 
-    if not is_admin(user.id):
-        await update.message.reply_text("⛔ Admin access required.", parse_mode="HTML")
-        return
-
+    Returns:
+        Tuple of (message_text, keyboard_buttons) or (None, None) if no users.
+    """
     users = database.get_all_authorized_users()
     frozen_users = database.get_frozen_users()
 
     if not users and not frozen_users:
-        await update.message.reply_text(
-            "📋 <b>No users</b>\n\nNo approved or frozen users.",
-            parse_mode="HTML"
-        )
-        return
+        return None, None
 
     message = ""
     keyboard = []
@@ -1523,6 +1511,25 @@ async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             message += f"<i>...and {len(frozen_users) - 10} more frozen users</i>\n"
 
     keyboard.append([InlineKeyboardButton("🔙 Close", callback_data="admin_close")])
+    return message, keyboard
+
+
+async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show list of approved and frozen users for admin management."""
+    user = update.effective_user
+
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ Admin access required.", parse_mode="HTML")
+        return
+
+    message, keyboard = _build_user_list_ui()
+
+    if message is None:
+        await update.message.reply_text(
+            "📋 <b>No users</b>\n\nNo approved or frozen users.",
+            parse_mode="HTML"
+        )
+        return
 
     await update.message.reply_text(
         message,
@@ -1560,62 +1567,14 @@ async def admin_revoke_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def show_updated_user_list(query, admin_id: int) -> None:
     """Show updated user list after revocation/unfreeze."""
-    users = database.get_all_authorized_users()
-    frozen_users = database.get_frozen_users()
+    message, keyboard = _build_user_list_ui()
 
-    if not users and not frozen_users:
+    if message is None:
         await query.edit_message_text(
             "📋 <b>No users</b>\n\nNo approved or frozen users.",
             parse_mode="HTML"
         )
         return
-
-    message = ""
-    keyboard = []
-
-    # Approved users
-    if users:
-        message += "👥 <b>Approved Users</b>\n\n"
-        for u in users[:15]:
-            username = f"@{u['username']}" if u.get('username') else "N/A"
-            name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
-            last_active = u.get('last_activity') or u.get('reviewed_at') or "Never"
-
-            message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
-            message += f"  Last active: {last_active}\n\n"
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"🚫 Revoke {name[:15]}",
-                    callback_data=f"admin_revoke_{u['user_id']}"
-                )
-            ])
-
-        if len(users) > 15:
-            message += f"<i>...and {len(users) - 15} more approved users</i>\n\n"
-
-    # Frozen users
-    if frozen_users:
-        message += "🧊 <b>Frozen Users</b>\n\n"
-        for u in frozen_users[:10]:
-            username = f"@{u['username']}" if u.get('username') else "N/A"
-            name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
-            frozen_at = u.get('reviewed_at') or "Unknown"
-
-            message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
-            message += f"  Frozen: {frozen_at}\n\n"
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"🔓 Unfreeze {name[:15]}",
-                    callback_data=f"admin_unfreeze_{u['user_id']}"
-                )
-            ])
-
-        if len(frozen_users) > 10:
-            message += f"<i>...and {len(frozen_users) - 10} more frozen users</i>\n"
-
-    keyboard.append([InlineKeyboardButton("🔙 Close", callback_data="admin_close")])
 
     await query.edit_message_text(
         message,

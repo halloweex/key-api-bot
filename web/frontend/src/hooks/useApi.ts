@@ -76,6 +76,14 @@ export const queryKeys = {
   restockAlerts: () => ['restockAlerts'] as const,
 }
 
+// Cache TTL constants (in milliseconds)
+const CACHE_TTL = {
+  REALTIME: 2 * 60 * 1000,     // 2 min - summary, revenue, sales (syncs every 60s)
+  STANDARD: 5 * 60 * 1000,     // 5 min - products, customers, goals
+  STATIC: 10 * 60 * 1000,      // 10 min - categories, brands, expense types
+  COMPUTED: 30 * 60 * 1000,    // 30 min - seasonality, growth metrics
+}
+
 // ─── Summary ────────────────────────────────────────────────────────────────
 
 export function useSummary() {
@@ -84,6 +92,7 @@ export function useSummary() {
   return useQuery<SummaryResponse>({
     queryKey: queryKeys.summary(queryParams),
     queryFn: () => api.getSummary(queryParams),
+    staleTime: CACHE_TTL.REALTIME,
   })
 }
 
@@ -110,6 +119,7 @@ export function useRevenueTrend(compareType: string = 'previous_period') {
   return useQuery<RevenueTrendResponse>({
     queryKey: [...queryKeys.revenueTrend(queryParams), compareType, wantsForecast],
     queryFn: () => api.getRevenueTrend(fullParams),
+    staleTime: CACHE_TTL.REALTIME,
   })
 }
 
@@ -121,7 +131,7 @@ export function useMaxForecastDate() {
   const { data } = useQuery({
     queryKey: ['maxForecastDate', salesType],
     queryFn: () => api.getRevenueForecast(salesType),
-    staleTime: 10 * 60 * 1000,
+    staleTime: CACHE_TTL.STATIC,
   })
 
   return data?.forecast_end ?? data?.month_end ?? null
@@ -135,6 +145,7 @@ export function useSalesBySource() {
   return useQuery<SalesBySourceResponse>({
     queryKey: queryKeys.salesBySource(queryParams),
     queryFn: () => api.getSalesBySource(queryParams),
+    staleTime: CACHE_TTL.REALTIME,
   })
 }
 
@@ -146,6 +157,7 @@ export function useTopProducts() {
   return useQuery<TopProductsResponse>({
     queryKey: queryKeys.topProducts(queryParams),
     queryFn: () => api.getTopProducts(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -155,6 +167,7 @@ export function useProductPerformance() {
   return useQuery<ProductPerformanceResponse>({
     queryKey: queryKeys.productPerformance(queryParams),
     queryFn: () => api.getProductPerformance(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -164,7 +177,7 @@ export function useCategories() {
   return useQuery<Category[]>({
     queryKey: queryKeys.categories(),
     queryFn: () => api.getCategories(),
-    staleTime: 10 * 60 * 1000, // Categories rarely change
+    staleTime: CACHE_TTL.STATIC,
   })
 }
 
@@ -173,7 +186,7 @@ export function useChildCategories(parentId: number | null) {
     queryKey: queryKeys.childCategories(parentId!),
     queryFn: () => api.getChildCategories(parentId!),
     enabled: parentId !== null,
-    staleTime: 10 * 60 * 1000,
+    staleTime: CACHE_TTL.STATIC,
   })
 }
 
@@ -184,6 +197,7 @@ export function useCategoryBreakdown(parentCategory: string | null) {
     queryKey: queryKeys.categoryBreakdown(parentCategory!, queryParams),
     queryFn: () => api.getCategoryBreakdown(parentCategory!, queryParams),
     enabled: parentCategory !== null,
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -195,6 +209,7 @@ export function useCustomerInsights() {
   return useQuery<CustomerInsightsResponse>({
     queryKey: queryKeys.customerInsights(queryParams),
     queryFn: () => api.getCustomerInsights(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -208,7 +223,7 @@ export function useCohortRetention(
   return useQuery<EnhancedCohortRetentionResponse>({
     queryKey: queryKeys.cohortRetention(monthsBack, retentionMonths, salesType, includeRevenue),
     queryFn: () => api.getCohortRetention(monthsBack, retentionMonths, salesType, includeRevenue),
-    staleTime: 5 * 60 * 1000, // 5 minutes - cohort data doesn't change often
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -218,7 +233,7 @@ export function usePurchaseTiming(monthsBack = 12) {
   return useQuery<PurchaseTimingResponse>({
     queryKey: queryKeys.purchaseTiming(monthsBack, salesType),
     queryFn: () => api.getPurchaseTiming(monthsBack, salesType),
-    staleTime: 5 * 60 * 1000,
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -228,7 +243,7 @@ export function useCohortLTV(monthsBack = 12) {
   return useQuery<CohortLTVResponse>({
     queryKey: queryKeys.cohortLTV(monthsBack, salesType),
     queryFn: () => api.getCohortLTV(monthsBack, salesType),
-    staleTime: 5 * 60 * 1000,
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -238,7 +253,7 @@ export function useAtRiskCustomers(daysThreshold = 90) {
   return useQuery<AtRiskResponse>({
     queryKey: queryKeys.atRiskCustomers(daysThreshold, salesType),
     queryFn: () => api.getAtRiskCustomers(daysThreshold, salesType),
-    staleTime: 5 * 60 * 1000,
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -248,7 +263,7 @@ export function useBrands() {
   return useQuery<Brand[]>({
     queryKey: queryKeys.brands(),
     queryFn: () => api.getBrands(),
-    staleTime: 10 * 60 * 1000,
+    staleTime: CACHE_TTL.STATIC,
   })
 }
 
@@ -258,6 +273,7 @@ export function useBrandAnalytics() {
   return useQuery<BrandAnalyticsResponse>({
     queryKey: queryKeys.brandAnalytics(queryParams),
     queryFn: () => api.getBrandAnalytics(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -267,7 +283,7 @@ export function useExpenseTypes() {
   return useQuery<ExpenseType[]>({
     queryKey: queryKeys.expenseTypes(),
     queryFn: () => api.getExpenseTypes(),
-    staleTime: 10 * 60 * 1000,
+    staleTime: CACHE_TTL.STATIC,
   })
 }
 
@@ -277,6 +293,7 @@ export function useExpenseSummary() {
   return useQuery<ExpenseSummaryResponse>({
     queryKey: queryKeys.expenseSummary(queryParams),
     queryFn: () => api.getExpenseSummary(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -286,6 +303,7 @@ export function useProfitAnalysis() {
   return useQuery<ProfitAnalysisResponse>({
     queryKey: queryKeys.profitAnalysis(queryParams),
     queryFn: () => api.getProfitAnalysis(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -297,7 +315,7 @@ export function useGoals() {
   return useQuery<GoalsResponse>({
     queryKey: queryKeys.goals(salesType),
     queryFn: () => api.getGoals(salesType),
-    staleTime: 5 * 60 * 1000, // Goals don't change often
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -307,7 +325,7 @@ export function useGoalHistory(periodType: string, weeksBack = 4) {
   return useQuery<GoalHistoryResponse>({
     queryKey: queryKeys.goalHistory(periodType, weeksBack, salesType),
     queryFn: () => api.getGoalHistory(periodType, weeksBack, salesType),
-    staleTime: 5 * 60 * 1000,
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -349,7 +367,7 @@ export function useSmartGoals() {
   return useQuery<SmartGoalsResponse>({
     queryKey: queryKeys.smartGoals(salesType),
     queryFn: () => api.getSmartGoals(salesType),
-    staleTime: 5 * 60 * 1000, // Goals don't change often
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -359,7 +377,7 @@ export function useSeasonality() {
   return useQuery<Record<number, SeasonalityIndex>>({
     queryKey: queryKeys.seasonality(salesType),
     queryFn: () => api.getSeasonality(salesType),
-    staleTime: 30 * 60 * 1000, // Seasonality rarely changes
+    staleTime: CACHE_TTL.COMPUTED,
   })
 }
 
@@ -369,7 +387,7 @@ export function useGrowthMetrics() {
   return useQuery<GrowthMetrics>({
     queryKey: queryKeys.growthMetrics(salesType),
     queryFn: () => api.getGrowthMetrics(salesType),
-    staleTime: 30 * 60 * 1000,
+    staleTime: CACHE_TTL.COMPUTED,
   })
 }
 
@@ -379,7 +397,7 @@ export function useWeeklyPatterns() {
   return useQuery<Record<number, Record<number, number>>>({
     queryKey: queryKeys.weeklyPatterns(salesType),
     queryFn: () => api.getWeeklyPatterns(salesType),
-    staleTime: 30 * 60 * 1000,
+    staleTime: CACHE_TTL.COMPUTED,
   })
 }
 
@@ -389,7 +407,7 @@ export function useGoalForecast(year: number, month: number) {
   return useQuery<GoalForecastResponse>({
     queryKey: queryKeys.goalForecast(year, month, salesType),
     queryFn: () => api.getGoalForecast(year, month, salesType),
-    staleTime: 10 * 60 * 1000,
+    staleTime: CACHE_TTL.STATIC,
     enabled: year > 0 && month > 0,
   })
 }
@@ -417,7 +435,7 @@ export function useStockSummary(limit = 20) {
   return useQuery<StockSummaryResponse>({
     queryKey: queryKeys.stockSummary(limit),
     queryFn: () => api.getStockSummary(limit),
-    staleTime: 5 * 60 * 1000, // 5 minutes
+    staleTime: CACHE_TTL.STANDARD,
   })
 }
 
@@ -425,7 +443,7 @@ export function useInventoryTrend(days = 90, granularity: 'daily' | 'monthly' = 
   return useQuery<InventoryTrendResponse>({
     queryKey: queryKeys.inventoryTrend(days, granularity),
     queryFn: () => api.getInventoryTrend(days, granularity),
-    staleTime: 10 * 60 * 1000, // 10 minutes
+    staleTime: CACHE_TTL.STATIC,
   })
 }
 
@@ -434,7 +452,7 @@ export function useInventoryAnalysis() {
   return useQuery<InventoryAnalysisResponse>({
     queryKey: queryKeys.inventoryAnalysis(),
     queryFn: () => api.getInventoryAnalysis(),
-    staleTime: 10 * 60 * 1000,
+    staleTime: CACHE_TTL.STATIC,
   })
 }
 
@@ -442,7 +460,7 @@ export function useStockActions() {
   return useQuery<StockAction[]>({
     queryKey: queryKeys.stockActions(),
     queryFn: () => api.getStockActions(),
-    staleTime: 10 * 60 * 1000,
+    staleTime: CACHE_TTL.STATIC,
   })
 }
 
@@ -450,6 +468,6 @@ export function useRestockAlerts() {
   return useQuery<RestockAlert[]>({
     queryKey: queryKeys.restockAlerts(),
     queryFn: () => api.getRestockAlerts(),
-    staleTime: 5 * 60 * 1000,
+    staleTime: CACHE_TTL.STANDARD,
   })
 }

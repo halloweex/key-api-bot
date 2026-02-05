@@ -5,9 +5,22 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="00033ac8-0ff0-4db9-8885-f829ba7bf2ad" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/sync_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/sync_service.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/routes/api.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/routes/api.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/=1.1.0" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/bot/handlers/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/bot/handlers/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/bot/handlers/base.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/bot/handlers/common.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/bot/handlers_legacy.py" beforeDir="false" afterPath="$PROJECT_DIR$/bot/handlers_legacy.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/duckdb_store.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/duckdb_store.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/repositories/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/repositories/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/repositories/goals_repo.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/repositories/inventory_repo.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/scheduler.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/scheduler.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/filters/DateRangePicker.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/filters/DateRangePicker.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/filters/PeriodFilter.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/filters/PeriodFilter.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/hooks/useApi.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/hooks/useApi.ts" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -293,7 +306,7 @@
       <workItem from="1769678640075" duration="124000" />
       <workItem from="1769678798867" duration="12000" />
       <workItem from="1769680433341" duration="313000" />
-      <workItem from="1769680767522" duration="114465000" />
+      <workItem from="1769680767522" duration="124163000" />
     </task>
     <servers />
   </component>

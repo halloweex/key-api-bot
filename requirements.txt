@@ -1,8 +1,6 @@
 requests~=2.32.3
 pytz~=2024.1
-dotenv~=0.9.9
 python-dotenv~=1.1.0
-telegram~=0.0.1
 python-dateutil~=2.9.0.post0
 python-telegram-bot[job-queue]~=22.0
 openpyxl>=3.0.10

@@ -96,12 +96,6 @@ from bot.handlers_legacy import (
     check_and_broadcast_milestones,
 )
 
-# Also export base module utilities directly
-from bot.handlers.base import (
-    set_report_service,
-    get_report_service,
-)
-
 __all__ = [
     # Authorization
     "authorized",
@@ -115,8 +109,6 @@ __all__ = [
     "update_user_session",
     "cleanup_expired_sessions",
     "SESSION_TIMEOUT_MINUTES",
-    "set_report_service",
-    "get_report_service",
     # Date utilities
     "calculate_date_range",
     # Report service
