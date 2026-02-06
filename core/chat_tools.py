@@ -105,6 +105,56 @@ TOOLS = [
         }
     },
     {
+        "name": "get_revenue_by_dates",
+        "description": "Get revenue summary for a custom date range. Use when user asks about specific dates or non-standard periods like 'first week of January', 'sales from March 1 to March 15', etc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_date": {
+                    "type": "string",
+                    "description": "Start date in YYYY-MM-DD format"
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "End date in YYYY-MM-DD format"
+                },
+                "sales_type": {
+                    "type": "string",
+                    "enum": ["retail", "b2b", "all"],
+                    "description": "Type of sales to include",
+                    "default": "retail"
+                }
+            },
+            "required": ["start_date", "end_date"]
+        }
+    },
+    {
+        "name": "compare_date_ranges",
+        "description": "Compare revenue between two custom date ranges. Use for complex comparisons like 'compare this week with first week of last month', 'compare January to February'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "current_start": {
+                    "type": "string",
+                    "description": "Current period start date (YYYY-MM-DD)"
+                },
+                "current_end": {
+                    "type": "string",
+                    "description": "Current period end date (YYYY-MM-DD)"
+                },
+                "previous_start": {
+                    "type": "string",
+                    "description": "Previous period start date (YYYY-MM-DD)"
+                },
+                "previous_end": {
+                    "type": "string",
+                    "description": "Previous period end date (YYYY-MM-DD)"
+                }
+            },
+            "required": ["current_start", "current_end", "previous_start", "previous_end"]
+        }
+    },
+    {
         "name": "get_customer_insights",
         "description": "Get customer metrics like new vs returning customers, repeat rate. Use for questions about customer behavior.",
         "input_schema": {
@@ -275,6 +325,19 @@ async def execute_tool(name: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
                 current_period=input_data.get("current_period", "week"),
                 previous_period=input_data.get("previous_period", "last_week")
             )
+        elif name == "get_revenue_by_dates":
+            return await _get_revenue_by_dates(
+                start_date=input_data.get("start_date"),
+                end_date=input_data.get("end_date"),
+                sales_type=input_data.get("sales_type", "retail")
+            )
+        elif name == "compare_date_ranges":
+            return await _compare_date_ranges(
+                current_start=input_data.get("current_start"),
+                current_end=input_data.get("current_end"),
+                previous_start=input_data.get("previous_start"),
+                previous_end=input_data.get("previous_end")
+            )
         elif name == "get_customer_insights":
             return await _get_customer_insights(
                 period=input_data.get("period", "today")
@@ -444,6 +507,71 @@ async def _compare_periods(current_period: str, previous_period: str) -> Dict[st
     return {
         "current_period": current_period,
         "previous_period": previous_period,
+        "current": current,
+        "previous": previous,
+        "revenue_change": current_rev - previous_rev,
+        "revenue_change_percent": round(change_pct, 1),
+        "orders_change": current["total_orders"] - previous["total_orders"]
+    }
+
+
+async def _get_revenue_by_dates(start_date: str, end_date: str, sales_type: str) -> Dict[str, Any]:
+    """Get revenue summary for custom date range."""
+    store = await get_store()
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+
+    async with store.connection() as conn:
+        sales_filter = ""
+        if sales_type == "retail":
+            sales_filter = "AND sales_type = 'retail'"
+        elif sales_type == "b2b":
+            sales_filter = "AND sales_type = 'b2b'"
+
+        result = conn.execute(f"""
+            SELECT
+                COALESCE(SUM(revenue), 0) as total_revenue,
+                COALESCE(SUM(orders_count), 0) as total_orders,
+                COALESCE(AVG(avg_order_value), 0) as avg_order_value,
+                COALESCE(SUM(returns_revenue), 0) as returns_revenue,
+                COALESCE(SUM(returns_count), 0) as returns_count
+            FROM gold_daily_revenue
+            WHERE date BETWEEN ? AND ?
+            {sales_filter}
+        """, [start, end]).fetchone()
+
+        return {
+            "start_date": start_date,
+            "end_date": end_date,
+            "total_revenue": float(result[0] or 0),
+            "total_orders": int(result[1] or 0),
+            "avg_order_value": float(result[2] or 0),
+            "returns_revenue": float(result[3] or 0),
+            "returns_count": int(result[4] or 0)
+        }
+
+
+async def _compare_date_ranges(
+    current_start: str,
+    current_end: str,
+    previous_start: str,
+    previous_end: str
+) -> Dict[str, Any]:
+    """Compare revenue between two custom date ranges."""
+    current = await _get_revenue_by_dates(current_start, current_end, "retail")
+    previous = await _get_revenue_by_dates(previous_start, previous_end, "retail")
+
+    current_rev = current["total_revenue"]
+    previous_rev = previous["total_revenue"]
+
+    if previous_rev > 0:
+        change_pct = ((current_rev - previous_rev) / previous_rev) * 100
+    else:
+        change_pct = 100 if current_rev > 0 else 0
+
+    return {
+        "current_range": {"start": current_start, "end": current_end},
+        "previous_range": {"start": previous_start, "end": previous_end},
         "current": current,
         "previous": previous,
         "revenue_change": current_rev - previous_rev,
