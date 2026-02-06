@@ -83,6 +83,32 @@ class WebConfig:
 
 
 @dataclass(frozen=True)
+class MeilisearchConfig:
+    """Meilisearch configuration."""
+
+    url: str = field(
+        default_factory=lambda: os.getenv("MEILI_URL", "http://meilisearch:7700")
+    )
+    master_key: str = field(
+        default_factory=lambda: os.getenv("MEILI_MASTER_KEY", "masterkey123")
+    )
+
+
+@dataclass(frozen=True)
+class ChatConfig:
+    """Chat assistant configuration."""
+
+    anthropic_api_key: str = field(
+        default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "")
+    )
+    # Rate limiting
+    rate_limit_per_minute: int = 10
+    max_tokens_per_response: int = 1000
+    # Model
+    model: str = "claude-sonnet-4-20250514"
+
+
+@dataclass(frozen=True)
 class SourceConfig:
     """Source (channel) configuration."""
 
@@ -182,6 +208,8 @@ class AppConfig:
     sources: SourceConfig = field(default_factory=SourceConfig)
     orders: OrderConfig = field(default_factory=OrderConfig)
     milestones: MilestoneConfig = field(default_factory=MilestoneConfig)
+    meilisearch: MeilisearchConfig = field(default_factory=MeilisearchConfig)
+    chat: ChatConfig = field(default_factory=ChatConfig)
 
 
 # Global config instance

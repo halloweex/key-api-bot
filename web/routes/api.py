@@ -222,6 +222,49 @@ async def sync_buyers(
         raise HTTPException(status_code=500, detail=f"Buyer sync failed: {str(e)}")
 
 
+@router.post("/duckdb/sync-all-buyers")
+@limiter.limit("10/minute")
+async def sync_all_buyers(request: Request):
+    """
+    Sync ALL buyers from KeyCRM (including those without orders).
+
+    This fetches all buyers from KeyCRM API and upserts them to DuckDB.
+    Can take several minutes for large datasets.
+    """
+    from core.keycrm import KeyCRMClient
+    from core.duckdb_store import get_store
+
+    try:
+        store = await get_store()
+
+        # Get current count
+        async with store.connection() as conn:
+            before_count = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+
+        # Fetch all buyers from KeyCRM
+        async with KeyCRMClient() as client:
+            buyers = await client.fetch_all_buyers()
+
+        # Upsert to DuckDB
+        if buyers:
+            await store.upsert_buyers(buyers)
+
+        # Get new count
+        async with store.connection() as conn:
+            after_count = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+
+        return {
+            "status": "success",
+            "message": f"Synced all buyers from KeyCRM",
+            "buyers_fetched": len(buyers),
+            "before_count": before_count,
+            "after_count": after_count,
+            "new_buyers": after_count - before_count
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Full buyer sync failed: {str(e)}")
+
+
 @router.get("/metrics", response_model=MetricsResponse)
 @limiter.limit("60/minute")
 async def get_metrics(request: Request):

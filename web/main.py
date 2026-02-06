@@ -13,7 +13,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from web.config import STATIC_DIR, STATIC_V2_DIR, VERSION
-from web.routes import api, pages, auth
+from web.routes import api, pages, auth, chat
 from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
 from bot.database import init_database
 from core.duckdb_store import get_store, close_store
@@ -79,6 +79,7 @@ app.mount("/static-v2", StaticFiles(directory=str(STATIC_V2_DIR)), name="static-
 app.include_router(auth.router)  # Auth routes first (login, logout, callback)
 app.include_router(pages.router)
 app.include_router(api.router, prefix="/api")
+app.include_router(chat.router, prefix="/api")
 
 
 @app.on_event("startup")

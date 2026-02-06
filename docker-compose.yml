@@ -1,4 +1,24 @@
 services:
+  meilisearch:
+    image: getmeili/meilisearch:v1.6
+    container_name: keycrm-meili
+    ports:
+      - "7700:7700"
+    volumes:
+      - meili_data:/meili_data
+    environment:
+      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY:-masterkey123}
+      - MEILI_NO_ANALYTICS=true
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.25
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   bot:
     image: halloweex/keycrm-bot:latest
     container_name: keycrm-bot
@@ -28,6 +48,8 @@ services:
       - ./data:/app/data
     expose:
       - "8080"
+    depends_on:
+      - meilisearch
     mem_limit: 1g
     cpus: 1.0
     # Enable remote debugging with debugwand (Python 3.14 sys.remote_exec)
@@ -55,3 +77,6 @@ services:
       - web
     mem_limit: 128m
     cpus: 0.25
+
+volumes:
+  meili_data:

@@ -26,6 +26,7 @@ from core.events import (
     emit_sync_failed,
     emit_orders_synced,
 )
+from core.meilisearch_client import get_meili_client, init_meilisearch
 from bot.config import DEFAULT_TIMEZONE
 
 logger = get_logger(__name__)
@@ -367,6 +368,106 @@ class SyncService:
         except KeyCRMError as e:
             logger.error(f"Stock sync error: {e}")
             return 0
+
+    async def sync_to_meilisearch(self) -> Dict[str, int]:
+        """
+        Sync buyers, orders, and products from DuckDB to Meilisearch.
+
+        This enables fast, typo-tolerant search for the chat assistant.
+
+        Returns:
+            Dict with counts for each synced entity
+        """
+        logger.info("Syncing data to Meilisearch...")
+        stats = {"buyers": 0, "orders": 0, "products": 0}
+
+        try:
+            meili = get_meili_client()
+
+            # Sync buyers with order count
+            async with self.store.connection() as conn:
+                buyers_df = conn.execute("""
+                    SELECT
+                        b.id,
+                        b.full_name,
+                        b.phone,
+                        b.email,
+                        b.city,
+                        b.note,
+                        b.manager_id,
+                        b.created_at,
+                        COUNT(DISTINCT o.id) as order_count
+                    FROM buyers b
+                    LEFT JOIN silver_orders o ON b.id = o.buyer_id AND NOT o.is_return
+                    GROUP BY b.id, b.full_name, b.phone, b.email, b.city, b.note, b.manager_id, b.created_at
+                """).fetchdf()
+
+                if not buyers_df.empty:
+                    # Convert datetime to ISO string for JSON serialization
+                    if 'created_at' in buyers_df.columns:
+                        buyers_df['created_at'] = buyers_df['created_at'].apply(
+                            lambda x: x.isoformat() if x else None
+                        )
+                    buyers = buyers_df.to_dict('records')
+                    stats["buyers"] = await meili.index_buyers(buyers)
+
+            # Sync orders with buyer name
+            async with self.store.connection() as conn:
+                orders_df = conn.execute("""
+                    SELECT
+                        o.id,
+                        o.grand_total,
+                        o.ordered_at,
+                        o.status_id,
+                        o.source_name,
+                        o.buyer_id,
+                        o.order_date,
+                        b.full_name as buyer_name
+                    FROM silver_orders o
+                    LEFT JOIN buyers b ON o.buyer_id = b.id
+                    ORDER BY o.ordered_at DESC
+                    LIMIT 50000
+                """).fetchdf()
+
+                if not orders_df.empty:
+                    # Convert datetime/date to ISO string
+                    if 'ordered_at' in orders_df.columns:
+                        orders_df['ordered_at'] = orders_df['ordered_at'].apply(
+                            lambda x: x.isoformat() if x else None
+                        )
+                    if 'order_date' in orders_df.columns:
+                        orders_df['order_date'] = orders_df['order_date'].apply(
+                            lambda x: x.isoformat() if x else None
+                        )
+                    orders = orders_df.to_dict('records')
+                    stats["orders"] = await meili.index_orders(orders)
+
+            # Sync products with category name
+            async with self.store.connection() as conn:
+                products_df = conn.execute("""
+                    SELECT
+                        p.id,
+                        p.name,
+                        p.sku,
+                        p.brand,
+                        p.price,
+                        p.category_id,
+                        c.name as category_name
+                    FROM products p
+                    LEFT JOIN categories c ON p.category_id = c.id
+                """).fetchdf()
+
+                if not products_df.empty:
+                    products = products_df.to_dict('records')
+                    stats["products"] = await meili.index_products(products)
+
+            logger.info(f"Meilisearch sync complete: {stats}")
+            await self.store.set_last_sync_time("meilisearch")
+            return stats
+
+        except Exception as e:
+            logger.error(f"Meilisearch sync error: {e}")
+            return stats
 
     async def full_sync(self, days_back: int = 365) -> Dict[str, Any]:
         """
@@ -796,6 +897,17 @@ async def init_and_sync(full_sync_days: int = 365) -> None:
     # Ensure warehouse layers (Silver/Gold) are populated
     wh_result = await store.refresh_warehouse_layers(trigger="startup")
     logger.info(f"Warehouse layers initialized: silver={wh_result.get('silver_rows', 0)}, gold_rev={wh_result.get('gold_revenue_rows', 0)}")
+
+    # Initialize Meilisearch for chat search
+    try:
+        if await init_meilisearch():
+            sync_service = await get_sync_service()
+            meili_stats = await sync_service.sync_to_meilisearch()
+            logger.info(f"Meilisearch initialized: {meili_stats}")
+        else:
+            logger.warning("Meilisearch not available, chat search will be limited")
+    except Exception as e:
+        logger.warning(f"Meilisearch initialization failed: {e}")
 
     # Note: Background sync is now handled by APScheduler (core/scheduler.py)
     # The scheduler runs incremental_sync every 60 seconds, plus other jobs:

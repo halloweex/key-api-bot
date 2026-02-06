@@ -34,3 +34,8 @@ redis>=5.0.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 pytest-cov>=4.1.0
+
+# Chat assistant
+anthropic>=0.40.0
+sse-starlette>=2.0.0
+meilisearch>=0.31.0

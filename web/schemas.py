@@ -311,3 +311,69 @@ class JobsResponse(BaseModel):
     status: str = Field(description="Scheduler status: running/not_running")
     jobs: List[JobInfo] = Field(default_factory=list, description="Registered jobs")
     history: List[JobHistoryEntry] = Field(default_factory=list, description="Recent execution history")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CHAT & SEARCH
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ChatRequest(BaseModel):
+    """Chat message request."""
+    message: str = Field(..., min_length=1, max_length=2000, description="User message")
+    conversation_id: Optional[str] = Field(None, description="Existing conversation ID")
+    context: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Context (period, sales_type, language)")
+
+
+class ChatResponse(BaseModel):
+    """Chat response."""
+    conversation_id: str = Field(description="Conversation ID for follow-up messages")
+    content: str = Field(description="Assistant response")
+    tokens_used: Optional[int] = Field(None, description="Total tokens used in conversation")
+    error: Optional[bool] = Field(None, description="True if an error occurred")
+
+
+class ChatStatusResponse(BaseModel):
+    """Chat service status."""
+    available: bool = Field(description="Whether chat service is available")
+    active_conversations: int = Field(description="Number of active conversations")
+
+
+class SearchHit(BaseModel):
+    """Search result item."""
+    id: int
+    formatted: Optional[Dict[str, str]] = Field(None, alias="_formatted", description="Highlighted fields")
+
+
+class BuyerSearchHit(SearchHit):
+    """Buyer search result."""
+    full_name: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    city: Optional[str] = None
+    order_count: int = 0
+
+
+class OrderSearchHit(SearchHit):
+    """Order search result."""
+    buyer_name: Optional[str] = None
+    grand_total: float
+    ordered_at: Optional[str] = None
+    status_id: int
+    source_name: Optional[str] = None
+
+
+class ProductSearchHit(SearchHit):
+    """Product search result."""
+    name: str
+    sku: Optional[str] = None
+    brand: Optional[str] = None
+    price: Optional[float] = None
+
+
+class SearchResponse(BaseModel):
+    """Universal search response."""
+    query: str = Field(description="Original search query")
+    buyers: List[Dict[str, Any]] = Field(default_factory=list)
+    orders: List[Dict[str, Any]] = Field(default_factory=list)
+    products: List[Dict[str, Any]] = Field(default_factory=list)
+    total_hits: int = Field(description="Total number of results")

@@ -211,6 +211,18 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Meilisearch sync (every 5 minutes)
+        # Sync buyers, orders, and products to Meilisearch for chat search
+        self._add_job(
+            job_id="meilisearch_sync",
+            name="Meilisearch Sync",
+            description="Sync data to Meilisearch for chat search",
+            func=self._run_meilisearch_sync,
+            trigger=IntervalTrigger(minutes=5),
+            max_instances=1,
+            coalesce=True,
+        )
+
         logger.info(f"Registered {len(self._job_info)} background jobs")
 
     def _add_job(
@@ -389,6 +401,30 @@ class BackgroundScheduler:
 
             logger.info(
                 "Order status refresh job complete",
+                extra={"stats": stats}
+            )
+            return stats
+
+    async def _run_meilisearch_sync(self) -> Dict[str, Any]:
+        """Sync data to Meilisearch for chat search."""
+        with correlation_context() as corr_id:
+            logger.debug("Starting Meilisearch sync job")
+
+            from core.sync_service import get_sync_service
+            from core.meilisearch_client import get_meili_client
+
+            # Check if Meilisearch is available
+            meili = get_meili_client()
+            health = await meili.health_check()
+            if health.get("status") != "available":
+                logger.debug("Meilisearch not available, skipping sync")
+                return {"skipped": True, "reason": "Meilisearch not available"}
+
+            sync_service = await get_sync_service()
+            stats = await sync_service.sync_to_meilisearch()
+
+            logger.debug(
+                "Meilisearch sync job complete",
                 extra={"stats": stats}
             )
             return stats

@@ -613,6 +613,53 @@ class KeyCRMClient:
         """
         return await self.fetch_all("offers/stocks", params, max_pages=max_pages)
 
+    async def fetch_all_buyers(
+        self,
+        limit: int = 50,
+        include: str = "loyalty,shipping",
+    ) -> List[Buyer]:
+        """
+        Fetch ALL buyers from KeyCRM (paginated).
+
+        Args:
+            limit: Items per page (max 50)
+            include: Related data to include
+
+        Returns:
+            List of all Buyer objects
+        """
+        buyers = []
+        page = 1
+
+        while True:
+            params = {
+                "limit": limit,
+                "page": page,
+                "include": include,
+            }
+
+            data = await self.get_customers(params)
+            items = data.get("data", [])
+
+            if not items:
+                break
+
+            for item in items:
+                buyer = Buyer.from_api(item)
+                if buyer:
+                    buyers.append(buyer)
+
+            if page % 50 == 0:
+                logger.info(f"Fetched {len(buyers)} buyers (page {page})...")
+
+            if not data.get("next_page_url"):
+                break
+
+            page += 1
+
+        logger.info(f"Total buyers fetched: {len(buyers)}")
+        return buyers
+
     async def fetch_buyers_by_ids(
         self,
         buyer_ids: List[int],
