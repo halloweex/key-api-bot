@@ -491,27 +491,41 @@ class SyncService:
             # Sync managers first (needed for retail/b2b filtering)
             stats["managers"] = await self.sync_managers()
 
-            # Sync categories first
-            logger.info("Syncing categories...")
-            categories = []
-            async for batch in client.paginate("products/categories", page_size=50):
-                categories.extend(batch)
+            # Fetch categories, expense_types, and products in parallel (independent data)
+            logger.info("Syncing categories, expense types, and products in parallel...")
+
+            async def fetch_categories():
+                items = []
+                async for batch in client.paginate("products/categories", page_size=50):
+                    items.extend(batch)
+                return items
+
+            async def fetch_expense_types():
+                items = []
+                async for batch in client.paginate("order/expense-type", page_size=50):
+                    items.extend(batch)
+                return items
+
+            async def fetch_products():
+                items = []
+                async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
+                    items.extend(batch)
+                return items
+
+            # Parallel fetch (3x faster than sequential)
+            categories, expense_types, products = await asyncio.gather(
+                fetch_categories(),
+                fetch_expense_types(),
+                fetch_products()
+            )
+
+            # Upsert to database (sequential due to DuckDB single-writer)
             stats["categories"] = await self.store.upsert_categories(categories)
             await self.store.set_last_sync_time("categories")
 
-            # Sync expense types
-            logger.info("Syncing expense types...")
-            expense_types = []
-            async for batch in client.paginate("order/expense-type", page_size=50):
-                expense_types.extend(batch)
             stats["expense_types"] = await self.store.upsert_expense_types(expense_types)
             await self.store.set_last_sync_time("expense_types")
 
-            # Sync products with custom_fields for brand extraction
-            logger.info("Syncing products...")
-            products = []
-            async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
-                products.extend(batch)
             stats["products"] = await self.store.upsert_products(products)
             await self.store.set_last_sync_time("products")
 
