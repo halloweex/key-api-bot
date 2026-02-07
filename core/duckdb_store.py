@@ -334,6 +334,9 @@ class DuckDBStore:
             -- See: https://github.com/duckdb/duckdb/issues/4023
         );
 
+        -- Expenses index for order lookups
+        CREATE INDEX IF NOT EXISTS idx_expenses_order ON expenses(order_id);
+
         -- Offers (product variations - links offer_id to product_id)
         CREATE TABLE IF NOT EXISTS offers (
             id INTEGER PRIMARY KEY,              -- offer_id from KeyCRM
@@ -557,6 +560,11 @@ class DuckDBStore:
             is_new_customer BOOLEAN NOT NULL DEFAULT FALSE,
             buyer_first_order_date DATE
         );
+
+        -- Silver orders indexes for analytics queries
+        CREATE INDEX IF NOT EXISTS idx_silver_orders_buyer ON silver_orders(buyer_id);
+        CREATE INDEX IF NOT EXISTS idx_silver_orders_date ON silver_orders(order_date);
+        CREATE INDEX IF NOT EXISTS idx_silver_orders_sales_type ON silver_orders(sales_type);
 
         -- ═══════════════════════════════════════════════════════════════════════
         -- GOLD LAYER: Pre-aggregated daily revenue (one row per date+sales_type)

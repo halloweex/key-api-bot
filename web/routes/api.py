@@ -6,6 +6,8 @@ All endpoints are rate-limited to prevent abuse:
 - Lightweight endpoints (categories, brands, health): 60 requests/minute
 - Data-heavy endpoints (revenue, summary, etc.): 30 requests/minute
 """
+import asyncio
+import logging
 import time
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional, List
@@ -49,8 +51,12 @@ _start_time = time.time()
 # Rate limiter (uses app.state.limiter from main.py)
 limiter = Limiter(key_func=get_remote_address)
 
-# Health check stats cache (10 second TTL)
+# Logger for this module
+logger = logging.getLogger(__name__)
+
+# Health check stats cache (10 second TTL) with thread-safe lock
 _stats_cache = {"data": None, "expires_at": 0}
+_stats_cache_lock = asyncio.Lock()
 _STATS_CACHE_TTL = 10  # seconds
 
 
@@ -63,26 +69,28 @@ async def health_check(request: Request):
     uptime_seconds = int(time.time() - _start_time)
 
     # Use cached stats if available (reduces DB load from frequent health checks)
+    # Thread-safe access with asyncio.Lock
     now = time.time()
-    if _stats_cache["data"] and now < _stats_cache["expires_at"]:
-        duckdb_stats = _stats_cache["data"]
-        duckdb_status = "connected"
-        db_latency_ms = 0.0  # Cached response
-    else:
-        # Get DuckDB stats with latency measurement
-        db_latency_ms = None
-        try:
-            with Timer("health_check_db") as timer:
-                store = await get_store()
-                duckdb_stats = await store.get_stats()
+    async with _stats_cache_lock:
+        if _stats_cache["data"] and now < _stats_cache["expires_at"]:
+            duckdb_stats = _stats_cache["data"]
             duckdb_status = "connected"
-            db_latency_ms = round(timer.elapsed_ms, 2)
-            # Update cache
-            _stats_cache["data"] = duckdb_stats
-            _stats_cache["expires_at"] = now + _STATS_CACHE_TTL
-        except Exception as e:
-            duckdb_stats = None
-            duckdb_status = f"error: {e}"
+            db_latency_ms = 0.0  # Cached response
+        else:
+            # Get DuckDB stats with latency measurement
+            db_latency_ms = None
+            try:
+                with Timer("health_check_db") as timer:
+                    store = await get_store()
+                    duckdb_stats = await store.get_stats()
+                duckdb_status = "connected"
+                db_latency_ms = round(timer.elapsed_ms, 2)
+                # Update cache
+                _stats_cache["data"] = duckdb_stats
+                _stats_cache["expires_at"] = now + _STATS_CACHE_TTL
+            except Exception as e:
+                duckdb_stats = None
+                duckdb_status = f"error: {e}"
 
     return {
         "status": "healthy" if duckdb_stats else "degraded",
@@ -807,17 +815,23 @@ async def get_summary(
     cache_key = f"summary:{start}:{end}:{source_id}:{category_id}:{brand}:{sales_type}"
 
     # Try cache first (60 second TTL for summary data)
-    cached = await cache.get(cache_key)
-    if cached is not None:
-        return cached
+    try:
+        cached = await cache.get(cache_key)
+        if cached is not None:
+            return cached
+    except Exception as e:
+        logger.warning(f"Cache get failed for {cache_key}: {e}")
 
     # Fetch from database
     result = await dashboard_service.get_summary_stats(
         start, end, category_id, brand=brand, source_id=source_id, sales_type=sales_type
     )
 
-    # Cache the result
-    await cache.set(cache_key, result, ttl=60)
+    # Cache the result (non-blocking, failure is acceptable)
+    try:
+        await cache.set(cache_key, result, ttl=60)
+    except Exception as e:
+        logger.warning(f"Cache set failed for {cache_key}: {e}")
 
     return result
 

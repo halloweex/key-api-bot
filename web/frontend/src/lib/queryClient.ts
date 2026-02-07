@@ -76,11 +76,12 @@ export function createQueryClient(): QueryClient {
     }),
     defaultOptions: {
       queries: {
-        // Data considered fresh for 5 minutes
-        staleTime: 5 * 60 * 1000,
+        // Default: data considered fresh for 2 minutes (for dynamic data like revenue)
+        // Static data (categories, brands) should override with longer staleTime
+        staleTime: 2 * 60 * 1000,
 
-        // Keep unused data in cache for 30 minutes
-        gcTime: 30 * 60 * 1000,
+        // Keep unused data in cache for 10 minutes (reduced from 30 to save memory)
+        gcTime: 10 * 60 * 1000,
 
         // Retry configuration
         retry: shouldRetry,
@@ -89,8 +90,8 @@ export function createQueryClient(): QueryClient {
         // Don't refetch on window focus (data changes infrequently)
         refetchOnWindowFocus: false,
 
-        // Don't refetch on reconnect automatically
-        refetchOnReconnect: 'always',
+        // Only refetch on reconnect if data is stale
+        refetchOnReconnect: true,
 
         // Don't refetch on mount if data is fresh
         refetchOnMount: true,
