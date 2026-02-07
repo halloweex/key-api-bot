@@ -2,12 +2,11 @@
  * Format number as Ukrainian Hryvnia currency
  */
 export function formatCurrency(value: number): string {
-  return new Intl.NumberFormat('uk-UA', {
-    style: 'currency',
-    currency: 'UAH',
+  const formatted = new Intl.NumberFormat('en-US', {
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
   }).format(value)
+  return `₴${formatted}`
 }
 
 /**
