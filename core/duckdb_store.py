@@ -91,6 +91,19 @@ class DuckDBStore:
                 self._connection = None
                 logger.info("DuckDB connection closed")
 
+    async def checkpoint(self) -> None:
+        """
+        Force WAL checkpoint to flush changes to main database file.
+
+        DuckDB uses Write-Ahead Logging (WAL) for durability. The WAL file
+        can grow over time with many writes. CHECKPOINT flushes all pending
+        changes to the main database file and resets the WAL.
+        """
+        async with self._lock:
+            if self._connection:
+                self._connection.execute("CHECKPOINT")
+                logger.info("DuckDB checkpoint completed")
+
     @asynccontextmanager
     async def connection(self):
         """Get database connection with automatic reconnection."""
@@ -239,6 +252,13 @@ class DuckDBStore:
             synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Orders indexes for common queries
+        CREATE INDEX IF NOT EXISTS idx_orders_ordered_at ON orders(ordered_at);
+        CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_buyer ON orders(buyer_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_source ON orders(source_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_manager ON orders(manager_id);
+
         -- Order products (line items)
         CREATE TABLE IF NOT EXISTS order_products (
             id INTEGER PRIMARY KEY,
@@ -250,6 +270,10 @@ class DuckDBStore:
             -- FK removed due to DuckDB UPDATE/DELETE bug with foreign keys
             -- See: https://github.com/duckdb/duckdb/issues/4023
         );
+
+        -- Order products indexes for joins
+        CREATE INDEX IF NOT EXISTS idx_order_products_order ON order_products(order_id);
+        CREATE INDEX IF NOT EXISTS idx_order_products_product ON order_products(product_id);
 
         -- Products catalog
         CREATE TABLE IF NOT EXISTS products (

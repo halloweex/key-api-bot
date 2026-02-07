@@ -105,7 +105,7 @@ class ChatConfig:
     rate_limit_per_minute: int = 10
     max_tokens_per_response: int = 1000
     # Model
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-opus-4-20250514"
 
 
 @dataclass(frozen=True)

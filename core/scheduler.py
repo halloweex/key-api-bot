@@ -223,6 +223,18 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: DuckDB WAL checkpoint (every 6 hours)
+        # Prevents WAL file from growing too large by flushing changes to main DB
+        self._add_job(
+            job_id="duckdb_checkpoint",
+            name="DuckDB Checkpoint",
+            description="Flush WAL to main database file",
+            func=self._run_duckdb_checkpoint,
+            trigger=IntervalTrigger(hours=6),
+            max_instances=1,
+            coalesce=True,
+        )
+
         logger.info(f"Registered {len(self._job_info)} background jobs")
 
     def _add_job(
@@ -428,6 +440,27 @@ class BackgroundScheduler:
                 extra={"stats": stats}
             )
             return stats
+
+    async def _run_duckdb_checkpoint(self) -> Dict[str, Any]:
+        """
+        Run CHECKPOINT to flush WAL to main database file.
+
+        DuckDB uses Write-Ahead Logging (WAL) for durability. The WAL file
+        can grow over time with many writes. CHECKPOINT forces all pending
+        changes to be written to the main database file and resets the WAL.
+        """
+        with correlation_context() as corr_id:
+            logger.info("Starting DuckDB checkpoint job")
+
+            from core.duckdb_store import get_store
+            store = await get_store()
+
+            # Run checkpoint
+            await store.checkpoint()
+
+            result = {"checkpointed": True}
+            logger.info("DuckDB checkpoint job complete")
+            return result
 
     # ═══════════════════════════════════════════════════════════════════════════
     # EVENT HANDLERS
