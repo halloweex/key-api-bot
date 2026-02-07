@@ -294,6 +294,9 @@ class DuckDBStore:
             synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Categories index for tree traversal
+        CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);
+
         -- Pre-aggregated daily statistics (materialized for speed)
         CREATE TABLE IF NOT EXISTS daily_stats (
             date DATE NOT NULL,
@@ -1542,6 +1545,52 @@ class DuckDBStore:
 
                 conn.execute("COMMIT")
                 return count
+
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
+    async def upsert_expenses_batch(self, orders_with_expenses: List[Dict[str, Any]]) -> int:
+        """
+        Insert or update expenses for multiple orders in a single transaction.
+
+        Args:
+            orders_with_expenses: List of order dicts with 'id' and 'expenses' keys
+
+        Returns:
+            Total number of expenses upserted
+        """
+        # Flatten all expenses with their order IDs
+        all_expenses = []
+        for order in orders_with_expenses:
+            order_id = order.get("id")
+            for exp in order.get("expenses", []):
+                all_expenses.append((order_id, exp))
+
+        if not all_expenses:
+            return 0
+
+        async with self.connection() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                for order_id, exp in all_expenses:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO expenses
+                        (id, order_id, expense_type_id, amount, description, status, payment_date, created_at, synced_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, [
+                        exp.get("id"),
+                        order_id,
+                        exp.get("expense_type_id"),
+                        exp.get("amount", 0),
+                        exp.get("description"),
+                        exp.get("status"),
+                        exp.get("payment_date"),
+                        exp.get("created_at")
+                    ])
+
+                conn.execute("COMMIT")
+                return len(all_expenses)
 
             except Exception:
                 conn.execute("ROLLBACK")

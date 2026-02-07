@@ -49,6 +49,10 @@ _start_time = time.time()
 # Rate limiter (uses app.state.limiter from main.py)
 limiter = Limiter(key_func=get_remote_address)
 
+# Health check stats cache (10 second TTL)
+_stats_cache = {"data": None, "expires_at": 0}
+_STATS_CACHE_TTL = 10  # seconds
+
 
 # ─── Health Check ────────────────────────────────────────────────────────────
 
@@ -58,17 +62,27 @@ async def health_check(request: Request):
     """Health check endpoint for Docker/load balancer monitoring."""
     uptime_seconds = int(time.time() - _start_time)
 
-    # Get DuckDB stats with latency measurement
-    db_latency_ms = None
-    try:
-        with Timer("health_check_db") as timer:
-            store = await get_store()
-            duckdb_stats = await store.get_stats()
+    # Use cached stats if available (reduces DB load from frequent health checks)
+    now = time.time()
+    if _stats_cache["data"] and now < _stats_cache["expires_at"]:
+        duckdb_stats = _stats_cache["data"]
         duckdb_status = "connected"
-        db_latency_ms = round(timer.elapsed_ms, 2)
-    except Exception as e:
-        duckdb_stats = None
-        duckdb_status = f"error: {e}"
+        db_latency_ms = 0.0  # Cached response
+    else:
+        # Get DuckDB stats with latency measurement
+        db_latency_ms = None
+        try:
+            with Timer("health_check_db") as timer:
+                store = await get_store()
+                duckdb_stats = await store.get_stats()
+            duckdb_status = "connected"
+            db_latency_ms = round(timer.elapsed_ms, 2)
+            # Update cache
+            _stats_cache["data"] = duckdb_stats
+            _stats_cache["expires_at"] = now + _STATS_CACHE_TTL
+        except Exception as e:
+            duckdb_stats = None
+            duckdb_status = f"error: {e}"
 
     return {
         "status": "healthy" if duckdb_stats else "degraded",
@@ -223,8 +237,8 @@ async def sync_buyers(
 
 
 @router.post("/duckdb/sync-all-buyers")
-@limiter.limit("10/minute")
-async def sync_all_buyers(request: Request):
+@limiter.limit("1/hour")
+async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)):
     """
     Sync ALL buyers from KeyCRM (including those without orders).
 

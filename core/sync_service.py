@@ -225,12 +225,10 @@ class SyncService:
             Tuple of (order_count, expense_count)
         """
         order_count = await self.store.upsert_orders(orders, force_update=force_update)
-        expense_count = 0
 
-        for order in orders:
-            expenses = order.get("expenses", [])
-            if expenses:
-                expense_count += await self.store.upsert_expenses(order["id"], expenses)
+        # Batch upsert all expenses in a single transaction
+        orders_with_expenses = [o for o in orders if o.get("expenses")]
+        expense_count = await self.store.upsert_expenses_batch(orders_with_expenses)
 
         return order_count, expense_count
 
