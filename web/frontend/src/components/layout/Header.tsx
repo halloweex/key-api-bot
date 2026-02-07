@@ -32,7 +32,7 @@ export function Header() {
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-base sm:text-xl font-bold text-slate-900 tracking-tight truncate">
+                <h1 className="text-sm sm:text-xl font-bold text-slate-900 tracking-tight whitespace-nowrap">
                   KoreanStory Analytics
                 </h1>
                 {health?.version && (
