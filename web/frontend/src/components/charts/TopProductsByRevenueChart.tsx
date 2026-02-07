@@ -124,12 +124,13 @@ export const TopProductsByRevenueChart = memo(function TopProductsByRevenueChart
                 const quantity = (props.payload as ChartDataPoint)?.quantity ?? 0
                 return [
                   `${formatCurrency(Number(value) || 0)} (${formatNumber(quantity)} sold)`,
-                  'Revenue',
+                  'Rev',
                 ]
               }}
               labelFormatter={(_label, payload) => {
                 const item = payload?.[0]?.payload as ChartDataPoint | undefined
-                return item?.fullName || String(_label)
+                const name = item?.fullName || String(_label)
+                return name.length > 40 ? name.slice(0, 40) + '...' : name
               }}
             />
             <Bar

@@ -122,11 +122,12 @@ export const TopProductsChart = memo(function TopProductsChart() {
               labelStyle={TOOLTIP_LABEL_STYLE}
               formatter={(value, _name, props) => {
                 const percentage = (props.payload as ChartDataPoint)?.percentage ?? 0
-                return [`${formatNumber(Number(value) || 0)} (${percentage.toFixed(1)}%)`, 'Quantity']
+                return [`${formatNumber(Number(value) || 0)} (${percentage.toFixed(1)}%)`, 'Qty']
               }}
               labelFormatter={(_label, payload) => {
                 const item = payload?.[0]?.payload as ChartDataPoint | undefined
-                return item?.fullName || String(_label)
+                const name = item?.fullName || String(_label)
+                return name.length > 40 ? name.slice(0, 40) + '...' : name
               }}
             />
             <Bar

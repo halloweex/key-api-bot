@@ -66,11 +66,19 @@ export const TOOLTIP_STYLE: CSSProperties = {
   backgroundColor: CHART_THEME.background,
   border: `1px solid ${CHART_THEME.border}`,
   borderRadius: '8px',
+  fontSize: '12px',
+  padding: '8px 12px',
+  maxWidth: '250px',
 }
 
 /** Standard tooltip label styling */
 export const TOOLTIP_LABEL_STYLE: CSSProperties = {
   color: CHART_THEME.text,
+  fontSize: '12px',
+  fontWeight: 500,
+  marginBottom: '4px',
+  whiteSpace: 'normal',
+  wordBreak: 'break-word',
 }
 
 /** Standard cartesian grid props */
