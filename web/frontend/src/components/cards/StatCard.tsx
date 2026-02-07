@@ -105,7 +105,7 @@ export const StatCard = memo(function StatCard({
   const showTrend = trend !== undefined && trend !== 0 && trendValue !== undefined
 
   return (
-    <div className={`rounded-xl p-4 border ${cardBgStyles[variant]} transition-all hover:shadow-md ${clickable ? 'relative' : ''}`}>
+    <div className={`rounded-xl p-4 border ${cardBgStyles[variant]} transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 ${clickable ? 'relative' : ''}`}>
         {/* Clickable indicator */}
         {clickable && (
           <div className="absolute top-2 right-2 flex items-center gap-1 group/hint cursor-pointer">

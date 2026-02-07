@@ -200,3 +200,273 @@ body {
 .animate-pulse-glow {
   animation: pulse-glow 1s ease-in-out infinite;
 }
+
+/* ─── Tooltip Animations ───────────────────────────────────────────────────── */
+
+@keyframes tooltip-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-tooltip-in {
+  animation: tooltip-in 0.15s ease-out forwards;
+}
+
+/* ─── Toast Animations ─────────────────────────────────────────────────────── */
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(100%) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(100%) scale(0.9);
+  }
+}
+
+.animate-toast-in {
+  animation: toast-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-toast-out {
+  animation: toast-out 0.25s ease-in forwards;
+}
+
+/* ─── Card Hover Effects ───────────────────────────────────────────────────── */
+
+.card-hover {
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px -8px rgb(0 0 0 / 0.1), 0 4px 8px -4px rgb(0 0 0 / 0.06);
+}
+
+.card-hover:active {
+  transform: translateY(0);
+}
+
+/* ─── Button Press Effect ──────────────────────────────────────────────────── */
+
+@keyframes button-press {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(0.97);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.animate-press:active {
+  animation: button-press 0.15s ease-out;
+}
+
+/* ─── Skeleton Pulse (improved) ────────────────────────────────────────────── */
+
+@keyframes skeleton-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-skeleton {
+  animation: skeleton-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* ─── Number Counter Animation ─────────────────────────────────────────────── */
+
+@keyframes count-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-count {
+  animation: count-up 0.3s ease-out forwards;
+}
+
+/* ─── Glow Ring Effect ─────────────────────────────────────────────────────── */
+
+@keyframes glow-ring {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(99, 102, 241, 0);
+  }
+}
+
+.animate-glow-ring {
+  animation: glow-ring 2s ease-in-out infinite;
+}
+
+/* ─── Bounce In Effect ─────────────────────────────────────────────────────── */
+
+@keyframes bounce-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  70% {
+    transform: scale(0.9);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-bounce-in {
+  animation: bounce-in 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55) forwards;
+}
+
+/* ─── Stagger Fade In (for lists) ──────────────────────────────────────────── */
+
+@keyframes stagger-fade {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-stagger > * {
+  opacity: 0;
+  animation: stagger-fade 0.4s ease-out forwards;
+}
+
+.animate-stagger > *:nth-child(1) { animation-delay: 0ms; }
+.animate-stagger > *:nth-child(2) { animation-delay: 50ms; }
+.animate-stagger > *:nth-child(3) { animation-delay: 100ms; }
+.animate-stagger > *:nth-child(4) { animation-delay: 150ms; }
+.animate-stagger > *:nth-child(5) { animation-delay: 200ms; }
+.animate-stagger > *:nth-child(6) { animation-delay: 250ms; }
+.animate-stagger > *:nth-child(7) { animation-delay: 300ms; }
+.animate-stagger > *:nth-child(8) { animation-delay: 350ms; }
+
+/* ─── Mobile Touch Improvements ────────────────────────────────────────────── */
+
+/* Larger touch targets on mobile */
+@media (max-width: 768px) {
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Remove hover effects on touch devices */
+  @media (hover: none) {
+    .card-hover:hover {
+      transform: none;
+      box-shadow: var(--shadow-card);
+    }
+  }
+}
+
+/* ─── Focus Visible Ring ───────────────────────────────────────────────────── */
+
+.focus-ring:focus-visible {
+  outline: none;
+  ring: 2px;
+  ring-offset: 2px;
+  ring-color: rgb(99 102 241 / 0.5);
+}
+
+/* ─── Gradient Text ────────────────────────────────────────────────────────── */
+
+.gradient-text {
+  background: linear-gradient(135deg, #2563EB 0%, #7C3AED 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ─── Scroll Snap for Mobile Carousels ─────────────────────────────────────── */
+
+.scroll-snap-x {
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+
+.scroll-snap-x > * {
+  scroll-snap-align: start;
+}
+
+.scroll-snap-align-start {
+  scroll-snap-align: start;
+}
+
+/* ─── Glass Morphism Effect ────────────────────────────────────────────────── */
+
+.glass {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+/* ─── Ripple Effect ────────────────────────────────────────────────────────── */
+
+@keyframes ripple {
+  to {
+    transform: scale(4);
+    opacity: 0;
+  }
+}
+
+.ripple {
+  position: relative;
+  overflow: hidden;
+}
+
+.ripple::after {
+  content: '';
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  top: 50%;
+  left: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(0, 0, 0, 0.1) 0%, transparent 70%);
+  transform: translate(-50%, -50%) scale(0);
+  opacity: 1;
+}
+
+.ripple:active::after {
+  animation: ripple 0.6s ease-out;
+}

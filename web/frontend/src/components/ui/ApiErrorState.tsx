@@ -170,14 +170,16 @@ export const ApiErrorState = memo(function ApiErrorState({
   return (
     <div
       role="alert"
-      className="bg-slate-50 border border-slate-200 rounded-xl p-6 flex flex-col items-center text-center"
+      className="bg-gradient-to-br from-slate-50 to-slate-100/50 border border-slate-200 rounded-xl p-8 flex flex-col items-center text-center animate-fade-in"
     >
-      <div className="mb-3">{icons[errorInfo.icon]}</div>
-      <h3 className="text-slate-900 font-medium mb-1">{errorInfo.title}</h3>
-      <p className="text-slate-500 text-sm mb-4">{errorInfo.message}</p>
+      <div className="w-14 h-14 rounded-2xl bg-white shadow-sm flex items-center justify-center mb-4">
+        {icons[errorInfo.icon]}
+      </div>
+      <h3 className="text-slate-900 font-semibold text-lg mb-1">{errorInfo.title}</h3>
+      <p className="text-slate-500 text-sm mb-5 max-w-xs">{errorInfo.message}</p>
 
       {autoRetrying && retryCount < 3 && (
-        <div className="flex items-center gap-2 text-sm text-slate-500 mb-3">
+        <div className="flex items-center gap-2.5 text-sm text-slate-500 mb-4 bg-white px-4 py-2 rounded-full shadow-sm">
           <div className="w-4 h-4 border-2 border-slate-300 border-t-blue-500 rounded-full animate-spin" />
           <span>Retrying automatically...</span>
         </div>
@@ -186,7 +188,7 @@ export const ApiErrorState = memo(function ApiErrorState({
       {onRetry && !autoRetrying && (
         <button
           onClick={handleManualRetry}
-          className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
+          className="px-5 py-2.5 bg-gradient-to-r from-blue-600 to-purple-600 text-white text-sm font-medium rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all shadow-md hover:shadow-lg animate-press"
         >
           Try Again
         </button>

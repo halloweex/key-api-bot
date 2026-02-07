@@ -12,13 +12,13 @@ export function Header() {
   })
 
   return (
-    <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-xl border-b border-slate-200/60 px-3 sm:px-6 py-3 sm:py-4">
+    <header className="sticky top-0 z-50 bg-white/90 backdrop-blur-xl border-b border-slate-200/60 px-3 sm:px-6 py-3 sm:py-4 shadow-sm">
       <div className="flex flex-col gap-3 sm:gap-4 max-w-[1800px] mx-auto">
         {/* Title row */}
         <div className="flex items-center gap-2">
           {/* Logo/Brand */}
-          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-            <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg flex items-center justify-center shadow-sm flex-shrink-0 overflow-hidden">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0 group">
+            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center shadow-md flex-shrink-0 overflow-hidden transition-transform duration-200 group-hover:scale-105">
               <svg className="w-full h-full" viewBox="0 0 24 24">
                 <defs>
                   <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -26,22 +26,22 @@ export function Header() {
                     <stop offset="100%" stopColor="#7C3AED"/>
                   </linearGradient>
                 </defs>
-                <rect width="24" height="24" rx="4" fill="url(#logoGrad)"/>
+                <rect width="24" height="24" rx="5" fill="url(#logoGrad)"/>
                 <path fill="#fff" d="M9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/>
               </svg>
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-base sm:text-xl font-semibold text-slate-900 tracking-tight truncate">
+                <h1 className="text-base sm:text-xl font-bold text-slate-900 tracking-tight truncate">
                   KoreanStory Analytics
                 </h1>
                 {health?.version && (
-                  <span className="text-[10px] sm:text-xs text-slate-400 font-medium">
+                  <span className="text-[10px] sm:text-xs text-slate-400 font-medium bg-slate-100 px-1.5 py-0.5 rounded-md">
                     v{health.version}
                   </span>
                 )}
               </div>
-              <p className="text-[10px] sm:text-xs text-slate-500 hidden xs:block">Sales & Performance</p>
+              <p className="text-[10px] sm:text-xs text-slate-500 hidden xs:block">Sales & Performance Dashboard</p>
             </div>
           </div>
 

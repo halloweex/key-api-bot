@@ -68,12 +68,12 @@ interface EmptyStateProps {
 const EmptyState = memo(function EmptyState({ message, height }: EmptyStateProps) {
   return (
     <div
-      className="flex flex-col items-center justify-center"
+      className="flex flex-col items-center justify-center animate-fade-in"
       style={{ height }}
     >
-      <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3">
+      <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 flex items-center justify-center mb-4 shadow-sm">
         <svg
-          className="w-6 h-6 text-slate-400"
+          className="w-7 h-7 text-slate-400"
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
@@ -87,8 +87,8 @@ const EmptyState = memo(function EmptyState({ message, height }: EmptyStateProps
           />
         </svg>
       </div>
-      <p className="text-sm text-slate-500 font-medium">{message}</p>
-      <p className="text-xs text-slate-400 mt-1">Try adjusting your filters</p>
+      <p className="text-sm text-slate-600 font-medium">{message}</p>
+      <p className="text-xs text-slate-400 mt-1.5">Try adjusting your filters</p>
     </div>
   )
 })
