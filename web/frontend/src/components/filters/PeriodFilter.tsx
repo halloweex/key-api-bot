@@ -42,7 +42,7 @@ export function PeriodFilter() {
 
   return (
     <div className="relative flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3">
-      <div className="flex flex-wrap items-center gap-1 sm:gap-0.5 bg-slate-100/80 rounded-xl p-1 border border-slate-200/60">
+      <div className="flex items-center gap-0.5 bg-slate-100/80 rounded-xl p-1 border border-slate-200/60 overflow-x-auto scrollbar-hide">
         {/* Period buttons */}
         {PERIODS.map(({ value, label, mobileLabel }) => (
           <Button
