@@ -11,9 +11,9 @@ const PERIODS: { value: Period; label: string; mobileLabel: string }[] = [
   { value: 'last_7_days', label: '7 Days', mobileLabel: '7d' },
   { value: 'last_28_days', label: '28 Days', mobileLabel: '28d' },
   { value: 'week', label: 'This Week', mobileLabel: 'Week' },
-  { value: 'last_week', label: 'Last Week', mobileLabel: 'Prev W' },
+  { value: 'last_week', label: 'Last Week', mobileLabel: 'Prev Week' },
   { value: 'month', label: 'This Month', mobileLabel: 'Month' },
-  { value: 'last_month', label: 'Last Month', mobileLabel: 'Prev M' },
+  { value: 'last_month', label: 'Last Month', mobileLabel: 'Prev Month' },
 ]
 
 export function PeriodFilter() {
