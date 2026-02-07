@@ -1,4 +1,4 @@
-import { type ReactNode, forwardRef } from 'react'
+import { type ReactNode } from 'react'
 
 interface CardProps {
   children: ReactNode
@@ -7,36 +7,22 @@ interface CardProps {
   interactive?: boolean
   /** Apply elevated shadow by default */
   elevated?: boolean
-  /** Add subtle glow effect on hover */
-  glow?: boolean
-  /** Enable glass morphism effect */
-  glass?: boolean
-  onClick?: () => void
 }
 
-export const Card = forwardRef<HTMLDivElement, CardProps>(
-  ({ children, className = '', interactive = false, elevated = false, glow = false, glass = false, onClick }, ref) => {
-    return (
-      <div
-        ref={ref}
-        onClick={onClick}
-        className={`
-          rounded-xl border
-          ${glass ? 'glass border-white/30' : 'bg-white border-slate-200/60'}
-          ${elevated ? 'shadow-[var(--shadow-md)]' : 'shadow-[var(--shadow-card)]'}
-          ${interactive ? 'card-hover hover:border-slate-300/80 cursor-pointer ripple' : ''}
-          ${glow ? 'hover:shadow-[0_0_20px_rgba(99,102,241,0.15)] hover:border-indigo-200/60' : ''}
-          transition-all duration-200
-          ${className}
-        `}
-      >
-        {children}
-      </div>
-    )
-  }
-)
-
-Card.displayName = 'Card'
+export function Card({ children, className = '', interactive = false, elevated = false }: CardProps) {
+  return (
+    <div
+      className={`
+        bg-white rounded-xl border border-slate-200/60
+        ${elevated ? 'shadow-[var(--shadow-md)]' : 'shadow-[var(--shadow-card)]'}
+        ${interactive ? 'hover:shadow-[var(--shadow-card-hover)] hover:border-slate-300/80 transition-all duration-200 cursor-pointer' : ''}
+        ${className}
+      `}
+    >
+      {children}
+    </div>
+  )
+}
 
 interface CardHeaderProps {
   children: ReactNode
