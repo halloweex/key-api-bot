@@ -9,6 +9,17 @@ export default defineConfig(({ command }) => ({
   build: {
     outDir: '../static-v2',  // Separate output for safe testing
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Split large vendor libraries into separate chunks
+          'react-vendor': ['react', 'react-dom'],
+          'query': ['@tanstack/react-query'],
+          'charts': ['recharts'],
+          'utils': ['date-fns', 'clsx', 'zustand'],
+        },
+      },
+    },
   },
   server: {
     port: 5173,
