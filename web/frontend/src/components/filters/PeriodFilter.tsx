@@ -5,15 +5,15 @@ import { DateRangePicker } from './DateRangePicker'
 import type { Period } from '../../types/filters'
 import { format } from 'date-fns'
 
-const PERIODS: { value: Period; label: string; mobileLabel: string }[] = [
-  { value: 'today', label: 'Today', mobileLabel: 'Today' },
-  { value: 'yesterday', label: 'Yesterday', mobileLabel: 'Yest.' },
-  { value: 'last_7_days', label: '7 Days', mobileLabel: '7d' },
-  { value: 'last_28_days', label: '28 Days', mobileLabel: '28d' },
-  { value: 'week', label: 'This Week', mobileLabel: 'Week' },
-  { value: 'last_week', label: 'Last Week', mobileLabel: 'PrevWk' },
-  { value: 'month', label: 'This Month', mobileLabel: 'Month' },
-  { value: 'last_month', label: 'Last Month', mobileLabel: 'PrevMo' },
+const PERIODS: { value: Period; label: string }[] = [
+  { value: 'today', label: 'Today' },
+  { value: 'yesterday', label: 'Yesterday' },
+  { value: 'last_7_days', label: '7 Days' },
+  { value: 'last_28_days', label: '28 Days' },
+  { value: 'week', label: 'This Week' },
+  { value: 'last_week', label: 'Last Week' },
+  { value: 'month', label: 'This Month' },
+  { value: 'last_month', label: 'Last Month' },
 ]
 
 export function PeriodFilter() {
@@ -42,36 +42,31 @@ export function PeriodFilter() {
 
   return (
     <div className="relative flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3">
-      <div className="flex items-center gap-0.5 bg-slate-100/80 rounded-xl p-1 border border-slate-200/60 overflow-x-auto scrollbar-hide">
-        {/* Period buttons */}
-        {PERIODS.map(({ value, label, mobileLabel }) => (
+      <div className="flex items-center gap-0.5 bg-slate-100/80 rounded-lg sm:rounded-xl p-0.5 sm:p-1 border border-slate-200/60 flex-shrink-0 overflow-x-auto scrollbar-hide scroll-snap-x">
+        {PERIODS.map(({ value, label }) => (
           <Button
             key={value}
             size="sm"
             variant={period === value ? 'primary' : 'ghost'}
             onClick={() => handlePeriodChange(value)}
-            className={`${period === value ? 'shadow-sm' : ''} whitespace-nowrap text-xs px-2 sm:px-3 py-1.5 min-h-[36px] sm:min-h-[32px] rounded-lg`}
+            className={`${period === value ? 'shadow-sm' : ''} whitespace-nowrap text-[10px] sm:text-xs md:text-sm px-2 sm:px-2.5 md:px-3 py-1.5 sm:py-1.5 min-h-[36px] sm:min-h-[32px] scroll-snap-align-start`}
           >
-            <span className="sm:hidden">{mobileLabel}</span>
-            <span className="hidden sm:inline">{label}</span>
+            {label}
           </Button>
         ))}
-
-        {/* Custom date button */}
         <Button
           size="sm"
           variant={period === 'custom' ? 'primary' : 'ghost'}
           onClick={handleCustomClick}
-          className={`${period === 'custom' ? 'shadow-sm' : ''} whitespace-nowrap text-xs px-2 sm:px-3 py-1.5 min-h-[36px] sm:min-h-[32px] rounded-lg flex items-center gap-1`}
+          className={`${period === 'custom' ? 'shadow-sm' : ''} whitespace-nowrap text-[10px] sm:text-xs md:text-sm px-2 sm:px-2.5 md:px-3 py-1.5 sm:py-1.5 min-h-[36px] sm:min-h-[32px] flex items-center gap-1 scroll-snap-align-start`}
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
           </svg>
           <span className="hidden sm:inline">{customLabel}</span>
-          <span className="sm:hidden">{period === 'custom' ? customLabel : ''}</span>
+          <span className="sm:hidden">{period === 'custom' ? customLabel : 'Custom'}</span>
         </Button>
       </div>
-
       {showDatePicker && (
         <DateRangePicker onClose={handleDatePickerClose} />
       )}
