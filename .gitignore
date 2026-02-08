@@ -170,7 +170,8 @@ cython_debug/
 
 
 # Claude Code CLI
-.claude/
+.claude/*
+!.claude/agents/
 
 # SQLite Database
 data/
