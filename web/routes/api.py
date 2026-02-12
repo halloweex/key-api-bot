@@ -92,6 +92,41 @@ async def health_check(request: Request):
                 duckdb_stats = None
                 duckdb_status = f"error: {e}"
 
+    # Get sync service status (non-blocking, graceful degradation)
+    sync_status = None
+    try:
+        from core.sync_service import get_sync_service
+        sync_service = await get_sync_service()
+        sync_stats = sync_service.get_sync_stats()
+
+        # Calculate seconds since last sync
+        seconds_since_sync = None
+        if sync_stats.get("last_sync_time"):
+            from datetime import datetime
+            from core.config import DEFAULT_TZ
+            last_sync = datetime.fromisoformat(sync_stats["last_sync_time"])
+            seconds_since_sync = int((datetime.now(DEFAULT_TZ) - last_sync).total_seconds())
+
+        # Determine sync status
+        if seconds_since_sync is None:
+            status = "idle"
+        elif seconds_since_sync > 900:  # 15 minutes without sync = warning
+            status = "stale"
+        else:
+            status = "active"
+
+        sync_status = {
+            "status": status,
+            "last_sync_time": sync_stats.get("last_sync_time"),
+            "seconds_since_sync": seconds_since_sync,
+            "consecutive_empty_syncs": sync_stats.get("consecutive_empty_syncs", 0),
+            "current_backoff_seconds": sync_stats.get("current_backoff_seconds", 300),
+            "is_off_hours": sync_stats.get("is_off_hours", False),
+        }
+    except Exception as e:
+        logger.debug(f"Could not get sync status: {e}")
+        # Non-fatal - sync status is optional
+
     return {
         "status": "healthy" if duckdb_stats else "degraded",
         "version": VERSION,
@@ -101,7 +136,128 @@ async def health_check(request: Request):
             "status": duckdb_status,
             "latency_ms": db_latency_ms,
             **(duckdb_stats or {})
+        },
+        "sync": sync_status
+    }
+
+
+@router.get("/health/detailed")
+@limiter.limit("30/minute")
+async def detailed_health_check(request: Request):
+    """
+    Detailed health check with component-level status.
+
+    Checks all system components and returns their individual health status:
+    - DuckDB database connection and stats
+    - Redis cache connection
+    - Meilisearch connection
+    - WebSocket active connections
+    - Sync service status
+    - System metrics (memory, uptime)
+    """
+    import psutil
+
+    components = {}
+    overall_status = "healthy"
+
+    # 1. DuckDB check
+    try:
+        with Timer("health_duckdb") as timer:
+            store = await get_store()
+            duckdb_stats = await store.get_stats()
+        components["duckdb"] = {
+            "status": "connected",
+            "latency_ms": round(timer.elapsed_ms, 2),
+            **duckdb_stats
         }
+    except Exception as e:
+        components["duckdb"] = {"status": "error", "error": str(e)}
+        overall_status = "degraded"
+
+    # 2. Redis check
+    try:
+        from core.cache import cache
+        if cache.is_connected:
+            components["redis"] = {
+                "status": "connected",
+                **cache.get_stats()
+            }
+        else:
+            components["redis"] = {"status": "not_connected"}
+    except Exception as e:
+        components["redis"] = {"status": "error", "error": str(e)}
+
+    # 3. Meilisearch check (optional component)
+    try:
+        import httpx
+        import os
+        meili_url = os.getenv("MEILI_URL", "http://meilisearch:7700")
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{meili_url}/health")
+            if response.status_code == 200:
+                components["meilisearch"] = {"status": "healthy"}
+            else:
+                components["meilisearch"] = {"status": "unhealthy", "code": response.status_code}
+    except Exception as e:
+        components["meilisearch"] = {"status": "unavailable", "error": str(e)}
+
+    # 4. WebSocket connections
+    try:
+        from core.websocket_manager import manager as ws_manager
+        ws_stats = ws_manager.get_stats()
+        components["websocket"] = {
+            "status": "active",
+            **ws_stats
+        }
+    except Exception as e:
+        components["websocket"] = {"status": "error", "error": str(e)}
+
+    # 5. Sync service status
+    try:
+        from core.sync_service import get_sync_service
+        sync_service = await get_sync_service()
+        sync_stats = sync_service.get_sync_stats()
+        components["sync"] = {
+            "status": "active" if sync_stats.get("last_sync_time") else "idle",
+            **sync_stats
+        }
+    except Exception as e:
+        components["sync"] = {"status": "error", "error": str(e)}
+
+    # 6. Prediction service
+    try:
+        from core.prediction_service import get_prediction_service
+        pred_service = get_prediction_service()
+        components["prediction"] = {
+            "status": "ready" if pred_service.is_ready else "not_ready",
+            "model_loaded": pred_service.is_ready
+        }
+    except Exception as e:
+        components["prediction"] = {"status": "unavailable", "error": str(e)}
+
+    # System metrics
+    uptime_seconds = int(time.time() - _start_time)
+    try:
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        metrics = {
+            "uptime_seconds": uptime_seconds,
+            "memory_mb": round(memory_info.rss / 1024 / 1024, 1),
+            "memory_percent": round(process.memory_percent(), 1),
+            "cpu_percent": round(process.cpu_percent(interval=0.1), 1),
+            "threads": process.num_threads(),
+        }
+    except Exception:
+        metrics = {
+            "uptime_seconds": uptime_seconds,
+        }
+
+    return {
+        "status": overall_status,
+        "version": VERSION,
+        "correlation_id": get_correlation_id(),
+        "components": components,
+        "metrics": metrics
     }
 
 
@@ -172,12 +328,26 @@ async def refresh_order_statuses(
     from core.sync_service import get_sync_service
 
     async def run_refresh():
-        sync_service = await get_sync_service()
-        return await sync_service.refresh_order_statuses(days_back=days)
+        try:
+            sync_service = await get_sync_service()
+            result = await sync_service.refresh_order_statuses(days_back=days)
+            logger.info(f"Background status refresh completed: {result}")
+            return result
+        except asyncio.CancelledError:
+            logger.warning("Background status refresh was cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Background status refresh failed: {e}", exc_info=True)
+            raise
 
     if background:
-        # Run in background task
-        asyncio.create_task(run_refresh())
+        # Run in background task with proper naming for debugging
+        task = asyncio.create_task(run_refresh(), name=f"refresh_statuses_{days}d")
+        # Add done callback to log completion/errors
+        task.add_done_callback(
+            lambda t: logger.error(f"Background task failed: {t.exception()}")
+            if t.exception() else None
+        )
         return {
             "status": "started",
             "message": f"Status refresh started in background - checking last {days} days",
@@ -644,8 +814,9 @@ async def get_revenue_trend(
                             result["revenue"].append(0)
                             result["orders"].append(0)
                             comparison["revenue"].append(round(extra_comp.get(d, 0), 2))
-        except Exception:
-            pass  # Graceful degradation
+        except Exception as e:
+            logger.warning(f"Forecast unavailable: {e}")
+            # Graceful degradation - continue without forecast
 
     return result
 
@@ -811,8 +982,8 @@ async def get_summary(
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
 
-    # Build cache key from parameters
-    cache_key = f"summary:{start}:{end}:{source_id}:{category_id}:{brand}:{sales_type}"
+    # Build cache key from parameters (normalize None to empty string for consistency)
+    cache_key = f"summary:{start}:{end}:{source_id or ''}:{category_id or ''}:{brand or ''}:{sales_type}"
 
     # Try cache first (60 second TTL for summary data)
     try:

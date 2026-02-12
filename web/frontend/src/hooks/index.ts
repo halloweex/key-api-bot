@@ -52,3 +52,7 @@ export {
 // Shared chart hooks
 export { useSourceChartData } from './useSourceChartData'
 export type { SourceChartDataPoint, SourceChartData } from './useSourceChartData'
+
+// WebSocket
+export { useWebSocket } from './useWebSocket'
+export type { ConnectionState, WebSocketEvent, WebSocketMessage } from './useWebSocket'

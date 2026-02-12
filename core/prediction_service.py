@@ -1367,3 +1367,15 @@ def get_prediction_service() -> PredictionService:
         # Try to load existing model from disk
         _service._load_model()
     return _service
+
+
+def shutdown_prediction_service() -> None:
+    """Shutdown the prediction service and release resources.
+
+    Call this during application shutdown to properly cleanup the
+    ThreadPoolExecutor and prevent resource leaks.
+    """
+    global _service
+    _executor.shutdown(wait=False)
+    _service = None
+    logger.info("Prediction service shutdown complete")

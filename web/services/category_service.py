@@ -68,25 +68,26 @@ async def fetch_all_products_categories() -> Dict[int, int]:
 
 
 async def warm_product_cache() -> None:
-    """Pre-load all product categories into cache."""
+    """Pre-load all product categories into cache.
+
+    Uses double-checked locking pattern with simplified lock structure.
+    """
     global _product_category_cache, _products_loaded, _last_products_update
 
-    # Quick check without load lock
-    async with _cache_lock:
+    # Quick check without lock (volatile read)
+    if _products_loaded and time.time() - _last_products_update < CACHE_TTL:
+        return
+
+    # Acquire load lock to prevent concurrent fetches
+    async with _load_lock:
+        # Double-check after acquiring lock
         if _products_loaded and time.time() - _last_products_update < CACHE_TTL:
             return
 
-    # Only one coroutine fetches at a time
-    async with _load_lock:
-        # Double-check after acquiring load lock
-        async with _cache_lock:
-            if _products_loaded and time.time() - _last_products_update < CACHE_TTL:
-                return
-
-        # Fetch outside cache lock (but inside load lock)
+        # Fetch outside cache lock
         product_categories = await fetch_all_products_categories()
 
-        # Update cache
+        # Update cache atomically
         async with _cache_lock:
             _product_category_cache.update(product_categories)
             _products_loaded = True
@@ -94,26 +95,27 @@ async def warm_product_cache() -> None:
 
 
 async def get_categories() -> Dict[int, Dict[str, Any]]:
-    """Get cached categories, refreshing if needed."""
+    """Get cached categories, refreshing if needed.
+
+    Uses double-checked locking pattern with simplified lock structure.
+    """
     global _categories_cache, _last_cache_update
 
-    # Quick check without load lock
-    async with _cache_lock:
-        if time.time() - _last_cache_update <= CACHE_TTL and _categories_cache:
+    # Quick check without lock (volatile read)
+    if _categories_cache and time.time() - _last_cache_update <= CACHE_TTL:
+        return _categories_cache
+
+    # Acquire load lock to prevent concurrent fetches
+    async with _categories_load_lock:
+        # Double-check after acquiring lock
+        if _categories_cache and time.time() - _last_cache_update <= CACHE_TTL:
             return _categories_cache
 
-    # Only one coroutine fetches at a time
-    async with _categories_load_lock:
-        # Double-check after acquiring load lock
-        async with _cache_lock:
-            if time.time() - _last_cache_update <= CACHE_TTL and _categories_cache:
-                return _categories_cache
-
-        # Fetch outside cache lock (but inside load lock)
+        # Fetch outside cache lock
         logger.info("Refreshing categories cache (async)...")
         categories = await fetch_all_categories()
 
-        # Update cache
+        # Update cache atomically
         async with _cache_lock:
             _categories_cache = categories
             _last_cache_update = time.time()
@@ -132,18 +134,30 @@ async def get_root_categories() -> List[Dict[str, Any]]:
 
 
 async def get_category_with_children(category_id: int) -> List[int]:
-    """Get category ID and all its children IDs."""
+    """Get category ID and all its children IDs.
+
+    Uses parent->children index for O(n) traversal instead of O(n²).
+    """
     categories = await get_categories()
+
+    # Build parent -> children index once (O(n))
+    children_map: Dict[int, List[int]] = {}
+    for cat in categories.values():
+        parent = cat.get('parent_id')
+        if parent is not None:
+            if parent not in children_map:
+                children_map[parent] = []
+            children_map[parent].append(cat['id'])
+
+    # Collect all descendants using iterative BFS (O(k) where k = descendants)
     result = [category_id]
+    stack = [category_id]
+    while stack:
+        parent = stack.pop()
+        for child_id in children_map.get(parent, []):
+            result.append(child_id)
+            stack.append(child_id)
 
-    # Find all children recursively
-    def find_children(parent_id: int):
-        for cat in categories.values():
-            if cat.get('parent_id') == parent_id:
-                result.append(cat['id'])
-                find_children(cat['id'])
-
-    find_children(category_id)
     return result
 
 

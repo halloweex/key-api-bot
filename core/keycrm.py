@@ -795,3 +795,15 @@ async def get_async_client() -> KeyCRMClient:
     client = get_client()
     await client.connect()
     return client
+
+
+async def close_client() -> None:
+    """Close the singleton KeyCRM client.
+
+    Call this during application shutdown to properly release HTTP connections.
+    """
+    global _client_instance
+    if _client_instance is not None:
+        await _client_instance.close()
+        _client_instance = None
+        logger.info("KeyCRM client closed")

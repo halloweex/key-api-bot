@@ -13,7 +13,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from web.config import STATIC_DIR, STATIC_V2_DIR, VERSION
-from web.routes import api, pages, auth, chat
+from web.routes import api, pages, auth, chat, batch, websocket
 from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
 from bot.database import init_database
 from core.duckdb_store import get_store, close_store
@@ -79,6 +79,8 @@ app.mount("/static-v2", StaticFiles(directory=str(STATIC_V2_DIR)), name="static-
 app.include_router(auth.router)  # Auth routes first (login, logout, callback)
 app.include_router(pages.router)
 app.include_router(api.router, prefix="/api")
+app.include_router(batch.router, prefix="/api")
+app.include_router(websocket.router)  # WebSocket routes (no /api prefix)
 app.include_router(chat.router, prefix="/api")
 
 
@@ -166,31 +168,76 @@ async def _train_prediction_model():
 
 def _register_event_handlers():
     """Register handlers for sync events."""
+    from core.websocket_manager import manager as ws_manager, WebSocketEvent
 
     @events.on(SyncEvent.ORDERS_SYNCED)
     async def on_orders_synced(data: dict):
-        """Log orders synced and potentially invalidate caches."""
+        """Log orders synced, broadcast to WebSocket clients, and invalidate caches."""
         count = data.get("count", 0)
         if count > 0:
             logger.debug(f"Orders synced: {count} orders")
-            # Future: Invalidate dashboard cache here
-            # await cache.invalidate_pattern("dashboard:*")
+
+            # Broadcast to connected dashboard clients
+            await ws_manager.broadcast(
+                "dashboard",
+                WebSocketEvent.ORDERS_SYNCED,
+                {
+                    "count": count,
+                    "duration_ms": data.get("duration_ms", 0),
+                }
+            )
+
+            # Invalidate dashboard cache
+            try:
+                await cache.invalidate_pattern("summary:*")
+            except Exception as e:
+                logger.debug(f"Cache invalidation skipped: {e}")
 
     @events.on(SyncEvent.PRODUCTS_SYNCED)
     async def on_products_synced(data: dict):
-        """Log products synced."""
+        """Log products synced and broadcast to WebSocket clients."""
         count = data.get("count", 0)
         if count > 0:
             logger.debug(f"Products synced: {count} products")
 
+            # Broadcast to connected dashboard clients
+            await ws_manager.broadcast(
+                "dashboard",
+                WebSocketEvent.PRODUCTS_SYNCED,
+                {"count": count}
+            )
+
+    @events.on(SyncEvent.INVENTORY_UPDATED)
+    async def on_inventory_updated(data: dict):
+        """Broadcast inventory updates to WebSocket clients."""
+        await ws_manager.broadcast(
+            "dashboard",
+            WebSocketEvent.INVENTORY_UPDATED,
+            data
+        )
+
     @events.on(SyncEvent.SYNC_FAILED)
     async def on_sync_failed(data: dict):
-        """Log sync failures for monitoring."""
+        """Log sync failures and notify admin WebSocket clients."""
         sync_type = data.get("sync_type", "unknown")
         error = data.get("error", "unknown error")
         logger.warning(f"Sync failed: {sync_type} - {error}")
-        # Future: Send alert to admin
-        # await notify_admin(f"Sync failed: {error}")
+
+        # Notify admin clients
+        await ws_manager.broadcast(
+            "admin",
+            "sync_failed",
+            {"sync_type": sync_type, "error": error}
+        )
+
+    @events.on(SyncEvent.GOALS_UPDATED)
+    async def on_goals_updated(data: dict):
+        """Broadcast goal updates to WebSocket clients."""
+        await ws_manager.broadcast(
+            "dashboard",
+            WebSocketEvent.GOAL_PROGRESS,
+            data
+        )
 
 
 @app.on_event("shutdown")
@@ -201,6 +248,20 @@ async def shutdown_event():
         logger.info("Scheduler stopped")
     except Exception as e:
         logger.warning(f"Error stopping scheduler: {e}")
+
+    # Shutdown prediction service (ThreadPoolExecutor cleanup)
+    try:
+        from core.prediction_service import shutdown_prediction_service
+        shutdown_prediction_service()
+    except Exception as e:
+        logger.warning(f"Error shutting down prediction service: {e}")
+
+    # Close KeyCRM client (HTTP connection cleanup)
+    try:
+        from core.keycrm import close_client
+        await close_client()
+    except Exception as e:
+        logger.warning(f"Error closing KeyCRM client: {e}")
 
     # Disconnect Redis cache
     try:

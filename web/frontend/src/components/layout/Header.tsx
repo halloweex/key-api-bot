@@ -1,5 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { FilterBar } from '../filters'
+import { LiveIndicator } from '../ui/LiveIndicator'
+import { useWebSocket } from '../../hooks/useWebSocket'
 import { api } from '../../api/client'
 import type { HealthResponse } from '../../types/api'
 
@@ -9,6 +11,12 @@ export function Header() {
     queryFn: () => api.getHealth(),
     staleTime: 5 * 60 * 1000, // 5 minutes
     refetchOnWindowFocus: false,
+  })
+
+  // WebSocket for real-time updates
+  const { connectionState, lastMessageTime } = useWebSocket({
+    enabled: true,
+    room: 'dashboard',
   })
 
   return (
@@ -43,6 +51,14 @@ export function Header() {
               </div>
               <p className="text-[10px] sm:text-xs text-slate-500 hidden xs:block">Sales & Performance Dashboard</p>
             </div>
+          </div>
+
+          {/* Live indicator - shows real-time connection status */}
+          <div className="hidden sm:flex items-center">
+            <LiveIndicator
+              connectionState={connectionState}
+              lastMessageTime={lastMessageTime}
+            />
           </div>
 
           {/* Spacer for toggle button area */}

@@ -6,7 +6,7 @@ No in-memory caching needed - DuckDB queries are <10ms.
 """
 import logging
 from datetime import date, datetime
-from typing import Dict, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple
 
 from core.duckdb_store import get_store
 from core.filters import parse_period as _parse_period_core
@@ -66,7 +66,7 @@ async def get_forecast_data(sales_type: str = "retail") -> Optional[Dict[str, An
 
 
 async def get_comparison_for_dates(
-    dates: list,
+    dates: List[date],
     compare_type: str = "year_ago",
     sales_type: str = "retail",
 ) -> Dict[date, float]:
@@ -228,7 +228,7 @@ async def get_subcategory_breakdown(
     )
 
 
-async def get_expense_types() -> list:
+async def get_expense_types() -> List[Dict[str, Any]]:
     """Get list of expense types for filter dropdown."""
     store = await get_store()
     return await store.get_expense_types()

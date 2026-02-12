@@ -356,6 +356,17 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   const isInitialMountRef = useRef(true)
   const prevRevenueRef = useRef<number>(0)
   const [isVisible, setIsVisible] = useState(false)
+  // Track pending timeouts for cleanup on unmount
+  const pendingTimeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
+
+  // Cleanup pending timeouts on unmount
+  useEffect(() => {
+    const timeouts = pendingTimeoutsRef.current
+    return () => {
+      timeouts.forEach(clearTimeout)
+      timeouts.clear()
+    }
+  }, [])
 
   // Intersection Observer to detect visibility
   useEffect(() => {
@@ -554,20 +565,26 @@ export const MilestoneProgress = memo(function MilestoneProgress({
       if (isNowReached && !wasReached && !celebratedRef.current.has(m.amount)) {
         celebratedRef.current.add(m.amount)
 
-        // Trigger particles
+        // Trigger particles (track timeout for cleanup)
         const trackRect = trackRef.current!.getBoundingClientRect()
         const position = (m.amount / metrics.maxMilestone) * 100
         const xPos = (position / 100) * trackRect.width
 
-        setTimeout(() => {
+        const particleTimeout = setTimeout(() => {
+          pendingTimeoutsRef.current.delete(particleTimeout)
           if (trackRef.current) {
             burstParticles(trackRef.current, xPos, 25)
           }
         }, index * 300)
+        pendingTimeoutsRef.current.add(particleTimeout)
 
-        // Show celebration for highest new milestone
+        // Show celebration for highest new milestone (track timeout for cleanup)
         if (index === milestones.length - 1 || effectiveRevenue < milestones[index + 1]?.amount) {
-          setTimeout(() => setCelebration(m), 500)
+          const celebrationTimeout = setTimeout(() => {
+            pendingTimeoutsRef.current.delete(celebrationTimeout)
+            setCelebration(m)
+          }, 500)
+          pendingTimeoutsRef.current.add(celebrationTimeout)
         }
       }
     })

@@ -43,12 +43,13 @@ async def fetch_all_products_with_brands() -> tuple:
                 if not product_id:
                     continue
 
-                # Extract brand from custom_fields
-                custom_fields = product.get("custom_fields", [])
+                # Extract brand from custom_fields (optimized: check uuid first as it's more reliable)
+                custom_fields = product.get("custom_fields") or []
                 for field in custom_fields:
-                    if field.get("name") == BRAND_FIELD_NAME or field.get("uuid") == BRAND_FIELD_UUID:
-                        values = field.get("value", [])
-                        if values and isinstance(values, list) and values[0]:
+                    # Check UUID first (faster string comparison, more reliable identifier)
+                    if field.get("uuid") == BRAND_FIELD_UUID or field.get("name") == BRAND_FIELD_NAME:
+                        values = field.get("value")
+                        if values and isinstance(values, list) and len(values) > 0 and values[0]:
                             brand = values[0]
                             brands.add(brand)
                             product_brands[product_id] = brand
@@ -61,25 +62,26 @@ async def fetch_all_products_with_brands() -> tuple:
 
 
 async def warm_brand_cache() -> None:
-    """Pre-load all product brands into cache."""
+    """Pre-load all product brands into cache.
+
+    Uses double-checked locking pattern with simplified lock structure.
+    """
     global _brands_cache, _product_brand_cache, _brands_loaded, _last_cache_update
 
-    # Quick check without load lock
-    async with _cache_lock:
+    # Quick check without lock (volatile read)
+    if _brands_loaded and time.time() - _last_cache_update < CACHE_TTL:
+        return
+
+    # Acquire load lock to prevent concurrent fetches
+    async with _load_lock:
+        # Double-check after acquiring lock
         if _brands_loaded and time.time() - _last_cache_update < CACHE_TTL:
             return
 
-    # Only one coroutine fetches at a time
-    async with _load_lock:
-        # Double-check after acquiring load lock
-        async with _cache_lock:
-            if _brands_loaded and time.time() - _last_cache_update < CACHE_TTL:
-                return
-
-        # Fetch outside cache lock (but inside load lock)
+        # Fetch outside cache lock
         brands, product_brands = await fetch_all_products_with_brands()
 
-        # Update cache
+        # Update cache atomically
         async with _cache_lock:
             _brands_cache = brands
             _product_brand_cache = product_brands

@@ -38,6 +38,16 @@ class DuckDBStats(BaseModel):
     db_size_mb: Optional[float] = None
 
 
+class SyncStatus(BaseModel):
+    """Background sync service status."""
+    status: str = Field(description="Sync status: active, idle, or error")
+    last_sync_time: Optional[str] = Field(None, description="Last sync time (ISO format)")
+    seconds_since_sync: Optional[int] = Field(None, description="Seconds since last sync")
+    consecutive_empty_syncs: int = Field(0, description="Number of syncs with no new orders")
+    current_backoff_seconds: int = Field(300, description="Current sync interval in seconds")
+    is_off_hours: bool = Field(False, description="Whether in off-hours mode (2-8 AM)")
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str = Field(description="Service status: healthy or degraded")
@@ -45,6 +55,7 @@ class HealthResponse(BaseModel):
     uptime_seconds: int = Field(description="Uptime in seconds")
     correlation_id: Optional[str] = Field(None, description="Request correlation ID")
     duckdb: DuckDBStats
+    sync: Optional[SyncStatus] = Field(None, description="Background sync service status")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

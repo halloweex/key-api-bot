@@ -275,13 +275,10 @@ docker-compose logs -f web
 
 ```bash
 # Commit format
-git commit -m "Add revenue forecast endpoint
-
+git commit -m "Add revenue forecast endpoint  
 - Implement /api/revenue/forecast
 - Add LightGBM model training
-- Update frontend chart
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
+- Update frontend chart"
 
 # Never force push to main
 # Never commit .env or secrets

@@ -106,10 +106,16 @@ class DuckDBStore:
 
     @asynccontextmanager
     async def connection(self):
-        """Get database connection with automatic reconnection."""
+        """Get database connection with automatic reconnection.
+
+        Acquires lock to ensure single-threaded DuckDB access.
+        DuckDB connections are NOT thread-safe - only one thread can use
+        a connection at a time.
+        """
         if self._connection is None:
             await self.connect()
-        yield self._connection
+        async with self._lock:
+            yield self._connection
 
     # ─── Query Execution with Timeout ────────────────────────────────────────
 
