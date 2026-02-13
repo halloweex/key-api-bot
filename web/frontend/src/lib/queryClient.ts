@@ -80,8 +80,8 @@ export function createQueryClient(): QueryClient {
         // Static data (categories, brands) should override with longer staleTime
         staleTime: 2 * 60 * 1000,
 
-        // Keep unused data in cache for 10 minutes (reduced from 30 to save memory)
-        gcTime: 10 * 60 * 1000,
+        // Keep unused data in cache for 30 minutes (better multi-tab workflow)
+        gcTime: 30 * 60 * 1000,
 
         // Retry configuration
         retry: shouldRetry,

@@ -6,6 +6,7 @@ Uses incremental sync to minimize API calls and enable fast historical queries.
 """
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -66,25 +67,45 @@ class DuckDBStore:
     - Incremental sync from KeyCRM API
     - Pre-aggregated daily statistics
     - Fast analytical queries
+    - Thread offloading to avoid blocking asyncio event loop
     """
 
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
         self._connection: Optional[duckdb.DuckDBPyConnection] = None
-        self._lock = asyncio.Lock()
+        self._lock = asyncio.Lock()  # Serializes all database access
+
+        # Thread pool for offloading blocking DB operations
+        self._executor: Optional[ThreadPoolExecutor] = None
+
+        # Stats for monitoring
+        self._total_queries = 0
 
     async def connect(self) -> None:
-        """Initialize database connection and schema."""
+        """Initialize database connection, schema, and thread pool."""
         DB_DIR.mkdir(parents=True, exist_ok=True)
 
         async with self._lock:
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
                 await self._init_schema()
+
+                # Thread pool for offloading blocking operations
+                self._executor = ThreadPoolExecutor(
+                    max_workers=1,  # Single worker - DuckDB requires serialized access
+                    thread_name_prefix="duckdb"
+                )
+
                 logger.info(f"DuckDB connected: {self.db_path}")
 
     async def close(self) -> None:
-        """Close database connection."""
+        """Close database connection and thread pool."""
+        # Shutdown thread pool
+        if self._executor:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+
+        # Close main connection
         async with self._lock:
             if self._connection:
                 self._connection.close()
@@ -103,6 +124,14 @@ class DuckDBStore:
             if self._connection:
                 self._connection.execute("CHECKPOINT")
                 logger.info("DuckDB checkpoint completed")
+
+    def get_connection_info(self) -> Dict[str, Any]:
+        """Get connection info for monitoring."""
+        return {
+            "status": "active" if self._connection else "not_initialized",
+            "total_queries": self._total_queries,
+            "db_path": str(self.db_path),
+        }
 
     @asynccontextmanager
     async def connection(self):
@@ -154,6 +183,8 @@ class DuckDBStore:
         """
         Execute query and fetch one result with timeout.
 
+        Offloads blocking DB work to thread pool to avoid blocking event loop.
+
         Args:
             query: SQL query string
             params: Query parameters
@@ -166,12 +197,15 @@ class DuckDBStore:
             QueryTimeoutError: If query exceeds timeout
         """
         async with self.connection() as conn:
+            self._total_queries += 1
             try:
+                loop = asyncio.get_event_loop()
+
                 def _run():
                     return conn.execute(query, params or []).fetchone()
 
                 return await asyncio.wait_for(
-                    asyncio.to_thread(_run),
+                    loop.run_in_executor(self._executor, _run),
                     timeout=timeout
                 )
             except asyncio.TimeoutError:
@@ -186,6 +220,8 @@ class DuckDBStore:
         """
         Execute query and fetch all results with timeout.
 
+        Offloads blocking DB work to thread pool to avoid blocking event loop.
+
         Args:
             query: SQL query string
             params: Query parameters
@@ -198,12 +234,15 @@ class DuckDBStore:
             QueryTimeoutError: If query exceeds timeout
         """
         async with self.connection() as conn:
+            self._total_queries += 1
             try:
+                loop = asyncio.get_event_loop()
+
                 def _run():
                     return conn.execute(query, params or []).fetchall()
 
                 return await asyncio.wait_for(
-                    asyncio.to_thread(_run),
+                    loop.run_in_executor(self._executor, _run),
                     timeout=timeout
                 )
             except asyncio.TimeoutError:
@@ -218,6 +257,8 @@ class DuckDBStore:
         """
         Execute query and return DataFrame with timeout.
 
+        Offloads blocking DB work to thread pool to avoid blocking event loop.
+
         Args:
             query: SQL query string
             params: Query parameters
@@ -230,12 +271,15 @@ class DuckDBStore:
             QueryTimeoutError: If query exceeds timeout
         """
         async with self.connection() as conn:
+            self._total_queries += 1
             try:
+                loop = asyncio.get_event_loop()
+
                 def _run():
                     return conn.execute(query, params or []).fetchdf()
 
                 return await asyncio.wait_for(
-                    asyncio.to_thread(_run),
+                    loop.run_in_executor(self._executor, _run),
                     timeout=timeout
                 )
             except asyncio.TimeoutError:

@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 # Health check stats cache (10 second TTL) with thread-safe lock
 _stats_cache = {"data": None, "expires_at": 0}
 _stats_cache_lock = asyncio.Lock()
-_STATS_CACHE_TTL = 10  # seconds
+_STATS_CACHE_TTL = 60  # seconds (increased from 10s - stats don't change often)
 
 
 # ─── Health Check ────────────────────────────────────────────────────────────

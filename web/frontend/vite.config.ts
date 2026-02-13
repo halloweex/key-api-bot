@@ -38,6 +38,11 @@ export default defineConfig(({ command }) => ({
           });
         },
       },
+      '/ws': {
+        target: 'ws://localhost:8080',
+        ws: true,  // Enable WebSocket proxy
+        changeOrigin: true,
+      },
       '/login': {
         target: 'http://localhost:8080',
         changeOrigin: true,

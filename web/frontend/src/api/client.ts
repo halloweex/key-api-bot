@@ -40,7 +40,16 @@ import type {
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const API_BASE = '/api'
-const DEFAULT_TIMEOUT = 30000 // 30 seconds
+const DEFAULT_TIMEOUT = 10000 // 10 seconds (reduced from 30s - faster failure detection)
+
+// ─── Request Deduplication ──────────────────────────────────────────────────
+// Prevents duplicate requests when users rapidly click filters
+
+const pendingRequests = new Map<string, Promise<unknown>>()
+
+function dedupKey(endpoint: string, queryParams?: string): string {
+  return queryParams ? `${endpoint}?${queryParams}` : endpoint
+}
 
 // ─── Error Classes ───────────────────────────────────────────────────────────
 
@@ -182,16 +191,33 @@ async function fetchApi<T>(
     ? `${API_BASE}${endpoint}?${queryParams}`
     : `${API_BASE}${endpoint}`
 
-  const response = await fetchWithTimeout(url, options)
-
-  if (!response.ok) {
-    throw ApiError.fromResponse(response)
+  // Request deduplication - prevent duplicate in-flight requests
+  const key = dedupKey(endpoint, queryParams)
+  const pending = pendingRequests.get(key)
+  if (pending) {
+    return pending as Promise<T>
   }
 
+  const request = (async () => {
+    const response = await fetchWithTimeout(url, options)
+
+    if (!response.ok) {
+      throw ApiError.fromResponse(response)
+    }
+
+    try {
+      return await response.json()
+    } catch {
+      throw new ApiError(response.status, 'Invalid response format', 'PARSE_ERROR')
+    }
+  })()
+
+  pendingRequests.set(key, request)
+
   try {
-    return await response.json()
-  } catch {
-    throw new ApiError(response.status, 'Invalid response format', 'PARSE_ERROR')
+    return await request
+  } finally {
+    pendingRequests.delete(key)
   }
 }
 
