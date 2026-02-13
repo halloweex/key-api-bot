@@ -42,11 +42,11 @@ async def send_telegram_alert(message: str) -> None:
         logger.warning("BOT_TOKEN or ADMIN_USER_IDS not configured, skipping alert")
         return
 
-    import aiohttp
+    import httpx
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    async with aiohttp.ClientSession() as session:
+    async with httpx.AsyncClient() as client:
         for user_id in ADMIN_USER_IDS:
             if not user_id.strip():
                 continue
@@ -56,11 +56,11 @@ async def send_telegram_alert(message: str) -> None:
                     "text": message,
                     "parse_mode": "HTML",
                 }
-                async with session.post(url, json=payload) as resp:
-                    if resp.status != 200:
-                        logger.error(f"Failed to send alert to {user_id}: {await resp.text()}")
-                    else:
-                        logger.info(f"Alert sent to {user_id}")
+                resp = await client.post(url, json=payload)
+                if resp.status_code != 200:
+                    logger.error(f"Failed to send alert to {user_id}: {resp.text}")
+                else:
+                    logger.info(f"Alert sent to {user_id}")
             except Exception as e:
                 logger.error(f"Error sending alert to {user_id}: {e}")
 
@@ -122,16 +122,8 @@ Check logs: <code>docker logs {container_name} --tail 50</code>
 
 
 async def monitor_docker_events() -> None:
-    """Monitor Docker events using the Docker API."""
-    import aiohttp
-
-    # Docker socket
-    socket_path = '/var/run/docker.sock'
-
-    if not os.path.exists(socket_path):
-        logger.error(f"Docker socket not found at {socket_path}")
-        logger.info("Make sure Docker is running and you have permission to access the socket")
-        return
+    """Monitor Docker events using docker CLI."""
+    import subprocess
 
     logger.info("Starting Docker event monitor...")
     logger.info(f"Monitoring containers: {MONITORED_CONTAINERS}")
@@ -139,27 +131,39 @@ async def monitor_docker_events() -> None:
     # Send startup notification
     await send_telegram_alert("🟢 Docker monitor started\n\nMonitoring container health...")
 
-    connector = aiohttp.UnixConnector(path=socket_path)
+    # Use docker events command with JSON format
+    cmd = [
+        'docker', 'events',
+        '--format', '{{json .}}',
+        '--filter', 'type=container',
+        '--filter', 'event=die',
+        '--filter', 'event=kill',
+        '--filter', 'event=oom',
+        '--filter', 'event=stop',
+        '--filter', 'event=restart',
+        '--filter', 'event=health_status',
+    ]
 
-    async with aiohttp.ClientSession(connector=connector) as session:
-        # Filter for container events only
-        params = {
-            'filters': json.dumps({
-                'type': ['container'],
-                'event': ['die', 'kill', 'oom', 'stop', 'restart', 'health_status']
-            })
-        }
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
 
-        async with session.get('http://localhost/events', params=params) as resp:
-            async for line in resp.content:
-                if line:
-                    try:
-                        event = json.loads(line.decode('utf-8'))
-                        await handle_event(event)
-                    except json.JSONDecodeError:
-                        continue
-                    except Exception as e:
-                        logger.error(f"Error handling event: {e}")
+    logger.info("Connected to Docker events stream")
+
+    while True:
+        line = await process.stdout.readline()
+        if not line:
+            break
+
+        try:
+            event = json.loads(line.decode('utf-8'))
+            await handle_event(event)
+        except json.JSONDecodeError:
+            continue
+        except Exception as e:
+            logger.error(f"Error handling event: {e}")
 
 
 async def main() -> None:
