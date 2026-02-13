@@ -5,8 +5,9 @@ Provides fast, typo-tolerant search for buyers, orders, and products.
 Syncs data from DuckDB to Meilisearch for optimal search performance.
 """
 import asyncio
+import math
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, date
 
 import meilisearch
 from meilisearch.errors import MeilisearchApiError
@@ -15,6 +16,28 @@ from core.config import config
 from core.observability import get_logger
 
 logger = get_logger(__name__)
+
+
+def _sanitize_for_json(obj: Any) -> Any:
+    """Sanitize a value for JSON serialization (handle NaN, Infinity, dates)."""
+    if obj is None:
+        return None
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj
+
+
+def _sanitize_documents(docs: List[dict]) -> List[dict]:
+    """Sanitize a list of documents for Meilisearch indexing."""
+    return [_sanitize_for_json(doc) for doc in docs]
 
 
 class MeiliClient:
@@ -269,6 +292,9 @@ class MeiliClient:
             loop = asyncio.get_event_loop()
             index = self.client.index("buyers")
 
+            # Sanitize data for JSON serialization
+            buyers = _sanitize_documents(buyers)
+
             # Add documents in batches
             batch_size = 1000
             total = 0
@@ -304,6 +330,9 @@ class MeiliClient:
             loop = asyncio.get_event_loop()
             index = self.client.index("orders")
 
+            # Sanitize data for JSON serialization
+            orders = _sanitize_documents(orders)
+
             batch_size = 1000
             total = 0
             for i in range(0, len(orders), batch_size):
@@ -337,6 +366,9 @@ class MeiliClient:
         try:
             loop = asyncio.get_event_loop()
             index = self.client.index("products")
+
+            # Sanitize data for JSON serialization
+            products = _sanitize_documents(products)
 
             batch_size = 1000
             total = 0
