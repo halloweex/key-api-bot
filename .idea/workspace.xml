@@ -6,11 +6,6 @@
   <component name="ChangeListManager">
     <list default="true" id="00033ac8-0ff0-4db9-8885-f829ba7bf2ad" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/duckdb_store.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/duckdb_store.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/nginx/nginx.conf" beforeDir="false" afterPath="$PROJECT_DIR$/nginx/nginx.conf" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/api/client.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/api/client.ts" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/lib/queryClient.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/lib/queryClient.ts" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/routes/api.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/routes/api.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -296,7 +291,7 @@
       <workItem from="1769678640075" duration="124000" />
       <workItem from="1769678798867" duration="12000" />
       <workItem from="1769680433341" duration="313000" />
-      <workItem from="1769680767522" duration="196551000" />
+      <workItem from="1769680767522" duration="197651000" />
     </task>
     <servers />
   </component>
