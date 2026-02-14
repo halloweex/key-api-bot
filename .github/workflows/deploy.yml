@@ -56,6 +56,9 @@ jobs:
           script: |
             cd /opt/key-api-bot
             git pull origin main
+            # Stop monitor container if running (disabled in docker-compose.yml)
+            docker stop keycrm-monitor 2>/dev/null || true
+            docker rm keycrm-monitor 2>/dev/null || true
             docker compose pull
             docker compose up -d --force-recreate
             docker image prune -f
