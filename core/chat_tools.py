@@ -253,6 +253,137 @@ TOOLS = [
             },
             "required": ["query"]
         }
+    },
+    # ═══════════════════════════════════════════════════════════════════════════
+    # EXPENSE TRACKING TOOLS
+    # ═══════════════════════════════════════════════════════════════════════════
+    {
+        "name": "add_expenses",
+        "description": "Add business expenses. Parse natural language input like 'facebook ads 22000, salary 45000' into structured expenses. Categories: marketing (ads), salary, taxes, logistics, other. Use today's date unless specified.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expenses": {
+                    "type": "array",
+                    "description": "List of expenses to add",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "date": {
+                                "type": "string",
+                                "description": "Expense date in YYYY-MM-DD format (default: today)"
+                            },
+                            "category": {
+                                "type": "string",
+                                "enum": ["marketing", "salary", "taxes", "logistics", "other"],
+                                "description": "Expense category"
+                            },
+                            "type": {
+                                "type": "string",
+                                "description": "Specific type (e.g., 'Facebook Ads', 'Google Ads', 'Salary', 'Nova Poshta')"
+                            },
+                            "amount": {
+                                "type": "number",
+                                "description": "Amount in UAH"
+                            },
+                            "note": {
+                                "type": "string",
+                                "description": "Optional note"
+                            }
+                        },
+                        "required": ["category", "type", "amount"]
+                    }
+                }
+            },
+            "required": ["expenses"]
+        }
+    },
+    {
+        "name": "list_expenses",
+        "description": "List recent expenses. Use for questions like 'Show my expenses', 'What did I spend this month?'",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "period": {
+                    "type": "string",
+                    "enum": ["today", "yesterday", "week", "last_week", "month", "last_month"],
+                    "description": "Time period"
+                },
+                "category": {
+                    "type": "string",
+                    "enum": ["marketing", "salary", "taxes", "logistics", "other"],
+                    "description": "Filter by category"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results",
+                    "default": 20
+                }
+            }
+        }
+    },
+    {
+        "name": "delete_expense",
+        "description": "Delete an expense by ID. Use after listing expenses to remove one.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expense_id": {
+                    "type": "integer",
+                    "description": "ID of the expense to delete"
+                }
+            },
+            "required": ["expense_id"]
+        }
+    },
+    {
+        "name": "update_expense",
+        "description": "Update an existing expense. Only provided fields will be updated.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expense_id": {
+                    "type": "integer",
+                    "description": "ID of the expense to update"
+                },
+                "date": {
+                    "type": "string",
+                    "description": "New date in YYYY-MM-DD format"
+                },
+                "category": {
+                    "type": "string",
+                    "enum": ["marketing", "salary", "taxes", "logistics", "other"],
+                    "description": "New category"
+                },
+                "type": {
+                    "type": "string",
+                    "description": "New type"
+                },
+                "amount": {
+                    "type": "number",
+                    "description": "New amount"
+                },
+                "note": {
+                    "type": "string",
+                    "description": "New note"
+                }
+            },
+            "required": ["expense_id"]
+        }
+    },
+    {
+        "name": "get_expenses_summary",
+        "description": "Get summary of expenses with totals by category. Use for questions like 'How much did I spend on marketing?', 'Total expenses this month?'",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "period": {
+                    "type": "string",
+                    "enum": ["today", "yesterday", "week", "last_week", "month", "last_month"],
+                    "description": "Time period"
+                }
+            }
+        }
     }
 ]
 
@@ -364,6 +495,34 @@ async def execute_tool(name: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
             return await _search_product(
                 query=input_data.get("query", ""),
                 limit=input_data.get("limit", 5)
+            )
+        # Expense tools
+        elif name == "add_expenses":
+            return await _add_expenses(
+                expenses=input_data.get("expenses", [])
+            )
+        elif name == "list_expenses":
+            return await _list_expenses(
+                period=input_data.get("period"),
+                category=input_data.get("category"),
+                limit=input_data.get("limit", 20)
+            )
+        elif name == "delete_expense":
+            return await _delete_expense(
+                expense_id=input_data.get("expense_id")
+            )
+        elif name == "update_expense":
+            return await _update_expense(
+                expense_id=input_data.get("expense_id"),
+                expense_date=input_data.get("date"),
+                category=input_data.get("category"),
+                expense_type=input_data.get("type"),
+                amount=input_data.get("amount"),
+                note=input_data.get("note")
+            )
+        elif name == "get_expenses_summary":
+            return await _get_expenses_summary(
+                period=input_data.get("period")
             )
         else:
             return {"error": f"Unknown tool: {name}"}
@@ -667,4 +826,146 @@ async def _search_product(query: str, limit: int) -> Dict[str, Any]:
         "query": query,
         "count": len(results),
         "products": results
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPENSE TOOL IMPLEMENTATIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _add_expenses(expenses: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Add multiple expenses."""
+    store = await get_store()
+    added = []
+    errors = []
+
+    today = datetime.now(DEFAULT_TZ).date()
+
+    for exp in expenses:
+        try:
+            # Parse date or use today
+            expense_date = today
+            if exp.get("date"):
+                try:
+                    expense_date = date.fromisoformat(exp["date"])
+                except ValueError:
+                    pass
+
+            result = await store.add_expense(
+                expense_date=expense_date,
+                category=exp.get("category", "other"),
+                expense_type=exp.get("type", "Unknown"),
+                amount=float(exp.get("amount", 0)),
+                currency="UAH",
+                note=exp.get("note")
+            )
+            added.append(result)
+        except Exception as e:
+            errors.append({"expense": exp, "error": str(e)})
+
+    return {
+        "added_count": len(added),
+        "added": added,
+        "errors": errors if errors else None
+    }
+
+
+async def _list_expenses(
+    period: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = 20
+) -> Dict[str, Any]:
+    """List expenses with optional filters."""
+    store = await get_store()
+
+    start_date = None
+    end_date = None
+
+    if period:
+        start_date, end_date = _get_date_range(period)
+
+    expenses = await store.list_expenses(
+        start_date=start_date,
+        end_date=end_date,
+        category=category,
+        limit=limit
+    )
+
+    # Calculate total
+    total = sum(exp["amount"] for exp in expenses)
+
+    return {
+        "period": period,
+        "category": category,
+        "count": len(expenses),
+        "total": total,
+        "expenses": expenses
+    }
+
+
+async def _delete_expense(expense_id: int) -> Dict[str, Any]:
+    """Delete an expense."""
+    store = await get_store()
+    success = await store.delete_expense(expense_id)
+
+    if success:
+        return {"success": True, "message": f"Expense {expense_id} deleted"}
+    else:
+        return {"success": False, "error": f"Expense {expense_id} not found"}
+
+
+async def _update_expense(
+    expense_id: int,
+    expense_date: Optional[str] = None,
+    category: Optional[str] = None,
+    expense_type: Optional[str] = None,
+    amount: Optional[float] = None,
+    note: Optional[str] = None
+) -> Dict[str, Any]:
+    """Update an expense."""
+    store = await get_store()
+
+    # Parse date if provided
+    parsed_date = None
+    if expense_date:
+        try:
+            parsed_date = date.fromisoformat(expense_date)
+        except ValueError:
+            return {"error": f"Invalid date format: {expense_date}"}
+
+    result = await store.update_expense(
+        expense_id=expense_id,
+        expense_date=parsed_date,
+        category=category,
+        expense_type=expense_type,
+        amount=amount,
+        note=note
+    )
+
+    if result:
+        return {"success": True, "expense": result}
+    else:
+        return {"success": False, "error": f"Expense {expense_id} not found"}
+
+
+async def _get_expenses_summary(period: Optional[str] = None) -> Dict[str, Any]:
+    """Get expenses summary."""
+    store = await get_store()
+
+    start_date = None
+    end_date = None
+
+    if period:
+        start_date, end_date = _get_date_range(period)
+
+    summary = await store.get_expenses_summary(
+        start_date=start_date,
+        end_date=end_date
+    )
+
+    return {
+        "period": period,
+        "start_date": start_date.isoformat() if start_date else None,
+        "end_date": end_date.isoformat() if end_date else None,
+        **summary
     }

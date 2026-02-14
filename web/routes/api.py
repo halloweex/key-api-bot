@@ -1747,3 +1747,74 @@ async def get_stock_alerts(request: Request):
     """
     store = await get_store()
     return await store.get_restock_alerts(limit=50)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MANUAL EXPENSES ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/expenses")
+@limiter.limit("30/minute")
+async def get_expenses(
+    request: Request,
+    period: Optional[str] = Query(None, description="Time period filter"),
+    category: Optional[str] = Query(None, description="Category filter"),
+    limit: int = Query(50, ge=1, le=200, description="Max results"),
+):
+    """
+    Get manual expenses list with optional filters.
+
+    Query params:
+    - period: today, yesterday, week, last_week, month, last_month
+    - category: marketing, salary, taxes, logistics, other
+    - limit: max results (default 50)
+    """
+    from datetime import date, timedelta
+    from zoneinfo import ZoneInfo
+
+    store = await get_store()
+
+    start_date = None
+    end_date = None
+
+    if period:
+        tz = ZoneInfo("Europe/Kyiv")
+        from datetime import datetime
+        today = datetime.now(tz).date()
+
+        if period == "today":
+            start_date = end_date = today
+        elif period == "yesterday":
+            start_date = end_date = today - timedelta(days=1)
+        elif period == "week":
+            start_date = today - timedelta(days=today.weekday())
+            end_date = today
+        elif period == "last_week":
+            end_date = today - timedelta(days=today.weekday() + 1)
+            start_date = end_date - timedelta(days=6)
+        elif period == "month":
+            start_date = today.replace(day=1)
+            end_date = today
+        elif period == "last_month":
+            first_of_month = today.replace(day=1)
+            end_date = first_of_month - timedelta(days=1)
+            start_date = end_date.replace(day=1)
+
+    expenses = await store.list_expenses(
+        start_date=start_date,
+        end_date=end_date,
+        category=category,
+        limit=limit
+    )
+
+    summary = await store.get_expenses_summary(
+        start_date=start_date,
+        end_date=end_date
+    )
+
+    return {
+        "expenses": expenses,
+        "summary": summary,
+        "period": period,
+        "category": category
+    }

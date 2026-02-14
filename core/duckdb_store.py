@@ -715,6 +715,25 @@ class DuckDBStore:
         CREATE INDEX IF NOT EXISTS idx_silver_active_return ON silver_orders(is_active_source, is_return, order_date);
         CREATE INDEX IF NOT EXISTS idx_gold_prod_cat_date ON gold_daily_products(category_id, date, sales_type);
         CREATE INDEX IF NOT EXISTS idx_gold_prod_brand_date ON gold_daily_products(brand, date, sales_type);
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- MANUAL EXPENSES (business expenses not in KeyCRM)
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE SEQUENCE IF NOT EXISTS seq_manual_expenses_id START 1;
+        CREATE TABLE IF NOT EXISTS manual_expenses (
+            id INTEGER PRIMARY KEY DEFAULT nextval('seq_manual_expenses_id'),
+            expense_date DATE NOT NULL,
+            category VARCHAR NOT NULL,          -- marketing, salary, taxes, logistics, other
+            expense_type VARCHAR NOT NULL,      -- Facebook Ads, Google Ads, Salary, etc.
+            amount DECIMAL(12, 2) NOT NULL,
+            currency VARCHAR DEFAULT 'UAH',
+            note VARCHAR,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_manual_expenses_date ON manual_expenses(expense_date);
+        CREATE INDEX IF NOT EXISTS idx_manual_expenses_category ON manual_expenses(category);
         """
         self._connection.execute(schema_sql)
 
@@ -5501,6 +5520,246 @@ class DuckDBStore:
             ).fetchall()
 
         return {row[0]: float(row[1]) for row in rows}
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MANUAL EXPENSES CRUD
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    async def add_expense(
+        self,
+        expense_date: date,
+        category: str,
+        expense_type: str,
+        amount: float,
+        currency: str = "UAH",
+        note: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Add a manual expense.
+
+        Args:
+            expense_date: Date of the expense
+            category: Category (marketing, salary, taxes, logistics, other)
+            expense_type: Type (Facebook Ads, Google Ads, Salary, etc.)
+            amount: Amount in specified currency
+            currency: Currency code (default UAH)
+            note: Optional note
+
+        Returns:
+            Created expense dict with id
+        """
+        async with self.connection() as conn:
+            result = conn.execute("""
+                INSERT INTO manual_expenses (expense_date, category, expense_type, amount, currency, note)
+                VALUES (?, ?, ?, ?, ?, ?)
+                RETURNING id, expense_date, category, expense_type, amount, currency, note, created_at
+            """, [expense_date, category, expense_type, amount, currency, note]).fetchone()
+
+            return {
+                "id": result[0],
+                "expense_date": result[1].isoformat() if result[1] else None,
+                "category": result[2],
+                "expense_type": result[3],
+                "amount": float(result[4]),
+                "currency": result[5],
+                "note": result[6],
+                "created_at": result[7].isoformat() if result[7] else None
+            }
+
+    async def update_expense(
+        self,
+        expense_id: int,
+        expense_date: Optional[date] = None,
+        category: Optional[str] = None,
+        expense_type: Optional[str] = None,
+        amount: Optional[float] = None,
+        currency: Optional[str] = None,
+        note: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Update a manual expense.
+
+        Args:
+            expense_id: ID of expense to update
+            Other args: Fields to update (None = keep existing)
+
+        Returns:
+            Updated expense dict or None if not found
+        """
+        async with self.connection() as conn:
+            # Build dynamic update query
+            updates = []
+            params = []
+
+            if expense_date is not None:
+                updates.append("expense_date = ?")
+                params.append(expense_date)
+            if category is not None:
+                updates.append("category = ?")
+                params.append(category)
+            if expense_type is not None:
+                updates.append("expense_type = ?")
+                params.append(expense_type)
+            if amount is not None:
+                updates.append("amount = ?")
+                params.append(amount)
+            if currency is not None:
+                updates.append("currency = ?")
+                params.append(currency)
+            if note is not None:
+                updates.append("note = ?")
+                params.append(note)
+
+            if not updates:
+                return None
+
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            params.append(expense_id)
+
+            result = conn.execute(f"""
+                UPDATE manual_expenses
+                SET {', '.join(updates)}
+                WHERE id = ?
+                RETURNING id, expense_date, category, expense_type, amount, currency, note, created_at, updated_at
+            """, params).fetchone()
+
+            if not result:
+                return None
+
+            return {
+                "id": result[0],
+                "expense_date": result[1].isoformat() if result[1] else None,
+                "category": result[2],
+                "expense_type": result[3],
+                "amount": float(result[4]),
+                "currency": result[5],
+                "note": result[6],
+                "created_at": result[7].isoformat() if result[7] else None,
+                "updated_at": result[8].isoformat() if result[8] else None
+            }
+
+    async def delete_expense(self, expense_id: int) -> bool:
+        """Delete a manual expense.
+
+        Args:
+            expense_id: ID of expense to delete
+
+        Returns:
+            True if deleted, False if not found
+        """
+        async with self.connection() as conn:
+            result = conn.execute("""
+                DELETE FROM manual_expenses WHERE id = ? RETURNING id
+            """, [expense_id]).fetchone()
+            return result is not None
+
+    async def list_expenses(
+        self,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        category: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """List manual expenses with optional filters.
+
+        Args:
+            start_date: Filter by start date
+            end_date: Filter by end date
+            category: Filter by category
+            limit: Max results
+
+        Returns:
+            List of expense dicts
+        """
+        conditions = []
+        params = []
+
+        if start_date:
+            conditions.append("expense_date >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("expense_date <= ?")
+            params.append(end_date)
+        if category:
+            conditions.append("category = ?")
+            params.append(category)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+
+        async with self.connection() as conn:
+            rows = conn.execute(f"""
+                SELECT id, expense_date, category, expense_type, amount, currency, note, created_at, updated_at
+                FROM manual_expenses
+                {where_clause}
+                ORDER BY expense_date DESC, created_at DESC
+                LIMIT ?
+            """, params).fetchall()
+
+            return [
+                {
+                    "id": row[0],
+                    "expense_date": row[1].isoformat() if row[1] else None,
+                    "category": row[2],
+                    "expense_type": row[3],
+                    "amount": float(row[4]),
+                    "currency": row[5],
+                    "note": row[6],
+                    "created_at": row[7].isoformat() if row[7] else None,
+                    "updated_at": row[8].isoformat() if row[8] else None
+                }
+                for row in rows
+            ]
+
+    async def get_expenses_summary(
+        self,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None
+    ) -> Dict[str, Any]:
+        """Get expenses summary with totals by category.
+
+        Args:
+            start_date: Filter by start date
+            end_date: Filter by end date
+
+        Returns:
+            Summary dict with total and by-category breakdown
+        """
+        conditions = []
+        params = []
+
+        if start_date:
+            conditions.append("expense_date >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("expense_date <= ?")
+            params.append(end_date)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        async with self.connection() as conn:
+            # Total
+            total_row = conn.execute(f"""
+                SELECT COALESCE(SUM(amount), 0) as total, COUNT(*) as count
+                FROM manual_expenses
+                {where_clause}
+            """, params).fetchone()
+
+            # By category
+            category_rows = conn.execute(f"""
+                SELECT category, SUM(amount) as total, COUNT(*) as count
+                FROM manual_expenses
+                {where_clause}
+                GROUP BY category
+                ORDER BY total DESC
+            """, params).fetchall()
+
+            return {
+                "total": float(total_row[0]),
+                "count": int(total_row[1]),
+                "by_category": [
+                    {"category": row[0], "total": float(row[1]), "count": int(row[2])}
+                    for row in category_rows
+                ]
+            }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
