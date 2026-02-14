@@ -112,7 +112,13 @@ async def telegram_callback(request: Request):
 
     # Sign session data and set cookie
     signed_session = session_serializer.dumps(session_data)
-    response = RedirectResponse(url="/", status_code=302)
+
+    # Build welcome redirect URL with user's name
+    first_name = auth_data.get('first_name', '')
+    from urllib.parse import quote
+    welcome_param = f"?welcome={quote(first_name)}" if first_name else ""
+
+    response = RedirectResponse(url=f"/{welcome_param}", status_code=302)
     response.set_cookie(
         key=SESSION_COOKIE,
         value=signed_session,

@@ -3,6 +3,7 @@ import { Header, Dashboard } from './components/layout'
 import { ChatToggle, ChatSidebar } from './components/chat'
 import { AdminUsersPage } from './components/admin'
 import { useIsAdmin } from './hooks/useAuth'
+import { useToast } from './components/ui/Toast'
 
 // ─── Simple Router Hook ──────────────────────────────────────────────────────
 
@@ -18,9 +19,36 @@ function useSimpleRouter() {
   return path
 }
 
+// ─── Welcome Toast Hook ──────────────────────────────────────────────────────
+
+function useWelcomeToast() {
+  const { addToast } = useToast()
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const welcomeName = params.get('welcome')
+
+    if (welcomeName) {
+      // Show welcome toast
+      addToast({
+        type: 'success',
+        title: `Welcome, ${decodeURIComponent(welcomeName)}!`,
+        duration: 4000,
+      })
+
+      // Clean up URL (remove ?welcome=... parameter)
+      const url = new URL(window.location.href)
+      url.searchParams.delete('welcome')
+      window.history.replaceState({}, '', url.pathname)
+    }
+  }, [addToast])
+}
+
 // ─── Dashboard Shell ─────────────────────────────────────────────────────────
 
 const DashboardShell = memo(function DashboardShell() {
+  useWelcomeToast()
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       <Header />
