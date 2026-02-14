@@ -635,3 +635,32 @@ export interface AdminUsersResponse {
   users: AdminUser[]
   count: number
 }
+
+// ─── Admin Permissions Matrix Types ──────────────────────────────────────────
+
+export interface FeatureInfo {
+  key: string
+  name: string
+  description: string
+}
+
+export interface RoleInfo {
+  key: string
+  name: string
+  description: string
+}
+
+export interface PermissionsMatrixResponse {
+  permissions: Record<UserRole, Record<string, FeaturePermissions>>
+  features: FeatureInfo[]
+  roles: RoleInfo[]
+}
+
+export interface UpdatePermissionResponse {
+  success: boolean
+  role: string
+  feature: string
+  can_view: boolean
+  can_edit: boolean
+  can_delete: boolean
+}

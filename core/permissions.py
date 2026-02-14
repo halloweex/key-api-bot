@@ -1,11 +1,14 @@
 """
 Role-based permissions system.
 
-Simple hardcoded permissions per role. Easy to modify in code,
-no database needed. Add dynamic permissions later if needed.
+Supports both hardcoded defaults and dynamic DB-stored permissions.
+DB permissions take precedence when available.
 """
+import logging
 from enum import Enum
-from typing import Dict, Set
+from typing import Dict, Set, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class Role(str, Enum):
@@ -113,14 +116,121 @@ def get_permissions_for_role(role: str) -> Dict[str, Dict[str, bool]]:
 def get_all_features() -> list:
     """Get list of all features with metadata."""
     return [
-        {"key": Feature.DASHBOARD, "name": "Dashboard", "description": "Main dashboard view"},
-        {"key": Feature.EXPENSES, "name": "Manual Expenses", "description": "View and manage expenses"},
-        {"key": Feature.INVENTORY, "name": "Inventory", "description": "Stock management"},
-        {"key": Feature.ANALYTICS, "name": "Analytics", "description": "Advanced analytics"},
-        {"key": Feature.CUSTOMERS, "name": "Customer Insights", "description": "Customer data"},
-        {"key": Feature.REPORTS, "name": "Reports", "description": "Export reports"},
-        {"key": Feature.USER_MANAGEMENT, "name": "User Management", "description": "Manage users"},
+        {"key": Feature.DASHBOARD.value, "name": "Dashboard", "description": "Main dashboard view"},
+        {"key": Feature.EXPENSES.value, "name": "Manual Expenses", "description": "View and manage expenses"},
+        {"key": Feature.INVENTORY.value, "name": "Inventory", "description": "Stock management"},
+        {"key": Feature.ANALYTICS.value, "name": "Analytics", "description": "Advanced analytics"},
+        {"key": Feature.CUSTOMERS.value, "name": "Customer Insights", "description": "Customer data"},
+        {"key": Feature.REPORTS.value, "name": "Reports", "description": "Export reports"},
+        {"key": Feature.USER_MANAGEMENT.value, "name": "User Management", "description": "Manage users"},
     ]
+
+
+def get_all_roles() -> list:
+    """Get list of all roles with metadata."""
+    return [
+        {"key": Role.ADMIN.value, "name": "Admin", "description": "Full access to all features"},
+        {"key": Role.EDITOR.value, "name": "Editor", "description": "Can view and edit most features"},
+        {"key": Role.VIEWER.value, "name": "Viewer", "description": "View-only access"},
+    ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ASYNC PERMISSIONS (Database-backed)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Cache for DB permissions (refreshed on updates)
+_permissions_cache: Optional[Dict[str, Dict[str, Dict[str, bool]]]] = None
+
+
+async def get_permissions_for_role_async(role: str) -> Dict[str, Dict[str, bool]]:
+    """
+    Get permissions for a role from database.
+
+    Falls back to hardcoded permissions if DB unavailable.
+    """
+    global _permissions_cache
+
+    try:
+        from core.duckdb_store import get_store
+        store = await get_store()
+
+        # Try cache first
+        if _permissions_cache is not None and role in _permissions_cache:
+            return _permissions_cache[role]
+
+        # Ensure defaults are seeded
+        await store.seed_default_permissions()
+
+        # Load from DB
+        db_perms = await store.get_role_permissions(role)
+
+        if db_perms:
+            # Fill in any missing features with defaults
+            result = {}
+            for feature in Feature:
+                if feature.value in db_perms:
+                    result[feature.value] = db_perms[feature.value]
+                else:
+                    result[feature.value] = {"view": False, "edit": False, "delete": False}
+            return result
+
+    except Exception as e:
+        logger.warning(f"Failed to load permissions from DB: {e}, using hardcoded")
+
+    # Fallback to hardcoded
+    return get_permissions_for_role(role)
+
+
+async def get_all_permissions_async() -> Dict[str, Dict[str, Dict[str, bool]]]:
+    """Get all permissions for all roles from database."""
+    global _permissions_cache
+
+    try:
+        from core.duckdb_store import get_store
+        store = await get_store()
+
+        # Ensure defaults are seeded
+        await store.seed_default_permissions()
+
+        # Load all from DB
+        _permissions_cache = await store.get_all_permissions()
+        return _permissions_cache
+
+    except Exception as e:
+        logger.warning(f"Failed to load all permissions from DB: {e}")
+        return {}
+
+
+async def set_permission_async(
+    role: str,
+    feature: str,
+    can_view: bool,
+    can_edit: bool,
+    can_delete: bool,
+    updated_by: int
+) -> bool:
+    """Set a permission in the database."""
+    global _permissions_cache
+
+    try:
+        from core.duckdb_store import get_store
+        store = await get_store()
+        result = await store.set_permission(role, feature, can_view, can_edit, can_delete, updated_by)
+
+        # Invalidate cache
+        _permissions_cache = None
+
+        return result
+    except Exception as e:
+        logger.error(f"Failed to set permission: {e}")
+        return False
+
+
+def invalidate_permissions_cache():
+    """Invalidate the permissions cache."""
+    global _permissions_cache
+    _permissions_cache = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

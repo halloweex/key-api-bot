@@ -792,6 +792,20 @@ class DuckDBStore:
             celebrated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (period_type, period_key, milestone_amount)
         );
+
+        -- Role permissions (dynamic permissions matrix)
+        CREATE TABLE IF NOT EXISTS role_permissions (
+            role VARCHAR NOT NULL,              -- admin, editor, viewer
+            feature VARCHAR NOT NULL,           -- dashboard, expenses, inventory, etc.
+            can_view BOOLEAN DEFAULT FALSE,
+            can_edit BOOLEAN DEFAULT FALSE,
+            can_delete BOOLEAN DEFAULT FALSE,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_by BIGINT,
+            PRIMARY KEY (role, feature)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_role_permissions_role ON role_permissions(role);
         """
         self._connection.execute(schema_sql)
 
@@ -6070,6 +6084,122 @@ class DuckDBStore:
     async def get_approved_users(self) -> List[Dict[str, Any]]:
         """Get all approved users."""
         return await self.get_user_by_status("approved")
+
+    # ─── Role Permissions ─────────────────────────────────────────────────────
+
+    async def get_role_permissions(self, role: str) -> Dict[str, Dict[str, bool]]:
+        """
+        Get all permissions for a role.
+
+        Returns dict of feature -> {view: bool, edit: bool, delete: bool}
+        """
+        async with self.connection() as conn:
+            rows = conn.execute("""
+                SELECT feature, can_view, can_edit, can_delete
+                FROM role_permissions
+                WHERE role = ?
+            """, [role]).fetchall()
+
+            return {
+                row[0]: {
+                    "view": bool(row[1]),
+                    "edit": bool(row[2]),
+                    "delete": bool(row[3]),
+                }
+                for row in rows
+            }
+
+    async def get_all_permissions(self) -> Dict[str, Dict[str, Dict[str, bool]]]:
+        """
+        Get permissions for all roles.
+
+        Returns dict of role -> feature -> {view: bool, edit: bool, delete: bool}
+        """
+        async with self.connection() as conn:
+            rows = conn.execute("""
+                SELECT role, feature, can_view, can_edit, can_delete
+                FROM role_permissions
+                ORDER BY role, feature
+            """).fetchall()
+
+            result: Dict[str, Dict[str, Dict[str, bool]]] = {}
+            for row in rows:
+                role, feature = row[0], row[1]
+                if role not in result:
+                    result[role] = {}
+                result[role][feature] = {
+                    "view": bool(row[2]),
+                    "edit": bool(row[3]),
+                    "delete": bool(row[4]),
+                }
+            return result
+
+    async def set_permission(
+        self,
+        role: str,
+        feature: str,
+        can_view: bool,
+        can_edit: bool,
+        can_delete: bool,
+        updated_by: int
+    ) -> bool:
+        """Set permission for a role/feature combination."""
+        async with self.connection() as conn:
+            conn.execute("""
+                INSERT INTO role_permissions (role, feature, can_view, can_edit, can_delete, updated_at, updated_by)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                ON CONFLICT (role, feature) DO UPDATE SET
+                    can_view = excluded.can_view,
+                    can_edit = excluded.can_edit,
+                    can_delete = excluded.can_delete,
+                    updated_at = excluded.updated_at,
+                    updated_by = excluded.updated_by
+            """, [role, feature, can_view, can_edit, can_delete, updated_by])
+            return True
+
+    async def seed_default_permissions(self) -> None:
+        """Seed default permissions if table is empty."""
+        async with self.connection() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM role_permissions").fetchone()[0]
+            if count > 0:
+                return  # Already seeded
+
+            # Default permissions matrix
+            defaults = [
+                # Admin - full access
+                ("admin", "dashboard", True, True, False),
+                ("admin", "expenses", True, True, True),
+                ("admin", "inventory", True, True, True),
+                ("admin", "analytics", True, True, False),
+                ("admin", "customers", True, True, False),
+                ("admin", "reports", True, True, False),
+                ("admin", "user_management", True, True, True),
+                # Editor - view + edit most things
+                ("editor", "dashboard", True, True, False),
+                ("editor", "expenses", True, True, False),
+                ("editor", "inventory", True, True, False),
+                ("editor", "analytics", True, False, False),
+                ("editor", "customers", True, False, False),
+                ("editor", "reports", True, False, False),
+                ("editor", "user_management", False, False, False),
+                # Viewer - view only, no expenses
+                ("viewer", "dashboard", True, False, False),
+                ("viewer", "expenses", False, False, False),
+                ("viewer", "inventory", True, False, False),
+                ("viewer", "analytics", True, False, False),
+                ("viewer", "customers", True, False, False),
+                ("viewer", "reports", True, False, False),
+                ("viewer", "user_management", False, False, False),
+            ]
+
+            for role, feature, can_view, can_edit, can_delete in defaults:
+                conn.execute("""
+                    INSERT INTO role_permissions (role, feature, can_view, can_edit, can_delete)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (role, feature) DO NOTHING
+                """, [role, feature, can_view, can_edit, can_delete])
+
+            logger.info("Default permissions seeded")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

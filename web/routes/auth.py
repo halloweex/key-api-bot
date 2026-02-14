@@ -304,6 +304,8 @@ async def get_current_user_info(request: Request):
 
     Returns user data with permissions for frontend conditional rendering.
     """
+    from core.permissions import get_permissions_for_role_async
+
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -315,8 +317,8 @@ async def get_current_user_info(request: Request):
     if is_hardcoded_admin(user_id):
         role = 'admin'
 
-    # Get permissions for role
-    permissions = get_permissions_for_role(role)
+    # Get permissions for role from database (async)
+    permissions = await get_permissions_for_role_async(role)
 
     return {
         "user": {

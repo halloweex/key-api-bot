@@ -40,6 +40,8 @@ import type {
   AdminUser,
   UserRole,
   UserStatus,
+  PermissionsMatrixResponse,
+  UpdatePermissionResponse,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -513,6 +515,24 @@ export const api = {
   updateUserStatus: (userId: number, status: UserStatus, options?: FetchOptions) =>
     fetchApiMutation<{ success: boolean; user_id: number; status: UserStatus }>(
       `/admin/users/${userId}/status?status=${status}`,
+      'PATCH',
+      options
+    ),
+
+  // Admin Permissions Management
+  getPermissionsMatrix: (options?: FetchOptions) =>
+    fetchApi<PermissionsMatrixResponse>('/admin/permissions', undefined, options),
+
+  updatePermission: (
+    role: UserRole,
+    feature: string,
+    canView: boolean,
+    canEdit: boolean,
+    canDelete: boolean,
+    options?: FetchOptions
+  ) =>
+    fetchApiMutation<UpdatePermissionResponse>(
+      `/admin/permissions?role=${role}&feature=${feature}&can_view=${canView}&can_edit=${canEdit}&can_delete=${canDelete}`,
       'PATCH',
       options
     ),
