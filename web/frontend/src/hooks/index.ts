@@ -56,3 +56,13 @@ export type { SourceChartDataPoint, SourceChartData } from './useSourceChartData
 // WebSocket
 export { useWebSocket } from './useWebSocket'
 export type { ConnectionState, WebSocketEvent, WebSocketMessage } from './useWebSocket'
+
+// Auth
+export {
+  useAuth,
+  usePermission,
+  useRole,
+  useIsAdmin,
+  useUserDisplayName,
+  authQueryKey,
+} from './useAuth'

@@ -188,12 +188,13 @@ def check_user_access(user_id: int) -> Dict[str, Any]:
     }
 
 
-def create_session_data(auth_data: Dict[str, Any]) -> Dict[str, Any]:
+def create_session_data(auth_data: Dict[str, Any], role: str = "viewer") -> Dict[str, Any]:
     """
     Create session data from verified Telegram auth data.
 
     Args:
         auth_data: Verified Telegram auth data
+        role: User role (admin, editor, viewer)
 
     Returns:
         Session data dict
@@ -205,5 +206,95 @@ def create_session_data(auth_data: Dict[str, Any]) -> Dict[str, Any]:
         'username': auth_data.get('username', ''),
         'photo_url': auth_data.get('photo_url', ''),
         'auth_date': int(auth_data['auth_date']),
-        'logged_in_at': int(time.time())
+        'logged_in_at': int(time.time()),
+        'role': role,
     }
+
+
+async def get_user_role(user_id: int) -> str:
+    """
+    Get user role from DuckDB.
+
+    Falls back to 'viewer' if user not found.
+    Hardcoded admins always get 'admin' role.
+    """
+    from core.permissions import is_hardcoded_admin
+    from core.duckdb_store import get_store
+
+    # Hardcoded admin fallback
+    if is_hardcoded_admin(user_id):
+        return "admin"
+
+    try:
+        store = await get_store()
+        user = await store.get_user(user_id)
+        if user:
+            return user.get("role", "viewer")
+    except Exception as e:
+        logger.warning(f"Error getting user role: {e}")
+
+    return "viewer"
+
+
+async def check_user_access_async(user_id: int, auth_data: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Check if a Telegram user has access to the dashboard (async version using DuckDB).
+
+    Args:
+        user_id: Telegram user ID
+        auth_data: Optional auth data to create/update user record
+
+    Returns:
+        Dict with 'authorized' bool, 'status' string, and 'role'
+    """
+    from core.duckdb_store import get_store
+    from core.permissions import is_hardcoded_admin
+
+    try:
+        store = await get_store()
+        user = await store.get_user(user_id)
+
+        if user:
+            # Update last activity
+            if auth_data:
+                await store.update_user_activity(user_id)
+            authorized = user.get("status") == "approved"
+            return {
+                "authorized": authorized,
+                "status": user.get("status", "unknown"),
+                "role": user.get("role", "viewer"),
+                "user_info": user
+            }
+
+        # Hardcoded admin fallback - auto-create and approve
+        if is_hardcoded_admin(user_id):
+            # Create admin user record if we have auth data
+            if auth_data:
+                await store.create_user(
+                    user_id=user_id,
+                    username=auth_data.get('username'),
+                    first_name=auth_data.get('first_name'),
+                    last_name=auth_data.get('last_name'),
+                    photo_url=auth_data.get('photo_url'),
+                    role='admin',
+                    status='approved',
+                )
+                logger.info(f"Auto-created admin user {user_id}")
+            return {
+                "authorized": True,
+                "status": "approved",
+                "role": "admin",
+                "user_info": None
+            }
+
+        return {
+            "authorized": False,
+            "status": "not_found",
+            "role": "viewer",
+            "user_info": None
+        }
+
+    except Exception as e:
+        logger.warning(f"Error checking user access: {e}")
+        # Fallback to SQLite during migration
+        return check_user_access(user_id)

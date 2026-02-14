@@ -576,3 +576,62 @@ export interface AtRiskResponse {
     overallAtRiskPct: number
   }
 }
+
+// ─── User & Permissions Types ─────────────────────────────────────────────────
+
+export type UserRole = 'admin' | 'editor' | 'viewer'
+
+export interface User {
+  id: number
+  username: string
+  first_name: string
+  last_name: string
+  photo_url: string
+  role: UserRole
+}
+
+export interface FeaturePermissions {
+  view: boolean
+  edit: boolean
+  delete: boolean
+}
+
+export interface Permissions {
+  dashboard: FeaturePermissions
+  expenses: FeaturePermissions
+  inventory: FeaturePermissions
+  analytics: FeaturePermissions
+  customers: FeaturePermissions
+  reports: FeaturePermissions
+  user_management: FeaturePermissions
+}
+
+export interface CurrentUserResponse {
+  user: User
+  permissions: Permissions
+}
+
+// ─── Admin User Management Types ──────────────────────────────────────────────
+
+export type UserStatus = 'pending' | 'approved' | 'denied' | 'frozen'
+
+export interface AdminUser {
+  user_id: number
+  username: string | null
+  first_name: string | null
+  last_name: string | null
+  photo_url: string | null
+  role: UserRole
+  status: UserStatus
+  requested_at: string | null
+  reviewed_at: string | null
+  reviewed_by: number | null
+  last_activity: string | null
+  denial_count: number
+  created_at: string | null
+}
+
+export interface AdminUsersResponse {
+  users: AdminUser[]
+  count: number
+}

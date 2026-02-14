@@ -1,9 +1,9 @@
-import { memo, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { memo, useMemo, useState, useCallback } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ChartContainer } from './ChartContainer'
 import { formatCurrency } from '../../utils/formatters'
 import { useFilterStore } from '../../store/filterStore'
-import { CurrencyIcon } from '../icons'
+import { CurrencyIcon, TrashIcon } from '../icons'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -66,6 +66,8 @@ const categoryConfig: Record<string, { bg: string; text: string; icon: string }>
   },
 }
 
+const CATEGORIES = ['marketing', 'salary', 'taxes', 'logistics', 'other']
+
 // ─── Category Badge ──────────────────────────────────────────────────────────
 
 const CategoryBadge = memo(function CategoryBadge({ category }: { category: string }) {
@@ -77,6 +79,81 @@ const CategoryBadge = memo(function CategoryBadge({ category }: { category: stri
       <span>{config.icon}</span>
       <span>{displayName}</span>
     </span>
+  )
+})
+
+// ─── Category Filter ─────────────────────────────────────────────────────────
+
+interface CategoryFilterProps {
+  value: string | null
+  onChange: (category: string | null) => void
+}
+
+const CategoryFilter = memo(function CategoryFilter({ value, onChange }: CategoryFilterProps) {
+  return (
+    <select
+      value={value || ''}
+      onChange={(e) => onChange(e.target.value || null)}
+      className="text-xs px-2 py-1 rounded-lg border border-slate-200 bg-white text-slate-600
+                 focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-300
+                 cursor-pointer hover:border-slate-300 transition-colors"
+    >
+      <option value="">All categories</option>
+      {CATEGORIES.map((cat) => {
+        const config = categoryConfig[cat]
+        return (
+          <option key={cat} value={cat}>
+            {config.icon} {cat.charAt(0).toUpperCase() + cat.slice(1)}
+          </option>
+        )
+      })}
+    </select>
+  )
+})
+
+// ─── Note Tooltip ────────────────────────────────────────────────────────────
+
+const NoteCell = memo(function NoteCell({ note }: { note: string | null }) {
+  if (!note) {
+    return <span className="text-slate-300">—</span>
+  }
+
+  const isLong = note.length > 30
+  const displayText = isLong ? note.slice(0, 30) + '...' : note
+
+  return (
+    <span
+      className="text-slate-500 text-xs cursor-default"
+      title={note}
+    >
+      {displayText}
+    </span>
+  )
+})
+
+// ─── Delete Button ───────────────────────────────────────────────────────────
+
+interface DeleteButtonProps {
+  expenseId: number
+  onDelete: (id: number) => void
+  isDeleting: boolean
+}
+
+const DeleteButton = memo(function DeleteButton({ expenseId, onDelete, isDeleting }: DeleteButtonProps) {
+  return (
+    <button
+      onClick={() => onDelete(expenseId)}
+      disabled={isDeleting}
+      className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50
+                 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      title="Delete expense"
+    >
+      {isDeleting ? (
+        <span className="block w-4 h-4 border-2 border-slate-300 border-t-transparent rounded-full animate-spin" />
+      ) : (
+        <TrashIcon className="w-4 h-4" />
+      )}
+    </button>
   )
 })
 
@@ -128,12 +205,16 @@ const EmptyHint = memo(function EmptyHint() {
 
 export const ManualExpensesTable = memo(function ManualExpensesTable() {
   const { period } = useFilterStore()
+  const queryClient = useQueryClient()
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
 
   const { data, isLoading, error, refetch } = useQuery<ExpensesResponse>({
-    queryKey: ['manualExpenses', period],
+    queryKey: ['manualExpenses', period, categoryFilter],
     queryFn: async () => {
       const params = new URLSearchParams()
       if (period) params.set('period', period)
+      if (categoryFilter) params.set('category', categoryFilter)
       params.set('limit', '50')
       const response = await fetch(`/api/expenses?${params}`)
       if (!response.ok) throw new Error('Failed to fetch expenses')
@@ -141,6 +222,32 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
     },
     staleTime: 30_000,
   })
+
+  const deleteMutation = useMutation({
+    mutationFn: async (expenseId: number) => {
+      const response = await fetch(`/api/expenses/${expenseId}`, {
+        method: 'DELETE',
+      })
+      if (!response.ok) throw new Error('Failed to delete expense')
+      return response.json()
+    },
+    onMutate: (expenseId) => {
+      setDeletingId(expenseId)
+    },
+    onSuccess: () => {
+      // Invalidate query to refetch data
+      queryClient.invalidateQueries({ queryKey: ['manualExpenses'] })
+    },
+    onSettled: () => {
+      setDeletingId(null)
+    },
+  })
+
+  const handleDelete = useCallback((expenseId: number) => {
+    if (confirm('Delete this expense?')) {
+      deleteMutation.mutate(expenseId)
+    }
+  }, [deleteMutation])
 
   const isEmpty = !isLoading && (!data?.expenses || data.expenses.length === 0)
 
@@ -154,6 +261,9 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
     return (
       <ChartContainer
         title="Manual Expenses"
+        titleExtra={
+          <CategoryFilter value={categoryFilter} onChange={setCategoryFilter} />
+        }
         isLoading={false}
         error={null}
         height="md"
@@ -168,9 +278,12 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
     <ChartContainer
       title="Manual Expenses"
       titleExtra={
-        <span className="text-xs text-slate-400 font-normal ml-2">
-          Add via chat: "facebook ads 22k, salary 45k"
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-slate-400 font-normal hidden sm:inline">
+            Add via chat: "facebook ads 22k"
+          </span>
+          <CategoryFilter value={categoryFilter} onChange={setCategoryFilter} />
+        </div>
       }
       isLoading={isLoading}
       error={error as Error | null}
@@ -225,16 +338,20 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
                 Type
               </th>
+              <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide hidden md:table-cell">
+                Note
+              </th>
               <th className="text-right py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
                 Amount
               </th>
+              <th className="w-12 py-3 px-2"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {data?.expenses?.map((expense) => (
               <tr
                 key={expense.id}
-                className="hover:bg-slate-50 transition-colors"
+                className="hover:bg-slate-50 transition-colors group"
               >
                 <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
                   {new Date(expense.expense_date).toLocaleDateString('uk-UA', {
@@ -249,8 +366,18 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
                 <td className="py-3 px-4 text-slate-800 font-medium">
                   {expense.expense_type}
                 </td>
+                <td className="py-3 px-4 hidden md:table-cell max-w-[200px]">
+                  <NoteCell note={expense.note} />
+                </td>
                 <td className="py-3 px-4 text-right text-red-600 font-semibold whitespace-nowrap">
                   -{formatCurrency(expense.amount)}
+                </td>
+                <td className="py-2 px-2">
+                  <DeleteButton
+                    expenseId={expense.id}
+                    onDelete={handleDelete}
+                    isDeleting={deletingId === expense.id}
+                  />
                 </td>
               </tr>
             ))}
@@ -258,12 +385,16 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
           {data?.expenses && data.expenses.length > 0 && (
             <tfoot>
               <tr className="bg-slate-50 border-t border-slate-200">
-                <td colSpan={3} className="py-3 px-4 text-right text-slate-600 font-semibold">
+                <td colSpan={4} className="py-3 px-4 text-right text-slate-600 font-semibold hidden md:table-cell">
+                  Total:
+                </td>
+                <td colSpan={3} className="py-3 px-4 text-right text-slate-600 font-semibold md:hidden">
                   Total:
                 </td>
                 <td className="py-3 px-4 text-right text-red-600 font-bold whitespace-nowrap">
                   -{formatCurrency(data.summary.total)}
                 </td>
+                <td></td>
               </tr>
             </tfoot>
           )}

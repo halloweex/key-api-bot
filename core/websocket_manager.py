@@ -33,6 +33,7 @@ class WebSocketEvent(Enum):
     ORDERS_SYNCED = "orders_synced"
     PRODUCTS_SYNCED = "products_synced"
     INVENTORY_UPDATED = "inventory_updated"
+    EXPENSES_UPDATED = "expenses_updated"
 
     # Goal events
     GOAL_PROGRESS = "goal_progress"

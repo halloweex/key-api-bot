@@ -35,6 +35,11 @@ import type {
   InventoryAnalysisResponse,
   StockAction,
   RestockAlert,
+  CurrentUserResponse,
+  AdminUsersResponse,
+  AdminUser,
+  UserRole,
+  UserStatus,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -223,7 +228,7 @@ async function fetchApi<T>(
 
 async function fetchApiMutation<T>(
   endpoint: string,
-  method: 'POST' | 'DELETE',
+  method: 'POST' | 'DELETE' | 'PATCH',
   options?: FetchOptions
 ): Promise<T> {
   const { timeout = DEFAULT_TIMEOUT, signal: externalSignal } = options || {}
@@ -474,6 +479,43 @@ export const api = {
 
   getRestockAlerts: (options?: FetchOptions) =>
     fetchApi<RestockAlert[]>('/stocks/alerts', undefined, options),
+
+  // Auth
+  getCurrentUser: (options?: FetchOptions) =>
+    fetchApi<CurrentUserResponse>('/me', undefined, options),
+
+  // Admin User Management
+  getAdminUsers: (
+    status?: UserStatus,
+    role?: UserRole,
+    limit = 100,
+    offset = 0,
+    options?: FetchOptions
+  ) => {
+    const params = new URLSearchParams()
+    if (status) params.append('status', status)
+    if (role) params.append('role', role)
+    params.append('limit', String(limit))
+    params.append('offset', String(offset))
+    return fetchApi<AdminUsersResponse>('/admin/users', params.toString(), options)
+  },
+
+  getAdminUser: (userId: number, options?: FetchOptions) =>
+    fetchApi<{ user: AdminUser }>(`/admin/users/${userId}`, undefined, options),
+
+  updateUserRole: (userId: number, role: UserRole, options?: FetchOptions) =>
+    fetchApiMutation<{ success: boolean; user_id: number; role: UserRole }>(
+      `/admin/users/${userId}/role?role=${role}`,
+      'PATCH',
+      options
+    ),
+
+  updateUserStatus: (userId: number, status: UserStatus, options?: FetchOptions) =>
+    fetchApiMutation<{ success: boolean; user_id: number; status: UserStatus }>(
+      `/admin/users/${userId}/status?status=${status}`,
+      'PATCH',
+      options
+    ),
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────

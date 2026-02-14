@@ -6,7 +6,22 @@
   <component name="ChangeListManager">
     <list default="true" id="00033ac8-0ff0-4db9-8885-f829ba7bf2ad" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/chat_tools.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/chat_tools.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/duckdb_store.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/duckdb_store.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/websocket_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/websocket_manager.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/App.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/App.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/api/client.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/api/client.ts" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/ManualExpensesTable.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/ManualExpensesTable.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/icons/index.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/icons/index.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/layout/Dashboard.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/layout/Dashboard.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/layout/Header.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/layout/Header.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/ui/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/ui/index.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/hooks/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/hooks/index.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/hooks/useWebSocket.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/hooks/useWebSocket.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/types/api.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/types/api.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/routes/api.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/routes/api.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/routes/auth.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/routes/auth.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/services/auth_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/services/auth_service.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -292,7 +307,7 @@
       <workItem from="1769678640075" duration="124000" />
       <workItem from="1769678798867" duration="12000" />
       <workItem from="1769680433341" duration="313000" />
-      <workItem from="1769680767522" duration="217132000" />
+      <workItem from="1769680767522" duration="224103000" />
     </task>
     <servers />
   </component>

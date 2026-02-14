@@ -9,11 +9,14 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 from core.config import config
+from core.permissions import get_permissions_for_role, is_hardcoded_admin
 from web.services.auth_service import (
     verify_telegram_auth,
     verify_webapp_auth,
     check_user_access,
-    create_session_data
+    check_user_access_async,
+    create_session_data,
+    get_user_role,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,17 +95,20 @@ async def telegram_callback(request: Request):
         logger.warning(f"Invalid auth data: {auth_data.get('id', 'unknown')}")
         return RedirectResponse(url="/login?error=Invalid+authentication+data", status_code=302)
 
-    # Check if user has access
+    # Check if user has access (pass auth_data to create/update user record)
     user_id = int(auth_data['id'])
-    access = check_user_access(user_id)
+    access = await check_user_access_async(user_id, auth_data)
 
     if not access['authorized']:
         status = access['status']
         logger.info(f"User {user_id} login denied - status: {status}")
         return RedirectResponse(url=f"/login?status={status}", status_code=302)
 
-    # Create session
-    session_data = create_session_data(auth_data)
+    # Get user role
+    role = access.get('role', 'viewer')
+
+    # Create session with role
+    session_data = create_session_data(auth_data, role=role)
 
     # Sign session data and set cookie
     signed_session = session_serializer.dumps(session_data)
@@ -142,14 +148,25 @@ async def webapp_auth(request: Request):
     if not user_data:
         return {"success": False, "error": "Invalid WebApp data"}
 
-    # Check if user has access
+    # Check if user has access (pass user_data to create/update user record)
     user_id = int(user_data['id'])
-    access = check_user_access(user_id)
+    # Convert to auth_data format for user creation
+    webapp_auth_data = {
+        'id': str(user_data['id']),
+        'username': user_data.get('username'),
+        'first_name': user_data.get('first_name'),
+        'last_name': user_data.get('last_name'),
+        'photo_url': user_data.get('photo_url'),
+    }
+    access = await check_user_access_async(user_id, webapp_auth_data)
 
     if not access['authorized']:
         status = access['status']
         logger.info(f"WebApp user {user_id} denied - status: {status}")
         return {"success": False, "error": "Not authorized", "status": status}
+
+    # Get user role
+    role = access.get('role', 'viewer')
 
     # Create session data (convert WebApp format to standard format)
     auth_data = {
@@ -160,7 +177,7 @@ async def webapp_auth(request: Request):
         'photo_url': user_data.get('photo_url', ''),
         'auth_date': str(user_data['auth_date'])
     }
-    session_data = create_session_data(auth_data)
+    session_data = create_session_data(auth_data, role=role)
 
     # Sign session data
     signed_session = session_serializer.dumps(session_data)
@@ -230,7 +247,79 @@ async def require_admin(request: Request) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    if not config.bot.is_admin(user.get('user_id')):
+    user_id = user.get('user_id')
+    role = user.get('role', 'viewer')
+
+    # Check role from session or hardcoded admin list
+    if role != 'admin' and not is_hardcoded_admin(user_id):
         raise HTTPException(status_code=403, detail="Admin access required")
 
     return user
+
+
+def require_permission(feature: str, action: str = "view"):
+    """
+    FastAPI dependency factory for permission-based access control.
+
+    Usage:
+        @router.get("/expenses")
+        async def get_expenses(user = Depends(require_permission("expenses", "view"))):
+            ...
+    """
+    from core.permissions import can
+
+    async def check_permission(request: Request) -> dict:
+        user = get_current_user(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+        role = user.get('role', 'viewer')
+        user_id = user.get('user_id')
+
+        # Hardcoded admins have all permissions
+        if is_hardcoded_admin(user_id):
+            return user
+
+        if not can(role, feature, action):
+            raise HTTPException(
+                status_code=403,
+                detail=f"No {action} access to {feature}"
+            )
+
+        return user
+
+    return check_permission
+
+
+@router.get("/api/me")
+async def get_current_user_info(request: Request):
+    """
+    Get current user info including role and permissions.
+
+    Returns user data with permissions for frontend conditional rendering.
+    """
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    user_id = user.get('user_id')
+    role = user.get('role', 'viewer')
+
+    # Ensure hardcoded admins get admin role
+    if is_hardcoded_admin(user_id):
+        role = 'admin'
+
+    # Get permissions for role
+    permissions = get_permissions_for_role(role)
+
+    return {
+        "user": {
+            "id": user_id,
+            "username": user.get('username', ''),
+            "first_name": user.get('first_name', ''),
+            "last_name": user.get('last_name', ''),
+            "photo_url": user.get('photo_url', ''),
+            "role": role,
+        },
+        "permissions": permissions,
+    }

@@ -6,6 +6,7 @@ export type WebSocketEvent =
   | 'orders_synced'
   | 'products_synced'
   | 'inventory_updated'
+  | 'expenses_updated'
   | 'goal_progress'
   | 'milestone_reached'
   | 'sync_status'
@@ -98,6 +99,10 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
           queryClient.invalidateQueries({ queryKey: ['stockSummary'] })
           queryClient.invalidateQueries({ queryKey: ['inventoryTrend'] })
           queryClient.invalidateQueries({ queryKey: ['inventoryAnalysis'] })
+          break
+
+        case 'expenses_updated':
+          queryClient.invalidateQueries({ queryKey: ['manualExpenses'] })
           break
 
         case 'goal_progress':

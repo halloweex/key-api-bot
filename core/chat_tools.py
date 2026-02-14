@@ -835,6 +835,8 @@ async def _search_product(query: str, limit: int) -> Dict[str, Any]:
 
 async def _add_expenses(expenses: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Add multiple expenses."""
+    from core.websocket_manager import manager, WebSocketEvent
+
     store = await get_store()
     added = []
     errors = []
@@ -862,6 +864,14 @@ async def _add_expenses(expenses: List[Dict[str, Any]]) -> Dict[str, Any]:
             added.append(result)
         except Exception as e:
             errors.append({"expense": exp, "error": str(e)})
+
+    # Broadcast to connected dashboard clients
+    if added:
+        await manager.broadcast(
+            "dashboard",
+            WebSocketEvent.EXPENSES_UPDATED,
+            {"action": "added", "count": len(added)}
+        )
 
     return {
         "added_count": len(added),
@@ -905,10 +915,18 @@ async def _list_expenses(
 
 async def _delete_expense(expense_id: int) -> Dict[str, Any]:
     """Delete an expense."""
+    from core.websocket_manager import manager, WebSocketEvent
+
     store = await get_store()
     success = await store.delete_expense(expense_id)
 
     if success:
+        # Broadcast to connected dashboard clients
+        await manager.broadcast(
+            "dashboard",
+            WebSocketEvent.EXPENSES_UPDATED,
+            {"action": "deleted", "expense_id": expense_id}
+        )
         return {"success": True, "message": f"Expense {expense_id} deleted"}
     else:
         return {"success": False, "error": f"Expense {expense_id} not found"}
