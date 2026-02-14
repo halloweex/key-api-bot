@@ -79,7 +79,8 @@ def should_alert(container_name: str) -> bool:
 
 async def handle_event(event: dict) -> None:
     """Handle Docker event and send alert if needed."""
-    status = event.get('status', '')
+    # Docker API can use 'status' or 'Action' depending on version
+    status = event.get('status', '') or event.get('Action', '')
     actor = event.get('Actor', {})
     attributes = actor.get('Attributes', {})
     container_name = attributes.get('name', 'unknown')
@@ -158,7 +159,8 @@ async def monitor_docker_events() -> None:
                         event = json.loads(line.decode('utf-8'))
                         container = event.get('Actor', {}).get('Attributes', {}).get('name', 'unknown')
                         status = event.get('status', '')
-                        logger.info(f"Event received: {status} - {container}")
+                        action = event.get('Action', '')
+                        logger.info(f"Event: status={status}, action={action}, container={container}")
                         await handle_event(event)
                     except json.JSONDecodeError:
                         continue
