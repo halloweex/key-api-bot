@@ -151,10 +151,14 @@ async def monitor_docker_events() -> None:
         }
 
         async with session.get('http://localhost/events', params=params) as resp:
+            logger.info(f"Connected to Docker events stream (status: {resp.status})")
             async for line in resp.content:
                 if line:
                     try:
                         event = json.loads(line.decode('utf-8'))
+                        container = event.get('Actor', {}).get('Attributes', {}).get('name', 'unknown')
+                        status = event.get('status', '')
+                        logger.info(f"Event received: {status} - {container}")
                         await handle_event(event)
                     except json.JSONDecodeError:
                         continue
