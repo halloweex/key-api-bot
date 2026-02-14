@@ -175,7 +175,18 @@ def check_user_access(user_id: int) -> Dict[str, Any]:
     Returns:
         Dict with 'authorized' bool and 'status' string
     """
-    # Check if user is authorized in bot database
+    from core.permissions import is_hardcoded_admin
+
+    # Hardcoded admins always have access
+    if is_hardcoded_admin(user_id):
+        return {
+            'authorized': True,
+            'status': 'approved',
+            'role': 'admin',
+            'user_info': None
+        }
+
+    # Check if user is authorized in bot database (SQLite fallback)
     authorized = is_user_authorized(user_id)
     status_info = get_user_auth_status(user_id)
 
