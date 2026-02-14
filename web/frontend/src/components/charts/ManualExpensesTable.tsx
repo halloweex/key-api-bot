@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ChartContainer } from './ChartContainer'
 import { formatCurrency } from '../../utils/formatters'
 import { useFilterStore } from '../../store/filterStore'
+import { CurrencyIcon } from '../icons'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -35,38 +36,90 @@ interface ExpensesResponse {
   category: string | null
 }
 
-// ─── Category Badge ──────────────────────────────────────────────────────────
+// ─── Category Configuration ───────────────────────────────────────────────────
 
-const categoryColors: Record<string, string> = {
-  marketing: 'bg-purple-500/20 text-purple-300 border-purple-500/30',
-  salary: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
-  taxes: 'bg-red-500/20 text-red-300 border-red-500/30',
-  logistics: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
-  other: 'bg-slate-500/20 text-slate-300 border-slate-500/30',
+const categoryConfig: Record<string, { bg: string; text: string; icon: string }> = {
+  marketing: {
+    bg: 'bg-purple-100',
+    text: 'text-purple-700',
+    icon: '📣',
+  },
+  salary: {
+    bg: 'bg-blue-100',
+    text: 'text-blue-700',
+    icon: '👥',
+  },
+  taxes: {
+    bg: 'bg-red-100',
+    text: 'text-red-700',
+    icon: '🏛️',
+  },
+  logistics: {
+    bg: 'bg-amber-100',
+    text: 'text-amber-700',
+    icon: '📦',
+  },
+  other: {
+    bg: 'bg-slate-100',
+    text: 'text-slate-700',
+    icon: '📋',
+  },
 }
 
+// ─── Category Badge ──────────────────────────────────────────────────────────
+
 const CategoryBadge = memo(function CategoryBadge({ category }: { category: string }) {
-  const colors = categoryColors[category] || categoryColors.other
+  const config = categoryConfig[category] || categoryConfig.other
+  const displayName = category.charAt(0).toUpperCase() + category.slice(1)
+
   return (
-    <span className={`px-2 py-0.5 text-xs rounded-full border ${colors}`}>
-      {category}
+    <span className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full ${config.bg} ${config.text}`}>
+      <span>{config.icon}</span>
+      <span>{displayName}</span>
     </span>
   )
 })
 
-// ─── Summary Card ────────────────────────────────────────────────────────────
+// ─── Summary Metric Card ──────────────────────────────────────────────────────
 
-interface SummaryCardProps {
+interface MetricCardProps {
   label: string
   value: string
-  colorClass?: string
+  icon?: string
+  colorClass: string
+  bgClass: string
 }
 
-const SummaryCard = memo(function SummaryCard({ label, value, colorClass = 'text-white' }: SummaryCardProps) {
+const MetricCard = memo(function MetricCard({ label, value, icon, colorClass, bgClass }: MetricCardProps) {
   return (
-    <div className="bg-slate-700/50 rounded-lg p-3">
-      <p className="text-xs text-slate-400">{label}</p>
-      <p className={`text-lg font-semibold ${colorClass}`}>{value}</p>
+    <div className={`rounded-xl p-4 border ${bgClass}`}>
+      <div className="flex items-start gap-3">
+        {icon && (
+          <div className={`p-2 rounded-lg bg-white/60 ${colorClass} text-lg`}>
+            {icon}
+          </div>
+        )}
+        <div className="flex-1 min-w-0">
+          <p className="text-xs text-slate-600 font-medium">{label}</p>
+          <p className={`text-lg lg:text-xl font-bold truncate ${colorClass}`}>{value}</p>
+        </div>
+      </div>
+    </div>
+  )
+})
+
+// ─── Empty State ──────────────────────────────────────────────────────────────
+
+const EmptyHint = memo(function EmptyHint() {
+  return (
+    <div className="text-center py-8">
+      <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 flex items-center justify-center shadow-sm text-slate-400">
+        <CurrencyIcon />
+      </div>
+      <p className="text-sm font-medium text-slate-600 mb-1">No expenses yet</p>
+      <p className="text-xs text-slate-400">
+        Use chat to add: <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded">facebook ads 22000</span>
+      </p>
     </div>
   )
 })
@@ -93,86 +146,123 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
 
   const topCategories = useMemo(() => {
     if (!data?.summary?.by_category) return []
-    return data.summary.by_category.slice(0, 3)
+    return data.summary.by_category.slice(0, 4)
   }, [data])
+
+  // Custom empty state since we have specific instructions
+  if (isEmpty && !isLoading && !error) {
+    return (
+      <ChartContainer
+        title="Manual Expenses"
+        isLoading={false}
+        error={null}
+        height="md"
+        ariaLabel="Table showing manual business expenses"
+      >
+        <EmptyHint />
+      </ChartContainer>
+    )
+  }
 
   return (
     <ChartContainer
-      title="Manual Expenses — Add via chat: 'facebook ads 22k, salary 45k'"
+      title="Manual Expenses"
+      titleExtra={
+        <span className="text-xs text-slate-400 font-normal ml-2">
+          Add via chat: "facebook ads 22k, salary 45k"
+        </span>
+      }
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
-      isEmpty={isEmpty}
-      emptyMessage="No expenses yet. Use chat to add: 'facebook ads 22000'"
-      height="md"
+      height="auto"
       ariaLabel="Table showing manual business expenses"
     >
-      {/* Summary */}
+      {/* Summary Cards */}
       {data?.summary && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-          <SummaryCard
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+          <MetricCard
             label="Total Expenses"
             value={formatCurrency(data.summary.total)}
-            colorClass="text-red-400"
+            icon="💰"
+            colorClass="text-red-600"
+            bgClass="bg-gradient-to-br from-red-50 to-red-100/50 border-red-200"
           />
-          <SummaryCard
-            label="Count"
+          <MetricCard
+            label="Transactions"
             value={String(data.summary.count)}
-            colorClass="text-slate-200"
+            icon="📝"
+            colorClass="text-slate-700"
+            bgClass="bg-gradient-to-br from-slate-50 to-slate-100/50 border-slate-200"
           />
-          {topCategories.slice(0, 2).map((cat) => (
-            <SummaryCard
-              key={cat.category}
-              label={cat.category.charAt(0).toUpperCase() + cat.category.slice(1)}
-              value={formatCurrency(cat.total)}
-              colorClass="text-slate-200"
-            />
-          ))}
+          {topCategories.slice(0, 2).map((cat) => {
+            const config = categoryConfig[cat.category] || categoryConfig.other
+            return (
+              <MetricCard
+                key={cat.category}
+                label={cat.category.charAt(0).toUpperCase() + cat.category.slice(1)}
+                value={formatCurrency(cat.total)}
+                icon={config.icon}
+                colorClass={config.text}
+                bgClass={`bg-gradient-to-br from-white to-slate-50 border-slate-200`}
+              />
+            )
+          })}
         </div>
       )}
 
       {/* Table */}
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto rounded-lg border border-slate-200">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-slate-700">
-              <th className="text-left py-2 px-3 text-slate-400 font-medium">Date</th>
-              <th className="text-left py-2 px-3 text-slate-400 font-medium">Category</th>
-              <th className="text-left py-2 px-3 text-slate-400 font-medium">Type</th>
-              <th className="text-right py-2 px-3 text-slate-400 font-medium">Amount</th>
+            <tr className="bg-slate-50 border-b border-slate-200">
+              <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
+                Date
+              </th>
+              <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
+                Category
+              </th>
+              <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
+                Type
+              </th>
+              <th className="text-right py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
+                Amount
+              </th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-slate-100">
             {data?.expenses?.map((expense) => (
               <tr
                 key={expense.id}
-                className="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors"
+                className="hover:bg-slate-50 transition-colors"
               >
-                <td className="py-2 px-3 text-slate-300">
+                <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
                   {new Date(expense.expense_date).toLocaleDateString('uk-UA', {
                     day: '2-digit',
                     month: '2-digit',
                     year: 'numeric',
                   })}
                 </td>
-                <td className="py-2 px-3">
+                <td className="py-3 px-4">
                   <CategoryBadge category={expense.category} />
                 </td>
-                <td className="py-2 px-3 text-slate-200">{expense.expense_type}</td>
-                <td className="py-2 px-3 text-right text-red-400 font-medium">
-                  {formatCurrency(expense.amount)}
+                <td className="py-3 px-4 text-slate-800 font-medium">
+                  {expense.expense_type}
+                </td>
+                <td className="py-3 px-4 text-right text-red-600 font-semibold whitespace-nowrap">
+                  -{formatCurrency(expense.amount)}
                 </td>
               </tr>
             ))}
           </tbody>
           {data?.expenses && data.expenses.length > 0 && (
             <tfoot>
-              <tr className="border-t border-slate-600">
-                <td colSpan={3} className="py-2 px-3 text-right text-slate-400 font-medium">
+              <tr className="bg-slate-50 border-t border-slate-200">
+                <td colSpan={3} className="py-3 px-4 text-right text-slate-600 font-semibold">
                   Total:
                 </td>
-                <td className="py-2 px-3 text-right text-red-400 font-bold">
-                  {formatCurrency(data.summary.total)}
+                <td className="py-3 px-4 text-right text-red-600 font-bold whitespace-nowrap">
+                  -{formatCurrency(data.summary.total)}
                 </td>
               </tr>
             </tfoot>
