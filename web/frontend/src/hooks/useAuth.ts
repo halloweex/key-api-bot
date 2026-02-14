@@ -3,7 +3,7 @@
  */
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
-import type { CurrentUserResponse, Permissions, User, UserRole } from '../types/api'
+import type { CurrentUserResponse, Permissions, UserRole } from '../types/api'
 
 // Cache TTL: 5 minutes (user data changes rarely)
 const AUTH_CACHE_TTL = 5 * 60 * 1000
