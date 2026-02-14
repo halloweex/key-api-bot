@@ -11,10 +11,10 @@ export const ChatToggle = memo(function ChatToggle() {
   return (
     <button
       onClick={toggleOpen}
-      className={`fixed bottom-4 left-4 z-[100]
+      className={`fixed top-3 right-4 z-[100]
         flex items-center gap-2 px-3 py-2 rounded-lg
         transition-all duration-300 ease-out
-        shadow-lg hover:shadow-xl
+        shadow-sm hover:shadow
         ${isOpen
           ? 'bg-blue-100 text-blue-700 border border-blue-200 hover:bg-blue-200'
           : 'bg-white/90 backdrop-blur-sm text-slate-600 hover:text-blue-600 border border-slate-200 hover:border-slate-300 hover:bg-white'

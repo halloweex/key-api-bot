@@ -275,7 +275,7 @@ docker-compose logs -f web
 
 ```bash
 # Commit format
-git commit -m "Add revenue forecast endpoint  
+git commit -m "Add revenue forecast endpoint
 - Implement /api/revenue/forecast
 - Add LightGBM model training
 - Update frontend chart"

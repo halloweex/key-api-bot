@@ -1,7 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { FilterBar } from '../filters'
 import { LiveIndicator } from '../ui/LiveIndicator'
-import { UserProfileDropdown } from '../ui/UserProfileDropdown'
 import { useWebSocket } from '../../hooks/useWebSocket'
 import { api } from '../../api/client'
 import type { HealthResponse } from '../../types/api'
@@ -64,9 +63,6 @@ export function Header() {
 
           {/* Spacer */}
           <div className="flex-1" />
-
-          {/* User profile dropdown */}
-          <UserProfileDropdown />
         </div>
 
         {/* Filters row */}

@@ -2,6 +2,7 @@ import { memo, useState, useEffect } from 'react'
 import { Header, Dashboard } from './components/layout'
 import { ChatToggle, ChatSidebar } from './components/chat'
 import { AdminUsersPage, AdminPermissionsPage } from './components/admin'
+import { UserProfileDropdown } from './components/ui/UserProfileDropdown'
 import { useIsAdmin } from './hooks/useAuth'
 import { useToast } from './components/ui/Toast'
 
@@ -56,9 +57,14 @@ const DashboardShell = memo(function DashboardShell() {
         <Dashboard />
       </div>
 
-      {/* Chat Assistant - fixed position elements outside DOM flow */}
+      {/* Fixed position elements outside DOM flow */}
       <ChatToggle />
       <ChatSidebar />
+
+      {/* User profile - fixed bottom-left */}
+      <div className="fixed bottom-4 left-4 z-[100]">
+        <UserProfileDropdown />
+      </div>
     </div>
   )
 })
