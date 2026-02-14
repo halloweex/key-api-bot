@@ -94,12 +94,12 @@ export function UserProfileDropdown() {
             src={user.photo_url}
             alt={displayName}
             className="w-9 h-9 rounded-full object-cover border-2 border-white shadow-sm"
+            onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.nextElementSibling?.classList.remove('hidden') }}
           />
-        ) : (
-          <div className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-semibold text-sm shadow-sm">
-            {initials}
-          </div>
-        )}
+        ) : null}
+        <div className={`w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-semibold text-sm shadow-sm ${user.photo_url ? 'hidden' : ''}`}>
+          {initials}
+        </div>
         {/* Chevron indicator on desktop */}
         <svg
           className={`w-4 h-4 text-slate-400 transition-transform hidden sm:block ${isOpen ? 'rotate-180' : ''}`}
@@ -122,12 +122,12 @@ export function UserProfileDropdown() {
                   src={user.photo_url}
                   alt={displayName}
                   className="w-10 h-10 rounded-full object-cover"
+                  onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.nextElementSibling?.classList.remove('hidden') }}
                 />
-              ) : (
-                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-semibold">
-                  {initials}
-                </div>
-              )}
+              ) : null}
+              <div className={`w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-semibold ${user.photo_url ? 'hidden' : ''}`}>
+                {initials}
+              </div>
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold text-slate-900 truncate">
                   {displayName}
