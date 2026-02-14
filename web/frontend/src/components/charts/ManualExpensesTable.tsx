@@ -212,9 +212,9 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
       )}
 
       {/* Table */}
-      <div className="overflow-x-auto rounded-lg border border-slate-200">
+      <div className="overflow-auto rounded-lg border border-slate-200 max-h-80">
         <table className="w-full text-sm">
-          <thead>
+          <thead className="sticky top-0 z-10">
             <tr className="bg-slate-50 border-b border-slate-200">
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
                 Date
