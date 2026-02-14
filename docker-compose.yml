@@ -92,25 +92,26 @@ services:
       retries: 3
       start_period: 10s
 
-  # Health monitor - sends Telegram alerts on container crashes
-  monitor:
-    image: halloweex/keycrm-web:latest
-    container_name: keycrm-monitor
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      - TZ=Europe/Kyiv
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./scripts:/app/scripts:ro
-    command: python /app/scripts/docker_monitor.py
-    mem_limit: 64m
-    cpus: 0.1
-    # Start after other services
-    depends_on:
-      - web
-      - bot
+  # Health monitor - DISABLED (sends Telegram alerts on container crashes)
+  # To re-enable: uncomment the monitor service below
+  # monitor:
+  #   image: halloweex/keycrm-web:latest
+  #   container_name: keycrm-monitor
+  #   restart: unless-stopped
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     - TZ=Europe/Kyiv
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #     - ./scripts:/app/scripts:ro
+  #   command: python /app/scripts/docker_monitor.py
+  #   mem_limit: 64m
+  #   cpus: 0.1
+  #   # Start after other services
+  #   depends_on:
+  #     - web
+  #     - bot
 
 volumes:
   meili_data:
