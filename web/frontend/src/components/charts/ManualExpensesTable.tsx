@@ -212,7 +212,7 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
       )}
 
       {/* Table */}
-      <div className="overflow-auto rounded-lg border border-slate-200 max-h-80">
+      <div className="overflow-auto rounded-lg border border-slate-200 max-h-[400px]">
         <table className="w-full text-sm">
           <thead className="sticky top-0 z-10">
             <tr className="bg-slate-50 border-b border-slate-200">
