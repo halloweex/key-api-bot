@@ -5,7 +5,7 @@ import asyncio
 import os
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import ORJSONResponse, JSONResponse
+from fastapi.responses import ORJSONResponse, JSONResponse, FileResponse
 from starlette.middleware.gzip import GZipMiddleware
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -67,6 +67,12 @@ app.add_middleware(RequestTimeoutMiddleware)
 
 # Add Gzip compression (min 500 bytes to compress)
 app.add_middleware(GZipMiddleware, minimum_size=500)
+
+# Apple touch icon at root for iOS home screen
+@app.get("/apple-touch-icon.png", include_in_schema=False)
+@app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
+async def apple_touch_icon():
+    return FileResponse(STATIC_DIR / "apple-touch-icon.png", media_type="image/png")
 
 # Mount static files
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
