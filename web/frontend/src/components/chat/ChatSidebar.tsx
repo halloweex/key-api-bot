@@ -56,19 +56,6 @@ export const ChatSidebar = memo(function ChatSidebar() {
         aria-hidden="true"
       />
 
-      {/* Mobile toggle button - top right */}
-      <button
-        onClick={() => setOpen(true)}
-        className={`fixed top-3 right-3 z-[53] sm:hidden
-          w-8 h-8 rounded-lg bg-white border border-slate-200 shadow-sm
-          flex items-center justify-center text-slate-500 [&_svg]:w-5 [&_svg]:h-5
-          hover:bg-slate-50 active:bg-slate-100
-          ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
-        aria-label="Open AI assistant"
-      >
-        <PanelRightIcon />
-      </button>
-
       <aside
         className={`fixed top-0 right-0 bottom-0 z-[55]
           bg-slate-50
