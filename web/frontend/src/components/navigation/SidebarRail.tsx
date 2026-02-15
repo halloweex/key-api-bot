@@ -131,15 +131,73 @@ export const SidebarRail = memo(function SidebarRail() {
   }, [toggleOpen])
 
   return (
-    <aside
-      className={`fixed top-0 left-0 bottom-0 z-[55]
-        bg-slate-50 border-r border-slate-200
-        hidden sm:block
-        ${isOpen ? 'w-[280px]' : 'w-12 cursor-pointer hover:bg-slate-100'}`}
-      role="navigation"
-      aria-label="Main navigation"
-      onClick={isOpen ? undefined : toggleOpen}
-    >
+    <>
+      {/* Mobile backdrop */}
+      <div
+        className={`fixed inset-0 bg-black/30 z-[54] sm:hidden
+          transition-opacity duration-200
+          ${isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+        onClick={() => setOpen(false)}
+        aria-hidden="true"
+      />
+
+      {/* Mobile toggle button - top left */}
+      <button
+        onClick={() => setOpen(true)}
+        className={`fixed top-3 left-3 z-[53] sm:hidden
+          w-10 h-10 rounded-xl bg-white border border-slate-200 shadow-sm
+          flex items-center justify-center text-slate-600
+          hover:bg-slate-50 active:bg-slate-100
+          ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
+        aria-label="Open menu"
+      >
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </button>
+
+      {/* Mobile user button - bottom left */}
+      <button
+        onClick={() => setOpen(true)}
+        className={`fixed bottom-3 left-3 z-[53] sm:hidden
+          ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
+        aria-label="Open menu"
+      >
+        {isAuthenticated && user ? (
+          <div className="relative w-10 h-10">
+            <div className="absolute inset-0 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-bold text-xs shadow-md">
+              {getInitials()}
+            </div>
+            {user.photo_url && !imageError && (
+              <img
+                src={user.photo_url}
+                alt=""
+                className="absolute inset-0 w-10 h-10 rounded-full object-cover border-2 border-white shadow-md"
+                onError={() => setImageError(true)}
+              />
+            )}
+          </div>
+        ) : (
+          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white shadow-md">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+            </svg>
+          </div>
+        )}
+      </button>
+
+      <aside
+        className={`fixed top-0 left-0 bottom-0 z-[55]
+          bg-slate-50 border-r border-slate-200
+          transition-transform duration-200 ease-out
+          ${isOpen
+            ? 'translate-x-0 w-[280px]'
+            : '-translate-x-full sm:translate-x-0 sm:w-12 sm:cursor-pointer sm:hover:bg-slate-100'
+          }`}
+        role="navigation"
+        aria-label="Main navigation"
+        onClick={isOpen ? undefined : toggleOpen}
+      >
       {/* Header with logo - always visible */}
       <div className="h-14 flex items-center border-b border-slate-200">
         {/* Collapsed: centered logo */}
@@ -271,5 +329,6 @@ export const SidebarRail = memo(function SidebarRail() {
         )}
       </div>
     </aside>
+    </>
   )
 })

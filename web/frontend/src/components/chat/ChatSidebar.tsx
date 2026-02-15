@@ -46,16 +46,44 @@ export const ChatSidebar = memo(function ChatSidebar() {
   }, [handleKeyDown])
 
   return (
-    <aside
-      className={`fixed top-0 right-0 bottom-0 z-[55]
-        bg-slate-50
-        border-l border-slate-200
-        hidden sm:block
-        ${isOpen ? 'w-[280px]' : 'w-12 cursor-pointer hover:bg-slate-100'}`}
-      role="complementary"
-      aria-label="AI Assistant"
-      onClick={isOpen ? undefined : toggleOpen}
-    >
+    <>
+      {/* Mobile backdrop */}
+      <div
+        className={`fixed inset-0 bg-black/30 z-[54] sm:hidden
+          transition-opacity duration-200
+          ${isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+        onClick={() => setOpen(false)}
+        aria-hidden="true"
+      />
+
+      {/* Mobile toggle button - top right */}
+      <button
+        onClick={() => setOpen(true)}
+        className={`fixed top-3 right-3 z-[53] sm:hidden
+          w-10 h-10 rounded-xl bg-white border border-slate-200 shadow-sm
+          flex items-center justify-center text-slate-600
+          hover:bg-slate-50 active:bg-slate-100
+          ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
+        aria-label="Open AI assistant"
+      >
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+        </svg>
+      </button>
+
+      <aside
+        className={`fixed top-0 right-0 bottom-0 z-[55]
+          bg-slate-50
+          border-l border-slate-200
+          transition-transform duration-200 ease-out
+          ${isOpen
+            ? 'translate-x-0 w-[280px]'
+            : 'translate-x-full sm:translate-x-0 sm:w-12 sm:cursor-pointer sm:hover:bg-slate-100'
+          }`}
+        role="complementary"
+        aria-label="AI Assistant"
+        onClick={isOpen ? undefined : toggleOpen}
+      >
         {/* Header area - always visible */}
         <div className="h-14 flex items-center border-b border-slate-200">
           {/* Collapsed: centered panel icon */}
@@ -97,5 +125,6 @@ export const ChatSidebar = memo(function ChatSidebar() {
           <ChatInput />
         </div>
       </aside>
+    </>
   )
 })
