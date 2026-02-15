@@ -58,8 +58,8 @@ const MetricCard = memo(function MetricCard({ label, value, colorClass }: Metric
   return (
     <Card className="bg-slate-700/50">
       <CardContent className="py-2 px-3">
-        <p className="text-xs text-slate-400">{label}</p>
-        <p className={`text-lg font-semibold ${colorClass}`}>{value}</p>
+        <p className="text-xs text-slate-600 font-medium">{label}</p>
+        <p className={`text-xl font-bold ${colorClass}`}>{value}</p>
       </CardContent>
     </Card>
   )
@@ -146,7 +146,7 @@ export const ExpensesChart = memo(function ExpensesChart() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Expenses by Type */}
         <div>
-          <h4 className="text-sm font-medium text-slate-400 mb-2">Expenses by Type</h4>
+          <h4 className="text-sm font-medium text-slate-700 mb-2">Expenses by Type</h4>
           <div style={{ height: CHART_DIMENSIONS.height.md - 32 }}>
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
@@ -183,7 +183,7 @@ export const ExpensesChart = memo(function ExpensesChart() {
 
         {/* Profit Analysis */}
         <div>
-          <h4 className="text-sm font-medium text-slate-400 mb-2">Profit Analysis</h4>
+          <h4 className="text-sm font-medium text-slate-700 mb-2">Profit Analysis</h4>
           <div style={{ height: CHART_DIMENSIONS.height.md - 32 }}>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={profitChartData} margin={CHART_DIMENSIONS.margin.default}>

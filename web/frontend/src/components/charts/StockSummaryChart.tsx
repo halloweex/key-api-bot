@@ -50,24 +50,24 @@ function StockSummaryChartComponent() {
           {/* Value Stats */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="text-center py-2 bg-slate-50 rounded-lg">
-              <div className="text-lg font-semibold text-slate-700">
+              <div className="text-xl font-bold text-slate-700">
                 {formatCurrency(data.summary.totalValue)}
               </div>
-              <div className="text-xs text-slate-500">Stock Value</div>
+              <div className="text-xs text-slate-600 font-medium">Stock Value</div>
               {data.summary.reserveValue > 0 && (
-                <div className="text-xs text-slate-400 mt-0.5">
+                <div className="text-xs text-slate-500 mt-0.5">
                   {formatCurrency(data.summary.reserveValue)} reserved
                 </div>
               )}
             </div>
             <div className="text-center py-2 bg-purple-50 rounded-lg">
-              <div className="text-lg font-semibold text-purple-700">
+              <div className="text-xl font-bold text-purple-700">
                 {formatCurrency(data.summary.averageValue)}
               </div>
-              <div className="text-xs text-slate-500">
+              <div className="text-xs text-slate-600 font-medium">
                 Avg Inventory (30d)
                 {data.summary.avgDataPoints > 0 && (
-                  <span className="text-slate-400 ml-1">
+                  <span className="text-slate-500 ml-1">
                     · {data.summary.avgDataPoints} pts
                   </span>
                 )}
@@ -80,7 +80,7 @@ function StockSummaryChartComponent() {
             {/* Low Stock Alert */}
             {data.lowStock.length > 0 && (
               <div>
-                <h4 className="text-sm font-medium text-amber-700 mb-2 flex items-center gap-1">
+                <h4 className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-1">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
@@ -111,9 +111,7 @@ function StockSummaryChartComponent() {
 
             {/* Top by Quantity */}
             <div>
-              <h4 className="text-sm font-medium text-slate-700 mb-2">
-                Top by Quantity
-              </h4>
+              <h4 className="text-sm font-medium text-slate-700 mb-2">Top by Quantity</h4>
               <div className="space-y-1 max-h-64 overflow-y-auto">
                 {data.topByQuantity.slice(0, 10).map((item, index) => (
                   <div
@@ -166,8 +164,8 @@ function StatCard({ label, value, subValue, color, bgColor }: StatCardProps) {
   return (
     <div className={`${bgColor} rounded-lg p-3 text-center`}>
       <div className={`text-xl font-bold ${color}`}>{value}</div>
-      <div className="text-xs text-slate-500">{label}</div>
-      {subValue && <div className="text-xs text-slate-400 mt-0.5">{subValue}</div>}
+      <div className="text-xs text-slate-600 font-medium">{label}</div>
+      {subValue && <div className="text-xs text-slate-500 mt-0.5">{subValue}</div>}
     </div>
   )
 }

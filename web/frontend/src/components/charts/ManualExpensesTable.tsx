@@ -178,7 +178,7 @@ const MetricCard = memo(function MetricCard({ label, value, icon, colorClass, bg
         )}
         <div className="flex-1 min-w-0">
           <p className="text-xs text-slate-600 font-medium">{label}</p>
-          <p className={`text-lg lg:text-xl font-bold truncate ${colorClass}`}>{value}</p>
+          <p className={`text-xl font-bold truncate ${colorClass}`}>{value}</p>
         </div>
       </div>
     </div>

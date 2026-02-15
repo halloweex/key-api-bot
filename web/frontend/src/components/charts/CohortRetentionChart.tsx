@@ -54,12 +54,6 @@ const SummaryCard = memo(function SummaryCard({
     blue: 'from-blue-50 to-blue-100/50 border-blue-200',
     amber: 'from-amber-50 to-amber-100/50 border-amber-200',
   }
-  const textStyles = {
-    default: 'text-slate-600',
-    emerald: 'text-emerald-700',
-    blue: 'text-blue-700',
-    amber: 'text-amber-700',
-  }
   const valueStyles = {
     default: 'text-slate-800',
     emerald: 'text-emerald-800',
@@ -69,7 +63,7 @@ const SummaryCard = memo(function SummaryCard({
 
   return (
     <div className={`bg-gradient-to-br ${variantStyles[variant]} border rounded-xl p-4`}>
-      <p className={`text-xs ${textStyles[variant]} font-medium`}>{label}</p>
+      <p className="text-xs text-slate-600 font-medium">{label}</p>
       <p className={`text-xl font-bold ${valueStyles[variant]}`}>{value}</p>
       {subtitle && (
         <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>

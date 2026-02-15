@@ -226,9 +226,9 @@ interface StatCardProps {
 function StatCard({ label, value, subValue, color }: StatCardProps) {
   return (
     <div className="bg-slate-50 rounded-lg p-3 text-center">
-      <div className={`text-lg font-semibold ${color}`}>{value}</div>
-      <div className="text-xs text-slate-500">{label}</div>
-      {subValue && <div className="text-xs text-slate-400">{subValue}</div>}
+      <div className={`text-xl font-bold ${color}`}>{value}</div>
+      <div className="text-xs text-slate-600 font-medium">{label}</div>
+      {subValue && <div className="text-xs text-slate-500">{subValue}</div>}
     </div>
   )
 }

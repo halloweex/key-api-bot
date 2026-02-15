@@ -55,16 +55,16 @@ function DeadStockChartComponent() {
           {/* Value Summary */}
           <div className="grid grid-cols-2 gap-3">
             <div className="text-center py-2 bg-red-50 rounded-lg">
-              <div className="text-lg font-semibold text-red-700">
+              <div className="text-xl font-bold text-red-700">
                 {formatCurrency(data.summary.deadStock.value + data.summary.neverSold.value)}
               </div>
-              <div className="text-xs text-slate-500">Dead Stock Value</div>
+              <div className="text-xs text-slate-600 font-medium">Dead Stock Value</div>
             </div>
             <div className="text-center py-2 bg-amber-50 rounded-lg">
-              <div className="text-lg font-semibold text-amber-700">
+              <div className="text-xl font-bold text-amber-700">
                 {formatCurrency(data.summary.atRisk.value)}
               </div>
-              <div className="text-xs text-slate-500">At Risk Value</div>
+              <div className="text-xs text-slate-600 font-medium">At Risk Value</div>
             </div>
           </div>
 
@@ -111,8 +111,8 @@ function StatCard({ label, value, subValue, color, bgColor }: StatCardProps) {
   return (
     <div className={`${bgColor} rounded-lg p-3 text-center`}>
       <div className={`text-xl font-bold ${color}`}>{value}</div>
-      <div className="text-xs text-slate-500">{label}</div>
-      {subValue && <div className="text-xs text-slate-400 mt-0.5">{subValue}</div>}
+      <div className="text-xs text-slate-600 font-medium">{label}</div>
+      {subValue && <div className="text-xs text-slate-500 mt-0.5">{subValue}</div>}
     </div>
   )
 }
@@ -216,7 +216,7 @@ function SummaryTab({ data }: SummaryTabProps) {
       {/* Category Thresholds */}
       {data.categoryThresholds.length > 0 && (
         <div>
-          <div className="text-xs font-medium text-slate-600 mb-2">Category Thresholds</div>
+          <h4 className="text-sm font-medium text-slate-700 mb-2">Category Thresholds</h4>
           <div className="space-y-1 max-h-32 overflow-y-auto">
             {data.categoryThresholds.slice(0, 8).map((cat) => (
               <div

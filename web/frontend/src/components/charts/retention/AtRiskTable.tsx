@@ -34,11 +34,11 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
       {/* Summary Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <div className="bg-gradient-to-br from-red-50 to-red-100/50 border border-red-200 rounded-xl p-4">
-          <p className="text-xs text-red-700 font-medium">At-Risk Customers</p>
+          <p className="text-xs text-slate-600 font-medium">At-Risk Customers</p>
           <p className="text-xl font-bold text-red-800">
             {formatNumber(data.summary.totalAtRisk)}
           </p>
-          <p className="text-xs text-red-600">
+          <p className="text-xs text-slate-500">
             {formatPercent(data.summary.overallAtRiskPct)} of total
           </p>
         </div>
@@ -50,18 +50,18 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
           <p className="text-xs text-slate-500">in last 12 months</p>
         </div>
         <div className="bg-gradient-to-br from-amber-50 to-amber-100/50 border border-amber-200 rounded-xl p-4">
-          <p className="text-xs text-amber-700 font-medium">At-Risk Revenue</p>
+          <p className="text-xs text-slate-600 font-medium">At-Risk Revenue</p>
           <p className="text-xl font-bold text-amber-800">
             {formatCurrency(totalAtRiskRevenue)}
           </p>
-          <p className="text-xs text-amber-600">historical value</p>
+          <p className="text-xs text-slate-500">historical value</p>
         </div>
         <div className="bg-gradient-to-br from-blue-50 to-blue-100/50 border border-blue-200 rounded-xl p-4">
-          <p className="text-xs text-blue-700 font-medium">Threshold</p>
+          <p className="text-xs text-slate-600 font-medium">Threshold</p>
           <p className="text-xl font-bold text-blue-800">
             {data.daysThreshold} days
           </p>
-          <p className="text-xs text-blue-600">since last purchase</p>
+          <p className="text-xs text-slate-500">since last purchase</p>
         </div>
       </div>
 
@@ -70,13 +70,13 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-slate-200">
-              <th className="text-left py-2 px-3 font-semibold text-slate-700">Cohort</th>
-              <th className="text-center py-2 px-3 font-semibold text-slate-700">Total</th>
-              <th className="text-center py-2 px-3 font-semibold text-slate-700">At Risk</th>
-              <th className="text-center py-2 px-3 font-semibold text-slate-700">Risk %</th>
-              <th className="text-center py-2 px-3 font-semibold text-slate-700">At-Risk Revenue</th>
-              <th className="text-center py-2 px-3 font-semibold text-slate-700">Avg Orders</th>
-              <th className="text-center py-2 px-3 font-semibold text-slate-700">Status</th>
+              <th className="text-left py-2 px-3 font-medium text-slate-700">Cohort</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">Total</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">At Risk</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">Risk %</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">At-Risk Revenue</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">Avg Orders</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">Status</th>
             </tr>
           </thead>
           <tbody>

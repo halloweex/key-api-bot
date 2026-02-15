@@ -57,7 +57,7 @@ export const PurchaseTimingChart = memo(function PurchaseTimingChart({
       {/* Summary Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">
         <div className="bg-gradient-to-br from-emerald-50 to-emerald-100/50 border border-emerald-200 rounded-xl p-4">
-          <p className="text-xs text-emerald-700 font-medium">Repeat Customers</p>
+          <p className="text-xs text-slate-600 font-medium">Repeat Customers</p>
           <p className="text-xl font-bold text-emerald-800">
             {formatNumber(data.summary.totalRepeatCustomers)}
           </p>

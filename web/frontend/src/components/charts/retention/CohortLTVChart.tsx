@@ -80,18 +80,18 @@ export const CohortLTVChart = memo(function CohortLTVChart({
       {/* Summary Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">
         <div className="bg-gradient-to-br from-blue-50 to-blue-100/50 border border-blue-200 rounded-xl p-4">
-          <p className="text-xs text-blue-700 font-medium">Avg LTV</p>
+          <p className="text-xs text-slate-600 font-medium">Avg LTV</p>
           <p className="text-xl font-bold text-blue-800">
             {formatCurrency(data.summary.avgLTV)}
           </p>
-          <p className="text-xs text-blue-600">across all cohorts</p>
+          <p className="text-xs text-slate-500">across all cohorts</p>
         </div>
         <div className="bg-gradient-to-br from-emerald-50 to-emerald-100/50 border border-emerald-200 rounded-xl p-4">
-          <p className="text-xs text-emerald-700 font-medium">Best Cohort</p>
+          <p className="text-xs text-slate-600 font-medium">Best Cohort</p>
           <p className="text-xl font-bold text-emerald-800">
             {data.summary.bestCohort || '-'}
           </p>
-          <p className="text-xs text-emerald-600">
+          <p className="text-xs text-slate-500">
             LTV: {formatCurrency(data.summary.bestCohortLTV)}
           </p>
         </div>

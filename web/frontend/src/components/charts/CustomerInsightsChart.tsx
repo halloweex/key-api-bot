@@ -309,7 +309,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
         {/* New vs Returning Pie Chart */}
         <div>
           <div className="relative">
-            <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
+            <h4 className="text-sm font-medium text-slate-700 mb-3 flex items-center gap-1.5">
               Customers in Period (New vs Returning)
               <InfoButton onClick={() => setShowCustomerInfo(!showCustomerInfo)} />
             </h4>
@@ -375,7 +375,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
         {/* AOV Trend Line Chart */}
         <div>
           <div className="relative">
-            <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
+            <h4 className="text-sm font-medium text-slate-700 mb-3 flex items-center gap-1.5">
               Average Order Value Trend
               <InfoButton onClick={() => setShowAovInfo(!showAovInfo)} />
             </h4>

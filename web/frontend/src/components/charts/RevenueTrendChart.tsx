@@ -360,7 +360,7 @@ function InfoTooltipContent({ onClose, children }: {
       >
         ×
       </button>
-      <h4 className="text-sm font-semibold text-slate-200 mb-2">Revenue Trend</h4>
+      <h4 className="text-sm font-medium text-slate-200 mb-2">Revenue Trend</h4>
       {children}
     </div>
   )

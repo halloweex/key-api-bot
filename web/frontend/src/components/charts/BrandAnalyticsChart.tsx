@@ -80,8 +80,8 @@ const MetricCard = memo(function MetricCard({ icon, label, value, colorClass, bg
           {icon}
         </div>
         <div className="flex-1 min-w-0">
-          <p className="text-xs lg:text-sm text-slate-600 font-medium">{label}</p>
-          <p className={`text-xl lg:text-2xl font-bold truncate ${colorClass}`}>{value}</p>
+          <p className="text-xs text-slate-600 font-medium">{label}</p>
+          <p className={`text-xl font-bold truncate ${colorClass}`}>{value}</p>
         </div>
       </div>
     </div>
@@ -165,7 +165,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Top Brands by Revenue */}
         <div>
-          <h4 className="text-sm font-semibold text-slate-700 mb-2">Top 10 by Revenue</h4>
+          <h4 className="text-sm font-medium text-slate-700 mb-2">Top 10 by Revenue</h4>
           <div style={HEIGHT_STYLE.xxl}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
@@ -211,7 +211,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
 
         {/* Top Brands by Quantity */}
         <div>
-          <h4 className="text-sm font-semibold text-slate-700 mb-2">Top 10 by Quantity</h4>
+          <h4 className="text-sm font-medium text-slate-700 mb-2">Top 10 by Quantity</h4>
           <div style={HEIGHT_STYLE.xxl}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart

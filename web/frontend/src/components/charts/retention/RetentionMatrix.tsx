@@ -38,16 +38,16 @@ export const RetentionMatrix = memo(function RetentionMatrix({
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-slate-200">
-            <th className="text-left py-2 px-3 font-semibold text-slate-700 sticky left-0 bg-white">
+            <th className="text-left py-2 px-3 font-medium text-slate-700 sticky left-0 bg-white">
               Cohort
             </th>
-            <th className="text-center py-2 px-2 font-semibold text-slate-700 w-16">
+            <th className="text-center py-2 px-2 font-medium text-slate-700 w-16">
               Size
             </th>
             {headers.map((header) => (
               <th
                 key={header}
-                className="text-center py-2 px-2 font-semibold text-slate-700 w-14"
+                className="text-center py-2 px-2 font-medium text-slate-700 w-14"
                 title={header === 'M0' ? 'First purchase month' : `${header.slice(1)} month(s) after first purchase`}
               >
                 {header}
