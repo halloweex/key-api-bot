@@ -57,10 +57,14 @@ export const ChatSidebar = memo(function ChatSidebar() {
 
       {/* Sidebar - rail when collapsed, full panel when expanded */}
       <aside
-        className={`fixed top-0 right-0 bottom-0 z-[55]
+        className={`fixed top-0 bottom-0 z-[55]
           bg-slate-50
           border-l border-slate-200
-          ${isOpen ? 'w-full sm:w-[280px]' : 'w-12 cursor-pointer hover:bg-slate-100'}`}
+          transition-transform duration-200 ease-out
+          ${isOpen
+            ? 'right-0 w-full sm:w-[280px]'
+            : 'translate-x-full sm:translate-x-0 sm:right-0 sm:w-12 sm:cursor-pointer sm:hover:bg-slate-100'
+          }`}
         role="complementary"
         aria-label="AI Assistant"
         onClick={isOpen ? undefined : toggleOpen}

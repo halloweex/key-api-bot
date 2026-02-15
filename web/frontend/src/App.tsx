@@ -52,8 +52,8 @@ const DashboardShell = memo(function DashboardShell() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
-      {/* Main content wrapper - fixed margins for collapsed sidebars */}
-      <div className="flex-1 flex flex-col ml-12 mr-12">
+      {/* Main content wrapper - no margins on mobile, fixed margins on desktop for rails */}
+      <div className="flex-1 flex flex-col sm:ml-12 sm:mr-12">
         <Header />
         <Dashboard />
       </div>
