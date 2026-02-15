@@ -5896,7 +5896,8 @@ class DuckDBStore:
         self,
         status: Optional[str] = None,
         role: Optional[str] = None,
-        limit: int = 100
+        limit: int = 100,
+        offset: int = 0
     ) -> List[Dict[str, Any]]:
         """List users with optional filters."""
         conditions = []
@@ -5910,7 +5911,7 @@ class DuckDBStore:
             params.append(role)
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        params.append(limit)
+        params.extend([limit, offset])
 
         async with self.connection() as conn:
             rows = conn.execute(f"""
@@ -5926,7 +5927,7 @@ class DuckDBStore:
                         WHEN 'frozen' THEN 4
                     END,
                     requested_at DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
             """, params).fetchall()
 
             return [
