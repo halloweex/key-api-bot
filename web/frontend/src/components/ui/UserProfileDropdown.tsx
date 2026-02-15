@@ -22,6 +22,7 @@ export function UserProfileDropdown() {
   const { user, isAuthenticated, isLoading } = useAuth()
   const displayName = useUserDisplayName()
   const [isOpen, setIsOpen] = useState(false)
+  const [imageError, setImageError] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   // Close dropdown when clicking outside
@@ -98,16 +99,21 @@ export function UserProfileDropdown() {
         aria-expanded={isOpen}
         aria-haspopup="true"
       >
-        {user.photo_url ? (
-          <img
-            src={user.photo_url}
-            alt={displayName}
-            className="w-9 h-9 rounded-full object-cover border-2 border-white shadow-sm"
-            onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.nextElementSibling?.classList.remove('hidden') }}
-          />
-        ) : null}
-        <div className={`w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-semibold text-sm shadow-sm ${user.photo_url ? 'hidden' : ''}`}>
-          {initials}
+        {/* Always show initials, optionally overlay with photo */}
+        <div className="relative w-10 h-10">
+          {/* Initials background - always visible */}
+          <div className="absolute inset-0 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-bold text-sm shadow-sm">
+            {initials}
+          </div>
+          {/* Photo overlay - only if available and not errored */}
+          {user.photo_url && !imageError && (
+            <img
+              src={user.photo_url}
+              alt={displayName}
+              className="absolute inset-0 w-10 h-10 rounded-full object-cover border-2 border-white shadow-sm"
+              onError={() => setImageError(true)}
+            />
+          )}
         </div>
         {/* Chevron indicator on desktop */}
         <svg
@@ -126,16 +132,19 @@ export function UserProfileDropdown() {
           {/* User info header */}
           <div className="px-4 py-3 border-b border-slate-100">
             <div className="flex items-center gap-3">
-              {user.photo_url ? (
-                <img
-                  src={user.photo_url}
-                  alt={displayName}
-                  className="w-10 h-10 rounded-full object-cover"
-                  onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.nextElementSibling?.classList.remove('hidden') }}
-                />
-              ) : null}
-              <div className={`w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-semibold ${user.photo_url ? 'hidden' : ''}`}>
-                {initials}
+              {/* Avatar with initials fallback */}
+              <div className="relative w-10 h-10 flex-shrink-0">
+                <div className="absolute inset-0 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-bold text-sm">
+                  {initials}
+                </div>
+                {user.photo_url && !imageError && (
+                  <img
+                    src={user.photo_url}
+                    alt={displayName}
+                    className="absolute inset-0 w-10 h-10 rounded-full object-cover"
+                    onError={() => setImageError(true)}
+                  />
+                )}
               </div>
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold text-slate-900 truncate">
