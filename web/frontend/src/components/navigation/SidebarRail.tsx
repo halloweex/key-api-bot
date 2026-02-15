@@ -145,8 +145,8 @@ export const SidebarRail = memo(function SidebarRail() {
       <button
         onClick={() => setOpen(true)}
         className={`fixed top-3 left-3 z-[53] sm:hidden
-          w-10 h-10 rounded-xl bg-white border border-slate-200 shadow-sm
-          flex items-center justify-center text-slate-500
+          w-8 h-8 rounded-lg bg-white border border-slate-200 shadow-sm
+          flex items-center justify-center text-slate-500 [&_svg]:w-5 [&_svg]:h-5
           hover:bg-slate-50 active:bg-slate-100
           ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
         aria-label="Open menu"
@@ -162,22 +162,22 @@ export const SidebarRail = memo(function SidebarRail() {
         aria-label="Open menu"
       >
         {isAuthenticated && user ? (
-          <div className="relative w-10 h-10">
-            <div className="absolute inset-0 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-bold text-xs shadow-md">
+          <div className="relative w-8 h-8">
+            <div className="absolute inset-0 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-bold text-[10px] shadow-sm">
               {getInitials()}
             </div>
             {user.photo_url && !imageError && (
               <img
                 src={user.photo_url}
                 alt=""
-                className="absolute inset-0 w-10 h-10 rounded-full object-cover border-2 border-white shadow-md"
+                className="absolute inset-0 w-8 h-8 rounded-full object-cover border-2 border-white shadow-sm"
                 onError={() => setImageError(true)}
               />
             )}
           </div>
         ) : (
-          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white shadow-md">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white shadow-sm">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
             </svg>
           </div>
