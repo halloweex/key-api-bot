@@ -1,8 +1,8 @@
 import { memo, useState, useEffect } from 'react'
 import { Header, Dashboard } from './components/layout'
-import { ChatToggle, ChatSidebar } from './components/chat'
+import { ChatSidebar } from './components/chat'
+import { SidebarRail } from './components/navigation'
 import { AdminUsersPage, AdminPermissionsPage } from './components/admin'
-import { UserProfileDropdown } from './components/ui/UserProfileDropdown'
 import { useAuth } from './hooks/useAuth'
 import { useToast } from './components/ui/Toast'
 
@@ -52,19 +52,15 @@ const DashboardShell = memo(function DashboardShell() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
-      <Header />
-      <div className="flex-1">
+      {/* Main content wrapper - fixed margins for collapsed sidebars */}
+      <div className="flex-1 flex flex-col ml-12 mr-12">
+        <Header />
         <Dashboard />
       </div>
 
-      {/* Fixed position elements outside DOM flow */}
-      <ChatToggle />
+      {/* Fixed position sidebars - overlay when expanded */}
+      <SidebarRail />
       <ChatSidebar />
-
-      {/* User profile - fixed bottom-left */}
-      <div className="fixed bottom-4 left-4 z-[100]">
-        <UserProfileDropdown />
-      </div>
     </div>
   )
 })

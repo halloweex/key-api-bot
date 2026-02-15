@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { useNavStore } from './navStore'
 
 export interface ChatMessage {
   id: string
@@ -52,7 +53,13 @@ export const useChatStore = create<ChatState>((set) => ({
   error: null,
   searchResults: [],
 
-  setOpen: (open) => set({ isOpen: open }),
+  setOpen: (open) => {
+    // Close nav sidebar when opening chat
+    if (open) {
+      useNavStore.getState().setOpen(false)
+    }
+    set({ isOpen: open })
+  },
 
   toggleOpen: () => set((state) => ({ isOpen: !state.isOpen })),
 

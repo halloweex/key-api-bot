@@ -19,7 +19,7 @@ export const ChatMessages = memo(function ChatMessages() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-4 space-y-6 pl-12">
+    <div className="flex-1 overflow-y-auto px-3 py-4 space-y-6 scrollbar-none [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none]">
       {messages.map((message, index) => (
         <ChatMessage key={message.id} message={message} index={index} />
       ))}
