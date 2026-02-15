@@ -131,27 +131,15 @@ export const SidebarRail = memo(function SidebarRail() {
   }, [toggleOpen])
 
   return (
-    <>
-      {/* Mobile backdrop */}
-      <div
-        className={`fixed inset-0 bg-black/30 backdrop-blur-sm z-[54] sm:hidden
-          ${isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
-        onClick={() => setOpen(false)}
-        aria-hidden="true"
-      />
-
-      <aside
-        className={`fixed top-0 bottom-0 z-[55]
-          bg-slate-50 border-r border-slate-200
-          transition-transform duration-200 ease-out
-          ${isOpen
-            ? 'left-0 w-full sm:w-[280px]'
-            : '-translate-x-full sm:translate-x-0 sm:left-0 sm:w-12 sm:cursor-pointer sm:hover:bg-slate-100'
-          }`}
-        role="navigation"
-        aria-label="Main navigation"
-        onClick={isOpen ? undefined : toggleOpen}
-      >
+    <aside
+      className={`fixed top-0 left-0 bottom-0 z-[55]
+        bg-slate-50 border-r border-slate-200
+        hidden sm:block
+        ${isOpen ? 'w-[280px]' : 'w-12 cursor-pointer hover:bg-slate-100'}`}
+      role="navigation"
+      aria-label="Main navigation"
+      onClick={isOpen ? undefined : toggleOpen}
+    >
       {/* Header with logo - always visible */}
       <div className="h-14 flex items-center border-b border-slate-200">
         {/* Collapsed: centered logo */}
@@ -283,6 +271,5 @@ export const SidebarRail = memo(function SidebarRail() {
         )}
       </div>
     </aside>
-    </>
   )
 })
