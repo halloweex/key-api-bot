@@ -15,8 +15,8 @@ const Logo = ({ size = 32 }: { size?: number }) => (
   <svg className="w-full h-full" viewBox="0 0 24 24" style={{ width: size, height: size }}>
     <defs>
       <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stopColor="#2563EB"/>
-        <stop offset="100%" stopColor="#7C3AED"/>
+        <stop offset="0%" stopColor="#F97316"/>
+        <stop offset="100%" stopColor="#DC2626"/>
       </linearGradient>
     </defs>
     <rect width="24" height="24" rx="5" fill="url(#logoGrad)"/>
