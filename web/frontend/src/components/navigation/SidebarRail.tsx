@@ -1,26 +1,13 @@
-import { memo, useEffect, useState, useRef } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavStore } from '../../store/navStore'
-import { useAuth, useUserDisplayName } from '../../hooks/useAuth'
+import { useAuth } from '../../hooks/useAuth'
 import { useWebSocket } from '../../hooks/useWebSocket'
 import { api } from '../../api/client'
 import { NavLink } from './NavLink'
 import { UserProfileDropdown } from '../ui/UserProfileDropdown'
 import { LiveIndicator } from '../ui/LiveIndicator'
-import type { HealthResponse, UserRole } from '../../types/api'
-
-// Role badge styles
-const roleBadgeStyles: Record<UserRole, string> = {
-  admin: 'bg-purple-100 text-purple-700',
-  editor: 'bg-blue-100 text-blue-700',
-  viewer: 'bg-slate-100 text-slate-600',
-}
-
-const roleLabels: Record<UserRole, string> = {
-  admin: 'Admin',
-  editor: 'Editor',
-  viewer: 'Viewer',
-}
+import type { HealthResponse } from '../../types/api'
 
 // ─── Logo ────────────────────────────────────────────────────────────────────
 
@@ -88,11 +75,8 @@ const ShieldCheckIcon = () => (
 export const SidebarRail = memo(function SidebarRail() {
   const { isOpen, toggleOpen, setOpen } = useNavStore()
   const { user, isAuthenticated } = useAuth()
-  const displayName = useUserDisplayName()
   const isAdmin = user?.role === 'admin'
   const [imageError, setImageError] = useState(false)
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-  const mobileMenuRef = useRef<HTMLDivElement>(null)
 
   // Get 2-letter initials from name, username, or fallback
   const getInitials = () => {
@@ -146,19 +130,6 @@ export const SidebarRail = memo(function SidebarRail() {
     return () => document.removeEventListener('keydown', handleShortcut)
   }, [toggleOpen])
 
-  // Close mobile menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (mobileMenuRef.current && !mobileMenuRef.current.contains(e.target as Node)) {
-        setMobileMenuOpen(false)
-      }
-    }
-    if (mobileMenuOpen) {
-      document.addEventListener('mousedown', handleClickOutside)
-      return () => document.removeEventListener('mousedown', handleClickOutside)
-    }
-  }, [mobileMenuOpen])
-
   return (
     <>
       {/* Mobile backdrop */}
@@ -182,83 +153,6 @@ export const SidebarRail = memo(function SidebarRail() {
       >
         <PanelLeftIcon />
       </button>
-
-      {/* Mobile user menu - bottom left */}
-      <div
-        ref={mobileMenuRef}
-        className={`fixed bottom-3 left-3 z-[56] sm:hidden
-          ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
-      >
-        {/* Dropdown menu - opens upward */}
-        {mobileMenuOpen && (
-          <div className="absolute left-0 bottom-full mb-2 w-56 bg-white rounded-xl shadow-lg border border-slate-200 py-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
-            {isAuthenticated && user ? (
-              <>
-                {/* User info */}
-                <div className="px-4 py-3 border-b border-slate-100">
-                  <p className="text-sm font-semibold text-slate-900 truncate">{displayName}</p>
-                  {user.username && (
-                    <p className="text-xs text-slate-500 truncate">@{user.username}</p>
-                  )}
-                  <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium mt-2 ${roleBadgeStyles[user.role]}`}>
-                    {roleLabels[user.role]}
-                  </span>
-                </div>
-                {/* Logout */}
-                <a
-                  href="/logout"
-                  className="flex items-center gap-3 px-4 py-2 text-sm text-red-600 hover:bg-red-50"
-                  onClick={() => setMobileMenuOpen(false)}
-                >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-                  </svg>
-                  Logout
-                </a>
-              </>
-            ) : (
-              <a
-                href="/login"
-                className="flex items-center gap-3 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                onClick={() => setMobileMenuOpen(false)}
-              >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
-                </svg>
-                Login
-              </a>
-            )}
-          </div>
-        )}
-
-        {/* Avatar button */}
-        <button
-          onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-          aria-label="User menu"
-        >
-          {isAuthenticated && user ? (
-            <div className="relative w-8 h-8">
-              <div className="absolute inset-0 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-bold text-[10px] shadow-sm">
-                {getInitials()}
-              </div>
-              {user.photo_url && !imageError && (
-                <img
-                  src={user.photo_url}
-                  alt=""
-                  className="absolute inset-0 w-8 h-8 rounded-full object-cover border-2 border-white shadow-sm"
-                  onError={() => setImageError(true)}
-                />
-              )}
-            </div>
-          ) : (
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white shadow-sm">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-              </svg>
-            </div>
-          )}
-        </button>
-      </div>
 
       <aside
         className={`fixed top-0 left-0 bottom-0 z-[55]
