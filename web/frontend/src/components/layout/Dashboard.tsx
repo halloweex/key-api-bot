@@ -51,7 +51,7 @@ interface GridSectionProps {
 
 const GridSection = memo(function GridSection({ children }: GridSectionProps) {
   return (
-    <section className="grid grid-cols-1 lg:grid-cols-2 gap-3 sm:gap-4">
+    <section className="grid grid-cols-1 lg:grid-cols-2 gap-2 sm:gap-3">
       {children}
     </section>
   )
@@ -61,7 +61,7 @@ const GridSection = memo(function GridSection({ children }: GridSectionProps) {
 
 export const Dashboard = memo(function Dashboard() {
   return (
-    <main className="py-3 pr-0 pl-0 sm:py-4 sm:pr-0 sm:pl-0 lg:py-6 lg:pr-0 lg:pl-0 space-y-3 sm:space-y-4 max-w-[1800px]">
+    <main className="py-2 pr-0 pl-0 sm:py-3 sm:pr-0 sm:pl-0 lg:py-4 lg:pr-0 lg:pl-0 space-y-2 sm:space-y-3 max-w-[1800px]">
       {/* Summary Cards - loaded immediately */}
       <section>
         <SummaryCards />

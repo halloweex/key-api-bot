@@ -161,7 +161,7 @@ export const SidebarRail = memo(function SidebarRail() {
               <Logo size={32} />
             </div>
             <div className="min-w-0">
-              <h1 className="text-sm font-bold text-slate-900 tracking-tight whitespace-nowrap">
+              <h1 className="text-sm font-semibold text-slate-900">
                 KoreanStory
               </h1>
               <p className="text-[10px] text-slate-500">Analytics</p>
