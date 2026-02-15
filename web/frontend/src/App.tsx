@@ -3,7 +3,7 @@ import { Header, Dashboard } from './components/layout'
 import { ChatToggle, ChatSidebar } from './components/chat'
 import { AdminUsersPage, AdminPermissionsPage } from './components/admin'
 import { UserProfileDropdown } from './components/ui/UserProfileDropdown'
-import { useIsAdmin } from './hooks/useAuth'
+import { useAuth } from './hooks/useAuth'
 import { useToast } from './components/ui/Toast'
 
 // ─── Simple Router Hook ──────────────────────────────────────────────────────
@@ -72,7 +72,17 @@ const DashboardShell = memo(function DashboardShell() {
 // ─── Admin Shell ─────────────────────────────────────────────────────────────
 
 const AdminUsersShell = memo(function AdminUsersShell() {
-  const isAdmin = useIsAdmin()
+  const { user, isLoading } = useAuth()
+  const isAdmin = user?.role === 'admin'
+
+  // Wait for auth to load before checking
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
 
   // Redirect non-admins back to dashboard
   if (!isAdmin) {
@@ -88,7 +98,17 @@ const AdminUsersShell = memo(function AdminUsersShell() {
 })
 
 const AdminPermissionsShell = memo(function AdminPermissionsShell() {
-  const isAdmin = useIsAdmin()
+  const { user, isLoading } = useAuth()
+  const isAdmin = user?.role === 'admin'
+
+  // Wait for auth to load before checking
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
 
   // Redirect non-admins back to dashboard
   if (!isAdmin) {
