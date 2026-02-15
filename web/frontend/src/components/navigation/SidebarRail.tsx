@@ -1,7 +1,7 @@
 import { memo, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavStore } from '../../store/navStore'
-import { useAuth } from '../../hooks/useAuth'
+import { useAuth, useUserDisplayName } from '../../hooks/useAuth'
 import { useWebSocket } from '../../hooks/useWebSocket'
 import { api } from '../../api/client'
 import { NavLink } from './NavLink'
@@ -75,6 +75,7 @@ const ShieldCheckIcon = () => (
 export const SidebarRail = memo(function SidebarRail() {
   const { isOpen, toggleOpen, setOpen } = useNavStore()
   const { user, isAuthenticated } = useAuth()
+  const displayName = useUserDisplayName()
   const isAdmin = user?.role === 'admin'
   const [imageError, setImageError] = useState(false)
 
@@ -191,7 +192,9 @@ export const SidebarRail = memo(function SidebarRail() {
               <h1 className="text-sm font-semibold text-slate-900">
                 KoreanStory
               </h1>
-              <p className="text-[10px] text-slate-500">Analytics</p>
+              <p className="text-[10px] text-slate-500 truncate">
+                {isAuthenticated && displayName ? displayName : 'Analytics'}
+              </p>
             </div>
           </div>
           <button
