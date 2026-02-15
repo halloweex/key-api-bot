@@ -7,8 +7,8 @@ import { BrandFilter } from './BrandFilter'
 export function FilterBar() {
   return (
     <div className="flex flex-col gap-3 sm:gap-4">
-      {/* Period filter - scrollable on mobile */}
-      <div className="overflow-x-auto -mx-3 px-3 sm:mx-0 sm:px-0 scrollbar-hide">
+      {/* Period filter - scrollable on mobile, with margins for sidebar icons */}
+      <div className="overflow-x-auto mx-9 sm:mx-0 scrollbar-hide">
         <PeriodFilter />
       </div>
 

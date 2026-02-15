@@ -5,7 +5,7 @@ import { ChatInput } from './ChatInput'
 
 // Panel icon (right side panel) with thick divider line
 const PanelRightIcon = () => (
-  <svg className="h-6 w-6" viewBox="0 0 24 24">
+  <svg className="h-5 w-5" viewBox="0 0 24 24">
     <rect x="2" y="2" width="20" height="20" rx="5" fill="none" stroke="currentColor" strokeWidth={1.5} />
     <rect x="14" y="2" width="8" height="20" rx="5" fill="currentColor" fillOpacity="0.2" />
     <line x1="14" y1="4" x2="14" y2="20" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
@@ -61,7 +61,7 @@ export const ChatSidebar = memo(function ChatSidebar() {
         onClick={() => setOpen(true)}
         className={`fixed top-3 right-3 z-[53] sm:hidden
           w-8 h-8 rounded-lg bg-white border border-slate-200 shadow-sm
-          flex items-center justify-center text-slate-500 [&_svg]:w-5 [&_svg]:h-5
+          flex items-center justify-center text-slate-500
           hover:bg-slate-50 active:bg-slate-100
           ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
         aria-label="Open AI assistant"
