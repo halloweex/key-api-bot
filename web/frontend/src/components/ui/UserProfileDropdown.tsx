@@ -74,11 +74,20 @@ export function UserProfileDropdown() {
     )
   }
 
-  const initials = user.first_name
-    ? user.first_name.charAt(0).toUpperCase()
-    : user.username
-      ? user.username.charAt(0).toUpperCase()
-      : '?'
+  // Get 2-letter initials from name, username, or fallback
+  const getInitials = () => {
+    if (user.first_name && user.last_name) {
+      return (user.first_name.charAt(0) + user.last_name.charAt(0)).toUpperCase()
+    }
+    if (user.first_name && user.first_name.length >= 2) {
+      return user.first_name.substring(0, 2).toUpperCase()
+    }
+    if (user.username && user.username.length >= 2) {
+      return user.username.substring(0, 2).toUpperCase()
+    }
+    return user.first_name?.charAt(0).toUpperCase() || user.username?.charAt(0).toUpperCase() || '??'
+  }
+  const initials = getInitials()
 
   return (
     <div ref={dropdownRef} className="relative">
@@ -111,9 +120,9 @@ export function UserProfileDropdown() {
         </svg>
       </button>
 
-      {/* Dropdown menu */}
+      {/* Dropdown menu - opens upward */}
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-64 bg-white rounded-xl shadow-lg border border-slate-200 py-2 z-50 animate-in fade-in slide-in-from-top-2 duration-200">
+        <div className="absolute left-0 bottom-full mb-2 w-64 bg-white rounded-xl shadow-lg border border-slate-200 py-2 z-50 animate-in fade-in slide-in-from-bottom-2 duration-200">
           {/* User info header */}
           <div className="px-4 py-3 border-b border-slate-100">
             <div className="flex items-center gap-3">
