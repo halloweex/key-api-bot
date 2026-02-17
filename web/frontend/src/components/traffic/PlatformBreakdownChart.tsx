@@ -24,6 +24,8 @@ const PLATFORM_COLORS: Record<string, string> = {
   google: '#2563EB',    // blue
   instagram: '#EC4899', // pink
   email: '#10B981',     // green
+  telegram: '#0EA5E9',  // sky blue
+  manager: '#14B8A6',   // teal
   other: '#6B7280',     // gray
 }
 
@@ -38,6 +40,8 @@ const formatPlatformName = (platform: string): string => {
     google: 'Google',
     instagram: 'Instagram',
     email: 'Email',
+    telegram: 'Telegram',
+    manager: 'Manager',
   }
   return names[platform.toLowerCase()] || platform.charAt(0).toUpperCase() + platform.slice(1)
 }
@@ -48,7 +52,7 @@ interface TooltipPayload {
   platform: string
   orders: number
   revenue: number
-  percent?: number
+  pct?: number
 }
 
 function CustomTooltip({
@@ -80,10 +84,10 @@ function CustomTooltip({
           <span style={{ fontWeight: 500 }}>{formatCurrency(data.revenue)}</span>
         </div>
       )}
-      {data.percent !== undefined && (
+      {data.pct !== undefined && (
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', paddingTop: '4px', borderTop: `1px solid ${CHART_THEME.border}` }}>
           <span style={{ color: CHART_THEME.muted }}>Share:</span>
-          <span style={{ fontWeight: 600, color: getPlatformColor(data.platform) }}>{data.percent.toFixed(1)}%</span>
+          <span style={{ fontWeight: 600, color: getPlatformColor(data.platform) }}>{data.pct.toFixed(1)}%</span>
         </div>
       )}
     </div>
@@ -110,7 +114,7 @@ export const PlatformBreakdownChart = memo(function PlatformBreakdownChart() {
         orders: p.orders,
         revenue: p.revenue,
         color: getPlatformColor(platform),
-        percent: totalRevenue > 0 ? (p.revenue / totalRevenue) * 100 : 0,
+        pct: totalRevenue > 0 ? (p.revenue / totalRevenue) * 100 : 0,
       }))
       .sort((a, b) => b.revenue - a.revenue)
   }, [data])
