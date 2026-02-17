@@ -16,11 +16,6 @@ export const TrafficPage = memo(function TrafficPage() {
           <TrafficSummaryCards />
         </section>
 
-        {/* ROAS Calculator */}
-        <section aria-label="ROAS calculator">
-          <ROASSection />
-        </section>
-
         {/* Trend Chart - Full Width */}
         <section aria-label="Traffic trend">
           <TrafficTrendChart />
@@ -34,6 +29,11 @@ export const TrafficPage = memo(function TrafficPage() {
         {/* Order Details Table */}
         <section aria-label="Traffic transactions">
           <TrafficTransactionsTable />
+        </section>
+
+        {/* ROAS Calculator */}
+        <section aria-label="ROAS calculator">
+          <ROASSection />
         </section>
       </div>
     </main>
