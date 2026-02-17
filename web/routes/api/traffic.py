@@ -98,7 +98,7 @@ async def get_traffic_transactions(
         raise HTTPException(status_code=400, detail=str(e))
 
     if traffic_type and traffic_type not in (
-        "paid_confirmed", "paid_likely", "organic", "pixel_only", "unknown",
+        "paid_confirmed", "paid_likely", "manager", "organic", "pixel_only", "unknown",
     ):
         raise HTTPException(status_code=400, detail=f"Invalid traffic_type: {traffic_type}")
 
@@ -160,6 +160,36 @@ async def refresh_traffic_data(
     except Exception as e:
         logger.error(f"Traffic refresh failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Refresh failed: {e}")
+
+
+@router.post("/traffic/reclassify")
+@limiter.limit("2/minute")
+async def reclassify_traffic(
+    request: Request,
+    user: dict = Depends(require_admin),
+):
+    """Re-parse ALL UTM data with current classification rules (admin only).
+
+    Use after classification rule changes. Deletes silver_order_utm
+    and re-parses everything from scratch.
+    """
+    store = await get_store()
+
+    try:
+        async with store.connection() as conn:
+            conn.execute("DELETE FROM silver_order_utm")
+
+        utm_count = await store.refresh_utm_silver_layer()
+        traffic_rows = await store.refresh_traffic_gold_layer()
+
+        return {
+            "success": True,
+            "utm_records": utm_count,
+            "traffic_rows": traffic_rows,
+        }
+    except Exception as e:
+        logger.error(f"Traffic reclassify failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Reclassify failed: {e}")
 
 
 _backfill_status: dict = {"running": False, "result": None}
@@ -265,9 +295,6 @@ async def _run_backfill(days: int):
                 "SELECT COUNT(*) FROM orders WHERE manager_comment IS NULL"
             ).fetchone()[0]
         logger.info(f"UTM backfill: {remaining_null} orders still have NULL mc (was {null_count})")
-
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM silver_order_utm")
 
         utm_count = await store.refresh_utm_silver_layer()
         traffic_rows = await store.refresh_traffic_gold_layer()

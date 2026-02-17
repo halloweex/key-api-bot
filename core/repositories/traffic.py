@@ -46,102 +46,78 @@ class TrafficMixin:
             Tuple of (traffic_type, platform)
 
         Traffic types:
-            - paid_confirmed: Strong evidence of paid ad (fbc, fbclid+medium=paid, campaign patterns)
-            - paid_likely: Medium confidence paid (utm_medium=cpc/paid but no click tracking)
+            - paid_confirmed: Strong evidence of paid ad (explicit UTM + click tracking)
+            - paid_likely: Medium confidence paid (cookie/fbclid only, no explicit UTM)
+            - manager: Sales manager driven (campaign starts with sales_manager_)
             - organic: Explicit organic/social medium with no ad indicators
             - pixel_only: Only pixel present, no UTM parameters
             - unknown: No tracking data at all
+
+        Priority: explicit UTM params > cookies/pixels (cookies persist 90 days
+        and don't indicate current session intent).
         """
         source = (utm_data.get('utm_source') or '').lower()
         medium = (utm_data.get('utm_medium') or '').lower()
         campaign = (utm_data.get('utm_campaign') or '').lower()
         content = (utm_data.get('utm_content') or '').lower()
 
-        has_fbc = '_fbc' in utm_data  # Facebook click tracking = ad click
+        has_fbc = '_fbc' in utm_data  # Facebook click cookie (persists 90 days)
         has_fbp = '_fbp' in utm_data  # Facebook browser pixel
         has_ttp = 'ttp' in utm_data   # TikTok pixel
         has_fbclid = 'fbclid' in utm_data
 
-        # Default values
-        platform = 'other'
-        traffic_type = 'unknown'
+        # ─── Explicit UTM rules (highest priority) ──────────────────────────────
 
-        # ─── Platform Detection ─────────────────────────────────────────────────
+        # 1. Sales manager tag (campaign starts with sales_manager_)
+        if campaign.startswith('sales_manager_'):
+            return 'manager', 'manager'
 
-        # Facebook Ads - explicit patterns
+        # 2. Email / Klaviyo (source or medium indicates email)
+        if source in ['klaviyo', 'email'] or medium in ['email', 'klaviyo']:
+            return 'organic', 'email'
+
+        # 3. Facebook Ads - explicit fbads patterns
         if (source.startswith('fbads') or medium.startswith('fbads') or
-            campaign.startswith('fbads') or 'facebook_ua' in content):
-            platform = 'facebook'
-            traffic_type = 'paid_confirmed'
+                campaign.startswith('fbads') or 'facebook_ua' in content):
+            return 'paid_confirmed', 'facebook'
 
-        # Facebook Ads - fbc (click tracking) indicates ad click
-        elif has_fbc:
-            platform = 'facebook'
-            traffic_type = 'paid_confirmed'
+        # 4. Facebook Ads - explicit UTM (source=facebook, medium=paid/cpc)
+        if source == 'facebook' and medium in ['paid', 'cpc']:
+            return 'paid_confirmed', 'facebook'
 
-        # Facebook paid via medium
-        elif has_fbclid and medium in ['paid', 'cpc']:
-            platform = 'facebook'
-            traffic_type = 'paid_confirmed'
+        # 5. TikTok Ads - campaign patterns (TOF/MOF/BOF = funnel stages)
+        if campaign and any(x in campaign for x in ['tof', 'mof', 'bof', '| ss |', '| retarget', '| dynamic']):
+            return 'paid_confirmed', 'tiktok'
 
-        # TikTok Ads - explicit campaign patterns (TOF/MOF/BOF = funnel stages)
-        elif any(x in campaign for x in ['tof', 'mof', 'bof', '| ss |', '| retarget', '| dynamic']):
-            platform = 'tiktok'
-            traffic_type = 'paid_confirmed'
+        # 6. TikTok Ads - source + medium
+        if source == 'tiktok' and medium in ['paid', 'cpc']:
+            return 'paid_confirmed', 'tiktok'
 
-        # TikTok Ads - source + medium
-        elif source == 'tiktok' and medium in ['paid', 'cpc']:
-            platform = 'tiktok'
-            traffic_type = 'paid_confirmed'
+        # 7. Google Ads (source=google, medium=cpc OR campaign is numeric)
+        if source == 'google' and (medium == 'cpc' or (campaign and campaign.isdigit())):
+            return 'paid_confirmed', 'google'
 
-        # Google Ads
-        elif source == 'google' and (medium == 'cpc' or campaign.isdigit()):
-            platform = 'google'
-            traffic_type = 'paid_confirmed'
+        # 8. Google Shopping organic (source=google, medium=product_sync)
+        if source == 'google' and medium == 'product_sync':
+            return 'organic', 'google'
 
-        # Instagram Organic (social medium)
-        elif source in ['ig', 'instagram'] and medium in ['social', 'organic', '']:
-            platform = 'instagram'
-            traffic_type = 'organic'
+        # 9. Instagram organic (source=ig/instagram)
+        if source in ['ig', 'instagram']:
+            return 'organic', 'instagram'
 
-        # Facebook Organic (social medium)
-        elif source == 'facebook' and medium in ['social', 'organic']:
-            platform = 'facebook'
-            traffic_type = 'organic'
+        # 10. Facebook organic (source=facebook, medium=social/organic)
+        if source == 'facebook' and medium in ['social', 'organic']:
+            return 'organic', 'facebook'
 
-        # TikTok Organic
-        elif source == 'tiktok' and medium in ['social', 'organic', '']:
-            platform = 'tiktok'
-            traffic_type = 'organic'
+        # 11. TikTok organic (source=tiktok, medium not paid/cpc)
+        if source == 'tiktok' and medium in ['social', 'organic', '']:
+            return 'organic', 'tiktok'
 
-        # Email (Klaviyo)
-        elif source in ['klaviyo', 'email'] or medium in ['email', 'klaviyo']:
-            platform = 'email'
-            traffic_type = 'organic'  # Email is not "paid ads"
+        # ─── Generic UTM fallback (has source/medium but no known pattern) ──────
 
-        # Pixel only - no UTM but has tracking pixel
-        elif not source and not medium:
-            if has_fbp or has_fbc:
-                platform = 'facebook'
-                traffic_type = 'pixel_only'
-            elif has_ttp:
-                platform = 'tiktok'
-                traffic_type = 'pixel_only'
-            else:
-                platform = 'other'
-                traffic_type = 'unknown'
-
-        # Has some UTM but doesn't match known patterns
-        elif source or medium:
-            # Likely paid if medium indicates payment
-            if medium in ['cpc', 'paid', 'ppc']:
-                traffic_type = 'paid_likely'
-            elif medium in ['social', 'organic', 'referral']:
-                traffic_type = 'organic'
-            else:
-                traffic_type = 'unknown'
-
-            # Try to infer platform from source
+        if source or medium:
+            # Infer platform from source
+            platform = 'other'
             if 'facebook' in source or 'fb' in source:
                 platform = 'facebook'
             elif 'tiktok' in source or 'tt' in source:
@@ -151,7 +127,31 @@ class TrafficMixin:
             elif 'insta' in source or 'ig' in source:
                 platform = 'instagram'
 
-        return traffic_type, platform
+            if medium in ['cpc', 'paid', 'ppc']:
+                return 'paid_likely', platform
+            elif medium in ['social', 'organic', 'referral']:
+                return 'organic', platform
+            else:
+                return 'unknown', platform
+
+        # ─── Cookie/pixel fallback (no explicit UTM matched above) ──────────────
+
+        # 12. _fbc only (no UTM) → paid_likely (cookie persists 90 days, not confirmed)
+        if has_fbc:
+            return 'paid_likely', 'facebook'
+
+        # 13. fbclid only → paid_likely (URL click ID, no UTM params)
+        if has_fbclid:
+            return 'paid_likely', 'facebook'
+
+        # 14. Pixel-only — passive tracking
+        if has_fbp:
+            return 'pixel_only', 'facebook'
+        if has_ttp:
+            return 'pixel_only', 'tiktok'
+
+        # 15. No tracking data at all
+        return 'unknown', 'other'
 
     async def refresh_utm_silver_layer(self) -> int:
         """Parse UTM data from orders and populate silver_order_utm table.
@@ -239,8 +239,12 @@ class TrafficMixin:
                     s.order_date AS date,
                     s.source_id,
                     s.sales_type,
-                    COALESCE(u.platform, 'other') AS platform,
-                    COALESCE(u.traffic_type, 'unknown') AS traffic_type,
+                    COALESCE(u.platform,
+                        CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END
+                    ) AS platform,
+                    COALESCE(u.traffic_type,
+                        CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
+                    ) AS traffic_type,
                     COUNT(DISTINCT s.id) AS orders_count,
                     COALESCE(SUM(s.grand_total), 0) AS revenue
                 FROM silver_orders s
@@ -326,16 +330,13 @@ class TrafficMixin:
         total_revenue = sum(p['revenue'] for p in platforms.values())
 
         # Paid vs organic summary
-        paid_orders = sum(
-            traffic_types.get(t, {}).get('orders', 0)
-            for t in ['paid_confirmed', 'paid_likely']
-        )
-        paid_revenue = sum(
-            traffic_types.get(t, {}).get('revenue', 0)
-            for t in ['paid_confirmed', 'paid_likely']
-        )
+        paid_confirmed = traffic_types.get('paid_confirmed', {'orders': 0, 'revenue': 0.0})
+        paid_likely = traffic_types.get('paid_likely', {'orders': 0, 'revenue': 0.0})
+        paid_orders = paid_confirmed.get('orders', 0) + paid_likely.get('orders', 0)
+        paid_revenue = paid_confirmed.get('revenue', 0) + paid_likely.get('revenue', 0)
         organic_orders = traffic_types.get('organic', {}).get('orders', 0)
         organic_revenue = traffic_types.get('organic', {}).get('revenue', 0)
+        manager_data = traffic_types.get('manager', {'orders': 0, 'revenue': 0.0})
 
         return {
             'period': {
@@ -348,7 +349,10 @@ class TrafficMixin:
             },
             'summary': {
                 'paid': {'orders': paid_orders, 'revenue': round(paid_revenue, 2)},
+                'paid_confirmed': {'orders': paid_confirmed.get('orders', 0), 'revenue': round(paid_confirmed.get('revenue', 0), 2)},
+                'paid_likely': {'orders': paid_likely.get('orders', 0), 'revenue': round(paid_likely.get('revenue', 0), 2)},
                 'organic': {'orders': organic_orders, 'revenue': round(organic_revenue, 2)},
+                'manager': {'orders': manager_data.get('orders', 0), 'revenue': round(manager_data.get('revenue', 0), 2)},
                 'pixel_only': traffic_types.get('pixel_only', {'orders': 0, 'revenue': 0.0}),
                 'unknown': traffic_types.get('unknown', {'orders': 0, 'revenue': 0.0}),
             },
@@ -473,7 +477,10 @@ class TrafficMixin:
             params.append(sales_type)
 
         if traffic_type:
-            filters.append("COALESCE(u.traffic_type, 'unknown') = ?")
+            filters.append("""
+                COALESCE(u.traffic_type,
+                    CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
+                ) = ?""")
             params.append(traffic_type)
 
         where_clause = " AND ".join(filters)
@@ -492,8 +499,12 @@ class TrafficMixin:
         data_query = f"""
             SELECT
                 s.id, s.order_date, s.grand_total, s.source_name,
-                COALESCE(u.traffic_type, 'unknown') AS traffic_type,
-                COALESCE(u.platform, 'other') AS platform,
+                COALESCE(u.traffic_type,
+                    CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
+                ) AS traffic_type,
+                COALESCE(u.platform,
+                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END
+                ) AS platform,
                 u.utm_source, u.utm_medium, u.utm_campaign, u.utm_content,
                 u.fbp, u.fbc, u.ttp, u.fbclid
             FROM silver_orders s
