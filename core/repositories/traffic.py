@@ -452,6 +452,7 @@ class TrafficMixin:
         sales_type: str = "all",
         source_id: Optional[int] = None,
         traffic_type: Optional[str] = None,
+        platform: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> Dict[str, Any]:
@@ -482,6 +483,13 @@ class TrafficMixin:
                     CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
                 ) = ?""")
             params.append(traffic_type)
+
+        if platform:
+            filters.append("""
+                COALESCE(u.platform,
+                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END
+                ) = ?""")
+            params.append(platform)
 
         where_clause = " AND ".join(filters)
 

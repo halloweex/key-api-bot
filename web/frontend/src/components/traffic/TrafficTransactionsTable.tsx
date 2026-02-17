@@ -26,6 +26,18 @@ const trafficBadgeConfig: Record<string, { bg: string; text: string; label: stri
   unknown: { bg: 'bg-purple-100', text: 'text-purple-700', label: 'Unknown' },
 }
 
+const PLATFORMS = [
+  { value: '', label: 'All platforms' },
+  { value: 'facebook', label: 'Facebook' },
+  { value: 'instagram', label: 'Instagram' },
+  { value: 'google', label: 'Google' },
+  { value: 'tiktok', label: 'TikTok' },
+  { value: 'email', label: 'Email' },
+  { value: 'telegram', label: 'Telegram' },
+  { value: 'manager', label: 'Manager' },
+  { value: 'other', label: 'Other' },
+] as const
+
 const PAGE_SIZE = 50
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
@@ -74,12 +86,14 @@ const EvidencePills = memo(function EvidencePills({ evidence }: { evidence: Traf
   )
 })
 
-const TrafficTypeFilter = memo(function TrafficTypeFilter({
+const FilterSelect = memo(function FilterSelect({
   value,
   onChange,
+  options,
 }: {
   value: string
   onChange: (v: string) => void
+  options: readonly { value: string; label: string }[]
 }) {
   return (
     <select
@@ -89,7 +103,7 @@ const TrafficTypeFilter = memo(function TrafficTypeFilter({
                  focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300
                  cursor-pointer hover:border-slate-300 transition-colors"
     >
-      {TRAFFIC_TYPES.map((t) => (
+      {options.map((t) => (
         <option key={t.value} value={t.value}>{t.label}</option>
       ))}
     </select>
@@ -100,6 +114,7 @@ const TrafficTypeFilter = memo(function TrafficTypeFilter({
 
 export const TrafficTransactionsTable = memo(function TrafficTransactionsTable() {
   const [trafficFilter, setTrafficFilter] = useState('')
+  const [platformFilter, setPlatformFilter] = useState('')
   const [offset, setOffset] = useState(0)
   // Accumulate loaded pages; keyed by the filter context to reset on change
   const pagesRef = useRef<TrafficTransaction[]>([])
@@ -107,9 +122,10 @@ export const TrafficTransactionsTable = memo(function TrafficTransactionsTable()
 
   const queryParams = useQueryParams()
   const filterValue = trafficFilter || null
+  const platformValue = platformFilter || null
 
   // Build a stable key from all filters that should reset pagination
-  const resetKey = `${queryParams}|${trafficFilter}`
+  const resetKey = `${queryParams}|${trafficFilter}|${platformFilter}`
 
   // Reset accumulated pages when any filter changes
   if (resetKey !== prevKeyRef.current) {
@@ -121,7 +137,7 @@ export const TrafficTransactionsTable = memo(function TrafficTransactionsTable()
     }
   }
 
-  const { data, isLoading, error, refetch } = useTrafficTransactions(filterValue, PAGE_SIZE, offset)
+  const { data, isLoading, error, refetch } = useTrafficTransactions(filterValue, platformValue, PAGE_SIZE, offset)
 
   // Build the full visible list from accumulated pages + current data
   const allTransactions = useMemo(() => {
@@ -143,6 +159,11 @@ export const TrafficTransactionsTable = memo(function TrafficTransactionsTable()
     setOffset(0)
   }, [])
 
+  const handlePlatformChange = useCallback((value: string) => {
+    setPlatformFilter(value)
+    setOffset(0)
+  }, [])
+
   const handleLoadMore = useCallback(() => {
     setOffset(prev => prev + PAGE_SIZE)
   }, [])
@@ -155,7 +176,10 @@ export const TrafficTransactionsTable = memo(function TrafficTransactionsTable()
     <ChartContainer
       title="Order Details"
       titleExtra={
-        <TrafficTypeFilter value={trafficFilter} onChange={handleFilterChange} />
+        <div className="flex items-center gap-2">
+          <FilterSelect value={trafficFilter} onChange={handleFilterChange} options={TRAFFIC_TYPES} />
+          <FilterSelect value={platformFilter} onChange={handlePlatformChange} options={PLATFORMS} />
+        </div>
       }
       isLoading={isLoading && offset === 0}
       error={error as Error | null}

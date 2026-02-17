@@ -86,6 +86,7 @@ async def get_traffic_transactions(
     source_id: Optional[int] = Query(None),
     sales_type: Optional[str] = Query("retail"),
     traffic_type: Optional[str] = Query(None),
+    platform: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -102,6 +103,10 @@ async def get_traffic_transactions(
     ):
         raise HTTPException(status_code=400, detail=f"Invalid traffic_type: {traffic_type}")
 
+    valid_platforms = ("facebook", "instagram", "google", "tiktok", "email", "telegram", "manager", "other")
+    if platform and platform not in valid_platforms:
+        raise HTTPException(status_code=400, detail=f"Invalid platform: {platform}")
+
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
@@ -109,7 +114,8 @@ async def get_traffic_transactions(
     store = await get_store()
     return await store.get_traffic_transactions(
         start_date=start_dt, end_date=end_dt, sales_type=sales_type,
-        source_id=source_id, traffic_type=traffic_type, limit=limit, offset=offset,
+        source_id=source_id, traffic_type=traffic_type, platform=platform,
+        limit=limit, offset=offset,
     )
 
 

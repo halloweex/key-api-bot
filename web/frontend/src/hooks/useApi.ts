@@ -519,17 +519,18 @@ export function useTrafficTrend() {
   })
 }
 
-export function useTrafficTransactions(trafficType: string | null, limit: number, offset: number) {
+export function useTrafficTransactions(trafficType: string | null, platform: string | null, limit: number, offset: number) {
   const queryParams = useQueryParams()
 
   const fullParams = new URLSearchParams(queryParams)
   if (trafficType) fullParams.set('traffic_type', trafficType)
+  if (platform) fullParams.set('platform', platform)
   fullParams.set('limit', String(limit))
   fullParams.set('offset', String(offset))
   const paramsStr = fullParams.toString()
 
   return useQuery<TrafficTransactionsResponse>({
-    queryKey: [...queryKeys.trafficTransactions(queryParams), trafficType, limit, offset],
+    queryKey: [...queryKeys.trafficTransactions(queryParams), trafficType, platform, limit, offset],
     queryFn: () => api.getTrafficTransactions(paramsStr),
     staleTime: CACHE_TTL.STANDARD,
   })
