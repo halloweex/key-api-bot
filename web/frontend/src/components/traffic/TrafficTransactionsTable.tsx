@@ -211,6 +211,9 @@ export const TrafficTransactionsTable = memo(function TrafficTransactionsTable()
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
                 Type
               </th>
+              <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide hidden md:table-cell">
+                Campaign
+              </th>
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide hidden lg:table-cell">
                 Evidence
               </th>
@@ -240,6 +243,11 @@ export const TrafficTransactionsTable = memo(function TrafficTransactionsTable()
                 </td>
                 <td className="py-3 px-4">
                   <TrafficBadge type={tx.traffic_type} />
+                </td>
+                <td className="py-3 px-4 hidden md:table-cell">
+                  <span className="text-xs text-slate-500 max-w-[200px] truncate block" title={tx.evidence.find(e => e.field === 'utm_campaign')?.value}>
+                    {tx.evidence.find(e => e.field === 'utm_campaign')?.value || '--'}
+                  </span>
                 </td>
                 <td className="py-3 px-4 hidden lg:table-cell">
                   <EvidencePills evidence={tx.evidence} />
