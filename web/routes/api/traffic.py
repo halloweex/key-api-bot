@@ -189,9 +189,10 @@ async def _run_backfill(days: int):
         logger.info(f"UTM backfill: {null_count}/{total} orders missing manager_comment")
 
         final_end = _dt.now(tz) + timedelta(days=1)
-        chunk_days = 90
+        chunk_days = 30  # Smaller chunks to stay well within pagination limit
         current_start = _dt.now(tz) - timedelta(days=days)
-        updated_total = 0
+        api_fetched_total = 0
+        db_updated_total = 0
         chunks_processed = 0
 
         while current_start < final_end:
@@ -216,29 +217,54 @@ async def _run_backfill(days: int):
                 current_start = current_end
                 continue
 
+            api_fetched_total += len(orders_by_id)
+            chunk_updated = 0
+
             if orders_by_id:
                 async with store.connection() as conn:
-                    conn.execute("BEGIN TRANSACTION")
-                    try:
-                        for order_id, comment in orders_by_id.items():
-                            conn.execute(
-                                "UPDATE orders SET manager_comment = ? WHERE id = ? AND manager_comment IS NULL",
-                                [comment, order_id]
-                            )
-                        conn.execute("COMMIT")
-                        updated_total += len(orders_by_id)
-                    except Exception as e:
-                        conn.execute("ROLLBACK")
-                        logger.error(f"UTM backfill DB update failed: {e}")
+                    null_before = conn.execute(
+                        "SELECT COUNT(*) FROM orders WHERE manager_comment IS NULL"
+                    ).fetchone()[0]
+                    for order_id, comment in orders_by_id.items():
+                        conn.execute(
+                            "UPDATE orders SET manager_comment = ? "
+                            "WHERE id = ? AND manager_comment IS NULL",
+                            [comment, order_id],
+                        )
+                    null_after = conn.execute(
+                        "SELECT COUNT(*) FROM orders WHERE manager_comment IS NULL"
+                    ).fetchone()[0]
+                    conn.execute("CHECKPOINT")
+                    chunk_updated = null_before - null_after
+                    db_updated_total += chunk_updated
+
+            logger.info(
+                f"UTM backfill chunk {chunks_processed} ({start_str} to {end_str}): "
+                f"api={len(orders_by_id)}, db_changed={chunk_updated}"
+            )
 
             _backfill_status["result"] = {
                 "status": "in_progress",
                 "chunks_processed": chunks_processed,
-                "orders_updated": updated_total,
+                "api_fetched": api_fetched_total,
+                "db_updated": db_updated_total,
             }
             current_start = current_end
+            # Pause between chunks to avoid tripping the circuit breaker
+            await asyncio.sleep(3)
 
-        logger.info(f"UTM backfill: updated {updated_total} orders across {chunks_processed} chunks")
+        logger.info(f"UTM backfill: api_fetched={api_fetched_total}, db_updated={db_updated_total} across {chunks_processed} chunks")
+
+        # Force final checkpoint before UTM refresh
+        async with store.connection() as conn:
+            conn.execute("CHECKPOINT")
+
+        # Verify the update worked
+        async with store.connection() as conn:
+            remaining_null = conn.execute(
+                "SELECT COUNT(*) FROM orders WHERE manager_comment IS NULL"
+            ).fetchone()[0]
+        logger.info(f"UTM backfill: {remaining_null} orders still have NULL mc (was {null_count})")
 
         async with store.connection() as conn:
             conn.execute("DELETE FROM silver_order_utm")
@@ -251,7 +277,9 @@ async def _run_backfill(days: int):
         _backfill_status.update(running=False, result={
             "status": "success",
             "orders_missing_before": null_count,
-            "orders_updated": updated_total,
+            "orders_remaining_null": remaining_null,
+            "api_fetched": api_fetched_total,
+            "db_updated": db_updated_total,
             "chunks_processed": chunks_processed,
             "utm_records_parsed": utm_count,
             "traffic_gold_rows": traffic_rows,
