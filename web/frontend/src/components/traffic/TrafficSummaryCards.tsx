@@ -156,18 +156,17 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
 
       {/* Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
-      <div className="cursor-pointer" onClick={() => setShowPaidBreakdown(!showPaidBreakdown)}>
-        <StatCard
-          label="Paid Ads"
-          value={summary?.paid?.revenue ?? 0}
-          formatter={formatCurrency}
-          icon={<AdsIcon />}
-          variant="blue"
-          subtitle={`${formatNumber(summary?.paid?.orders ?? 0)} orders`}
-          ariaLabel={`Paid ads revenue: ${formatCurrency(summary?.paid?.revenue ?? 0)}`}
-          clickable={!showPaidBreakdown}
-        />
-      </div>
+      <StatCard
+        label="Paid Ads"
+        value={summary?.paid?.revenue ?? 0}
+        formatter={formatCurrency}
+        icon={<AdsIcon />}
+        variant="blue"
+        subtitle={`${formatNumber(summary?.paid?.orders ?? 0)} orders`}
+        ariaLabel={`Paid ads revenue: ${formatCurrency(summary?.paid?.revenue ?? 0)}`}
+        clickable={!showPaidBreakdown}
+        onClick={() => setShowPaidBreakdown(!showPaidBreakdown)}
+      />
       <StatCard
         label="Organic"
         value={summary?.organic?.revenue ?? 0}

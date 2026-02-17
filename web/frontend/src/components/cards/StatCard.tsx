@@ -28,6 +28,8 @@ export interface StatCardProps {
   ariaLabel?: string
   /** Show clickable indicator */
   clickable?: boolean
+  /** Optional click handler */
+  onClick?: () => void
 }
 
 // ─── Styling ─────────────────────────────────────────────────────────────────
@@ -100,12 +102,19 @@ export const StatCard = memo(function StatCard({
   animationDuration = 500,
   ariaLabel,
   clickable = false,
+  onClick,
 }: StatCardProps) {
   const trendKey = trend === 1 ? 'up' : trend === -1 ? 'down' : 'neutral'
   const showTrend = trend !== undefined && trend !== 0 && trendValue !== undefined
 
   return (
-    <div className={`rounded-xl p-4 border ${cardBgStyles[variant]} transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 ${clickable ? 'relative' : ''}`}>
+    <div
+      className={`rounded-xl p-4 border ${cardBgStyles[variant]} transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 ${clickable ? 'relative cursor-pointer' : ''}`}
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } } : undefined}
+    >
         {/* Clickable indicator */}
         {clickable && (
           <div className="absolute top-2 right-2 flex items-center gap-1 group/hint cursor-pointer">
