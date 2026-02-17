@@ -1,4 +1,5 @@
 """Traffic analytics, trend, transactions, refresh endpoints."""
+import asyncio
 import logging
 from datetime import datetime as _dt, timedelta
 from zoneinfo import ZoneInfo
@@ -161,97 +162,127 @@ async def refresh_traffic_data(
         raise HTTPException(status_code=500, detail=f"Refresh failed: {e}")
 
 
-@router.post("/traffic/backfill-utm")
-@limiter.limit("1/minute")
-async def backfill_utm_data(
-    request: Request,
-    days: int = Query(730, ge=30, le=1000),
-):
-    """Backfill manager_comment (UTM data) from KeyCRM API for orders missing it.
+_backfill_status: dict = {"running": False, "result": None}
 
-    This re-fetches orders from the API and updates the manager_comment column,
-    then re-parses UTM data and refreshes traffic layers.
-    """
+
+async def _run_backfill(days: int):
+    """Background task: backfill manager_comment from KeyCRM API."""
     from core.keycrm import get_async_client
 
     store = await get_store()
     client = await get_async_client()
     tz = ZoneInfo("Europe/Kyiv")
 
-    # Count orders with NULL manager_comment
-    async with store.connection() as conn:
-        null_count = conn.execute(
-            "SELECT COUNT(*) FROM orders WHERE manager_comment IS NULL"
-        ).fetchone()[0]
-        total = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+    try:
+        async with store.connection() as conn:
+            null_count = conn.execute(
+                "SELECT COUNT(*) FROM orders WHERE manager_comment IS NULL"
+            ).fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
 
-    if null_count == 0:
-        return {"status": "skip", "message": "All orders already have manager_comment"}
+        if null_count == 0:
+            _backfill_status.update(running=False, result={
+                "status": "skip", "message": "All orders already have manager_comment",
+            })
+            return
 
-    logger.info(f"UTM backfill: {null_count}/{total} orders missing manager_comment")
+        logger.info(f"UTM backfill: {null_count}/{total} orders missing manager_comment")
 
-    # Fetch orders in chunks and update manager_comment
-    final_end = _dt.now(tz) + timedelta(days=1)
-    chunk_days = 90
-    current_start = _dt.now(tz) - timedelta(days=days)
-    updated_total = 0
-    chunks_processed = 0
+        final_end = _dt.now(tz) + timedelta(days=1)
+        chunk_days = 90
+        current_start = _dt.now(tz) - timedelta(days=days)
+        updated_total = 0
+        chunks_processed = 0
 
-    while current_start < final_end:
-        current_end = min(current_start + timedelta(days=chunk_days), final_end)
-        start_str = current_start.strftime('%Y-%m-%d')
-        end_str = current_end.strftime('%Y-%m-%d')
-        chunks_processed += 1
+        while current_start < final_end:
+            current_end = min(current_start + timedelta(days=chunk_days), final_end)
+            start_str = current_start.strftime('%Y-%m-%d')
+            end_str = current_end.strftime('%Y-%m-%d')
+            chunks_processed += 1
 
-        orders_by_id = {}
-        try:
-            params = {
-                "filter[created_between]": f"{start_str}, {end_str}",
-                "limit": 50,
+            orders_by_id = {}
+            try:
+                params = {
+                    "filter[created_between]": f"{start_str}, {end_str}",
+                    "limit": 50,
+                }
+                async for batch in client.paginate("order", params=params, page_size=50):
+                    for order in batch:
+                        mc = order.get("manager_comment")
+                        if mc:
+                            orders_by_id[order["id"]] = mc
+            except Exception as e:
+                logger.warning(f"UTM backfill chunk {start_str}-{end_str} failed: {e}")
+                current_start = current_end
+                continue
+
+            if orders_by_id:
+                async with store.connection() as conn:
+                    conn.execute("BEGIN TRANSACTION")
+                    try:
+                        for order_id, comment in orders_by_id.items():
+                            conn.execute(
+                                "UPDATE orders SET manager_comment = ? WHERE id = ? AND manager_comment IS NULL",
+                                [comment, order_id]
+                            )
+                        conn.execute("COMMIT")
+                        updated_total += len(orders_by_id)
+                    except Exception as e:
+                        conn.execute("ROLLBACK")
+                        logger.error(f"UTM backfill DB update failed: {e}")
+
+            _backfill_status["result"] = {
+                "status": "in_progress",
+                "chunks_processed": chunks_processed,
+                "orders_updated": updated_total,
             }
-            async for batch in client.paginate("order", params=params, page_size=50):
-                for order in batch:
-                    mc = order.get("manager_comment")
-                    if mc:
-                        orders_by_id[order["id"]] = mc
-        except Exception as e:
-            logger.warning(f"UTM backfill chunk {start_str}-{end_str} failed: {e}")
             current_start = current_end
-            continue
 
-        if orders_by_id:
-            async with store.connection() as conn:
-                conn.execute("BEGIN TRANSACTION")
-                try:
-                    for order_id, comment in orders_by_id.items():
-                        conn.execute(
-                            "UPDATE orders SET manager_comment = ? WHERE id = ? AND manager_comment IS NULL",
-                            [comment, order_id]
-                        )
-                    conn.execute("COMMIT")
-                    updated_total += len(orders_by_id)
-                except Exception as e:
-                    conn.execute("ROLLBACK")
-                    logger.error(f"UTM backfill DB update failed: {e}")
+        logger.info(f"UTM backfill: updated {updated_total} orders across {chunks_processed} chunks")
 
-        current_start = current_end
+        async with store.connection() as conn:
+            conn.execute("DELETE FROM silver_order_utm")
 
-    logger.info(f"UTM backfill: updated {updated_total} orders across {chunks_processed} chunks")
+        utm_count = await store.refresh_utm_silver_layer()
+        traffic_rows = await store.refresh_traffic_gold_layer()
 
-    # Clear and re-parse silver UTM layer
-    async with store.connection() as conn:
-        conn.execute("DELETE FROM silver_order_utm")
+        logger.info(f"UTM backfill complete: {utm_count} UTM records, {traffic_rows} traffic rows")
 
-    utm_count = await store.refresh_utm_silver_layer()
-    traffic_rows = await store.refresh_traffic_gold_layer()
+        _backfill_status.update(running=False, result={
+            "status": "success",
+            "orders_missing_before": null_count,
+            "orders_updated": updated_total,
+            "chunks_processed": chunks_processed,
+            "utm_records_parsed": utm_count,
+            "traffic_gold_rows": traffic_rows,
+        })
+    except Exception as e:
+        logger.error(f"UTM backfill failed: {e}", exc_info=True)
+        _backfill_status.update(running=False, result={
+            "status": "error", "error": str(e),
+        })
 
-    logger.info(f"UTM backfill complete: {utm_count} UTM records, {traffic_rows} traffic rows")
 
+@router.post("/traffic/backfill-utm")
+@limiter.limit("1/minute")
+async def backfill_utm_data(
+    request: Request,
+    days: int = Query(730, ge=30, le=1000),
+):
+    """Start UTM backfill as background task. Check status via GET."""
+    if _backfill_status["running"]:
+        return {"status": "already_running", "progress": _backfill_status["result"]}
+
+    _backfill_status.update(running=True, result={"status": "started"})
+    asyncio.create_task(_run_backfill(days))
+    return {"status": "started", "message": "Backfill started in background. GET /traffic/backfill-utm/status to check."}
+
+
+@router.get("/traffic/backfill-utm/status")
+@limiter.limit("30/minute")
+async def backfill_utm_status(request: Request):
+    """Check status of UTM backfill background task."""
     return {
-        "status": "success",
-        "orders_missing_before": null_count,
-        "orders_updated": updated_total,
-        "chunks_processed": chunks_processed,
-        "utm_records_parsed": utm_count,
-        "traffic_gold_rows": traffic_rows,
+        "running": _backfill_status["running"],
+        "result": _backfill_status["result"],
     }
