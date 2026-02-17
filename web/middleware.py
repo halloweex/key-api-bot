@@ -38,6 +38,7 @@ SLOW_ENDPOINTS = {
     "/api/revenue/forecast/train",
     "/api/revenue/forecast/evaluate",
     "/api/revenue/forecast/tune",
+    "/api/traffic/reclassify",
 }
 
 
