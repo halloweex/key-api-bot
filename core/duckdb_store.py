@@ -989,6 +989,26 @@ class DuckDBStore(
         except Exception as e:
             logger.error(f"Migration error (expenses FK removal): {e}")
 
+        # Migration: Add platform column to manual_expenses (for ad spend tracking)
+        try:
+            self._connection.execute(
+                "ALTER TABLE manual_expenses ADD COLUMN IF NOT EXISTS platform VARCHAR"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_manual_expenses_platform ON manual_expenses(platform)"
+            )
+            # Backfill existing marketing rows
+            self._connection.execute("""
+                UPDATE manual_expenses SET platform = CASE
+                    WHEN LOWER(expense_type) LIKE '%facebook%' OR LOWER(expense_type) LIKE '%fb %' THEN 'facebook'
+                    WHEN LOWER(expense_type) LIKE '%tiktok%' THEN 'tiktok'
+                    WHEN LOWER(expense_type) LIKE '%google%' THEN 'google'
+                END WHERE category = 'marketing' AND platform IS NULL
+            """)
+            logger.debug("Migration: platform column added/verified on manual_expenses")
+        except Exception as e:
+            logger.debug(f"Migration note (manual_expenses platform): {e}")
+
     async def _create_inventory_views(self) -> None:
         """Create Layer 3 & 4 analytics views for inventory."""
         views_sql = """

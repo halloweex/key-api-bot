@@ -1,5 +1,6 @@
 import { memo } from 'react'
 import { TrafficSummaryCards } from './TrafficSummaryCards'
+import { ROASSection } from './ROASSection'
 import { PlatformBreakdownChart } from './PlatformBreakdownChart'
 import { TrafficTrendChart } from './TrafficTrendChart'
 import { TrafficTransactionsTable } from './TrafficTransactionsTable'
@@ -13,6 +14,11 @@ export const TrafficPage = memo(function TrafficPage() {
         {/* Summary Cards */}
         <section aria-label="Traffic summary">
           <TrafficSummaryCards />
+        </section>
+
+        {/* ROAS Calculator */}
+        <section aria-label="ROAS calculator">
+          <ROASSection />
         </section>
 
         {/* Trend Chart - Full Width */}

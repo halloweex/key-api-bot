@@ -1,5 +1,7 @@
 """Expense types, expense summary, profit analysis, manual expenses endpoints."""
+from datetime import date as date_type
 from fastapi import APIRouter, Query, Request, HTTPException
+from pydantic import BaseModel, Field
 from typing import Optional
 
 from web.services import dashboard_service
@@ -8,6 +10,16 @@ from ._deps import (
     validate_period, validate_source_id, validate_sales_type,
     ValidationError,
 )
+
+
+class CreateExpenseRequest(BaseModel):
+    expense_date: str = Field(..., pattern=r'^\d{4}-\d{2}-\d{2}$')
+    category: str
+    expense_type: str
+    amount: float = Field(..., gt=0)
+    currency: str = "UAH"
+    note: Optional[str] = None
+    platform: Optional[str] = None
 
 router = APIRouter()
 
@@ -113,3 +125,40 @@ async def get_expenses(
     summary = await store.get_expenses_summary(start_date=start_date, end_date=end_date)
 
     return {"expenses": expenses, "summary": summary, "period": period, "category": category}
+
+
+@router.post("/expenses")
+@limiter.limit("30/minute")
+async def create_expense(request: Request, body: CreateExpenseRequest):
+    """Create a manual expense."""
+    from datetime import datetime
+
+    store = await get_store()
+
+    # Validate platform
+    valid_platforms = {None, "facebook", "tiktok", "google"}
+    if body.platform and body.platform not in valid_platforms:
+        raise HTTPException(status_code=400, detail=f"Invalid platform: {body.platform}")
+
+    expense_date = datetime.strptime(body.expense_date, "%Y-%m-%d").date()
+    result = await store.add_expense(
+        expense_date=expense_date,
+        category=body.category,
+        expense_type=body.expense_type,
+        amount=body.amount,
+        currency=body.currency,
+        note=body.note,
+        platform=body.platform,
+    )
+    return result
+
+
+@router.delete("/expenses/{expense_id}")
+@limiter.limit("30/minute")
+async def delete_expense(request: Request, expense_id: int):
+    """Delete a manual expense."""
+    store = await get_store()
+    deleted = await store.delete_expense(expense_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Expense not found")
+    return {"success": True, "id": expense_id}

@@ -1,5 +1,6 @@
 export { TrafficPage } from './TrafficPage'
 export { TrafficSummaryCards } from './TrafficSummaryCards'
+export { ROASSection } from './ROASSection'
 export { PlatformBreakdownChart } from './PlatformBreakdownChart'
 export { TrafficTrendChart } from './TrafficTrendChart'
 export { TrafficTransactionsTable } from './TrafficTransactionsTable'

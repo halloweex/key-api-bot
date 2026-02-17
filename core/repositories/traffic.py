@@ -577,4 +577,112 @@ class TrafficMixin:
 
         return evidence
 
+    # ─── ROAS Calculation ──────────────────────────────────────────────────────
+
+    BONUS_TIERS = [
+        (7.0, "+30%"),
+        (6.0, "+20%"),
+        (5.0, "+10%"),
+        (4.0, "Base rate"),
+        (0.0, "No bonus"),
+    ]
+
+    async def get_traffic_roas(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "all",
+    ) -> Dict[str, Any]:
+        """Calculate blended and per-platform ROAS.
+
+        Combines:
+        - Total revenue from gold_daily_revenue
+        - Paid revenue per platform from gold_daily_traffic
+        - Ad spend per platform from manual_expenses
+
+        Returns dict with blended ROAS, per-platform breakdown, and bonus tier.
+        """
+        # 1. Total revenue (for blended ROAS)
+        revenue_filters = ["date >= ?", "date <= ?"]
+        revenue_params: list = [start_date, end_date]
+        if sales_type != "all":
+            revenue_filters.append("sales_type = ?")
+            revenue_params.append(sales_type)
+        revenue_where = " AND ".join(revenue_filters)
+
+        total_rev_row = await self._fetch_one(
+            f"SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue WHERE {revenue_where}",
+            revenue_params,
+        )
+        total_revenue = float(total_rev_row[0]) if total_rev_row else 0.0
+
+        # 2. Paid revenue per platform from gold_daily_traffic
+        traffic_filters = [
+            "g.date >= ?",
+            "g.date <= ?",
+            "g.traffic_type IN ('paid_confirmed', 'paid_likely')",
+        ]
+        traffic_params: list = [start_date, end_date]
+        if sales_type != "all":
+            traffic_filters.append("g.sales_type = ?")
+            traffic_params.append(sales_type)
+        traffic_where = " AND ".join(traffic_filters)
+
+        paid_rows = await self._fetch_all(
+            f"""SELECT g.platform, SUM(g.revenue) as paid_revenue
+                FROM gold_daily_traffic g
+                WHERE {traffic_where}
+                GROUP BY g.platform""",
+            traffic_params,
+        )
+        paid_by_platform = {row[0]: float(row[1]) for row in paid_rows}
+
+        # 3. Ad spend per platform from manual_expenses
+        spend_rows = await self._fetch_all(
+            """SELECT platform, SUM(amount) as spend
+               FROM manual_expenses
+               WHERE expense_date BETWEEN ? AND ?
+                 AND category = 'marketing'
+                 AND platform IS NOT NULL
+               GROUP BY platform""",
+            [start_date, end_date],
+        )
+        spend_by_platform = {row[0]: float(row[1]) for row in spend_rows}
+        total_spend = sum(spend_by_platform.values())
+
+        # 4. Compute blended ROAS
+        blended_roas = round(total_revenue / total_spend, 2) if total_spend > 0 else None
+
+        # 5. Compute bonus tier
+        bonus_tier = "No bonus"
+        if blended_roas is not None:
+            for threshold, tier in self.BONUS_TIERS:
+                if blended_roas >= threshold:
+                    bonus_tier = tier
+                    break
+
+        # 6. Per-platform ROAS
+        all_platforms = set(list(spend_by_platform.keys()) + list(paid_by_platform.keys()))
+        by_platform = {}
+        for platform in sorted(all_platforms):
+            spend = spend_by_platform.get(platform, 0)
+            paid_rev = paid_by_platform.get(platform, 0)
+            platform_roas = round(paid_rev / spend, 2) if spend > 0 else None
+            by_platform[platform] = {
+                "paid_revenue": round(paid_rev, 2),
+                "spend": round(spend, 2),
+                "roas": platform_roas,
+            }
+
+        return {
+            "blended": {
+                "revenue": round(total_revenue, 2),
+                "spend": round(total_spend, 2),
+                "roas": blended_roas,
+            },
+            "by_platform": by_platform,
+            "bonus_tier": bonus_tier,
+            "has_spend_data": total_spend > 0,
+        }
+
     # ─── Sync Methods ─────────────────────────────────────────────────────────

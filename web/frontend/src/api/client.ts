@@ -45,6 +45,10 @@ import type {
   TrafficAnalyticsResponse,
   TrafficTrendResponse,
   TrafficTransactionsResponse,
+  TrafficROASResponse,
+  CreateExpenseRequest,
+  CreateExpenseResponse,
+  DeleteExpenseResponse,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -247,6 +251,60 @@ async function fetchApiMutation<T>(
 
   try {
     const response = await fetch(`${API_BASE}${endpoint}`, { method, signal })
+    clearTimeout(timeoutId)
+
+    if (!response.ok) {
+      throw ApiError.fromResponse(response)
+    }
+
+    return await response.json()
+  } catch (error) {
+    clearTimeout(timeoutId)
+
+    if (error instanceof ApiError) {
+      throw error
+    }
+
+    if (error instanceof Error) {
+      if (error.name === 'AbortError') {
+        if (controller.signal.aborted && !externalSignal?.aborted) {
+          throw new TimeoutError(timeout)
+        }
+        throw error
+      }
+
+      throw new NetworkError(
+        navigator.onLine ? 'Unable to connect to server' : 'No internet connection',
+        navigator.onLine ? 'CONNECTION_FAILED' : 'OFFLINE'
+      )
+    }
+
+    throw error
+  }
+}
+
+async function fetchApiMutationWithBody<T>(
+  endpoint: string,
+  method: 'POST' | 'DELETE' | 'PATCH',
+  body: unknown,
+  options?: FetchOptions
+): Promise<T> {
+  const { timeout = DEFAULT_TIMEOUT, signal: externalSignal } = options || {}
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeout)
+
+  const signal = externalSignal
+    ? combineSignals(externalSignal, controller.signal)
+    : controller.signal
+
+  try {
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      method,
+      signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
     clearTimeout(timeoutId)
 
     if (!response.ok) {
@@ -549,6 +607,15 @@ export const api = {
 
   getTrafficTransactions: (params: string, options?: FetchOptions) =>
     fetchApi<TrafficTransactionsResponse>('/traffic/transactions', params, options),
+
+  getTrafficROAS: (params: string, options?: FetchOptions) =>
+    fetchApi<TrafficROASResponse>('/traffic/roas', params, options),
+
+  createExpense: (data: CreateExpenseRequest, options?: FetchOptions) =>
+    fetchApiMutationWithBody<CreateExpenseResponse>('/expenses', 'POST', data, options),
+
+  deleteExpense: (id: number, options?: FetchOptions) =>
+    fetchApiMutation<DeleteExpenseResponse>(`/expenses/${id}`, 'DELETE', options),
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────

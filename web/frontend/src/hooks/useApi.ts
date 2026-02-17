@@ -37,6 +37,8 @@ import type {
   TrafficAnalyticsResponse,
   TrafficTrendResponse,
   TrafficTransactionsResponse,
+  TrafficROASResponse,
+  CreateExpenseRequest,
 } from '../types/api'
 
 // Query key factory for consistent cache keys
@@ -83,6 +85,7 @@ export const queryKeys = {
   trafficAnalytics: (params: string) => ['trafficAnalytics', params] as const,
   trafficTrend: (params: string) => ['trafficTrend', params] as const,
   trafficTransactions: (params: string) => ['trafficTransactions', params] as const,
+  trafficROAS: (params: string) => ['trafficROAS', params] as const,
 }
 
 // Cache TTL constants (in milliseconds)
@@ -529,5 +532,41 @@ export function useTrafficTransactions(trafficType: string | null, limit: number
     queryKey: [...queryKeys.trafficTransactions(queryParams), trafficType, limit, offset],
     queryFn: () => api.getTrafficTransactions(paramsStr),
     staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useTrafficROAS() {
+  const queryParams = useQueryParams()
+
+  return useQuery<TrafficROASResponse>({
+    queryKey: queryKeys.trafficROAS(queryParams),
+    queryFn: () => api.getTrafficROAS(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useCreateExpense() {
+  const queryClient = useQueryClient()
+  const queryParams = useQueryParams()
+
+  return useMutation({
+    mutationFn: (data: CreateExpenseRequest) => api.createExpense(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.trafficROAS(queryParams) })
+      queryClient.invalidateQueries({ queryKey: ['manualExpenses'] })
+    },
+  })
+}
+
+export function useDeleteExpense() {
+  const queryClient = useQueryClient()
+  const queryParams = useQueryParams()
+
+  return useMutation({
+    mutationFn: (id: number) => api.deleteExpense(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.trafficROAS(queryParams) })
+      queryClient.invalidateQueries({ queryKey: ['manualExpenses'] })
+    },
   })
 }

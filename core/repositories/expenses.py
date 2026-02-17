@@ -362,7 +362,8 @@ class ExpensesMixin:
         expense_type: str,
         amount: float,
         currency: str = "UAH",
-        note: Optional[str] = None
+        note: Optional[str] = None,
+        platform: Optional[str] = None
     ) -> Dict[str, Any]:
         """Add a manual expense.
 
@@ -373,16 +374,17 @@ class ExpensesMixin:
             amount: Amount in specified currency
             currency: Currency code (default UAH)
             note: Optional note
+            platform: Optional ad platform (facebook, tiktok, google)
 
         Returns:
             Created expense dict with id
         """
         async with self.connection() as conn:
             result = conn.execute("""
-                INSERT INTO manual_expenses (expense_date, category, expense_type, amount, currency, note)
-                VALUES (?, ?, ?, ?, ?, ?)
-                RETURNING id, expense_date, category, expense_type, amount, currency, note, created_at
-            """, [expense_date, category, expense_type, amount, currency, note]).fetchone()
+                INSERT INTO manual_expenses (expense_date, category, expense_type, amount, currency, note, platform)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                RETURNING id, expense_date, category, expense_type, amount, currency, note, created_at, platform
+            """, [expense_date, category, expense_type, amount, currency, note, platform]).fetchone()
 
             return {
                 "id": result[0],
@@ -392,7 +394,8 @@ class ExpensesMixin:
                 "amount": float(result[4]),
                 "currency": result[5],
                 "note": result[6],
-                "created_at": result[7].isoformat() if result[7] else None
+                "created_at": result[7].isoformat() if result[7] else None,
+                "platform": result[8],
             }
 
     async def update_expense(
@@ -486,6 +489,7 @@ class ExpensesMixin:
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
         category: Optional[str] = None,
+        platform: Optional[str] = None,
         limit: int = 100
     ) -> List[Dict[str, Any]]:
         """List manual expenses with optional filters.
@@ -494,6 +498,7 @@ class ExpensesMixin:
             start_date: Filter by start date
             end_date: Filter by end date
             category: Filter by category
+            platform: Filter by ad platform (facebook, tiktok, google)
             limit: Max results
 
         Returns:
@@ -511,13 +516,16 @@ class ExpensesMixin:
         if category:
             conditions.append("category = ?")
             params.append(category)
+        if platform:
+            conditions.append("platform = ?")
+            params.append(platform)
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
 
         async with self.connection() as conn:
             rows = conn.execute(f"""
-                SELECT id, expense_date, category, expense_type, amount, currency, note, created_at, updated_at
+                SELECT id, expense_date, category, expense_type, amount, currency, note, created_at, updated_at, platform
                 FROM manual_expenses
                 {where_clause}
                 ORDER BY expense_date DESC, created_at DESC
@@ -534,10 +542,48 @@ class ExpensesMixin:
                     "currency": row[5],
                     "note": row[6],
                     "created_at": row[7].isoformat() if row[7] else None,
-                    "updated_at": row[8].isoformat() if row[8] else None
+                    "updated_at": row[8].isoformat() if row[8] else None,
+                    "platform": row[9],
                 }
                 for row in rows
             ]
+
+    async def get_ad_spend_by_platform(
+        self,
+        start_date: date,
+        end_date: date
+    ) -> Dict[str, Any]:
+        """Get ad spend aggregated by platform for a date range.
+
+        Args:
+            start_date: Start date
+            end_date: End date
+
+        Returns:
+            Dict with by_platform breakdown and total_spend
+        """
+        async with self.connection() as conn:
+            rows = conn.execute("""
+                SELECT platform, SUM(amount) as spend, COUNT(*) as entries
+                FROM manual_expenses
+                WHERE expense_date BETWEEN ? AND ?
+                  AND category = 'marketing'
+                  AND platform IS NOT NULL
+                GROUP BY platform
+            """, [start_date, end_date]).fetchall()
+
+            by_platform = {}
+            total_spend = 0.0
+            for row in rows:
+                platform, spend, entries = row
+                spend_val = float(spend)
+                by_platform[platform] = {"spend": round(spend_val, 2), "entries": int(entries)}
+                total_spend += spend_val
+
+            return {
+                "by_platform": by_platform,
+                "total_spend": round(total_spend, 2),
+            }
 
     async def get_expenses_summary(
         self,

@@ -723,3 +723,45 @@ export interface TrafficTransactionsResponse {
   limit: number
   offset: number
 }
+
+// ─── ROAS / Ad Spend Types ──────────────────────────────────────────────────
+
+export interface PlatformROAS {
+  paid_revenue: number
+  spend: number
+  roas: number | null
+}
+
+export interface TrafficROASResponse {
+  blended: { revenue: number; spend: number; roas: number | null }
+  by_platform: Record<string, PlatformROAS>
+  bonus_tier: string
+  has_spend_data: boolean
+}
+
+export interface CreateExpenseRequest {
+  expense_date: string
+  category: string
+  expense_type: string
+  amount: number
+  currency?: string
+  note?: string
+  platform?: string
+}
+
+export interface CreateExpenseResponse {
+  id: number
+  expense_date: string
+  category: string
+  expense_type: string
+  amount: number
+  currency: string
+  note: string | null
+  created_at: string
+  platform: string | null
+}
+
+export interface DeleteExpenseResponse {
+  success: boolean
+  id: number
+}

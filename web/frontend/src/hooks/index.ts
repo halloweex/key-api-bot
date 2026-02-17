@@ -51,6 +51,9 @@ export {
   useTrafficAnalytics,
   useTrafficTrend,
   useTrafficTransactions,
+  useTrafficROAS,
+  useCreateExpense,
+  useDeleteExpense,
 } from './useApi'
 
 // Shared chart hooks
