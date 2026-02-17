@@ -674,7 +674,10 @@ export interface TrafficMetric {
 
 export interface TrafficSummary {
   paid: TrafficMetric
+  paid_confirmed: TrafficMetric
+  paid_likely: TrafficMetric
   organic: TrafficMetric
+  manager: TrafficMetric
   pixel_only: TrafficMetric
   unknown: TrafficMetric
 }

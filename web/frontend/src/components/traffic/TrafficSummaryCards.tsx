@@ -9,11 +9,10 @@ const TRAFFIC_DESCRIPTIONS = [
   {
     label: 'Paid Ads',
     color: 'bg-blue-500',
-    description: 'Confirmed paid advertising orders.',
+    description: 'Paid advertising orders (confirmed + likely).',
     details: [
-      'Facebook Ads: has _fbc (click ID), fbclid + utm_medium=paid/cpc, or campaign starts with "fbads"',
-      'TikTok Ads: campaign contains TOF/MOF/BOF (funnel stages), "retarget", or "dynamic"',
-      'Google Ads: utm_source=google + utm_medium=cpc',
+      'Confirmed: explicit UTM (fbads, source=facebook/tiktok + medium=paid/cpc, Google CPC)',
+      'Likely: _fbc cookie or fbclid present but no explicit UTM (previous ad click, 90-day cookie)',
     ],
   },
   {
@@ -21,9 +20,18 @@ const TRAFFIC_DESCRIPTIONS = [
     color: 'bg-green-500',
     description: 'Free traffic without paid advertising.',
     details: [
-      'Social media: utm_medium=social/organic from Instagram, Facebook, TikTok profiles',
-      'Email: utm_source=klaviyo/email (newsletter campaigns)',
-      'Referral: utm_medium=referral from partner links',
+      'Social media: Instagram, Facebook, TikTok (utm_medium=social/organic)',
+      'Email: Klaviyo, Rivo loyalty (utm_source=klaviyo/email/rivo)',
+      'Google Shopping: utm_medium=product_sync (free listings)',
+      'Instagram/Telegram: manager-created orders (source_id 1, 2)',
+    ],
+  },
+  {
+    label: 'Sales Manager',
+    color: 'bg-cyan-500',
+    description: 'Orders driven by sales managers.',
+    details: [
+      'Campaign starts with "sales_manager_" — human-driven sale',
     ],
   },
   {
@@ -31,9 +39,8 @@ const TRAFFIC_DESCRIPTIONS = [
     color: 'bg-orange-500',
     description: 'Has tracking pixel but missing UTM parameters.',
     details: [
-      'Facebook pixel (_fbp) detected but no utm_source/utm_medium',
-      'TikTok pixel (ttp) detected but no UTM tags',
-      'Likely from ads, but cannot confirm - user may have clicked ad then returned directly',
+      'Facebook pixel (_fbp) or TikTok pixel (ttp) detected but no UTM',
+      'Likely from ads, but cannot confirm — user may have returned directly',
     ],
   },
   {
@@ -42,8 +49,7 @@ const TRAFFIC_DESCRIPTIONS = [
     description: 'No tracking data available.',
     details: [
       'Direct traffic: customer typed URL or used bookmark',
-      'Untracked links: shared links without UTM parameters',
-      'Manual orders: created by managers in KeyCRM',
+      'Untracked links: shared without UTM parameters',
       'Privacy tools: tracking blocked by browser/extensions',
     ],
   },
@@ -75,6 +81,12 @@ const QuestionIcon = () => (
   </svg>
 )
 
+const ManagerIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+  </svg>
+)
+
 const InfoIcon = () => (
   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -86,10 +98,12 @@ const InfoIcon = () => (
 export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
   const { data, isLoading } = useTrafficAnalytics()
   const [showLegend, setShowLegend] = useState(false)
+  const [showPaidBreakdown, setShowPaidBreakdown] = useState(false)
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+        <StatCardSkeleton />
         <StatCardSkeleton />
         <StatCardSkeleton />
         <StatCardSkeleton />
@@ -141,16 +155,19 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
       )}
 
       {/* Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-      <StatCard
-        label="Paid Ads"
-        value={summary?.paid?.revenue ?? 0}
-        formatter={formatCurrency}
-        icon={<AdsIcon />}
-        variant="blue"
-        subtitle={`${formatNumber(summary?.paid?.orders ?? 0)} orders`}
-        ariaLabel={`Paid ads revenue: ${formatCurrency(summary?.paid?.revenue ?? 0)}`}
-      />
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+      <div className="cursor-pointer" onClick={() => setShowPaidBreakdown(!showPaidBreakdown)}>
+        <StatCard
+          label="Paid Ads"
+          value={summary?.paid?.revenue ?? 0}
+          formatter={formatCurrency}
+          icon={<AdsIcon />}
+          variant="blue"
+          subtitle={`${formatNumber(summary?.paid?.orders ?? 0)} orders`}
+          ariaLabel={`Paid ads revenue: ${formatCurrency(summary?.paid?.revenue ?? 0)}`}
+          clickable={!showPaidBreakdown}
+        />
+      </div>
       <StatCard
         label="Organic"
         value={summary?.organic?.revenue ?? 0}
@@ -159,6 +176,15 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         variant="green"
         subtitle={`${formatNumber(summary?.organic?.orders ?? 0)} orders`}
         ariaLabel={`Organic revenue: ${formatCurrency(summary?.organic?.revenue ?? 0)}`}
+      />
+      <StatCard
+        label="Sales Manager"
+        value={summary?.manager?.revenue ?? 0}
+        formatter={formatCurrency}
+        icon={<ManagerIcon />}
+        variant="cyan"
+        subtitle={`${formatNumber(summary?.manager?.orders ?? 0)} orders`}
+        ariaLabel={`Sales manager revenue: ${formatCurrency(summary?.manager?.revenue ?? 0)}`}
       />
       <StatCard
         label="Pixel Only"
@@ -179,6 +205,43 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         ariaLabel={`Unknown source revenue: ${formatCurrency(summary?.unknown?.revenue ?? 0)}`}
       />
       </div>
+
+      {/* Paid Ads Breakdown */}
+      {showPaidBreakdown && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 animate-fade-in">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-blue-800">Paid Ads Breakdown</h3>
+            <button
+              onClick={() => setShowPaidBreakdown(false)}
+              className="text-blue-400 hover:text-blue-600 text-xs"
+            >
+              Close
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-white rounded-lg p-3 border border-blue-100">
+              <p className="text-xs text-slate-500 mb-1">Confirmed</p>
+              <p className="text-lg font-bold text-blue-700">
+                {formatCurrency(summary?.paid_confirmed?.revenue ?? 0)}
+              </p>
+              <p className="text-xs text-slate-500">
+                {formatNumber(summary?.paid_confirmed?.orders ?? 0)} orders
+              </p>
+              <p className="text-xs text-blue-400 mt-1">Explicit UTM (fbads, cpc, paid)</p>
+            </div>
+            <div className="bg-white rounded-lg p-3 border border-blue-100">
+              <p className="text-xs text-slate-500 mb-1">Likely</p>
+              <p className="text-lg font-bold text-blue-500">
+                {formatCurrency(summary?.paid_likely?.revenue ?? 0)}
+              </p>
+              <p className="text-xs text-slate-500">
+                {formatNumber(summary?.paid_likely?.orders ?? 0)} orders
+              </p>
+              <p className="text-xs text-blue-400 mt-1">Cookie/fbclid only (no UTM)</p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 })

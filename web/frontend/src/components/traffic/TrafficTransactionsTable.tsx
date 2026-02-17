@@ -11,6 +11,7 @@ const TRAFFIC_TYPES = [
   { value: '', label: 'All types' },
   { value: 'paid_confirmed', label: 'Paid' },
   { value: 'paid_likely', label: 'Paid (likely)' },
+  { value: 'manager', label: 'Sales Manager' },
   { value: 'organic', label: 'Organic' },
   { value: 'pixel_only', label: 'Pixel Only' },
   { value: 'unknown', label: 'Unknown' },
@@ -19,6 +20,7 @@ const TRAFFIC_TYPES = [
 const trafficBadgeConfig: Record<string, { bg: string; text: string; label: string }> = {
   paid_confirmed: { bg: 'bg-blue-100', text: 'text-blue-700', label: 'Paid' },
   paid_likely: { bg: 'bg-blue-50', text: 'text-blue-500', label: 'Paid (likely)' },
+  manager: { bg: 'bg-cyan-100', text: 'text-cyan-700', label: 'Manager' },
   organic: { bg: 'bg-green-100', text: 'text-green-700', label: 'Organic' },
   pixel_only: { bg: 'bg-orange-100', text: 'text-orange-700', label: 'Pixel Only' },
   unknown: { bg: 'bg-purple-100', text: 'text-purple-700', label: 'Unknown' },
