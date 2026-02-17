@@ -664,3 +664,62 @@ export interface UpdatePermissionResponse {
   can_edit: boolean
   can_delete: boolean
 }
+
+// ─── Traffic Analytics Types ────────────────────────────────────────────────
+
+export interface TrafficMetric {
+  orders: number
+  revenue: number
+}
+
+export interface TrafficSummary {
+  paid: TrafficMetric
+  organic: TrafficMetric
+  pixel_only: TrafficMetric
+  unknown: TrafficMetric
+}
+
+export interface TrafficAnalyticsResponse {
+  period: { start: string; end: string }
+  totals: TrafficMetric
+  summary: TrafficSummary
+  by_platform: Record<string, TrafficMetric>
+  by_traffic_type: Record<string, TrafficMetric>
+}
+
+export interface TrafficTrendDay {
+  date: string
+  paid_orders: number
+  paid_revenue: number
+  organic_orders: number
+  organic_revenue: number
+  other_orders: number
+  other_revenue: number
+}
+
+export interface TrafficTrendResponse {
+  trend: TrafficTrendDay[]
+}
+
+export interface TrafficEvidence {
+  field: string
+  value: string
+  reason?: string
+}
+
+export interface TrafficTransaction {
+  id: number
+  date: string
+  amount: number
+  source: string
+  traffic_type: string
+  platform: string
+  evidence: TrafficEvidence[]
+}
+
+export interface TrafficTransactionsResponse {
+  transactions: TrafficTransaction[]
+  total: number
+  limit: number
+  offset: number
+}

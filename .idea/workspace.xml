@@ -5,7 +5,29 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="00033ac8-0ff0-4db9-8885-f829ba7bf2ad" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.claude/agents/engineering.md" beforeDir="false" afterPath="$PROJECT_DIR$/.claude/agents/engineering.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/duckdb_store.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/duckdb_store.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/models.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/models.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/repositories/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/repositories/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/repositories/analytics_repo.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/repositories/base.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/repositories/catalog_repo.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/repositories/sync_repo.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/App.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/App.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/api/client.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/api/client.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatHeader.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatHeader.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatInput.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatInput.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatToggle.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatToggle.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/layout/Dashboard.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/layout/Dashboard.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/navigation/NavLink.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/navigation/NavLink.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/navigation/SidebarRail.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/navigation/SidebarRail.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/hooks/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/hooks/index.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/hooks/useApi.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/hooks/useApi.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/frontend/src/types/api.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/types/api.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/routes/api.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/web/services/dashboard_service.py" beforeDir="false" afterPath="$PROJECT_DIR$/web/services/dashboard_service.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -291,7 +313,7 @@
       <workItem from="1769678640075" duration="124000" />
       <workItem from="1769678798867" duration="12000" />
       <workItem from="1769680433341" duration="313000" />
-      <workItem from="1769680767522" duration="233670000" />
+      <workItem from="1769680767522" duration="277343000" />
     </task>
     <servers />
   </component>

@@ -266,34 +266,3 @@ async def get_profit_analysis(
         source_id=source_id,
         sales_type=sales_type
     )
-
-
-# ─── Backwards Compatibility ──────────────────────────────────────────────────
-
-
-async def async_get_revenue_trend(
-    start_date: str,
-    end_date: str,
-    category_id: Optional[int] = None,
-    granularity: str = "daily",
-    brand: Optional[str] = None,
-    source_id: Optional[int] = None
-) -> Dict[str, Any]:
-    """Alias for get_revenue_trend (backwards compatibility)."""
-    return await get_revenue_trend(
-        start_date, end_date, granularity,
-        category_id=category_id, brand=brand, source_id=source_id
-    )
-
-
-# ─── No-op Cache Functions (for backwards compatibility) ─────────────────────
-
-
-def start_cache_warming():
-    """No-op: DuckDB replaces in-memory cache warming."""
-    logger.info("Cache warming disabled - using DuckDB for queries")
-
-
-def stop_cache_warming():
-    """No-op: DuckDB replaces in-memory cache warming."""
-    pass

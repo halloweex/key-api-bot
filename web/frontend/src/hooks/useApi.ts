@@ -34,6 +34,9 @@ import type {
   InventoryAnalysisResponse,
   StockAction,
   RestockAlert,
+  TrafficAnalyticsResponse,
+  TrafficTrendResponse,
+  TrafficTransactionsResponse,
 } from '../types/api'
 
 // Query key factory for consistent cache keys
@@ -76,6 +79,10 @@ export const queryKeys = {
   inventoryAnalysis: () => ['inventoryAnalysis'] as const,
   stockActions: () => ['stockActions'] as const,
   restockAlerts: () => ['restockAlerts'] as const,
+  // Traffic analytics
+  trafficAnalytics: (params: string) => ['trafficAnalytics', params] as const,
+  trafficTrend: (params: string) => ['trafficTrend', params] as const,
+  trafficTransactions: (params: string) => ['trafficTransactions', params] as const,
 }
 
 // Cache TTL constants (in milliseconds)
@@ -483,6 +490,44 @@ export function useRestockAlerts() {
   return useQuery<RestockAlert[]>({
     queryKey: queryKeys.restockAlerts(),
     queryFn: () => api.getRestockAlerts(),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+// ─── Traffic Analytics ────────────────────────────────────────────────────────
+
+export function useTrafficAnalytics() {
+  const queryParams = useQueryParams()
+
+  return useQuery<TrafficAnalyticsResponse>({
+    queryKey: queryKeys.trafficAnalytics(queryParams),
+    queryFn: () => api.getTrafficAnalytics(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useTrafficTrend() {
+  const queryParams = useQueryParams()
+
+  return useQuery<TrafficTrendResponse>({
+    queryKey: queryKeys.trafficTrend(queryParams),
+    queryFn: () => api.getTrafficTrend(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useTrafficTransactions(trafficType: string | null, limit: number, offset: number) {
+  const queryParams = useQueryParams()
+
+  const fullParams = new URLSearchParams(queryParams)
+  if (trafficType) fullParams.set('traffic_type', trafficType)
+  fullParams.set('limit', String(limit))
+  fullParams.set('offset', String(offset))
+  const paramsStr = fullParams.toString()
+
+  return useQuery<TrafficTransactionsResponse>({
+    queryKey: [...queryKeys.trafficTransactions(queryParams), trafficType, limit, offset],
+    queryFn: () => api.getTrafficTransactions(paramsStr),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

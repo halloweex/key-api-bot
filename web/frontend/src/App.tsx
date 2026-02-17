@@ -1,24 +1,15 @@
-import { memo, useState, useEffect } from 'react'
+import { memo, lazy, Suspense, useEffect, type ReactNode } from 'react'
 import { Header, Dashboard } from './components/layout'
 import { ChatSidebar } from './components/chat'
 import { SidebarRail } from './components/navigation'
 import { AdminUsersPage, AdminPermissionsPage } from './components/admin'
 import { useAuth } from './hooks/useAuth'
 import { useToast } from './components/ui/Toast'
+import { useRouter, navigate } from './hooks/useRouter'
 
-// ─── Simple Router Hook ──────────────────────────────────────────────────────
-
-function useSimpleRouter() {
-  const [path, setPath] = useState(window.location.pathname)
-
-  useEffect(() => {
-    const handlePopState = () => setPath(window.location.pathname)
-    window.addEventListener('popstate', handlePopState)
-    return () => window.removeEventListener('popstate', handlePopState)
-  }, [])
-
-  return path
-}
+// Lazy load pages
+const TrafficPage = lazy(() => import('./components/traffic/TrafficPage'))
+const InventoryPage = lazy(() => import('./components/inventory/InventoryPage'))
 
 // ─── Welcome Toast Hook ──────────────────────────────────────────────────────
 
@@ -30,14 +21,12 @@ function useWelcomeToast() {
     const welcomeName = params.get('welcome')
 
     if (welcomeName) {
-      // Show welcome toast
       addToast({
         type: 'success',
         title: `Welcome, ${decodeURIComponent(welcomeName)}!`,
         duration: 4000,
       })
 
-      // Clean up URL (remove ?welcome=... parameter)
       const url = new URL(window.location.href)
       url.searchParams.delete('welcome')
       window.history.replaceState({}, '', url.pathname)
@@ -45,33 +34,37 @@ function useWelcomeToast() {
   }, [addToast])
 }
 
-// ─── Dashboard Shell ─────────────────────────────────────────────────────────
+// ─── Shared App Shell ─────────────────────────────────────────────────────────
 
-const DashboardShell = memo(function DashboardShell() {
+const AppShell = memo(function AppShell({ children }: { children: ReactNode }) {
   useWelcomeToast()
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
-      {/* Main content wrapper - no margins on mobile, fixed margins on desktop for rails */}
       <div className="flex-1 flex flex-col sm:ml-12 sm:mr-12">
         <Header />
-        <Dashboard />
+        {children}
       </div>
-
-      {/* Fixed position sidebars - overlay when expanded */}
       <SidebarRail />
       <ChatSidebar />
     </div>
   )
 })
 
-// ─── Admin Shell ─────────────────────────────────────────────────────────────
+// ─── Page Loading Spinner ─────────────────────────────────────────────────────
 
-const AdminUsersShell = memo(function AdminUsersShell() {
+const PageSpinner = () => (
+  <div className="flex-1 flex items-center justify-center">
+    <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" />
+  </div>
+)
+
+// ─── Admin Guard ──────────────────────────────────────────────────────────────
+
+const AdminGuard = memo(function AdminGuard({ children }: { children: ReactNode }) {
   const { user, isLoading } = useAuth()
   const isAdmin = user?.role === 'admin'
 
-  // Wait for auth to load before checking
   if (isLoading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -80,41 +73,14 @@ const AdminUsersShell = memo(function AdminUsersShell() {
     )
   }
 
-  // Redirect non-admins back to dashboard
   if (!isAdmin) {
-    window.location.href = '/v2'
+    navigate('/v2')
     return null
   }
 
   return (
     <div className="min-h-screen bg-slate-50">
-      <AdminUsersPage />
-    </div>
-  )
-})
-
-const AdminPermissionsShell = memo(function AdminPermissionsShell() {
-  const { user, isLoading } = useAuth()
-  const isAdmin = user?.role === 'admin'
-
-  // Wait for auth to load before checking
-  if (isLoading) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" />
-      </div>
-    )
-  }
-
-  // Redirect non-admins back to dashboard
-  if (!isAdmin) {
-    window.location.href = '/v2'
-    return null
-  }
-
-  return (
-    <div className="min-h-screen bg-slate-50">
-      <AdminPermissionsPage />
+      {children}
     </div>
   )
 })
@@ -122,19 +88,45 @@ const AdminPermissionsShell = memo(function AdminPermissionsShell() {
 // ─── App Component ───────────────────────────────────────────────────────────
 
 function App() {
-  const path = useSimpleRouter()
+  const path = useRouter()
 
-  // Route to admin pages
+  // Admin pages (no AppShell - they have their own layout)
   if (path === '/v2/admin/users' || path === '/admin/users') {
-    return <AdminUsersShell />
+    return <AdminGuard><AdminUsersPage /></AdminGuard>
   }
 
   if (path === '/v2/admin/permissions' || path === '/admin/permissions') {
-    return <AdminPermissionsShell />
+    return <AdminGuard><AdminPermissionsPage /></AdminGuard>
+  }
+
+  // Traffic Analytics
+  if (path === '/v2/traffic' || path === '/traffic') {
+    return (
+      <AppShell>
+        <Suspense fallback={<PageSpinner />}>
+          <TrafficPage />
+        </Suspense>
+      </AppShell>
+    )
+  }
+
+  // Inventory
+  if (path === '/v2/inventory' || path === '/inventory') {
+    return (
+      <AppShell>
+        <Suspense fallback={<PageSpinner />}>
+          <InventoryPage />
+        </Suspense>
+      </AppShell>
+    )
   }
 
   // Default: Dashboard
-  return <DashboardShell />
+  return (
+    <AppShell>
+      <Dashboard />
+    </AppShell>
+  )
 }
 
 export default App

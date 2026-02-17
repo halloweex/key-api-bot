@@ -42,6 +42,9 @@ import type {
   UserStatus,
   PermissionsMatrixResponse,
   UpdatePermissionResponse,
+  TrafficAnalyticsResponse,
+  TrafficTrendResponse,
+  TrafficTransactionsResponse,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -536,6 +539,16 @@ export const api = {
       'PATCH',
       options
     ),
+
+  // Traffic Analytics
+  getTrafficAnalytics: (params: string, options?: FetchOptions) =>
+    fetchApi<TrafficAnalyticsResponse>('/traffic/analytics', params, options),
+
+  getTrafficTrend: (params: string, options?: FetchOptions) =>
+    fetchApi<TrafficTrendResponse>('/traffic/trend', params, options),
+
+  getTrafficTransactions: (params: string, options?: FetchOptions) =>
+    fetchApi<TrafficTransactionsResponse>('/traffic/transactions', params, options),
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────

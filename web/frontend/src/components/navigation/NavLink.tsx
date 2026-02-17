@@ -1,4 +1,6 @@
-import { memo, type ReactNode } from 'react'
+import { memo, useCallback, type ReactNode, type MouseEvent } from 'react'
+import { navigate, useRouter } from '../../hooks/useRouter'
+import { useNavStore } from '../../store/navStore'
 
 interface NavLinkProps {
   href: string
@@ -8,7 +10,16 @@ interface NavLinkProps {
 }
 
 export const NavLink = memo(function NavLink({ href, icon, disabled, children }: NavLinkProps) {
-  const isActive = window.location.pathname === href
+  const path = useRouter()
+  const isActive = path === href
+  const setOpen = useNavStore((s) => s.setOpen)
+
+  const handleClick = useCallback((e: MouseEvent) => {
+    e.preventDefault()
+    navigate(href)
+    // Close sidebar on mobile after navigation
+    setOpen(false)
+  }, [href, setOpen])
 
   if (disabled) {
     return (
@@ -25,6 +36,7 @@ export const NavLink = memo(function NavLink({ href, icon, disabled, children }:
   return (
     <a
       href={href}
+      onClick={handleClick}
       className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors
         ${isActive
           ? 'bg-purple-100 text-purple-700 font-medium'

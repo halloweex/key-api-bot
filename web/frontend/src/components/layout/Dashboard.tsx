@@ -11,9 +11,6 @@ import {
   LazyCustomerInsightsChart,
   LazyCohortRetentionChart,
   LazyBrandAnalyticsChart,
-  LazyStockSummaryChart,
-  LazyDeadStockChart,
-  LazyInventoryTrendChart,
   LazyManualExpensesTable,
 } from '../charts/lazy'
 
@@ -110,21 +107,6 @@ export const Dashboard = memo(function Dashboard() {
       {/* Brand Analytics - Full Width */}
       <ChartSection>
         <LazyBrandAnalyticsChart />
-      </ChartSection>
-
-      {/* Stock Summary & Dead Stock Analysis */}
-      <GridSection>
-        <ChartSection>
-          <LazyStockSummaryChart />
-        </ChartSection>
-        <ChartSection>
-          <LazyDeadStockChart />
-        </ChartSection>
-      </GridSection>
-
-      {/* Inventory Trend - Full Width */}
-      <ChartSection>
-        <LazyInventoryTrendChart />
       </ChartSection>
 
       {/* ROI Calculator */}

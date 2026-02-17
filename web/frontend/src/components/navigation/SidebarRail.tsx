@@ -12,11 +12,16 @@ import type { HealthResponse } from '../../types/api'
 // ─── Logo ────────────────────────────────────────────────────────────────────
 
 const Logo = ({ size = 32 }: { size?: number }) => (
-  <svg className="w-full h-full" viewBox="0 0 24 24" style={{ width: size, height: size }}>
+  <svg
+    viewBox="0 0 24 24"
+    width={size}
+    height={size}
+    style={{ width: size, height: size, minWidth: size, minHeight: size }}
+  >
     <defs>
       <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stopColor="#F97316"/>
-        <stop offset="100%" stopColor="#DC2626"/>
+        <stop offset="0%" stopColor="#8B5CF6"/>
+        <stop offset="100%" stopColor="#2563EB"/>
       </linearGradient>
     </defs>
     <rect width="24" height="24" rx="5" fill="url(#logoGrad)"/>
@@ -55,6 +60,12 @@ const CurrencyDollarIcon = () => (
 const CubeIcon = () => (
   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+  </svg>
+)
+
+const SignalIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
   </svg>
 )
 
@@ -185,7 +196,7 @@ export const SidebarRail = memo(function SidebarRail() {
             ${isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
         >
           <div className="flex items-center gap-2.5">
-            <div className="rounded-xl shadow-md overflow-hidden flex-shrink-0">
+            <div className="shadow-md overflow-hidden flex-shrink-0">
               <Logo size={32} />
             </div>
             <div className="min-w-0">
@@ -218,13 +229,16 @@ export const SidebarRail = memo(function SidebarRail() {
           <NavLink href="/v2" icon={<ChartBarIcon />}>
             Sales Dashboard
           </NavLink>
+          <NavLink href="/v2/traffic" icon={<SignalIcon />}>
+            Traffic Analytics
+          </NavLink>
           <NavLink href="/v2/marketing" icon={<MegaphoneIcon />} disabled>
             Marketing
           </NavLink>
           <NavLink href="/v2/financial" icon={<CurrencyDollarIcon />} disabled>
             Financial
           </NavLink>
-          <NavLink href="/v2/inventory" icon={<CubeIcon />} disabled>
+          <NavLink href="/v2/inventory" icon={<CubeIcon />}>
             Inventory
           </NavLink>
         </nav>

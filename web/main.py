@@ -58,6 +58,37 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
         }
     )
 
+
+# Centralized exception handlers for consistent error responses
+from core.exceptions import ValidationError, QueryTimeoutError
+
+
+@app.exception_handler(ValidationError)
+async def validation_error_handler(request: Request, exc: ValidationError):
+    return JSONResponse(
+        status_code=400,
+        content={"error": "Validation Error", "detail": str(exc)}
+    )
+
+
+@app.exception_handler(QueryTimeoutError)
+async def query_timeout_handler(request: Request, exc: QueryTimeoutError):
+    logger.error(f"Query timeout on {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=504,
+        content={"error": "Query Timeout", "detail": str(exc)}
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal Server Error", "detail": "An unexpected error occurred."}
+    )
+
+
 # Add request logging middleware (adds correlation IDs and timing)
 app.add_middleware(RequestLoggingMiddleware)
 

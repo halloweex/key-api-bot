@@ -289,6 +289,7 @@ class Order:
     buyer: Optional[Buyer] = None
     manager: Optional[Manager] = None
     products: List[OrderProduct] = field(default_factory=list)
+    manager_comment: Optional[str] = None  # Contains UTM data for Shopify orders
 
     @classmethod
     def from_api(cls, data: Dict[str, Any]) -> "Order":
@@ -341,6 +342,7 @@ class Order:
             buyer=Buyer.from_api(data.get("buyer")),
             manager=Manager.from_api(data.get("manager")),
             products=products,
+            manager_comment=data.get("manager_comment"),
         )
 
     @property

@@ -47,6 +47,10 @@ export {
   useInventoryAnalysis,
   useStockActions,
   useRestockAlerts,
+  // Traffic Analytics
+  useTrafficAnalytics,
+  useTrafficTrend,
+  useTrafficTransactions,
 } from './useApi'
 
 // Shared chart hooks
@@ -66,3 +70,6 @@ export {
   useUserDisplayName,
   authQueryKey,
 } from './useAuth'
+
+// Router
+export { useRouter, navigate } from './useRouter'

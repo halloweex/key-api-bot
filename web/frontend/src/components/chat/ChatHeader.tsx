@@ -8,7 +8,7 @@ export const ChatHeader = memo(function ChatHeader() {
   const { clearMessages, messages } = useChatStore()
 
   return (
-    <div className="flex items-center justify-between px-4 py-4 bg-gradient-to-r from-slate-50 via-white to-blue-50 border-b border-slate-200/60">
+    <div className="flex items-center justify-between px-3 py-4 bg-gradient-to-r from-slate-50 via-white to-blue-50 border-b border-slate-200/60">
       <div className="flex items-center gap-3">
         {/* AI Avatar */}
         <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
