@@ -146,7 +146,7 @@ export const ExpensesChart = memo(function ExpensesChart() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Expenses by Type */}
         <div>
-          <h4 className="text-sm font-medium text-slate-700 mb-2">Expenses by Type</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">Expenses by Type</h4>
           <div style={{ height: CHART_DIMENSIONS.height.md - 32 }}>
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
@@ -183,7 +183,7 @@ export const ExpensesChart = memo(function ExpensesChart() {
 
         {/* Profit Analysis */}
         <div>
-          <h4 className="text-sm font-medium text-slate-700 mb-2">Profit Analysis</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">Profit Analysis</h4>
           <div style={{ height: CHART_DIMENSIONS.height.md - 32 }}>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={profitChartData} margin={CHART_DIMENSIONS.margin.default}>

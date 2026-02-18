@@ -58,7 +58,7 @@ const GridSection = memo(function GridSection({ children }: GridSectionProps) {
 
 export const Dashboard = memo(function Dashboard() {
   return (
-    <main className="py-1.5 pr-0 pl-0 sm:py-2 sm:pr-0 sm:pl-0 lg:py-3 lg:pr-0 lg:pl-0 space-y-1.5 sm:space-y-2 max-w-[1800px]">
+    <main className="py-1.5 px-1 sm:py-2 sm:px-1.5 lg:py-3 lg:px-2 space-y-1.5 sm:space-y-2 max-w-[1800px]">
       {/* Summary Cards - loaded immediately */}
       <section>
         <SummaryCards />

@@ -658,7 +658,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         <div className="flex justify-between items-center mb-4">
           <div className="relative flex items-center gap-1.5">
             <div className={`w-2 h-2 rounded-full ${metrics.themeColor}`} />
-            <span className="text-sm font-semibold text-slate-700">{periodLabel}</span>
+            <span className="text-base font-semibold text-slate-800 tracking-tight">{periodLabel}</span>
             {/* Custom goal indicator */}
             {isCustomGoal && (
               <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-medium" title="Custom goal set manually">

@@ -216,7 +216,7 @@ function SummaryTab({ data }: SummaryTabProps) {
       {/* Category Thresholds */}
       {data.categoryThresholds.length > 0 && (
         <div>
-          <h4 className="text-sm font-medium text-slate-700 mb-2">Category Thresholds</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">Category Thresholds</h4>
           <div className="space-y-1 max-h-32 overflow-y-auto">
             {data.categoryThresholds.slice(0, 8).map((cat) => (
               <div

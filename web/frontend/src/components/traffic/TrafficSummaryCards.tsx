@@ -118,7 +118,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
     <div className="space-y-3">
       {/* Header with info button */}
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium text-slate-600">Traffic Attribution</h2>
+        <h2 className="text-base font-semibold text-slate-800 tracking-tight">Traffic Attribution</h2>
         <button
           onClick={() => setShowLegend(!showLegend)}
           className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg transition-colors ${

@@ -165,7 +165,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Top Brands by Revenue */}
         <div>
-          <h4 className="text-sm font-medium text-slate-700 mb-2">Top 10 by Revenue</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">Top 10 by Revenue</h4>
           <div style={HEIGHT_STYLE.xxl}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
@@ -211,7 +211,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
 
         {/* Top Brands by Quantity */}
         <div>
-          <h4 className="text-sm font-medium text-slate-700 mb-2">Top 10 by Quantity</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">Top 10 by Quantity</h4>
           <div style={HEIGHT_STYLE.xxl}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
