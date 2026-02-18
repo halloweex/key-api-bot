@@ -298,7 +298,7 @@ class DuckDBStore(
 
         -- Order products (line items)
         CREATE TABLE IF NOT EXISTS order_products (
-            id INTEGER PRIMARY KEY,
+            id BIGINT PRIMARY KEY,
             order_id INTEGER NOT NULL,
             product_id INTEGER,
             name VARCHAR NOT NULL,
@@ -598,10 +598,7 @@ class DuckDBStore(
             buyer_first_order_date DATE
         );
 
-        -- Silver orders indexes for analytics queries
-        CREATE INDEX IF NOT EXISTS idx_silver_orders_buyer ON silver_orders(buyer_id);
-        CREATE INDEX IF NOT EXISTS idx_silver_orders_date ON silver_orders(order_date);
-        CREATE INDEX IF NOT EXISTS idx_silver_orders_sales_type ON silver_orders(sales_type);
+        -- Silver orders indexes (defined in consolidated block below)
 
         -- ═══════════════════════════════════════════════════════════════════════
         -- GOLD LAYER: Pre-aggregated daily revenue (one row per date+sales_type)
@@ -665,17 +662,10 @@ class DuckDBStore(
             error VARCHAR
         );
 
-        -- Indexes for common queries
-        CREATE INDEX IF NOT EXISTS idx_orders_ordered_at ON orders(ordered_at);
-        CREATE INDEX IF NOT EXISTS idx_orders_source_id ON orders(source_id);
-        CREATE INDEX IF NOT EXISTS idx_orders_status_id ON orders(status_id);
-        CREATE INDEX IF NOT EXISTS idx_orders_manager_id ON orders(manager_id);
-        CREATE INDEX IF NOT EXISTS idx_order_products_order_id ON order_products(order_id);
-        CREATE INDEX IF NOT EXISTS idx_order_products_product_id ON order_products(product_id);
+        -- Additional indexes (non-duplicate, supplementing per-table indexes above)
         CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id);
         CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);
         CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(date);
-        CREATE INDEX IF NOT EXISTS idx_expenses_order_id ON expenses(order_id);
         CREATE INDEX IF NOT EXISTS idx_expenses_expense_type_id ON expenses(expense_type_id);
         CREATE INDEX IF NOT EXISTS idx_expenses_payment_date ON expenses(payment_date);
         CREATE INDEX IF NOT EXISTS idx_managers_is_retail ON managers(is_retail);
@@ -739,17 +729,19 @@ class DuckDBStore(
         CREATE TABLE IF NOT EXISTS gold_daily_traffic (
             date DATE NOT NULL,
             source_id INTEGER NOT NULL,
+            sales_type VARCHAR NOT NULL,       -- retail, b2b, other
             platform VARCHAR(20) NOT NULL,     -- facebook, tiktok, google, instagram, email, other
             traffic_type VARCHAR(20) NOT NULL, -- paid_confirmed, paid_likely, organic, pixel_only, unknown
 
             orders_count INTEGER DEFAULT 0,
             revenue DECIMAL(12,2) DEFAULT 0,
 
-            PRIMARY KEY (date, source_id, platform, traffic_type)
+            PRIMARY KEY (date, source_id, sales_type, platform, traffic_type)
         );
 
         CREATE INDEX IF NOT EXISTS idx_gold_traffic_date ON gold_daily_traffic(date);
         CREATE INDEX IF NOT EXISTS idx_gold_traffic_platform ON gold_daily_traffic(platform);
+        CREATE INDEX IF NOT EXISTS idx_gold_traffic_sales_type ON gold_daily_traffic(sales_type);
 
         -- ═══════════════════════════════════════════════════════════════════════
         -- MANUAL EXPENSES (business expenses not in KeyCRM)
@@ -989,6 +981,15 @@ class DuckDBStore(
         except Exception as e:
             logger.error(f"Migration error (expenses FK removal): {e}")
 
+        # Migration: Add sales_type column to gold_daily_traffic
+        try:
+            self._connection.execute(
+                "ALTER TABLE gold_daily_traffic ADD COLUMN IF NOT EXISTS sales_type VARCHAR NOT NULL DEFAULT 'retail'"
+            )
+            logger.debug("Migration: sales_type column added/verified on gold_daily_traffic")
+        except Exception as e:
+            logger.debug(f"Migration note (gold_daily_traffic sales_type): {e}")
+
         # Migration: Add platform column to manual_expenses (for ad spend tracking)
         try:
             self._connection.execute(
@@ -1008,6 +1009,41 @@ class DuckDBStore(
             logger.debug("Migration: platform column added/verified on manual_expenses")
         except Exception as e:
             logger.debug(f"Migration note (manual_expenses platform): {e}")
+
+        # Migration: order_products.id INTEGER → BIGINT (overflow safety)
+        try:
+            col_type = self._connection.execute("""
+                SELECT data_type FROM information_schema.columns
+                WHERE table_name = 'order_products' AND column_name = 'id'
+            """).fetchone()
+            if col_type and col_type[0] == 'INTEGER':
+                logger.info("Migration: order_products.id INTEGER → BIGINT")
+                self._connection.execute("BEGIN TRANSACTION")
+                try:
+                    self._connection.execute("CREATE TABLE order_products_new AS SELECT * FROM order_products")
+                    self._connection.execute("DROP TABLE order_products")
+                    self._connection.execute("""
+                        CREATE TABLE order_products (
+                            id BIGINT PRIMARY KEY,
+                            order_id INTEGER NOT NULL,
+                            product_id INTEGER,
+                            name VARCHAR NOT NULL,
+                            quantity INTEGER NOT NULL,
+                            price_sold DECIMAL(12, 2) NOT NULL
+                        )
+                    """)
+                    self._connection.execute("INSERT INTO order_products SELECT * FROM order_products_new")
+                    self._connection.execute("DROP TABLE order_products_new")
+                    self._connection.execute("CREATE INDEX IF NOT EXISTS idx_order_products_order ON order_products(order_id)")
+                    self._connection.execute("CREATE INDEX IF NOT EXISTS idx_order_products_product ON order_products(product_id)")
+                    self._connection.execute("COMMIT")
+                    logger.info("Migration: order_products.id BIGINT migration complete")
+                except Exception as e:
+                    self._connection.execute("ROLLBACK")
+                    logger.error(f"Migration failed (order_products BIGINT), rolling back: {e}")
+                    raise
+        except Exception as e:
+            logger.debug(f"Migration note (order_products BIGINT): {e}")
 
     async def _create_inventory_views(self) -> None:
         """Create Layer 3 & 4 analytics views for inventory."""
@@ -1187,14 +1223,23 @@ class DuckDBStore(
 
     # ─── Warehouse Layer Refresh ─────────────────────────────────────────────
 
-    async def refresh_warehouse_layers(self, trigger: str = "manual") -> Dict[str, Any]:
+    async def refresh_warehouse_layers(
+        self,
+        trigger: str = "manual",
+        changed_order_ids: list[int] | None = None,
+    ) -> Dict[str, Any]:
         """Rebuild Silver and Gold warehouse layers from Bronze tables.
 
-        Atomically rebuilds silver_orders, gold_daily_revenue, and gold_daily_products
-        using CREATE OR REPLACE TABLE. Validates checksums and logs to warehouse_refreshes.
+        Uses transactional DELETE+INSERT (preserves indexes and PKs).
+        Split locking: releases the asyncio lock between Silver and each Gold
+        rebuild so queued read queries can execute between steps.
+
+        When changed_order_ids is provided, Gold layers are rebuilt only for
+        affected dates (incremental). Otherwise full rebuild (startup, full_sync).
 
         Args:
-            trigger: What triggered the refresh (incremental_sync, full_sync, sync_today, manual)
+            trigger: What triggered the refresh
+            changed_order_ids: Order IDs that changed (for incremental Gold rebuild)
 
         Returns:
             Dict with refresh stats and validation results
@@ -1203,169 +1248,269 @@ class DuckDBStore(
         start_time = time.perf_counter()
         error_msg = None
 
+        # Pre-compute SQL fragments used across steps
+        manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
+        retail_filter = f"""
+            WHEN o.manager_id IS NULL THEN 'retail'
+            WHEN o.manager_id = {B2B_MANAGER_ID} THEN 'b2b'
+            WHEN o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'
+            WHEN NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
+                 AND o.manager_id IN ({manager_list}) THEN 'retail'
+            ELSE 'other'
+        """
+        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+
         try:
+            # ── Step 1: Silver rebuild (always full — is_new_customer depends on global min) ──
             async with self.connection() as conn:
-                # Build the retail manager filter SQL for use inside CASE
-                manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
-                retail_filter = f"""
-                    WHEN o.manager_id IS NULL THEN 'retail'
-                    WHEN o.manager_id = {B2B_MANAGER_ID} THEN 'b2b'
-                    WHEN o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'
-                    WHEN NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
-                         AND o.manager_id IN ({manager_list}) THEN 'retail'
-                    ELSE 'other'
-                """
-
-                # ── Silver: one row per order with derived fields ──
-                conn.execute(f"""
-                    CREATE OR REPLACE TABLE silver_orders AS
-                    SELECT
-                        o.id,
-                        o.source_id,
-                        o.status_id,
-                        o.grand_total,
-                        o.ordered_at,
-                        o.buyer_id,
-                        o.manager_id,
-                        {_date_in_kyiv('o.ordered_at')} AS order_date,
-                        o.status_id IN {tuple(int(s) for s in OrderStatus.return_statuses())} AS is_return,
-                        CASE {retail_filter} END AS sales_type,
-                        o.source_id IN (1, 2, 4) AS is_active_source,
-                        CASE o.source_id
-                            WHEN 1 THEN 'Instagram'
-                            WHEN 2 THEN 'Telegram'
-                            WHEN 4 THEN 'Shopify'
-                            ELSE 'Other'
-                        END AS source_name,
-                        CASE
-                            WHEN o.buyer_id IS NOT NULL
-                                 AND {_date_in_kyiv('o.ordered_at')} = fo.first_order_date
-                            THEN TRUE ELSE FALSE
-                        END AS is_new_customer,
-                        fo.first_order_date AS buyer_first_order_date
-                    FROM orders o
-                    LEFT JOIN (
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    conn.execute("DELETE FROM silver_orders")
+                    conn.execute(f"""
+                        INSERT INTO silver_orders
                         SELECT
-                            buyer_id,
-                            MIN({_date_in_kyiv('ordered_at')}) AS first_order_date
-                        FROM orders
-                        WHERE buyer_id IS NOT NULL
-                          AND source_id IN (1, 2, 4)
-                          AND status_id NOT IN {tuple(int(s) for s in OrderStatus.return_statuses())}
-                        GROUP BY buyer_id
-                    ) fo ON o.buyer_id = fo.buyer_id
-                """)
+                            o.id,
+                            o.source_id,
+                            o.status_id,
+                            o.grand_total,
+                            o.ordered_at,
+                            o.buyer_id,
+                            o.manager_id,
+                            {_date_in_kyiv('o.ordered_at')} AS order_date,
+                            o.status_id IN {return_statuses} AS is_return,
+                            CASE {retail_filter} END AS sales_type,
+                            o.source_id IN (1, 2, 4) AS is_active_source,
+                            CASE o.source_id
+                                WHEN 1 THEN 'Instagram'
+                                WHEN 2 THEN 'Telegram'
+                                WHEN 4 THEN 'Shopify'
+                                ELSE 'Other'
+                            END AS source_name,
+                            CASE
+                                WHEN o.buyer_id IS NOT NULL
+                                     AND {_date_in_kyiv('o.ordered_at')} = fo.first_order_date
+                                THEN TRUE ELSE FALSE
+                            END AS is_new_customer,
+                            fo.first_order_date AS buyer_first_order_date
+                        FROM orders o
+                        LEFT JOIN (
+                            SELECT
+                                buyer_id,
+                                MIN({_date_in_kyiv('ordered_at')}) AS first_order_date
+                            FROM orders
+                            WHERE buyer_id IS NOT NULL
+                              AND source_id IN (1, 2, 4)
+                              AND status_id NOT IN {return_statuses}
+                            GROUP BY buyer_id
+                        ) fo ON o.buyer_id = fo.buyer_id
+                    """)
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
 
-                # ── Gold: daily revenue aggregated by (date, sales_type) ──
-                conn.execute("""
-                    CREATE OR REPLACE TABLE gold_daily_revenue AS
-                    SELECT
-                        order_date AS date,
-                        sales_type,
-                        COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0) AS revenue,
-                        COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) AS orders_count,
-                        COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN buyer_id END) AS unique_customers,
-                        COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND is_new_customer THEN buyer_id END) AS new_customers,
-                        COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END) AS returning_customers,
-                        COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 1 THEN grand_total END), 0) AS instagram_revenue,
-                        COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 2 THEN grand_total END), 0) AS telegram_revenue,
-                        COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 4 THEN grand_total END), 0) AS shopify_revenue,
-                        COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 1 THEN id END) AS instagram_orders,
-                        COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 2 THEN id END) AS telegram_orders,
-                        COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 4 THEN id END) AS shopify_orders,
-                        COUNT(DISTINCT CASE WHEN is_return AND is_active_source THEN id END) AS returns_count,
-                        COALESCE(SUM(CASE WHEN is_return AND is_active_source THEN grand_total END), 0) AS returns_revenue,
-                        CASE
-                            WHEN COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) > 0
-                            THEN COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0)
-                                 / COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END)
-                            ELSE 0
-                        END AS avg_order_value
-                    FROM silver_orders
-                    WHERE order_date IS NOT NULL
-                    GROUP BY order_date, sales_type
-                    ORDER BY order_date, sales_type
-                """)
+            # ── Determine affected dates for incremental Gold rebuild ──
+            affected_dates: set[date] | None = None
+            if changed_order_ids:
+                async with self.connection() as conn:
+                    # Get dates for changed orders + all dates for affected buyers
+                    # (is_new_customer can cascade to other dates for the same buyer)
+                    id_list = ",".join(str(i) for i in changed_order_ids)
+                    rows = conn.execute(f"""
+                        SELECT DISTINCT order_date FROM silver_orders
+                        WHERE id IN ({id_list})
+                           OR buyer_id IN (
+                               SELECT DISTINCT buyer_id FROM silver_orders
+                               WHERE id IN ({id_list}) AND buyer_id IS NOT NULL
+                           )
+                    """).fetchall()
+                    affected_dates = {r[0] for r in rows if r[0] is not None}
 
-                # ── Gold: daily products aggregated by (date, sales_type, product, source) ──
-                conn.execute(f"""
-                    CREATE OR REPLACE TABLE gold_daily_products AS
-                    SELECT
-                        s.order_date AS date,
-                        s.sales_type,
-                        s.source_id,
-                        op.product_id,
-                        op.name AS product_name,
-                        p.brand,
-                        p.category_id,
-                        c.name AS category_name,
-                        parent_c.name AS parent_category_name,
-                        SUM(op.quantity) AS quantity_sold,
-                        SUM(op.price_sold * op.quantity) AS product_revenue,
-                        COUNT(DISTINCT s.id) AS order_count
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
-                    LEFT JOIN products p ON op.product_id = p.id
-                    LEFT JOIN categories c ON p.category_id = c.id
-                    LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
-                    WHERE NOT s.is_return
-                      AND s.is_active_source
-                      AND s.order_date IS NOT NULL
-                    GROUP BY
-                        s.order_date, s.sales_type, s.source_id,
-                        op.product_id, op.name, p.brand, p.category_id,
-                        c.name, parent_c.name
-                """)
+                if not affected_dates:
+                    affected_dates = None  # Fall back to full rebuild
 
-                # ── Recreate indexes (CREATE OR REPLACE TABLE drops them) ──
-                # Basic indexes
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_order_date ON silver_orders(order_date)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_sales_type ON silver_orders(sales_type, order_date)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_buyer ON silver_orders(buyer_id)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_rev_date ON gold_daily_revenue(date, sales_type)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_date ON gold_daily_products(date, sales_type)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_product ON gold_daily_products(product_id)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_brand ON gold_daily_products(brand)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_category ON gold_daily_products(category_id)")
-                # Composite indexes for drill-down query optimization
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_source_date_type ON silver_orders(source_id, order_date, sales_type)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_silver_active_return ON silver_orders(is_active_source, is_return, order_date)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_cat_date ON gold_daily_products(category_id, date, sales_type)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_prod_brand_date ON gold_daily_products(brand, date, sales_type)")
+            # ── Step 2: Gold daily revenue (lock acquired + released) ──
+            gold_revenue_rows = 0
+            async with self.connection() as conn:
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    if affected_dates:
+                        date_list = ",".join(f"'{d}'" for d in affected_dates)
+                        conn.execute(f"DELETE FROM gold_daily_revenue WHERE date IN ({date_list})")
+                        conn.execute(f"""
+                            INSERT INTO gold_daily_revenue
+                            SELECT
+                                order_date AS date,
+                                sales_type,
+                                COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0) AS revenue,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) AS orders_count,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN buyer_id END) AS unique_customers,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND is_new_customer THEN buyer_id END) AS new_customers,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END) AS returning_customers,
+                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 1 THEN grand_total END), 0) AS instagram_revenue,
+                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 2 THEN grand_total END), 0) AS telegram_revenue,
+                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 4 THEN grand_total END), 0) AS shopify_revenue,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 1 THEN id END) AS instagram_orders,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 2 THEN id END) AS telegram_orders,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 4 THEN id END) AS shopify_orders,
+                                COUNT(DISTINCT CASE WHEN is_return AND is_active_source THEN id END) AS returns_count,
+                                COALESCE(SUM(CASE WHEN is_return AND is_active_source THEN grand_total END), 0) AS returns_revenue,
+                                CASE
+                                    WHEN COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) > 0
+                                    THEN COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0)
+                                         / COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END)
+                                    ELSE 0
+                                END AS avg_order_value
+                            FROM silver_orders
+                            WHERE order_date IN ({date_list})
+                            GROUP BY order_date, sales_type
+                        """)
+                    else:
+                        conn.execute("DELETE FROM gold_daily_revenue")
+                        conn.execute("""
+                            INSERT INTO gold_daily_revenue
+                            SELECT
+                                order_date AS date,
+                                sales_type,
+                                COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0) AS revenue,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) AS orders_count,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN buyer_id END) AS unique_customers,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND is_new_customer THEN buyer_id END) AS new_customers,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END) AS returning_customers,
+                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 1 THEN grand_total END), 0) AS instagram_revenue,
+                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 2 THEN grand_total END), 0) AS telegram_revenue,
+                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 4 THEN grand_total END), 0) AS shopify_revenue,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 1 THEN id END) AS instagram_orders,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 2 THEN id END) AS telegram_orders,
+                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 4 THEN id END) AS shopify_orders,
+                                COUNT(DISTINCT CASE WHEN is_return AND is_active_source THEN id END) AS returns_count,
+                                COALESCE(SUM(CASE WHEN is_return AND is_active_source THEN grand_total END), 0) AS returns_revenue,
+                                CASE
+                                    WHEN COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) > 0
+                                    THEN COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0)
+                                         / COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END)
+                                    ELSE 0
+                                END AS avg_order_value
+                            FROM silver_orders
+                            WHERE order_date IS NOT NULL
+                            GROUP BY order_date, sales_type
+                        """)
+                    gold_revenue_rows = conn.execute("SELECT COUNT(*) FROM gold_daily_revenue").fetchone()[0]
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
 
-                # ── Validation checksums ──
+            # ── Step 3: Gold daily products (lock acquired + released) ──
+            gold_products_rows = 0
+            async with self.connection() as conn:
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    if affected_dates:
+                        date_list = ",".join(f"'{d}'" for d in affected_dates)
+                        conn.execute(f"DELETE FROM gold_daily_products WHERE date IN ({date_list})")
+                        conn.execute(f"""
+                            INSERT INTO gold_daily_products
+                            SELECT
+                                s.order_date AS date,
+                                s.sales_type,
+                                s.source_id,
+                                op.product_id,
+                                op.name AS product_name,
+                                p.brand,
+                                p.category_id,
+                                c.name AS category_name,
+                                parent_c.name AS parent_category_name,
+                                SUM(op.quantity) AS quantity_sold,
+                                SUM(op.price_sold * op.quantity) AS product_revenue,
+                                COUNT(DISTINCT s.id) AS order_count
+                            FROM silver_orders s
+                            JOIN order_products op ON s.id = op.order_id
+                            LEFT JOIN products p ON op.product_id = p.id
+                            LEFT JOIN categories c ON p.category_id = c.id
+                            LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
+                            WHERE NOT s.is_return
+                              AND s.is_active_source
+                              AND s.order_date IN ({date_list})
+                            GROUP BY
+                                s.order_date, s.sales_type, s.source_id,
+                                op.product_id, op.name, p.brand, p.category_id,
+                                c.name, parent_c.name
+                        """)
+                    else:
+                        conn.execute("DELETE FROM gold_daily_products")
+                        conn.execute("""
+                            INSERT INTO gold_daily_products
+                            SELECT
+                                s.order_date AS date,
+                                s.sales_type,
+                                s.source_id,
+                                op.product_id,
+                                op.name AS product_name,
+                                p.brand,
+                                p.category_id,
+                                c.name AS category_name,
+                                parent_c.name AS parent_category_name,
+                                SUM(op.quantity) AS quantity_sold,
+                                SUM(op.price_sold * op.quantity) AS product_revenue,
+                                COUNT(DISTINCT s.id) AS order_count
+                            FROM silver_orders s
+                            JOIN order_products op ON s.id = op.order_id
+                            LEFT JOIN products p ON op.product_id = p.id
+                            LEFT JOIN categories c ON p.category_id = c.id
+                            LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
+                            WHERE NOT s.is_return
+                              AND s.is_active_source
+                              AND s.order_date IS NOT NULL
+                            GROUP BY
+                                s.order_date, s.sales_type, s.source_id,
+                                op.product_id, op.name, p.brand, p.category_id,
+                                c.name, parent_c.name
+                        """)
+                    gold_products_rows = conn.execute("SELECT COUNT(*) FROM gold_daily_products").fetchone()[0]
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+
+            # ── Step 4: Validation + audit log ──
+            async with self.connection() as conn:
                 checksums = conn.execute("""
                     SELECT
                         (SELECT COUNT(*) FROM orders) AS bronze_orders,
                         (SELECT COUNT(*) FROM silver_orders) AS silver_rows,
-                        (SELECT COUNT(*) FROM gold_daily_revenue) AS gold_revenue_rows,
-                        (SELECT COUNT(*) FROM gold_daily_products) AS gold_products_rows,
                         (SELECT COALESCE(SUM(grand_total), 0) FROM silver_orders
                          WHERE NOT is_return AND is_active_source) AS silver_revenue,
-                        (SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue) AS gold_revenue
+                        (SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue) AS gold_revenue,
+                        (SELECT COALESCE(SUM(product_revenue), 0) FROM gold_daily_products) AS gold_product_revenue,
+                        (SELECT COALESCE(SUM(op.price_sold * op.quantity), 0)
+                         FROM order_products op
+                         JOIN silver_orders s ON op.order_id = s.id
+                         WHERE NOT s.is_return AND s.is_active_source) AS bronze_product_revenue
                 """).fetchone()
 
                 bronze_orders = checksums[0]
                 silver_rows = checksums[1]
-                gold_revenue_rows = checksums[2]
-                gold_products_rows = checksums[3]
-                silver_revenue = float(checksums[4])
-                gold_revenue = float(checksums[5])
+                silver_revenue = float(checksums[2])
+                gold_revenue = float(checksums[3])
+                gold_product_revenue = float(checksums[4])
+                bronze_product_revenue = float(checksums[5])
 
                 checksum_match = abs(silver_revenue - gold_revenue) < 0.01
+                product_checksum_match = abs(gold_product_revenue - bronze_product_revenue) < 0.01
                 row_count_match = bronze_orders == silver_rows
-                validation_passed = checksum_match and row_count_match
+                validation_passed = checksum_match and row_count_match and product_checksum_match
 
                 if not validation_passed:
                     logger.warning(
                         f"Warehouse validation failed: "
                         f"rows={bronze_orders}→{silver_rows} (match={row_count_match}), "
-                        f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match})"
+                        f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match}), "
+                        f"product_revenue={bronze_product_revenue:.2f}→{gold_product_revenue:.2f} (match={product_checksum_match})"
                     )
 
                 duration_ms = (time.perf_counter() - start_time) * 1000
 
-                # ── Audit log ──
                 conn.execute("""
                     INSERT INTO warehouse_refreshes
                         (refreshed_at, trigger, duration_ms, bronze_orders, silver_rows,
@@ -1379,20 +1524,26 @@ class DuckDBStore(
                     checksum_match, validation_passed, None
                 ])
 
-                logger.info(
-                    f"Warehouse layers refreshed ({trigger}): "
-                    f"silver={silver_rows}, gold_rev={gold_revenue_rows}, "
-                    f"gold_prod={gold_products_rows}, "
-                    f"duration={duration_ms:.0f}ms, valid={validation_passed}"
-                )
+            incremental_info = ""
+            if affected_dates:
+                incremental_info = f", incremental={len(affected_dates)} dates"
+
+            logger.info(
+                f"Warehouse layers refreshed ({trigger}): "
+                f"silver={silver_rows}, gold_rev={gold_revenue_rows}, "
+                f"gold_prod={gold_products_rows}, "
+                f"duration={duration_ms:.0f}ms, valid={validation_passed}"
+                f"{incremental_info}"
+            )
 
             # ── UTM/Traffic layers (after main refresh completes) ──
-            # Process UTM data from manager_comment field
             utm_count = 0
             traffic_rows = 0
             try:
                 utm_count = await self.refresh_utm_silver_layer()
-                traffic_rows = await self.refresh_traffic_gold_layer()
+                traffic_rows = await self.refresh_traffic_gold_layer(
+                    affected_dates=affected_dates,
+                )
             except Exception as utm_error:
                 logger.warning(f"UTM layer refresh failed (non-critical): {utm_error}")
 

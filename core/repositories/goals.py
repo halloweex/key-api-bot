@@ -7,6 +7,7 @@ from typing import Optional, List, Dict, Any
 from zoneinfo import ZoneInfo
 
 from core.duckdb_constants import DEFAULT_TZ, _date_in_kyiv
+from core.models import OrderStatus
 
 logger = logging.getLogger(__name__)
 

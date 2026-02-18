@@ -6,6 +6,7 @@ from datetime import timedelta
 from typing import Optional, List, Dict, Any
 
 from core.duckdb_constants import _date_in_kyiv
+from core.models import OrderStatus
 
 logger = logging.getLogger(__name__)
 

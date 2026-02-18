@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import date
 from typing import Optional, List, Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
@@ -86,7 +87,11 @@ class TrafficMixin:
             return 'paid_confirmed', 'facebook'
 
         # 5. TikTok Ads - campaign patterns (TOF/MOF/BOF = funnel stages)
-        if campaign and any(x in campaign for x in ['tof', 'mof', 'bof', '| ss |', '| retarget', '| dynamic']):
+        if campaign and re.search(
+            r'(?:^|[\s_|])(?:tof|mof|bof)(?:[\s_|]|$)|'
+            r'\| ss \||\| retarget|\| dynamic',
+            campaign
+        ):
             return 'paid_confirmed', 'tiktok'
 
         # 6. TikTok Ads - source + medium
@@ -116,15 +121,16 @@ class TrafficMixin:
         # ─── Generic UTM fallback (has source/medium but no known pattern) ──────
 
         if source or medium:
-            # Infer platform from source
+            # Infer platform from source (token-based to avoid substring false positives)
             platform = 'other'
-            if 'facebook' in source or 'fb' in source:
+            source_tokens = set(re.split(r'[_\-\s]', source))
+            if 'facebook' in source_tokens or source_tokens & {'fb', 'fbads'}:
                 platform = 'facebook'
-            elif 'tiktok' in source or 'tt' in source:
+            elif 'tiktok' in source_tokens or source_tokens & {'tt', 'ttads'}:
                 platform = 'tiktok'
-            elif 'google' in source:
+            elif 'google' in source_tokens:
                 platform = 'google'
-            elif 'insta' in source or 'ig' in source:
+            elif source_tokens & {'instagram', 'insta', 'ig'}:
                 platform = 'instagram'
 
             if medium in ['cpc', 'paid', 'ppc']:
@@ -160,13 +166,19 @@ class TrafficMixin:
             Number of orders processed
         """
         async with self.connection() as conn:
-            # Get orders with manager_comment that haven't been parsed yet
+            # Get orders that need UTM parsing:
+            # - never parsed (no silver_order_utm row)
+            # - stale (order updated after last parse)
             orders = conn.execute("""
                 SELECT o.id, o.manager_comment
                 FROM orders o
+                LEFT JOIN silver_order_utm u ON u.order_id = o.id
                 WHERE o.manager_comment IS NOT NULL
                   AND o.manager_comment != ''
-                  AND NOT EXISTS (SELECT 1 FROM silver_order_utm u WHERE u.order_id = o.id)
+                  AND (
+                      u.order_id IS NULL
+                      OR o.updated_at > u.parsed_at
+                  )
             """).fetchall()
 
             if not orders:
@@ -224,45 +236,68 @@ class TrafficMixin:
             logger.info(f"Parsed UTM data for {len(utm_rows)} orders")
             return len(utm_rows)
 
-    async def refresh_traffic_gold_layer(self) -> int:
+    async def refresh_traffic_gold_layer(
+        self, affected_dates: set[date] | None = None,
+    ) -> int:
         """Rebuild gold_daily_traffic from silver layers.
 
-        Aggregates traffic by date, source_id, sales_type, platform, and traffic_type.
+        Uses transactional DELETE+INSERT (preserves indexes).
+        When affected_dates is provided, only rebuilds those dates.
+
+        Args:
+            affected_dates: Dates to rebuild (None = full rebuild)
 
         Returns:
             Number of rows in gold_daily_traffic
         """
+        _traffic_select = """
+            SELECT
+                s.order_date AS date,
+                s.source_id,
+                s.sales_type,
+                COALESCE(u.platform,
+                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END
+                ) AS platform,
+                COALESCE(u.traffic_type,
+                    CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
+                ) AS traffic_type,
+                COUNT(DISTINCT s.id) AS orders_count,
+                COALESCE(SUM(s.grand_total), 0) AS revenue
+            FROM silver_orders s
+            LEFT JOIN silver_order_utm u ON s.id = u.order_id
+            WHERE NOT s.is_return
+              AND s.is_active_source
+              AND s.order_date IS NOT NULL
+        """
+
         async with self.connection() as conn:
-            conn.execute("""
-                CREATE OR REPLACE TABLE gold_daily_traffic AS
-                SELECT
-                    s.order_date AS date,
-                    s.source_id,
-                    s.sales_type,
-                    COALESCE(u.platform,
-                        CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END
-                    ) AS platform,
-                    COALESCE(u.traffic_type,
-                        CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
-                    ) AS traffic_type,
-                    COUNT(DISTINCT s.id) AS orders_count,
-                    COALESCE(SUM(s.grand_total), 0) AS revenue
-                FROM silver_orders s
-                LEFT JOIN silver_order_utm u ON s.id = u.order_id
-                WHERE NOT s.is_return
-                  AND s.is_active_source
-                  AND s.order_date IS NOT NULL
-                GROUP BY s.order_date, s.source_id, s.sales_type, u.platform, u.traffic_type
-                ORDER BY s.order_date DESC, s.source_id
-            """)
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                if affected_dates:
+                    date_list = ",".join(f"'{d}'" for d in affected_dates)
+                    conn.execute(f"DELETE FROM gold_daily_traffic WHERE date IN ({date_list})")
+                    conn.execute(f"""
+                        INSERT INTO gold_daily_traffic
+                        {_traffic_select}
+                          AND s.order_date IN ({date_list})
+                        GROUP BY s.order_date, s.source_id, s.sales_type, u.platform, u.traffic_type
+                    """)
+                else:
+                    conn.execute("DELETE FROM gold_daily_traffic")
+                    conn.execute(f"""
+                        INSERT INTO gold_daily_traffic
+                        {_traffic_select}
+                        GROUP BY s.order_date, s.source_id, s.sales_type, u.platform, u.traffic_type
+                    """)
 
-            # Recreate indexes
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_traffic_date ON gold_daily_traffic(date)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_traffic_platform ON gold_daily_traffic(platform)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_gold_traffic_sales_type ON gold_daily_traffic(sales_type)")
+                row_count = conn.execute("SELECT COUNT(*) FROM gold_daily_traffic").fetchone()[0]
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
-            row_count = conn.execute("SELECT COUNT(*) FROM gold_daily_traffic").fetchone()[0]
-            logger.info(f"Refreshed gold_daily_traffic: {row_count} rows")
+            logger.info(f"Refreshed gold_daily_traffic: {row_count} rows"
+                        f"{f' (incremental: {len(affected_dates)} dates)' if affected_dates else ''}")
             return row_count
 
     async def get_traffic_analytics(

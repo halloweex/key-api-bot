@@ -642,7 +642,9 @@ class SyncService:
                 sync_to.strftime('%Y-%m-%d %H:%M:%S')
             )
 
+            order_ids = []
             if orders:
+                order_ids = [o["id"] for o in orders if "id" in o]
                 order_count, expense_count = await self._upsert_orders_with_expenses(orders)
                 stats["orders"] = order_count
                 stats["expenses"] = expense_count
@@ -702,8 +704,14 @@ class SyncService:
                 # Emit inventory updated event
                 await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
 
-            # Refresh warehouse layers (Silver → Gold) after all syncs
-            await self.store.refresh_warehouse_layers(trigger="incremental_sync")
+            # Refresh warehouse layers (Silver → Gold) only when data changed
+            data_changed = stats["orders"] > 0 or stats["products"] > 0 or stats["managers"] > 0
+            if data_changed:
+                changed_ids = order_ids if stats["orders"] > 0 else None
+                await self.store.refresh_warehouse_layers(
+                    trigger="incremental_sync",
+                    changed_order_ids=changed_ids,
+                )
 
             # Update adaptive backoff based on orders found
             self._update_backoff(stats["orders"])
@@ -906,9 +914,9 @@ async def init_and_sync(full_sync_days: int = 365) -> None:
     if sku_count > 0:
         logger.info(f"Initialized sku_inventory_status: {sku_count} SKUs")
 
-    # Ensure warehouse layers (Silver/Gold) are populated
-    wh_result = await store.refresh_warehouse_layers(trigger="startup")
-    logger.info(f"Warehouse layers initialized: silver={wh_result.get('silver_rows', 0)}, gold_rev={wh_result.get('gold_revenue_rows', 0)}")
+    # Warehouse layers (Silver/Gold) are refreshed inside incremental_sync()
+    # or full_sync() when data changes. With DELETE+INSERT, tables persist across
+    # restarts so existing data remains valid without a redundant second refresh.
 
     # Initialize Meilisearch for chat search
     try:
