@@ -86,13 +86,13 @@ class DuckDBStore(
 
     async def close(self) -> None:
         """Close database connection and thread pool."""
-        # Shutdown thread pool
-        if self._executor:
-            self._executor.shutdown(wait=True)
-            self._executor = None
-
-        # Close main connection
         async with self._lock:
+            # Shutdown thread pool (waits for in-flight queries to finish)
+            if self._executor:
+                self._executor.shutdown(wait=True)
+                self._executor = None
+
+            # Close main connection
             if self._connection:
                 self._connection.close()
                 self._connection = None
@@ -427,7 +427,8 @@ class DuckDBStore(
             -- Timestamps
             last_sale_date DATE,
             first_seen_at DATE NOT NULL DEFAULT CURRENT_DATE,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            last_stock_out_at DATE
         );
 
         CREATE INDEX IF NOT EXISTS idx_sku_status_category
@@ -451,6 +452,32 @@ class DuckDBStore(
 
         CREATE INDEX IF NOT EXISTS idx_sku_history_offer
             ON inventory_sku_history(offer_id, date DESC);
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- Stock Movements (delta detection from hourly sync)
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE SEQUENCE IF NOT EXISTS seq_stock_movements_id START 1;
+
+        CREATE TABLE IF NOT EXISTS stock_movements (
+            id INTEGER PRIMARY KEY DEFAULT(nextval('seq_stock_movements_id')),
+            offer_id INTEGER NOT NULL,
+            product_id INTEGER,
+            movement_type VARCHAR NOT NULL,
+            quantity_before INTEGER NOT NULL,
+            quantity_after INTEGER NOT NULL,
+            delta INTEGER NOT NULL,
+            reserve_before INTEGER NOT NULL,
+            reserve_after INTEGER NOT NULL,
+            recorded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            source VARCHAR DEFAULT 'sync'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_movements_offer
+            ON stock_movements(offer_id, recorded_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_movements_product
+            ON stock_movements(product_id, recorded_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_movements_date
+            ON stock_movements(recorded_at);
 
         -- Sync metadata
         CREATE TABLE IF NOT EXISTS sync_metadata (
@@ -1045,6 +1072,15 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (order_products BIGINT): {e}")
 
+        # Migration: Add last_stock_out_at column to sku_inventory_status
+        try:
+            self._connection.execute(
+                "ALTER TABLE sku_inventory_status ADD COLUMN IF NOT EXISTS last_stock_out_at DATE"
+            )
+            logger.debug("Migration: last_stock_out_at column added/verified on sku_inventory_status")
+        except Exception as e:
+            logger.debug(f"Migration note (sku_inventory_status last_stock_out_at): {e}")
+
     async def _create_inventory_views(self) -> None:
         """Create Layer 3 & 4 analytics views for inventory."""
         views_sql = """
@@ -1315,15 +1351,16 @@ class DuckDBStore(
                 async with self.connection() as conn:
                     # Get dates for changed orders + all dates for affected buyers
                     # (is_new_customer can cascade to other dates for the same buyer)
-                    id_list = ",".join(str(i) for i in changed_order_ids)
+                    placeholders = ",".join("?" * len(changed_order_ids))
+                    id_params = list(changed_order_ids)
                     rows = conn.execute(f"""
                         SELECT DISTINCT order_date FROM silver_orders
-                        WHERE id IN ({id_list})
+                        WHERE id IN ({placeholders})
                            OR buyer_id IN (
                                SELECT DISTINCT buyer_id FROM silver_orders
-                               WHERE id IN ({id_list}) AND buyer_id IS NOT NULL
+                               WHERE id IN ({placeholders}) AND buyer_id IS NOT NULL
                            )
-                    """).fetchall()
+                    """, id_params + id_params).fetchall()
                     affected_dates = {r[0] for r in rows if r[0] is not None}
 
                 if not affected_dates:
@@ -1335,8 +1372,9 @@ class DuckDBStore(
                 conn.execute("BEGIN TRANSACTION")
                 try:
                     if affected_dates:
-                        date_list = ",".join(f"'{d}'" for d in affected_dates)
-                        conn.execute(f"DELETE FROM gold_daily_revenue WHERE date IN ({date_list})")
+                        date_params = list(affected_dates)
+                        date_placeholders = ",".join("?" * len(date_params))
+                        conn.execute(f"DELETE FROM gold_daily_revenue WHERE date IN ({date_placeholders})", date_params)
                         conn.execute(f"""
                             INSERT INTO gold_daily_revenue
                             SELECT
@@ -1362,9 +1400,9 @@ class DuckDBStore(
                                     ELSE 0
                                 END AS avg_order_value
                             FROM silver_orders
-                            WHERE order_date IN ({date_list})
+                            WHERE order_date IN ({date_placeholders})
                             GROUP BY order_date, sales_type
-                        """)
+                        """, date_params)
                     else:
                         conn.execute("DELETE FROM gold_daily_revenue")
                         conn.execute("""
@@ -1407,8 +1445,9 @@ class DuckDBStore(
                 conn.execute("BEGIN TRANSACTION")
                 try:
                     if affected_dates:
-                        date_list = ",".join(f"'{d}'" for d in affected_dates)
-                        conn.execute(f"DELETE FROM gold_daily_products WHERE date IN ({date_list})")
+                        date_params = list(affected_dates)
+                        date_placeholders = ",".join("?" * len(date_params))
+                        conn.execute(f"DELETE FROM gold_daily_products WHERE date IN ({date_placeholders})", date_params)
                         conn.execute(f"""
                             INSERT INTO gold_daily_products
                             SELECT
@@ -1431,12 +1470,12 @@ class DuckDBStore(
                             LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
                             WHERE NOT s.is_return
                               AND s.is_active_source
-                              AND s.order_date IN ({date_list})
+                              AND s.order_date IN ({date_placeholders})
                             GROUP BY
                                 s.order_date, s.sales_type, s.source_id,
                                 op.product_id, op.name, p.brand, p.category_id,
                                 c.name, parent_c.name
-                        """)
+                        """, date_params)
                     else:
                         conn.execute("DELETE FROM gold_daily_products")
                         conn.execute("""
@@ -2139,14 +2178,16 @@ class DuckDBStore(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _store_instance: Optional[DuckDBStore] = None
+_store_lock = asyncio.Lock()
 
 
 async def get_store() -> DuckDBStore:
-    """Get singleton DuckDB store instance."""
+    """Get singleton DuckDB store instance (coroutine-safe)."""
     global _store_instance
-    if _store_instance is None:
-        _store_instance = DuckDBStore()
-        await _store_instance.connect()
+    async with _store_lock:
+        if _store_instance is None:
+            _store_instance = DuckDBStore()
+            await _store_instance.connect()
     return _store_instance
 
 

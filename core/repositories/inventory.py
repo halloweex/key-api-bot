@@ -51,6 +51,8 @@ class InventoryMixin:
     async def upsert_stocks(self, stocks: List[Dict[str, Any]]) -> int:
         """Insert or update offer stocks from KeyCRM API response.
 
+        Detects stock changes and records movements for audit trail.
+
         Args:
             stocks: List of stock dicts from KeyCRM API (offers/stocks endpoint)
 
@@ -63,21 +65,57 @@ class InventoryMixin:
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
+                # Fetch current state for delta detection
+                current = {}
+                for r in conn.execute("SELECT id, quantity, reserve FROM offer_stocks").fetchall():
+                    current[r[0]] = (r[1], r[2])
+
+                # Build offer_id → product_id mapping for denormalization
+                product_map = {}
+                for r in conn.execute("SELECT id, product_id FROM offers").fetchall():
+                    product_map[r[0]] = r[1]
+
                 count = 0
+                movements = []
                 for stock in stocks:
+                    offer_id = stock.get("id")
+                    new_qty = stock.get("quantity", 0)
+                    new_rsv = stock.get("reserve", 0)
+                    old = current.get(offer_id)
+                    pid = product_map.get(offer_id)
+
+                    if old is None:
+                        # New offer — record initial state if it has stock
+                        if new_qty > 0 or new_rsv > 0:
+                            movements.append((offer_id, pid, "initial",
+                                              0, new_qty, new_qty, 0, new_rsv))
+                    elif old[0] != new_qty or old[1] != new_rsv:
+                        # Changed — classify by delta direction
+                        delta = new_qty - old[0]
+                        if delta != 0:
+                            mtype = "stock_out" if delta < 0 else "stock_in"
+                        else:
+                            mtype = "reserve_change"
+                        movements.append((offer_id, pid, mtype,
+                                          old[0], new_qty, delta, old[1], new_rsv))
+
                     conn.execute("""
                         INSERT OR REPLACE INTO offer_stocks
                         (id, sku, price, purchased_price, quantity, reserve, synced_at)
                         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, [
-                        stock.get("id"),
-                        stock.get("sku"),
-                        stock.get("price"),
-                        stock.get("purchased_price"),
-                        stock.get("quantity", 0),
-                        stock.get("reserve", 0),
-                    ])
+                    """, [offer_id, stock.get("sku"), stock.get("price"),
+                          stock.get("purchased_price"), new_qty, new_rsv])
                     count += 1
+
+                if movements:
+                    conn.executemany("""
+                        INSERT INTO stock_movements
+                        (offer_id, product_id, movement_type,
+                         quantity_before, quantity_after, delta,
+                         reserve_before, reserve_after)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, movements)
+                    logger.info(f"Recorded {len(movements)} stock movements")
 
                 conn.execute("COMMIT")
                 logger.info(f"Upserted {count} offer stocks to DuckDB")
@@ -115,9 +153,11 @@ class InventoryMixin:
                     pls.last_sale_date,
                     COALESCE(
                         (SELECT first_seen_at FROM sku_inventory_status WHERE offer_id = os.id),
+                        fod.first_order_date,
                         CURRENT_DATE
                     ) as first_seen_at,
-                    CURRENT_TIMESTAMP as updated_at
+                    CURRENT_TIMESTAMP as updated_at,
+                    smo.last_stock_out_date as last_stock_out_at
                 FROM offer_stocks os
                 LEFT JOIN offers o ON os.id = o.id
                 LEFT JOIN products p ON o.product_id = p.id
@@ -130,6 +170,22 @@ class InventoryMixin:
                     WHERE ord.status_id NOT IN (19, 22, 21, 23)
                     GROUP BY op.product_id
                 ) pls ON o.product_id = pls.product_id
+                LEFT JOIN (
+                    SELECT
+                        op2.product_id,
+                        MIN(DATE(ord2.ordered_at AT TIME ZONE 'Europe/Kyiv')) as first_order_date
+                    FROM order_products op2
+                    JOIN orders ord2 ON op2.order_id = ord2.id
+                    GROUP BY op2.product_id
+                ) fod ON o.product_id = fod.product_id
+                LEFT JOIN (
+                    SELECT
+                        offer_id,
+                        MAX(DATE(recorded_at AT TIME ZONE 'Europe/Kyiv')) as last_stock_out_date
+                    FROM stock_movements
+                    WHERE movement_type = 'stock_out'
+                    GROUP BY offer_id
+                ) smo ON os.id = smo.offer_id
             """)
 
             count = conn.execute("SELECT COUNT(*) FROM sku_inventory_status").fetchone()[0]
@@ -162,7 +218,6 @@ class InventoryMixin:
                     reserve,
                     price
                 FROM sku_inventory_status
-                WHERE quantity > 0
             """)
 
             count = conn.execute(
@@ -434,7 +489,7 @@ class InventoryMixin:
         async with self.connection() as conn:
             if granularity == "monthly":
                 # Monthly aggregation
-                result = conn.execute(f"""
+                result = conn.execute("""
                     SELECT
                         DATE_TRUNC('month', date) as period,
                         AVG(total_quantity) as avg_quantity,
@@ -446,10 +501,10 @@ class InventoryMixin:
                         MAX(total_value) as max_value,
                         COUNT(*) as data_points
                     FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL '{days} days'
+                    WHERE date >= CURRENT_DATE - INTERVAL ? DAY
                     GROUP BY DATE_TRUNC('month', date)
                     ORDER BY period
-                """).fetchall()
+                """, [days]).fetchall()
 
                 labels = [row[0].strftime('%b %Y') for row in result if row[0]]
                 quantities = [round(row[1] or 0) for row in result]
@@ -467,7 +522,7 @@ class InventoryMixin:
                 }
             else:
                 # Daily data
-                result = conn.execute(f"""
+                result = conn.execute("""
                     SELECT
                         date,
                         total_quantity,
@@ -475,9 +530,9 @@ class InventoryMixin:
                         total_reserve,
                         sku_count
                     FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL '{days} days'
+                    WHERE date >= CURRENT_DATE - INTERVAL ? DAY
                     ORDER BY date
-                """).fetchall()
+                """, [days]).fetchall()
 
                 labels = [row[0].strftime('%d %b') for row in result if row[0]]
                 quantities = [row[1] or 0 for row in result]
