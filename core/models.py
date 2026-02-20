@@ -254,6 +254,7 @@ class OrderProduct:
     quantity: int
     price_sold: float
     offer: Optional[ProductOffer] = None
+    line_item_id: Optional[int] = None  # API-provided line item ID
 
     @classmethod
     def from_api(cls, data: Dict[str, Any]) -> "OrderProduct":
@@ -263,6 +264,7 @@ class OrderProduct:
             quantity=int(data.get("quantity", 1)),
             price_sold=float(data.get("price_sold", 0)),
             offer=ProductOffer.from_api(data.get("offer")),
+            line_item_id=data.get("id"),  # Use API id to avoid synthetic collision
         )
 
     @property

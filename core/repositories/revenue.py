@@ -62,15 +62,19 @@ class RevenueMixin:
                 total_orders = int(result[0] or 0)
                 total_revenue = float(result[1] or 0)
 
-                # Returns from gold_daily_revenue (returns aren't product-specific)
+                # Returns from silver_orders — consistent with the filtered orders query above
+                # (Gold doesn't have category/brand/source breakdown for returns)
                 ret_params = [start_date, end_date]
-                ret_where = ["date BETWEEN ? AND ?"]
+                ret_where = ["s.order_date BETWEEN ? AND ?", "s.is_return", "s.is_active_source"]
                 if sales_type != "all":
-                    ret_where.append("sales_type = ?")
+                    ret_where.append("s.sales_type = ?")
                     ret_params.append(sales_type)
+                if source_id:
+                    ret_where.append("s.source_id = ?")
+                    ret_params.append(source_id)
                 ret_result = conn.execute(f"""
-                    SELECT COALESCE(SUM(returns_count), 0), COALESCE(SUM(returns_revenue), 0)
-                    FROM gold_daily_revenue
+                    SELECT COUNT(DISTINCT s.id), COALESCE(SUM(s.grand_total), 0)
+                    FROM silver_orders s
                     WHERE {" AND ".join(ret_where)}
                 """, ret_params).fetchone()
                 total_returns = int(ret_result[0])
@@ -87,19 +91,28 @@ class RevenueMixin:
                 where_sql = " AND ".join(where_clauses)
 
                 if source_id:
-                    # Source-specific: sum per-source columns
+                    # Source-specific: sum per-source columns for orders/revenue
                     source_col_map = {1: "instagram", 2: "telegram", 4: "shopify"}
                     src_name = source_col_map.get(source_id)
                     if src_name:
                         result = conn.execute(f"""
                             SELECT
                                 SUM({src_name}_orders) as total_orders,
-                                SUM({src_name}_revenue) as total_revenue,
-                                SUM(returns_count) as total_returns,
-                                SUM(returns_revenue) as returns_revenue
+                                SUM({src_name}_revenue) as total_revenue
                             FROM gold_daily_revenue
                             WHERE {where_sql}
                         """, params).fetchone()
+                        # Gold doesn't have per-source return columns — query Silver
+                        ret_params = [start_date, end_date, source_id]
+                        sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
+                        ret_result = conn.execute(f"""
+                            SELECT COUNT(DISTINCT id), COALESCE(SUM(grand_total), 0)
+                            FROM silver_orders
+                            WHERE order_date BETWEEN ? AND ?
+                              AND is_return AND is_active_source AND source_id = ?
+                              AND {sales_filter}
+                        """, ret_params).fetchone()
+                        result = (result[0], result[1], ret_result[0], ret_result[1])
                     else:
                         result = (0, 0, 0, 0)
                 else:
@@ -141,13 +154,13 @@ class RevenueMixin:
 
         Returns list of orders with id, date, amount, status, source.
         """
-        # Status ID to name mapping for returns
+        # Derive status names from OrderStatus enum (single source of truth)
         STATUS_NAMES = {
-            19: "Returned",
-            21: "Partially Returned",
-            22: "Cancelled",
-            23: "Refunded",
+            s.value: s.name.replace("_", " ").title()
+            for s in OrderStatus.return_statuses()
         }
+        # Ensure we have a mapping (safety net)
+        STATUS_NAMES.setdefault(19, "Returned")
 
         async with self.connection() as conn:
             params: list = [start_date, end_date]
@@ -555,11 +568,11 @@ class RevenueMixin:
 
             results = conn.execute(f"""
                 SELECT
-                    g.product_name,
+                    ANY_VALUE(g.product_name) as product_name,
                     SUM(g.quantity_sold) as total_qty
                 FROM gold_daily_products g
                 WHERE {where_sql}
-                GROUP BY g.product_name
+                GROUP BY COALESCE(CAST(g.product_id AS VARCHAR), g.product_name)
                 ORDER BY total_qty DESC
                 LIMIT ?
             """, params).fetchall()
@@ -757,7 +770,8 @@ class RevenueMixin:
             where_clauses = [
                 f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
                 f"o.status_id NOT IN {return_statuses}",
-                self._build_sales_type_filter(sales_type)
+                "o.source_id IN (1, 2, 4)",  # Exclude Opencart (deprecated)
+                self._build_sales_type_filter(sales_type, conn=conn)
             ]
 
             if source_id:

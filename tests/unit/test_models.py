@@ -68,10 +68,9 @@ class TestBuyer:
         data = {
             "id": 123,
             "created_at": "2025-01-01T10:00:00Z",
-            "phone": "+380123456789",
-            "email": "test@example.com",
-            "first_name": "John",
-            "last_name": "Doe",
+            "phone": ["+380123456789"],
+            "email": ["test@example.com"],
+            "full_name": "John Doe",
         }
         buyer = Buyer.from_api(data)
 
@@ -84,16 +83,13 @@ class TestBuyer:
         """from_api should return None for None input."""
         assert Buyer.from_api(None) is None
 
-    def test_full_name_partial(self):
-        """full_name should handle partial names."""
-        buyer = Buyer(id=1, first_name="John")
-        assert buyer.full_name == "John"
-
-        buyer = Buyer(id=1, last_name="Doe")
-        assert buyer.full_name == "Doe"
+    def test_full_name(self):
+        """full_name should use the provided value or default to None."""
+        buyer = Buyer(id=1, full_name="John Doe")
+        assert buyer.full_name == "John Doe"
 
         buyer = Buyer(id=1)
-        assert buyer.full_name == "Unknown"
+        assert buyer.full_name is None
 
     def test_is_returning(self):
         """is_returning should check if buyer existed before period."""

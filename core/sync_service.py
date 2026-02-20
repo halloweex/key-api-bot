@@ -265,7 +265,7 @@ class SyncService:
             logger.error(f"Manager sync error: {e}")
             return 0
 
-    async def sync_missing_buyers(self, limit: int = 100) -> int:
+    async def sync_missing_buyers(self, limit: int = 500) -> int:
         """
         Sync buyers that are referenced in orders but not yet in buyers table.
 
@@ -557,7 +557,7 @@ class SyncService:
                     stats["expenses"] += expense_count
                     logger.info(f"  Chunk {chunk_num}: Saved {order_count} orders, {expense_count} expenses")
 
-                current_start = current_end
+                current_start = current_end + timedelta(days=1)
 
             logger.info(f"All chunks complete. Total: {stats['orders']} orders, {stats['expenses']} expenses")
 
@@ -636,10 +636,11 @@ class SyncService:
             sync_to = datetime.now(DEFAULT_TZ) + timedelta(minutes=5)
 
             # Sync new orders with expenses using the smart date filter helper
+            # Explicitly localise to DEFAULT_TZ before formatting to survive DST transitions
             orders = await self._fetch_orders_with_date_filter(
                 client,
-                sync_from.strftime('%Y-%m-%d %H:%M:%S'),
-                sync_to.strftime('%Y-%m-%d %H:%M:%S')
+                sync_from.astimezone(DEFAULT_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+                sync_to.astimezone(DEFAULT_TZ).strftime('%Y-%m-%d %H:%M:%S'),
             )
 
             order_ids = []
@@ -878,14 +879,16 @@ class SyncService:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _sync_service: Optional[SyncService] = None
+_sync_service_lock = asyncio.Lock()
 
 
 async def get_sync_service() -> SyncService:
-    """Get singleton sync service instance."""
+    """Get singleton sync service instance (coroutine-safe)."""
     global _sync_service
-    if _sync_service is None:
-        store = await get_store()
-        _sync_service = SyncService(store)
+    async with _sync_service_lock:
+        if _sync_service is None:
+            store = await get_store()
+            _sync_service = SyncService(store)
     return _sync_service
 
 
@@ -954,12 +957,18 @@ async def force_resync(days_back: int = 365) -> dict:
 
     store = await get_store()
 
-    # Clear existing orders and related data
+    # Clear existing orders and related data atomically
     async with store.connection() as conn:
-        conn.execute("DELETE FROM expenses")
-        conn.execute("DELETE FROM order_products")
-        conn.execute("DELETE FROM orders")
-        conn.execute("DELETE FROM sync_metadata WHERE key LIKE 'last_sync_orders%'")
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            conn.execute("DELETE FROM expenses")
+            conn.execute("DELETE FROM order_products")
+            conn.execute("DELETE FROM orders")
+            conn.execute("DELETE FROM sync_metadata WHERE key LIKE 'last_sync_orders%'")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         logger.info("Cleared orders, order_products, expenses tables")
 
     # Perform fresh full sync

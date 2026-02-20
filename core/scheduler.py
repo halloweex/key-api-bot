@@ -14,6 +14,7 @@ Features:
 - Graceful shutdown
 """
 import asyncio
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass, field
@@ -93,6 +94,9 @@ class BackgroundScheduler:
         self._job_info: Dict[str, JobInfo] = {}
         self._max_history = 50  # Keep last N executions per job
         self._started = False
+        # Protects _job_info and _job_history: APScheduler event listeners
+        # are called from its internal thread, not the asyncio event loop.
+        self._state_lock = threading.Lock()
 
     async def start(self) -> None:
         """Start the scheduler and register all jobs."""
@@ -299,7 +303,7 @@ class BackgroundScheduler:
 
             from core.sync_service import get_sync_service
             sync_service = await get_sync_service()
-            stats = await sync_service.full_sync(days_back=90)
+            stats = await sync_service.full_sync(days_back=365)
 
             logger.info(
                 "Weekly full sync job complete",
@@ -376,12 +380,12 @@ class BackgroundScheduler:
 
             # Calculate for retail
             retail_indices = await store.calculate_seasonality_indices("retail")
-            retail_goals = await store.calculate_suggested_goals(1.10, "retail")
+            retail_goals = await store.calculate_suggested_goals(sales_type="retail", growth_factor=1.10)
             await store.calculate_yoy_growth("retail")
 
             # Calculate for b2b
             b2b_indices = await store.calculate_seasonality_indices("b2b")
-            b2b_goals = await store.calculate_suggested_goals(1.10, "b2b")
+            b2b_goals = await store.calculate_suggested_goals(sales_type="b2b", growth_factor=1.10)
             await store.calculate_yoy_growth("b2b")
 
             result = {
@@ -469,84 +473,91 @@ class BackgroundScheduler:
     def _on_job_executed(self, event: JobExecutionEvent) -> None:
         """Handle successful job execution."""
         job_id = event.job_id
-        if job_id not in self._job_info:
-            return
+        # _state_lock: APScheduler calls listeners from its own thread,
+        # not the asyncio event loop. Lock prevents races with get_jobs().
+        with self._state_lock:
+            if job_id not in self._job_info:
+                return
 
-        info = self._job_info[job_id]
-        info.last_run = datetime.now(SCHEDULER_TIMEZONE)
-        info.last_status = JobStatus.SUCCESS
-        info.run_count += 1
+            info = self._job_info[job_id]
+            info.last_run = datetime.now(SCHEDULER_TIMEZONE)
+            info.last_status = JobStatus.SUCCESS
+            info.run_count += 1
 
-        # Update next run time
-        job = self._scheduler.get_job(job_id)
-        if job and job.next_run_time:
-            info.next_run = job.next_run_time
+            # Update next run time
+            job = self._scheduler.get_job(job_id)
+            if job and job.next_run_time:
+                info.next_run = job.next_run_time
 
-        # Record execution
-        execution = JobExecution(
-            job_id=job_id,
-            started_at=info.last_run,
-            finished_at=datetime.now(SCHEDULER_TIMEZONE),
-            status=JobStatus.SUCCESS,
-            result=event.retval if hasattr(event, 'retval') else None,
-        )
-        if execution.finished_at and execution.started_at:
-            execution.duration_ms = (
-                execution.finished_at - execution.started_at
-            ).total_seconds() * 1000
+            # Record execution
+            execution = JobExecution(
+                job_id=job_id,
+                started_at=info.last_run,
+                finished_at=datetime.now(SCHEDULER_TIMEZONE),
+                status=JobStatus.SUCCESS,
+                result=event.retval if hasattr(event, 'retval') else None,
+            )
+            if execution.finished_at and execution.started_at:
+                execution.duration_ms = (
+                    execution.finished_at - execution.started_at
+                ).total_seconds() * 1000
 
-        self._add_execution(job_id, execution)
+            self._add_execution(job_id, execution)
 
     def _on_job_error(self, event: JobExecutionEvent) -> None:
         """Handle job execution error."""
         job_id = event.job_id
-        if job_id not in self._job_info:
-            return
+        last_error = ""
+        with self._state_lock:
+            if job_id not in self._job_info:
+                return
 
-        info = self._job_info[job_id]
-        info.last_run = datetime.now(SCHEDULER_TIMEZONE)
-        info.last_status = JobStatus.FAILED
-        info.run_count += 1
-        info.error_count += 1
-        info.last_error = str(event.exception) if event.exception else "Unknown error"
+            info = self._job_info[job_id]
+            info.last_run = datetime.now(SCHEDULER_TIMEZONE)
+            info.last_status = JobStatus.FAILED
+            info.run_count += 1
+            info.error_count += 1
+            info.last_error = str(event.exception) if event.exception else "Unknown error"
+            last_error = info.last_error
 
-        # Update next run time
-        job = self._scheduler.get_job(job_id)
-        if job and job.next_run_time:
-            info.next_run = job.next_run_time
+            # Update next run time
+            job = self._scheduler.get_job(job_id)
+            if job and job.next_run_time:
+                info.next_run = job.next_run_time
 
-        # Record execution
-        execution = JobExecution(
-            job_id=job_id,
-            started_at=info.last_run,
-            finished_at=datetime.now(SCHEDULER_TIMEZONE),
-            status=JobStatus.FAILED,
-            error=info.last_error,
-        )
-        self._add_execution(job_id, execution)
+            # Record execution
+            execution = JobExecution(
+                job_id=job_id,
+                started_at=info.last_run,
+                finished_at=datetime.now(SCHEDULER_TIMEZONE),
+                status=JobStatus.FAILED,
+                error=info.last_error,
+            )
+            self._add_execution(job_id, execution)
 
         logger.error(
-            f"Job {job_id} failed: {info.last_error}",
-            extra={"job_id": job_id, "error": info.last_error}
+            f"Job {job_id} failed: {last_error}",
+            extra={"job_id": job_id, "error": last_error}
         )
 
     def _on_job_missed(self, event: JobExecutionEvent) -> None:
         """Handle missed job execution."""
         job_id = event.job_id
-        if job_id not in self._job_info:
-            return
+        with self._state_lock:
+            if job_id not in self._job_info:
+                return
 
-        info = self._job_info[job_id]
-        info.last_status = JobStatus.MISSED
+            info = self._job_info[job_id]
+            info.last_status = JobStatus.MISSED
 
-        # Record execution
-        execution = JobExecution(
-            job_id=job_id,
-            started_at=datetime.now(SCHEDULER_TIMEZONE),
-            finished_at=datetime.now(SCHEDULER_TIMEZONE),
-            status=JobStatus.MISSED,
-        )
-        self._add_execution(job_id, execution)
+            # Record execution
+            execution = JobExecution(
+                job_id=job_id,
+                started_at=datetime.now(SCHEDULER_TIMEZONE),
+                finished_at=datetime.now(SCHEDULER_TIMEZONE),
+                status=JobStatus.MISSED,
+            )
+            self._add_execution(job_id, execution)
 
         logger.warning(
             f"Job {job_id} missed scheduled execution",
@@ -571,9 +582,12 @@ class BackgroundScheduler:
 
     def get_jobs(self) -> List[Dict[str, Any]]:
         """Get list of all jobs with their status."""
+        with self._state_lock:
+            items = list(self._job_info.items())
+
         jobs = []
-        for job_id, info in self._job_info.items():
-            # Get trigger description from APScheduler job
+        for job_id, info in items:
+            # Get trigger description from APScheduler job (outside lock — APScheduler is thread-safe)
             trigger_desc = ""
             job = self._scheduler.get_job(job_id) if self._scheduler else None
             if job and job.trigger:
@@ -595,10 +609,11 @@ class BackgroundScheduler:
 
     def get_job_history(self, job_id: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Get execution history for a job."""
-        if job_id not in self._job_history:
-            return []
+        with self._state_lock:
+            if job_id not in self._job_history:
+                return []
+            history = list(self._job_history[job_id][-limit:])
 
-        history = self._job_history[job_id][-limit:]
         return [{
             "started_at": e.started_at.isoformat() if e.started_at else None,
             "finished_at": e.finished_at.isoformat() if e.finished_at else None,

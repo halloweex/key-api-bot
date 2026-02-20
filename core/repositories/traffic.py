@@ -274,14 +274,15 @@ class TrafficMixin:
             conn.execute("BEGIN TRANSACTION")
             try:
                 if affected_dates:
-                    date_list = ",".join(f"'{d}'" for d in affected_dates)
-                    conn.execute(f"DELETE FROM gold_daily_traffic WHERE date IN ({date_list})")
+                    date_params = list(affected_dates)
+                    date_placeholders = ",".join("?" * len(date_params))
+                    conn.execute(f"DELETE FROM gold_daily_traffic WHERE date IN ({date_placeholders})", date_params)
                     conn.execute(f"""
                         INSERT INTO gold_daily_traffic
                         {_traffic_select}
-                          AND s.order_date IN ({date_list})
+                          AND s.order_date IN ({date_placeholders})
                         GROUP BY s.order_date, s.source_id, s.sales_type, u.platform, u.traffic_type
-                    """)
+                    """, date_params)
                 else:
                     conn.execute("DELETE FROM gold_daily_traffic")
                     conn.execute(f"""

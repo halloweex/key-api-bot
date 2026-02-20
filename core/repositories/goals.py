@@ -33,7 +33,7 @@ class GoalsMixin:
         """
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type)
+            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
 
             if period_type == "daily":
                 # Get daily averages for the same day of week over past N weeks
@@ -43,7 +43,7 @@ class GoalsMixin:
                             {_date_in_kyiv('o.ordered_at')} as day,
                             SUM(o.grand_total) as revenue
                         FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{weeks_back * 7} days'
+                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL ? DAY
                             AND {_date_in_kyiv('o.ordered_at')} < CURRENT_DATE
                             AND o.status_id NOT IN {return_statuses}
                             AND {sales_filter}
@@ -57,6 +57,7 @@ class GoalsMixin:
                         STDDEV(revenue) as std_dev
                     FROM daily_revenue
                 """
+                sql_params = [weeks_back * 7]
             elif period_type == "weekly":
                 # Get weekly totals for past N weeks
                 sql = f"""
@@ -65,7 +66,7 @@ class GoalsMixin:
                             DATE_TRUNC('week', {_date_in_kyiv('o.ordered_at')}) as week_start,
                             SUM(o.grand_total) as revenue
                         FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{weeks_back} weeks'
+                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL ? DAY
                             AND {_date_in_kyiv('o.ordered_at')} < DATE_TRUNC('week', CURRENT_DATE)
                             AND o.status_id NOT IN {return_statuses}
                             AND {sales_filter}
@@ -79,6 +80,7 @@ class GoalsMixin:
                         STDDEV(revenue) as std_dev
                     FROM weekly_revenue
                 """
+                sql_params = [weeks_back * 7]
             else:  # monthly
                 # Get monthly totals for past N months
                 months_back = max(3, weeks_back // 4)
@@ -88,7 +90,7 @@ class GoalsMixin:
                             DATE_TRUNC('month', {_date_in_kyiv('o.ordered_at')}) as month_start,
                             SUM(o.grand_total) as revenue
                         FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{months_back} months'
+                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL ? MONTH
                             AND {_date_in_kyiv('o.ordered_at')} < DATE_TRUNC('month', CURRENT_DATE)
                             AND o.status_id NOT IN {return_statuses}
                             AND {sales_filter}
@@ -102,8 +104,9 @@ class GoalsMixin:
                         STDDEV(revenue) as std_dev
                     FROM monthly_revenue
                 """
+                sql_params = [months_back]
 
-            result = conn.execute(sql).fetchone()
+            result = conn.execute(sql, sql_params).fetchone()
 
             avg_revenue = float(result[0] or 0)
             min_revenue = float(result[1] or 0)
@@ -121,7 +124,7 @@ class GoalsMixin:
                             SUM(o.grand_total) as revenue,
                             ROW_NUMBER() OVER (ORDER BY DATE_TRUNC('week', {_date_in_kyiv('o.ordered_at')}) DESC) as week_num
                         FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{weeks_back} weeks'
+                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL ? DAY
                             AND {_date_in_kyiv('o.ordered_at')} < DATE_TRUNC('week', CURRENT_DATE)
                             AND o.status_id NOT IN {return_statuses}
                             AND {sales_filter}
@@ -132,7 +135,7 @@ class GoalsMixin:
                         AVG(CASE WHEN week_num > 2 THEN revenue END) as older_avg
                     FROM weekly_revenue
                 """
-                trend_result = conn.execute(trend_sql).fetchone()
+                trend_result = conn.execute(trend_sql, [weeks_back * 7]).fetchone()
                 recent = float(trend_result[0] or 0)
                 older = float(trend_result[1] or 0)
                 if older > 0:
@@ -342,7 +345,7 @@ class GoalsMixin:
         """
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type)
+            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
 
             # Get monthly revenue totals for all available history (only complete months with 25+ days)
             sql = f"""
@@ -358,7 +361,7 @@ class GoalsMixin:
                     GROUP BY
                         EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
                         EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
-                    HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
+                    HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 20
                 ),
                 monthly_stats AS (
                     SELECT
@@ -412,10 +415,16 @@ class GoalsMixin:
                     "confidence": confidence
                 }
 
-            # Store in database for caching
+            # Store in database for caching — batch upsert to avoid row-by-row lock hold
             now = datetime.now(DEFAULT_TZ)
-            for month, data in indices.items():
-                conn.execute("""
+            rows_to_upsert = [
+                [month, data["seasonality_index"], data["sample_size"],
+                 data["avg_revenue"], data["min_revenue"], data["max_revenue"],
+                 data["confidence"], now]
+                for month, data in indices.items()
+            ]
+            if rows_to_upsert:
+                conn.executemany("""
                     INSERT INTO seasonal_indices
                     (month, seasonality_index, sample_size, avg_revenue, min_revenue, max_revenue, confidence, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -427,16 +436,7 @@ class GoalsMixin:
                         max_revenue = excluded.max_revenue,
                         confidence = excluded.confidence,
                         updated_at = excluded.updated_at
-                """, [
-                    month,
-                    data["seasonality_index"],
-                    data["sample_size"],
-                    data["avg_revenue"],
-                    data["min_revenue"],
-                    data["max_revenue"],
-                    data["confidence"],
-                    now
-                ])
+                """, rows_to_upsert)
 
             logger.info(f"Calculated seasonality indices for {len(indices)} months")
             return indices
@@ -455,7 +455,7 @@ class GoalsMixin:
         """
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type)
+            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
 
             # Get yearly totals
             yearly_sql = f"""
@@ -559,7 +559,7 @@ class GoalsMixin:
         """
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type)
+            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
 
             # Calculate weekly revenue within each month instance
             sql = f"""
@@ -602,6 +602,7 @@ class GoalsMixin:
 
             patterns = {}
             now = datetime.now(DEFAULT_TZ)
+            pattern_rows = []
             for row in results:
                 month = int(row[0])
                 week = int(row[1])
@@ -611,16 +612,18 @@ class GoalsMixin:
                 if month not in patterns:
                     patterns[month] = {}
                 patterns[month][week] = round(weight, 4)
+                pattern_rows.append([month, week, weight, sample_size, now])
 
-                # Store in database
-                conn.execute("""
+            # Batch upsert to avoid row-by-row lock hold
+            if pattern_rows:
+                conn.executemany("""
                     INSERT INTO weekly_patterns (month, week_of_month, weight, sample_size, updated_at)
                     VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT (month, week_of_month) DO UPDATE SET
                         weight = excluded.weight,
                         sample_size = excluded.sample_size,
                         updated_at = excluded.updated_at
-                """, [month, week, weight, sample_size, now])
+                """, pattern_rows)
 
             # Ensure all months have all 5 weeks (fill missing with equal distribution)
             for month in range(1, 13):
@@ -701,7 +704,7 @@ class GoalsMixin:
 
             # Get last year's same month revenue
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type)
+            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
 
             last_year_sql = f"""
                 SELECT SUM(o.grand_total) as revenue
@@ -939,14 +942,14 @@ class GoalsMixin:
                 [sales_type, min_date, max_date]
             )
 
-            # Insert new predictions
-            for pred in predictions:
-                conn.execute(
-                    """INSERT INTO revenue_predictions
-                       (prediction_date, sales_type, predicted_revenue, model_mae, model_mape)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    [pred['date'], sales_type, pred['predicted_revenue'], mae, mape]
-                )
+            # Batch insert new predictions
+            conn.executemany(
+                """INSERT INTO revenue_predictions
+                   (prediction_date, sales_type, predicted_revenue, model_mae, model_mape)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [[pred['date'], sales_type, pred['predicted_revenue'], mae, mape]
+                 for pred in predictions]
+            )
 
             logger.info(f"Stored {len(predictions)} predictions for {sales_type}")
             return len(predictions)
@@ -996,12 +999,12 @@ class GoalsMixin:
         if not dates:
             return {}
 
-        sales_filter = self._build_sales_type_filter(sales_type)
-        return_statuses = (19, 22, 21, 23)
+        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
         placeholders = ", ".join(["?"] * len(dates))
         date_strs = [d.isoformat() for d in dates]
 
         async with self.connection() as conn:
+            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
             rows = conn.execute(
                 f"""SELECT {_date_in_kyiv('o.ordered_at')} as day,
                            SUM(o.grand_total) as revenue
