@@ -18,7 +18,7 @@ from telegram.ext import (
 from bot.config import BOT_TOKEN, KEYCRM_API_KEY, ConversationState
 from core.keycrm import SyncKeyCRMClient as KeyCRMClient
 from bot.services import ReportService
-from bot import handlers
+from bot import handlers, handlers_legacy
 from bot import database
 from core.config import validate_config, ConfigurationError
 
@@ -144,8 +144,8 @@ def main() -> None:
     api_client = KeyCRMClient(KEYCRM_API_KEY)
     report_service = ReportService(api_client)
 
-    # Inject service into handlers module
-    handlers.report_service = report_service
+    # Inject service into the actual module where handler functions live
+    handlers_legacy.report_service = report_service
 
     # Create the Application
     application = Application.builder().token(BOT_TOKEN).build()
