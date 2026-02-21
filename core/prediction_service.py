@@ -280,16 +280,16 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 FEATURE_COLUMNS = [
-    # Calendar (5)
-    'day_of_week', 'month', 'day_of_month', 'week_of_year', 'is_weekend',
+    # Calendar (4)
+    'day_of_week', 'month', 'day_of_month', 'week_of_year',
     # Cyclical (4)
     'month_sin', 'month_cos', 'dow_sin', 'dow_cos',
     # Lags (5)
     'lag_1d', 'lag_7d', 'lag_14d', 'lag_28d', 'lag_365d',
     # Rolling (4)
     'rolling_mean_7d', 'rolling_mean_14d', 'rolling_mean_28d', 'rolling_std_7d',
-    # Trend + Momentum (5)
-    'yoy_ratio', 'trend_index', 'log_trend_index', 'momentum_7d_28d', 'revenue_growth_7d',
+    # Trend + Momentum (4)
+    'yoy_ratio', 'trend_index', 'momentum_7d_28d', 'revenue_growth_7d',
     # Events (1)
     'days_to_nearest_event',
     # Payday (1)
