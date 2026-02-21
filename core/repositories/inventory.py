@@ -400,7 +400,7 @@ class InventoryMixin:
         """
         async with self.connection() as conn:
             # Get beginning and ending inventory for the period
-            result = conn.execute("""
+            result = conn.execute(f"""
                 WITH period_data AS (
                     SELECT
                         date,
@@ -489,7 +489,7 @@ class InventoryMixin:
         async with self.connection() as conn:
             if granularity == "monthly":
                 # Monthly aggregation
-                result = conn.execute("""
+                result = conn.execute(f"""
                     SELECT
                         DATE_TRUNC('month', date) as period,
                         AVG(total_quantity) as avg_quantity,
@@ -522,7 +522,7 @@ class InventoryMixin:
                 }
             else:
                 # Daily data
-                result = conn.execute("""
+                result = conn.execute(f"""
                     SELECT
                         date,
                         total_quantity,
