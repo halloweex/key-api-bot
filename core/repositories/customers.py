@@ -257,11 +257,11 @@ class CustomersMixin:
                 ROUND(100.0 * r.retained_customers / s.size, 1) as retention_pct
             FROM retention_data r
             JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
-            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL ? MONTH
+            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
             ORDER BY r.cohort_month DESC, r.months_since
             """
 
-            rows = conn.execute(query, [retention_months, months_back]).fetchall()
+            rows = conn.execute(query, [retention_months]).fetchall()
 
             # Build cohort data structure
             cohorts = {}
@@ -407,11 +407,11 @@ class CustomersMixin:
                 ROUND(100.0 * r.period_revenue / NULLIF(s.m0_revenue, 0), 1) as revenue_retention_pct
             FROM retention_data r
             JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
-            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL ? MONTH
+            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
             ORDER BY r.cohort_month DESC, r.months_since
             """
 
-            rows = conn.execute(query, [retention_months, months_back]).fetchall()
+            rows = conn.execute(query, [retention_months]).fetchall()
 
             # Build cohort data structure
             cohorts = {}
@@ -532,7 +532,7 @@ class CustomersMixin:
                     ON c1.buyer_id = c2.buyer_id
                     AND c1.order_num = 1
                     AND c2.order_num = 2
-                WHERE c1.order_date >= CURRENT_DATE - INTERVAL ? MONTH
+                WHERE c1.order_date >= CURRENT_DATE - INTERVAL '{int(months_back)} months'
             ),
             bucketed AS (
                 SELECT
@@ -564,7 +564,7 @@ class CustomersMixin:
             ORDER BY bucket_order
             """
 
-            rows = conn.execute(query, [months_back]).fetchall()
+            rows = conn.execute(query).fetchall()
 
             # Calculate totals and percentages
             total_repeat = sum(row[1] for row in rows)
@@ -597,14 +597,14 @@ class CustomersMixin:
                     ON c1.buyer_id = c2.buyer_id
                     AND c1.order_num = 1
                     AND c2.order_num = 2
-                WHERE c1.order_date >= CURRENT_DATE - INTERVAL ? MONTH
+                WHERE c1.order_date >= CURRENT_DATE - INTERVAL '{int(months_back)} months'
             )
             SELECT
                 MEDIAN(days_to_second) AS median_days,
                 AVG(days_to_second) AS avg_days
             FROM second_purchase
             """
-            stats = conn.execute(median_query, [months_back]).fetchone()
+            stats = conn.execute(median_query).fetchone()
             median_days = stats[0] if stats else None
             avg_days_overall = stats[1] if stats else None
 
@@ -692,11 +692,11 @@ class CustomersMixin:
                 cm.active_customers
             FROM cohort_monthly cm
             JOIN cohort_sizes cs ON cm.cohort_month = cs.cohort_month
-            WHERE cm.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL ? MONTH
+            WHERE cm.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
             ORDER BY cm.cohort_month DESC, cm.months_since
             """
 
-            rows = conn.execute(query, [months_back]).fetchall()
+            rows = conn.execute(query).fetchall()
 
             # Build cohort LTV structure with cumulative revenue
             cohorts = {}

@@ -90,7 +90,7 @@ class GoalsMixin:
                             DATE_TRUNC('month', {_date_in_kyiv('o.ordered_at')}) as month_start,
                             SUM(o.grand_total) as revenue
                         FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL ? MONTH
+                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{int(months_back)} months'
                             AND {_date_in_kyiv('o.ordered_at')} < DATE_TRUNC('month', CURRENT_DATE)
                             AND o.status_id NOT IN {return_statuses}
                             AND {sales_filter}
@@ -104,7 +104,7 @@ class GoalsMixin:
                         STDDEV(revenue) as std_dev
                     FROM monthly_revenue
                 """
-                sql_params = [months_back]
+                sql_params = []
 
             result = conn.execute(sql, sql_params).fetchone()
 
