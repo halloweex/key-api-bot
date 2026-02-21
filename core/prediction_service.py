@@ -146,14 +146,15 @@ def _get_holiday_features(dates: pd.Series) -> pd.DataFrame:
 def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Engineer features from a DataFrame with 'date', 'revenue', and optional extra columns.
 
-    Creates 31+ features:
-    - Calendar: day_of_week, month, day_of_month, week_of_year, is_weekend
+    Creates 32 features used by the model, plus extras for analysis:
+    - Calendar: day_of_week, month, day_of_month, week_of_year
     - Cyclical: month_sin, month_cos, dow_sin, dow_cos
     - Lags: 1d, 7d, 14d, 28d, 365d
     - Rolling: mean_7d, mean_14d, mean_28d, std_7d
-    - Trend + Momentum: yoy_ratio, trend_index, log_trend_index, momentum_7d_28d, revenue_growth_7d
+    - Trend + Momentum: yoy_ratio, trend_index, momentum_7d_28d, revenue_growth_7d
     - Events: days_to_nearest_event
     - Payday: days_to_payday
+    - DOW-specific: rolling_mean_4w_same_dow, dow_event_interaction, rolling_std_4w_same_dow
     - Source shares: lag_7d_instagram_share, lag_7d_telegram_share, lag_7d_shopify_share
     - Orders + AOV: lag_7d_orders, rolling_mean_7d_orders, lag_7d_aov, rolling_mean_7d_aov
     - Customer mix: rolling_mean_7d_new_cust_ratio, rolling_mean_7d_returning_ratio, rolling_mean_7d_return_rate
@@ -227,6 +228,33 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     for col in holiday_df.columns:
         df[col] = holiday_df[col].values
 
+    # DOW-specific features: same-weekday lag and rolling mean
+    # lag_same_dow: revenue from the same weekday 1 week ago (shift by 7 is already lag_7d,
+    #   but this is semantically a DOW feature computed on sorted data with gaps filled)
+    # rolling_mean_4w_same_dow: average revenue for the same weekday over last 4 weeks
+    shifted_rev = df['revenue'].shift(1)
+    dow = df['day_of_week']
+    same_dow_mean = pd.Series(np.nan, index=df.index, dtype=float)
+    for d in range(7):
+        mask = dow == d
+        if mask.sum() > 0:
+            # For each DOW, compute rolling mean over last 4 occurrences (shift 1 to avoid leakage)
+            dow_rev = df.loc[mask, 'revenue'].shift(1)
+            same_dow_mean.loc[mask] = dow_rev.rolling(4, min_periods=2).mean()
+    df['rolling_mean_4w_same_dow'] = same_dow_mean
+
+    # DOW-event interaction: captures "Thursday near a promo" vs "normal Thursday"
+    df['dow_event_interaction'] = df['day_of_week'] * df['is_high_sales_event']
+
+    # DOW-specific volatility: rolling std for same weekday over last 4 weeks
+    same_dow_std = pd.Series(np.nan, index=df.index, dtype=float)
+    for d in range(7):
+        mask = dow == d
+        if mask.sum() > 0:
+            dow_rev = df.loc[mask, 'revenue'].shift(1)
+            same_dow_std.loc[mask] = dow_rev.rolling(4, min_periods=2).std()
+    df['rolling_std_4w_same_dow'] = same_dow_std
+
     # Source share features (lagged — avoids leakage)
     for src in ['instagram', 'telegram', 'shopify']:
         col_name = f'{src}_revenue'
@@ -294,6 +322,8 @@ FEATURE_COLUMNS = [
     'days_to_nearest_event',
     # Payday (1)
     'days_to_payday',
+    # DOW-specific (3) — addresses Thu/Fri bimodal distribution
+    'rolling_mean_4w_same_dow', 'dow_event_interaction', 'rolling_std_4w_same_dow',
     # AOV (1)
     'rolling_mean_7d_aov',
     # Orders (2)
@@ -360,6 +390,7 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float
         'momentum_7d_28d', 'revenue_growth_7d',
         'rolling_mean_7d_new_cust_ratio', 'rolling_mean_7d_returning_ratio',
         'rolling_mean_7d_return_rate',
+        'rolling_mean_4w_same_dow', 'rolling_std_4w_same_dow',
     }
 
     # Drop rows with NaN in core features (due to lags)
@@ -402,14 +433,22 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float
     val_pred = model.predict(X_val)
     val_pred = np.maximum(val_pred, 0)
 
-    # DOW residual correction: mean(actual) / mean(predicted) per day-of-week
+    # DOW residual correction: use last 180 days of data for more robust estimates
+    # (60-day val set only gives ~8 samples per DOW; 180 days gives ~26)
+    dow_window = min(180, len(X))
+    dow_X = X[-dow_window:]
+    dow_y = y[-dow_window:]
+    dow_dates = dates[-dow_window:]
+    dow_pred = model.predict(dow_X)
+    dow_pred = np.maximum(dow_pred, 0)
+
     dow_corrections: Dict[int, float] = {}
-    val_dows = np.array([pd.Timestamp(d).dayofweek for d in dates_val])
+    dow_dows = np.array([pd.Timestamp(d).dayofweek for d in dow_dates])
     for dow in range(7):
-        mask = val_dows == dow
+        mask = dow_dows == dow
         if mask.sum() > 0:
-            mean_actual = float(np.mean(y_val[mask]))
-            mean_pred = float(np.mean(val_pred[mask]))
+            mean_actual = float(np.mean(dow_y[mask]))
+            mean_pred = float(np.mean(dow_pred[mask]))
             if mean_pred > 0:
                 correction = mean_actual / mean_pred
                 # Clamp to avoid overfitting
@@ -420,7 +459,7 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float
         else:
             dow_corrections[dow] = 1.0
 
-    logger.info(f"DOW corrections: {dow_corrections}")
+    logger.info(f"DOW corrections (180d window): {dow_corrections}")
 
     # Apply DOW corrections to validation predictions for metrics
     val_pred_corrected = val_pred.copy()
@@ -693,6 +732,7 @@ def _run_evaluation(df: pd.DataFrame) -> Dict[str, Any]:
             'momentum_7d_28d', 'revenue_growth_7d',
             'rolling_mean_7d_new_cust_ratio', 'rolling_mean_7d_returning_ratio',
             'rolling_mean_7d_return_rate',
+            'rolling_mean_4w_same_dow', 'rolling_std_4w_same_dow',
         }
 
         # Build features for train set
@@ -950,6 +990,7 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
             'momentum_7d_28d', 'revenue_growth_7d',
             'rolling_mean_7d_new_cust_ratio', 'rolling_mean_7d_returning_ratio',
             'rolling_mean_7d_return_rate',
+            'rolling_mean_4w_same_dow', 'rolling_std_4w_same_dow',
         }
         featured_train = _build_features(train_df)
         featured_train = featured_train.dropna(subset=[c for c in FEATURE_COLUMNS if c not in _nan_safe])
