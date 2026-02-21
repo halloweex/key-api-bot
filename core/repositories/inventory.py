@@ -409,7 +409,7 @@ class InventoryMixin:
                         ROW_NUMBER() OVER (ORDER BY date ASC) as rn_asc,
                         ROW_NUMBER() OVER (ORDER BY date DESC) as rn_desc
                     FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL ? DAY
+                    WHERE date >= CURRENT_DATE - INTERVAL '{int(days)} days'
                 )
                 SELECT
                     -- Beginning inventory (oldest in period)
@@ -425,7 +425,7 @@ class InventoryMixin:
                     AVG(total_value) as avg_daily_value,
                     COUNT(*) as data_points
                 FROM period_data
-            """, [days]).fetchone()
+            """).fetchone()
 
             if not result or not result[0]:
                 # No historical data, use current snapshot (sale/retail price)
@@ -501,10 +501,10 @@ class InventoryMixin:
                         MAX(total_value) as max_value,
                         COUNT(*) as data_points
                     FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL ? DAY
+                    WHERE date >= CURRENT_DATE - INTERVAL '{int(days)} days'
                     GROUP BY DATE_TRUNC('month', date)
                     ORDER BY period
-                """, [days]).fetchall()
+                """).fetchall()
 
                 labels = [row[0].strftime('%b %Y') for row in result if row[0]]
                 quantities = [round(row[1] or 0) for row in result]
@@ -530,9 +530,9 @@ class InventoryMixin:
                         total_reserve,
                         sku_count
                     FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL ? DAY
+                    WHERE date >= CURRENT_DATE - INTERVAL '{int(days)} days'
                     ORDER BY date
-                """, [days]).fetchall()
+                """).fetchall()
 
                 labels = [row[0].strftime('%d %b') for row in result if row[0]]
                 quantities = [row[1] or 0 for row in result]

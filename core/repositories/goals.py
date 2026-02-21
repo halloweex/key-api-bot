@@ -43,7 +43,7 @@ class GoalsMixin:
                             {_date_in_kyiv('o.ordered_at')} as day,
                             SUM(o.grand_total) as revenue
                         FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL ? DAY
+                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{int(weeks_back * 7)} days'
                             AND {_date_in_kyiv('o.ordered_at')} < CURRENT_DATE
                             AND o.status_id NOT IN {return_statuses}
                             AND {sales_filter}
@@ -57,7 +57,7 @@ class GoalsMixin:
                         STDDEV(revenue) as std_dev
                     FROM daily_revenue
                 """
-                sql_params = [weeks_back * 7]
+                sql_params = []
             elif period_type == "weekly":
                 # Get weekly totals for past N weeks
                 sql = f"""
@@ -66,7 +66,7 @@ class GoalsMixin:
                             DATE_TRUNC('week', {_date_in_kyiv('o.ordered_at')}) as week_start,
                             SUM(o.grand_total) as revenue
                         FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL ? DAY
+                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{int(weeks_back * 7)} days'
                             AND {_date_in_kyiv('o.ordered_at')} < DATE_TRUNC('week', CURRENT_DATE)
                             AND o.status_id NOT IN {return_statuses}
                             AND {sales_filter}
@@ -80,7 +80,7 @@ class GoalsMixin:
                         STDDEV(revenue) as std_dev
                     FROM weekly_revenue
                 """
-                sql_params = [weeks_back * 7]
+                sql_params = []
             else:  # monthly
                 # Get monthly totals for past N months
                 months_back = max(3, weeks_back // 4)
@@ -124,7 +124,7 @@ class GoalsMixin:
                             SUM(o.grand_total) as revenue,
                             ROW_NUMBER() OVER (ORDER BY DATE_TRUNC('week', {_date_in_kyiv('o.ordered_at')}) DESC) as week_num
                         FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL ? DAY
+                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{int(weeks_back * 7)} days'
                             AND {_date_in_kyiv('o.ordered_at')} < DATE_TRUNC('week', CURRENT_DATE)
                             AND o.status_id NOT IN {return_statuses}
                             AND {sales_filter}
@@ -135,7 +135,7 @@ class GoalsMixin:
                         AVG(CASE WHEN week_num > 2 THEN revenue END) as older_avg
                     FROM weekly_revenue
                 """
-                trend_result = conn.execute(trend_sql, [weeks_back * 7]).fetchone()
+                trend_result = conn.execute(trend_sql).fetchone()
                 recent = float(trend_result[0] or 0)
                 older = float(trend_result[1] or 0)
                 if older > 0:
