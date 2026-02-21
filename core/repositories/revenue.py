@@ -104,7 +104,7 @@ class RevenueMixin:
                         """, params).fetchone()
                         # Gold doesn't have per-source return columns — query Silver
                         ret_params = [start_date, end_date, source_id]
-                        sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
+                        sales_filter = self._build_sales_type_filter(sales_type)
                         ret_result = conn.execute(f"""
                             SELECT COUNT(DISTINCT id), COALESCE(SUM(grand_total), 0)
                             FROM silver_orders
@@ -771,7 +771,7 @@ class RevenueMixin:
                 f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
                 f"o.status_id NOT IN {return_statuses}",
                 "o.source_id IN (1, 2, 4)",  # Exclude Opencart (deprecated)
-                self._build_sales_type_filter(sales_type, conn=conn)
+                self._build_sales_type_filter(sales_type)
             ]
 
             if source_id:

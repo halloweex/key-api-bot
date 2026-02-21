@@ -33,7 +33,7 @@ class GoalsMixin:
         """
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
+            sales_filter = self._build_sales_type_filter(sales_type)
 
             if period_type == "daily":
                 # Get daily averages for the same day of week over past N weeks
@@ -345,7 +345,7 @@ class GoalsMixin:
         """
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
+            sales_filter = self._build_sales_type_filter(sales_type)
 
             # Get monthly revenue totals for all available history (only complete months with 25+ days)
             sql = f"""
@@ -455,7 +455,7 @@ class GoalsMixin:
         """
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
+            sales_filter = self._build_sales_type_filter(sales_type)
 
             # Get yearly totals
             yearly_sql = f"""
@@ -559,7 +559,7 @@ class GoalsMixin:
         """
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
+            sales_filter = self._build_sales_type_filter(sales_type)
 
             # Calculate weekly revenue within each month instance
             sql = f"""
@@ -704,7 +704,7 @@ class GoalsMixin:
 
             # Get last year's same month revenue
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
+            sales_filter = self._build_sales_type_filter(sales_type)
 
             last_year_sql = f"""
                 SELECT SUM(o.grand_total) as revenue
@@ -1004,7 +1004,7 @@ class GoalsMixin:
         date_strs = [d.isoformat() for d in dates]
 
         async with self.connection() as conn:
-            sales_filter = self._build_sales_type_filter(sales_type, conn=conn)
+            sales_filter = self._build_sales_type_filter(sales_type)
             rows = conn.execute(
                 f"""SELECT {_date_in_kyiv('o.ordered_at')} as day,
                            SUM(o.grand_total) as revenue
