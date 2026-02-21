@@ -49,6 +49,8 @@ import type {
   CreateExpenseRequest,
   CreateExpenseResponse,
   DeleteExpenseResponse,
+  ReportSummaryResponse,
+  ReportTopProductsResponse,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -616,6 +618,13 @@ export const api = {
 
   deleteExpense: (id: number, options?: FetchOptions) =>
     fetchApiMutation<DeleteExpenseResponse>(`/expenses/${id}`, 'DELETE', options),
+
+  // Reports
+  getReportSummary: (params: string, options?: FetchOptions) =>
+    fetchApi<ReportSummaryResponse>('/reports/summary', params, options),
+
+  getReportTopProducts: (params: string, options?: FetchOptions) =>
+    fetchApi<ReportTopProductsResponse>('/reports/top-products', params, options),
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────

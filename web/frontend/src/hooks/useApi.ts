@@ -39,6 +39,8 @@ import type {
   TrafficTransactionsResponse,
   TrafficROASResponse,
   CreateExpenseRequest,
+  ReportSummaryResponse,
+  ReportTopProductsResponse,
 } from '../types/api'
 
 // Query key factory for consistent cache keys
@@ -86,6 +88,9 @@ export const queryKeys = {
   trafficTrend: (params: string) => ['trafficTrend', params] as const,
   trafficTransactions: (params: string) => ['trafficTransactions', params] as const,
   trafficROAS: (params: string) => ['trafficROAS', params] as const,
+  // Reports
+  reportSummary: (params: string) => ['reportSummary', params] as const,
+  reportTopProducts: (params: string) => ['reportTopProducts', params] as const,
 }
 
 // Cache TTL constants (in milliseconds)
@@ -569,5 +574,32 @@ export function useDeleteExpense() {
       queryClient.invalidateQueries({ queryKey: queryKeys.trafficROAS(queryParams) })
       queryClient.invalidateQueries({ queryKey: ['manualExpenses'] })
     },
+  })
+}
+
+// ─── Reports ──────────────────────────────────────────────────────────────────
+
+export function useReportSummary() {
+  const queryParams = useQueryParams()
+
+  return useQuery<ReportSummaryResponse>({
+    queryKey: queryKeys.reportSummary(queryParams),
+    queryFn: () => api.getReportSummary(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useReportTopProducts(sourceId: number | null, limit: number) {
+  const queryParams = useQueryParams()
+
+  const fullParams = new URLSearchParams(queryParams)
+  if (sourceId) fullParams.set('source_id', String(sourceId))
+  fullParams.set('limit', String(limit))
+  const paramsStr = fullParams.toString()
+
+  return useQuery<ReportTopProductsResponse>({
+    queryKey: [...queryKeys.reportTopProducts(queryParams), sourceId, limit],
+    queryFn: () => api.getReportTopProducts(paramsStr),
+    staleTime: CACHE_TTL.STANDARD,
   })
 }

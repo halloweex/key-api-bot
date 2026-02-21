@@ -10,6 +10,7 @@ import { useRouter, navigate } from './hooks/useRouter'
 // Lazy load pages
 const TrafficPage = lazy(() => import('./components/traffic/TrafficPage'))
 const InventoryPage = lazy(() => import('./components/inventory/InventoryPage'))
+const ReportsPage = lazy(() => import('./components/reports/ReportsPage'))
 
 // ─── Welcome Toast Hook ──────────────────────────────────────────────────────
 
@@ -116,6 +117,17 @@ function App() {
       <AppShell>
         <Suspense fallback={<PageSpinner />}>
           <InventoryPage />
+        </Suspense>
+      </AppShell>
+    )
+  }
+
+  // Reports
+  if (path === '/v2/reports' || path === '/reports') {
+    return (
+      <AppShell>
+        <Suspense fallback={<PageSpinner />}>
+          <ReportsPage />
         </Suspense>
       </AppShell>
     )

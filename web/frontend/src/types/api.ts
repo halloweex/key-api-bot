@@ -768,3 +768,40 @@ export interface DeleteExpenseResponse {
   success: boolean
   id: number
 }
+
+// ─── Report Types ────────────────────────────────────────────────────────────
+
+export interface ReportSourceRow {
+  source_id: number
+  source_name: string
+  orders_count: number
+  products_sold: number
+  revenue: number
+  avg_check: number
+  returns_count: number
+  return_rate: number
+}
+
+export interface ReportSummaryResponse {
+  sources: ReportSourceRow[]
+  totals: {
+    orders_count: number
+    products_sold: number
+    revenue: number
+    avg_check: number
+    returns_count: number
+    return_rate: number
+  }
+}
+
+export interface ReportTopProduct {
+  rank: number
+  product_name: string
+  sku: string
+  quantity: number
+  percentage: number
+  revenue: number
+  orders_count: number
+}
+
+export type ReportTopProductsResponse = ReportTopProduct[]

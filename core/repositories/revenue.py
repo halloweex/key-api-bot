@@ -896,4 +896,224 @@ class RevenueMixin:
                 }
             }
 
+    # ─── Report Methods ──────────────────────────────────────────────────────
+
+    async def get_report_summary(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "retail",
+        source_id: Optional[int] = None,
+        category_id: Optional[int] = None,
+        brand: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get per-source breakdown report for a date range."""
+        source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
+
+        async with self.connection() as conn:
+            params: list = [start_date, end_date]
+            where_clauses = ["s.order_date BETWEEN ? AND ?", "s.is_active_source"]
+
+            if sales_type != "all":
+                where_clauses.append("s.sales_type = ?")
+                params.append(sales_type)
+
+            if source_id:
+                where_clauses.append("s.source_id = ?")
+                params.append(source_id)
+
+            cat_ids = None
+            if category_id:
+                cat_ids = await self._get_category_with_children(conn, category_id)
+                where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                params.extend(cat_ids)
+
+            if brand:
+                where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                params.append(brand)
+
+            where_sql = " AND ".join(where_clauses)
+
+            need_product_filter = bool(category_id or brand)
+
+            product_join = """
+                JOIN order_products op ON s.id = op.order_id
+                LEFT JOIN products p ON op.product_id = p.id
+            """ if need_product_filter else """
+                LEFT JOIN order_products op ON s.id = op.order_id
+            """
+
+            results = conn.execute(f"""
+                SELECT
+                    s.source_id,
+                    COUNT(DISTINCT CASE WHEN NOT s.is_return THEN s.id END) as orders_count,
+                    COALESCE(SUM(CASE WHEN NOT s.is_return THEN op.quantity ELSE 0 END), 0) as products_sold,
+                    COALESCE(SUM(CASE WHEN NOT s.is_return THEN s.grand_total ELSE 0 END), 0) as revenue,
+                    COUNT(DISTINCT CASE WHEN s.is_return THEN s.id END) as returns_count
+                FROM silver_orders s
+                {product_join}
+                WHERE {where_sql}
+                GROUP BY s.source_id
+                ORDER BY revenue DESC
+            """, params).fetchall()
+
+            sources = []
+            total_orders = 0
+            total_products = 0
+            total_revenue = 0.0
+            total_returns = 0
+
+            for row in results:
+                sid = row[0]
+                if sid not in source_names:
+                    continue
+                orders = int(row[1] or 0)
+                products = int(row[2] or 0)
+                revenue = float(row[3] or 0)
+                returns = int(row[4] or 0)
+                avg_check = revenue / orders if orders > 0 else 0
+                return_rate = returns / (orders + returns) * 100 if (orders + returns) > 0 else 0
+
+                sources.append({
+                    "source_id": sid,
+                    "source_name": source_names[sid],
+                    "orders_count": orders,
+                    "products_sold": products,
+                    "revenue": round(revenue, 2),
+                    "avg_check": round(avg_check, 2),
+                    "returns_count": returns,
+                    "return_rate": round(return_rate, 1),
+                })
+
+                total_orders += orders
+                total_products += products
+                total_revenue += revenue
+                total_returns += returns
+
+            total_avg_check = total_revenue / total_orders if total_orders > 0 else 0
+            total_return_rate = total_returns / (total_orders + total_returns) * 100 if (total_orders + total_returns) > 0 else 0
+
+            return {
+                "sources": sources,
+                "totals": {
+                    "orders_count": total_orders,
+                    "products_sold": total_products,
+                    "revenue": round(total_revenue, 2),
+                    "avg_check": round(total_avg_check, 2),
+                    "returns_count": total_returns,
+                    "return_rate": round(total_return_rate, 1),
+                },
+            }
+
+    async def get_report_top_products(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "retail",
+        source_id: Optional[int] = None,
+        category_id: Optional[int] = None,
+        brand: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Get top products report with rank, quantity, revenue, orders."""
+        async with self.connection() as conn:
+            params: list = [start_date, end_date]
+            where_clauses = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+
+            if sales_type != "all":
+                where_clauses.append("s.sales_type = ?")
+                params.append(sales_type)
+
+            if source_id:
+                where_clauses.append("s.source_id = ?")
+                params.append(source_id)
+
+            if category_id:
+                cat_ids = await self._get_category_with_children(conn, category_id)
+                where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                params.extend(cat_ids)
+
+            if brand:
+                where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                params.append(brand)
+
+            params.append(limit)
+            where_sql = " AND ".join(where_clauses)
+
+            results = conn.execute(f"""
+                SELECT
+                    COALESCE(p.name, op.name, 'Unknown') as product_name,
+                    COALESCE(p.sku, '') as sku,
+                    SUM(op.quantity) as quantity,
+                    COALESCE(SUM(op.price_sold * op.quantity), 0) as revenue,
+                    COUNT(DISTINCT s.id) as orders_count
+                FROM silver_orders s
+                JOIN order_products op ON s.id = op.order_id
+                LEFT JOIN products p ON op.product_id = p.id
+                WHERE {where_sql}
+                GROUP BY COALESCE(p.name, op.name, 'Unknown'), COALESCE(p.sku, '')
+                ORDER BY quantity DESC
+                LIMIT ?
+            """, params).fetchall()
+
+            total_qty = sum(int(row[2] or 0) for row in results)
+
+            return [
+                {
+                    "rank": i + 1,
+                    "product_name": row[0],
+                    "sku": row[1],
+                    "quantity": int(row[2] or 0),
+                    "percentage": round(int(row[2] or 0) / total_qty * 100, 1) if total_qty > 0 else 0,
+                    "revenue": round(float(row[3] or 0), 2),
+                    "orders_count": int(row[4] or 0),
+                }
+                for i, row in enumerate(results)
+            ]
+
+    async def get_report_products_by_source(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "retail",
+    ) -> Dict[str, Any]:
+        """Get all products grouped by source (matches bot Excel format)."""
+        source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
+
+        async with self.connection() as conn:
+            params: list = [start_date, end_date]
+            where_clauses = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+
+            if sales_type != "all":
+                where_clauses.append("s.sales_type = ?")
+                params.append(sales_type)
+
+            where_sql = " AND ".join(where_clauses)
+
+            results = conn.execute(f"""
+                SELECT
+                    s.source_id,
+                    COALESCE(p.name, op.name, 'Unknown') as product_name,
+                    SUM(op.quantity) as quantity
+                FROM silver_orders s
+                JOIN order_products op ON s.id = op.order_id
+                LEFT JOIN products p ON op.product_id = p.id
+                WHERE {where_sql}
+                GROUP BY s.source_id, COALESCE(p.name, op.name, 'Unknown')
+                ORDER BY s.source_id, quantity DESC
+            """, params).fetchall()
+
+            # Group by source
+            by_source: Dict[int, list] = {}
+            for row in results:
+                sid = int(row[0])
+                if sid not in source_names:
+                    continue
+                by_source.setdefault(sid, []).append({
+                    "product_name": row[1],
+                    "quantity": int(row[2] or 0),
+                })
+
+            return by_source
+
     # ─── Expense Methods ─────────────────────────────────────────────────────

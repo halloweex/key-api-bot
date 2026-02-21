@@ -15,6 +15,7 @@ from .inventory import router as inventory_router
 from .expenses import router as expenses_router
 from .traffic import router as traffic_router
 from .users import router as users_router
+from .reports import router as reports_router
 
 router = APIRouter(tags=["api"])
 
@@ -27,3 +28,4 @@ router.include_router(inventory_router)
 router.include_router(expenses_router)
 router.include_router(traffic_router)
 router.include_router(users_router)
+router.include_router(reports_router)
