@@ -9,14 +9,22 @@ import json
 import logging
 from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+_KYIV_TZ = ZoneInfo("Europe/Kyiv")
+
+
+def _today_kyiv() -> date:
+    """Get today's date in Kyiv timezone (matches Gold layer dates)."""
+    return datetime.now(_KYIV_TZ).date()
 
 # Model storage
 MODEL_DIR = Path(__file__).parent.parent / "data"
@@ -177,8 +185,8 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     df['rolling_mean_28d'] = df['revenue'].shift(1).rolling(28, min_periods=14).mean()
     df['rolling_std_7d'] = df['revenue'].shift(1).rolling(7, min_periods=3).std()
 
-    # Year-over-year ratio
-    df['yoy_ratio'] = df['revenue'] / df['lag_365d'].replace(0, np.nan)
+    # Year-over-year ratio (use lagged revenue to avoid target leakage)
+    df['yoy_ratio'] = df['revenue'].shift(1) / df['revenue'].shift(366).replace(0, np.nan)
 
     # Linear trend index
     df['trend_index'] = np.arange(len(df))
@@ -399,8 +407,7 @@ def _predict_future(
     """Generate predictions for future dates using trained model.
 
     Uses actual historical data for lag features, then iteratively fills in
-    predictions as we go forward. Predictions are made in log space and
-    converted back with expm1, then adjusted by DOW corrections.
+    predictions as we go forward, adjusted by DOW corrections.
     """
     if not future_dates:
         return []
@@ -563,7 +570,7 @@ def _run_evaluation(df: pd.DataFrame) -> Dict[str, Any]:
     df = df.sort_values('date').reset_index(drop=True)
 
     # Exclude today's incomplete data
-    today = pd.Timestamp(date.today())
+    today = pd.Timestamp(_today_kyiv())
     df = df[df['date'] < today].reset_index(drop=True)
 
     if len(df) < 120:
@@ -823,7 +830,7 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
     df = df.sort_values('date').reset_index(drop=True)
 
     # Exclude today's incomplete data
-    today = pd.Timestamp(date.today())
+    today = pd.Timestamp(_today_kyiv())
     df = df[df['date'] < today].reset_index(drop=True)
 
     if len(df) < 120:
@@ -1030,7 +1037,7 @@ class PredictionService:
 
         logger.info(f"Running evaluation on {len(df)} days of data (sales_type={sales_type})")
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(_executor, _run_evaluation, df)
 
         result["data_info"]["sales_type"] = sales_type
@@ -1050,7 +1057,7 @@ class PredictionService:
 
         logger.info(f"Running hyperparameter tuning on {len(df)} days of data (sales_type={sales_type})")
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(_executor, _tune_hyperparameters, df)
 
         result["sales_type"] = sales_type
@@ -1070,7 +1077,7 @@ class PredictionService:
         if not self.is_ready:
             return None
 
-        today = date.today()
+        today = _today_kyiv()
         # Include today (partial day) for stacked actual + remaining
         pred_start = max(start_date, today)
         if pred_start > end_date:
@@ -1090,7 +1097,7 @@ class PredictionService:
         historical_df = await self._query_daily_revenue(store, sales_type, days_back=780)
 
         dow_corrections = self._dow_corrections
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         predictions = await loop.run_in_executor(
             _executor, _predict_future, self._model, historical_df, future_dates, dow_corrections
         )
@@ -1125,7 +1132,7 @@ class PredictionService:
             logger.info(f"Training revenue model on {len(df)} days of data")
 
             # Train in thread pool (CPU-bound)
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             model, metrics, dow_corrections = await loop.run_in_executor(
                 _executor, _train_model, df
             )
@@ -1133,7 +1140,7 @@ class PredictionService:
             self._model = model
             self._metrics = metrics
             self._dow_corrections = dow_corrections
-            self._last_trained = date.today().isoformat()
+            self._last_trained = _today_kyiv().isoformat()
 
             # Save model to disk
             await loop.run_in_executor(_executor, self._save_model)
@@ -1169,10 +1176,10 @@ class PredictionService:
         if historical_df is None:
             historical_df = await self._query_daily_revenue(store, sales_type, days_back=780)
 
-        today = date.today()
+        today = _today_kyiv()
         forecast_end = today + timedelta(days=FORECAST_HORIZON_DAYS)
 
-        # Include today (partial day) so the chart can show actual + remaining
+        # Start from today (historical excludes today, so no overlap)
         future_dates = []
         d = today
         while d <= forecast_end:
@@ -1184,7 +1191,7 @@ class PredictionService:
 
         # Run prediction in thread pool
         dow_corrections = self._dow_corrections
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         predictions = await loop.run_in_executor(
             _executor, _predict_future, self._model, historical_df, future_dates, dow_corrections
         )
@@ -1202,7 +1209,7 @@ class PredictionService:
         from core.duckdb_store import get_store
         store = await get_store()
 
-        today = date.today()
+        today = _today_kyiv()
         month_start = date(today.year, today.month, 1)
         if today.month == 12:
             month_end = date(today.year + 1, 1, 1) - timedelta(days=1)
@@ -1247,13 +1254,22 @@ class PredictionService:
         }
 
     async def _query_daily_revenue(
-        self, store: Any, sales_type: str, days_back: int
+        self, store: Any, sales_type: str, days_back: int,
+        exclude_today: bool = True,
     ) -> pd.DataFrame:
-        """Query daily revenue from Gold layer (pre-aggregated)."""
-        start_date = date.today() - timedelta(days=days_back)
+        """Query daily revenue from Gold layer (pre-aggregated).
+
+        Args:
+            exclude_today: If True, excludes today's incomplete data (default for training).
+        """
+        today = _today_kyiv()
+        start_date = today - timedelta(days=days_back)
 
         sales_filter = "sales_type = ?" if sales_type != "all" else "1=1"
-        params = [start_date]
+        date_upper = "AND date < ?" if exclude_today else ""
+        params: list = [start_date]
+        if exclude_today:
+            params.append(today)
         if sales_type != "all":
             params.append(sales_type)
 
@@ -1270,6 +1286,7 @@ class PredictionService:
                     new_customers
                 FROM gold_daily_revenue
                 WHERE date >= ?
+                  {date_upper}
                   AND {sales_filter}
                 ORDER BY date
             """, params).fetchdf()
