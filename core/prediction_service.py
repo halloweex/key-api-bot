@@ -146,25 +146,36 @@ def _get_holiday_features(dates: pd.Series) -> pd.DataFrame:
 def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Engineer features from a DataFrame with 'date', 'revenue', and optional extra columns.
 
-    Creates 27 features:
-    - Calendar: day_of_week, month, day_of_month
+    Creates 31+ features:
+    - Calendar: day_of_week, month, day_of_month, week_of_year, is_weekend
     - Cyclical: month_sin, month_cos, dow_sin, dow_cos
     - Lags: 1d, 7d, 14d, 28d, 365d
     - Rolling: mean_7d, mean_14d, mean_28d, std_7d
-    - Trend: yoy_ratio, linear trend index
+    - Trend + Momentum: yoy_ratio, trend_index, log_trend_index, momentum_7d_28d, revenue_growth_7d
     - Events: days_to_nearest_event
+    - Payday: days_to_payday
     - Source shares: lag_7d_instagram_share, lag_7d_telegram_share, lag_7d_shopify_share
     - Orders + AOV: lag_7d_orders, rolling_mean_7d_orders, lag_7d_aov, rolling_mean_7d_aov
-    - Customer mix: rolling_mean_7d_new_cust_ratio
+    - Customer mix: rolling_mean_7d_new_cust_ratio, rolling_mean_7d_returning_ratio, rolling_mean_7d_return_rate
     """
     df = df.copy()
     df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values('date').reset_index(drop=True)
 
+    # Reindex to continuous daily date range so shift(n) means n calendar days
+    original_dates = set(df['date'])
+    date_range = pd.date_range(df['date'].min(), df['date'].max(), freq='D')
+    df = df.set_index('date').reindex(date_range).rename_axis('date').reset_index()
+    # Mark gap-filled rows (dates not in original data) — NOT based on NaN revenue,
+    # because future prediction rows legitimately have NaN revenue
+    df['_is_gap'] = ~df['date'].isin(original_dates)
+
     # Calendar features
     df['day_of_week'] = df['date'].dt.dayofweek
     df['month'] = df['date'].dt.month
     df['day_of_month'] = df['date'].dt.day
+    df['week_of_year'] = df['date'].dt.isocalendar().week.astype(int)
+    df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
 
     # Cyclical encoding
     df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
@@ -190,6 +201,26 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Linear trend index
     df['trend_index'] = np.arange(len(df))
+
+    # Growth / Momentum features
+    df['log_trend_index'] = np.log1p(df['trend_index'])
+    df['momentum_7d_28d'] = df['rolling_mean_7d'] / df['rolling_mean_28d'].replace(0, np.nan)
+    rolling_mean_7d_shifted = df['revenue'].shift(1).rolling(7, min_periods=3).mean()
+    rolling_mean_7d_prev_week = df['revenue'].shift(8).rolling(7, min_periods=3).mean()
+    df['revenue_growth_7d'] = (rolling_mean_7d_shifted / rolling_mean_7d_prev_week.replace(0, np.nan)) - 1
+
+    # Payday proximity (distance to nearest 1st or 15th, capped at 7)
+    def _days_to_payday(dt_val):
+        d = dt_val.day
+        # Distance to 1st of this month
+        dist1 = d - 1
+        # Distance to 15th of this month
+        dist15 = abs(d - 15)
+        # Distance to 1st of next month
+        _, last_day = monthrange(dt_val.year, dt_val.month)
+        dist_next_1 = last_day - d + 1
+        return min(dist1, dist15, dist_next_1, 7)
+    df['days_to_payday'] = df['date'].apply(_days_to_payday)
 
     # Holiday / event features
     holiday_df = _get_holiday_features(df['date'])
@@ -226,33 +257,58 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df['rolling_mean_7d_new_cust_ratio'] = np.nan
 
+    # Returning customer ratio (returning / unique, 7d rolling)
+    if 'returning_customers' in df.columns and 'unique_customers' in df.columns:
+        ret_ratio = df['returning_customers'] / df['unique_customers'].replace(0, np.nan)
+        df['rolling_mean_7d_returning_ratio'] = ret_ratio.fillna(0).shift(1).rolling(7, min_periods=3).mean()
+    else:
+        df['rolling_mean_7d_returning_ratio'] = np.nan
+
+    # Return rate (returns_count / orders_count, 7d rolling)
+    if 'returns_count' in df.columns and 'orders_count' in df.columns:
+        return_rate = df['returns_count'] / df['orders_count'].replace(0, np.nan)
+        df['rolling_mean_7d_return_rate'] = return_rate.fillna(0).shift(1).rolling(7, min_periods=3).mean()
+    else:
+        df['rolling_mean_7d_return_rate'] = np.nan
+
+    # Drop gap-filled rows (dates that had no original data)
+    # Features were computed on a continuous range, so lags are calendar-correct
+    if '_is_gap' in df.columns:
+        df = df[~df['_is_gap']].drop(columns=['_is_gap']).reset_index(drop=True)
+
     return df
 
 
 FEATURE_COLUMNS = [
-    # Calendar (3)
-    'day_of_week', 'month', 'day_of_month',
+    # Calendar (5)
+    'day_of_week', 'month', 'day_of_month', 'week_of_year', 'is_weekend',
     # Cyclical (4)
     'month_sin', 'month_cos', 'dow_sin', 'dow_cos',
     # Lags (5)
     'lag_1d', 'lag_7d', 'lag_14d', 'lag_28d', 'lag_365d',
     # Rolling (4)
     'rolling_mean_7d', 'rolling_mean_14d', 'rolling_mean_28d', 'rolling_std_7d',
-    # Trend (2)
-    'yoy_ratio', 'trend_index',
+    # Trend + Momentum (5)
+    'yoy_ratio', 'trend_index', 'log_trend_index', 'momentum_7d_28d', 'revenue_growth_7d',
     # Events (1)
     'days_to_nearest_event',
-    # AOV (1) — validated via ablation study
+    # Payday (1)
+    'days_to_payday',
+    # AOV (1)
     'rolling_mean_7d_aov',
+    # Orders (2)
+    'lag_7d_orders', 'rolling_mean_7d_orders',
+    # Customer mix (3)
+    'rolling_mean_7d_new_cust_ratio', 'rolling_mean_7d_returning_ratio', 'rolling_mean_7d_return_rate',
 ]
 
-# Default LightGBM hyperparameters
+# Default LightGBM hyperparameters (tuned for small datasets ~125-185 rows)
 DEFAULT_LGB_PARAMS = {
-    'num_leaves': 31,
+    'num_leaves': 15,
     'learning_rate': 0.05,
-    'min_child_samples': 20,
-    'reg_alpha': 0,
-    'subsample': 1.0,
+    'min_child_samples': 5,
+    'reg_alpha': 0.1,
+    'subsample': 0.8,
 }
 
 
@@ -275,11 +331,11 @@ def _build_lgb_params(tuned: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {
         'objective': 'regression',
         'metric': 'mae',
-        'num_leaves': hp.get('num_leaves', 31),
+        'num_leaves': hp.get('num_leaves', 15),
         'learning_rate': hp.get('learning_rate', 0.05),
-        'min_child_samples': hp.get('min_child_samples', 20),
-        'reg_alpha': hp.get('reg_alpha', 0),
-        'subsample': hp.get('subsample', 1.0),
+        'min_child_samples': hp.get('min_child_samples', 5),
+        'reg_alpha': hp.get('reg_alpha', 0.1),
+        'subsample': hp.get('subsample', 0.8),
         'n_jobs': 1,
         'verbose': -1,
         'seed': 42,
@@ -298,14 +354,23 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float
 
     featured = _build_features(df)
 
-    # Drop rows with NaN in features (due to lags)
-    nan_check_cols = [c for c in FEATURE_COLUMNS if c not in ('yoy_ratio',)]
+    # Columns that can legitimately be NaN early in the dataset — skip in dropna
+    _NAN_SAFE_COLS = {
+        'yoy_ratio', 'lag_365d',
+        'momentum_7d_28d', 'revenue_growth_7d',
+        'rolling_mean_7d_new_cust_ratio', 'rolling_mean_7d_returning_ratio',
+        'rolling_mean_7d_return_rate',
+    }
+
+    # Drop rows with NaN in core features (due to lags)
+    nan_check_cols = [c for c in FEATURE_COLUMNS if c not in _NAN_SAFE_COLS]
     train_data = featured.dropna(subset=nan_check_cols)
     # Fill remaining NaN in features
     train_data = train_data.copy()
     train_data['yoy_ratio'] = train_data['yoy_ratio'].fillna(1.0)
+    train_data['lag_365d'] = train_data['lag_365d'].fillna(0)
     for col in FEATURE_COLUMNS:
-        if col != 'yoy_ratio':
+        if col not in ('yoy_ratio', 'lag_365d'):
             train_data[col] = train_data[col].fillna(0)
 
     if len(train_data) < 60:
@@ -348,7 +413,7 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float
             if mean_pred > 0:
                 correction = mean_actual / mean_pred
                 # Clamp to avoid overfitting
-                correction = max(0.85, min(1.15, correction))
+                correction = max(0.70, min(1.30, correction))
             else:
                 correction = 1.0
             dow_corrections[dow] = round(correction, 4)
@@ -418,7 +483,10 @@ def _predict_future(
 
     # Extra columns needed by _build_features
     extra_cols = ['instagram_revenue', 'telegram_revenue', 'shopify_revenue',
-                  'orders_count', 'unique_customers', 'new_customers']
+                  'orders_count', 'unique_customers', 'new_customers',
+                  'returning_customers', 'returns_count', 'returns_revenue',
+                  'instagram_orders', 'telegram_orders', 'shopify_orders',
+                  'avg_order_value']
     future_row_data: Dict[str, Any] = {
         'date': pd.to_datetime(future_dates),
         'revenue': np.nan,
@@ -619,13 +687,22 @@ def _run_evaluation(df: pd.DataFrame) -> Dict[str, Any]:
         if len(train_df) < 60 or len(test_df) < 20:
             continue
 
+        # Columns that can legitimately be NaN early — skip in dropna
+        _nan_safe = {
+            'yoy_ratio', 'lag_365d',
+            'momentum_7d_28d', 'revenue_growth_7d',
+            'rolling_mean_7d_new_cust_ratio', 'rolling_mean_7d_returning_ratio',
+            'rolling_mean_7d_return_rate',
+        }
+
         # Build features for train set
         featured_train = _build_features(train_df)
-        featured_train = featured_train.dropna(subset=[c for c in FEATURE_COLUMNS if c != 'yoy_ratio'])
+        featured_train = featured_train.dropna(subset=[c for c in FEATURE_COLUMNS if c not in _nan_safe])
         featured_train = featured_train.copy()
         featured_train['yoy_ratio'] = featured_train['yoy_ratio'].fillna(1.0)
+        featured_train['lag_365d'] = featured_train['lag_365d'].fillna(0)
         for col in FEATURE_COLUMNS:
-            if col != 'yoy_ratio':
+            if col not in ('yoy_ratio', 'lag_365d'):
                 featured_train[col] = featured_train[col].fillna(0)
 
         if len(featured_train) < 60:
@@ -868,10 +945,17 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
         if len(train_df) < 60 or len(test_df) < 20:
             continue
 
+        _nan_safe = {
+            'yoy_ratio', 'lag_365d',
+            'momentum_7d_28d', 'revenue_growth_7d',
+            'rolling_mean_7d_new_cust_ratio', 'rolling_mean_7d_returning_ratio',
+            'rolling_mean_7d_return_rate',
+        }
         featured_train = _build_features(train_df)
-        featured_train = featured_train.dropna(subset=[c for c in FEATURE_COLUMNS if c != 'yoy_ratio'])
+        featured_train = featured_train.dropna(subset=[c for c in FEATURE_COLUMNS if c not in _nan_safe])
         featured_train = featured_train.copy()
         featured_train['yoy_ratio'] = featured_train['yoy_ratio'].fillna(1.0)
+        featured_train['lag_365d'] = featured_train['lag_365d'].fillna(0)
 
         if len(featured_train) < 60:
             continue
@@ -1129,7 +1213,15 @@ class PredictionService:
                 logger.warning(f"Insufficient data for training: {len(df)} rows")
                 return {"status": "insufficient_data", "rows": len(df)}
 
-            logger.info(f"Training revenue model on {len(df)} days of data")
+            # Check data coverage: detect sparse/gapped data
+            df['date'] = pd.to_datetime(df['date'])
+            date_span = (df['date'].max() - df['date'].min()).days
+            coverage = len(df) / max(date_span, 1)
+            if coverage < 0.5:
+                logger.warning(f"Sparse data: {len(df)} rows over {date_span} days (coverage={coverage:.2f})")
+                return {"status": "sparse_data", "rows": len(df), "date_span": date_span, "coverage": round(coverage, 2)}
+
+            logger.info(f"Training revenue model on {len(df)} days of data (coverage={coverage:.2f})")
 
             # Train in thread pool (CPU-bound)
             loop = asyncio.get_running_loop()
@@ -1239,6 +1331,7 @@ class PredictionService:
             metrics = {
                 'mae': predictions[0].get('model_mae', 0),
                 'mape': predictions[0].get('model_mape', 0),
+                'wape': predictions[0].get('model_wape', 0),
             }
 
         return {
@@ -1283,7 +1376,14 @@ class PredictionService:
                     shopify_revenue,
                     orders_count,
                     unique_customers,
-                    new_customers
+                    new_customers,
+                    returning_customers,
+                    returns_count,
+                    returns_revenue,
+                    instagram_orders,
+                    telegram_orders,
+                    shopify_orders,
+                    avg_order_value
                 FROM gold_daily_revenue
                 WHERE date >= ?
                   {date_upper}
