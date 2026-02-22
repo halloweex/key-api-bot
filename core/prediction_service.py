@@ -31,6 +31,7 @@ MODEL_DIR = Path(__file__).parent.parent / "data"
 MODEL_PATH = MODEL_DIR / "revenue_model.joblib"
 TUNED_PARAMS_PATH = MODEL_DIR / "lgbm_best_params.json"
 DOW_CORRECTIONS_PATH = MODEL_DIR / "dow_corrections.json"
+CLIP_RATIO_PATH = MODEL_DIR / "clip_ratio.json"
 
 # Thread pool for CPU-bound training
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ml-train")
@@ -146,7 +147,7 @@ def _get_holiday_features(dates: pd.Series) -> pd.DataFrame:
 def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Engineer features from a DataFrame with 'date', 'revenue', and optional extra columns.
 
-    Creates 32 features used by the model, plus extras for analysis:
+    Creates 31 features used by the model, plus extras for analysis:
     - Calendar: day_of_week, month, day_of_month, week_of_year
     - Cyclical: month_sin, month_cos, dow_sin, dow_cos
     - Lags: 1d, 7d, 14d, 28d, 365d
@@ -154,7 +155,7 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     - Trend + Momentum: yoy_ratio, trend_index, momentum_7d_28d, revenue_growth_7d
     - Events: days_to_nearest_event
     - Payday: days_to_payday
-    - DOW-specific: rolling_mean_4w_same_dow, dow_event_interaction, rolling_std_4w_same_dow
+    - DOW-specific: rolling_mean_4w_same_dow, rolling_std_4w_same_dow
     - Source shares: lag_7d_instagram_share, lag_7d_telegram_share, lag_7d_shopify_share
     - Orders + AOV: lag_7d_orders, rolling_mean_7d_orders, lag_7d_aov, rolling_mean_7d_aov
     - Customer mix: rolling_mean_7d_new_cust_ratio, rolling_mean_7d_returning_ratio, rolling_mean_7d_return_rate
@@ -176,7 +177,6 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     df['month'] = df['date'].dt.month
     df['day_of_month'] = df['date'].dt.day
     df['week_of_year'] = df['date'].dt.isocalendar().week.astype(int)
-    df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
 
     # Cyclical encoding
     df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
@@ -204,7 +204,6 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     df['trend_index'] = np.arange(len(df))
 
     # Growth / Momentum features
-    df['log_trend_index'] = np.log1p(df['trend_index'])
     df['momentum_7d_28d'] = df['rolling_mean_7d'] / df['rolling_mean_28d'].replace(0, np.nan)
     rolling_mean_7d_shifted = df['revenue'].shift(1).rolling(7, min_periods=3).mean()
     rolling_mean_7d_prev_week = df['revenue'].shift(8).rolling(7, min_periods=3).mean()
@@ -369,15 +368,28 @@ def _build_lgb_params(tuned: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     }
 
 
-def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float]]:
-    """Train LightGBM model on historical data. Returns (model, metrics, dow_corrections).
+def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float], float]:
+    """Train LightGBM model on historical data. Returns (model, metrics, dow_corrections, clip_ratio).
 
+    Winsorizes training revenue at P95 to reduce promo spike distortion.
     Computes day-of-week residual corrections on the validation set to
     adjust for systematic DOW bias.
     Runs in a thread pool to avoid blocking the event loop.
     """
     import lightgbm as lgb
     from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error
+
+    # Winsorize: clip training revenue at P95 to reduce promo spike distortion
+    # Save original revenue keyed by date for validation metrics on original scale
+    df = df.copy()
+    df['date'] = pd.to_datetime(df['date'])
+    original_rev_by_date = dict(zip(df['date'], df['revenue']))
+    p95 = df['revenue'].quantile(0.95)
+    df['revenue'] = df['revenue'].clip(upper=p95)
+    clip_ratio = float(
+        np.mean(list(original_rev_by_date.values())) / df['revenue'].mean()
+    )
+    logger.info(f"Winsorization: P95={p95:.0f}, clip_ratio={clip_ratio:.4f}")
 
     featured = _build_features(df)
 
@@ -429,9 +441,11 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float
 
     val_pred = model.predict(X_val)
     val_pred = np.maximum(val_pred, 0)
+    val_pred *= clip_ratio  # Scale back from winsorized training
 
     # DOW residual correction: use last 180 days of data for more robust estimates
     # (60-day val set only gives ~8 samples per DOW; 180 days gives ~26)
+    # DOW corrections computed in clipped space (clip_ratio cancels in ratio)
     dow_window = min(180, len(X))
     dow_X = X[-dow_window:]
     dow_y = y[-dow_window:]
@@ -464,17 +478,23 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float
     for i, dow in enumerate(val_dows):
         val_pred_corrected[i] *= dow_corrections[int(dow)]
 
+    # Recover original (unclipped) actuals for validation metrics
+    y_val_original = np.array([
+        original_rev_by_date.get(pd.Timestamp(d), y_val[i])
+        for i, d in enumerate(dates_val)
+    ])
+
     # Calculate metrics on original scale (with DOW correction)
-    mae = float(mean_absolute_error(y_val, val_pred_corrected))
-    mape = float(mean_absolute_percentage_error(y_val, val_pred_corrected)) * 100
+    mae = float(mean_absolute_error(y_val_original, val_pred_corrected))
+    mape = float(mean_absolute_percentage_error(y_val_original, val_pred_corrected)) * 100
     # WAPE: sum(|actual - predicted|) / sum(actual) — robust to low-revenue days
-    wape = float(np.sum(np.abs(y_val - val_pred_corrected)) / np.sum(y_val)) * 100 if np.sum(y_val) > 0 else 0.0
+    wape = float(np.sum(np.abs(y_val_original - val_pred_corrected)) / np.sum(y_val_original)) * 100 if np.sum(y_val_original) > 0 else 0.0
 
     # Per-day validation breakdown
     days_of_week = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
     daily_breakdown = []
-    for i in range(len(y_val)):
-        actual = float(y_val[i])
+    for i in range(len(y_val_original)):
+        actual = float(y_val_original[i])
         pred = float(val_pred_corrected[i])
         error = abs(actual - pred)
         ape = (error / actual * 100) if actual > 0 else 0
@@ -497,7 +517,7 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float
     logger.info(f"Model trained: MAE={mae:.0f}, MAPE={mape:.1f}%, WAPE={wape:.1f}%, "
                 f"rows={len(train_data)}, best_iter={model.best_iteration}")
 
-    return model, metrics, dow_corrections
+    return model, metrics, dow_corrections, clip_ratio
 
 
 def _predict_future(
@@ -505,6 +525,7 @@ def _predict_future(
     historical_df: pd.DataFrame,
     future_dates: List[date],
     dow_corrections: Optional[Dict[int, float]] = None,
+    clip_ratio: float = 1.0,
 ) -> List[Dict[str, Any]]:
     """Generate predictions for future dates using trained model.
 
@@ -554,6 +575,7 @@ def _predict_future(
 
         pred = float(model.predict(row_features)[0])
         pred = max(pred, 0)  # Revenue can't be negative
+        pred *= clip_ratio  # Scale back from winsorized training
 
         # Apply DOW correction
         if dow_corrections:
@@ -733,6 +755,12 @@ def _run_evaluation(df: pd.DataFrame) -> Dict[str, Any]:
             'rolling_mean_4w_same_dow', 'rolling_std_4w_same_dow',
         }
 
+        # Winsorize training revenue at P95
+        p95 = train_df['revenue'].quantile(0.95)
+        original_mean = train_df['revenue'].mean()
+        train_df['revenue'] = train_df['revenue'].clip(upper=p95)
+        fold_clip_ratio = original_mean / train_df['revenue'].mean()
+
         # Build features for train set
         featured_train = _build_features(train_df)
         featured_train = featured_train.dropna(subset=[c for c in FEATURE_COLUMNS if c not in _nan_safe])
@@ -784,6 +812,7 @@ def _run_evaluation(df: pd.DataFrame) -> Dict[str, Any]:
 
         lgbm_preds = model.predict(X_test)
         lgbm_preds = np.maximum(lgbm_preds, 0)
+        lgbm_preds *= fold_clip_ratio  # Scale back from winsorized training
 
         # LightGBM metrics for this fold
         lgbm_metrics = _compute_metrics(y_test, lgbm_preds)
@@ -990,6 +1019,13 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
             'rolling_mean_7d_return_rate',
             'rolling_mean_4w_same_dow', 'rolling_std_4w_same_dow',
         }
+
+        # Winsorize training revenue at P95
+        p95 = train_df['revenue'].quantile(0.95)
+        original_mean = train_df['revenue'].mean()
+        train_df['revenue'] = train_df['revenue'].clip(upper=p95)
+        fold_clip_ratio = original_mean / train_df['revenue'].mean()
+
         featured_train = _build_features(train_df)
         featured_train = featured_train.dropna(subset=[c for c in FEATURE_COLUMNS if c not in _nan_safe])
         featured_train = featured_train.copy()
@@ -1016,7 +1052,7 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
         X_test = test_featured[FEATURE_COLUMNS].fillna(0).values
         y_test = test_featured['revenue'].values
 
-        fold_data.append((X_tr, y_tr, X_es, y_es, X_test, y_test))
+        fold_data.append((X_tr, y_tr, X_es, y_es, X_test, y_test, fold_clip_ratio))
 
     if not fold_data:
         raise ValueError("No valid folds could be prepared for tuning")
@@ -1054,7 +1090,7 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
         all_actuals = []
         all_preds = []
 
-        for X_tr, y_tr, X_es, y_es, X_test, y_test in fold_data:
+        for X_tr, y_tr, X_es, y_es, X_test, y_test, fold_clip_ratio in fold_data:
             train_set = lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURE_COLUMNS)
             es_set = lgb.Dataset(X_es, label=y_es, reference=train_set)
 
@@ -1067,6 +1103,7 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
             )
 
             preds = np.maximum(model.predict(X_test), 0)
+            preds *= fold_clip_ratio  # Scale back from winsorized training
             all_actuals.extend(y_test.tolist())
             all_preds.extend(preds.tolist())
 
@@ -1091,7 +1128,7 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
 
     all_actuals = []
     all_preds = []
-    for X_tr, y_tr, X_es, y_es, X_test, y_test in fold_data:
+    for X_tr, y_tr, X_es, y_es, X_test, y_test, fold_clip_ratio in fold_data:
         train_set = lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURE_COLUMNS)
         es_set = lgb.Dataset(X_es, label=y_es, reference=train_set)
         model = lgb.train(
@@ -1102,6 +1139,7 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
             callbacks=[lgb.early_stopping(50, verbose=False)],
         )
         preds = np.maximum(model.predict(X_test), 0)
+        preds *= fold_clip_ratio  # Scale back from winsorized training
         all_actuals.extend(y_test.tolist())
         all_preds.extend(preds.tolist())
 
@@ -1134,6 +1172,7 @@ class PredictionService:
         self._model = None
         self._metrics: Dict[str, float] = {}
         self._dow_corrections: Dict[int, float] = {}
+        self._clip_ratio: float = 1.0
         self._last_trained: Optional[str] = None
         self._training = False
 
@@ -1220,9 +1259,10 @@ class PredictionService:
         historical_df = await self._query_daily_revenue(store, sales_type, days_back=780)
 
         dow_corrections = self._dow_corrections
+        clip_ratio = self._clip_ratio
         loop = asyncio.get_running_loop()
         predictions = await loop.run_in_executor(
-            _executor, _predict_future, self._model, historical_df, future_dates, dow_corrections
+            _executor, _predict_future, self._model, historical_df, future_dates, dow_corrections, clip_ratio
         )
 
         predicted_total = sum(p['predicted_revenue'] for p in predictions)
@@ -1264,13 +1304,14 @@ class PredictionService:
 
             # Train in thread pool (CPU-bound)
             loop = asyncio.get_running_loop()
-            model, metrics, dow_corrections = await loop.run_in_executor(
+            model, metrics, dow_corrections, clip_ratio = await loop.run_in_executor(
                 _executor, _train_model, df
             )
 
             self._model = model
             self._metrics = metrics
             self._dow_corrections = dow_corrections
+            self._clip_ratio = clip_ratio
             self._last_trained = _today_kyiv().isoformat()
 
             # Save model to disk
@@ -1322,9 +1363,10 @@ class PredictionService:
 
         # Run prediction in thread pool
         dow_corrections = self._dow_corrections
+        clip_ratio = self._clip_ratio
         loop = asyncio.get_running_loop()
         predictions = await loop.run_in_executor(
-            _executor, _predict_future, self._model, historical_df, future_dates, dow_corrections
+            _executor, _predict_future, self._model, historical_df, future_dates, dow_corrections, clip_ratio
         )
 
         # Store predictions in DuckDB
@@ -1452,7 +1494,7 @@ class PredictionService:
         return float(result[0]) if result else 0.0
 
     def _save_model(self) -> None:
-        """Save model and DOW corrections to disk."""
+        """Save model, DOW corrections, and clip_ratio to disk."""
         import joblib
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         joblib.dump(self._model, MODEL_PATH)
@@ -1465,6 +1507,11 @@ class PredictionService:
             with open(DOW_CORRECTIONS_PATH, 'w') as f:
                 json.dump(corrections_str_keys, f, indent=2)
             logger.info(f"DOW corrections saved to {DOW_CORRECTIONS_PATH}")
+
+        # Save clip_ratio
+        with open(CLIP_RATIO_PATH, 'w') as f:
+            json.dump({"clip_ratio": self._clip_ratio}, f, indent=2)
+        logger.info(f"Clip ratio saved to {CLIP_RATIO_PATH}: {self._clip_ratio:.4f}")
 
     def _load_model(self) -> bool:
         """Load model and DOW corrections from disk if available.
@@ -1504,6 +1551,19 @@ class PredictionService:
             except Exception as e:
                 logger.warning(f"Failed to load DOW corrections: {e}")
                 self._dow_corrections = {}
+
+        # Load clip_ratio
+        if CLIP_RATIO_PATH.exists():
+            try:
+                with open(CLIP_RATIO_PATH) as f:
+                    data = json.load(f)
+                self._clip_ratio = float(data.get("clip_ratio", 1.0))
+                logger.info(f"Clip ratio loaded from {CLIP_RATIO_PATH}: {self._clip_ratio:.4f}")
+            except Exception as e:
+                logger.warning(f"Failed to load clip ratio: {e}")
+                self._clip_ratio = 1.0
+        else:
+            self._clip_ratio = 1.0
 
         return True
 
