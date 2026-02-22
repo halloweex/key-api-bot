@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.2
+
+- Add winsorized LightGBM training to reduce promo spike distortion
+
+
 ## 3.0.1
 
 - Bump major version to 3.0.0
