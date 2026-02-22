@@ -463,6 +463,7 @@ def _train_model(df: pd.DataFrame) -> Tuple[Any, Dict[str, Any], Dict[int, float
 
     # Apply DOW corrections to validation predictions for metrics
     val_pred_corrected = val_pred.copy()
+    val_dows = np.array([pd.Timestamp(d).dayofweek for d in dates_val])
     for i, dow in enumerate(val_dows):
         val_pred_corrected[i] *= dow_corrections[int(dow)]
 
