@@ -5,13 +5,15 @@ Contains all constants, environment variables, and configuration settings.
 """
 import os
 from enum import IntEnum
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
 # ─── Version ───────────────────────────────────────────────────────────────
-VERSION = "2.0.1"
+_VERSION_FILE = Path(__file__).parent.parent / "VERSION"
+VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
 
 # ─── Environment Variables ──────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")

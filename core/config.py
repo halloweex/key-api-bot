@@ -13,9 +13,14 @@ Usage:
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Set, Optional
 
 from dotenv import load_dotenv
+
+# Read version from VERSION file (single source of truth)
+_VERSION_FILE = Path(__file__).parent.parent / "VERSION"
+_VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
 
 # Load environment variables
 load_dotenv()
@@ -200,7 +205,7 @@ class MilestoneConfig:
 class AppConfig:
     """Main application configuration."""
 
-    version: str = "2.0.1"
+    version: str = _VERSION
     api: APIConfig = field(default_factory=APIConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     bot: BotConfig = field(default_factory=BotConfig)
