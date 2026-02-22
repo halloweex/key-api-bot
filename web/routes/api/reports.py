@@ -116,30 +116,31 @@ async def export_report_csv(
     output = io.StringIO()
     writer = csv.writer(output)
 
+    source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
+
     if type == "summary":
         data = await store.get_report_summary(s, e, st, src, cat, br)
-        writer.writerow(["Source", "Orders", "Products Sold", "Revenue", "Avg Check", "Returns", "Return %"])
+        products_by_source = await store.get_report_products_by_source(s, e, st)
+
+        # Header matching bot Excel format
+        display_date = f"{s} to {e}" if s != e else str(s)
+        writer.writerow([f"Sales Summary for {display_date} (Timezone: Europe/Kyiv)"])
+        writer.writerow([f"Total Orders: {data['totals']['orders_count']}"])
+        writer.writerow([])
+
+        # Per-source sections with product tables
         for src_row in data["sources"]:
-            writer.writerow([
-                src_row["source_name"],
-                src_row["orders_count"],
-                src_row["products_sold"],
-                src_row["revenue"],
-                src_row["avg_check"],
-                src_row["returns_count"],
-                src_row["return_rate"],
-            ])
-        totals = data["totals"]
-        writer.writerow([
-            "TOTAL",
-            totals["orders_count"],
-            totals["products_sold"],
-            totals["revenue"],
-            totals["avg_check"],
-            totals["returns_count"],
-            totals["return_rate"],
-        ])
-        filename = f"summary_{s}_{e}.csv"
+            sid = src_row["source_id"]
+            writer.writerow([f"Source: {src_row['source_name']}"])
+            writer.writerow([f"Total Orders: {src_row['orders_count']}"])
+            writer.writerow([f"Average Check: {src_row['avg_check']:.2f} UAH"])
+            writer.writerow([f"Returns: {src_row['returns_count']} ({src_row['return_rate']}%)"])
+            writer.writerow(["Product", "Quantity"])
+            for product in products_by_source.get(sid, []):
+                writer.writerow([product["product_name"], product["quantity"]])
+            writer.writerow([])
+
+        filename = f"sales_report_{s}_{e}.csv"
     else:
         products = await store.get_report_top_products(s, e, st, src, cat, br, limit)
         writer.writerow(["#", "Product", "SKU", "Qty", "%", "Revenue", "Orders"])

@@ -919,7 +919,7 @@ class GoalsMixin:
         Args:
             predictions: List of dicts with 'date' and 'predicted_revenue' keys.
             sales_type: 'retail' or 'b2b'.
-            metrics: Model metrics dict with 'mae' and 'mape'.
+            metrics: Model metrics dict with 'mae', 'mape', and 'wape'.
 
         Returns:
             Number of predictions stored.
@@ -929,6 +929,7 @@ class GoalsMixin:
 
         mae = metrics.get('mae', 0) if metrics else 0
         mape = metrics.get('mape', 0) if metrics else 0
+        wape = metrics.get('wape', 0) if metrics else 0
 
         async with self.connection() as conn:
             # Delete existing predictions for this sales_type in the date range
@@ -945,9 +946,9 @@ class GoalsMixin:
             # Batch insert new predictions
             conn.executemany(
                 """INSERT INTO revenue_predictions
-                   (prediction_date, sales_type, predicted_revenue, model_mae, model_mape)
-                   VALUES (?, ?, ?, ?, ?)""",
-                [[pred['date'], sales_type, pred['predicted_revenue'], mae, mape]
+                   (prediction_date, sales_type, predicted_revenue, model_mae, model_mape, model_wape)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                [[pred['date'], sales_type, pred['predicted_revenue'], mae, mape, wape]
                  for pred in predictions]
             )
 
@@ -963,11 +964,11 @@ class GoalsMixin:
         """Get stored revenue predictions for a date range.
 
         Returns:
-            List of dicts with date, predicted_revenue, model_mae, model_mape.
+            List of dicts with date, predicted_revenue, model_mae, model_mape, model_wape.
         """
         async with self.connection() as conn:
             rows = conn.execute(
-                """SELECT prediction_date, predicted_revenue, model_mae, model_mape
+                """SELECT prediction_date, predicted_revenue, model_mae, model_mape, model_wape
                    FROM revenue_predictions
                    WHERE sales_type = ?
                      AND prediction_date >= ?
@@ -982,6 +983,7 @@ class GoalsMixin:
                 'predicted_revenue': float(row[1]),
                 'model_mae': float(row[2]) if row[2] else 0,
                 'model_mape': float(row[3]) if row[3] else 0,
+                'model_wape': float(row[4]) if row[4] else 0,
             }
             for row in rows
         ]

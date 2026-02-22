@@ -536,6 +536,7 @@ class DuckDBStore(
             predicted_revenue DECIMAL(12, 2),
             model_mae DECIMAL(10, 2),
             model_mape DECIMAL(6, 2),
+            model_wape DECIMAL(6, 2),
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (prediction_date, sales_type)
         );
@@ -1080,6 +1081,15 @@ class DuckDBStore(
             logger.debug("Migration: last_stock_out_at column added/verified on sku_inventory_status")
         except Exception as e:
             logger.debug(f"Migration note (sku_inventory_status last_stock_out_at): {e}")
+
+        # Migration: Add model_wape column to revenue_predictions
+        try:
+            self._connection.execute(
+                "ALTER TABLE revenue_predictions ADD COLUMN IF NOT EXISTS model_wape DECIMAL(6, 2)"
+            )
+            logger.debug("Migration: model_wape column added/verified on revenue_predictions")
+        except Exception as e:
+            logger.debug(f"Migration note (revenue_predictions model_wape): {e}")
 
     async def _create_inventory_views(self) -> None:
         """Create Layer 3 & 4 analytics views for inventory."""
