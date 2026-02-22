@@ -243,9 +243,6 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
             same_dow_mean.loc[mask] = dow_rev.rolling(4, min_periods=2).mean()
     df['rolling_mean_4w_same_dow'] = same_dow_mean
 
-    # DOW-event interaction: captures "Thursday near a promo" vs "normal Thursday"
-    df['dow_event_interaction'] = df['day_of_week'] * df['is_high_sales_event']
-
     # DOW-specific volatility: rolling std for same weekday over last 4 weeks
     same_dow_std = pd.Series(np.nan, index=df.index, dtype=float)
     for d in range(7):
@@ -322,8 +319,8 @@ FEATURE_COLUMNS = [
     'days_to_nearest_event',
     # Payday (1)
     'days_to_payday',
-    # DOW-specific (3) — addresses Thu/Fri bimodal distribution
-    'rolling_mean_4w_same_dow', 'dow_event_interaction', 'rolling_std_4w_same_dow',
+    # DOW-specific (2) — addresses Thu/Fri bimodal distribution
+    'rolling_mean_4w_same_dow', 'rolling_std_4w_same_dow',
     # AOV (1)
     'rolling_mean_7d_aov',
     # Orders (2)
