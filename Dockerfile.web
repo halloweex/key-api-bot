@@ -28,6 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 curl &
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy version file
+COPY VERSION ./
+
 # Copy bot modules (needed for shared services)
 COPY bot/ ./bot/
 
