@@ -805,3 +805,63 @@ export interface ReportTopProduct {
 }
 
 export type ReportTopProductsResponse = ReportTopProduct[]
+
+// ─── Product Intelligence ────────────────────────────────────────────────────
+
+export interface BasketSummaryResponse {
+  avgBasketSize: number
+  multiItemPct: number
+  multiItemOrders: number
+  totalOrders: number
+  aovUplift: number
+  multiAov: number
+  singleAov: number
+  topPair: string
+  topPairCount: number
+}
+
+export interface ProductPair {
+  productA: { id: number | null; name: string; orders: number }
+  productB: { id: number | null; name: string; orders: number }
+  coOccurrence: number
+  support: number
+  confidenceAtoB: number
+  confidenceBtoA: number
+  lift: number
+  totalOrders: number
+}
+
+export interface BasketBucket {
+  bucket: string
+  orders: number
+  revenue: number
+  aov: number
+}
+
+export interface CategoryCombo {
+  categoryA: string
+  categoryB: string
+  coOccurrence: number
+}
+
+export interface BrandAffinityPair {
+  brandA: string
+  brandB: string
+  coOccurrence: number
+  productPairs: number
+}
+
+export interface MomentumProduct {
+  productId: number | null
+  productName: string
+  currentRevenue: number
+  prevRevenue: number
+  currentQty: number
+  prevQty: number
+  growthPct: number
+}
+
+export interface ProductMomentumResponse {
+  gainers: MomentumProduct[]
+  losers: MomentumProduct[]
+}

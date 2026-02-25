@@ -41,6 +41,12 @@ import type {
   CreateExpenseRequest,
   ReportSummaryResponse,
   ReportTopProductsResponse,
+  BasketSummaryResponse,
+  ProductPair,
+  BasketBucket,
+  CategoryCombo,
+  BrandAffinityPair,
+  ProductMomentumResponse,
 } from '../types/api'
 
 // Query key factory for consistent cache keys
@@ -91,6 +97,13 @@ export const queryKeys = {
   // Reports
   reportSummary: (params: string) => ['reportSummary', params] as const,
   reportTopProducts: (params: string) => ['reportTopProducts', params] as const,
+  // Product Intelligence
+  basketSummary: (params: string) => ['basketSummary', params] as const,
+  productPairs: (params: string) => ['productPairs', params] as const,
+  basketDistribution: (params: string) => ['basketDistribution', params] as const,
+  categoryCombos: (params: string) => ['categoryCombos', params] as const,
+  brandAffinity: (params: string) => ['brandAffinity', params] as const,
+  productMomentum: (params: string) => ['productMomentum', params] as const,
 }
 
 // Cache TTL constants (in milliseconds)
@@ -600,6 +613,72 @@ export function useReportTopProducts(sourceId: number | null, limit: number) {
   return useQuery<ReportTopProductsResponse>({
     queryKey: [...queryKeys.reportTopProducts(queryParams), sourceId, limit],
     queryFn: () => api.getReportTopProducts(paramsStr),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+// ─── Product Intelligence ───────────────────────────────────────────────────
+
+export function useBasketSummary() {
+  const queryParams = useQueryParams()
+
+  return useQuery<BasketSummaryResponse>({
+    queryKey: queryKeys.basketSummary(queryParams),
+    queryFn: () => api.getBasketSummary(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useProductPairs(productId?: number | null) {
+  const queryParams = useQueryParams()
+
+  const fullParams = new URLSearchParams(queryParams)
+  if (productId) fullParams.set('product_id', String(productId))
+  const paramsStr = fullParams.toString()
+
+  return useQuery<ProductPair[]>({
+    queryKey: [...queryKeys.productPairs(queryParams), productId],
+    queryFn: () => api.getProductPairs(paramsStr),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useBasketDistribution() {
+  const queryParams = useQueryParams()
+
+  return useQuery<BasketBucket[]>({
+    queryKey: queryKeys.basketDistribution(queryParams),
+    queryFn: () => api.getBasketDistribution(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useCategoryCombos() {
+  const queryParams = useQueryParams()
+
+  return useQuery<CategoryCombo[]>({
+    queryKey: queryKeys.categoryCombos(queryParams),
+    queryFn: () => api.getCategoryCombos(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useBrandAffinity() {
+  const queryParams = useQueryParams()
+
+  return useQuery<BrandAffinityPair[]>({
+    queryKey: queryKeys.brandAffinity(queryParams),
+    queryFn: () => api.getBrandAffinity(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useProductMomentum() {
+  const queryParams = useQueryParams()
+
+  return useQuery<ProductMomentumResponse>({
+    queryKey: queryKeys.productMomentum(queryParams),
+    queryFn: () => api.getProductMomentum(queryParams),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

@@ -9,6 +9,7 @@ import { useRouter, navigate } from './hooks/useRouter'
 
 // Lazy load pages
 const TrafficPage = lazy(() => import('./components/traffic/TrafficPage'))
+const ProductIntelPage = lazy(() => import('./components/products/ProductIntelPage'))
 const InventoryPage = lazy(() => import('./components/inventory/InventoryPage'))
 const ReportsPage = lazy(() => import('./components/reports/ReportsPage'))
 
@@ -106,6 +107,17 @@ function App() {
       <AppShell>
         <Suspense fallback={<PageSpinner />}>
           <TrafficPage />
+        </Suspense>
+      </AppShell>
+    )
+  }
+
+  // Product Intelligence
+  if (path === '/v2/products' || path === '/products') {
+    return (
+      <AppShell>
+        <Suspense fallback={<PageSpinner />}>
+          <ProductIntelPage />
         </Suspense>
       </AppShell>
     )

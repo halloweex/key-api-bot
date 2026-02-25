@@ -104,7 +104,7 @@ class RevenueMixin:
                         """, params).fetchone()
                         # Gold doesn't have per-source return columns — query Silver
                         ret_params = [start_date, end_date, source_id]
-                        sales_filter = self._build_sales_type_filter(sales_type)
+                        sales_filter = self._build_sales_type_filter(sales_type, table_alias="silver_orders")
                         ret_result = conn.execute(f"""
                             SELECT COUNT(DISTINCT id), COALESCE(SUM(grand_total), 0)
                             FROM silver_orders

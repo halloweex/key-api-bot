@@ -51,6 +51,12 @@ import type {
   DeleteExpenseResponse,
   ReportSummaryResponse,
   ReportTopProductsResponse,
+  BasketSummaryResponse,
+  ProductPair,
+  BasketBucket,
+  CategoryCombo,
+  BrandAffinityPair,
+  ProductMomentumResponse,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -625,6 +631,25 @@ export const api = {
 
   getReportTopProducts: (params: string, options?: FetchOptions) =>
     fetchApi<ReportTopProductsResponse>('/reports/top-products', params, options),
+
+  // Product Intelligence
+  getBasketSummary: (params: string, options?: FetchOptions) =>
+    fetchApi<BasketSummaryResponse>('/products/intel/summary', params, options),
+
+  getProductPairs: (params: string, options?: FetchOptions) =>
+    fetchApi<ProductPair[]>('/products/intel/pairs', params, options),
+
+  getBasketDistribution: (params: string, options?: FetchOptions) =>
+    fetchApi<BasketBucket[]>('/products/intel/basket-distribution', params, options),
+
+  getCategoryCombos: (params: string, options?: FetchOptions) =>
+    fetchApi<CategoryCombo[]>('/products/intel/category-combos', params, options),
+
+  getBrandAffinity: (params: string, options?: FetchOptions) =>
+    fetchApi<BrandAffinityPair[]>('/products/intel/brand-affinity', params, options),
+
+  getProductMomentum: (params: string, options?: FetchOptions) =>
+    fetchApi<ProductMomentumResponse>('/products/intel/momentum', params, options),
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────
