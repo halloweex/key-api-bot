@@ -74,8 +74,6 @@ class DuckDBStore(
         async with self._lock:
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
-                # Limit DuckDB memory to avoid OOM in containers (spills to disk)
-                self._connection.execute("SET memory_limit = '400MB'")
                 await self._init_schema()
 
                 # Thread pool for offloading blocking operations
