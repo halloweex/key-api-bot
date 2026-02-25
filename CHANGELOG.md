@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.3
+
+- Add Product Intelligence page with basket analysis, pairs, and momentum
+
+
 ## 3.0.2
 
 - Add winsorized LightGBM training to reduce promo spike distortion
