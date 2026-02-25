@@ -75,7 +75,7 @@ class DuckDBStore(
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
                 # Limit DuckDB memory to avoid OOM in containers (spills to disk)
-                self._connection.execute("SET memory_limit = '600MB'")
+                self._connection.execute("SET memory_limit = '400MB'")
                 await self._init_schema()
 
                 # Thread pool for offloading blocking operations
@@ -1547,80 +1547,106 @@ class DuckDBStore(
                     raise
 
             # ── Step 3.5: Gold product pairs (always full rebuild) ──
-            # Memory-optimized: self-join uses only IDs (not names) to reduce
-            # intermediate memory. Names are resolved in the final SELECT.
+            # Uses staged temp tables to keep peak memory low (avoids OOM
+            # in 1GB containers with 35K+ orders). Each step runs separately
+            # so DuckDB can release intermediate memory between statements.
             gold_pairs_rows = 0
             async with self.connection() as conn:
-                conn.execute("BEGIN TRANSACTION")
                 try:
-                    conn.execute("DELETE FROM gold_product_pairs")
+                    # Stage 1: Minimal temp table — just IDs for the self-join
+                    conn.execute("DROP TABLE IF EXISTS _tmp_order_items")
                     conn.execute("""
-                        WITH order_items AS (
-                            SELECT s.id AS order_id, s.sales_type,
-                                   COALESCE(op.product_id, op.id) AS product_id
-                            FROM silver_orders s
-                            JOIN order_products op ON s.id = op.order_id
-                            WHERE NOT s.is_return AND s.is_active_source
-                              AND s.sales_type IN ('retail', 'b2b')
-                        ),
-                        multi_order_ids AS (
-                            SELECT order_id
-                            FROM order_items
+                        CREATE TEMP TABLE _tmp_order_items AS
+                        SELECT s.id AS order_id, s.sales_type,
+                               COALESCE(op.product_id, op.id) AS product_id
+                        FROM silver_orders s
+                        JOIN order_products op ON s.id = op.order_id
+                        WHERE NOT s.is_return AND s.is_active_source
+                          AND s.sales_type IN ('retail', 'b2b')
+                    """)
+
+                    # Stage 2: Filter to multi-item orders only
+                    conn.execute("DROP TABLE IF EXISTS _tmp_multi")
+                    conn.execute("""
+                        CREATE TEMP TABLE _tmp_multi AS
+                        SELECT oi.*
+                        FROM _tmp_order_items oi
+                        WHERE oi.order_id IN (
+                            SELECT order_id FROM _tmp_order_items
                             GROUP BY order_id
                             HAVING COUNT(DISTINCT product_id) >= 2
-                        ),
-                        multi_only AS (
-                            SELECT oi.order_id, oi.sales_type, oi.product_id
-                            FROM order_items oi
-                            SEMI JOIN multi_order_ids mo ON oi.order_id = mo.order_id
-                        ),
-                        pairs AS (
-                            SELECT a.sales_type,
-                                   a.product_id AS pa_id,
-                                   b.product_id AS pb_id,
-                                   COUNT(DISTINCT a.order_id) AS co_occurrence
-                            FROM multi_only a
-                            JOIN multi_only b ON a.order_id = b.order_id
-                                AND a.sales_type = b.sales_type AND a.product_id < b.product_id
-                            GROUP BY a.sales_type, a.product_id, b.product_id
-                            HAVING co_occurrence >= 3
-                        ),
-                        product_counts AS (
-                            SELECT sales_type, product_id, COUNT(DISTINCT order_id) AS orders
-                            FROM order_items GROUP BY sales_type, product_id
-                        ),
-                        totals AS (
-                            SELECT sales_type, COUNT(DISTINCT order_id) AS total
-                            FROM multi_only GROUP BY sales_type
-                        ),
-                        product_names AS (
-                            SELECT COALESCE(op.product_id, op.id) AS product_id,
-                                   ANY_VALUE(COALESCE(p.name, op.name)) AS product_name
-                            FROM order_products op
-                            LEFT JOIN products p ON op.product_id = p.id
-                            GROUP BY COALESCE(op.product_id, op.id)
                         )
+                    """)
+
+                    # Stage 3: Self-join for co-occurrence pairs (memory-intensive step)
+                    conn.execute("DROP TABLE IF EXISTS _tmp_pairs")
+                    conn.execute("""
+                        CREATE TEMP TABLE _tmp_pairs AS
+                        SELECT a.sales_type,
+                               a.product_id AS pa_id,
+                               b.product_id AS pb_id,
+                               COUNT(DISTINCT a.order_id) AS co_occurrence
+                        FROM _tmp_multi a
+                        JOIN _tmp_multi b ON a.order_id = b.order_id
+                            AND a.sales_type = b.sales_type AND a.product_id < b.product_id
+                        GROUP BY a.sales_type, a.product_id, b.product_id
+                        HAVING COUNT(DISTINCT a.order_id) >= 3
+                    """)
+
+                    # Stage 4: Final insert with metrics + product names
+                    conn.execute("BEGIN TRANSACTION")
+                    conn.execute("DELETE FROM gold_product_pairs")
+                    conn.execute("""
                         INSERT INTO gold_product_pairs
                         SELECT p.sales_type,
-                            p.pa_id, COALESCE(na.product_name, 'Unknown') AS pa_name,
-                            p.pb_id, COALESCE(nb.product_name, 'Unknown') AS pb_name,
+                            p.pa_id,
+                            COALESCE(na.name, opa.name, 'Unknown'),
+                            p.pb_id,
+                            COALESCE(nb.name, opb.name, 'Unknown'),
                             p.co_occurrence, ca.orders, cb.orders, t.total,
                             CAST(p.co_occurrence AS DOUBLE) / t.total,
                             CAST(p.co_occurrence AS DOUBLE) / ca.orders,
                             CAST(p.co_occurrence AS DOUBLE) / cb.orders,
                             (CAST(p.co_occurrence AS DOUBLE) * t.total) / (CAST(ca.orders AS DOUBLE) * cb.orders)
-                        FROM pairs p
-                        JOIN product_counts ca ON p.sales_type = ca.sales_type AND p.pa_id = ca.product_id
-                        JOIN product_counts cb ON p.sales_type = cb.sales_type AND p.pb_id = cb.product_id
-                        JOIN totals t ON p.sales_type = t.sales_type
-                        LEFT JOIN product_names na ON p.pa_id = na.product_id
-                        LEFT JOIN product_names nb ON p.pb_id = nb.product_id
+                        FROM _tmp_pairs p
+                        JOIN (
+                            SELECT sales_type, product_id, COUNT(DISTINCT order_id) AS orders
+                            FROM _tmp_order_items GROUP BY sales_type, product_id
+                        ) ca ON p.sales_type = ca.sales_type AND p.pa_id = ca.product_id
+                        JOIN (
+                            SELECT sales_type, product_id, COUNT(DISTINCT order_id) AS orders
+                            FROM _tmp_order_items GROUP BY sales_type, product_id
+                        ) cb ON p.sales_type = cb.sales_type AND p.pb_id = cb.product_id
+                        JOIN (
+                            SELECT sales_type, COUNT(DISTINCT order_id) AS total
+                            FROM _tmp_multi GROUP BY sales_type
+                        ) t ON p.sales_type = t.sales_type
+                        LEFT JOIN products na ON p.pa_id = na.id
+                        LEFT JOIN products nb ON p.pb_id = nb.id
+                        LEFT JOIN (
+                            SELECT COALESCE(product_id, id) AS pid, ANY_VALUE(name) AS name
+                            FROM order_products GROUP BY COALESCE(product_id, id)
+                        ) opa ON p.pa_id = opa.pid
+                        LEFT JOIN (
+                            SELECT COALESCE(product_id, id) AS pid, ANY_VALUE(name) AS name
+                            FROM order_products GROUP BY COALESCE(product_id, id)
+                        ) opb ON p.pb_id = opb.pid
                     """)
                     gold_pairs_rows = conn.execute("SELECT COUNT(*) FROM gold_product_pairs").fetchone()[0]
                     conn.execute("COMMIT")
                 except Exception:
-                    conn.execute("ROLLBACK")
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
                     raise
+                finally:
+                    # Always clean up temp tables
+                    for t in ("_tmp_pairs", "_tmp_multi", "_tmp_order_items"):
+                        try:
+                            conn.execute(f"DROP TABLE IF EXISTS {t}")
+                        except Exception:
+                            pass
 
             # ── Step 4: Validation + audit log ──
             async with self.connection() as conn:
