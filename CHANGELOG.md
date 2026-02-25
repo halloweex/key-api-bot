@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.4
+
+- Fix OOM crash: limit DuckDB memory + optimize gold_product_pairs query
+
+
 ## 3.0.3
 
 - Add Product Intelligence page with basket analysis, pairs, and momentum
