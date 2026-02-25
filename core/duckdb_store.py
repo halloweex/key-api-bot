@@ -74,6 +74,8 @@ class DuckDBStore(
         async with self._lock:
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
+                # Limit DuckDB memory to avoid OOM in containers (spills to disk)
+                self._connection.execute("SET memory_limit = '600MB'")
                 await self._init_schema()
 
                 # Thread pool for offloading blocking operations
@@ -1545,35 +1547,37 @@ class DuckDBStore(
                     raise
 
             # ── Step 3.5: Gold product pairs (always full rebuild) ──
+            # Memory-optimized: self-join uses only IDs (not names) to reduce
+            # intermediate memory. Names are resolved in the final SELECT.
             gold_pairs_rows = 0
             async with self.connection() as conn:
                 conn.execute("BEGIN TRANSACTION")
                 try:
                     conn.execute("DELETE FROM gold_product_pairs")
                     conn.execute("""
-                        WITH multi_orders AS (
+                        WITH order_items AS (
                             SELECT s.id AS order_id, s.sales_type,
-                                   COALESCE(op.product_id, op.id) AS product_id,
-                                   COALESCE(p.name, op.name) AS product_name
+                                   COALESCE(op.product_id, op.id) AS product_id
                             FROM silver_orders s
                             JOIN order_products op ON s.id = op.order_id
-                            LEFT JOIN products p ON op.product_id = p.id
                             WHERE NOT s.is_return AND s.is_active_source
                               AND s.sales_type IN ('retail', 'b2b')
                         ),
-                        order_item_counts AS (
-                            SELECT order_id, COUNT(DISTINCT product_id) AS n
-                            FROM multi_orders GROUP BY order_id
+                        multi_order_ids AS (
+                            SELECT order_id
+                            FROM order_items
+                            GROUP BY order_id
+                            HAVING COUNT(DISTINCT product_id) >= 2
                         ),
                         multi_only AS (
-                            SELECT mo.* FROM multi_orders mo
-                            JOIN order_item_counts oic ON mo.order_id = oic.order_id
-                            WHERE oic.n >= 2
+                            SELECT oi.order_id, oi.sales_type, oi.product_id
+                            FROM order_items oi
+                            SEMI JOIN multi_order_ids mo ON oi.order_id = mo.order_id
                         ),
                         pairs AS (
                             SELECT a.sales_type,
-                                   a.product_id AS pa_id, ANY_VALUE(a.product_name) AS pa_name,
-                                   b.product_id AS pb_id, ANY_VALUE(b.product_name) AS pb_name,
+                                   a.product_id AS pa_id,
+                                   b.product_id AS pb_id,
                                    COUNT(DISTINCT a.order_id) AS co_occurrence
                             FROM multi_only a
                             JOIN multi_only b ON a.order_id = b.order_id
@@ -1583,14 +1587,23 @@ class DuckDBStore(
                         ),
                         product_counts AS (
                             SELECT sales_type, product_id, COUNT(DISTINCT order_id) AS orders
-                            FROM multi_orders GROUP BY sales_type, product_id
+                            FROM order_items GROUP BY sales_type, product_id
                         ),
                         totals AS (
                             SELECT sales_type, COUNT(DISTINCT order_id) AS total
                             FROM multi_only GROUP BY sales_type
+                        ),
+                        product_names AS (
+                            SELECT COALESCE(op.product_id, op.id) AS product_id,
+                                   ANY_VALUE(COALESCE(p.name, op.name)) AS product_name
+                            FROM order_products op
+                            LEFT JOIN products p ON op.product_id = p.id
+                            GROUP BY COALESCE(op.product_id, op.id)
                         )
                         INSERT INTO gold_product_pairs
-                        SELECT p.sales_type, p.pa_id, p.pa_name, p.pb_id, p.pb_name,
+                        SELECT p.sales_type,
+                            p.pa_id, COALESCE(na.product_name, 'Unknown') AS pa_name,
+                            p.pb_id, COALESCE(nb.product_name, 'Unknown') AS pb_name,
                             p.co_occurrence, ca.orders, cb.orders, t.total,
                             CAST(p.co_occurrence AS DOUBLE) / t.total,
                             CAST(p.co_occurrence AS DOUBLE) / ca.orders,
@@ -1600,6 +1613,8 @@ class DuckDBStore(
                         JOIN product_counts ca ON p.sales_type = ca.sales_type AND p.pa_id = ca.product_id
                         JOIN product_counts cb ON p.sales_type = cb.sales_type AND p.pb_id = cb.product_id
                         JOIN totals t ON p.sales_type = t.sales_type
+                        LEFT JOIN product_names na ON p.pa_id = na.product_id
+                        LEFT JOIN product_names nb ON p.pb_id = nb.product_id
                     """)
                     gold_pairs_rows = conn.execute("SELECT COUNT(*) FROM gold_product_pairs").fetchone()[0]
                     conn.execute("COMMIT")
