@@ -1,6 +1,7 @@
 import { memo, useState, useCallback } from 'react'
 import { useProductPairs } from '../../hooks/useApi'
 import { formatNumber } from '../../utils/formatters'
+import { InfoPopover } from '../ui/InfoPopover'
 
 type SortKey = 'coOccurrence' | 'lift' | 'confidenceAtoB' | 'confidenceBtoA'
 
@@ -38,8 +39,28 @@ export const FrequentlyBoughtTogether = memo(function FrequentlyBoughtTogether()
   return (
     <div className="bg-white rounded-lg border border-slate-200 shadow-sm">
       <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <h3 className="text-sm font-semibold text-slate-800">Frequently Bought Together</h3>
+          <InfoPopover title="Frequently Bought Together">
+            <p className="text-xs text-slate-300 mb-2">
+              Products often purchased in the same order.
+            </p>
+            <p className="text-xs text-slate-300 mb-2">
+              <strong className="text-purple-400">Co-purchases:</strong> Number of orders containing both products.
+            </p>
+            <p className="text-xs text-slate-300 mb-2">
+              <strong className="text-purple-400">Support:</strong> Percentage of all orders that contain this pair. Higher = more common.
+            </p>
+            <p className="text-xs text-slate-300 mb-2">
+              <strong className="text-purple-400">Conf A→B:</strong> If a customer buys Product A, the probability they also buy Product B.
+            </p>
+            <p className="text-xs text-slate-300 mb-2">
+              <strong className="text-purple-400">Conf B→A:</strong> If a customer buys Product B, the probability they also buy Product A.
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-purple-400">Lift:</strong> How much more likely these products are bought together vs. by chance. Lift &gt; 1 means positive association; higher = stronger link.
+            </p>
+          </InfoPopover>
           {selectedProductId && (
             <button
               onClick={() => setSelectedProductId(null)}

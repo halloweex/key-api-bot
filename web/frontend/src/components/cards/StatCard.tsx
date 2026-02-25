@@ -24,6 +24,8 @@ export interface StatCardProps {
   trendValue?: number
   /** Animation duration in ms */
   animationDuration?: number
+  /** Optional extra element rendered after the label (e.g. info tooltip) */
+  labelExtra?: React.ReactNode
   /** Accessible description for screen readers */
   ariaLabel?: string
   /** Show clickable indicator */
@@ -100,6 +102,7 @@ export const StatCard = memo(function StatCard({
   trend,
   trendValue,
   animationDuration = 500,
+  labelExtra,
   ariaLabel,
   clickable = false,
   onClick,
@@ -139,7 +142,7 @@ export const StatCard = memo(function StatCard({
 
           <div className={icon ? "flex-1 min-w-0" : ""}>
             {/* Label */}
-            <h3 className="text-xs lg:text-sm text-slate-600 font-medium mb-1">{label}</h3>
+            <h3 className="text-xs lg:text-sm text-slate-600 font-medium mb-1 flex items-center gap-1">{label}{labelExtra}</h3>
 
             {/* Value with animation */}
             <div className={`flex items-baseline gap-2 ${icon ? "" : "justify-center"} min-w-0`}>

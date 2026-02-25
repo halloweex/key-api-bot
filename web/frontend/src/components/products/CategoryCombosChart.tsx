@@ -5,6 +5,7 @@ import {
 } from 'recharts'
 import { useCategoryCombos } from '../../hooks/useApi'
 import { formatNumber } from '../../utils/formatters'
+import { InfoPopover } from '../ui/InfoPopover'
 
 export const CategoryCombosChart = memo(function CategoryCombosChart() {
   const { data, isLoading } = useCategoryCombos()
@@ -16,7 +17,12 @@ export const CategoryCombosChart = memo(function CategoryCombosChart() {
 
   return (
     <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4">
-      <h3 className="text-sm font-semibold text-slate-800 mb-3">Category Combinations</h3>
+      <div className="flex items-center gap-1.5 mb-3">
+        <h3 className="text-sm font-semibold text-slate-800">Category Combinations</h3>
+        <InfoPopover>
+          <p className="text-xs text-slate-300">Most common category pairs appearing in the same order.</p>
+        </InfoPopover>
+      </div>
 
       {isLoading ? (
         <div className="h-[280px] flex items-center justify-center">

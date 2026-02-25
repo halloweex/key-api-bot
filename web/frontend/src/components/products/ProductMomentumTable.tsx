@@ -1,6 +1,7 @@
 import { memo } from 'react'
 import { useProductMomentum } from '../../hooks/useApi'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
+import { InfoPopover } from '../ui/InfoPopover'
 
 export const ProductMomentumTable = memo(function ProductMomentumTable() {
   const { data, isLoading } = useProductMomentum()
@@ -8,7 +9,12 @@ export const ProductMomentumTable = memo(function ProductMomentumTable() {
   if (isLoading) {
     return (
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4">
-        <h3 className="text-sm font-semibold text-slate-800 mb-3">Product Momentum</h3>
+        <div className="flex items-center gap-1.5 mb-3">
+          <h3 className="text-sm font-semibold text-slate-800">Product Momentum</h3>
+          <InfoPopover>
+            <p className="text-xs text-slate-300">Products with the biggest revenue change compared to the previous period.</p>
+          </InfoPopover>
+        </div>
         <div className="h-[280px] flex items-center justify-center">
           <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
         </div>
@@ -22,7 +28,20 @@ export const ProductMomentumTable = memo(function ProductMomentumTable() {
 
   return (
     <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4">
-      <h3 className="text-sm font-semibold text-slate-800 mb-3">Product Momentum</h3>
+      <div className="flex items-center gap-1.5 mb-3">
+        <h3 className="text-sm font-semibold text-slate-800">Product Momentum</h3>
+        <InfoPopover title="Product Momentum">
+          <p className="text-xs text-slate-300 mb-2">
+            Products with the biggest revenue change compared to the previous period.
+          </p>
+          <p className="text-xs text-slate-300 mb-2">
+            <strong className="text-green-400">Gainers:</strong> Highest revenue increase.
+          </p>
+          <p className="text-xs text-slate-300">
+            <strong className="text-red-400">Losers:</strong> Biggest revenue decline.
+          </p>
+        </InfoPopover>
+      </div>
 
       {!hasData ? (
         <div className="h-[280px] flex items-center justify-center text-sm text-slate-400">

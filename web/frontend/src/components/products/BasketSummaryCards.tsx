@@ -2,6 +2,7 @@ import { memo } from 'react'
 import { StatCard, StatCardSkeleton } from '../cards/StatCard'
 import { useBasketSummary } from '../../hooks/useApi'
 import { formatNumber, formatCurrency } from '../../utils/formatters'
+import { InfoPopover } from '../ui/InfoPopover'
 
 const BasketIcon = () => (
   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -47,6 +48,11 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         icon={<BasketIcon />}
         variant="blue"
         subtitle={`${formatNumber(data.totalOrders)} orders`}
+        labelExtra={
+          <InfoPopover>
+            <p className="text-xs text-slate-300">Average number of distinct products per order.</p>
+          </InfoPopover>
+        }
       />
       <StatCard
         label="Multi-Item Orders"
@@ -55,6 +61,11 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         icon={<MultiIcon />}
         variant="purple"
         subtitle={`${formatNumber(data.multiItemOrders)} of ${formatNumber(data.totalOrders)}`}
+        labelExtra={
+          <InfoPopover>
+            <p className="text-xs text-slate-300">Percentage of orders containing 2 or more products.</p>
+          </InfoPopover>
+        }
       />
       <StatCard
         label="AOV Uplift"
@@ -63,6 +74,11 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         icon={<UpliftIcon />}
         variant="green"
         subtitle={`${formatCurrency(data.multiAov)} vs ${formatCurrency(data.singleAov)}`}
+        labelExtra={
+          <InfoPopover>
+            <p className="text-xs text-slate-300">How much more multi-item orders spend compared to single-item orders. 2.4x means multi-item baskets are 2.4 times larger by value.</p>
+          </InfoPopover>
+        }
       />
       <StatCard
         label="Top Pair"
@@ -71,6 +87,11 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         icon={<PairIcon />}
         variant="orange"
         subtitle={data.topPair}
+        labelExtra={
+          <InfoPopover>
+            <p className="text-xs text-slate-300">The two products most frequently purchased together.</p>
+          </InfoPopover>
+        }
       />
     </div>
   )

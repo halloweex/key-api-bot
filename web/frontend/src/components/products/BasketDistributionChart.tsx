@@ -5,13 +5,19 @@ import {
 } from 'recharts'
 import { useBasketDistribution } from '../../hooks/useApi'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
+import { InfoPopover } from '../ui/InfoPopover'
 
 export const BasketDistributionChart = memo(function BasketDistributionChart() {
   const { data, isLoading } = useBasketDistribution()
 
   return (
     <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4">
-      <h3 className="text-sm font-semibold text-slate-800 mb-3">Basket Size Distribution</h3>
+      <div className="flex items-center gap-1.5 mb-3">
+        <h3 className="text-sm font-semibold text-slate-800">Basket Size Distribution</h3>
+        <InfoPopover>
+          <p className="text-xs text-slate-300">How many items customers buy per order and how it affects average order value.</p>
+        </InfoPopover>
+      </div>
 
       {isLoading ? (
         <div className="h-[280px] flex items-center justify-center">

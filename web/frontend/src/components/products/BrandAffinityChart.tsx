@@ -5,6 +5,7 @@ import {
 } from 'recharts'
 import { useBrandAffinity } from '../../hooks/useApi'
 import { formatNumber } from '../../utils/formatters'
+import { InfoPopover } from '../ui/InfoPopover'
 
 export const BrandAffinityChart = memo(function BrandAffinityChart() {
   const { data, isLoading } = useBrandAffinity()
@@ -17,7 +18,12 @@ export const BrandAffinityChart = memo(function BrandAffinityChart() {
 
   return (
     <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4">
-      <h3 className="text-sm font-semibold text-slate-800 mb-3">Brand Affinity</h3>
+      <div className="flex items-center gap-1.5 mb-3">
+        <h3 className="text-sm font-semibold text-slate-800">Brand Affinity</h3>
+        <InfoPopover>
+          <p className="text-xs text-slate-300">Brand pairs that customers frequently buy together.</p>
+        </InfoPopover>
+      </div>
 
       {isLoading ? (
         <div className="h-[280px] flex items-center justify-center">
