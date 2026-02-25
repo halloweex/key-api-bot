@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.5
+
+- Fix OOM: use staged temp tables for gold_product_pairs, limit memory to 400MB
+
+
 ## 3.0.4
 
 - Fix OOM crash: limit DuckDB memory + optimize gold_product_pairs query
