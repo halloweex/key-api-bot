@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.7
+
+- Add info popovers to Product Intelligence page metrics
+
+
 ## 3.0.6
 
 - Bump web container memory to 2GB, remove DuckDB memory limit
