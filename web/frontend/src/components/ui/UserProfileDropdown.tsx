@@ -25,6 +25,7 @@ export function UserProfileDropdown() {
   const { user, isAuthenticated, isLoading } = useAuth()
   const displayName = useUserDisplayName()
   const [isOpen, setIsOpen] = useState(false)
+  const [langOpen, setLangOpen] = useState(false)
   const [imageError, setImageError] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
@@ -178,29 +179,50 @@ export function UserProfileDropdown() {
             </div>
           </div>
 
-          {/* Language selector */}
+          {/* Language selector (accordion) */}
           <div className="py-1 border-b border-slate-100">
-            {SUPPORTED_LANGUAGES.map((lang) => (
-              <button
-                key={lang}
-                onClick={() => handleLanguageChange(lang)}
-                className={`flex items-center justify-between w-full px-4 py-2 text-sm transition-colors ${
-                  currentLang === lang
-                    ? 'text-purple-700 bg-purple-50'
-                    : 'text-slate-700 hover:bg-slate-50'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <span className="text-base">{LANGUAGE_FLAGS[lang]}</span>
-                  <span className={currentLang === lang ? 'font-medium' : ''}>{LANGUAGE_LABELS[lang]}</span>
-                </div>
-                {currentLang === lang && (
-                  <svg className="w-4 h-4 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-                  </svg>
-                )}
-              </button>
-            ))}
+            <button
+              onClick={() => setLangOpen(!langOpen)}
+              className="flex items-center justify-between w-full px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129" />
+                </svg>
+                <span>{t('profile.language')}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-500">{LANGUAGE_FLAGS[currentLang]} {LANGUAGE_LABELS[currentLang]}</span>
+                <svg className={`w-3.5 h-3.5 text-slate-400 transition-transform ${langOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
+            </button>
+            {langOpen && (
+              <div className="pb-1">
+                {SUPPORTED_LANGUAGES.map((lang) => (
+                  <button
+                    key={lang}
+                    onClick={() => handleLanguageChange(lang)}
+                    className={`flex items-center justify-between w-full pl-11 pr-4 py-1.5 text-sm transition-colors ${
+                      currentLang === lang
+                        ? 'text-purple-700 bg-purple-50'
+                        : 'text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span>{LANGUAGE_FLAGS[lang]}</span>
+                      <span className={currentLang === lang ? 'font-medium' : ''}>{LANGUAGE_LABELS[lang]}</span>
+                    </div>
+                    {currentLang === lang && (
+                      <svg className="w-4 h-4 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Menu items */}

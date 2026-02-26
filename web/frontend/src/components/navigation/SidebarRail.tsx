@@ -1,10 +1,11 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { useNavStore } from '../../store/navStore'
 import { useAuth, useUserDisplayName } from '../../hooks/useAuth'
 import { useWebSocket } from '../../hooks/useWebSocket'
 import { api } from '../../api/client'
+import { navigate, useRouter } from '../../hooks/useRouter'
 import { NavLink } from './NavLink'
 import { UserProfileDropdown } from '../ui/UserProfileDropdown'
 import { LiveIndicator } from '../ui/LiveIndicator'
@@ -93,6 +94,34 @@ const ShieldCheckIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
   </svg>
 )
+
+// ─── Collapsed Nav Icon ──────────────────────────────────────────────────────
+
+function CollapsedNavIcon({ href, icon, label }: { href: string; icon: ReactNode; label: string }) {
+  const path = useRouter()
+  const isActive = path === href
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    navigate(href)
+  }
+
+  return (
+    <a
+      href={href}
+      onClick={handleClick}
+      title={label}
+      className={`w-9 h-9 flex items-center justify-center rounded-lg transition-colors ${
+        isActive
+          ? 'bg-purple-100 text-purple-700'
+          : 'text-slate-500 hover:bg-slate-200 hover:text-slate-700'
+      }`}
+    >
+      {icon}
+    </a>
+  )
+}
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -231,6 +260,18 @@ export const SidebarRail = memo(function SidebarRail() {
             <PanelLeftIcon />
           </button>
         </div>
+      </div>
+
+      {/* Collapsed: icon-only nav */}
+      <div
+        className={`absolute top-14 left-0 right-0 hidden sm:flex flex-col items-center gap-1 pt-2 px-1
+          ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
+      >
+        <CollapsedNavIcon href="/v2" icon={<ChartBarIcon />} label={t('nav.salesDashboard')} />
+        <CollapsedNavIcon href="/v2/products" icon={<LightBulbIcon />} label={t('nav.productIntelligence')} />
+        <CollapsedNavIcon href="/v2/traffic" icon={<SignalIcon />} label={t('nav.trafficAnalytics')} />
+        <CollapsedNavIcon href="/v2/inventory" icon={<CubeIcon />} label={t('nav.inventory')} />
+        <CollapsedNavIcon href="/v2/reports" icon={<ClipboardDocIcon />} label={t('nav.reports')} />
       </div>
 
       {/* Expanded content */}
