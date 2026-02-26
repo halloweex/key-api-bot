@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.8
+
+- Add multi-language support (EN/UK/RU) with react-i18next
+
+
 ## 3.0.7
 
 - Add info popovers to Product Intelligence page metrics
