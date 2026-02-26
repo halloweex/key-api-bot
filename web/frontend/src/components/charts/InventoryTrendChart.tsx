@@ -1,4 +1,5 @@
 import { memo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   ComposedChart,
   Line,
@@ -17,6 +18,7 @@ import { formatCurrency, formatNumber } from '../../utils/formatters'
 // ─── Component ───────────────────────────────────────────────────────────────
 
 function InventoryTrendChartComponent() {
+  const { t } = useTranslation()
   const [days, setDays] = useState(90)
   const [granularity, setGranularity] = useState<'daily' | 'monthly'>('daily')
   const { data, isLoading, error } = useInventoryTrend(days, granularity)
@@ -32,11 +34,11 @@ function InventoryTrendChartComponent() {
 
   return (
     <ChartContainer
-      title="Inventory Trend"
+      title={t('inventory.trendLabel')}
       isLoading={isLoading}
       error={error}
       className="col-span-1"
-      ariaLabel="Inventory trend over time"
+      ariaLabel={t('inventory.trendDesc')}
     >
       {data && (
         <div className="space-y-4">
@@ -44,16 +46,16 @@ function InventoryTrendChartComponent() {
           <div className="flex flex-wrap gap-3 items-center justify-between">
             <div className="flex gap-2">
               <PeriodButton active={days === 30} onClick={() => setDays(30)}>
-                30d
+                {t('inventory.30d')}
               </PeriodButton>
               <PeriodButton active={days === 90} onClick={() => setDays(90)}>
-                90d
+                {t('inventory.90d')}
               </PeriodButton>
               <PeriodButton active={days === 180} onClick={() => setDays(180)}>
-                180d
+                {t('inventory.180d')}
               </PeriodButton>
               <PeriodButton active={days === 365} onClick={() => setDays(365)}>
-                1y
+                {t('inventory.1y')}
               </PeriodButton>
             </div>
             <div className="flex gap-2">
@@ -61,13 +63,13 @@ function InventoryTrendChartComponent() {
                 active={granularity === 'daily'}
                 onClick={() => setGranularity('daily')}
               >
-                Daily
+                {t('inventory.daily')}
               </GranularityButton>
               <GranularityButton
                 active={granularity === 'monthly'}
                 onClick={() => setGranularity('monthly')}
               >
-                Monthly
+                {t('inventory.monthly')}
               </GranularityButton>
             </div>
           </div>
@@ -76,23 +78,23 @@ function InventoryTrendChartComponent() {
           {data.summary && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <StatCard
-                label="Start Value"
+                label={t('inventory.startValue')}
                 value={formatCurrency(data.summary.startValue)}
                 color="text-slate-600"
               />
               <StatCard
-                label="End Value"
+                label={t('inventory.endValue')}
                 value={formatCurrency(data.summary.endValue)}
                 color="text-slate-600"
               />
               <StatCard
-                label="Change"
+                label={t('inventory.change')}
                 value={formatCurrency(data.summary.change)}
                 subValue={`${data.summary.changePercent >= 0 ? '+' : ''}${data.summary.changePercent}%`}
                 color={data.summary.change >= 0 ? 'text-emerald-600' : 'text-red-600'}
               />
               <StatCard
-                label="Data Points"
+                label={t('inventory.dataPoints')}
                 value={data.dataPoints}
                 subValue={`${data.granularity}`}
                 color="text-blue-600"
@@ -140,7 +142,7 @@ function InventoryTrendChartComponent() {
                     yAxisId="value"
                     type="monotone"
                     dataKey="value"
-                    name="Stock Value"
+                    name={t('inventory.stockValue')}
                     stroke="#6366f1"
                     strokeWidth={2}
                     dot={false}
@@ -149,7 +151,7 @@ function InventoryTrendChartComponent() {
                   <Bar
                     yAxisId="quantity"
                     dataKey="quantity"
-                    name="Quantity"
+                    name={t('chart.quantity')}
                     fill="#10b981"
                     opacity={0.3}
                     radius={[2, 2, 0, 0]}
@@ -163,11 +165,11 @@ function InventoryTrendChartComponent() {
                 <svg className="w-12 h-12 mx-auto mb-2 text-slate-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                 </svg>
-                <p>Not enough data yet</p>
+                <p>{t('inventory.notEnoughData')}</p>
                 <p className="text-sm text-slate-400">
-                  Daily snapshots are recorded automatically.
+                  {t('inventory.dailySnapshots')}
                   <br />
-                  Check back in a few days.
+                  {t('inventory.checkBack')}
                 </p>
               </div>
             </div>

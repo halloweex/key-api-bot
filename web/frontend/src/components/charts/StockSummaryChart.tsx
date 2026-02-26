@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
 import { useStockSummary } from '../../hooks'
 import { formatNumber, formatCurrency } from '../../utils/formatters'
@@ -6,42 +7,43 @@ import { formatNumber, formatCurrency } from '../../utils/formatters'
 // ─── Component ───────────────────────────────────────────────────────────────
 
 function StockSummaryChartComponent() {
+  const { t } = useTranslation()
   const { data, isLoading, error } = useStockSummary(15)
 
   return (
     <ChartContainer
-      title="Stock Levels"
+      title={t('inventory.stockLevels')}
       isLoading={isLoading}
       error={error}
       className="col-span-1"
-      ariaLabel="Stock levels summary"
+      ariaLabel={t('inventory.stockLevelsDesc')}
     >
       {data && (
         <div className="space-y-4 min-h-[420px]">
           {/* Summary Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <StatCard
-              label="In Stock"
+              label={t('inventory.inStock')}
               value={data.summary.inStockCount}
               color="text-emerald-600"
               bgColor="bg-emerald-50"
             />
             <StatCard
-              label="Low Stock"
+              label={t('inventory.lowStock')}
               value={data.summary.lowStockCount}
               color="text-amber-600"
               bgColor="bg-amber-50"
             />
             <StatCard
-              label="Out of Stock"
+              label={t('inventory.outOfStock')}
               value={data.summary.outOfStockCount}
               color="text-red-600"
               bgColor="bg-red-50"
             />
             <StatCard
-              label="Available"
+              label={t('inventory.available')}
               value={formatNumber(data.summary.totalQuantity)}
-              subValue={`${formatNumber(data.summary.totalReserve)} reserved`}
+              subValue={`${formatNumber(data.summary.totalReserve)} ${t('inventory.reserved')}`}
               color="text-blue-600"
               bgColor="bg-blue-50"
             />
@@ -53,10 +55,10 @@ function StockSummaryChartComponent() {
               <div className="text-xl font-bold text-slate-700">
                 {formatCurrency(data.summary.totalValue)}
               </div>
-              <div className="text-xs text-slate-600 font-medium">Stock Value</div>
+              <div className="text-xs text-slate-600 font-medium">{t('inventory.stockValue')}</div>
               {data.summary.reserveValue > 0 && (
                 <div className="text-xs text-slate-500 mt-0.5">
-                  {formatCurrency(data.summary.reserveValue)} reserved
+                  {formatCurrency(data.summary.reserveValue)} {t('inventory.reserved')}
                 </div>
               )}
             </div>
@@ -65,10 +67,10 @@ function StockSummaryChartComponent() {
                 {formatCurrency(data.summary.averageValue)}
               </div>
               <div className="text-xs text-slate-600 font-medium">
-                Avg Inventory (30d)
+                {t('inventory.avgInventory30d')}
                 {data.summary.avgDataPoints > 0 && (
                   <span className="text-slate-500 ml-1">
-                    · {data.summary.avgDataPoints} pts
+                    · {data.summary.avgDataPoints} {t('inventory.pts')}
                   </span>
                 )}
               </div>
@@ -84,7 +86,7 @@ function StockSummaryChartComponent() {
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
-                  Low Stock ({data.lowStock.length})
+                  {t('inventory.lowStock')} ({data.lowStock.length})
                 </h4>
                 <div className="space-y-1 max-h-64 overflow-y-auto">
                   {data.lowStock.slice(0, 10).map((item) => (
@@ -96,10 +98,10 @@ function StockSummaryChartComponent() {
                         {item.name || item.sku}
                       </span>
                       <span className="font-medium text-amber-700 whitespace-nowrap">
-                        {item.quantity} left
+                        {item.quantity} {t('inventory.left')}
                         {item.reserve > 0 && (
                           <span className="text-amber-500 text-xs ml-1">
-                            ({item.reserve} res)
+                            ({item.reserve} {t('inventory.res')})
                           </span>
                         )}
                       </span>
@@ -111,7 +113,7 @@ function StockSummaryChartComponent() {
 
             {/* Top by Quantity */}
             <div>
-              <h4 className="text-sm font-semibold text-slate-700 mb-2">Top by Quantity</h4>
+              <h4 className="text-sm font-semibold text-slate-700 mb-2">{t('inventory.topByQuantity')}</h4>
               <div className="space-y-1 max-h-64 overflow-y-auto">
                 {data.topByQuantity.slice(0, 10).map((item, index) => (
                   <div
@@ -141,7 +143,7 @@ function StockSummaryChartComponent() {
           {/* Last Sync */}
           {data.lastSync && (
             <div className="text-xs text-slate-400 text-center pt-2">
-              Last synced: {new Date(data.lastSync).toLocaleString()}
+              {t('inventory.lastSynced')} {new Date(data.lastSync).toLocaleString()}
             </div>
           )}
         </div>

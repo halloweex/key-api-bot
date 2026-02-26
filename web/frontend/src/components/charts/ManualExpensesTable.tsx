@@ -1,4 +1,5 @@
 import { memo, useMemo, useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ChartContainer } from './ChartContainer'
 import { formatCurrency } from '../../utils/formatters'
@@ -90,6 +91,7 @@ interface CategoryFilterProps {
 }
 
 const CategoryFilter = memo(function CategoryFilter({ value, onChange }: CategoryFilterProps) {
+  const { t } = useTranslation()
   return (
     <select
       value={value || ''}
@@ -98,7 +100,7 @@ const CategoryFilter = memo(function CategoryFilter({ value, onChange }: Categor
                  focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-300
                  cursor-pointer hover:border-slate-300 transition-colors"
     >
-      <option value="">All categories</option>
+      <option value="">{t('chart.allCategories')}</option>
       {CATEGORIES.map((cat) => {
         const config = categoryConfig[cat]
         return (
@@ -140,13 +142,14 @@ interface DeleteButtonProps {
 }
 
 const DeleteButton = memo(function DeleteButton({ expenseId, onDelete, isDeleting }: DeleteButtonProps) {
+  const { t } = useTranslation()
   return (
     <button
       onClick={() => onDelete(expenseId)}
       disabled={isDeleting}
       className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50
                  transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-      title="Delete expense"
+      title={t('chart.deleteExpense')}
     >
       {isDeleting ? (
         <span className="block w-4 h-4 border-2 border-slate-300 border-t-transparent rounded-full animate-spin" />
@@ -188,14 +191,15 @@ const MetricCard = memo(function MetricCard({ label, value, icon, colorClass, bg
 // ─── Empty State ──────────────────────────────────────────────────────────────
 
 const EmptyHint = memo(function EmptyHint() {
+  const { t } = useTranslation()
   return (
     <div className="text-center py-8">
       <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 flex items-center justify-center shadow-sm text-slate-400">
         <CurrencyIcon />
       </div>
-      <p className="text-sm font-medium text-slate-600 mb-1">No expenses yet</p>
+      <p className="text-sm font-medium text-slate-600 mb-1">{t('chart.noExpensesYet')}</p>
       <p className="text-xs text-slate-400">
-        Use chat to add: <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded">facebook ads 22000</span>
+        {t('chart.addViaChat')}
       </p>
     </div>
   )
@@ -204,6 +208,7 @@ const EmptyHint = memo(function EmptyHint() {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const ManualExpensesTable = memo(function ManualExpensesTable() {
+  const { t } = useTranslation()
   const { period } = useFilterStore()
   const queryClient = useQueryClient()
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
@@ -244,7 +249,7 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
   })
 
   const handleDelete = useCallback((expenseId: number) => {
-    if (confirm('Delete this expense?')) {
+    if (confirm(t('chart.deleteConfirm'))) {
       deleteMutation.mutate(expenseId)
     }
   }, [deleteMutation])
@@ -260,7 +265,7 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
   if (isEmpty && !isLoading && !error) {
     return (
       <ChartContainer
-        title="Manual Expenses"
+        title={t('chart.manualExpenses')}
         titleExtra={
           <CategoryFilter value={categoryFilter} onChange={setCategoryFilter} />
         }
@@ -276,11 +281,11 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
 
   return (
     <ChartContainer
-      title="Manual Expenses"
+      title={t('chart.manualExpenses')}
       titleExtra={
         <div className="flex items-center gap-3">
           <span className="text-xs text-slate-400 font-normal hidden sm:inline">
-            Add via chat: "facebook ads 22k"
+            {t('chart.addViaChatShort')}
           </span>
           <CategoryFilter value={categoryFilter} onChange={setCategoryFilter} />
         </div>
@@ -295,14 +300,14 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
       {data?.summary && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
           <MetricCard
-            label="Total Expenses"
+            label={t('chart.totalExpenses')}
             value={formatCurrency(data.summary.total)}
             icon="💰"
             colorClass="text-red-600"
             bgClass="bg-gradient-to-br from-red-50 to-red-100/50 border-red-200"
           />
           <MetricCard
-            label="Transactions"
+            label={t('chart.transactions')}
             value={String(data.summary.count)}
             icon="📝"
             colorClass="text-slate-700"
@@ -330,19 +335,19 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
           <thead className="sticky top-0 z-10">
             <tr className="bg-slate-50 border-b border-slate-200">
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
-                Date
+                {t('chart.date')}
               </th>
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
-                Category
+                {t('chart.category')}
               </th>
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
-                Type
+                {t('chart.type')}
               </th>
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide hidden md:table-cell">
-                Note
+                {t('chart.note')}
               </th>
               <th className="text-right py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
-                Amount
+                {t('chart.amount')}
               </th>
               <th className="w-12 py-3 px-2"></th>
             </tr>
@@ -386,10 +391,10 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
             <tfoot>
               <tr className="bg-slate-50 border-t border-slate-200">
                 <td colSpan={4} className="py-3 px-4 text-right text-slate-600 font-semibold hidden md:table-cell">
-                  Total:
+                  {t('common.total')}
                 </td>
                 <td colSpan={3} className="py-3 px-4 text-right text-slate-600 font-semibold md:hidden">
-                  Total:
+                  {t('common.total')}
                 </td>
                 <td className="py-3 px-4 text-right text-red-600 font-bold whitespace-nowrap">
                   -{formatCurrency(data.summary.total)}

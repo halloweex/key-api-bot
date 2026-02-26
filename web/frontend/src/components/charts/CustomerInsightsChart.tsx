@@ -1,4 +1,5 @@
 import { useMemo, memo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   PieChart,
   Pie,
@@ -125,6 +126,7 @@ function InfoTooltipContent({ onClose, title, children }: {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
+  const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useCustomerInsights()
   const [showCustomerInfo, setShowCustomerInfo] = useState(false)
   const [showAovInfo, setShowAovInfo] = useState(false)
@@ -159,7 +161,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
 
   return (
     <ChartContainer
-      title="Customer Lifetime Value Metrics"
+      title={t('customer.lifetimeMetrics')}
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
@@ -174,33 +176,33 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <SummaryCard
               icon={<UserPlusIcon />}
-              label="New Customers"
+              label={t('customer.newCustomers')}
               value={formatNumber(metrics.newCustomers ?? 0)}
-              subtitle={`${newPercent}% of total`}
+              subtitle={`${newPercent}% ${t('customer.ofTotal')}`}
               colorClass="text-blue-600"
               bgClass="bg-gradient-to-br from-blue-100 to-blue-50 border border-blue-200"
             />
             <SummaryCard
               icon={<UserGroupIcon />}
-              label="Returning Customers"
+              label={t('customer.returningCustomers')}
               value={formatNumber(metrics.returningCustomers ?? 0)}
-              subtitle={`${returningPercent}% of total`}
+              subtitle={`${returningPercent}% ${t('customer.ofTotal')}`}
               colorClass="text-purple-600"
               bgClass="bg-gradient-to-br from-purple-100 to-purple-50 border border-purple-200"
             />
             <SummaryCard
               icon={<RefreshIcon />}
-              label="Repeat Rate"
+              label={t('customer.repeatRate')}
               value={formatPercent(metrics.repeatRate ?? 0)}
-              subtitle="Orders from returning"
+              subtitle={t('customer.ordersFromReturning')}
               colorClass="text-green-600"
               bgClass="bg-gradient-to-br from-green-100 to-green-50 border border-green-200"
             />
             <SummaryCard
               icon={<CurrencyIcon />}
-              label="Avg Order Value"
+              label={t('customer.avgOrderValue')}
               value={formatCurrency(metrics.averageOrderValue ?? 0)}
-              subtitle="Per order"
+              subtitle={t('customer.perOrder')}
               colorClass="text-orange-600"
               bgClass="bg-gradient-to-br from-orange-100 to-orange-50 border border-orange-200"
             />
@@ -211,19 +213,19 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
             <div className="relative">
               <div className="flex items-center gap-1.5 mb-2">
                 <h4 className="text-xs font-medium text-slate-500 uppercase tracking-wide">
-                  Repeat Customer Behavior
+                  {t('customer.repeatBehavior')}
                 </h4>
                 <InfoButton onClick={() => setShowClvInfo(!showClvInfo)} />
                 {showClvInfo && (
-                  <InfoTooltipContent onClose={() => setShowClvInfo(false)} title="Repeat Customer Metrics">
+                  <InfoTooltipContent onClose={() => setShowClvInfo(false)} title={t('customer.repeatBehavior')}>
                     <p className="text-xs text-slate-300 mb-2">
-                      <strong className="text-rose-400">CLV:</strong> Average total revenue per repeat customer.
+                      <strong className="text-rose-400">CLV:</strong> {t('customer.clvDesc').replace('CLV: ', '')}
                     </p>
                     <p className="text-xs text-slate-300 mb-2">
-                      <strong className="text-indigo-400">Purchase Frequency:</strong> Avg orders per repeat customer.
+                      <strong className="text-indigo-400">{t('customer.purchaseFrequency')}:</strong> {t('customer.freqDesc').replace('Purchase Frequency: ', '')}
                     </p>
                     <p className="text-xs text-slate-300">
-                      <strong className="text-teal-400">Lifespan:</strong> Avg days between first and last order.
+                      <strong className="text-teal-400">{t('customer.customerLifespan')}:</strong> {t('customer.lifespanDesc').replace('Lifespan: ', '')}
                     </p>
                   </InfoTooltipContent>
                 )}
@@ -231,33 +233,33 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <SummaryCard
                   icon={<HeartIcon />}
-                  label="Customer Lifetime Value"
+                  label={t('customer.clv')}
                   value={formatCurrency(metrics.customerLifetimeValue ?? 0)}
-                  subtitle="Avg revenue per repeat customer"
+                  subtitle={t('customer.clvShort')}
                   colorClass="text-rose-600"
                   bgClass="bg-gradient-to-br from-rose-100 to-rose-50 border border-rose-200"
                 />
                 <SummaryCard
                   icon={<ShoppingBagIcon />}
-                  label="Purchase Frequency"
+                  label={t('customer.purchaseFrequency')}
                   value={`${(metrics.avgPurchaseFrequency ?? 0).toFixed(1)}x`}
-                  subtitle="Avg orders per repeat customer"
+                  subtitle={t('customer.purchaseFrequencyShort')}
                   colorClass="text-indigo-600"
                   bgClass="bg-gradient-to-br from-indigo-100 to-indigo-50 border border-indigo-200"
                 />
                 <SummaryCard
                   icon={<CalendarIcon />}
-                  label="Customer Lifespan"
+                  label={t('customer.customerLifespan')}
                   value={`${Math.round(metrics.avgCustomerLifespanDays ?? 0)} days`}
-                  subtitle="Avg time from first to last order"
+                  subtitle={t('customer.customerLifespanShort')}
                   colorClass="text-teal-600"
                   bgClass="bg-gradient-to-br from-teal-100 to-teal-50 border border-teal-200"
                 />
                 <SummaryCard
                   icon={<RefreshIcon />}
-                  label="Orders per Customer"
+                  label={t('customer.ordersPerCustomer')}
                   value={`${(metrics.purchaseFrequency ?? 0).toFixed(2)}x`}
-                  subtitle="In selected period"
+                  subtitle={t('customer.inSelectedPeriod')}
                   colorClass="text-amber-600"
                   bgClass="bg-gradient-to-br from-amber-100 to-amber-50 border border-amber-200"
                 />
@@ -270,21 +272,21 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
             <div className="relative">
               <div className="flex items-center gap-1.5 mb-2">
                 <h4 className="text-xs font-medium text-slate-500 uppercase tracking-wide">
-                  All-Time
+                  {t('customer.allTime')}
                 </h4>
               </div>
               <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
                 <SummaryCard
                   icon={<UserGroupIcon />}
-                  label="Total Customers"
+                  label={t('customer.totalCustomers')}
                   value={formatNumber(metrics.totalCustomersAllTime ?? 0)}
-                  subtitle="Unique customers"
+                  subtitle={t('customer.uniqueCustomers')}
                   colorClass="text-cyan-600"
                   bgClass="bg-gradient-to-br from-cyan-100 to-cyan-50 border border-cyan-200"
                 />
                 <SummaryCard
                   icon={<RefreshIcon />}
-                  label="True Repeat Rate"
+                  label={t('customer.trueRepeatRate')}
                   value={formatPercent(metrics.trueRepeatRate ?? 0)}
                   subtitle={`${formatNumber(metrics.repeatCustomersAllTime ?? 0)} repeat customers`}
                   colorClass="text-green-600"
@@ -292,9 +294,9 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 />
                 <SummaryCard
                   icon={<ShoppingBagIcon />}
-                  label="Orders per Customer"
+                  label={t('customer.ordersPerCustomer')}
                   value={`${(metrics.avgOrdersPerCustomer ?? 0).toFixed(2)}x`}
-                  subtitle="Average"
+                  subtitle={t('customer.average')}
                   colorClass="text-amber-600"
                   bgClass="bg-gradient-to-br from-amber-100 to-amber-50 border border-amber-200"
                 />
@@ -310,19 +312,19 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
         <div>
           <div className="relative">
             <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
-              Customers in Period (New vs Returning)
+              {t('customer.customersInPeriod')}
               <InfoButton onClick={() => setShowCustomerInfo(!showCustomerInfo)} />
             </h4>
             {showCustomerInfo && (
-              <InfoTooltipContent onClose={() => setShowCustomerInfo(false)} title="Period-Based Customer Split">
+              <InfoTooltipContent onClose={() => setShowCustomerInfo(false)} title={t('customer.periodSplit')}>
                 <p className="text-xs text-slate-300 mb-2">
-                  <strong className="text-blue-400">New:</strong> First order was in selected period.
+                  {t('customer.newDesc')}
                 </p>
                 <p className="text-xs text-slate-300 mb-2">
-                  <strong className="text-purple-400">Returning:</strong> Had orders before selected period.
+                  {t('customer.returningDesc')}
                 </p>
                 <p className="text-xs text-slate-300">
-                  <strong className="text-slate-400">Note:</strong> Shows customers who ordered in this period only.
+                  {t('customer.splitNote')}
                 </p>
               </InfoTooltipContent>
             )}
@@ -376,19 +378,19 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
         <div>
           <div className="relative">
             <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
-              Average Order Value Trend
+              {t('customer.aovTrend')}
               <InfoButton onClick={() => setShowAovInfo(!showAovInfo)} />
             </h4>
             {showAovInfo && (
-              <InfoTooltipContent onClose={() => setShowAovInfo(false)} title="How is AOV calculated?">
+              <InfoTooltipContent onClose={() => setShowAovInfo(false)} title={t('customer.aovCalcTitle')}>
                 <p className="text-xs text-slate-300 mb-2">
-                  <strong className="text-orange-400">AOV:</strong> Total Revenue ÷ Number of Orders per day.
+                  {t('customer.aovCalcDesc')}
                 </p>
                 <p className="text-xs text-slate-300 mb-2">
-                  <strong className="text-blue-400">Revenue:</strong> Sum of product prices × quantities.
+                  {t('customer.aovRevenueDesc')}
                 </p>
                 <p className="text-xs text-slate-300">
-                  <strong className="text-slate-400">Excluded:</strong> Returns and cancelled orders.
+                  {t('customer.aovExcluded')}
                 </p>
               </InfoTooltipContent>
             )}
@@ -428,7 +430,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
           {aovData.length > 0 && (
             <div className="flex justify-center mt-2">
               <span className="text-sm text-slate-600">
-                Period Average: <span className="text-orange-600 font-semibold">
+                {t('customer.periodAverage')} <span className="text-orange-600 font-semibold">
                   {formatCurrency(aovData.reduce((sum, d) => sum + d.aov, 0) / aovData.length)}
                 </span>
               </span>

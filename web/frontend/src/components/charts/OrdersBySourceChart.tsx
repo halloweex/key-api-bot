@@ -1,4 +1,5 @@
 import { useMemo, memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   BarChart,
   Bar,
@@ -25,6 +26,7 @@ import { formatNumber } from '../../utils/formatters'
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const OrdersBySourceChart = memo(function OrdersBySourceChart() {
+  const { t } = useTranslation()
   const { chartData: rawData, totalOrders, isEmpty, isLoading, error, refetch } = useSourceChartData()
 
   // Add label for bar chart
@@ -37,13 +39,13 @@ export const OrdersBySourceChart = memo(function OrdersBySourceChart() {
 
   return (
     <ChartContainer
-      title="Orders by Source"
+      title={t('chart.ordersBySource')}
       isLoading={isLoading}
       error={error}
       onRetry={refetch}
       isEmpty={isEmpty}
       height="md"
-      ariaLabel="Bar chart showing orders distribution by source"
+      ariaLabel={t('chart.ordersBySourceDesc')}
     >
       <div style={{ height: CHART_DIMENSIONS.height.md }}>
         <ResponsiveContainer width="100%" height="100%">
@@ -88,7 +90,7 @@ export const OrdersBySourceChart = memo(function OrdersBySourceChart() {
       {/* Summary */}
       <div className="mt-4 pt-4 border-t border-slate-200">
         <div className="flex justify-between items-center">
-          <span className="text-slate-500 text-sm">Total Orders</span>
+          <span className="text-slate-500 text-sm">{t('chart.totalOrders')}</span>
           <span className="text-slate-900 font-semibold">{formatNumber(totalOrders)}</span>
         </div>
       </div>

@@ -305,6 +305,7 @@ async def get_current_user_info(request: Request):
     Returns user data with permissions for frontend conditional rendering.
     """
     from core.permissions import get_permissions_for_role_async
+    from core.duckdb_store import get_store
 
     user = get_current_user(request)
     if not user:
@@ -320,6 +321,20 @@ async def get_current_user_info(request: Request):
     # Get permissions for role from database (async)
     permissions = await get_permissions_for_role_async(role)
 
+    # Get user preferences
+    preferences = {"language": "en"}
+    try:
+        store = await get_store()
+        async with store.connection() as conn:
+            result = conn.execute(
+                "SELECT language FROM user_preferences WHERE user_id = ?",
+                [user_id]
+            ).fetchone()
+            if result:
+                preferences["language"] = result[0] or "en"
+    except Exception as e:
+        logger.debug(f"Failed to load preferences for user {user_id}: {e}")
+
     return {
         "user": {
             "id": user_id,
@@ -330,4 +345,50 @@ async def get_current_user_info(request: Request):
             "role": role,
         },
         "permissions": permissions,
+        "preferences": preferences,
+    }
+
+
+SUPPORTED_LANGUAGES = {'en', 'uk', 'ru'}
+
+
+@router.patch("/api/me/preferences")
+async def update_preferences(request: Request):
+    """Update user preferences (language, etc.)."""
+    from core.duckdb_store import get_store
+
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    user_id = user.get('user_id')
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    language = body.get('language')
+    if language and language not in SUPPORTED_LANGUAGES:
+        raise HTTPException(status_code=400, detail=f"Unsupported language: {language}. Supported: {', '.join(sorted(SUPPORTED_LANGUAGES))}")
+
+    store = await get_store()
+    async with store.connection() as conn:
+        # Upsert preference
+        if language:
+            conn.execute("""
+                INSERT INTO user_preferences (user_id, language, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id)
+                DO UPDATE SET language = excluded.language, updated_at = CURRENT_TIMESTAMP
+            """, [user_id, language])
+
+        # Return updated preferences
+        result = conn.execute(
+            "SELECT language FROM user_preferences WHERE user_id = ?",
+            [user_id]
+        ).fetchone()
+
+    return {
+        "language": result[0] if result else "en",
     }

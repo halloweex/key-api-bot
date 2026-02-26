@@ -1,4 +1,5 @@
 import { useMemo, memo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   ComposedChart,
   Bar,
@@ -58,17 +59,17 @@ const formatShortCurrency = (value: number): string => {
 
 // ─── Period Labels ───────────────────────────────────────────────────────────
 
-const PERIOD_LABELS: Record<string, { current: string; previous: string }> = {
-  today: { current: 'Today', previous: 'Yesterday' },
-  yesterday: { current: 'Yesterday', previous: 'Day Before' },
-  week: { current: 'This Week', previous: 'Last Week' },
-  last_week: { current: 'Last Week', previous: 'Week Before' },
-  month: { current: 'This Month', previous: 'Last Month' },
-  last_month: { current: 'Last Month', previous: 'Month Before' },
-  last_7_days: { current: 'Last 7 Days', previous: 'Previous 7 Days' },
-  last_28_days: { current: 'Last 28 Days', previous: 'Previous 28 Days' },
-  custom: { current: 'Selected', previous: 'Previous' },
-}
+const getPeriodLabels = (t: (key: string) => string): Record<string, { current: string; previous: string }> => ({
+  today: { current: t('filter.today'), previous: t('filter.yesterday') },
+  yesterday: { current: t('filter.yesterday'), previous: t('chart.dayBefore') },
+  week: { current: t('filter.thisWeek'), previous: t('filter.lastWeek') },
+  last_week: { current: t('filter.lastWeek'), previous: t('chart.weekBefore') },
+  month: { current: t('filter.thisMonth'), previous: t('filter.lastMonth') },
+  last_month: { current: t('filter.lastMonth'), previous: t('chart.previousMonth') },
+  last_7_days: { current: t('filter.7days'), previous: t('chart.previous7Days') },
+  last_28_days: { current: t('filter.28days'), previous: t('chart.previous28Days') },
+  custom: { current: t('chart.selected'), previous: t('chart.previous') },
+})
 
 // ─── Custom Tooltip ──────────────────────────────────────────────────────────
 
@@ -391,12 +392,14 @@ const getComparisonLabel = (compareType: CompareType, basePeriodLabel: string): 
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const RevenueTrendChart = memo(function RevenueTrendChart() {
+  const { t } = useTranslation()
   const [compareType, setCompareType] = useState<CompareType>('year_ago')
   const { data, isLoading, error, refetch } = useRevenueTrend(compareType)
   const { period } = useFilterStore()
   const [showInfo, setShowInfo] = useState(false)
 
-  const basePeriodLabels = PERIOD_LABELS[period] || PERIOD_LABELS.custom
+  const allPeriodLabels = getPeriodLabels(t)
+  const basePeriodLabels = allPeriodLabels[period] || allPeriodLabels.custom
 
   // Create dynamic period labels based on compare type
   const periodLabels = useMemo(() => ({

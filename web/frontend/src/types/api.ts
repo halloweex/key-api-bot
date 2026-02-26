@@ -606,9 +606,14 @@ export interface Permissions {
   user_management: FeaturePermissions
 }
 
+export interface UserPreferences {
+  language: string
+}
+
 export interface CurrentUserResponse {
   user: User
   permissions: Permissions
+  preferences?: UserPreferences
 }
 
 // ─── Admin User Management Types ──────────────────────────────────────────────

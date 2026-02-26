@@ -1,4 +1,5 @@
 import { useMemo, memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   BarChart,
   Bar,
@@ -91,6 +92,7 @@ const MetricCard = memo(function MetricCard({ icon, label, value, colorClass, bg
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
+  const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useBrandAnalytics()
 
   const revenueData = useMemo<RevenueDataPoint[]>(() => {
@@ -124,20 +126,20 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
 
   return (
     <ChartContainer
-      title="Brand Analytics"
+      title={t('chart.brandAnalytics')}
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
       isEmpty={isEmpty}
       height="xxl"
-      ariaLabel="Bar charts showing top brands by revenue and quantity"
+      ariaLabel={t('chart.brandAnalyticsDesc')}
     >
       {/* Metrics */}
       {metrics && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3 mb-4">
           <MetricCard
             icon={<TagIcon />}
-            label="Total Brands"
+            label={t('chart.totalBrands')}
             value={formatNumber(metrics.totalBrands ?? 0)}
             colorClass="text-blue-600"
             bgClass="bg-gradient-to-br from-blue-100 to-blue-50 border-blue-200"
@@ -145,15 +147,15 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
           />
           <MetricCard
             icon={<TrophyIcon />}
-            label="Top Brand"
-            value={metrics.topBrand ?? 'N/A'}
+            label={t('chart.topBrand')}
+            value={metrics.topBrand ?? t('chart.na')}
             colorClass="text-purple-600"
             bgClass="bg-gradient-to-br from-purple-100 to-purple-50 border-purple-200"
             iconBgClass="bg-purple-200/60"
           />
           <MetricCard
             icon={<ChartPieIcon />}
-            label="Top Brand Share"
+            label={t('chart.topBrandShare')}
             value={formatPercent(metrics.topBrandShare ?? 0)}
             colorClass="text-green-600"
             bgClass="bg-gradient-to-br from-green-100 to-green-50 border-green-200"
@@ -165,7 +167,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Top Brands by Revenue */}
         <div>
-          <h4 className="text-sm font-semibold text-slate-700 mb-2">Top 10 by Revenue</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">{t('chart.top10ByRevenue')}</h4>
           <div style={HEIGHT_STYLE.xxl}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
@@ -187,7 +189,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
                 />
                 <Tooltip
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(value) => [formatCurrency(Number(value) || 0), 'Revenue']}
+                  formatter={(value) => [formatCurrency(Number(value) || 0), t('chart.revenue')]}
                   labelFormatter={(_label, payload) => {
                     const item = payload?.[0]?.payload as RevenueDataPoint | undefined
                     return item?.fullName || String(_label)
@@ -211,7 +213,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
 
         {/* Top Brands by Quantity */}
         <div>
-          <h4 className="text-sm font-semibold text-slate-700 mb-2">Top 10 by Quantity</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">{t('chart.top10ByQuantity')}</h4>
           <div style={HEIGHT_STYLE.xxl}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
@@ -233,7 +235,7 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
                 />
                 <Tooltip
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(value) => [formatNumber(Number(value) || 0), 'Quantity']}
+                  formatter={(value) => [formatNumber(Number(value) || 0), t('chart.quantity')]}
                   labelFormatter={(_label, payload) => {
                     const item = payload?.[0]?.payload as QuantityDataPoint | undefined
                     return item?.fullName || String(_label)

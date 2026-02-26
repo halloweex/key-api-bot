@@ -1,9 +1,11 @@
 import { useCallback, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Select } from '../ui'
 import { useFilterStore } from '../../store/filterStore'
 import { useBrands } from '../../hooks'
 
 export function BrandFilter() {
+  const { t } = useTranslation()
   const { brand, setBrand } = useFilterStore()
   const { data: brands, isLoading } = useBrands()
 
@@ -26,7 +28,7 @@ export function BrandFilter() {
       options={options}
       value={brand}
       onChange={handleChange}
-      placeholder="All Brands"
+      placeholder={t('filter.allBrands')}
       disabled={isLoading}
     />
   )

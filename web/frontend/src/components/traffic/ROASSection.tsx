@@ -1,4 +1,5 @@
 import { memo, useState, useCallback, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { ChartContainer } from '../charts/ChartContainer'
 import { Card, CardContent } from '../ui'
@@ -20,9 +21,9 @@ const BONUS_TIERS = [
   { label: '> 7.0x', bonus: '+30%' },
   { label: '6.0 \u2013 7.0x', bonus: '+20%' },
   { label: '5.0 \u2013 6.0x', bonus: '+10%' },
-  { label: '4.0 \u2013 5.0x', bonus: 'Base rate' },
-  { label: '< 4.0x', bonus: 'No bonus' },
-]
+  { label: '4.0 \u2013 5.0x', bonusKey: 'traffic.baseRate' },
+  { label: '< 4.0x', bonusKey: 'traffic.noBonus' },
+] as const
 
 function roasColor(roas: number | null): string {
   if (roas === null) return 'text-slate-400'
@@ -48,28 +49,29 @@ interface BlendedCardProps {
 }
 
 const BlendedROASCard = memo(function BlendedROASCard({ revenue, spend, roas, bonusTier }: BlendedCardProps) {
+  const { t } = useTranslation()
   return (
     <div className={`rounded-xl p-4 sm:p-5 border bg-gradient-to-br ${roasBg(roas)}`}>
-      <h4 className="text-sm font-semibold text-slate-700 mb-3">Blended ROAS</h4>
+      <h4 className="text-sm font-semibold text-slate-700 mb-3">{t('traffic.blendedRoas')}</h4>
       <div className="grid grid-cols-2 gap-3 mb-3">
         <div>
-          <p className="text-xs text-slate-500">Total Revenue</p>
+          <p className="text-xs text-slate-500">{t('summary.totalRevenue')}</p>
           <p className="text-lg font-bold text-slate-800">{formatCurrency(revenue)}</p>
         </div>
         <div>
-          <p className="text-xs text-slate-500">Total Ad Spend</p>
+          <p className="text-xs text-slate-500">{t('traffic.totalAdSpend')}</p>
           <p className="text-lg font-bold text-slate-800">{spend > 0 ? formatCurrency(spend) : '\u2014'}</p>
         </div>
       </div>
       <div className="flex items-end gap-4 pt-3 border-t border-slate-200/60">
         <div>
-          <p className="text-xs text-slate-500">ROAS</p>
+          <p className="text-xs text-slate-500">{t('traffic.roas')}</p>
           <p className={`text-2xl font-bold ${roasColor(roas)}`}>
             {roas !== null ? `${roas}x` : '\u2014'}
           </p>
         </div>
         <div>
-          <p className="text-xs text-slate-500">Bonus Tier</p>
+          <p className="text-xs text-slate-500">{t('traffic.bonusTier')}</p>
           <span className={`inline-block px-2.5 py-1 text-sm font-semibold rounded-lg ${roasColor(roas)} bg-white/60`}>
             {bonusTier}
           </span>
@@ -82,22 +84,24 @@ const BlendedROASCard = memo(function BlendedROASCard({ revenue, spend, roas, bo
 // ─── Bonus Tier Table ───────────────────────────────────────────────────────
 
 const BonusTierTable = memo(function BonusTierTable({ currentTier }: { currentTier: string }) {
+  const { t } = useTranslation()
   return (
     <div className="overflow-hidden rounded-lg border border-slate-200">
       <table className="w-full text-sm">
         <thead>
           <tr className="bg-slate-50">
             <th className="text-left py-2 px-3 text-xs font-semibold text-slate-600 uppercase tracking-wide">
-              Blended ROAS
+              {t('traffic.blendedRoas')}
             </th>
             <th className="text-left py-2 px-3 text-xs font-semibold text-slate-600 uppercase tracking-wide">
-              Bonus
+              {t('traffic.bonus')}
             </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
           {BONUS_TIERS.map((tier) => {
-            const isActive = tier.bonus === currentTier
+            const bonusText = 'bonusKey' in tier ? t(tier.bonusKey) : tier.bonus
+            const isActive = bonusText === currentTier
             return (
               <tr
                 key={tier.label}
@@ -108,7 +112,7 @@ const BonusTierTable = memo(function BonusTierTable({ currentTier }: { currentTi
                 </td>
                 <td className={`py-2 px-3 ${isActive ? 'text-emerald-700' : 'text-slate-600'}`}>
                   {isActive && <span className="mr-1">{'\u2192'}</span>}
-                  {tier.bonus}
+                  {bonusText}
                 </td>
               </tr>
             )
@@ -130,6 +134,7 @@ interface PlatformCardProps {
 }
 
 const PlatformCard = memo(function PlatformCard({ platform, icon, paidRevenue, spend, roas }: PlatformCardProps) {
+  const { t } = useTranslation()
   return (
     <div className="rounded-xl p-4 border border-slate-200 bg-white">
       <div className="flex items-center gap-2 mb-3">
@@ -138,15 +143,15 @@ const PlatformCard = memo(function PlatformCard({ platform, icon, paidRevenue, s
       </div>
       <div className="space-y-1.5 text-sm">
         <div className="flex justify-between">
-          <span className="text-slate-500">Ad Spend</span>
+          <span className="text-slate-500">{t('traffic.adSpend')}</span>
           <span className="font-medium text-slate-800">{spend > 0 ? formatCurrency(spend) : '\u2014'}</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-slate-500">Paid Revenue</span>
+          <span className="text-slate-500">{t('traffic.paidRevenue')}</span>
           <span className="font-medium text-slate-800">{paidRevenue > 0 ? formatCurrency(paidRevenue) : '\u2014'}</span>
         </div>
         <div className="flex justify-between pt-1.5 border-t border-slate-100">
-          <span className="text-slate-500">Channel ROAS</span>
+          <span className="text-slate-500">{t('traffic.channelRoas')}</span>
           <span className={`font-bold ${roasColor(roas)}`}>
             {roas !== null ? `${roas}x` : '\u2014'}
           </span>
@@ -159,6 +164,7 @@ const PlatformCard = memo(function PlatformCard({ platform, icon, paidRevenue, s
 // ─── Ad Spend Input Form ────────────────────────────────────────────────────
 
 const AdSpendInput = memo(function AdSpendInput() {
+  const { t } = useTranslation()
   const [platform, setPlatform] = useState('facebook')
   const [date, setDate] = useState(() => new Date().toISOString().split('T')[0])
   const [amount, setAmount] = useState('')
@@ -187,7 +193,7 @@ const AdSpendInput = memo(function AdSpendInput() {
   return (
     <form onSubmit={handleSubmit} className="flex flex-wrap items-end gap-2 mt-3">
       <div className="flex-shrink-0">
-        <label className="block text-xs text-slate-500 mb-1">Platform</label>
+        <label className="block text-xs text-slate-500 mb-1">{t('common.platform')}</label>
         <select
           value={platform}
           onChange={(e) => setPlatform(e.target.value)}
@@ -200,7 +206,7 @@ const AdSpendInput = memo(function AdSpendInput() {
         </select>
       </div>
       <div className="flex-shrink-0">
-        <label className="block text-xs text-slate-500 mb-1">Date</label>
+        <label className="block text-xs text-slate-500 mb-1">{t('common.date')}</label>
         <input
           type="date"
           value={date}
@@ -210,7 +216,7 @@ const AdSpendInput = memo(function AdSpendInput() {
         />
       </div>
       <div className="flex-1 min-w-[120px]">
-        <label className="block text-xs text-slate-500 mb-1">Amount (UAH)</label>
+        <label className="block text-xs text-slate-500 mb-1">{t('traffic.amountUah')}</label>
         <input
           type="number"
           value={amount}
@@ -229,7 +235,7 @@ const AdSpendInput = memo(function AdSpendInput() {
                    hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed
                    transition-colors flex-shrink-0"
       >
-        {createExpense.isPending ? 'Adding...' : 'Add'}
+        {createExpense.isPending ? t('traffic.adding') : t('traffic.add')}
       </button>
     </form>
   )
@@ -251,6 +257,7 @@ interface ExpenseListResponse {
 }
 
 const RecentEntries = memo(function RecentEntries() {
+  const { t } = useTranslation()
   const deleteExpense = useDeleteExpense()
   const [deletingId, setDeletingId] = useState<number | null>(null)
   const { period } = useFilterStore()
@@ -288,9 +295,9 @@ const RecentEntries = memo(function RecentEntries() {
       <table className="w-full text-sm">
         <thead>
           <tr className="bg-slate-50">
-            <th className="text-left py-2 px-3 text-xs font-semibold text-slate-600">Date</th>
-            <th className="text-left py-2 px-3 text-xs font-semibold text-slate-600">Platform</th>
-            <th className="text-right py-2 px-3 text-xs font-semibold text-slate-600">Amount</th>
+            <th className="text-left py-2 px-3 text-xs font-semibold text-slate-600">{t('common.date')}</th>
+            <th className="text-left py-2 px-3 text-xs font-semibold text-slate-600">{t('common.platform')}</th>
+            <th className="text-right py-2 px-3 text-xs font-semibold text-slate-600">{t('common.amount')}</th>
             <th className="w-10 py-2 px-2"></th>
           </tr>
         </thead>
@@ -335,6 +342,7 @@ const RecentEntries = memo(function RecentEntries() {
 // ─── Main Component ─────────────────────────────────────────────────────────
 
 export const ROASSection = memo(function ROASSection() {
+  const { t } = useTranslation()
   const { data: summary } = useSummary()
   const { data: roasData, isLoading, error, refetch } = useTrafficROAS()
   const [showInput, setShowInput] = useState(false)
@@ -363,19 +371,19 @@ export const ROASSection = memo(function ROASSection() {
 
   return (
     <ChartContainer
-      title="ROAS Calculator"
+      title={t('traffic.roasCalcTitle')}
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
       height="auto"
-      ariaLabel="Blended ROAS calculator with bonus tier"
+      ariaLabel={t('traffic.roasCalcDesc')}
       action={
         <button
           onClick={() => setShowInput(!showInput)}
           className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600
                      hover:bg-slate-50 hover:border-slate-300 transition-colors font-medium"
         >
-          {showInput ? 'Hide Input' : 'Edit Ad Spend'}
+          {showInput ? t('traffic.hideInput') : t('traffic.editAdSpend')}
         </button>
       }
     >
@@ -411,8 +419,8 @@ export const ROASSection = memo(function ROASSection() {
         {showInput && (
           <Card>
             <CardContent>
-              <h4 className="text-sm font-semibold text-slate-700 mb-1">Add Ad Spend</h4>
-              <p className="text-xs text-slate-400 mb-2">Enter daily ad spend per platform</p>
+              <h4 className="text-sm font-semibold text-slate-700 mb-1">{t('traffic.addAdSpend')}</h4>
+              <p className="text-xs text-slate-400 mb-2">{t('traffic.enterDailyAdSpend')}</p>
               <AdSpendInput />
               <RecentEntries />
             </CardContent>
@@ -423,14 +431,14 @@ export const ROASSection = memo(function ROASSection() {
         {!hasSpendData && !showInput && (
           <div className="text-center py-4">
             <p className="text-sm text-slate-500">
-              No ad spend data for this period.{' '}
+              {t('traffic.noAdSpendData')}{' '}
               <button
                 onClick={() => setShowInput(true)}
                 className="text-blue-600 hover:text-blue-700 font-medium"
               >
-                Add ad spend
+                {t('traffic.addAdSpend')}
               </button>{' '}
-              to calculate ROAS.
+              {t('traffic.addAdSpendToCalc')}
             </p>
           </div>
         )}

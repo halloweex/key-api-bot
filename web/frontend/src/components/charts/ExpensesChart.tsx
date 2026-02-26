@@ -1,4 +1,5 @@
 import { useMemo, memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   PieChart,
   Pie,
@@ -68,6 +69,7 @@ const MetricCard = memo(function MetricCard({ label, value, colorClass }: Metric
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const ExpensesChart = memo(function ExpensesChart() {
+  const { t } = useTranslation()
   const {
     data: expenseData,
     isLoading: loadingExpense,
@@ -108,12 +110,12 @@ export const ExpensesChart = memo(function ExpensesChart() {
 
   return (
     <ChartContainer
-      title="Expenses & Profit"
+      title={t('chart.expensesProfit')}
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetchExpense}
       isEmpty={isEmpty}
-      emptyMessage="No expense data available"
+      emptyMessage={t('chart.noExpenseData')}
       height="md"
       ariaLabel="Charts showing expense breakdown and profit analysis"
     >
@@ -121,22 +123,22 @@ export const ExpensesChart = memo(function ExpensesChart() {
       {metrics && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
           <MetricCard
-            label="Total Expenses"
+            label={t('chart.totalExpenses')}
             value={formatCurrency(metrics.totalExpenses ?? 0)}
             colorClass="text-red-400"
           />
           <MetricCard
-            label="Gross Profit"
+            label={t('chart.grossProfit')}
             value={formatCurrency(metrics.grossProfit ?? 0)}
             colorClass="text-green-400"
           />
           <MetricCard
-            label="Profit Margin"
+            label={t('chart.profitMargin')}
             value={formatPercent(metrics.profitMargin ?? 0)}
             colorClass="text-blue-400"
           />
           <MetricCard
-            label="Orders w/ Expenses"
+            label={t('chart.ordersWithExpenses')}
             value={String(metrics.ordersWithExpenses ?? 0)}
             colorClass="text-purple-400"
           />
@@ -146,7 +148,7 @@ export const ExpensesChart = memo(function ExpensesChart() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Expenses by Type */}
         <div>
-          <h4 className="text-sm font-semibold text-slate-700 mb-2">Expenses by Type</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">{t('chart.expensesByType')}</h4>
           <div style={{ height: CHART_DIMENSIONS.height.md - 32 }}>
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
@@ -183,7 +185,7 @@ export const ExpensesChart = memo(function ExpensesChart() {
 
         {/* Profit Analysis */}
         <div>
-          <h4 className="text-sm font-semibold text-slate-700 mb-2">Profit Analysis</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">{t('chart.profitAnalysis')}</h4>
           <div style={{ height: CHART_DIMENSIONS.height.md - 32 }}>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={profitChartData} margin={CHART_DIMENSIONS.margin.default}>
@@ -202,9 +204,9 @@ export const ExpensesChart = memo(function ExpensesChart() {
                   contentStyle={TOOLTIP_STYLE}
                   formatter={(value, name) => [
                     formatCurrency(Number(value) || 0),
-                    name === 'revenue' ? 'Revenue'
-                      : name === 'expenses' ? 'Expenses'
-                      : 'Profit',
+                    name === 'revenue' ? t('chart.revenue')
+                      : name === 'expenses' ? t('chart.expenses')
+                      : t('chart.profit'),
                   ]}
                 />
                 <Legend
@@ -214,21 +216,21 @@ export const ExpensesChart = memo(function ExpensesChart() {
                 <Line
                   type="monotone"
                   dataKey="revenue"
-                  name="Revenue"
+                  name={t('chart.revenue')}
                   stroke={EXPENSE_COLORS.revenue}
                   {...LINE_PROPS}
                 />
                 <Line
                   type="monotone"
                   dataKey="expenses"
-                  name="Expenses"
+                  name={t('chart.expenses')}
                   stroke={EXPENSE_COLORS.expenses}
                   {...LINE_PROPS}
                 />
                 <Line
                   type="monotone"
                   dataKey="profit"
-                  name="Profit"
+                  name={t('chart.profit')}
                   stroke={EXPENSE_COLORS.profit}
                   {...LINE_PROPS}
                 />

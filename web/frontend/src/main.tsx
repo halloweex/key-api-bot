@@ -4,6 +4,7 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { ToastProvider } from './components/ui/Toast'
 import { getQueryClient } from './lib/queryClient'
+import './lib/i18n' // Must init before any component renders
 import App from './App'
 import './index.css'
 

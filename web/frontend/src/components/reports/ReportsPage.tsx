@@ -1,4 +1,5 @@
 import { memo, useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card'
 import { SkeletonChart, ApiErrorState } from '../ui'
 import { useReportSummary, useReportTopProducts } from '../../hooks/useApi'
@@ -59,8 +60,10 @@ const MetricCard = memo(function MetricCard({
 })
 
 const SourceTable = memo(function SourceTable({ sources }: { sources: ReportSourceRow[] }) {
+  const { t } = useTranslation()
+
   if (!sources.length) {
-    return <p className="text-sm text-slate-500 py-8 text-center">No data for this period</p>
+    return <p className="text-sm text-slate-500 py-8 text-center">{t('reports.noDataPeriod')}</p>
   }
 
   return (
@@ -68,13 +71,13 @@ const SourceTable = memo(function SourceTable({ sources }: { sources: ReportSour
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-slate-200 text-left">
-            <th className="py-2.5 px-3 font-semibold text-slate-600">Source</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">Orders</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">Products</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">Revenue</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden md:table-cell">Avg Check</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">Returns</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">Return %</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600">{t('traffic.source')}</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">{t('reports.orders')}</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{t('reports.productsSold')}</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">{t('reports.revenue')}</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden md:table-cell">{t('reports.avgCheck')}</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">{t('reports.returnsCount')}</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">{t('reports.returnPct')}</th>
           </tr>
         </thead>
         <tbody>
@@ -96,6 +99,7 @@ const SourceTable = memo(function SourceTable({ sources }: { sources: ReportSour
 })
 
 const SummaryTab = memo(function SummaryTab() {
+  const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useReportSummary()
   const downloadCsv = useDownloadCsv()
 
@@ -109,25 +113,25 @@ const SummaryTab = memo(function SummaryTab() {
     <div className="space-y-4">
       {/* Totals Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <MetricCard label="Orders" value={formatNumber(totals.orders_count)} />
-        <MetricCard label="Revenue" value={formatCurrency(totals.revenue)} />
-        <MetricCard label="Products Sold" value={formatNumber(totals.products_sold)} />
+        <MetricCard label={t('reports.orders')} value={formatNumber(totals.orders_count)} />
+        <MetricCard label={t('reports.revenue')} value={formatCurrency(totals.revenue)} />
+        <MetricCard label={t('reports.productsSold')} value={formatNumber(totals.products_sold)} />
         <MetricCard
-          label="Avg Check"
+          label={t('reports.avgCheck')}
           value={formatCurrency(totals.avg_check)}
-          sub={`${totals.returns_count} returns (${totals.return_rate}%)`}
+          sub={`${totals.returns_count} ${t('reports.returnsCount')} (${totals.return_rate}%)`}
         />
       </div>
 
       {/* Source Table */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Source Breakdown</CardTitle>
+          <CardTitle>{t('reports.sourceBreakdown')}</CardTitle>
           <button
             onClick={() => downloadCsv('summary')}
             className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
           >
-            Export CSV
+            {t('reports.exportCsv')}
           </button>
         </CardHeader>
         <CardContent className="!p-0 sm:!px-5 sm:!pb-5">
@@ -151,8 +155,10 @@ const ProductsTable = memo(function ProductsTable({
 }: {
   products: ReportTopProduct[]
 }) {
+  const { t } = useTranslation()
+
   if (!products.length) {
-    return <p className="text-sm text-slate-500 py-8 text-center">No data for this period</p>
+    return <p className="text-sm text-slate-500 py-8 text-center">{t('reports.noDataPeriod')}</p>
   }
 
   return (
@@ -160,12 +166,12 @@ const ProductsTable = memo(function ProductsTable({
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-slate-200 text-left">
-            <th className="py-2.5 px-3 font-semibold text-slate-600 w-10">#</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600">Product</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">Qty</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">%</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">Revenue</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden md:table-cell">Orders</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600 w-10">{t('reports.rank')}</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600">{t('reports.product')}</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">{t('reports.qty')}</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">{t('reports.pct')}</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{t('reports.revenue')}</th>
+            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden md:table-cell">{t('reports.orders')}</th>
           </tr>
         </thead>
         <tbody>
@@ -209,6 +215,7 @@ const ProductsTable = memo(function ProductsTable({
 })
 
 const TopProductsTab = memo(function TopProductsTab() {
+  const { t } = useTranslation()
   const [sourceFilter, setSourceFilter] = useState<number | null>(null)
   const [limit, setLimit] = useState<number>(10)
   const { data, isLoading, error, refetch } = useReportTopProducts(sourceFilter, limit)
@@ -221,7 +228,7 @@ const TopProductsTab = memo(function TopProductsTab() {
     <div className="space-y-4">
       <Card>
         <CardHeader className="flex flex-col sm:flex-row sm:items-center gap-3">
-          <CardTitle className="flex-1">Top Products</CardTitle>
+          <CardTitle className="flex-1">{t('reports.topProducts')}</CardTitle>
           <div className="flex items-center gap-2 flex-wrap">
             {/* Source filter chips */}
             <div className="flex gap-1">
@@ -263,7 +270,7 @@ const TopProductsTab = memo(function TopProductsTab() {
               }}
               className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
             >
-              Export CSV
+              {t('reports.exportCsv')}
             </button>
           </div>
         </CardHeader>
@@ -277,12 +284,13 @@ const TopProductsTab = memo(function TopProductsTab() {
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
-const TABS: { key: Tab; label: string }[] = [
-  { key: 'summary', label: 'Summary' },
-  { key: 'top_products', label: 'Top Products' },
+const TAB_KEYS: { key: Tab; labelKey: string }[] = [
+  { key: 'summary', labelKey: 'reports.summary' },
+  { key: 'top_products', labelKey: 'reports.topProducts' },
 ]
 
 export const ReportsPage = memo(function ReportsPage() {
+  const { t } = useTranslation()
   const [activeTab, setActiveTab] = useState<Tab>('summary')
 
   return (
@@ -290,7 +298,7 @@ export const ReportsPage = memo(function ReportsPage() {
       <div className="max-w-[1800px] mx-auto space-y-4 sm:space-y-6">
         {/* Tab bar */}
         <div className="flex gap-1 bg-slate-100 p-1 rounded-xl w-fit">
-          {TABS.map((tab) => (
+          {TAB_KEYS.map((tab) => (
             <button
               key={tab.key}
               onClick={() => setActiveTab(tab.key)}
@@ -300,7 +308,7 @@ export const ReportsPage = memo(function ReportsPage() {
                   : 'text-slate-500 hover:text-slate-700'
               }`}
             >
-              {tab.label}
+              {t(tab.labelKey)}
             </button>
           ))}
         </div>

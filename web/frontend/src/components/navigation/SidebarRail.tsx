@@ -1,5 +1,6 @@
 import { memo, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { useNavStore } from '../../store/navStore'
 import { useAuth, useUserDisplayName } from '../../hooks/useAuth'
 import { useWebSocket } from '../../hooks/useWebSocket'
@@ -96,6 +97,7 @@ const ShieldCheckIcon = () => (
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const SidebarRail = memo(function SidebarRail() {
+  const { t } = useTranslation()
   const { isOpen, toggleOpen, setOpen } = useNavStore()
   const { user, isAuthenticated } = useAuth()
   const displayName = useUserDisplayName()
@@ -223,7 +225,7 @@ export const SidebarRail = memo(function SidebarRail() {
           <button
             onClick={toggleOpen}
             className="p-1.5 rounded-lg hover:bg-slate-200 text-slate-500 hover:text-slate-700"
-            title="Collapse menu (Esc)"
+            title={t('nav.collapseMenu')}
             aria-label="Collapse navigation"
           >
             <PanelLeftIcon />
@@ -239,25 +241,25 @@ export const SidebarRail = memo(function SidebarRail() {
         {/* Main navigation */}
         <nav className="space-y-1" aria-label="Dashboard pages">
           <NavLink href="/v2" icon={<ChartBarIcon />}>
-            Sales Dashboard
+            {t('nav.salesDashboard')}
           </NavLink>
           <NavLink href="/v2/products" icon={<LightBulbIcon />}>
-            Product Intelligence
+            {t('nav.productIntelligence')}
           </NavLink>
           <NavLink href="/v2/traffic" icon={<SignalIcon />}>
-            Traffic Analytics
+            {t('nav.trafficAnalytics')}
           </NavLink>
           <NavLink href="/v2/marketing" icon={<MegaphoneIcon />} disabled>
-            Marketing
+            {t('nav.marketing')}
           </NavLink>
           <NavLink href="/v2/financial" icon={<CurrencyDollarIcon />} disabled>
-            Financial
+            {t('nav.financial')}
           </NavLink>
           <NavLink href="/v2/inventory" icon={<CubeIcon />}>
-            Inventory
+            {t('nav.inventory')}
           </NavLink>
           <NavLink href="/v2/reports" icon={<ClipboardDocIcon />}>
-            Reports
+            {t('nav.reports')}
           </NavLink>
         </nav>
 
@@ -265,14 +267,14 @@ export const SidebarRail = memo(function SidebarRail() {
         {isAdmin && (
           <div className="mt-6 pt-4 border-t border-slate-200">
             <p className="text-xs text-slate-400 uppercase tracking-wide mb-2 px-3 font-medium">
-              Admin
+              {t('nav.admin')}
             </p>
             <nav className="space-y-1" aria-label="Admin pages">
               <NavLink href="/v2/admin/users" icon={<UsersIcon />}>
-                Manage Users
+                {t('nav.manageUsers')}
               </NavLink>
               <NavLink href="/v2/admin/permissions" icon={<ShieldCheckIcon />}>
-                Permissions
+                {t('nav.permissions')}
               </NavLink>
             </nav>
           </div>

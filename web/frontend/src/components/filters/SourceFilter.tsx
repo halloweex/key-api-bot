@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Select } from '../ui'
 import { useFilterStore } from '../../store/filterStore'
 
@@ -9,6 +10,7 @@ const SOURCES = [
 ]
 
 export function SourceFilter() {
+  const { t } = useTranslation()
   const { sourceId, setSourceId } = useFilterStore()
 
   const options = useMemo(() =>
@@ -28,7 +30,7 @@ export function SourceFilter() {
       options={options}
       value={sourceId ? String(sourceId) : null}
       onChange={handleChange}
-      placeholder="All Sources"
+      placeholder={t('filter.allSources')}
     />
   )
 }

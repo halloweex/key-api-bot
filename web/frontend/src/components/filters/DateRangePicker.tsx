@@ -14,6 +14,7 @@ import {
   subDays,
   startOfWeek as getStartOfWeek,
 } from 'date-fns'
+import { useTranslation } from 'react-i18next'
 import { Button } from '../ui'
 import { useFilterStore } from '../../store/filterStore'
 import { useMaxForecastDate } from '../../hooks'
@@ -23,40 +24,40 @@ interface DateRangePickerProps {
 }
 
 const QUICK_RANGES = [
-  { label: 'Today', getValue: () => {
+  { labelKey: 'filter.today', getValue: () => {
     const today = new Date()
     return { start: today, end: today }
   }},
-  { label: 'Yesterday', getValue: () => {
+  { labelKey: 'filter.yesterday', getValue: () => {
     const yesterday = subDays(new Date(), 1)
     return { start: yesterday, end: yesterday }
   }},
-  { label: 'Last 7 days', getValue: () => {
+  { labelKey: 'filter.7days', getValue: () => {
     const today = new Date()
     return { start: subDays(today, 6), end: today }
   }},
-  { label: 'Last 14 days', getValue: () => {
+  { labelKey: 'filter.14days', getValue: () => {
     const today = new Date()
     return { start: subDays(today, 13), end: today }
   }},
-  { label: 'Last 30 days', getValue: () => {
+  { labelKey: 'filter.30days', getValue: () => {
     const today = new Date()
     return { start: subDays(today, 29), end: today }
   }},
-  { label: 'This week', getValue: () => {
+  { labelKey: 'filter.thisWeek', getValue: () => {
     const today = new Date()
     return { start: getStartOfWeek(today, { weekStartsOn: 1 }), end: today }
   }},
-  { label: 'Last week', getValue: () => {
+  { labelKey: 'filter.lastWeek', getValue: () => {
     const today = new Date()
     const lastWeekStart = subDays(getStartOfWeek(today, { weekStartsOn: 1 }), 7)
     return { start: lastWeekStart, end: addDays(lastWeekStart, 6) }
   }},
-  { label: 'This month', getValue: () => {
+  { labelKey: 'filter.thisMonth', getValue: () => {
     const today = new Date()
     return { start: startOfMonth(today), end: today }
   }},
-  { label: 'Last month', getValue: () => {
+  { labelKey: 'filter.lastMonth', getValue: () => {
     const today = new Date()
     const lastMonth = subMonths(today, 1)
     return { start: startOfMonth(lastMonth), end: endOfMonth(lastMonth) }
@@ -66,6 +67,7 @@ const QUICK_RANGES = [
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 export function DateRangePicker({ onClose }: DateRangePickerProps) {
+  const { t } = useTranslation()
   const { startDate, endDate, setCustomDates } = useFilterStore()
   const maxForecastDate = useMaxForecastDate()
 
@@ -176,14 +178,14 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
       >
         {/* Quick ranges - left side on desktop, top on mobile */}
         <div className="flex sm:flex-col gap-1 sm:gap-0.5 overflow-x-auto sm:overflow-visible pb-2 sm:pb-0 sm:pr-4 sm:border-r border-slate-200 sm:min-w-[120px] flex-shrink-0">
-          <div className="hidden sm:block text-xs font-medium text-slate-500 mb-2">Quick select</div>
-          {QUICK_RANGES.map(({ label, getValue }) => (
+          <div className="hidden sm:block text-xs font-medium text-slate-500 mb-2">{t('filter.quickSelect')}</div>
+          {QUICK_RANGES.map(({ labelKey, getValue }) => (
             <button
-              key={label}
+              key={labelKey}
               onClick={() => handleQuickRange(getValue)}
               className="px-3 py-1.5 text-xs sm:text-sm text-left text-slate-600 hover:bg-slate-100 rounded-lg whitespace-nowrap transition-colors"
             >
-              {label}
+              {t(labelKey)}
             </button>
           ))}
         </div>
@@ -195,7 +197,7 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
             <button
               onClick={goToPrevMonth}
               className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors"
-              aria-label="Previous month"
+              aria-label={t('filter.previousMonth')}
             >
               <svg className="w-5 h-5 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -207,7 +209,7 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
             <button
               onClick={goToNextMonth}
               className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors"
-              aria-label="Next month"
+              aria-label={t('filter.nextMonth')}
             >
               <svg className="w-5 h-5 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -275,7 +277,7 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
                     )}
                   </>
                 ) : (
-                  <span className="text-slate-400 italic">Click a date to start</span>
+                  <span className="text-slate-400 italic">{t('filter.clickDateToStart')}</span>
                 )}
               </div>
             </div>
@@ -290,7 +292,7 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
               disabled={!isValid}
               className="flex-1"
             >
-              Apply
+              {t('filter.apply')}
             </Button>
             {onClose && (
               <Button
@@ -299,7 +301,7 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
                 onClick={onClose}
                 className="flex-1"
               >
-                Cancel
+                {t('filter.cancel')}
               </Button>
             )}
           </div>

@@ -1,4 +1,5 @@
 import { useMemo, memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   BarChart,
   Bar,
@@ -66,6 +67,7 @@ const CustomYAxisTick = ({ x, y, payload, tickData }: CustomTickProps) => {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const TopProductsChart = memo(function TopProductsChart() {
+  const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useTopProducts()
 
   const chartData = useMemo<ChartDataPoint[]>(() => {
@@ -93,13 +95,13 @@ export const TopProductsChart = memo(function TopProductsChart() {
 
   return (
     <ChartContainer
-      title="Top 10 Products by Quantity"
+      title={t('chart.topProductsQty')}
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
       isEmpty={isEmpty}
       height="xxl"
-      ariaLabel="Horizontal bar chart showing top 10 products by quantity sold"
+      ariaLabel={t('chart.topProductsQtyDesc')}
     >
       <div className="h-[380px] sm:h-[400px] lg:h-[420px]">
         <ResponsiveContainer width="100%" height="100%">
@@ -122,7 +124,7 @@ export const TopProductsChart = memo(function TopProductsChart() {
               labelStyle={TOOLTIP_LABEL_STYLE}
               formatter={(value, _name, props) => {
                 const percentage = (props.payload as ChartDataPoint)?.percentage ?? 0
-                return [`${formatNumber(Number(value) || 0)} (${percentage.toFixed(1)}%)`, 'Qty']
+                return [`${formatNumber(Number(value) || 0)} (${percentage.toFixed(1)}%)`, t('chart.qty')]
               }}
               labelFormatter={(_label, payload) => {
                 const item = payload?.[0]?.payload as ChartDataPoint | undefined

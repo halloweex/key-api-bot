@@ -1,4 +1,5 @@
 import { useMemo, useState, useCallback, memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   BarChart,
   Bar,
@@ -127,6 +128,7 @@ interface TooltipProps {
 }
 
 function CustomTooltip({ active, payload, isSubcategory }: TooltipProps) {
+  const { t } = useTranslation()
   if (!active || !payload?.length) return null
 
   const data = payload[0]?.payload
@@ -144,7 +146,7 @@ function CustomTooltip({ active, payload, isSubcategory }: TooltipProps) {
 
       {/* Revenue */}
       <div style={TOOLTIP_ROW_STYLE}>
-        <span style={TOOLTIP_LABEL_SMALL}>Revenue</span>
+        <span style={TOOLTIP_LABEL_SMALL}>{t('chart.revenue')}</span>
         <span style={TOOLTIP_VALUE_STYLE}>
           {formatCurrency(data.value)}
         </span>
@@ -162,7 +164,7 @@ function CustomTooltip({ active, payload, isSubcategory }: TooltipProps) {
       {!isSubcategory && (
         <div style={TOOLTIP_HINT_CONTAINER}>
           <span style={TOOLTIP_HINT_TEXT}>
-            Click to see subcategories
+            {t('chart.clickToSeeSubcategories')}
           </span>
         </div>
       )}
@@ -173,6 +175,7 @@ function CustomTooltip({ active, payload, isSubcategory }: TooltipProps) {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const CategoryChart = memo(function CategoryChart() {
+  const { t } = useTranslation()
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
 
   const {
@@ -242,7 +245,7 @@ export const CategoryChart = memo(function CategoryChart() {
 
   const title = selectedCategory
     ? `${selectedCategory}`
-    : 'Sales by Category'
+    : t('chart.salesByCategory')
 
   const isEmpty = !isLoading && chartData.length === 0
 
@@ -257,11 +260,11 @@ export const CategoryChart = memo(function CategoryChart() {
       onRetry={refetchPerformance}
       isEmpty={isEmpty}
       height="auto"
-      ariaLabel={`Bar chart showing ${selectedCategory ? 'subcategory' : 'category'} sales breakdown`}
+      ariaLabel={t('chart.salesByCategoryDesc')}
       action={
         selectedCategory && (
           <Button size="sm" variant="ghost" onClick={handleBack}>
-            ← Back to Categories
+            {t('chart.backToCategories')}
           </Button>
         )
       }
@@ -270,12 +273,12 @@ export const CategoryChart = memo(function CategoryChart() {
       <div className="flex items-center gap-4 mb-4 text-sm">
         <div className="flex items-center gap-2">
           <span className="text-slate-500">
-            {selectedCategory ? 'Subcategories:' : 'Categories:'}
+            {selectedCategory ? t('chart.subcategories') : t('chart.categories')}
           </span>
           <span className="font-semibold text-slate-700">{formatNumber(chartData.length)}</span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-slate-500">Total:</span>
+          <span className="text-slate-500">{t('chart.total')}</span>
           <span className="font-semibold text-green-600">{formatCurrency(totalRevenue)}</span>
         </div>
       </div>
@@ -329,7 +332,7 @@ export const CategoryChart = memo(function CategoryChart() {
       {/* Hint for drill-down */}
       {!selectedCategory && chartData.length > 0 && (
         <p className="text-xs text-slate-400 text-center mt-3">
-          Click a category to view subcategories
+          {t('chart.clickCategoryToView')}
         </p>
       )}
     </ChartContainer>

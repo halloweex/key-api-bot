@@ -1,4 +1,5 @@
 import { memo, useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useProductPairs } from '../../hooks/useApi'
 import { formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
@@ -6,6 +7,7 @@ import { InfoPopover } from '../ui/InfoPopover'
 type SortKey = 'coOccurrence' | 'lift' | 'confidenceAtoB' | 'confidenceBtoA'
 
 export const FrequentlyBoughtTogether = memo(function FrequentlyBoughtTogether() {
+  const { t } = useTranslation()
   const [selectedProductId, setSelectedProductId] = useState<number | null>(null)
   const [sortKey, setSortKey] = useState<SortKey>('coOccurrence')
   const { data: pairs, isLoading } = useProductPairs(selectedProductId)
@@ -40,25 +42,25 @@ export const FrequentlyBoughtTogether = memo(function FrequentlyBoughtTogether()
     <div className="bg-white rounded-lg border border-slate-200 shadow-sm">
       <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
-          <h3 className="text-sm font-semibold text-slate-800">Frequently Bought Together</h3>
-          <InfoPopover title="Frequently Bought Together">
+          <h3 className="text-sm font-semibold text-slate-800">{t('products.fbtTitle')}</h3>
+          <InfoPopover title={t('products.fbtTitle')}>
             <p className="text-xs text-slate-300 mb-2">
-              Products often purchased in the same order.
+              {t('products.fbtDesc')}
             </p>
             <p className="text-xs text-slate-300 mb-2">
-              <strong className="text-purple-400">Co-purchases:</strong> Number of orders containing both products.
+              <strong className="text-purple-400">{t('products.coPurchases')}:</strong> {t('products.fbtCoDesc')}
             </p>
             <p className="text-xs text-slate-300 mb-2">
-              <strong className="text-purple-400">Support:</strong> Percentage of all orders that contain this pair. Higher = more common.
+              <strong className="text-purple-400">{t('products.support')}:</strong> {t('products.fbtSupportDesc')}
             </p>
             <p className="text-xs text-slate-300 mb-2">
-              <strong className="text-purple-400">Conf A→B:</strong> If a customer buys Product A, the probability they also buy Product B.
+              <strong className="text-purple-400">{t('products.confAB')}:</strong> {t('products.fbtConfABDesc')}
             </p>
             <p className="text-xs text-slate-300 mb-2">
-              <strong className="text-purple-400">Conf B→A:</strong> If a customer buys Product B, the probability they also buy Product A.
+              <strong className="text-purple-400">{t('products.confBA')}:</strong> {t('products.fbtConfBADesc')}
             </p>
             <p className="text-xs text-slate-300">
-              <strong className="text-purple-400">Lift:</strong> How much more likely these products are bought together vs. by chance. Lift &gt; 1 means positive association; higher = stronger link.
+              <strong className="text-purple-400">{t('products.lift')}:</strong> {t('products.fbtLiftDesc')}
             </p>
           </InfoPopover>
           {selectedProductId && (
@@ -66,16 +68,16 @@ export const FrequentlyBoughtTogether = memo(function FrequentlyBoughtTogether()
               onClick={() => setSelectedProductId(null)}
               className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full hover:bg-purple-200"
             >
-              Clear filter
+              {t('products.clearFilter')}
             </button>
           )}
         </div>
         <div className="flex items-center gap-1">
-          <span className="text-xs text-slate-400 mr-1">Sort:</span>
-          <SortButton label="Count" field="coOccurrence" />
-          <SortButton label="Lift" field="lift" />
-          <SortButton label="Conf A→B" field="confidenceAtoB" />
-          <SortButton label="Conf B→A" field="confidenceBtoA" />
+          <span className="text-xs text-slate-400 mr-1">{t('products.sort')}</span>
+          <SortButton label={t('products.count')} field="coOccurrence" />
+          <SortButton label={t('products.lift')} field="lift" />
+          <SortButton label={t('products.confAB')} field="confidenceAtoB" />
+          <SortButton label={t('products.confBA')} field="confidenceBtoA" />
         </div>
       </div>
 
@@ -84,19 +86,19 @@ export const FrequentlyBoughtTogether = memo(function FrequentlyBoughtTogether()
           <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto" />
         </div>
       ) : !sortedPairs.length ? (
-        <div className="p-8 text-center text-sm text-slate-400">No product pairs found</div>
+        <div className="p-8 text-center text-sm text-slate-400">{t('products.noPairsFound')}</div>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="text-xs text-slate-500 border-b border-slate-100">
-                <th className="text-left px-4 py-2 font-medium">Product A</th>
-                <th className="text-left px-4 py-2 font-medium">Product B</th>
-                <th className="text-right px-4 py-2 font-medium">Co-purchases</th>
-                <th className="text-right px-4 py-2 font-medium hidden sm:table-cell">Support</th>
-                <th className="text-right px-4 py-2 font-medium hidden md:table-cell">Conf A→B</th>
-                <th className="text-right px-4 py-2 font-medium hidden md:table-cell">Conf B→A</th>
-                <th className="text-right px-4 py-2 font-medium">Lift</th>
+                <th className="text-left px-4 py-2 font-medium">{t('products.productA')}</th>
+                <th className="text-left px-4 py-2 font-medium">{t('products.productB')}</th>
+                <th className="text-right px-4 py-2 font-medium">{t('products.coPurchases')}</th>
+                <th className="text-right px-4 py-2 font-medium hidden sm:table-cell">{t('products.support')}</th>
+                <th className="text-right px-4 py-2 font-medium hidden md:table-cell">{t('products.confAB')}</th>
+                <th className="text-right px-4 py-2 font-medium hidden md:table-cell">{t('products.confBA')}</th>
+                <th className="text-right px-4 py-2 font-medium">{t('products.lift')}</th>
               </tr>
             </thead>
             <tbody>

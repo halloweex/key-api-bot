@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { StatCard, StatCardSkeleton } from '../cards/StatCard'
 import { useBasketSummary } from '../../hooks/useApi'
 import { formatNumber, formatCurrency } from '../../utils/formatters'
@@ -29,6 +30,7 @@ const PairIcon = () => (
 )
 
 export const BasketSummaryCards = memo(function BasketSummaryCards() {
+  const { t } = useTranslation()
   const { data, isLoading } = useBasketSummary()
 
   if (isLoading || !data) {
@@ -42,46 +44,46 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
       <StatCard
-        label="Avg Basket Size"
+        label={t('products.avgBasketSize')}
         value={data.avgBasketSize}
-        formatter={(v) => `${v.toFixed(1)} items`}
+        formatter={(v) => `${v.toFixed(1)} ${t('products.items')}`}
         icon={<BasketIcon />}
         variant="blue"
-        subtitle={`${formatNumber(data.totalOrders)} orders`}
+        subtitle={`${formatNumber(data.totalOrders)} ${t('products.orders')}`}
         labelExtra={
           <InfoPopover>
-            <p className="text-xs text-slate-300">Average number of distinct products per order.</p>
+            <p className="text-xs text-slate-300">{t('products.avgBasketSizeDesc')}</p>
           </InfoPopover>
         }
       />
       <StatCard
-        label="Multi-Item Orders"
+        label={t('products.multiItemOrders')}
         value={data.multiItemPct}
         formatter={(v) => `${v.toFixed(1)}%`}
         icon={<MultiIcon />}
         variant="purple"
-        subtitle={`${formatNumber(data.multiItemOrders)} of ${formatNumber(data.totalOrders)}`}
+        subtitle={`${formatNumber(data.multiItemOrders)} ${t('products.of')} ${formatNumber(data.totalOrders)}`}
         labelExtra={
           <InfoPopover>
-            <p className="text-xs text-slate-300">Percentage of orders containing 2 or more products.</p>
+            <p className="text-xs text-slate-300">{t('products.multiItemDesc')}</p>
           </InfoPopover>
         }
       />
       <StatCard
-        label="AOV Uplift"
+        label={t('products.aovUplift')}
         value={data.aovUplift}
         formatter={(v) => `${v.toFixed(1)}x`}
         icon={<UpliftIcon />}
         variant="green"
-        subtitle={`${formatCurrency(data.multiAov)} vs ${formatCurrency(data.singleAov)}`}
+        subtitle={`${formatCurrency(data.multiAov)} ${t('products.vs')} ${formatCurrency(data.singleAov)}`}
         labelExtra={
           <InfoPopover>
-            <p className="text-xs text-slate-300">How much more multi-item orders spend compared to single-item orders. 2.4x means multi-item baskets are 2.4 times larger by value.</p>
+            <p className="text-xs text-slate-300">{t('products.aovUpliftDesc', { value: data.aovUplift.toFixed(1) })}</p>
           </InfoPopover>
         }
       />
       <StatCard
-        label="Top Pair"
+        label={t('products.topPair')}
         value={data.topPairCount}
         formatter={formatNumber}
         icon={<PairIcon />}
@@ -89,7 +91,7 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         subtitle={data.topPair}
         labelExtra={
           <InfoPopover>
-            <p className="text-xs text-slate-300">The two products most frequently purchased together.</p>
+            <p className="text-xs text-slate-300">{t('products.topPairDesc')}</p>
           </InfoPopover>
         }
       />

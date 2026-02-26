@@ -1113,6 +1113,15 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (revenue_predictions model_wape): {e}")
 
+        # Migration: Add language column to user_preferences
+        try:
+            self._connection.execute(
+                "ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS language VARCHAR DEFAULT 'en'"
+            )
+            logger.debug("Migration: language column added/verified on user_preferences")
+        except Exception as e:
+            logger.debug(f"Migration note (user_preferences language): {e}")
+
     async def _create_inventory_views(self) -> None:
         """Create Layer 3 & 4 analytics views for inventory."""
         views_sql = """

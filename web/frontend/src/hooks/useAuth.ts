@@ -1,8 +1,10 @@
 /**
  * Authentication hook for user data and permissions.
  */
+import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
+import i18n, { SUPPORTED_LANGUAGES, type SupportedLanguage } from '../lib/i18n'
 import type { CurrentUserResponse, Permissions, UserRole } from '../types/api'
 
 // Cache TTL: 5 minutes (user data changes rarely)
@@ -47,13 +49,25 @@ export function useAuth() {
 
   const user = query.data?.user ?? null
   const permissions = query.data?.permissions ?? null
+  const preferences = query.data?.preferences ?? null
   const isAuthenticated = !!user
   const isLoading = query.isLoading
   const error = query.error
 
+  // Sync language from server preferences (server wins for cross-device consistency)
+  useEffect(() => {
+    if (preferences?.language) {
+      const serverLang = preferences.language as SupportedLanguage
+      if (SUPPORTED_LANGUAGES.includes(serverLang) && i18n.language !== serverLang) {
+        i18n.changeLanguage(serverLang)
+      }
+    }
+  }, [preferences?.language])
+
   return {
     user,
     permissions,
+    preferences,
     isAuthenticated,
     isLoading,
     error,

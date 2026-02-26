@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   BarChart,
   Bar,
@@ -29,17 +30,18 @@ import { formatCurrency } from '../../utils/formatters'
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const SalesBySourceChart = memo(function SalesBySourceChart() {
+  const { t } = useTranslation()
   const { chartData, totalRevenue, isEmpty, isLoading, error, refetch } = useSourceChartData()
 
   return (
     <ChartContainer
-      title="Sales by Source"
+      title={t('chart.salesBySource')}
       isLoading={isLoading}
       error={error}
       onRetry={refetch}
       isEmpty={isEmpty}
       height="md"
-      ariaLabel="Bar and pie charts showing sales distribution by source"
+      ariaLabel={t('chart.salesBySourceDesc')}
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Bar Chart */}
@@ -107,7 +109,7 @@ export const SalesBySourceChart = memo(function SalesBySourceChart() {
       {/* Summary */}
       <div className="mt-4 pt-4 border-t border-slate-700">
         <div className="flex justify-between items-center">
-          <span className="text-slate-400 text-sm">Total Revenue</span>
+          <span className="text-slate-400 text-sm">{t('chart.totalRevenue')}</span>
           <span className="text-white font-semibold">{formatCurrency(totalRevenue)}</span>
         </div>
       </div>

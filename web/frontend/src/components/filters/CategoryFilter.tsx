@@ -1,9 +1,11 @@
 import { useCallback, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Select } from '../ui'
 import { useFilterStore } from '../../store/filterStore'
 import { useCategories, useChildCategories } from '../../hooks'
 
 export function CategoryFilter() {
+  const { t } = useTranslation()
   const { categoryId, setCategoryId } = useFilterStore()
   const { data: categories, isLoading: loadingCategories } = useCategories()
 
@@ -66,7 +68,7 @@ export function CategoryFilter() {
         options={options}
         value={selectedParentId ? String(selectedParentId) : (categoryId ? String(categoryId) : null)}
         onChange={handleParentChange}
-        placeholder="All Categories"
+        placeholder={t('filter.allCategories')}
         disabled={loadingCategories}
       />
       {childOptions.length > 0 && (
@@ -74,7 +76,7 @@ export function CategoryFilter() {
           options={childOptions}
           value={currentChildId ? String(currentChildId) : null}
           onChange={handleChildChange}
-          placeholder="All Subcategories"
+          placeholder={t('filter.allSubcategories')}
         />
       )}
     </div>

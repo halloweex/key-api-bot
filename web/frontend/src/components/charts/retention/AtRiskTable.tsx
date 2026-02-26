@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { AtRiskResponse } from '../../../types/api'
 import { formatNumber, formatCurrency, formatPercent } from '../../../utils/formatters'
 
@@ -27,6 +28,7 @@ function getRiskBadge(percent: number): { label: string; color: string } {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps) {
+  const { t } = useTranslation()
   const totalAtRiskRevenue = data.cohorts.reduce((sum, c) => sum + c.atRiskRevenue, 0)
 
   return (
@@ -34,34 +36,34 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
       {/* Summary Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <div className="bg-gradient-to-br from-red-50 to-red-100/50 border border-red-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">At-Risk Customers</p>
+          <p className="text-xs text-slate-600 font-medium">{t('retention.atRiskCustomers')}</p>
           <p className="text-xl font-bold text-red-800">
             {formatNumber(data.summary.totalAtRisk)}
           </p>
           <p className="text-xs text-slate-500">
-            {formatPercent(data.summary.overallAtRiskPct)} of total
+            {formatPercent(data.summary.overallAtRiskPct)} {t('retention.atRiskOfTotal')}
           </p>
         </div>
         <div className="bg-gradient-to-br from-slate-50 to-slate-100/50 border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">Total Customers</p>
+          <p className="text-xs text-slate-600 font-medium">{t('customer.totalCustomers')}</p>
           <p className="text-xl font-bold text-slate-800">
             {formatNumber(data.summary.totalCustomers)}
           </p>
-          <p className="text-xs text-slate-500">in last 12 months</p>
+          <p className="text-xs text-slate-500">{t('retention.inLast12Months')}</p>
         </div>
         <div className="bg-gradient-to-br from-amber-50 to-amber-100/50 border border-amber-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">At-Risk Revenue</p>
+          <p className="text-xs text-slate-600 font-medium">{t('retention.atRiskRevenue')}</p>
           <p className="text-xl font-bold text-amber-800">
             {formatCurrency(totalAtRiskRevenue)}
           </p>
-          <p className="text-xs text-slate-500">historical value</p>
+          <p className="text-xs text-slate-500">{t('retention.historicalValue')}</p>
         </div>
         <div className="bg-gradient-to-br from-blue-50 to-blue-100/50 border border-blue-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">Threshold</p>
+          <p className="text-xs text-slate-600 font-medium">{t('retention.threshold')}</p>
           <p className="text-xl font-bold text-blue-800">
-            {data.daysThreshold} days
+            {data.daysThreshold} {t('retention.days')}
           </p>
-          <p className="text-xs text-slate-500">since last purchase</p>
+          <p className="text-xs text-slate-500">{t('retention.sinceLastPurchase')}</p>
         </div>
       </div>
 

@@ -1,4 +1,5 @@
 import { memo, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   PieChart,
   Pie,
@@ -59,10 +60,12 @@ function CustomTooltip({
   active,
   payload,
   showRevenue = true,
+  t,
 }: {
   active?: boolean
   payload?: Array<{ payload: TooltipPayload }>
   showRevenue?: boolean
+  t: (key: string) => string
 }) {
   if (!active || !payload?.length) return null
 
@@ -75,18 +78,18 @@ function CustomTooltip({
         {formatPlatformName(data.platform)}
       </p>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-        <span style={{ color: CHART_THEME.muted }}>Orders:</span>
+        <span style={{ color: CHART_THEME.muted }}>{t('summary.totalOrders')}:</span>
         <span style={{ fontWeight: 500 }}>{formatNumber(data.orders)}</span>
       </div>
       {showRevenue && (
         <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-          <span style={{ color: CHART_THEME.muted }}>Revenue:</span>
+          <span style={{ color: CHART_THEME.muted }}>{t('common.revenue')}:</span>
           <span style={{ fontWeight: 500 }}>{formatCurrency(data.revenue)}</span>
         </div>
       )}
       {data.pct !== undefined && (
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', paddingTop: '4px', borderTop: `1px solid ${CHART_THEME.border}` }}>
-          <span style={{ color: CHART_THEME.muted }}>Share:</span>
+          <span style={{ color: CHART_THEME.muted }}>{t('traffic.share')}</span>
           <span style={{ fontWeight: 600, color: getPlatformColor(data.platform) }}>{data.pct.toFixed(1)}%</span>
         </div>
       )}
@@ -97,6 +100,7 @@ function CustomTooltip({
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export const PlatformBreakdownChart = memo(function PlatformBreakdownChart() {
+  const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useTrafficAnalytics()
 
   const chartData = useMemo(() => {
@@ -125,13 +129,13 @@ export const PlatformBreakdownChart = memo(function PlatformBreakdownChart() {
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       {/* Revenue by Platform - Donut Chart */}
       <ChartContainer
-        title="Revenue by Platform"
+        title={t('traffic.revenueByPlatform')}
         isLoading={isLoading}
         error={error as Error | null}
         onRetry={refetch}
         isEmpty={isEmpty}
         height="md"
-        ariaLabel="Donut chart showing revenue distribution by platform"
+        ariaLabel={t('traffic.revenueByPlatformDesc')}
       >
         <div style={{ height: 256 }}>
           <ResponsiveContainer width="100%" height="100%">
@@ -153,7 +157,7 @@ export const PlatformBreakdownChart = memo(function PlatformBreakdownChart() {
                   <Cell key={`pie-${index}`} fill={entry.color} />
                 ))}
               </Pie>
-              <Tooltip content={<CustomTooltip showRevenue />} />
+              <Tooltip content={<CustomTooltip showRevenue t={t} />} />
             </PieChart>
           </ResponsiveContainer>
         </div>
@@ -176,13 +180,13 @@ export const PlatformBreakdownChart = memo(function PlatformBreakdownChart() {
 
       {/* Orders by Platform - Horizontal Bar Chart */}
       <ChartContainer
-        title="Orders by Platform"
+        title={t('traffic.ordersByPlatform')}
         isLoading={isLoading}
         error={error as Error | null}
         onRetry={refetch}
         isEmpty={isEmpty}
         height="md"
-        ariaLabel="Horizontal bar chart showing orders by platform"
+        ariaLabel={t('traffic.ordersByPlatformDesc')}
       >
         <div style={{ height: 256 }}>
           <ResponsiveContainer width="100%" height="100%">
@@ -199,7 +203,7 @@ export const PlatformBreakdownChart = memo(function PlatformBreakdownChart() {
                 width={75}
                 tick={{ fontSize: 12 }}
               />
-              <Tooltip content={<CustomTooltip showRevenue={false} />} />
+              <Tooltip content={<CustomTooltip showRevenue={false} t={t} />} />
               <Bar
                 dataKey="orders"
                 {...BAR_PROPS}

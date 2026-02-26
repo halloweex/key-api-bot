@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent, SkeletonChart, ApiErrorState } from '../ui'
 import { CHART_DIMENSIONS, type ChartHeight } from './config'
 
@@ -44,6 +45,7 @@ const ErrorStateWrapper = memo(function ErrorStateWrapper({
   error,
   onRetry
 }: ErrorStateWrapperProps) {
+  const { t } = useTranslation()
   return (
     <Card>
       <CardHeader>
@@ -53,7 +55,7 @@ const ErrorStateWrapper = memo(function ErrorStateWrapper({
         <ApiErrorState
           error={error}
           onRetry={onRetry}
-          title={`Failed to load ${title.toLowerCase()}`}
+          title={`${t('chart.failedToLoad')} ${title.toLowerCase()}`}
         />
       </CardContent>
     </Card>
@@ -66,6 +68,7 @@ interface EmptyStateProps {
 }
 
 const EmptyState = memo(function EmptyState({ message, height }: EmptyStateProps) {
+  const { t } = useTranslation()
   return (
     <div
       className="flex flex-col items-center justify-center animate-fade-in"
@@ -88,7 +91,7 @@ const EmptyState = memo(function EmptyState({ message, height }: EmptyStateProps
         </svg>
       </div>
       <p className="text-sm text-slate-600 font-medium">{message}</p>
-      <p className="text-xs text-slate-400 mt-1.5">Try adjusting your filters</p>
+      <p className="text-xs text-slate-400 mt-1.5">{t('chart.adjustFilters')}</p>
     </div>
   )
 })
@@ -107,8 +110,10 @@ export const ChartContainer = memo(function ChartContainer({
   height = 'lg',
   ariaLabel,
   isEmpty = false,
-  emptyMessage = 'No data available',
+  emptyMessage,
 }: ChartContainerProps) {
+  const { t } = useTranslation()
+  const resolvedEmptyMessage = emptyMessage || t('chart.noData')
   const chartHeight = height === 'auto' ? CHART_DIMENSIONS.height.lg : CHART_DIMENSIONS.height[height]
 
   const handleRetry = useCallback(() => {
@@ -147,7 +152,7 @@ export const ChartContainer = memo(function ChartContainer({
           className="animate-chart-scale"
         >
           {isEmpty ? (
-            <EmptyState message={emptyMessage} height={chartHeight} />
+            <EmptyState message={resolvedEmptyMessage} height={chartHeight} />
           ) : (
             children
           )}

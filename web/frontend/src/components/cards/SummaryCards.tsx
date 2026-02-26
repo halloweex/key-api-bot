@@ -1,4 +1,5 @@
 import { useMemo, useCallback, useState, useRef, useEffect, type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 import { StatCard, StatCardSkeleton, type StatCardVariant } from './StatCard'
 import { MilestoneProgress } from '../ui'
 import { useSummary, useReturns } from '../../hooks'
@@ -26,34 +27,31 @@ interface CardConfig {
 
 // ─── Card Configuration ──────────────────────────────────────────────────────
 
-const CARD_CONFIGS: CardConfig[] = [
+const CARD_CONFIGS: (Omit<CardConfig, 'label'> & { labelKey: string })[] = [
   {
     id: 'orders',
-    label: 'Total Orders',
+    labelKey: 'summary.totalOrders',
     variant: 'blue',
     icon: <ShoppingCartIcon />,
     getValue: (data) => data.totalOrders,
     formatter: formatNumber,
     getSubtitle: (data) => `${data.startDate} - ${data.endDate}`,
-    ariaLabel: (data) => `Total orders: ${formatNumber(data.totalOrders)} from ${data.startDate} to ${data.endDate}`,
   },
   {
     id: 'revenue',
-    label: 'Total Revenue',
+    labelKey: 'summary.totalRevenue',
     variant: 'green',
     icon: <CurrencyIcon />,
     getValue: (data) => data.totalRevenue,
     formatter: formatCurrency,
-    ariaLabel: (data) => `Total revenue: ${formatCurrency(data.totalRevenue)}`,
   },
   {
     id: 'avgCheck',
-    label: 'Average Check',
+    labelKey: 'summary.avgCheck',
     variant: 'purple',
     icon: <CalculatorIcon />,
     getValue: (data) => data.avgCheck,
     formatter: formatCurrency,
-    ariaLabel: (data) => `Average check: ${formatCurrency(data.avgCheck)}`,
   },
 ]
 
@@ -75,6 +73,7 @@ interface ReturnsCardProps {
 }
 
 function ReturnsCard({ data }: ReturnsCardProps) {
+  const { t } = useTranslation()
   const [isOpen, setIsOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
   const { data: returnsData, isLoading } = useReturns(isOpen)
@@ -127,13 +126,12 @@ function ReturnsCard({ data }: ReturnsCardProps) {
         aria-haspopup="true"
       >
         <StatCard
-          label="Returns"
+          label={t('summary.returns')}
           value={data.totalReturns}
           formatter={formatNumber}
           variant="orange"
           icon={<ArrowUturnLeftIcon />}
-          subtitle={returnRate > 0 ? `${formatPercent(returnRate)} return rate` : undefined}
-          ariaLabel={`Returns: ${formatNumber(data.totalReturns)}`}
+          subtitle={returnRate > 0 ? `${formatPercent(returnRate)}` : undefined}
           clickable={data.totalReturns > 0}
         />
       </button>
@@ -144,7 +142,7 @@ function ReturnsCard({ data }: ReturnsCardProps) {
           <div className="sticky top-0 bg-white border-b border-slate-100 px-4 py-2">
             <div className="flex items-center justify-between">
               <span className="text-sm font-medium text-slate-700">
-                Return Orders ({data.totalReturns})
+                {t('summary.returnOrders')} ({data.totalReturns})
               </span>
               <button
                 onClick={() => setIsOpen(false)}
@@ -159,7 +157,7 @@ function ReturnsCard({ data }: ReturnsCardProps) {
 
           {isLoading ? (
             <div className="p-4 text-center text-slate-500 text-sm">
-              Loading returns...
+              {t('summary.loadingReturns')}
             </div>
           ) : returnsData?.returns?.length ? (
             <div className="divide-y divide-slate-100">
@@ -190,7 +188,7 @@ function ReturnsCard({ data }: ReturnsCardProps) {
             </div>
           ) : (
             <div className="p-4 text-center text-slate-500 text-sm">
-              No return orders found
+              {t('summary.noReturnOrders')}
             </div>
           )}
         </div>
@@ -207,6 +205,7 @@ interface ErrorStateProps {
 }
 
 function ErrorState({ message, onRetry }: ErrorStateProps) {
+  const { t } = useTranslation()
   return (
     <div
       role="alert"
@@ -235,7 +234,7 @@ function ErrorState({ message, onRetry }: ErrorStateProps) {
             onClick={onRetry}
             className="text-sm text-red-600 hover:text-red-800 underline underline-offset-2 transition-colors"
           >
-            Retry
+            {t('error.retry')}
           </button>
         )}
       </div>
@@ -258,6 +257,7 @@ function LoadingState() {
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export function SummaryCards() {
+  const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useSummary()
 
   const handleRetry = useCallback(() => {
@@ -271,13 +271,12 @@ export function SummaryCards() {
     return CARD_CONFIGS.map((config) => (
       <StatCard
         key={config.id}
-        label={config.label}
+        label={t(config.labelKey)}
         value={config.getValue(data)}
         formatter={config.formatter}
         variant={config.variant}
         icon={config.icon}
         subtitle={config.getSubtitle?.(data)}
-        ariaLabel={config.ariaLabel?.(data)}
       />
     ))
   }, [data])
@@ -298,7 +297,7 @@ export function SummaryCards() {
 
         {error && !isLoading && (
           <ErrorState
-            message="Failed to load summary data"
+            message={t('summary.failedToLoad')}
             onRetry={handleRetry}
           />
         )}

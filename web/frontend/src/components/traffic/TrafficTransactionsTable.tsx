@@ -1,4 +1,5 @@
 import { memo, useState, useCallback, useRef, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ChartContainer } from '../charts/ChartContainer'
 import { formatCurrency } from '../../utils/formatters'
 import { useTrafficTransactions } from '../../hooks'
@@ -8,34 +9,34 @@ import type { TrafficEvidence, TrafficTransaction } from '../../types/api'
 // ─── Traffic Type Config ─────────────────────────────────────────────────────
 
 const TRAFFIC_TYPES = [
-  { value: '', label: 'All types' },
-  { value: 'paid_confirmed', label: 'Paid' },
-  { value: 'paid_likely', label: 'Paid (likely)' },
-  { value: 'manager', label: 'Sales Manager' },
-  { value: 'organic', label: 'Organic' },
-  { value: 'pixel_only', label: 'Pixel Only' },
-  { value: 'unknown', label: 'Unknown' },
+  { value: '', labelKey: 'traffic.allTypes' },
+  { value: 'paid_confirmed', labelKey: 'traffic.paid' },
+  { value: 'paid_likely', labelKey: 'traffic.paidLikely' },
+  { value: 'manager', labelKey: 'traffic.salesManager' },
+  { value: 'organic', labelKey: 'traffic.organic' },
+  { value: 'pixel_only', labelKey: 'traffic.pixelOnly' },
+  { value: 'unknown', labelKey: 'traffic.unknown' },
 ] as const
 
-const trafficBadgeConfig: Record<string, { bg: string; text: string; label: string }> = {
-  paid_confirmed: { bg: 'bg-blue-100', text: 'text-blue-700', label: 'Paid' },
-  paid_likely: { bg: 'bg-blue-50', text: 'text-blue-500', label: 'Paid (likely)' },
-  manager: { bg: 'bg-cyan-100', text: 'text-cyan-700', label: 'Manager' },
-  organic: { bg: 'bg-green-100', text: 'text-green-700', label: 'Organic' },
-  pixel_only: { bg: 'bg-orange-100', text: 'text-orange-700', label: 'Pixel Only' },
-  unknown: { bg: 'bg-purple-100', text: 'text-purple-700', label: 'Unknown' },
+const trafficBadgeConfig: Record<string, { bg: string; text: string; labelKey: string }> = {
+  paid_confirmed: { bg: 'bg-blue-100', text: 'text-blue-700', labelKey: 'traffic.paid' },
+  paid_likely: { bg: 'bg-blue-50', text: 'text-blue-500', labelKey: 'traffic.paidLikely' },
+  manager: { bg: 'bg-cyan-100', text: 'text-cyan-700', labelKey: 'traffic.manager' },
+  organic: { bg: 'bg-green-100', text: 'text-green-700', labelKey: 'traffic.organic' },
+  pixel_only: { bg: 'bg-orange-100', text: 'text-orange-700', labelKey: 'traffic.pixelOnly' },
+  unknown: { bg: 'bg-purple-100', text: 'text-purple-700', labelKey: 'traffic.unknown' },
 }
 
 const PLATFORMS = [
-  { value: '', label: 'All platforms' },
-  { value: 'facebook', label: 'Facebook' },
-  { value: 'instagram', label: 'Instagram' },
-  { value: 'google', label: 'Google' },
-  { value: 'tiktok', label: 'TikTok' },
-  { value: 'email', label: 'Email' },
-  { value: 'telegram', label: 'Telegram' },
-  { value: 'manager', label: 'Manager' },
-  { value: 'other', label: 'Other' },
+  { value: '', labelKey: 'traffic.allPlatforms' },
+  { value: 'facebook', labelKey: 'traffic.facebook' },
+  { value: 'instagram', labelKey: 'traffic.instagram' },
+  { value: 'google', labelKey: 'traffic.google' },
+  { value: 'tiktok', labelKey: 'traffic.tiktok' },
+  { value: 'email', labelKey: 'traffic.email' },
+  { value: 'telegram', labelKey: 'traffic.telegram' },
+  { value: 'manager', labelKey: 'traffic.manager' },
+  { value: 'other', labelKey: 'traffic.otherPlatform' },
 ] as const
 
 const PAGE_SIZE = 50
@@ -43,10 +44,11 @@ const PAGE_SIZE = 50
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
 const TrafficBadge = memo(function TrafficBadge({ type }: { type: string }) {
+  const { t } = useTranslation()
   const config = trafficBadgeConfig[type] || trafficBadgeConfig.unknown
   return (
     <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${config.bg} ${config.text}`}>
-      {config.label}
+      {t(config.labelKey)}
     </span>
   )
 })
@@ -93,8 +95,9 @@ const FilterSelect = memo(function FilterSelect({
 }: {
   value: string
   onChange: (v: string) => void
-  options: readonly { value: string; label: string }[]
+  options: readonly { value: string; labelKey: string }[]
 }) {
+  const { t } = useTranslation()
   return (
     <select
       value={value}
@@ -103,8 +106,8 @@ const FilterSelect = memo(function FilterSelect({
                  focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300
                  cursor-pointer hover:border-slate-300 transition-colors"
     >
-      {options.map((t) => (
-        <option key={t.value} value={t.value}>{t.label}</option>
+      {options.map((opt) => (
+        <option key={opt.value} value={opt.value}>{t(opt.labelKey)}</option>
       ))}
     </select>
   )
@@ -113,6 +116,7 @@ const FilterSelect = memo(function FilterSelect({
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export const TrafficTransactionsTable = memo(function TrafficTransactionsTable() {
+  const { t } = useTranslation()
   const [trafficFilter, setTrafficFilter] = useState('')
   const [platformFilter, setPlatformFilter] = useState('')
   const [offset, setOffset] = useState(0)
@@ -174,7 +178,7 @@ export const TrafficTransactionsTable = memo(function TrafficTransactionsTable()
 
   return (
     <ChartContainer
-      title="Order Details"
+      title={t('traffic.orderDetails')}
       titleExtra={
         <div className="flex items-center gap-2">
           <FilterSelect value={trafficFilter} onChange={handleFilterChange} options={TRAFFIC_TYPES} />
@@ -186,36 +190,36 @@ export const TrafficTransactionsTable = memo(function TrafficTransactionsTable()
       onRetry={refetch}
       height="auto"
       isEmpty={isEmpty}
-      emptyMessage="No orders with traffic data for this period"
-      ariaLabel="Table showing individual orders with traffic attribution"
+      emptyMessage={t('traffic.noOrdersData')}
+      ariaLabel={t('traffic.orderDetailsDesc')}
     >
       <div className="overflow-auto rounded-lg border border-slate-200 max-h-[500px]">
         <table className="w-full text-sm">
           <thead className="sticky top-0 z-10">
             <tr className="bg-slate-50 border-b border-slate-200">
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
-                Order #
+                {t('traffic.orderNum')}
               </th>
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide hidden md:table-cell">
-                Date
+                {t('common.date')}
               </th>
               <th className="text-right py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
-                Amount
+                {t('common.amount')}
               </th>
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide hidden md:table-cell">
-                Source
+                {t('traffic.source')}
               </th>
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide hidden md:table-cell">
-                Platform
+                {t('traffic.platform')}
               </th>
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
-                Type
+                {t('chart.type')}
               </th>
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide hidden md:table-cell">
-                Campaign
+                {t('traffic.campaign')}
               </th>
               <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide hidden lg:table-cell">
-                Evidence
+                {t('traffic.evidence')}
               </th>
             </tr>
           </thead>
@@ -261,7 +265,7 @@ export const TrafficTransactionsTable = memo(function TrafficTransactionsTable()
       {/* Footer: count + load more */}
       <div className="flex items-center justify-between mt-3 px-1">
         <span className="text-xs text-slate-400">
-          Showing {allTransactions.length} of {total}
+          {t('traffic.showing')} {allTransactions.length} {t('common.of')} {total}
         </span>
         {hasMore && (
           <button
@@ -270,7 +274,7 @@ export const TrafficTransactionsTable = memo(function TrafficTransactionsTable()
             className="text-xs px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200
                        transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium"
           >
-            {isLoading ? 'Loading...' : 'Load more'}
+            {isLoading ? t('common.loading') : t('traffic.loadMore')}
           </button>
         )}
       </div>

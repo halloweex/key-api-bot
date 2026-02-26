@@ -1,4 +1,5 @@
 import { memo, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   ComposedChart,
   Bar,
@@ -44,9 +45,11 @@ interface ChartDataPoint {
 function CustomTooltip({
   active,
   payload,
+  t,
 }: {
   active?: boolean
   payload?: Array<{ payload: ChartDataPoint }>
+  t: (key: string) => string
 }) {
   if (!active || !payload?.length) return null
 
@@ -73,14 +76,14 @@ function CustomTooltip({
             borderRadius: '3px',
             background: PAID_COLOR,
           }} />
-          <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>Paid</span>
+          <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>{t('traffic.paid')}</span>
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{ fontWeight: 600, color: PAID_COLOR }}>
             {formatCurrency(data.paidRevenue)}
           </div>
           <div style={{ fontSize: '10px', color: CHART_THEME.muted }}>
-            {formatNumber(data.paidOrders)} orders
+            {formatNumber(data.paidOrders)} {t('common.orders')}
           </div>
         </div>
       </div>
@@ -99,14 +102,14 @@ function CustomTooltip({
             borderRadius: '3px',
             background: ORGANIC_COLOR,
           }} />
-          <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>Organic</span>
+          <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>{t('traffic.organic')}</span>
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{ fontWeight: 600, color: ORGANIC_COLOR }}>
             {formatCurrency(data.organicRevenue)}
           </div>
           <div style={{ fontSize: '10px', color: CHART_THEME.muted }}>
-            {formatNumber(data.organicOrders)} orders
+            {formatNumber(data.organicOrders)} {t('common.orders')}
           </div>
         </div>
       </div>
@@ -127,14 +130,14 @@ function CustomTooltip({
             borderRadius: '3px',
             background: OTHER_COLOR,
           }} />
-          <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>Other</span>
+          <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>{t('traffic.other')}</span>
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{ fontWeight: 600, color: OTHER_COLOR }}>
             {formatCurrency(data.otherRevenue)}
           </div>
           <div style={{ fontSize: '10px', color: CHART_THEME.muted }}>
-            {formatNumber(data.otherOrders)} orders
+            {formatNumber(data.otherOrders)} {t('common.orders')}
           </div>
         </div>
       </div>
@@ -150,7 +153,7 @@ function CustomTooltip({
         marginTop: '4px',
       }}>
         <span style={{ color: CHART_THEME.text, fontWeight: 500, fontSize: '12px' }}>
-          Total
+          {t('chart.total')}
         </span>
         <span style={{ fontWeight: 700, color: CHART_THEME.text }}>
           {formatCurrency(data.total)}
@@ -162,7 +165,7 @@ function CustomTooltip({
 
 // ─── Custom Legend ────────────────────────────────────────────────────────────
 
-function CustomLegend() {
+function CustomLegend({ t }: { t: (key: string) => string }) {
   return (
     <div style={{
       display: 'flex',
@@ -178,7 +181,7 @@ function CustomLegend() {
           borderRadius: '3px',
           background: PAID_COLOR,
         }} />
-        <span style={{ color: CHART_THEME.text, fontWeight: 500 }}>Paid</span>
+        <span style={{ color: CHART_THEME.text, fontWeight: 500 }}>{t('traffic.paid')}</span>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
         <div style={{
@@ -187,7 +190,7 @@ function CustomLegend() {
           borderRadius: '3px',
           background: ORGANIC_COLOR,
         }} />
-        <span style={{ color: CHART_THEME.text, fontWeight: 500 }}>Organic</span>
+        <span style={{ color: CHART_THEME.text, fontWeight: 500 }}>{t('traffic.organic')}</span>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
         <div style={{
@@ -196,7 +199,7 @@ function CustomLegend() {
           borderRadius: '3px',
           background: OTHER_COLOR,
         }} />
-        <span style={{ color: CHART_THEME.text, fontWeight: 500 }}>Other</span>
+        <span style={{ color: CHART_THEME.text, fontWeight: 500 }}>{t('traffic.other')}</span>
       </div>
     </div>
   )
@@ -205,6 +208,7 @@ function CustomLegend() {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export const TrafficTrendChart = memo(function TrafficTrendChart() {
+  const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useTrafficTrend()
 
   const chartData = useMemo(() => {
@@ -243,24 +247,24 @@ export const TrafficTrendChart = memo(function TrafficTrendChart() {
 
   return (
     <ChartContainer
-      title="Revenue Trend by Traffic Type"
+      title={t('traffic.revenueTrend')}
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
       isEmpty={isEmpty}
       height="xl"
-      ariaLabel="Stacked bar chart showing daily paid vs organic revenue"
+      ariaLabel={t('traffic.revenueTrendDesc')}
       action={
         !isLoading && totals.paid + totals.organic + totals.other > 0 ? (
           <div className="flex items-center gap-1.5 text-[10px] sm:text-xs flex-wrap">
             <span className="px-1.5 sm:px-2 py-0.5 sm:py-1 rounded-full bg-blue-50 text-blue-600 font-medium">
-              Paid: {formatCurrency(totals.paid)}
+              {t('traffic.paid')}: {formatCurrency(totals.paid)}
             </span>
             <span className="px-1.5 sm:px-2 py-0.5 sm:py-1 rounded-full bg-emerald-50 text-emerald-600 font-medium">
-              Organic: {formatCurrency(totals.organic)}
+              {t('traffic.organic')}: {formatCurrency(totals.organic)}
             </span>
             <span className="px-1.5 sm:px-2 py-0.5 sm:py-1 rounded-full bg-slate-100 text-slate-600 font-medium">
-              Other: {formatCurrency(totals.other)}
+              {t('traffic.other')}: {formatCurrency(totals.other)}
             </span>
           </div>
         ) : undefined
@@ -289,7 +293,7 @@ export const TrafficTrendChart = memo(function TrafficTrendChart() {
               <YAxis hide />
 
               <Tooltip
-                content={<CustomTooltip />}
+                content={<CustomTooltip t={t} />}
                 cursor={{ fill: 'rgba(0, 0, 0, 0.04)' }}
               />
 
@@ -324,7 +328,7 @@ export const TrafficTrendChart = memo(function TrafficTrendChart() {
           </ResponsiveContainer>
         </div>
 
-        <CustomLegend />
+        <CustomLegend t={t} />
       </div>
     </ChartContainer>
   )

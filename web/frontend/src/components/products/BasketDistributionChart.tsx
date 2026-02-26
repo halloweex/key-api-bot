@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   ResponsiveContainer, ComposedChart, Bar, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -8,14 +9,15 @@ import { formatCurrency, formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
 
 export const BasketDistributionChart = memo(function BasketDistributionChart() {
+  const { t } = useTranslation()
   const { data, isLoading } = useBasketDistribution()
 
   return (
     <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4">
       <div className="flex items-center gap-1.5 mb-3">
-        <h3 className="text-sm font-semibold text-slate-800">Basket Size Distribution</h3>
+        <h3 className="text-sm font-semibold text-slate-800">{t('products.basketDistTitle')}</h3>
         <InfoPopover>
-          <p className="text-xs text-slate-300">How many items customers buy per order and how it affects average order value.</p>
+          <p className="text-xs text-slate-300">{t('products.basketDistDesc')}</p>
         </InfoPopover>
       </div>
 
@@ -25,7 +27,7 @@ export const BasketDistributionChart = memo(function BasketDistributionChart() {
         </div>
       ) : !data?.length ? (
         <div className="h-[280px] flex items-center justify-center text-sm text-slate-400">
-          No data available
+          {t('chart.noData')}
         </div>
       ) : (
         <ResponsiveContainer width="100%" height={280}>
@@ -49,8 +51,8 @@ export const BasketDistributionChart = memo(function BasketDistributionChart() {
               contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
               formatter={(value, name) => {
                 const v = Number(value) || 0
-                if (name === 'Orders') return [formatNumber(v), 'Orders']
-                if (name === 'AOV') return [formatCurrency(v), 'AOV']
+                if (name === t('common.orders') || name === 'Orders') return [formatNumber(v), t('common.orders')]
+                if (name === t('products.aov') || name === 'AOV') return [formatCurrency(v), t('products.aov')]
                 return [String(v), String(name)]
               }}
             />
@@ -58,7 +60,7 @@ export const BasketDistributionChart = memo(function BasketDistributionChart() {
             <Bar
               yAxisId="left"
               dataKey="orders"
-              name="Orders"
+              name={t('common.orders')}
               fill="#8B5CF6"
               radius={[4, 4, 0, 0]}
               fillOpacity={0.8}
@@ -66,7 +68,7 @@ export const BasketDistributionChart = memo(function BasketDistributionChart() {
             <Line
               yAxisId="right"
               dataKey="aov"
-              name="AOV"
+              name={t('products.aov')}
               stroke="#F59E0B"
               strokeWidth={2}
               dot={{ fill: '#F59E0B', r: 4 }}

@@ -555,6 +555,9 @@ export const api = {
   getCurrentUser: (options?: FetchOptions) =>
     fetchApi<CurrentUserResponse>('/me', undefined, options),
 
+  updatePreferences: (body: { language: string }, options?: FetchOptions) =>
+    fetchApiMutationWithBody<{ language: string }>('/me/preferences', 'PATCH', body, options),
+
   // Admin User Management
   getAdminUsers: (
     status?: UserStatus,

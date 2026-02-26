@@ -1,4 +1,5 @@
 import { memo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { StatCard, StatCardSkeleton } from '../cards/StatCard'
 import { useTrafficAnalytics } from '../../hooks/useApi'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
@@ -7,50 +8,50 @@ import { formatCurrency, formatNumber } from '../../utils/formatters'
 
 const TRAFFIC_DESCRIPTIONS = [
   {
-    label: 'Paid Ads',
+    labelKey: 'traffic.paidAds',
     color: 'bg-blue-500',
-    description: 'Paid advertising orders (confirmed + likely).',
-    details: [
-      'Confirmed: explicit UTM (fbads, source=facebook/tiktok + medium=paid/cpc, Google CPC)',
-      'Likely: _fbc cookie or fbclid present but no explicit UTM (previous ad click, 90-day cookie)',
+    descriptionKey: 'traffic.paidAdsDesc',
+    detailKeys: [
+      'traffic.paidConfirmedDesc',
+      'traffic.paidLikelyDesc',
     ],
   },
   {
-    label: 'Organic',
+    labelKey: 'traffic.organic',
     color: 'bg-green-500',
-    description: 'Free traffic without paid advertising.',
-    details: [
-      'Social media: Instagram, Facebook, TikTok (utm_medium=social/organic)',
-      'Email: Klaviyo, Rivo loyalty (utm_source=klaviyo/email/rivo)',
-      'Google Shopping: utm_medium=product_sync (free listings)',
-      'Instagram/Telegram: manager-created orders (source_id 1, 2)',
+    descriptionKey: 'traffic.organicDesc',
+    detailKeys: [
+      'traffic.organicSocialDesc',
+      'traffic.organicEmailDesc',
+      'traffic.organicShoppingDesc',
+      'traffic.organicManagerDesc',
     ],
   },
   {
-    label: 'Sales Manager',
+    labelKey: 'traffic.salesManager',
     color: 'bg-cyan-500',
-    description: 'Orders driven by sales managers.',
-    details: [
-      'Campaign starts with "sales_manager_" — human-driven sale',
+    descriptionKey: 'traffic.salesManagerDesc',
+    detailKeys: [
+      'traffic.salesManagerCampaign',
     ],
   },
   {
-    label: 'Pixel Only',
+    labelKey: 'traffic.pixelOnly',
     color: 'bg-orange-500',
-    description: 'Has tracking pixel but missing UTM parameters.',
-    details: [
-      'Facebook pixel (_fbp) or TikTok pixel (ttp) detected but no UTM',
-      'Likely from ads, but cannot confirm — user may have returned directly',
+    descriptionKey: 'traffic.pixelOnlyDesc',
+    detailKeys: [
+      'traffic.pixelOnlyDetail',
+      'traffic.pixelOnlyNote',
     ],
   },
   {
-    label: 'Unknown',
+    labelKey: 'traffic.unknown',
     color: 'bg-purple-500',
-    description: 'No tracking data available.',
-    details: [
-      'Direct traffic: customer typed URL or used bookmark',
-      'Untracked links: shared without UTM parameters',
-      'Privacy tools: tracking blocked by browser/extensions',
+    descriptionKey: 'traffic.unknownDesc',
+    detailKeys: [
+      'traffic.unknownDirectDesc',
+      'traffic.unknownUntrackedDesc',
+      'traffic.unknownPrivacyDesc',
     ],
   },
 ]
@@ -96,6 +97,7 @@ const InfoIcon = () => (
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
+  const { t } = useTranslation()
   const { data, isLoading } = useTrafficAnalytics()
   const [showLegend, setShowLegend] = useState(false)
   const [showPaidBreakdown, setShowPaidBreakdown] = useState(false)
@@ -118,7 +120,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
     <div className="space-y-3">
       {/* Header with info button */}
       <div className="flex items-center justify-between">
-        <h2 className="text-base font-semibold text-slate-800 tracking-tight">Traffic Attribution</h2>
+        <h2 className="text-base font-semibold text-slate-800 tracking-tight">{t('traffic.attribution')}</h2>
         <button
           onClick={() => setShowLegend(!showLegend)}
           className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg transition-colors ${
@@ -128,7 +130,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
           }`}
         >
           <InfoIcon />
-          <span>{showLegend ? 'Hide' : 'What is this?'}</span>
+          <span>{showLegend ? t('traffic.hide') : t('traffic.whatIsThis')}</span>
         </button>
       </div>
 
@@ -137,14 +139,14 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 animate-fade-in">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             {TRAFFIC_DESCRIPTIONS.map((item) => (
-              <div key={item.label} className="flex gap-3">
+              <div key={item.labelKey} className="flex gap-3">
                 <div className={`w-3 h-3 rounded-sm ${item.color} mt-1.5 flex-shrink-0`} />
                 <div className="space-y-1">
-                  <p className="text-sm font-semibold text-slate-700">{item.label}</p>
-                  <p className="text-xs text-slate-600">{item.description}</p>
+                  <p className="text-sm font-semibold text-slate-700">{t(item.labelKey)}</p>
+                  <p className="text-xs text-slate-600">{t(item.descriptionKey)}</p>
                   <ul className="text-xs text-slate-500 space-y-0.5 list-disc list-inside">
-                    {item.details.map((detail, i) => (
-                      <li key={i}>{detail}</li>
+                    {item.detailKeys.map((detailKey, i) => (
+                      <li key={i}>{t(detailKey)}</li>
                     ))}
                   </ul>
                 </div>
@@ -157,51 +159,51 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
       {/* Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
       <StatCard
-        label="Paid Ads"
+        label={t('traffic.paidAds')}
         value={summary?.paid?.revenue ?? 0}
         formatter={formatCurrency}
         icon={<AdsIcon />}
         variant="blue"
-        subtitle={`${formatNumber(summary?.paid?.orders ?? 0)} orders`}
-        ariaLabel={`Paid ads revenue: ${formatCurrency(summary?.paid?.revenue ?? 0)}`}
+        subtitle={`${formatNumber(summary?.paid?.orders ?? 0)} ${t('common.orders')}`}
+        ariaLabel={`${t('traffic.paidAds')}: ${formatCurrency(summary?.paid?.revenue ?? 0)}`}
         clickable={!showPaidBreakdown}
         onClick={() => setShowPaidBreakdown(!showPaidBreakdown)}
       />
       <StatCard
-        label="Organic"
+        label={t('traffic.organic')}
         value={summary?.organic?.revenue ?? 0}
         formatter={formatCurrency}
         icon={<LeafIcon />}
         variant="green"
-        subtitle={`${formatNumber(summary?.organic?.orders ?? 0)} orders`}
-        ariaLabel={`Organic revenue: ${formatCurrency(summary?.organic?.revenue ?? 0)}`}
+        subtitle={`${formatNumber(summary?.organic?.orders ?? 0)} ${t('common.orders')}`}
+        ariaLabel={`${t('traffic.organic')}: ${formatCurrency(summary?.organic?.revenue ?? 0)}`}
       />
       <StatCard
-        label="Sales Manager"
+        label={t('traffic.salesManager')}
         value={summary?.manager?.revenue ?? 0}
         formatter={formatCurrency}
         icon={<ManagerIcon />}
         variant="cyan"
-        subtitle={`${formatNumber(summary?.manager?.orders ?? 0)} orders`}
-        ariaLabel={`Sales manager revenue: ${formatCurrency(summary?.manager?.revenue ?? 0)}`}
+        subtitle={`${formatNumber(summary?.manager?.orders ?? 0)} ${t('common.orders')}`}
+        ariaLabel={`${t('traffic.salesManager')}: ${formatCurrency(summary?.manager?.revenue ?? 0)}`}
       />
       <StatCard
-        label="Pixel Only"
+        label={t('traffic.pixelOnly')}
         value={summary?.pixel_only?.revenue ?? 0}
         formatter={formatCurrency}
         icon={<PixelIcon />}
         variant="orange"
-        subtitle={`${formatNumber(summary?.pixel_only?.orders ?? 0)} orders`}
-        ariaLabel={`Pixel only revenue: ${formatCurrency(summary?.pixel_only?.revenue ?? 0)}`}
+        subtitle={`${formatNumber(summary?.pixel_only?.orders ?? 0)} ${t('common.orders')}`}
+        ariaLabel={`${t('traffic.pixelOnly')}: ${formatCurrency(summary?.pixel_only?.revenue ?? 0)}`}
       />
       <StatCard
-        label="Unknown"
+        label={t('traffic.unknown')}
         value={summary?.unknown?.revenue ?? 0}
         formatter={formatCurrency}
         icon={<QuestionIcon />}
         variant="purple"
-        subtitle={`${formatNumber(summary?.unknown?.orders ?? 0)} orders`}
-        ariaLabel={`Unknown source revenue: ${formatCurrency(summary?.unknown?.revenue ?? 0)}`}
+        subtitle={`${formatNumber(summary?.unknown?.orders ?? 0)} ${t('common.orders')}`}
+        ariaLabel={`${t('traffic.unknown')}: ${formatCurrency(summary?.unknown?.revenue ?? 0)}`}
       />
       </div>
 
@@ -209,34 +211,34 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
       {showPaidBreakdown && (
         <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 animate-fade-in">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-blue-800">Paid Ads Breakdown</h3>
+            <h3 className="text-sm font-semibold text-blue-800">{t('traffic.paidAdsBreakdown')}</h3>
             <button
               onClick={() => setShowPaidBreakdown(false)}
               className="text-blue-400 hover:text-blue-600 text-xs"
             >
-              Close
+              {t('traffic.close')}
             </button>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-white rounded-lg p-3 border border-blue-100">
-              <p className="text-xs text-slate-500 mb-1">Confirmed</p>
+              <p className="text-xs text-slate-500 mb-1">{t('traffic.confirmed')}</p>
               <p className="text-lg font-bold text-blue-700">
                 {formatCurrency(summary?.paid_confirmed?.revenue ?? 0)}
               </p>
               <p className="text-xs text-slate-500">
-                {formatNumber(summary?.paid_confirmed?.orders ?? 0)} orders
+                {formatNumber(summary?.paid_confirmed?.orders ?? 0)} {t('common.orders')}
               </p>
-              <p className="text-xs text-blue-400 mt-1">Explicit UTM (fbads, cpc, paid)</p>
+              <p className="text-xs text-blue-400 mt-1">{t('traffic.confirmedDesc')}</p>
             </div>
             <div className="bg-white rounded-lg p-3 border border-blue-100">
-              <p className="text-xs text-slate-500 mb-1">Likely</p>
+              <p className="text-xs text-slate-500 mb-1">{t('traffic.likely')}</p>
               <p className="text-lg font-bold text-blue-500">
                 {formatCurrency(summary?.paid_likely?.revenue ?? 0)}
               </p>
               <p className="text-xs text-slate-500">
-                {formatNumber(summary?.paid_likely?.orders ?? 0)} orders
+                {formatNumber(summary?.paid_likely?.orders ?? 0)} {t('common.orders')}
               </p>
-              <p className="text-xs text-blue-400 mt-1">Cookie/fbclid only (no UTM)</p>
+              <p className="text-xs text-blue-400 mt-1">{t('traffic.likelyDesc')}</p>
             </div>
           </div>
         </div>

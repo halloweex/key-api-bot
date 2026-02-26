@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   PieChart,
   Pie,
@@ -19,17 +20,18 @@ import { formatCurrency } from '../../utils/formatters'
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const RevenueBySourceChart = memo(function RevenueBySourceChart() {
+  const { t } = useTranslation()
   const { chartData, totalRevenue, isEmpty, isLoading, error, refetch } = useSourceChartData()
 
   return (
     <ChartContainer
-      title="Revenue by Source"
+      title={t('chart.revenueBySource')}
       isLoading={isLoading}
       error={error}
       onRetry={refetch}
       isEmpty={isEmpty}
       height="md"
-      ariaLabel="Pie chart showing revenue distribution by source"
+      ariaLabel={t('chart.revenueBySourceDesc')}
     >
       <div style={{ height: CHART_DIMENSIONS.height.md }}>
         <ResponsiveContainer width="100%" height="100%">
@@ -61,7 +63,7 @@ export const RevenueBySourceChart = memo(function RevenueBySourceChart() {
       {/* Summary */}
       <div className="mt-4 pt-4 border-t border-slate-200">
         <div className="flex justify-between items-center">
-          <span className="text-slate-500 text-sm">Total Revenue</span>
+          <span className="text-slate-500 text-sm">{t('chart.totalRevenue')}</span>
           <span className="text-slate-900 font-semibold">{formatCurrency(totalRevenue)}</span>
         </div>
       </div>

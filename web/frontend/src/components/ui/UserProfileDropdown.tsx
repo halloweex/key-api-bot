@@ -1,8 +1,16 @@
 /**
- * User profile dropdown with avatar, name, role badge, and logout.
+ * User profile dropdown with avatar, name, role badge, language selector, and logout.
  */
 import { useState, useRef, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useAuth, useUserDisplayName } from '../../hooks/useAuth'
+import { api } from '../../api/client'
+import {
+  SUPPORTED_LANGUAGES,
+  LANGUAGE_LABELS,
+  LANGUAGE_FLAGS,
+  type SupportedLanguage,
+} from '../../lib/i18n'
 import type { UserRole } from '../../types/api'
 
 // Role badge colors
@@ -12,18 +20,15 @@ const roleBadgeStyles: Record<UserRole, string> = {
   viewer: 'bg-slate-100 text-slate-600',
 }
 
-const roleLabels: Record<UserRole, string> = {
-  admin: 'Admin',
-  editor: 'Editor',
-  viewer: 'Viewer',
-}
-
 export function UserProfileDropdown() {
+  const { t, i18n } = useTranslation()
   const { user, isAuthenticated, isLoading } = useAuth()
   const displayName = useUserDisplayName()
   const [isOpen, setIsOpen] = useState(false)
   const [imageError, setImageError] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
+
+  const currentLang = i18n.language as SupportedLanguage
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -53,6 +58,19 @@ export function UserProfileDropdown() {
     }
   }, [isOpen])
 
+  const handleLanguageChange = (lang: SupportedLanguage) => {
+    i18n.changeLanguage(lang)
+    // Fire-and-forget server sync
+    api.updatePreferences({ language: lang }).catch(() => {})
+  }
+
+  // Cycle to next language
+  const cycleLanguage = () => {
+    const idx = SUPPORTED_LANGUAGES.indexOf(currentLang)
+    const next = SUPPORTED_LANGUAGES[(idx + 1) % SUPPORTED_LANGUAGES.length]
+    handleLanguageChange(next)
+  }
+
   // Loading state
   if (isLoading) {
     return (
@@ -70,7 +88,7 @@ export function UserProfileDropdown() {
         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
         </svg>
-        <span className="hidden sm:inline">Login</span>
+        <span className="hidden sm:inline">{t('profile.login')}</span>
       </a>
     )
   }
@@ -89,6 +107,8 @@ export function UserProfileDropdown() {
     return user.first_name?.charAt(0).toUpperCase() || user.username?.charAt(0).toUpperCase() || '??'
   }
   const initials = getInitials()
+
+  const roleKey = `profile.${user.role}` as const
 
   return (
     <div ref={dropdownRef} className="relative">
@@ -160,9 +180,27 @@ export function UserProfileDropdown() {
             {/* Role badge */}
             <div className="mt-2">
               <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${roleBadgeStyles[user.role]}`}>
-                {roleLabels[user.role]}
+                {t(roleKey)}
               </span>
             </div>
+          </div>
+
+          {/* Language selector */}
+          <div className="py-1 border-b border-slate-100">
+            <button
+              onClick={cycleLanguage}
+              className="flex items-center justify-between w-full px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129" />
+                </svg>
+                <span>{t('profile.language')}</span>
+              </div>
+              <span className="text-xs text-slate-500">
+                {LANGUAGE_FLAGS[currentLang]} {LANGUAGE_LABELS[currentLang]}
+              </span>
+            </button>
           </div>
 
           {/* Menu items */}
@@ -178,7 +216,7 @@ export function UserProfileDropdown() {
                   <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
                   </svg>
-                  Manage Users
+                  {t('profile.manageUsers')}
                 </a>
                 <a
                   href="/v2/admin/permissions"
@@ -188,7 +226,7 @@ export function UserProfileDropdown() {
                   <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                   </svg>
-                  Permissions
+                  {t('profile.permissions')}
                 </a>
               </>
             )}
@@ -202,7 +240,7 @@ export function UserProfileDropdown() {
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
               </svg>
-              Logout
+              {t('profile.logout')}
             </a>
           </div>
         </div>

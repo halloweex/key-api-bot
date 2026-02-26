@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   ResponsiveContainer, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip,
@@ -8,6 +9,7 @@ import { formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
 
 export const CategoryCombosChart = memo(function CategoryCombosChart() {
+  const { t } = useTranslation()
   const { data, isLoading } = useCategoryCombos()
 
   const chartData = data?.map((d) => ({
@@ -18,9 +20,9 @@ export const CategoryCombosChart = memo(function CategoryCombosChart() {
   return (
     <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4">
       <div className="flex items-center gap-1.5 mb-3">
-        <h3 className="text-sm font-semibold text-slate-800">Category Combinations</h3>
+        <h3 className="text-sm font-semibold text-slate-800">{t('products.catCombosTitle')}</h3>
         <InfoPopover>
-          <p className="text-xs text-slate-300">Most common category pairs appearing in the same order.</p>
+          <p className="text-xs text-slate-300">{t('products.catCombosDesc')}</p>
         </InfoPopover>
       </div>
 
@@ -30,7 +32,7 @@ export const CategoryCombosChart = memo(function CategoryCombosChart() {
         </div>
       ) : !chartData.length ? (
         <div className="h-[280px] flex items-center justify-center text-sm text-slate-400">
-          No data available
+          {t('chart.noData')}
         </div>
       ) : (
         <ResponsiveContainer width="100%" height={280}>
@@ -46,7 +48,7 @@ export const CategoryCombosChart = memo(function CategoryCombosChart() {
             />
             <Tooltip
               contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
-              formatter={(value) => [formatNumber(Number(value) || 0), 'Orders']}
+              formatter={(value) => [formatNumber(Number(value) || 0), t('common.orders')]}
             />
             <Bar dataKey="value" fill="#7C3AED" radius={[0, 4, 4, 0]} fillOpacity={0.8} />
           </BarChart>

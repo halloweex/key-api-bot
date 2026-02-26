@@ -1,4 +1,5 @@
 import { memo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
 import { useInventoryAnalysis, useStockActions } from '../../hooks'
 import { formatNumber, formatCurrency } from '../../utils/formatters'
@@ -6,45 +7,46 @@ import { formatNumber, formatCurrency } from '../../utils/formatters'
 // ─── Component ───────────────────────────────────────────────────────────────
 
 function DeadStockChartComponent() {
+  const { t } = useTranslation()
   const { data, isLoading, error } = useInventoryAnalysis()
   const { data: actions } = useStockActions()
   const [activeTab, setActiveTab] = useState<'summary' | 'aging' | 'items' | 'actions'>('summary')
 
   return (
     <ChartContainer
-      title="Inventory Health"
+      title={t('inventory.health')}
       isLoading={isLoading}
       error={error}
       className="col-span-1"
-      ariaLabel="Inventory health analysis"
+      ariaLabel={t('inventory.healthDesc')}
     >
       {data && (
         <div className="space-y-4 min-h-[420px]">
           {/* Summary Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <StatCard
-              label="Healthy"
+              label={t('inventory.healthy')}
               value={data.summary.healthy.skuCount}
               subValue={`${data.summary.healthy.valuePercent}%`}
               color="text-emerald-600"
               bgColor="bg-emerald-50"
             />
             <StatCard
-              label="At Risk"
+              label={t('inventory.atRisk')}
               value={data.summary.atRisk.skuCount}
               subValue={`${data.summary.atRisk.valuePercent}%`}
               color="text-amber-600"
               bgColor="bg-amber-50"
             />
             <StatCard
-              label="Dead Stock"
+              label={t('inventory.deadStock')}
               value={data.summary.deadStock.skuCount}
               subValue={`${data.summary.deadStock.valuePercent}%`}
               color="text-red-600"
               bgColor="bg-red-50"
             />
             <StatCard
-              label="Never Sold"
+              label={t('inventory.neverSold')}
               value={data.summary.neverSold.skuCount}
               subValue={`${data.summary.neverSold.valuePercent}%`}
               color="text-slate-600"
@@ -58,29 +60,29 @@ function DeadStockChartComponent() {
               <div className="text-xl font-bold text-red-700">
                 {formatCurrency(data.summary.deadStock.value + data.summary.neverSold.value)}
               </div>
-              <div className="text-xs text-slate-600 font-medium">Dead Stock Value</div>
+              <div className="text-xs text-slate-600 font-medium">{t('inventory.deadStockValue')}</div>
             </div>
             <div className="text-center py-2 bg-amber-50 rounded-lg">
               <div className="text-xl font-bold text-amber-700">
                 {formatCurrency(data.summary.atRisk.value)}
               </div>
-              <div className="text-xs text-slate-600 font-medium">At Risk Value</div>
+              <div className="text-xs text-slate-600 font-medium">{t('inventory.atRiskValue')}</div>
             </div>
           </div>
 
           {/* Tabs */}
           <div className="flex gap-1 border-b border-slate-200 overflow-x-auto">
             <TabButton active={activeTab === 'summary'} onClick={() => setActiveTab('summary')}>
-              Summary
+              {t('inventory.summaryTab')}
             </TabButton>
             <TabButton active={activeTab === 'aging'} onClick={() => setActiveTab('aging')}>
-              Aging
+              {t('inventory.agingTab')}
             </TabButton>
             <TabButton active={activeTab === 'items'} onClick={() => setActiveTab('items')}>
-              Items ({data.items.length})
+              {t('inventory.itemsTab')} ({data.items.length})
             </TabButton>
             <TabButton active={activeTab === 'actions'} onClick={() => setActiveTab('actions')}>
-              Actions
+              {t('inventory.actionsTab')}
             </TabButton>
           </div>
 
@@ -143,6 +145,7 @@ interface SummaryTabProps {
 }
 
 function SummaryTab({ data }: SummaryTabProps) {
+  const { t } = useTranslation()
   const total = data.summary.total
   const deadAndNever = data.summary.deadStock.value + data.summary.neverSold.value
   const deadPercent = total.value > 0 ? (deadAndNever / total.value * 100) : 0
@@ -152,8 +155,8 @@ function SummaryTab({ data }: SummaryTabProps) {
       {/* Progress Bar */}
       <div>
         <div className="flex justify-between text-xs text-slate-500 mb-1">
-          <span>Inventory Health</span>
-          <span>{data.summary.healthy.valuePercent}% healthy</span>
+          <span>{t('inventory.health')}</span>
+          <span>{data.summary.healthy.valuePercent}% {t('inventory.pctHealthy')}</span>
         </div>
         <div className="h-3 bg-slate-100 rounded-full overflow-hidden flex">
           <div
@@ -176,19 +179,19 @@ function SummaryTab({ data }: SummaryTabProps) {
         <div className="flex gap-3 mt-2 text-xs flex-wrap">
           <span className="flex items-center gap-1">
             <span className="w-2 h-2 bg-emerald-500 rounded-full"></span>
-            Healthy
+            {t('inventory.healthy')}
           </span>
           <span className="flex items-center gap-1">
             <span className="w-2 h-2 bg-amber-500 rounded-full"></span>
-            At Risk
+            {t('inventory.atRisk')}
           </span>
           <span className="flex items-center gap-1">
             <span className="w-2 h-2 bg-red-500 rounded-full"></span>
-            Dead
+            {t('inventory.deadStock')}
           </span>
           <span className="flex items-center gap-1">
             <span className="w-2 h-2 bg-slate-400 rounded-full"></span>
-            Never Sold
+            {t('inventory.neverSold')}
           </span>
         </div>
       </div>
@@ -196,19 +199,19 @@ function SummaryTab({ data }: SummaryTabProps) {
       {/* Details Grid */}
       <div className="grid grid-cols-2 gap-2 text-sm">
         <div className="bg-slate-50 rounded p-2">
-          <div className="text-slate-500 text-xs">Total SKUs</div>
+          <div className="text-slate-500 text-xs">{t('inventory.totalSkus')}</div>
           <div className="font-medium">{formatNumber(total.skuCount)}</div>
         </div>
         <div className="bg-slate-50 rounded p-2">
-          <div className="text-slate-500 text-xs">Total Units</div>
+          <div className="text-slate-500 text-xs">{t('inventory.totalUnits')}</div>
           <div className="font-medium">{formatNumber(total.quantity)}</div>
         </div>
         <div className="bg-slate-50 rounded p-2">
-          <div className="text-slate-500 text-xs">Total Value</div>
+          <div className="text-slate-500 text-xs">{t('inventory.totalValue')}</div>
           <div className="font-medium">{formatCurrency(total.value)}</div>
         </div>
         <div className="bg-red-50 rounded p-2">
-          <div className="text-slate-500 text-xs">Dead Stock %</div>
+          <div className="text-slate-500 text-xs">{t('inventory.deadStockPct')}</div>
           <div className="font-medium text-red-600">{deadPercent.toFixed(1)}%</div>
         </div>
       </div>
@@ -216,7 +219,7 @@ function SummaryTab({ data }: SummaryTabProps) {
       {/* Category Thresholds */}
       {data.categoryThresholds.length > 0 && (
         <div>
-          <h4 className="text-sm font-semibold text-slate-700 mb-2">Category Thresholds</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-2">{t('inventory.categoryThresholds')}</h4>
           <div className="space-y-1 max-h-32 overflow-y-auto">
             {data.categoryThresholds.slice(0, 8).map((cat) => (
               <div
@@ -303,10 +306,12 @@ interface ItemsTabProps {
 }
 
 function ItemsTab({ items }: ItemsTabProps) {
+  const { t } = useTranslation()
+
   if (items.length === 0) {
     return (
       <div className="text-center text-slate-500 py-8">
-        No dead stock or at-risk items found
+        {t('inventory.noDeadStock')}
       </div>
     )
   }
@@ -331,12 +336,12 @@ function ItemsTab({ items }: ItemsTabProps) {
             <div className="text-xs text-slate-500 flex flex-wrap gap-x-2">
               {item.brand && <span className="font-medium">{item.brand}</span>}
               {item.brand && <span>·</span>}
-              <span>{item.categoryName || 'Uncategorized'}</span>
+              <span>{item.categoryName || t('inventory.uncategorized')}</span>
               <span>·</span>
               <span>
                 {item.daysSinceSale !== null
-                  ? `${item.daysSinceSale}d ago`
-                  : 'Never sold'}
+                  ? `${item.daysSinceSale}${t('inventory.daysAgo')}`
+                  : t('inventory.neverSoldLabel')}
               </span>
             </div>
           </div>
@@ -365,10 +370,12 @@ interface ActionsTabProps {
 }
 
 function ActionsTab({ actions }: ActionsTabProps) {
+  const { t } = useTranslation()
+
   if (!actions || actions.length === 0) {
     return (
       <div className="text-center text-slate-500 py-8">
-        No recommended actions
+        {t('inventory.noActions')}
       </div>
     )
   }

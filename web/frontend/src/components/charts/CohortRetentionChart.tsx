@@ -1,4 +1,5 @@
 import { memo, useState, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
 import {
   useCohortRetention,
@@ -26,11 +27,11 @@ interface Tab {
 }
 
 const TABS: Tab[] = [
-  { id: 'retention', label: 'Customer Retention', shortLabel: 'Retention' },
-  { id: 'revenue', label: 'Revenue Retention', shortLabel: 'Revenue' },
-  { id: 'timing', label: 'Purchase Timing', shortLabel: 'Timing' },
-  { id: 'ltv', label: 'Lifetime Value', shortLabel: 'LTV' },
-  { id: 'at-risk', label: 'At-Risk Customers', shortLabel: 'At-Risk' },
+  { id: 'retention', label: 'retention.customerRetention', shortLabel: 'retention.tabRetention' },
+  { id: 'revenue', label: 'retention.revenueRetention', shortLabel: 'retention.tabRevenue' },
+  { id: 'timing', label: 'retention.purchaseTiming', shortLabel: 'retention.tabTiming' },
+  { id: 'ltv', label: 'retention.lifetimeValue', shortLabel: 'retention.tabLTV' },
+  { id: 'at-risk', label: 'retention.atRiskCustomers', shortLabel: 'retention.tabAtRisk' },
 ]
 
 // ─── Summary Card ────────────────────────────────────────────────────────────
@@ -81,6 +82,7 @@ interface TabButtonProps {
 }
 
 const TabButton = memo(function TabButton({ tab, isActive, onClick }: TabButtonProps) {
+  const { t } = useTranslation()
   return (
     <button
       onClick={onClick}
@@ -92,8 +94,8 @@ const TabButton = memo(function TabButton({ tab, isActive, onClick }: TabButtonP
         }
       `}
     >
-      <span className="hidden sm:inline">{tab.label}</span>
-      <span className="sm:hidden">{tab.shortLabel}</span>
+      <span className="hidden sm:inline">{t(tab.label)}</span>
+      <span className="sm:hidden">{t(tab.shortLabel)}</span>
     </button>
   )
 })
@@ -101,6 +103,7 @@ const TabButton = memo(function TabButton({ tab, isActive, onClick }: TabButtonP
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const CohortRetentionChart = memo(function CohortRetentionChart() {
+  const { t } = useTranslation()
   const [activeTab, setActiveTab] = useState<TabId>('retention')
   const [monthsBack] = useState(12)
   const [retentionMonths] = useState(6)
@@ -143,34 +146,34 @@ export const CohortRetentionChart = memo(function CohortRetentionChart() {
       return (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
           <SummaryCard
-            label="Total Cohorts"
+            label={t('retention.totalCohorts')}
             value={formatNumber(data.summary.totalCohorts)}
-            subtitle={`Last ${monthsBack} months`}
+            subtitle={t('retention.lastMonths', { count: monthsBack })}
           />
           <SummaryCard
-            label="Total Customers"
+            label={t('customer.totalCustomers')}
             value={formatNumber(data.summary.totalCustomers)}
-            subtitle="In analyzed cohorts"
+            subtitle={t('retention.inAnalyzedCohorts')}
           />
           <SummaryCard
-            label={`Avg M1 ${activeTab === 'revenue' ? 'Rev' : ''} Retention`}
+            label={activeTab === 'revenue' ? t('retention.avgM1RevRetention') : `Avg M1 Retention`}
             value={avgRetention?.[1] ? formatPercent(avgRetention[1]) : '-'}
-            subtitle="Return in 2nd month"
+            subtitle={t('retention.returnIn2ndMonth')}
             variant="emerald"
           />
           {activeTab === 'revenue' && data.summary.totalRevenue && (
             <SummaryCard
-              label="Total Revenue"
+              label={t('chart.totalRevenue')}
               value={formatCurrency(data.summary.totalRevenue)}
-              subtitle="M0 revenue"
+              subtitle={t('retention.m0Revenue')}
               variant="blue"
             />
           )}
           {activeTab === 'retention' && (
             <SummaryCard
-              label="Avg M3 Retention"
+              label={t('retention.avgM3Retention')}
               value={avgRetention?.[3] ? formatPercent(avgRetention[3]) : '-'}
-              subtitle="Return in 4th month"
+              subtitle={t('retention.returnIn4thMonth')}
             />
           )}
         </div>
@@ -231,15 +234,15 @@ export const CohortRetentionChart = memo(function CohortRetentionChart() {
   const getInfoText = () => {
     switch (activeTab) {
       case 'retention':
-        return 'Each row is a cohort of customers who made their first purchase in that month. The percentages show what % returned to purchase again in subsequent months.'
+        return t('retention.retentionExplain')
       case 'revenue':
-        return 'Shows revenue retention: what % of original cohort revenue is generated in each subsequent month. Useful for understanding revenue sustainability.'
+        return t('retention.revenueExplain')
       case 'timing':
-        return 'Analyzes how long it takes customers to make their second purchase. Helps optimize re-engagement timing and email automation triggers.'
+        return t('retention.timingExplain')
       case 'ltv':
-        return 'Tracks cumulative lifetime value per customer for each cohort over time. Compare cohorts to identify which acquisition periods brought valuable customers.'
+        return t('retention.ltvExplain')
       case 'at-risk':
-        return 'Identifies customers who haven\'t purchased in 90+ days, grouped by their acquisition cohort. Focus on high-value at-risk customers for win-back campaigns.'
+        return t('retention.atRiskExplain')
       default:
         return ''
     }
@@ -247,7 +250,7 @@ export const CohortRetentionChart = memo(function CohortRetentionChart() {
 
   return (
     <ChartContainer
-      title="Cohort Analysis"
+      title={t('retention.title')}
       isLoading={activeQuery.isLoading}
       error={activeQuery.error as Error | null}
       onRetry={activeQuery.refetch}
@@ -270,7 +273,7 @@ export const CohortRetentionChart = memo(function CohortRetentionChart() {
       {/* Info Banner */}
       <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
         <p className="text-sm text-blue-800">
-          <strong>How to read:</strong> {getInfoText()}
+          <strong>{t('retention.howToRead')}</strong> {getInfoText()}
         </p>
       </div>
 

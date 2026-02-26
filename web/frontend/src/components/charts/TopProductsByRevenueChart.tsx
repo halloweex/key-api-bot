@@ -1,4 +1,5 @@
 import { useMemo, memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   BarChart,
   Bar,
@@ -66,6 +67,7 @@ const CustomYAxisTick = ({ x, y, payload, tickData }: CustomTickProps) => {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const TopProductsByRevenueChart = memo(function TopProductsByRevenueChart() {
+  const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useProductPerformance()
 
   const chartData = useMemo<ChartDataPoint[]>(() => {
@@ -93,13 +95,13 @@ export const TopProductsByRevenueChart = memo(function TopProductsByRevenueChart
 
   return (
     <ChartContainer
-      title="Top 10 Products by Revenue"
+      title={t('chart.topProductsRevenue')}
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
       isEmpty={isEmpty}
       height="xxl"
-      ariaLabel="Horizontal bar chart showing top 10 products by revenue"
+      ariaLabel={t('chart.topProductsRevenueDesc')}
     >
       <div className="h-[380px] sm:h-[400px] lg:h-[420px]">
         <ResponsiveContainer width="100%" height="100%">
@@ -123,8 +125,8 @@ export const TopProductsByRevenueChart = memo(function TopProductsByRevenueChart
               formatter={(value, _name, props) => {
                 const quantity = (props.payload as ChartDataPoint)?.quantity ?? 0
                 return [
-                  `${formatCurrency(Number(value) || 0)} (${formatNumber(quantity)} sold)`,
-                  'Rev',
+                  `${formatCurrency(Number(value) || 0)} (${formatNumber(quantity)} ${t('chart.sold')})`,
+                  t('chart.rev'),
                 ]
               }}
               labelFormatter={(_label, payload) => {
