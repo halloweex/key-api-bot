@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.11
+
+- Sidebar UX: push content with smart formula, collapsed nav icons, language accordion
+
+
 ## 3.0.10
 
 - Restyle language selector as vertical dropdown list with checkmark
