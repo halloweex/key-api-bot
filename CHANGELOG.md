@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.10
+
+- Restyle language selector as vertical dropdown list with checkmark
+
+
 ## 3.0.9
 
 - Change language selector from cycle to dropdown with all options
