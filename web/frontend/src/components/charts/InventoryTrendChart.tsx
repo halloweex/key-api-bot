@@ -1,5 +1,6 @@
 import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { InfoPopover } from '../ui/InfoPopover'
 import {
   ComposedChart,
   Line,
@@ -35,6 +36,25 @@ function InventoryTrendChartComponent() {
   return (
     <ChartContainer
       title={t('inventory.trendLabel')}
+      titleExtra={
+        <InfoPopover title={t('inventory.trendLabel')}>
+          <div className="space-y-2">
+            <p className="text-xs text-slate-300">{t('inventory.trendInfo1')}</p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-indigo-400">{t('inventory.stockValue')}:</strong> {t('inventory.trendInfo2')}
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-emerald-400">{t('chart.quantity')}:</strong> {t('inventory.trendInfo3')}
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-slate-400">{t('inventory.trendInfo4')}</strong>
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-blue-400">{t('inventory.monthly')}:</strong> {t('inventory.trendInfo5')}
+            </p>
+          </div>
+        </InfoPopover>
+      }
       isLoading={isLoading}
       error={error}
       className="col-span-1"
@@ -131,7 +151,7 @@ function InventoryTrendChartComponent() {
                     axisLine={false}
                   />
                   <Tooltip
-                    content={<CustomTooltip />}
+                    content={<CustomTooltip t={t} />}
                     cursor={{ fill: 'rgba(0, 0, 0, 0.05)' }}
                   />
                   <Legend
@@ -255,9 +275,10 @@ interface CustomTooltipProps {
   active?: boolean
   payload?: TooltipPayload[]
   label?: string
+  t: (key: string) => string
 }
 
-function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
+function CustomTooltip({ active, payload, label, t }: CustomTooltipProps) {
   if (!active || !payload || !payload.length) return null
 
   const data = payload[0]?.payload
@@ -268,20 +289,20 @@ function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
       <div className="font-medium text-slate-700 mb-2">{label}</div>
       <div className="space-y-1">
         <div className="flex justify-between gap-4">
-          <span className="text-slate-500">Stock Value:</span>
+          <span className="text-slate-500">{t('inventory.stockValue')}:</span>
           <span className="font-medium text-indigo-600">{formatCurrency(data.value)}</span>
         </div>
         <div className="flex justify-between gap-4">
-          <span className="text-slate-500">Quantity:</span>
+          <span className="text-slate-500">{t('chart.quantity')}:</span>
           <span className="font-medium text-emerald-600">{formatNumber(data.quantity)}</span>
         </div>
         <div className="flex justify-between gap-4">
-          <span className="text-slate-500">Reserved:</span>
+          <span className="text-slate-500">{t('inventory.reserved')}:</span>
           <span className="font-medium text-slate-600">{formatNumber(data.reserve)}</span>
         </div>
         {data.change !== 0 && (
           <div className="flex justify-between gap-4 pt-1 border-t border-slate-100">
-            <span className="text-slate-500">Change:</span>
+            <span className="text-slate-500">{t('inventory.change')}:</span>
             <span className={`font-medium ${data.change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
               {data.change >= 0 ? '+' : ''}{formatCurrency(data.change)}
             </span>

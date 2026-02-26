@@ -250,7 +250,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 <SummaryCard
                   icon={<CalendarIcon />}
                   label={t('customer.customerLifespan')}
-                  value={`${Math.round(metrics.avgCustomerLifespanDays ?? 0)} days`}
+                  value={`${Math.round(metrics.avgCustomerLifespanDays ?? 0)} ${t('customer.daysUnit')}`}
                   subtitle={t('customer.customerLifespanShort')}
                   colorClass="text-teal-600"
                   bgClass="bg-gradient-to-br from-teal-100 to-teal-50 border border-teal-200"
@@ -288,7 +288,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                   icon={<RefreshIcon />}
                   label={t('customer.trueRepeatRate')}
                   value={formatPercent(metrics.trueRepeatRate ?? 0)}
-                  subtitle={`${formatNumber(metrics.repeatCustomersAllTime ?? 0)} repeat customers`}
+                  subtitle={`${formatNumber(metrics.repeatCustomersAllTime ?? 0)} ${t('customer.repeatCustomersCount')}`}
                   colorClass="text-green-600"
                   bgClass="bg-gradient-to-br from-green-100 to-green-50 border border-green-200"
                 />
@@ -348,7 +348,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 </Pie>
                 <Tooltip
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(value) => [formatNumber(Number(value) || 0), 'Customers']}
+                  formatter={(value) => [formatNumber(Number(value) || 0), t('customer.customersLabel')]}
                 />
               </PieChart>
             </ResponsiveContainer>
@@ -413,7 +413,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 />
                 <Tooltip
                   contentStyle={TOOLTIP_STYLE}
-                  formatter={(value) => [formatCurrency(Number(value) || 0), 'AOV']}
+                  formatter={(value) => [formatCurrency(Number(value) || 0), t('customer.aovLabel')]}
                 />
                 <Line
                   type="monotone"

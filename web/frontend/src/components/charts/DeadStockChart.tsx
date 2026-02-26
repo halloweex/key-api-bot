@@ -1,6 +1,7 @@
 import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
+import { InfoPopover } from '../ui/InfoPopover'
 import { useInventoryAnalysis, useStockActions } from '../../hooks'
 import { formatNumber, formatCurrency } from '../../utils/formatters'
 
@@ -15,6 +16,27 @@ function DeadStockChartComponent() {
   return (
     <ChartContainer
       title={t('inventory.health')}
+      titleExtra={
+        <InfoPopover title={t('inventory.health')}>
+          <div className="space-y-2">
+            <p className="text-xs text-slate-300">{t('inventory.healthInfo1')}</p>
+            <p className="text-xs text-slate-300">{t('inventory.healthInfo2')}</p>
+            <p className="text-xs text-slate-300">{t('inventory.healthInfo3')}</p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-emerald-400">{t('inventory.healthy')}:</strong> {t('inventory.healthInfo4')}
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-amber-400">{t('inventory.atRisk')}:</strong> {t('inventory.healthInfo5')}
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-red-400">{t('inventory.deadStock')}:</strong> {t('inventory.healthInfo6')}
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-slate-400">{t('inventory.neverSold')}:</strong> {t('inventory.healthInfo7')}
+            </p>
+          </div>
+        </InfoPopover>
+      }
       isLoading={isLoading}
       error={error}
       className="col-span-1"
@@ -219,7 +241,8 @@ function SummaryTab({ data }: SummaryTabProps) {
       {/* Category Thresholds */}
       {data.categoryThresholds.length > 0 && (
         <div>
-          <h4 className="text-sm font-semibold text-slate-700 mb-2">{t('inventory.categoryThresholds')}</h4>
+          <h4 className="text-sm font-semibold text-slate-700 mb-1">{t('inventory.categoryThresholds')}</h4>
+          <p className="text-[11px] text-slate-400 mb-2">{t('inventory.categoryThresholdsDesc')}</p>
           <div className="space-y-1 max-h-32 overflow-y-auto">
             {data.categoryThresholds.slice(0, 8).map((cat) => (
               <div

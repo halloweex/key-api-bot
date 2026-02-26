@@ -1,6 +1,7 @@
 import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
+import { InfoPopover } from '../ui/InfoPopover'
 import { useStockSummary } from '../../hooks'
 import { formatNumber, formatCurrency } from '../../utils/formatters'
 
@@ -13,6 +14,27 @@ function StockSummaryChartComponent() {
   return (
     <ChartContainer
       title={t('inventory.stockLevels')}
+      titleExtra={
+        <InfoPopover title={t('inventory.stockLevels')}>
+          <div className="space-y-2">
+            <p className="text-xs text-slate-300">
+              <strong className="text-emerald-400">{t('inventory.inStock')}:</strong> {t('inventory.stockLevelsInfo1')}
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-blue-400">{t('inventory.available')}:</strong> {t('inventory.stockLevelsInfo2')}
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-amber-400">{t('inventory.lowStock')}:</strong> {t('inventory.stockLevelsInfo3')}
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-purple-400">{t('inventory.stockValue')}:</strong> {t('inventory.stockLevelsInfo4')}
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-slate-400">{t('inventory.avgInventory30d')}:</strong> {t('inventory.stockLevelsInfo5')}
+            </p>
+          </div>
+        </InfoPopover>
+      }
       isLoading={isLoading}
       error={error}
       className="col-span-1"

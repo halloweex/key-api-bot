@@ -84,7 +84,7 @@ interface TooltipProps {
   periodLabels: { current: string; previous: string }
 }
 
-function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
+function CustomTooltip({ active, payload, periodLabels, t }: TooltipProps & { t: (key: string) => string }) {
   if (!active || !payload?.length) return null
 
   const data = payload[0]?.payload
@@ -110,12 +110,12 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
         {data.date}
         {data.isForecast && (
           <span style={{ color: CHART_THEME.muted, fontWeight: 400, fontSize: '11px', marginLeft: '6px' }}>
-            (predicted)
+            {t('chart.predictedLabel')}
           </span>
         )}
         {isPartialDay && (
           <span style={{ color: CHART_THEME.muted, fontWeight: 400, fontSize: '11px', marginLeft: '6px' }}>
-            (today)
+            {t('chart.todayLabel')}
           </span>
         )}
       </p>
@@ -137,7 +137,7 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
             background: data.isForecast ? FORECAST_BAR_COLOR : CHART_THEME.primary,
           }} />
           <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
-            {data.isForecast ? 'Predicted' : isPartialDay ? 'Actual so far' : periodLabels.current}
+            {data.isForecast ? t('chart.predicted') : isPartialDay ? t('chart.actualSoFar') : periodLabels.current}
           </span>
         </div>
         <span style={{ fontWeight: 600, color: data.isForecast ? FORECAST_BAR_COLOR : CHART_THEME.primary }}>
@@ -163,7 +163,7 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
               background: FORECAST_BAR_COLOR,
             }} />
             <span style={{ color: CHART_THEME.muted, fontSize: '12px' }}>
-              Predicted total
+              {t('chart.predictedTotal')}
             </span>
           </div>
           <span style={{ fontWeight: 600, color: FORECAST_BAR_COLOR }}>
@@ -207,7 +207,7 @@ function CustomTooltip({ active, payload, periodLabels }: TooltipProps) {
             marginTop: '4px'
           }}>
             <span style={{ color: CHART_THEME.text, fontSize: '12px', fontWeight: 500 }}>
-              vs Previous
+              {t('chart.vsPrevious')}
             </span>
             <span style={{ fontWeight: 700, color: changeColor, fontSize: '13px' }}>
               {changeIcon} {Math.abs(data.changePercent).toFixed(1)}%
@@ -226,11 +226,14 @@ interface LegendProps {
   hasComparison: boolean
   hasPrevMonthDays: boolean
   hasForecast: boolean
+  t: (key: string) => string
 }
 
-function CustomLegend({ periodLabels, hasComparison, hasPrevMonthDays, hasForecast }: LegendProps) {
-  // Get current month name for legend
-  const currentMonthName = new Date().toLocaleString('en', { month: 'short' })
+function CustomLegend({ periodLabels, hasComparison, hasPrevMonthDays, hasForecast, t }: LegendProps) {
+  // Get current month name for legend using i18n locale
+  const localeMap: Record<string, string> = { en: 'en-US', uk: 'uk-UA', ru: 'ru-RU' }
+  const lang = (typeof window !== 'undefined' && localStorage.getItem('ks_language')) || 'en'
+  const currentMonthName = new Date().toLocaleString(localeMap[lang] || 'en-US', { month: 'short' })
 
   return (
     <div style={{
@@ -251,7 +254,7 @@ function CustomLegend({ periodLabels, hasComparison, hasPrevMonthDays, hasForeca
           flexShrink: 0,
         }} />
         <span style={{ color: CHART_THEME.text, fontWeight: 500, whiteSpace: 'nowrap' }}>
-          {hasPrevMonthDays ? `${currentMonthName} (current month)` : periodLabels.current}
+          {hasPrevMonthDays ? `${currentMonthName} ${t('chart.currentMonthTag')}` : periodLabels.current}
         </span>
       </div>
       {/* Previous month indicator - only show when there are prev month days */}
@@ -264,7 +267,7 @@ function CustomLegend({ periodLabels, hasComparison, hasPrevMonthDays, hasForeca
             background: PREV_MONTH_BAR_COLOR,
             flexShrink: 0,
           }} />
-          <span style={{ color: CHART_THEME.muted, whiteSpace: 'nowrap' }}>Previous month</span>
+          <span style={{ color: CHART_THEME.muted, whiteSpace: 'nowrap' }}>{t('chart.previousMonth')}</span>
         </div>
       )}
       {/* Forecast indicator */}
@@ -278,7 +281,7 @@ function CustomLegend({ periodLabels, hasComparison, hasPrevMonthDays, hasForeca
             opacity: 0.7,
             flexShrink: 0,
           }} />
-          <span style={{ color: CHART_THEME.muted, whiteSpace: 'nowrap' }}>Predicted</span>
+          <span style={{ color: CHART_THEME.muted, whiteSpace: 'nowrap' }}>{t('chart.predicted')}</span>
         </div>
       )}
       {/* Comparison period indicator */}
@@ -348,8 +351,9 @@ function InfoButton({ onClick }: { onClick: () => void }) {
   )
 }
 
-function InfoTooltipContent({ onClose, children }: {
+function InfoTooltipContent({ onClose, title, children }: {
   onClose: () => void
+  title: string
   children: React.ReactNode
 }) {
   return (
@@ -361,7 +365,7 @@ function InfoTooltipContent({ onClose, children }: {
       >
         ×
       </button>
-      <h4 className="text-sm font-medium text-slate-200 mb-2">Revenue Trend</h4>
+      <h4 className="text-sm font-medium text-slate-200 mb-2">{title}</h4>
       {children}
     </div>
   )
@@ -371,19 +375,19 @@ function InfoTooltipContent({ onClose, children }: {
 
 type CompareType = 'previous_period' | 'year_ago' | 'month_ago'
 
-const COMPARE_TYPE_OPTIONS: { value: CompareType; label: string; shortLabel: string }[] = [
-  { value: 'year_ago', label: 'Year over Year', shortLabel: 'Year ago' },
-  { value: 'month_ago', label: 'Month over Month', shortLabel: 'Month ago' },
-  { value: 'previous_period', label: 'Prior Period', shortLabel: 'Previous' },
+const getCompareTypeOptions = (t: (key: string) => string): { value: CompareType; label: string; shortLabel: string }[] => [
+  { value: 'year_ago', label: t('chart.yearOverYear'), shortLabel: t('chart.yearAgoShort') },
+  { value: 'month_ago', label: t('chart.monthOverMonth'), shortLabel: t('chart.monthAgoShort') },
+  { value: 'previous_period', label: t('chart.priorPeriod'), shortLabel: t('chart.previousShort') },
 ]
 
 // Get comparison label based on compare type
-const getComparisonLabel = (compareType: CompareType, basePeriodLabel: string): string => {
+const getComparisonLabel = (compareType: CompareType, basePeriodLabel: string, t: (key: string) => string): string => {
   switch (compareType) {
     case 'year_ago':
-      return 'Last Year'
+      return t('chart.lastYear')
     case 'month_ago':
-      return 'Last Month'
+      return t('chart.lastMonth')
     default:
       return basePeriodLabel
   }
@@ -404,8 +408,8 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
   // Create dynamic period labels based on compare type
   const periodLabels = useMemo(() => ({
     current: basePeriodLabels.current,
-    previous: getComparisonLabel(compareType, basePeriodLabels.previous)
-  }), [basePeriodLabels, compareType])
+    previous: getComparisonLabel(compareType, basePeriodLabels.previous, t)
+  }), [basePeriodLabels, compareType, t])
 
   // Get growth data from comparison
   const growthData = data?.comparison?.totals
@@ -544,29 +548,29 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
   return (
     <ChartContainer
-      title="Revenue Trend"
+      title={t('chart.revenueTrend')}
       titleExtra={
         <div className="relative flex-shrink-0">
           <InfoButton onClick={() => setShowInfo(!showInfo)} />
           {showInfo && (
-            <InfoTooltipContent onClose={() => setShowInfo(false)}>
+            <InfoTooltipContent onClose={() => setShowInfo(false)} title={t('chart.revenueTrend')}>
               <div className="space-y-2">
                 <p className="text-xs text-slate-300">
-                  <strong className="text-blue-400">Bars:</strong> Daily revenue for selected period.
+                  <strong className="text-blue-400">{t('chart.rtBarsLabel')}</strong> {t('chart.rtBarsDesc')}
                 </p>
                 {hasForecast && (
                   <p className="text-xs text-slate-300">
-                    <strong style={{ color: FORECAST_BAR_COLOR }}>Lighter bars:</strong> ML-predicted revenue for remaining days.
+                    <strong style={{ color: FORECAST_BAR_COLOR }}>{t('chart.rtForecastLabel')}</strong> {t('chart.rtForecastDesc')}
                   </p>
                 )}
                 <p className="text-xs text-slate-300">
-                  <strong className="text-slate-400">Dashed line:</strong> Comparison period (Year ago, Month ago, or Previous).
+                  <strong className="text-slate-400">{t('chart.rtDashedLabel')}</strong> {t('chart.rtDashedDesc')}
                 </p>
                 <p className="text-xs text-slate-300">
-                  <strong className="text-emerald-400">Growth badge:</strong> Total revenue change vs comparison period.
+                  <strong className="text-emerald-400">{t('chart.rtGrowthLabel')}</strong> {t('chart.rtGrowthDesc')}
                 </p>
                 <p className="text-xs text-slate-300">
-                  <strong className="text-amber-400">Peak labels:</strong> Top 5 revenue days.
+                  <strong className="text-amber-400">{t('chart.rtPeakLabel')}</strong> {t('chart.rtPeakDesc')}
                 </p>
               </div>
             </InfoTooltipContent>
@@ -578,13 +582,13 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
       onRetry={refetch}
       isEmpty={isEmpty}
       height="xl"
-      ariaLabel="Chart showing revenue comparison between current and previous period"
+      ariaLabel={t('chart.revenueTrend')}
       action={
         <div className="flex items-center gap-1.5 sm:gap-3 flex-wrap justify-end">
           {/* Forecast Predicted Total Badge */}
           {forecast && !isLoading && (
             <div className="px-1.5 sm:px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-semibold flex items-center gap-1 bg-blue-50 text-blue-600 border border-blue-200">
-              <span>Predicted:</span>
+              <span>{t('chart.predictedColon')}</span>
               <span>{formatShortCurrency(forecast.predicted_total)}</span>
             </div>
           )}
@@ -609,9 +613,9 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
             onChange={(e) => setCompareType(e.target.value as CompareType)}
             className="text-[10px] sm:text-xs bg-slate-100 border-0 rounded-lg px-1.5 sm:px-2.5 py-1.5 text-slate-600 font-medium cursor-pointer hover:bg-slate-200 transition-colors focus:ring-2 focus:ring-blue-500 focus:outline-none"
           >
-            {COMPARE_TYPE_OPTIONS.map((opt) => (
+            {getCompareTypeOptions(t).map((opt) => (
               <option key={opt.value} value={opt.value}>
-                vs {opt.shortLabel}
+                {t('chart.vs')} {opt.shortLabel}
               </option>
             ))}
           </select>
@@ -649,7 +653,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
             />
 
             <Tooltip
-              content={<CustomTooltip periodLabels={periodLabels} />}
+              content={<CustomTooltip periodLabels={periodLabels} t={t} />}
               cursor={{ fill: 'rgba(0, 0, 0, 0.04)' }}
             />
 
@@ -685,7 +689,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
             {hasForecast && (
               <Bar
                 dataKey="forecastRevenue"
-                name="Predicted"
+                name={t('chart.predicted')}
                 stackId="revenue"
                 fill="url(#forecastBarGradient)"
                 radius={[4, 4, 0, 0]}
@@ -698,7 +702,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
               <Line
                 type="monotone"
                 dataKey="prevRevenue"
-                name={`${periodLabels.previous} Trend`}
+                name={`${periodLabels.previous} ${t('chart.trendSuffix')}`}
                 stroke={CHART_THEME.muted}
                 strokeWidth={2}
                 strokeDasharray="5 5"
@@ -714,7 +718,7 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
         </div>
 
         {/* Custom Legend */}
-        <CustomLegend periodLabels={periodLabels} hasComparison={hasComparison} hasPrevMonthDays={hasPrevMonthDays} hasForecast={hasForecast} />
+        <CustomLegend periodLabels={periodLabels} hasComparison={hasComparison} hasPrevMonthDays={hasPrevMonthDays} hasForecast={hasForecast} t={t} />
       </div>
     </ChartContainer>
   )
