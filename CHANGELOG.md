@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.12
+
+- Fix i18n: replace hardcoded English strings with t() calls in charts
+
+
 ## 3.0.11
 
 - Sidebar UX: push content with smart formula, collapsed nav icons, language accordion
