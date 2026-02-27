@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.13
+
+- Move ROI Calculator to new Marketing page, reorder sidebar tabs
+
+
 ## 3.0.12
 
 - Fix i18n: replace hardcoded English strings with t() calls in charts
