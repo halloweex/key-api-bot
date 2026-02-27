@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.14
+
+- i18n: translate MilestoneProgress, rename to Main Dashboard
+
+
 ## 3.0.13
 
 - Move ROI Calculator to new Marketing page, reorder sidebar tabs
