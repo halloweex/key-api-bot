@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.19
+
+- Fix date filtering for product pairs & brand affinity endpoints
+
+
 ## 3.0.18
 
 - Upgrade MilestoneProgress with rich SVG animations and Lottie confetti
