@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.18
+
+- Upgrade MilestoneProgress with rich SVG animations and Lottie confetti
+
+
 ## 3.0.17
 
 - Add Vector
