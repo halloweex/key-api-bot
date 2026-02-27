@@ -1,5 +1,6 @@
 import { memo, useMemo, useEffect, useRef, useState, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Check, CheckCircle, CircleHelp } from 'lucide-react'
 import { useFilterStore } from '../../store/filterStore'
 import { formatCurrency } from '../../utils/formatters'
 import { useSmartGoals, useRevenueTrend } from '../../hooks'
@@ -112,7 +113,7 @@ function burstParticles(container: HTMLElement, x: number, count: number = 20) {
   }
 }
 
-// ─── Sparkle Generator ───────────────────────────────────────────────────────
+// ─── SVG Sparkle Generator ───────────────────────────────────────────────────
 
 function generateSparkles(count: number, progressWidth: number): Sparkle[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -124,42 +125,95 @@ function generateSparkles(count: number, progressWidth: number): Sparkle[] {
   }))
 }
 
-// ─── Sparkle Component ───────────────────────────────────────────────────────
+// ─── SVG Sparkle Star ───────────────────────────────────────────────────────
 
-function SparkleParticle({ sparkle }: { sparkle: Sparkle }) {
+function SvgSparkle({ sparkle }: { sparkle: Sparkle }) {
+  const s = sparkle.size
   return (
-    <div
-      className="sparkle-particle"
-      style={{
-        left: `${sparkle.x}px`,
-        top: `${sparkle.y}%`,
-        width: `${sparkle.size}px`,
-        height: `${sparkle.size}px`,
-        animationDelay: `${sparkle.delay}s`,
-      }}
-    />
+    <svg
+      className="absolute pointer-events-none"
+      style={{ left: sparkle.x, top: `${sparkle.y}%`, width: s * 3, height: s * 3, transform: 'translate(-50%, -50%)' }}
+      viewBox="0 0 24 24"
+    >
+      <path
+        d="M12 2 L14 9 L21 9 L15.5 13.5 L17.5 21 L12 16 L6.5 21 L8.5 13.5 L3 9 L10 9 Z"
+        fill="white"
+        fillOpacity="0.9"
+      >
+        <animate attributeName="opacity" values="0.3;1;0.3" dur={`${1.2 + sparkle.delay * 0.3}s`} repeatCount="indefinite" />
+        <animateTransform attributeName="transform" type="scale" values="0.6;1.1;0.6" dur={`${1.5 + sparkle.delay * 0.2}s`} repeatCount="indefinite" additive="sum" />
+        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur={`${3 + sparkle.delay}s`} repeatCount="indefinite" additive="sum" />
+      </path>
+    </svg>
   )
 }
 
-// ─── Leading Edge Glow ───────────────────────────────────────────────────────
+// ─── SVG Shimmer Overlay ────────────────────────────────────────────────────
 
-function LeadingEdgeGlow({ progress, themeColor }: { progress: number; themeColor: string }) {
+function SvgShimmer() {
+  return (
+    <svg className="absolute inset-0 w-full h-full rounded-full overflow-hidden pointer-events-none" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="shimmerGrad" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stopColor="white" stopOpacity="0" />
+          <stop offset="50%" stopColor="white" stopOpacity="0.4" />
+          <stop offset="100%" stopColor="white" stopOpacity="0" />
+          <animateTransform attributeName="gradientTransform" type="translate" from="-1 0" to="2 0" dur="2.5s" repeatCount="indefinite" />
+        </linearGradient>
+      </defs>
+      <rect width="100%" height="100%" fill="url(#shimmerGrad)" />
+    </svg>
+  )
+}
+
+// ─── SVG Leading Edge ───────────────────────────────────────────────────────
+
+function SvgLeadingEdge({ progress, themeColor }: { progress: number; themeColor: string }) {
   if (progress <= 0 || progress >= 100) return null
 
-  // Extract the main color from theme for glow
-  const glowColor = themeColor.includes('green') ? '#22c55e'
+  const color = themeColor.includes('green') ? '#22c55e'
     : themeColor.includes('amber') ? '#f59e0b'
     : themeColor.includes('purple') ? '#a855f7'
     : '#3b82f6'
 
   return (
-    <div
-      className="leading-edge-glow"
-      style={{
-        left: `${progress}%`,
-        '--glow-color': glowColor,
-      } as React.CSSProperties}
-    />
+    <svg
+      className="absolute pointer-events-none"
+      style={{ left: `${progress}%`, top: '50%', transform: 'translate(-50%, -50%)', width: 28, height: 28, zIndex: 15 }}
+      viewBox="0 0 28 28"
+    >
+      {/* Expanding ring */}
+      <circle cx="14" cy="14" r="8" fill="none" stroke={color} strokeWidth="1.5" opacity="0.6">
+        <animate attributeName="r" values="5;12;5" dur="1.5s" repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.7;0;0.7" dur="1.5s" repeatCount="indefinite" />
+      </circle>
+      {/* Core dot */}
+      <circle cx="14" cy="14" r="5" fill={color}>
+        <animate attributeName="r" values="4;5.5;4" dur="1.5s" repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.8;1;0.8" dur="1.5s" repeatCount="indefinite" />
+      </circle>
+    </svg>
+  )
+}
+
+// ─── SVG Floating Bubbles ───────────────────────────────────────────────────
+
+function SvgFloatingBubbles() {
+  const bubbles = [
+    { cx: '20%', delay: '0s', dur: '2.2s' },
+    { cx: '50%', delay: '0.7s', dur: '2.5s' },
+    { cx: '80%', delay: '1.4s', dur: '2s' },
+  ]
+  return (
+    <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ overflow: 'visible' }}>
+      {bubbles.map((b, i) => (
+        <circle key={i} cx={b.cx} cy="100%" r="2" fill="white" fillOpacity="0.8">
+          <animate attributeName="cy" values="100%;-50%" dur={b.dur} begin={b.delay} repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0;0.9;0" dur={b.dur} begin={b.delay} repeatCount="indefinite" />
+          <animate attributeName="r" values="1.5;2.5;1" dur={b.dur} begin={b.delay} repeatCount="indefinite" />
+        </circle>
+      ))}
+    </svg>
   )
 }
 
@@ -314,9 +368,7 @@ function InfoButton({ onClick }: { onClick: () => void }) {
       className="text-slate-400 hover:text-slate-600 transition-colors"
       aria-label="Goal calculation details"
     >
-      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H8c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z"/>
-      </svg>
+      <CircleHelp className="w-4 h-4" />
     </button>
   )
 }
@@ -745,31 +797,31 @@ export const MilestoneProgress = memo(function MilestoneProgress({
               boxShadow: metrics.progress > 0 ? `0 0 10px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.3)` : 'none'
             }}
           >
-            {/* Static shine gradient */}
-            <div className="absolute inset-0 rounded-full overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-b from-white/30 to-transparent h-1/2" />
-            </div>
+            {/* SVG shine gradient */}
+            <svg className="absolute inset-0 w-full h-full rounded-full pointer-events-none" preserveAspectRatio="none">
+              <defs>
+                <linearGradient id="shineGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="white" stopOpacity="0.3" />
+                  <stop offset="50%" stopColor="white" stopOpacity="0" />
+                </linearGradient>
+              </defs>
+              <rect width="100%" height="100%" fill="url(#shineGrad)" />
+            </svg>
 
-            {/* Animated shimmer sweep */}
-            <div className="shimmer-sweep" />
+            {/* SVG animated shimmer sweep */}
+            <SvgShimmer />
 
-            {/* Sparkle particles */}
+            {/* SVG sparkle stars */}
             {metrics.progress > 5 && sparkles.map(sparkle => (
-              <SparkleParticle key={sparkle.id} sparkle={sparkle} />
+              <SvgSparkle key={sparkle.id} sparkle={sparkle} />
             ))}
 
-            {/* Ambient floating particles */}
-            {metrics.progress > 10 && (
-              <div className="floating-particles">
-                <div className="floating-particle" style={{ left: '20%', animationDelay: '0s' }} />
-                <div className="floating-particle" style={{ left: '50%', animationDelay: '0.5s' }} />
-                <div className="floating-particle" style={{ left: '80%', animationDelay: '1s' }} />
-              </div>
-            )}
+            {/* SVG floating bubbles */}
+            {metrics.progress > 10 && <SvgFloatingBubbles />}
           </div>
 
-          {/* Leading edge glow */}
-          <LeadingEdgeGlow progress={metrics.progress} themeColor={metrics.themeColor} />
+          {/* SVG leading edge glow */}
+          <SvgLeadingEdge progress={metrics.progress} themeColor={metrics.themeColor} />
 
           {/* Milestone Markers */}
           {milestones.map((m, index) => {
@@ -819,9 +871,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
                   aria-label={`Milestone: ${formatAmount(m.amount)}`}
                 >
                   {isReached && (
-                    <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                    </svg>
+                    <Check className="w-3 h-3 text-white" />
                   )}
                 </div>
               </div>
@@ -864,9 +914,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         {metrics.allCompleted && (
           <div className="mt-3 pt-3 border-t border-slate-100">
             <p className="text-xs text-center font-medium text-purple-600 flex items-center justify-center gap-1">
-              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-              </svg>
+              <CheckCircle className="w-4 h-4" />
               {t('goal.allAchieved')}
             </p>
           </div>
@@ -904,9 +952,8 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         />
       )}
 
-      {/* Animation Styles */}
+      {/* Animation Styles (only CSS that can't be done in SVG) */}
       <style>{`
-        /* ─── Base Animations ─────────────────────────────────────────────── */
         @keyframes fade-in {
           from { opacity: 0; }
           to { opacity: 1; }
@@ -919,140 +966,6 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         .animate-fade-in { animation: fade-in 0.3s ease-out; }
         .animate-bounce-in { animation: bounce-in 0.5s ease-out; }
 
-        /* ─── Shimmer Sweep Effect ────────────────────────────────────────── */
-        @keyframes shimmer-sweep {
-          0% { transform: translateX(-100%); }
-          100% { transform: translateX(200%); }
-        }
-        .shimmer-sweep {
-          position: absolute;
-          inset: 0;
-          border-radius: inherit;
-          overflow: hidden;
-        }
-        .shimmer-sweep::after {
-          content: '';
-          position: absolute;
-          top: 0;
-          left: 0;
-          width: 50%;
-          height: 100%;
-          background: linear-gradient(
-            90deg,
-            transparent 0%,
-            rgba(255, 255, 255, 0.4) 50%,
-            transparent 100%
-          );
-          animation: shimmer-sweep 2.5s ease-in-out infinite;
-        }
-
-        /* ─── Sparkle Particles ───────────────────────────────────────────── */
-        @keyframes sparkle {
-          0%, 100% {
-            opacity: 0;
-            transform: scale(0) rotate(0deg);
-          }
-          50% {
-            opacity: 1;
-            transform: scale(1) rotate(180deg);
-          }
-        }
-        @keyframes sparkle-flicker {
-          0%, 100% { opacity: 0.3; transform: scale(0.8); }
-          25% { opacity: 1; transform: scale(1.2); }
-          50% { opacity: 0.6; transform: scale(1); }
-          75% { opacity: 1; transform: scale(1.1); }
-        }
-        .sparkle-particle {
-          position: absolute;
-          background: radial-gradient(circle, #fff 0%, rgba(255,255,255,0) 70%);
-          border-radius: 50%;
-          pointer-events: none;
-          animation: sparkle-flicker 1.5s ease-in-out infinite;
-          box-shadow: 0 0 4px 1px rgba(255, 255, 255, 0.8);
-        }
-
-        /* ─── Floating Particles ──────────────────────────────────────────── */
-        @keyframes float-up {
-          0% {
-            opacity: 0;
-            transform: translateY(100%) scale(0);
-          }
-          20% {
-            opacity: 1;
-            transform: translateY(50%) scale(1);
-          }
-          100% {
-            opacity: 0;
-            transform: translateY(-150%) scale(0.5);
-          }
-        }
-        .floating-particles {
-          position: absolute;
-          inset: 0;
-          overflow: visible;
-          pointer-events: none;
-        }
-        .floating-particle {
-          position: absolute;
-          bottom: 0;
-          width: 4px;
-          height: 4px;
-          background: rgba(255, 255, 255, 0.9);
-          border-radius: 50%;
-          box-shadow: 0 0 6px 2px rgba(255, 255, 255, 0.6);
-          animation: float-up 2s ease-out infinite;
-        }
-
-        /* ─── Leading Edge Glow ───────────────────────────────────────────── */
-        @keyframes edge-pulse {
-          0%, 100% {
-            opacity: 0.7;
-            transform: translate(-50%, -50%) scale(1);
-          }
-          50% {
-            opacity: 1;
-            transform: translate(-50%, -50%) scale(1.3);
-          }
-        }
-        @keyframes edge-ring {
-          0% {
-            opacity: 0.8;
-            transform: translate(-50%, -50%) scale(0.8);
-          }
-          100% {
-            opacity: 0;
-            transform: translate(-50%, -50%) scale(2);
-          }
-        }
-        .leading-edge-glow {
-          position: absolute;
-          top: 50%;
-          width: 12px;
-          height: 12px;
-          border-radius: 50%;
-          background: var(--glow-color, #22c55e);
-          transform: translate(-50%, -50%);
-          animation: edge-pulse 1.5s ease-in-out infinite;
-          box-shadow:
-            0 0 8px 2px var(--glow-color, #22c55e),
-            0 0 16px 4px var(--glow-color, #22c55e);
-          z-index: 15;
-        }
-        .leading-edge-glow::before {
-          content: '';
-          position: absolute;
-          top: 50%;
-          left: 50%;
-          width: 20px;
-          height: 20px;
-          border-radius: 50%;
-          border: 2px solid var(--glow-color, #22c55e);
-          transform: translate(-50%, -50%);
-          animation: edge-ring 1.5s ease-out infinite;
-        }
-
-        /* ─── Near Milestone Pulse ────────────────────────────────────────── */
         @keyframes near-milestone-pulse {
           0%, 100% {
             box-shadow:
@@ -1070,8 +983,6 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         .progress-fill.near-milestone {
           animation: near-milestone-pulse 1.5s ease-in-out infinite;
         }
-
-        /* ─── Track Background Pattern ────────────────────────────────────── */
         .progress-track {
           background:
             linear-gradient(90deg, rgba(0,0,0,0.02) 0%, transparent 50%, rgba(0,0,0,0.02) 100%),

@@ -1,16 +1,8 @@
 import { memo, useEffect, useCallback } from 'react'
+import { PanelRight } from 'lucide-react'
 import { useChatStore } from '../../store/chatStore'
 import { ChatMessages } from './ChatMessages'
 import { ChatInput } from './ChatInput'
-
-// Panel icon (right side panel) with thick divider line
-const PanelRightIcon = () => (
-  <svg className="h-5 w-5" viewBox="0 0 24 24">
-    <rect x="2" y="2" width="20" height="20" rx="5" fill="none" stroke="currentColor" strokeWidth={1.5} />
-    <rect x="14" y="2" width="8" height="20" rx="5" fill="currentColor" fillOpacity="0.2" />
-    <line x1="14" y1="4" x2="14" y2="20" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
-  </svg>
-)
 
 /**
  * Collapsible sidebar panel for AI chat assistant.
@@ -66,7 +58,7 @@ export const ChatSidebar = memo(function ChatSidebar() {
           ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
         aria-label="Open AI assistant"
       >
-        <PanelRightIcon />
+        <PanelRight className="h-5 w-5" />
       </button>
 
       <aside
@@ -90,7 +82,7 @@ export const ChatSidebar = memo(function ChatSidebar() {
               ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
           >
             <div className="p-1.5 text-slate-500">
-              <PanelRightIcon />
+              <PanelRight className="h-5 w-5" />
             </div>
           </div>
 
@@ -109,7 +101,7 @@ export const ChatSidebar = memo(function ChatSidebar() {
               title="Collapse panel (Esc)"
               aria-label="Collapse AI panel"
             >
-              <PanelRightIcon />
+              <PanelRight className="h-5 w-5" />
             </button>
           </div>
         </div>

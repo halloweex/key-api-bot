@@ -1,6 +1,10 @@
-import { memo, useEffect, useState, type ReactNode } from 'react'
+import { memo, useEffect, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
+import {
+  BarChart3, Lightbulb, Activity, Box, ClipboardList, Rocket,
+  CircleDollarSign, Users, ShieldCheck, PanelLeft, User,
+} from 'lucide-react'
 import { useNavStore } from '../../store/navStore'
 import { useAuth, useUserDisplayName } from '../../hooks/useAuth'
 import { useWebSocket } from '../../hooks/useWebSocket'
@@ -8,6 +12,7 @@ import { api } from '../../api/client'
 import { navigate, useRouter } from '../../hooks/useRouter'
 import { NavLink } from './NavLink'
 import { UserProfileDropdown } from '../ui/UserProfileDropdown'
+import { UserAvatar } from '../ui/UserAvatar'
 import { LiveIndicator } from '../ui/LiveIndicator'
 import type { HealthResponse } from '../../types/api'
 
@@ -28,71 +33,6 @@ const Logo = ({ size = 32 }: { size?: number }) => (
     </defs>
     <rect width="24" height="24" rx="5" fill="url(#logoGrad)"/>
     <path fill="#fff" d="M9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/>
-  </svg>
-)
-
-// ─── Icons ───────────────────────────────────────────────────────────────────
-
-const PanelLeftIcon = () => (
-  <svg className="h-5 w-5" viewBox="0 0 24 24">
-    <rect x="2" y="2" width="20" height="20" rx="5" fill="none" stroke="currentColor" strokeWidth={1.5} />
-    <rect x="2" y="2" width="8" height="20" rx="5" fill="currentColor" fillOpacity="0.2" />
-    <line x1="10" y1="4" x2="10" y2="20" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
-  </svg>
-)
-
-const ChartBarIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-  </svg>
-)
-
-const RocketIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M15.59 14.37a6 6 0 01-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 006.16-12.12A14.98 14.98 0 009.63 8.41m5.96 5.96a14.926 14.926 0 01-5.841 2.58m-.119-8.54a6 6 0 00-7.381 5.84h4.8m2.581-5.84a14.927 14.927 0 00-2.58 5.84m2.699 2.7c-.103.021-.207.041-.311.06a15.09 15.09 0 01-2.448-2.448 14.9 14.9 0 01.06-.312m-2.24 2.39a4.493 4.493 0 00-6.233 0c-1.045 1.045-1.087 2.698-.105 4.174 1.476.982 3.13.94 4.174-.105a4.493 4.493 0 000-6.233" />
-  </svg>
-)
-
-const CurrencyDollarIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-  </svg>
-)
-
-
-const CubeIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-  </svg>
-)
-
-const ClipboardDocIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25z" />
-  </svg>
-)
-
-const SignalIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
-  </svg>
-)
-
-const LightBulbIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-  </svg>
-)
-
-const UsersIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-  </svg>
-)
-
-const ShieldCheckIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
   </svg>
 )
 
@@ -132,22 +72,6 @@ export const SidebarRail = memo(function SidebarRail() {
   const { user, isAuthenticated } = useAuth()
   const displayName = useUserDisplayName()
   const isAdmin = user?.role === 'admin'
-  const [imageError, setImageError] = useState(false)
-
-  // Get 2-letter initials from name, username, or fallback
-  const getInitials = () => {
-    if (!user) return '??'
-    if (user.first_name && user.last_name) {
-      return (user.first_name.charAt(0) + user.last_name.charAt(0)).toUpperCase()
-    }
-    if (user.first_name && user.first_name.length >= 2) {
-      return user.first_name.substring(0, 2).toUpperCase()
-    }
-    if (user.username && user.username.length >= 2) {
-      return user.username.substring(0, 2).toUpperCase()
-    }
-    return user.first_name?.charAt(0).toUpperCase() || user.username?.charAt(0).toUpperCase() || '??'
-  }
 
   // Health check for version
   const { data: health } = useQuery<HealthResponse>({
@@ -207,7 +131,7 @@ export const SidebarRail = memo(function SidebarRail() {
           ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
         aria-label="Open menu"
       >
-        <PanelLeftIcon />
+        <PanelLeft className="h-5 w-5" />
       </button>
 
       <aside
@@ -258,7 +182,7 @@ export const SidebarRail = memo(function SidebarRail() {
             title={t('nav.collapseMenu')}
             aria-label="Collapse navigation"
           >
-            <PanelLeftIcon />
+            <PanelLeft className="h-5 w-5" />
           </button>
         </div>
       </div>
@@ -268,12 +192,12 @@ export const SidebarRail = memo(function SidebarRail() {
         className={`absolute top-14 left-0 right-0 hidden sm:flex flex-col items-center gap-1 pt-2 px-1
           ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
       >
-        <CollapsedNavIcon href="/v2" icon={<ChartBarIcon />} label={t('nav.salesDashboard')} />
-        <CollapsedNavIcon href="/v2/products" icon={<LightBulbIcon />} label={t('nav.productIntelligence')} />
-        <CollapsedNavIcon href="/v2/traffic" icon={<SignalIcon />} label={t('nav.trafficAnalytics')} />
-        <CollapsedNavIcon href="/v2/inventory" icon={<CubeIcon />} label={t('nav.inventory')} />
-        <CollapsedNavIcon href="/v2/reports" icon={<ClipboardDocIcon />} label={t('nav.reports')} />
-        <CollapsedNavIcon href="/v2/marketing" icon={<RocketIcon />} label={t('nav.marketing')} />
+        <CollapsedNavIcon href="/v2" icon={<BarChart3 className="w-5 h-5" />} label={t('nav.salesDashboard')} />
+        <CollapsedNavIcon href="/v2/products" icon={<Lightbulb className="w-5 h-5" />} label={t('nav.productIntelligence')} />
+        <CollapsedNavIcon href="/v2/traffic" icon={<Activity className="w-5 h-5" />} label={t('nav.trafficAnalytics')} />
+        <CollapsedNavIcon href="/v2/inventory" icon={<Box className="w-5 h-5" />} label={t('nav.inventory')} />
+        <CollapsedNavIcon href="/v2/reports" icon={<ClipboardList className="w-5 h-5" />} label={t('nav.reports')} />
+        <CollapsedNavIcon href="/v2/marketing" icon={<Rocket className="w-5 h-5" />} label={t('nav.marketing')} />
       </div>
 
       {/* Expanded content */}
@@ -283,25 +207,25 @@ export const SidebarRail = memo(function SidebarRail() {
       >
         {/* Main navigation */}
         <nav className="space-y-1" aria-label="Dashboard pages">
-          <NavLink href="/v2" icon={<ChartBarIcon />}>
+          <NavLink href="/v2" icon={<BarChart3 className="w-5 h-5" />}>
             {t('nav.salesDashboard')}
           </NavLink>
-          <NavLink href="/v2/products" icon={<LightBulbIcon />}>
+          <NavLink href="/v2/products" icon={<Lightbulb className="w-5 h-5" />}>
             {t('nav.productIntelligence')}
           </NavLink>
-          <NavLink href="/v2/traffic" icon={<SignalIcon />}>
+          <NavLink href="/v2/traffic" icon={<Activity className="w-5 h-5" />}>
             {t('nav.trafficAnalytics')}
           </NavLink>
-          <NavLink href="/v2/inventory" icon={<CubeIcon />}>
+          <NavLink href="/v2/inventory" icon={<Box className="w-5 h-5" />}>
             {t('nav.inventory')}
           </NavLink>
-          <NavLink href="/v2/reports" icon={<ClipboardDocIcon />}>
+          <NavLink href="/v2/reports" icon={<ClipboardList className="w-5 h-5" />}>
             {t('nav.reports')}
           </NavLink>
-          <NavLink href="/v2/marketing" icon={<RocketIcon />}>
+          <NavLink href="/v2/marketing" icon={<Rocket className="w-5 h-5" />}>
             {t('nav.marketing')}
           </NavLink>
-          <NavLink href="/v2/financial" icon={<CurrencyDollarIcon />} disabled>
+          <NavLink href="/v2/financial" icon={<CircleDollarSign className="w-5 h-5" />} disabled>
             {t('nav.financial')}
           </NavLink>
         </nav>
@@ -313,10 +237,10 @@ export const SidebarRail = memo(function SidebarRail() {
               {t('nav.admin')}
             </p>
             <nav className="space-y-1" aria-label="Admin pages">
-              <NavLink href="/v2/admin/users" icon={<UsersIcon />}>
+              <NavLink href="/v2/admin/users" icon={<Users className="w-5 h-5" />}>
                 {t('nav.manageUsers')}
               </NavLink>
-              <NavLink href="/v2/admin/permissions" icon={<ShieldCheckIcon />}>
+              <NavLink href="/v2/admin/permissions" icon={<ShieldCheck className="w-5 h-5" />}>
                 {t('nav.permissions')}
               </NavLink>
             </nav>
@@ -353,26 +277,14 @@ export const SidebarRail = memo(function SidebarRail() {
           ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
       >
         {isAuthenticated && user ? (
-          <div className="relative w-8 h-8">
-            {/* Initials background - always visible */}
-            <div className="absolute inset-0 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-bold text-xs shadow-sm">
-              {getInitials()}
-            </div>
-            {/* Photo overlay - only if available and not errored */}
-            {user.photo_url && !imageError && (
-              <img
-                src={user.photo_url}
-                alt=""
-                className="absolute inset-0 w-8 h-8 rounded-full object-cover border-2 border-white shadow-sm"
-                onError={() => setImageError(true)}
-              />
-            )}
-          </div>
+          <UserAvatar
+            name={displayName || user.username || 'User'}
+            photoUrl={user.photo_url}
+            size={32}
+          />
         ) : (
           <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white text-xs font-bold shadow-sm">
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-            </svg>
+            <User className="w-4 h-4" />
           </div>
         )}
       </div>

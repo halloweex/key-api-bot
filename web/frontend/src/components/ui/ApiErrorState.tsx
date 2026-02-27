@@ -1,6 +1,8 @@
 import { memo, useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ApiError, NetworkError, TimeoutError } from '../../api/client'
+import { LottieAnimation } from './LottieAnimation'
+import errorAnimation from '../../assets/animations/error-state.json'
 import type { TFunction } from 'i18next'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -106,31 +108,6 @@ function getErrorInfo(error: Error | null, defaultTitle: string, t: TFunction): 
   }
 }
 
-// ─── Icons ───────────────────────────────────────────────────────────────────
-
-const icons = {
-  warning: (
-    <svg className="w-6 h-6 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-    </svg>
-  ),
-  offline: (
-    <svg className="w-6 h-6 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 5.636a9 9 0 010 12.728m0 0l-2.829-2.829m2.829 2.829L21 21M15.536 8.464a5 5 0 010 7.072m0 0l-2.829-2.829m-4.243 2.829a4.978 4.978 0 01-1.414-2.83m-1.414 5.658a9 9 0 01-2.167-9.238m7.824 2.167a1 1 0 111.414 1.414m-1.414-1.414L3 3" />
-    </svg>
-  ),
-  timeout: (
-    <svg className="w-6 h-6 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-    </svg>
-  ),
-  error: (
-    <svg className="w-6 h-6 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-    </svg>
-  ),
-}
-
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const ApiErrorState = memo(function ApiErrorState({
@@ -175,9 +152,11 @@ export const ApiErrorState = memo(function ApiErrorState({
       role="alert"
       className="bg-gradient-to-br from-slate-50 to-slate-100/50 border border-slate-200 rounded-xl p-8 flex flex-col items-center text-center animate-fade-in"
     >
-      <div className="w-14 h-14 rounded-2xl bg-white shadow-sm flex items-center justify-center mb-4">
-        {icons[errorInfo.icon]}
-      </div>
+      <LottieAnimation
+        animationData={errorAnimation}
+        loop={false}
+        className="w-20 h-20 mb-2"
+      />
       <h3 className="text-slate-900 font-semibold text-lg mb-1">{errorInfo.title}</h3>
       <p className="text-slate-500 text-sm mb-5 max-w-xs">{errorInfo.message}</p>
 

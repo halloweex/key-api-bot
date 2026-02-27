@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { TrendingUp, TrendingDown, Minus, ChevronDown } from 'lucide-react'
 import { AnimatedNumber } from '../ui/AnimatedNumber'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -62,21 +63,9 @@ const trendStyles = {
 } as const
 
 const TrendIcon = {
-  up: (
-    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
-      <path fillRule="evenodd" d="M5.293 9.707a1 1 0 010-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 01-1.414 1.414L11 7.414V15a1 1 0 11-2 0V7.414L6.707 9.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
-    </svg>
-  ),
-  down: (
-    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
-      <path fillRule="evenodd" d="M14.707 10.293a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 111.414-1.414L9 12.586V5a1 1 0 012 0v7.586l2.293-2.293a1 1 0 011.414 0z" clipRule="evenodd" />
-    </svg>
-  ),
-  neutral: (
-    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
-      <path fillRule="evenodd" d="M5 10a1 1 0 011-1h8a1 1 0 110 2H6a1 1 0 01-1-1z" clipRule="evenodd" />
-    </svg>
-  ),
+  up: <TrendingUp className="w-3 h-3" aria-hidden="true" />,
+  down: <TrendingDown className="w-3 h-3" aria-hidden="true" />,
+  neutral: <Minus className="w-3 h-3" aria-hidden="true" />,
 } as const
 
 // ─── Icon Background Styles ───────────────────────────────────────────────────
@@ -124,9 +113,7 @@ export const StatCard = memo(function StatCard({
             <span className="bg-orange-500 hover:bg-orange-600 text-white text-xs px-2 py-0.5 rounded-full shadow-sm transition-all duration-200 hover:scale-105 animate-pulse hover:animate-none">
               Click me
             </span>
-            <svg className="w-4 h-4 text-orange-400 transition-transform duration-200 group-hover/hint:translate-y-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
+            <ChevronDown className="w-4 h-4 text-orange-400 transition-transform duration-200 group-hover/hint:translate-y-0.5" />
           </div>
         )}
         <article

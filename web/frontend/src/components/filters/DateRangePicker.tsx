@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo } from 'react'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 import {
   format,
   startOfMonth,
@@ -199,9 +200,7 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
               className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors"
               aria-label={t('filter.previousMonth')}
             >
-              <svg className="w-5 h-5 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
+              <ChevronLeft className="w-5 h-5 text-slate-600" />
             </button>
             <span className="font-semibold text-slate-800">
               {format(currentMonth, 'MMMM yyyy')}
@@ -211,9 +210,7 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
               className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors"
               aria-label={t('filter.nextMonth')}
             >
-              <svg className="w-5 h-5 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
+              <ChevronRight className="w-5 h-5 text-slate-600" />
             </button>
           </div>
 

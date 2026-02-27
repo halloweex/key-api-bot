@@ -1,6 +1,8 @@
 import { type ReactNode, useCallback, memo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent, SkeletonChart, ApiErrorState } from '../ui'
+import { LottieAnimation } from '../ui/LottieAnimation'
+import emptyDataAnimation from '../../assets/animations/empty-data.json'
 import { CHART_DIMENSIONS, type ChartHeight } from './config'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -74,22 +76,10 @@ const EmptyState = memo(function EmptyState({ message, height }: EmptyStateProps
       className="flex flex-col items-center justify-center animate-fade-in"
       style={{ height }}
     >
-      <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 flex items-center justify-center mb-4 shadow-sm">
-        <svg
-          className="w-7 h-7 text-slate-400"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          aria-hidden="true"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={1.5}
-            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
-          />
-        </svg>
-      </div>
+      <LottieAnimation
+        animationData={emptyDataAnimation}
+        className="w-24 h-24 mb-2"
+      />
       <p className="text-sm text-slate-600 font-medium">{message}</p>
       <p className="text-xs text-slate-400 mt-1.5">{t('chart.adjustFilters')}</p>
     </div>

@@ -17,6 +17,8 @@ export default defineConfig(({ command }) => ({
           'query': ['@tanstack/react-query'],
           'charts': ['recharts'],
           'utils': ['date-fns', 'clsx', 'zustand'],
+          'icons': ['lucide-react'],
+          'lottie': ['lottie-react'],
         },
       },
     },

@@ -1,5 +1,6 @@
 import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Megaphone, Sparkles, Monitor, CircleHelp, User, Info } from 'lucide-react'
 import { StatCard, StatCardSkeleton } from '../cards/StatCard'
 import { useTrafficAnalytics } from '../../hooks/useApi'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
@@ -56,44 +57,6 @@ const TRAFFIC_DESCRIPTIONS = [
   },
 ]
 
-// ─── Icons ────────────────────────────────────────────────────────────────────
-
-const AdsIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-  </svg>
-)
-
-const LeafIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
-  </svg>
-)
-
-const PixelIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-  </svg>
-)
-
-const QuestionIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-  </svg>
-)
-
-const ManagerIcon = () => (
-  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-  </svg>
-)
-
-const InfoIcon = () => (
-  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-  </svg>
-)
-
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
@@ -129,7 +92,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
               : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100'
           }`}
         >
-          <InfoIcon />
+          <Info className="w-4 h-4" />
           <span>{showLegend ? t('traffic.hide') : t('traffic.whatIsThis')}</span>
         </button>
       </div>
@@ -162,7 +125,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.paidAds')}
         value={summary?.paid?.revenue ?? 0}
         formatter={formatCurrency}
-        icon={<AdsIcon />}
+        icon={<Megaphone className="w-5 h-5" />}
         variant="blue"
         subtitle={`${formatNumber(summary?.paid?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.paidAds')}: ${formatCurrency(summary?.paid?.revenue ?? 0)}`}
@@ -173,7 +136,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.organic')}
         value={summary?.organic?.revenue ?? 0}
         formatter={formatCurrency}
-        icon={<LeafIcon />}
+        icon={<Sparkles className="w-5 h-5" />}
         variant="green"
         subtitle={`${formatNumber(summary?.organic?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.organic')}: ${formatCurrency(summary?.organic?.revenue ?? 0)}`}
@@ -182,7 +145,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.salesManager')}
         value={summary?.manager?.revenue ?? 0}
         formatter={formatCurrency}
-        icon={<ManagerIcon />}
+        icon={<User className="w-5 h-5" />}
         variant="cyan"
         subtitle={`${formatNumber(summary?.manager?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.salesManager')}: ${formatCurrency(summary?.manager?.revenue ?? 0)}`}
@@ -191,7 +154,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.pixelOnly')}
         value={summary?.pixel_only?.revenue ?? 0}
         formatter={formatCurrency}
-        icon={<PixelIcon />}
+        icon={<Monitor className="w-5 h-5" />}
         variant="orange"
         subtitle={`${formatNumber(summary?.pixel_only?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.pixelOnly')}: ${formatCurrency(summary?.pixel_only?.revenue ?? 0)}`}
@@ -200,7 +163,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.unknown')}
         value={summary?.unknown?.revenue ?? 0}
         formatter={formatCurrency}
-        icon={<QuestionIcon />}
+        icon={<CircleHelp className="w-5 h-5" />}
         variant="purple"
         subtitle={`${formatNumber(summary?.unknown?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.unknown')}: ${formatCurrency(summary?.unknown?.revenue ?? 0)}`}

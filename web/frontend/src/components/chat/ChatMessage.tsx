@@ -1,4 +1,5 @@
 import { memo, useState } from 'react'
+import { Sparkles, Copy, Check } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import type { ChatMessage as ChatMessageType } from '../../store/chatStore'
 
@@ -29,9 +30,7 @@ export const ChatMessage = memo(function ChatMessage({ message, index }: ChatMes
         {/* Avatar for assistant */}
         {!isUser && (
           <div className="absolute -left-10 top-0 w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center shadow-sm">
-            <svg className="w-4 h-4 text-white" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-            </svg>
+            <Sparkles className="w-4 h-4 text-white" />
           </div>
         )}
 
@@ -94,12 +93,12 @@ export const ChatMessage = memo(function ChatMessage({ message, index }: ChatMes
             >
               {copied ? (
                 <>
-                  <CheckIcon className="w-3 h-3" />
+                  <Check className="w-3 h-3" />
                   <span>Copied</span>
                 </>
               ) : (
                 <>
-                  <CopyIcon className="w-3 h-3" />
+                  <Copy className="w-3 h-3" />
                   <span>Copy</span>
                 </>
               )}
@@ -133,7 +132,7 @@ function ToolCallCard({ tool }: { tool: { tool: string; input: Record<string, un
       </div>
       {tool.result && (
         <div className="w-5 h-5 rounded-full bg-green-100 flex items-center justify-center">
-          <CheckIcon className="w-3 h-3 text-green-600" />
+          <Check className="w-3 h-3 text-green-600" />
         </div>
       )}
     </div>
@@ -163,18 +162,3 @@ function formatTime(date: Date): string {
   }).format(date)
 }
 
-function CopyIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-    </svg>
-  )
-}
-
-function CheckIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-    </svg>
-  )
-}
