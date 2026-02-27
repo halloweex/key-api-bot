@@ -109,14 +109,14 @@ export function UserProfileDropdown() {
       {/* Avatar button */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-2 p-1 rounded-full hover:bg-slate-100 transition-colors focus:outline-none focus:ring-2 focus:ring-purple-500/40 focus:ring-offset-2"
+        className="flex items-center gap-2.5 w-full p-1.5 rounded-lg hover:bg-slate-100 transition-colors focus:outline-none focus:ring-2 focus:ring-purple-500/40 focus:ring-offset-2"
         aria-expanded={isOpen}
         aria-haspopup="true"
       >
         {/* Always show initials, optionally overlay with photo */}
-        <div className="relative w-10 h-10">
+        <div className="relative w-9 h-9 flex-shrink-0">
           {/* Initials background - always visible */}
-          <div className="absolute inset-0 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-bold text-sm shadow-sm">
+          <div className="absolute inset-0 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-bold text-xs shadow-sm">
             {initials}
           </div>
           {/* Photo overlay - only if available and not errored */}
@@ -124,14 +124,25 @@ export function UserProfileDropdown() {
             <img
               src={user.photo_url}
               alt={displayName}
-              className="absolute inset-0 w-10 h-10 rounded-full object-cover border-2 border-white shadow-sm"
+              className="absolute inset-0 w-9 h-9 rounded-full object-cover border-2 border-white shadow-sm"
               onError={() => setImageError(true)}
             />
           )}
         </div>
-        {/* Chevron indicator on desktop */}
+        {/* Name and username */}
+        <div className="min-w-0 flex-1 text-left">
+          <p className="text-sm font-medium text-slate-800 truncate">
+            {displayName}
+          </p>
+          {user.username && (
+            <p className="text-[11px] text-slate-500 truncate">
+              @{user.username}
+            </p>
+          )}
+        </div>
+        {/* Chevron */}
         <svg
-          className={`w-4 h-4 text-slate-400 transition-transform hidden sm:block ${isOpen ? 'rotate-180' : ''}`}
+          className={`w-4 h-4 text-slate-400 transition-transform flex-shrink-0 ${isOpen ? 'rotate-180' : ''}`}
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
