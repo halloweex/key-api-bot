@@ -356,6 +356,7 @@
 
   "products.brandAffinityTitle": "Brand Affinity",
   "products.brandAffinityDesc": "Brand pairs that customers frequently buy together.",
+  "products.qty": "qty",
 
   "error.noInternet": "No internet connection",
   "error.checkNetwork": "Check your network and try again",

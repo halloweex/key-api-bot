@@ -68,7 +68,7 @@ export const ProductMomentumTable = memo(function ProductMomentumTable() {
                         {p.productName}
                       </p>
                       <p className="text-[10px] text-slate-400">
-                        {formatCurrency(p.currentRevenue)} ({formatNumber(p.currentQty)} qty)
+                        {formatCurrency(p.currentRevenue)} ({formatNumber(p.currentQty)} {t('products.qty')})
                       </p>
                     </div>
                     <span className="text-xs font-semibold text-green-600 whitespace-nowrap">
@@ -97,7 +97,7 @@ export const ProductMomentumTable = memo(function ProductMomentumTable() {
                         {p.productName}
                       </p>
                       <p className="text-[10px] text-slate-400">
-                        {formatCurrency(p.currentRevenue)} ({formatNumber(p.currentQty)} qty)
+                        {formatCurrency(p.currentRevenue)} ({formatNumber(p.currentQty)} {t('products.qty')})
                       </p>
                     </div>
                     <span className="text-xs font-semibold text-red-600 whitespace-nowrap">
