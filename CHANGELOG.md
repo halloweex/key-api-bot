@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.15
+
+- Fix i18n: hardcoded qty strings, fix 60+ bad DeepL translations
+
+
 ## 3.0.14
 
 - i18n: translate MilestoneProgress, rename to Main Dashboard
