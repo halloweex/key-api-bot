@@ -1,4 +1,5 @@
 import { memo, useMemo, useEffect, useRef, useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useFilterStore } from '../../store/filterStore'
 import { formatCurrency } from '../../utils/formatters'
 import { useSmartGoals, useRevenueTrend } from '../../hooks'
@@ -27,23 +28,23 @@ interface Sparkle {
 
 // ─── Fallback Goals (used while loading or on error) ─────────────────────────
 
-const FALLBACK_MILESTONES: Record<string, Milestone[]> = {
+type TFunc = (key: string, opts?: Record<string, string | number>) => string
+
+const getFallbackMilestones = (t: TFunc): Record<string, Milestone[]> => ({
   daily: [
-    { amount: 200000, message: '200K Daily Revenue!', emoji: '🎉' },
+    { amount: 200000, message: t('goal.dailyRevenue', { amount: '200K' }), emoji: '🎉' },
   ],
   weekly: [
-    { amount: 800000, message: '800K Weekly Revenue!', emoji: '🔥' },
-    { amount: 1000000, message: '1 MILLION Weekly!', emoji: '💰🎊' },
+    { amount: 800000, message: t('goal.weeklyRevenue', { amount: '800K' }), emoji: '🔥' },
+    { amount: 1000000, message: t('goal.weeklyRevenue', { amount: '1M' }), emoji: '💰🎊' },
   ],
   monthly: [
-    // Weekly intermediate milestones (assuming 1M weekly goal)
-    { amount: 1000000, message: 'Week 1: 1M!', emoji: '🔥' },
-    { amount: 2000000, message: 'Week 2: 2M!', emoji: '⚡' },
-    { amount: 3000000, message: 'Week 3: 3M!', emoji: '💪' },
-    // Final monthly goal
-    { amount: 4000000, message: '4 MILLION Monthly!', emoji: '👑🎇🎆' },
+    { amount: 1000000, message: t('goal.weekLabel', { num: 1, amount: '1M' }), emoji: '🔥' },
+    { amount: 2000000, message: t('goal.weekLabel', { num: 2, amount: '2M' }), emoji: '⚡' },
+    { amount: 3000000, message: t('goal.weekLabel', { num: 3, amount: '3M' }), emoji: '💪' },
+    { amount: 4000000, message: t('goal.monthlyRevenue', { amount: '4M' }), emoji: '👑🎇🎆' },
   ],
-}
+})
 
 // Map period to milestone type
 function getPeriodType(period: string): string | null {
@@ -164,7 +165,7 @@ function LeadingEdgeGlow({ progress, themeColor }: { progress: number; themeColo
 
 // ─── Celebration Overlay ──────────────────────────────────────────────────────
 
-function CelebrationOverlay({ milestone, onClose }: { milestone: Milestone; onClose: () => void }) {
+function CelebrationOverlay({ milestone, onClose, t }: { milestone: Milestone; onClose: () => void; t: TFunc }) {
   useEffect(() => {
     const timer = setTimeout(onClose, 4000)
     return () => clearTimeout(timer)
@@ -179,7 +180,7 @@ function CelebrationOverlay({ milestone, onClose }: { milestone: Milestone; onCl
         <div className="text-6xl mb-4">{milestone.emoji}</div>
         <h2 className="text-3xl font-bold text-white mb-2">{milestone.message}</h2>
         <p className="text-slate-300">
-          Congratulations on reaching {formatAmount(milestone.amount)}!
+          {t('goal.congratulations', { amount: formatAmount(milestone.amount) })}
         </p>
       </div>
     </div>
@@ -196,7 +197,7 @@ interface SmartGoalInput {
   weeklyGoalAmount?: number  // average weekly goal for simple calculation
 }
 
-function generateMilestonesFromGoals(input: SmartGoalInput): Milestone[] {
+function generateMilestonesFromGoals(input: SmartGoalInput, t: TFunc): Milestone[] {
   const { periodType, goalAmount, isCustom, weeklyBreakdown, weeklyGoalAmount } = input
 
   // Generate message based on amount
@@ -206,11 +207,11 @@ function generateMilestonesFromGoals(input: SmartGoalInput): Milestone[] {
       : `${(amount / 1000).toFixed(0)}K`
 
     if (weekNum) {
-      return `Week ${weekNum}: ${formattedAmount}!`
+      return t('goal.weekLabel', { num: weekNum, amount: formattedAmount })
     }
 
-    const periodLabel = type === 'daily' ? 'Daily' : type === 'weekly' ? 'Weekly' : 'Monthly'
-    return `${formattedAmount} ${periodLabel} Revenue!`
+    const key = type === 'daily' ? 'goal.dailyRevenue' : type === 'weekly' ? 'goal.weeklyRevenue' : 'goal.monthlyRevenue'
+    return t(key, { amount: formattedAmount })
   }
 
   // Select emoji based on period type and position
@@ -320,8 +321,9 @@ function InfoButton({ onClick }: { onClick: () => void }) {
   )
 }
 
-function InfoTooltipContent({ onClose, children }: {
+function InfoTooltipContent({ onClose, title, children }: {
   onClose: () => void
+  title: string
   children: React.ReactNode
 }) {
   return (
@@ -333,7 +335,7 @@ function InfoTooltipContent({ onClose, children }: {
       >
         ×
       </button>
-      <h4 className="text-sm font-semibold text-slate-200 mb-2">Goal Calculation</h4>
+      <h4 className="text-sm font-semibold text-slate-200 mb-2">{title}</h4>
       {children}
     </div>
   )
@@ -345,6 +347,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   revenue,
   className = ''
 }: MilestoneProgressProps) {
+  const { t } = useTranslation()
   const { period } = useFilterStore()
   const containerRef = useRef<HTMLDivElement>(null)
   const trackRef = useRef<HTMLDivElement>(null)
@@ -471,13 +474,13 @@ export const MilestoneProgress = memo(function MilestoneProgress({
           isCustom: goalData.isCustom,
           weeklyBreakdown,
           weeklyGoalAmount,
-        })
+        }, t)
       }
     }
 
     // Fallback to hardcoded values while loading or on error
-    return FALLBACK_MILESTONES[periodType] || null
-  }, [periodType, goalsData])
+    return getFallbackMilestones(t)[periodType] || null
+  }, [periodType, goalsData, t])
 
   // Calculate progress metrics
   const metrics = useMemo(() => {
@@ -621,9 +624,9 @@ export const MilestoneProgress = memo(function MilestoneProgress({
     return null
   }
 
-  const periodLabel = periodType === 'daily' ? 'Daily Goal'
-    : periodType === 'weekly' ? 'Weekly Goal'
-    : 'Monthly Goal'
+  const periodLabel = periodType === 'daily' ? t('goal.dailyGoal')
+    : periodType === 'weekly' ? t('goal.weeklyGoal')
+    : t('goal.monthlyGoal')
 
   // Get goal details from smart goals data
   const currentGoalData = periodType === 'daily' ? goalsData?.daily
@@ -643,11 +646,11 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   // Format calculation method for display
   const getMethodLabel = (method?: string): string => {
     switch (method) {
-      case 'yoy_growth': return 'YoY Growth'
-      case 'recent_trend': return 'Recent Trend'
-      case 'historical_avg': return 'Historical Avg'
-      case 'fallback': return 'Default'
-      default: return 'Auto'
+      case 'yoy_growth': return t('goal.methodYoy')
+      case 'recent_trend': return t('goal.methodTrend')
+      case 'historical_avg': return t('goal.methodHistorical')
+      case 'fallback': return t('goal.methodDefault')
+      default: return t('goal.methodAuto')
     }
   }
 
@@ -661,8 +664,8 @@ export const MilestoneProgress = memo(function MilestoneProgress({
             <span className="text-base font-semibold text-slate-800 tracking-tight">{periodLabel}</span>
             {/* Custom goal indicator */}
             {isCustomGoal && (
-              <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-medium" title="Custom goal set manually">
-                Custom
+              <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-medium">
+                {t('goal.custom')}
               </span>
             )}
             {/* Info button for auto-calculated goals (click-based) */}
@@ -671,36 +674,36 @@ export const MilestoneProgress = memo(function MilestoneProgress({
             )}
             {/* Click-based tooltip */}
             {showGoalInfo && (
-              <InfoTooltipContent onClose={() => setShowGoalInfo(false)}>
+              <InfoTooltipContent onClose={() => setShowGoalInfo(false)} title={t('goal.calcTitle')}>
                 <div className="space-y-2">
                   {growthRate !== undefined && growthRate > 0 && (
                     <p className="text-xs text-slate-300">
-                      <strong className="text-emerald-400">YoY Growth:</strong> +{(growthRate * 100).toFixed(0)}%
+                      <strong className="text-emerald-400">{t('goal.yoyGrowth')}</strong> +{(growthRate * 100).toFixed(0)}%
                     </p>
                   )}
                   {recent3MonthAvg && recent3MonthAvg > 0 && (
                     <p className="text-xs text-slate-300">
-                      <strong className="text-blue-400">Recent 3mo avg:</strong> {formatAmount(recent3MonthAvg)}
+                      <strong className="text-blue-400">{t('goal.recent3mo')}</strong> {formatAmount(recent3MonthAvg)}
                     </p>
                   )}
                   {lastYearRevenue && lastYearRevenue > 0 && (
                     <p className="text-xs text-slate-300">
-                      <strong className="text-purple-400">Last year same month:</strong> {formatAmount(lastYearRevenue)}
+                      <strong className="text-purple-400">{t('goal.lastYearMonth')}</strong> {formatAmount(lastYearRevenue)}
                     </p>
                   )}
                   {seasonalityIndex && (
                     <p className="text-xs text-slate-300">
-                      <strong className="text-orange-400">Seasonality:</strong> {seasonalityIndex.toFixed(2)}x
+                      <strong className="text-orange-400">{t('goal.seasonality')}</strong> {seasonalityIndex.toFixed(2)}x
                     </p>
                   )}
                   {calculationMethod && (
                     <p className="text-xs text-slate-400 pt-1 mt-1 border-t border-slate-600">
-                      Method: {getMethodLabel(calculationMethod)}
+                      {t('goal.method')} {getMethodLabel(calculationMethod)}
                     </p>
                   )}
                   {excludedPrevMonthRevenue > 0 && (
                     <p className="text-xs text-slate-300 pt-1 mt-1 border-t border-slate-600">
-                      <strong className="text-amber-400">{formatCurrency(excludedPrevMonthRevenue)}</strong> from previous month not included
+                      <strong className="text-amber-400">{formatCurrency(excludedPrevMonthRevenue)}</strong> {t('goal.prevMonthExcluded')}
                     </p>
                   )}
                 </div>
@@ -709,7 +712,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
             {/* Loading indicator */}
             {isLoadingGoals && (
               <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded animate-pulse">
-                Loading...
+                {t('goal.loading')}
               </span>
             )}
           </div>
@@ -719,7 +722,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
             </span>
             {metrics.nearMilestone && (
               <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium animate-pulse">
-                Almost there!
+                {t('goal.almostThere')}
               </span>
             )}
           </div>
@@ -832,11 +835,11 @@ export const MilestoneProgress = memo(function MilestoneProgress({
             <span className={`text-base font-bold ${metrics.textColor}`}>
               {formatCurrency(effectiveRevenue)}
             </span>
-            <span className="text-xs text-slate-400 ml-1">current</span>
+            <span className="text-xs text-slate-400 ml-1">{t('goal.current')}</span>
             {/* Show note about excluded previous month revenue */}
             {excludedPrevMonthRevenue > 0 && (
-              <span className="text-xs text-slate-400 ml-1" title={`${formatCurrency(excludedPrevMonthRevenue)} from previous month excluded`}>
-                (this month only)
+              <span className="text-xs text-slate-400 ml-1">
+                {t('goal.thisMonthOnly')}
               </span>
             )}
           </div>
@@ -844,7 +847,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
             <span className="text-base font-semibold text-slate-600">
               {formatAmount(metrics.maxMilestone)}
             </span>
-            <span className="text-xs text-slate-400 ml-1">goal</span>
+            <span className="text-xs text-slate-400 ml-1">{t('goal.goalLabel')}</span>
           </div>
         </div>
 
@@ -852,7 +855,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         {!metrics.allCompleted && (
           <div className="mt-3 pt-3 border-t border-slate-100">
             <p className="text-xs text-slate-500 text-center">
-              <span className="font-medium text-slate-700">{formatCurrency(metrics.maxMilestone - effectiveRevenue)}</span> remaining to reach goal
+              <span className="font-medium text-slate-700">{formatCurrency(metrics.maxMilestone - effectiveRevenue)}</span> {t('goal.remaining')}
             </p>
           </div>
         )}
@@ -864,7 +867,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
               <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                 <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
               </svg>
-              All milestones achieved!
+              {t('goal.allAchieved')}
             </p>
           </div>
         )}
@@ -873,7 +876,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         {periodType === 'monthly' && lastYearRevenue && lastYearRevenue > 0 && !isCustomGoal && (
           <div className="mt-3 pt-3 border-t border-slate-100">
             <div className="flex justify-between items-center text-xs">
-              <span className="text-slate-500">vs. Same month last year</span>
+              <span className="text-slate-500">{t('goal.vsLastYear')}</span>
               <span className="font-medium text-slate-700">
                 {formatAmount(lastYearRevenue)}
                 {effectiveRevenue > lastYearRevenue && (
@@ -897,6 +900,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
         <CelebrationOverlay
           milestone={celebration}
           onClose={() => setCelebration(null)}
+          t={t}
         />
       )}
 
