@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.17
+
+- Add Vector
+
+
 ## 3.0.16
 
 - Show user name and username next to avatar in expanded sidebar
