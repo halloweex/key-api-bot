@@ -51,21 +51,35 @@ class ProductsIntelMixin:
             single_aov = float(result[6] or 0)
             uplift = round(multi_aov / single_aov, 1) if single_aov > 0 else 0
 
-            # Top pair by co-occurrence
-            st_param = sales_type if sales_type != "all" else None
-            if st_param:
-                top_pair = conn.execute("""
-                    SELECT product_a_name, product_b_name, co_occurrence
-                    FROM gold_product_pairs
-                    WHERE sales_type = ?
-                    ORDER BY co_occurrence DESC LIMIT 1
-                """, [st_param]).fetchone()
-            else:
-                top_pair = conn.execute("""
-                    SELECT product_a_name, product_b_name, co_occurrence
-                    FROM gold_product_pairs
-                    ORDER BY co_occurrence DESC LIMIT 1
-                """).fetchone()
+            # Top pair by co-occurrence (date-filtered)
+            top_pair = conn.execute(f"""
+                WITH oi AS (
+                    SELECT s.id AS order_id,
+                           COALESCE(op.product_id, op.id) AS product_id,
+                           ANY_VALUE(op.name) AS product_name
+                    FROM silver_orders s
+                    JOIN order_products op ON s.id = op.order_id
+                    WHERE {where_sql}
+                    GROUP BY s.id, COALESCE(op.product_id, op.id)
+                ),
+                multi AS (
+                    SELECT order_id, product_id, product_name
+                    FROM oi WHERE order_id IN (
+                        SELECT order_id FROM oi GROUP BY order_id HAVING COUNT(*) >= 2
+                    )
+                )
+                SELECT
+                    COALESCE(p_a.name, a.product_name) AS name_a,
+                    COALESCE(p_b.name, b.product_name) AS name_b,
+                    COUNT(DISTINCT a.order_id) AS co_occurrence
+                FROM multi a
+                JOIN multi b ON a.order_id = b.order_id AND a.product_id < b.product_id
+                LEFT JOIN products p_a ON a.product_id = p_a.id
+                LEFT JOIN products p_b ON b.product_id = p_b.id
+                GROUP BY name_a, name_b
+                ORDER BY co_occurrence DESC
+                LIMIT 1
+            """, params).fetchone()
 
             top_pair_name = f"{top_pair[0]} + {top_pair[1]}" if top_pair else "N/A"
             top_pair_count = int(top_pair[2]) if top_pair else 0
@@ -84,31 +98,94 @@ class ProductsIntelMixin:
 
     async def get_frequently_bought_together(
         self,
+        start_date: date,
+        end_date: date,
         sales_type: str = "retail",
         limit: int = 20,
         product_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Get top product pairs from pre-computed gold table."""
+        """Get top product pairs by co-occurrence within date range."""
         async with self.connection() as conn:
-            params: list = []
-            where = []
+            params: list = [start_date, end_date]
+            where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
 
             if sales_type != "all":
-                where.append("sales_type = ?")
+                where.append("s.sales_type = ?")
                 params.append(sales_type)
 
+            where_sql = " AND ".join(where)
+
+            # Dynamic threshold: >= 2 for 14+ day ranges, >= 1 for shorter
+            days_span = (end_date - start_date).days + 1
+            having_threshold = 2 if days_span >= 14 else 1
+
+            product_filter = ""
             if product_id is not None:
-                where.append("(product_a_id = ? OR product_b_id = ?)")
+                product_filter = "WHERE a_id = ? OR b_id = ?"
                 params.extend([product_id, product_id])
 
-            where_sql = " AND ".join(where) if where else "1=1"
-
             rows = conn.execute(f"""
-                SELECT product_a_id, product_a_name, product_b_id, product_b_name,
-                       co_occurrence, support, confidence_a_to_b, confidence_b_to_a, lift,
-                       product_a_orders, product_b_orders, total_orders
-                FROM gold_product_pairs
-                WHERE {where_sql}
+                WITH order_items AS (
+                    SELECT s.id AS order_id,
+                           COALESCE(op.product_id, op.id) AS product_id,
+                           ANY_VALUE(op.name) AS product_name
+                    FROM silver_orders s
+                    JOIN order_products op ON s.id = op.order_id
+                    WHERE {where_sql}
+                    GROUP BY s.id, COALESCE(op.product_id, op.id)
+                ),
+                multi_orders AS (
+                    SELECT order_id, product_id, product_name
+                    FROM order_items
+                    WHERE order_id IN (
+                        SELECT order_id FROM order_items
+                        GROUP BY order_id HAVING COUNT(*) >= 2
+                    )
+                ),
+                pair_counts AS (
+                    SELECT a.product_id AS a_id, b.product_id AS b_id,
+                           COUNT(DISTINCT a.order_id) AS co_occurrence
+                    FROM multi_orders a
+                    JOIN multi_orders b ON a.order_id = b.order_id
+                        AND a.product_id < b.product_id
+                    GROUP BY a.product_id, b.product_id
+                    HAVING co_occurrence >= {having_threshold}
+                ),
+                product_orders AS (
+                    SELECT product_id, COUNT(DISTINCT order_id) AS orders
+                    FROM order_items
+                    GROUP BY product_id
+                ),
+                total AS (
+                    SELECT COUNT(DISTINCT order_id) AS total_orders FROM order_items
+                ),
+                with_metrics AS (
+                    SELECT pc.a_id, pc.b_id, pc.co_occurrence,
+                           COALESCE(p_a.name, oi_a.product_name, 'Unknown') AS a_name,
+                           COALESCE(p_b.name, oi_b.product_name, 'Unknown') AS b_name,
+                           po_a.orders AS a_orders,
+                           po_b.orders AS b_orders,
+                           t.total_orders,
+                           pc.co_occurrence * 1.0 / t.total_orders AS support,
+                           pc.co_occurrence * 1.0 / po_a.orders AS conf_a_to_b,
+                           pc.co_occurrence * 1.0 / po_b.orders AS conf_b_to_a,
+                           CASE WHEN po_a.orders * po_b.orders > 0
+                               THEN (pc.co_occurrence * t.total_orders * 1.0) / (po_a.orders * po_b.orders)
+                               ELSE 0 END AS lift
+                    FROM pair_counts pc
+                    LEFT JOIN products p_a ON pc.a_id = p_a.id
+                    LEFT JOIN products p_b ON pc.b_id = p_b.id
+                    LEFT JOIN (SELECT product_id, ANY_VALUE(product_name) AS product_name FROM multi_orders GROUP BY product_id) oi_a ON pc.a_id = oi_a.product_id
+                    LEFT JOIN (SELECT product_id, ANY_VALUE(product_name) AS product_name FROM multi_orders GROUP BY product_id) oi_b ON pc.b_id = oi_b.product_id
+                    LEFT JOIN product_orders po_a ON pc.a_id = po_a.product_id
+                    LEFT JOIN product_orders po_b ON pc.b_id = po_b.product_id
+                    CROSS JOIN total t
+                )
+                SELECT a_id, a_name, b_id, b_name,
+                       co_occurrence, support, conf_a_to_b, conf_b_to_a, lift,
+                       a_orders, b_orders, total_orders
+                FROM with_metrics
+                {product_filter}
                 ORDER BY co_occurrence DESC
                 LIMIT ?
             """, params + [limit]).fetchall()
@@ -249,34 +326,47 @@ class ProductsIntelMixin:
 
     async def get_brand_affinity(
         self,
+        start_date: date,
+        end_date: date,
         sales_type: str = "retail",
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """Get top brand pair co-purchases from gold_product_pairs + products."""
+        """Get top brand pair co-purchases within date range."""
         async with self.connection() as conn:
-            params: list = []
-            where = []
+            params: list = [start_date, end_date]
+            where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
 
             if sales_type != "all":
-                where.append("gpp.sales_type = ?")
+                where.append("s.sales_type = ?")
                 params.append(sales_type)
 
-            where_sql = " AND ".join(where) if where else "1=1"
+            where_sql = " AND ".join(where)
+
+            days_span = (end_date - start_date).days + 1
+            having_threshold = 2 if days_span >= 14 else 1
 
             rows = conn.execute(f"""
-                SELECT
-                    COALESCE(pa.brand, 'Unknown') AS brand_a,
-                    COALESCE(pb.brand, 'Unknown') AS brand_b,
-                    SUM(gpp.co_occurrence) AS total_co_occurrence,
-                    COUNT(*) AS product_pairs
-                FROM gold_product_pairs gpp
-                LEFT JOIN products pa ON gpp.product_a_id = pa.id
-                LEFT JOIN products pb ON gpp.product_b_id = pb.id
-                WHERE {where_sql}
-                  AND pa.brand IS NOT NULL AND pb.brand IS NOT NULL
-                  AND pa.brand != pb.brand
-                GROUP BY COALESCE(pa.brand, 'Unknown'), COALESCE(pb.brand, 'Unknown')
-                ORDER BY total_co_occurrence DESC
+                WITH order_brands AS (
+                    SELECT DISTINCT s.id AS order_id, p.brand
+                    FROM silver_orders s
+                    JOIN order_products op ON s.id = op.order_id
+                    JOIN products p ON op.product_id = p.id
+                    WHERE {where_sql}
+                      AND p.brand IS NOT NULL AND p.brand != ''
+                ),
+                brand_pairs AS (
+                    SELECT a.brand AS brand_a, b.brand AS brand_b,
+                           COUNT(DISTINCT a.order_id) AS co_occurrence,
+                           0 AS product_pairs
+                    FROM order_brands a
+                    JOIN order_brands b ON a.order_id = b.order_id
+                        AND a.brand < b.brand
+                    GROUP BY a.brand, b.brand
+                    HAVING co_occurrence >= {having_threshold}
+                )
+                SELECT brand_a, brand_b, co_occurrence, product_pairs
+                FROM brand_pairs
+                ORDER BY co_occurrence DESC
                 LIMIT ?
             """, params + [limit]).fetchall()
 
