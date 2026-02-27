@@ -47,9 +47,9 @@ const ChartBarIcon = () => (
   </svg>
 )
 
-const MegaphoneIcon = () => (
+const RocketIcon = () => (
   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M15.59 14.37a6 6 0 01-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 006.16-12.12A14.98 14.98 0 009.63 8.41m5.96 5.96a14.926 14.926 0 01-5.841 2.58m-.119-8.54a6 6 0 00-7.381 5.84h4.8m2.581-5.84a14.927 14.927 0 00-2.58 5.84m2.699 2.7c-.103.021-.207.041-.311.06a15.09 15.09 0 01-2.448-2.448 14.9 14.9 0 01.06-.312m-2.24 2.39a4.493 4.493 0 00-6.233 0c-1.045 1.045-1.087 2.698-.105 4.174 1.476.982 3.13.94 4.174-.105a4.493 4.493 0 000-6.233" />
   </svg>
 )
 
@@ -58,6 +58,7 @@ const CurrencyDollarIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
   </svg>
 )
+
 
 const CubeIcon = () => (
   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -272,6 +273,7 @@ export const SidebarRail = memo(function SidebarRail() {
         <CollapsedNavIcon href="/v2/traffic" icon={<SignalIcon />} label={t('nav.trafficAnalytics')} />
         <CollapsedNavIcon href="/v2/inventory" icon={<CubeIcon />} label={t('nav.inventory')} />
         <CollapsedNavIcon href="/v2/reports" icon={<ClipboardDocIcon />} label={t('nav.reports')} />
+        <CollapsedNavIcon href="/v2/marketing" icon={<RocketIcon />} label={t('nav.marketing')} />
       </div>
 
       {/* Expanded content */}
@@ -290,17 +292,17 @@ export const SidebarRail = memo(function SidebarRail() {
           <NavLink href="/v2/traffic" icon={<SignalIcon />}>
             {t('nav.trafficAnalytics')}
           </NavLink>
-          <NavLink href="/v2/marketing" icon={<MegaphoneIcon />} disabled>
-            {t('nav.marketing')}
-          </NavLink>
-          <NavLink href="/v2/financial" icon={<CurrencyDollarIcon />} disabled>
-            {t('nav.financial')}
-          </NavLink>
           <NavLink href="/v2/inventory" icon={<CubeIcon />}>
             {t('nav.inventory')}
           </NavLink>
           <NavLink href="/v2/reports" icon={<ClipboardDocIcon />}>
             {t('nav.reports')}
+          </NavLink>
+          <NavLink href="/v2/marketing" icon={<RocketIcon />}>
+            {t('nav.marketing')}
+          </NavLink>
+          <NavLink href="/v2/financial" icon={<CurrencyDollarIcon />} disabled>
+            {t('nav.financial')}
           </NavLink>
         </nav>
 

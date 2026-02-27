@@ -13,6 +13,7 @@ const TrafficPage = lazy(() => import('./components/traffic/TrafficPage'))
 const ProductIntelPage = lazy(() => import('./components/products/ProductIntelPage'))
 const InventoryPage = lazy(() => import('./components/inventory/InventoryPage'))
 const ReportsPage = lazy(() => import('./components/reports/ReportsPage'))
+const MarketingPage = lazy(() => import('./components/marketing/MarketingPage'))
 
 // ─── Welcome Toast Hook ──────────────────────────────────────────────────────
 
@@ -177,6 +178,17 @@ function App() {
       <AppShell>
         <Suspense fallback={<PageSpinner />}>
           <InventoryPage />
+        </Suspense>
+      </AppShell>
+    )
+  }
+
+  // Marketing
+  if (path === '/v2/marketing' || path === '/marketing') {
+    return (
+      <AppShell>
+        <Suspense fallback={<PageSpinner />}>
+          <MarketingPage />
         </Suspense>
       </AppShell>
     )

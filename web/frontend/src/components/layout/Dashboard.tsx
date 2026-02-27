@@ -1,6 +1,6 @@
 import { Suspense, memo } from 'react'
 import { SummaryCards } from '../cards'
-import { SkeletonChart, ROICalculator, ProtectedSection } from '../ui'
+import { SkeletonChart, ProtectedSection } from '../ui'
 import {
   LazyRevenueTrendChart,
   LazyOrdersBySourceChart,
@@ -108,11 +108,6 @@ export const Dashboard = memo(function Dashboard() {
       <ChartSection>
         <LazyBrandAnalyticsChart />
       </ChartSection>
-
-      {/* ROI Calculator */}
-      <section>
-        <ROICalculator />
-      </section>
 
       {/* Manual Expenses Table - Admin Only */}
       <ProtectedSection feature="expenses">
