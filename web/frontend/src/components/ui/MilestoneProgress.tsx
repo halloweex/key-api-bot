@@ -1,9 +1,12 @@
-import { memo, useMemo, useEffect, useRef, useState, useCallback } from 'react'
+import { memo, useMemo, useEffect, useRef, useState, useCallback, lazy, Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Check, CheckCircle, CircleHelp } from 'lucide-react'
+import { CheckCircle, CircleHelp } from 'lucide-react'
 import { useFilterStore } from '../../store/filterStore'
 import { formatCurrency } from '../../utils/formatters'
 import { useSmartGoals, useRevenueTrend } from '../../hooks'
+import confettiAnimation from '../../assets/animations/confetti-burst.json'
+
+const LottiePlayer = lazy(() => import('lottie-react'))
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -125,7 +128,7 @@ function generateSparkles(count: number, progressWidth: number): Sparkle[] {
   }))
 }
 
-// ─── SVG Sparkle Star ───────────────────────────────────────────────────────
+// ─── SVG Sparkle Star (4-point diamond sparkle) ─────────────────────────────
 
 function SvgSparkle({ sparkle }: { sparkle: Sparkle }) {
   const s = sparkle.size
@@ -135,14 +138,15 @@ function SvgSparkle({ sparkle }: { sparkle: Sparkle }) {
       style={{ left: sparkle.x, top: `${sparkle.y}%`, width: s * 3, height: s * 3, transform: 'translate(-50%, -50%)' }}
       viewBox="0 0 24 24"
     >
+      {/* 4-point diamond sparkle - cleaner than star */}
       <path
-        d="M12 2 L14 9 L21 9 L15.5 13.5 L17.5 21 L12 16 L6.5 21 L8.5 13.5 L3 9 L10 9 Z"
+        d="M12 0 L14.5 9.5 L24 12 L14.5 14.5 L12 24 L9.5 14.5 L0 12 L9.5 9.5 Z"
         fill="white"
-        fillOpacity="0.9"
+        fillOpacity="0.95"
       >
-        <animate attributeName="opacity" values="0.3;1;0.3" dur={`${1.2 + sparkle.delay * 0.3}s`} repeatCount="indefinite" />
-        <animateTransform attributeName="transform" type="scale" values="0.6;1.1;0.6" dur={`${1.5 + sparkle.delay * 0.2}s`} repeatCount="indefinite" additive="sum" />
-        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur={`${3 + sparkle.delay}s`} repeatCount="indefinite" additive="sum" />
+        <animate attributeName="opacity" values="0.2;1;0.2" dur={`${1.0 + sparkle.delay * 0.3}s`} repeatCount="indefinite" />
+        <animateTransform attributeName="transform" type="scale" values="0.4;1.2;0.4" dur={`${1.2 + sparkle.delay * 0.2}s`} repeatCount="indefinite" additive="sum" />
+        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="180 12 12" dur={`${2.5 + sparkle.delay}s`} repeatCount="indefinite" additive="sum" />
       </path>
     </svg>
   )
@@ -150,18 +154,110 @@ function SvgSparkle({ sparkle }: { sparkle: Sparkle }) {
 
 // ─── SVG Shimmer Overlay ────────────────────────────────────────────────────
 
-function SvgShimmer() {
+function SvgShimmer({ uniqueId }: { uniqueId: string }) {
   return (
     <svg className="absolute inset-0 w-full h-full rounded-full overflow-hidden pointer-events-none" preserveAspectRatio="none">
       <defs>
-        <linearGradient id="shimmerGrad" x1="0" y1="0" x2="1" y2="0">
+        <linearGradient id={`shimmer-${uniqueId}`} x1="0" y1="0" x2="1" y2="0">
           <stop offset="0%" stopColor="white" stopOpacity="0" />
-          <stop offset="50%" stopColor="white" stopOpacity="0.4" />
+          <stop offset="40%" stopColor="white" stopOpacity="0.2" />
+          <stop offset="50%" stopColor="white" stopOpacity="0.5" />
+          <stop offset="60%" stopColor="white" stopOpacity="0.2" />
           <stop offset="100%" stopColor="white" stopOpacity="0" />
-          <animateTransform attributeName="gradientTransform" type="translate" from="-1 0" to="2 0" dur="2.5s" repeatCount="indefinite" />
+          <animateTransform attributeName="gradientTransform" type="translate" from="-1.5 0" to="2.5 0" dur="2.5s" repeatCount="indefinite" />
         </linearGradient>
       </defs>
-      <rect width="100%" height="100%" fill="url(#shimmerGrad)" />
+      <rect width="100%" height="100%" fill={`url(#shimmer-${uniqueId})`} />
+    </svg>
+  )
+}
+
+// ─── SVG Liquid Wave Top Edge ───────────────────────────────────────────────
+
+function SvgLiquidWave({ themeColor }: { themeColor: string }) {
+  const color = themeColor.includes('green') ? '#22c55e'
+    : themeColor.includes('amber') ? '#f59e0b'
+    : themeColor.includes('purple') ? '#a855f7'
+    : '#3b82f6'
+
+  return (
+    <svg
+      className="absolute pointer-events-none"
+      style={{ top: -4, left: 0, width: '100%', height: 8, zIndex: 5 }}
+      viewBox="0 0 200 8"
+      preserveAspectRatio="none"
+    >
+      {/* Wave 1 — darker, slower */}
+      <path fill={color} fillOpacity="0.4">
+        <animate
+          attributeName="d"
+          values="M0 4 Q10 0,20 4 Q30 8,40 4 Q50 0,60 4 Q70 8,80 4 Q90 0,100 4 Q110 8,120 4 Q130 0,140 4 Q150 8,160 4 Q170 0,180 4 Q190 8,200 4 L200 8 L0 8 Z;M0 4 Q10 8,20 4 Q30 0,40 4 Q50 8,60 4 Q70 0,80 4 Q90 8,100 4 Q110 0,120 4 Q130 8,140 4 Q150 0,160 4 Q170 8,180 4 Q190 0,200 4 L200 8 L0 8 Z;M0 4 Q10 0,20 4 Q30 8,40 4 Q50 0,60 4 Q70 8,80 4 Q90 0,100 4 Q110 8,120 4 Q130 0,140 4 Q150 8,160 4 Q170 0,180 4 Q190 8,200 4 L200 8 L0 8 Z"
+          dur="3s"
+          repeatCount="indefinite"
+        />
+      </path>
+      {/* Wave 2 — lighter, faster */}
+      <path fill="white" fillOpacity="0.3">
+        <animate
+          attributeName="d"
+          values="M0 5 Q15 2,30 5 Q45 8,60 5 Q75 2,90 5 Q105 8,120 5 Q135 2,150 5 Q165 8,180 5 Q195 2,200 5 L200 8 L0 8 Z;M0 5 Q15 8,30 5 Q45 2,60 5 Q75 8,90 5 Q105 2,120 5 Q135 8,150 5 Q165 2,180 5 Q195 8,200 5 L200 8 L0 8 Z;M0 5 Q15 2,30 5 Q45 8,60 5 Q75 2,90 5 Q105 8,120 5 Q135 2,150 5 Q165 8,180 5 Q195 2,200 5 L200 8 L0 8 Z"
+          dur="2s"
+          repeatCount="indefinite"
+        />
+      </path>
+    </svg>
+  )
+}
+
+// ─── SVG Traveling Light Orbs ───────────────────────────────────────────────
+
+function SvgTravelingOrbs({ uniqueId }: { uniqueId: string }) {
+  const orbs = [
+    { dur: '3s', delay: '0s', r: 3, opacity: 0.7 },
+    { dur: '4s', delay: '1s', r: 2.5, opacity: 0.5 },
+    { dur: '3.5s', delay: '2s', r: 2, opacity: 0.6 },
+  ]
+  return (
+    <svg className="absolute inset-0 w-full h-full rounded-full overflow-hidden pointer-events-none" preserveAspectRatio="none">
+      <defs>
+        {orbs.map((_, i) => (
+          <radialGradient key={i} id={`orb-glow-${uniqueId}-${i}`}>
+            <stop offset="0%" stopColor="white" stopOpacity="1" />
+            <stop offset="50%" stopColor="white" stopOpacity="0.5" />
+            <stop offset="100%" stopColor="white" stopOpacity="0" />
+          </radialGradient>
+        ))}
+      </defs>
+      {orbs.map((o, i) => (
+        <circle
+          key={i}
+          cy="50%"
+          r={o.r}
+          fill={`url(#orb-glow-${uniqueId}-${i})`}
+          opacity={o.opacity}
+        >
+          <animate
+            attributeName="cx"
+            values="0%;100%"
+            dur={o.dur}
+            begin={o.delay}
+            repeatCount="indefinite"
+          />
+          <animate
+            attributeName="opacity"
+            values={`0;${o.opacity};${o.opacity};0`}
+            dur={o.dur}
+            begin={o.delay}
+            repeatCount="indefinite"
+          />
+          <animate
+            attributeName="r"
+            values={`${o.r * 0.7};${o.r * 1.3};${o.r * 0.7}`}
+            dur="1.2s"
+            repeatCount="indefinite"
+          />
+        </circle>
+      ))}
     </svg>
   )
 }
@@ -179,18 +275,26 @@ function SvgLeadingEdge({ progress, themeColor }: { progress: number; themeColor
   return (
     <svg
       className="absolute pointer-events-none"
-      style={{ left: `${progress}%`, top: '50%', transform: 'translate(-50%, -50%)', width: 28, height: 28, zIndex: 15 }}
-      viewBox="0 0 28 28"
+      style={{ left: `${progress}%`, top: '50%', transform: 'translate(-50%, -50%)', width: 32, height: 32, zIndex: 15 }}
+      viewBox="0 0 32 32"
     >
-      {/* Expanding ring */}
-      <circle cx="14" cy="14" r="8" fill="none" stroke={color} strokeWidth="1.5" opacity="0.6">
-        <animate attributeName="r" values="5;12;5" dur="1.5s" repeatCount="indefinite" />
-        <animate attributeName="opacity" values="0.7;0;0.7" dur="1.5s" repeatCount="indefinite" />
+      {/* Outer expanding ring */}
+      <circle cx="16" cy="16" r="8" fill="none" stroke={color} strokeWidth="1" opacity="0.4">
+        <animate attributeName="r" values="6;14;6" dur="2s" repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.5;0;0.5" dur="2s" repeatCount="indefinite" />
       </circle>
-      {/* Core dot */}
-      <circle cx="14" cy="14" r="5" fill={color}>
-        <animate attributeName="r" values="4;5.5;4" dur="1.5s" repeatCount="indefinite" />
-        <animate attributeName="opacity" values="0.8;1;0.8" dur="1.5s" repeatCount="indefinite" />
+      {/* Inner expanding ring */}
+      <circle cx="16" cy="16" r="5" fill="none" stroke="white" strokeWidth="1" opacity="0.3">
+        <animate attributeName="r" values="4;10;4" dur="2s" begin="0.5s" repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.4;0;0.4" dur="2s" begin="0.5s" repeatCount="indefinite" />
+      </circle>
+      {/* Core dot with glow */}
+      <circle cx="16" cy="16" r="5" fill={color} filter="url(#edgeGlow)">
+        <animate attributeName="r" values="4;6;4" dur="1.5s" repeatCount="indefinite" />
+      </circle>
+      <circle cx="16" cy="16" r="3" fill="white" fillOpacity="0.6">
+        <animate attributeName="r" values="2;3.5;2" dur="1.5s" repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.4;0.8;0.4" dur="1.5s" repeatCount="indefinite" />
       </circle>
     </svg>
   )
@@ -200,28 +304,123 @@ function SvgLeadingEdge({ progress, themeColor }: { progress: number; themeColor
 
 function SvgFloatingBubbles() {
   const bubbles = [
-    { cx: '20%', delay: '0s', dur: '2.2s' },
-    { cx: '50%', delay: '0.7s', dur: '2.5s' },
-    { cx: '80%', delay: '1.4s', dur: '2s' },
+    { cx: '15%', delay: '0s', dur: '2.2s', r: 1.5 },
+    { cx: '35%', delay: '0.5s', dur: '2.8s', r: 2 },
+    { cx: '55%', delay: '1.0s', dur: '2.5s', r: 1.8 },
+    { cx: '75%', delay: '1.5s', dur: '2.0s', r: 1.5 },
+    { cx: '90%', delay: '0.3s', dur: '2.6s', r: 2.2 },
   ]
   return (
     <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ overflow: 'visible' }}>
       {bubbles.map((b, i) => (
-        <circle key={i} cx={b.cx} cy="100%" r="2" fill="white" fillOpacity="0.8">
-          <animate attributeName="cy" values="100%;-50%" dur={b.dur} begin={b.delay} repeatCount="indefinite" />
-          <animate attributeName="opacity" values="0;0.9;0" dur={b.dur} begin={b.delay} repeatCount="indefinite" />
-          <animate attributeName="r" values="1.5;2.5;1" dur={b.dur} begin={b.delay} repeatCount="indefinite" />
+        <circle key={i} cx={b.cx} cy="100%" r={b.r} fill="white" fillOpacity="0.8">
+          <animate attributeName="cy" values="110%;-20%" dur={b.dur} begin={b.delay} repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0;0.8;0.6;0" dur={b.dur} begin={b.delay} repeatCount="indefinite" />
+          <animate attributeName="r" values={`${b.r * 0.6};${b.r};${b.r * 0.4}`} dur={b.dur} begin={b.delay} repeatCount="indefinite" />
         </circle>
       ))}
     </svg>
   )
 }
 
-// ─── Celebration Overlay ──────────────────────────────────────────────────────
+// ─── SVG Color-Shifting Gradient Fill ────────────────────────────────────────
+
+function SvgColorShiftGradient({ uniqueId, themeColor }: { uniqueId: string; themeColor: string }) {
+  // Determine color palette based on theme
+  const colors = themeColor.includes('purple')
+    ? { c1: '#a855f7', c2: '#ec4899', c3: '#8b5cf6', c4: '#d946ef' }
+    : themeColor.includes('amber')
+    ? { c1: '#f59e0b', c2: '#ef4444', c3: '#f97316', c4: '#eab308' }
+    : { c1: '#22c55e', c2: '#06b6d4', c3: '#10b981', c4: '#14b8a6' }
+
+  return (
+    <svg className="absolute inset-0 w-full h-full rounded-full pointer-events-none" preserveAspectRatio="none" style={{ mixBlendMode: 'overlay', opacity: 0.4 }}>
+      <defs>
+        <linearGradient id={`shift-${uniqueId}`} x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%">
+            <animate attributeName="stop-color" values={`${colors.c1};${colors.c2};${colors.c3};${colors.c4};${colors.c1}`} dur="6s" repeatCount="indefinite" />
+          </stop>
+          <stop offset="50%">
+            <animate attributeName="stop-color" values={`${colors.c3};${colors.c1};${colors.c4};${colors.c2};${colors.c3}`} dur="6s" repeatCount="indefinite" />
+          </stop>
+          <stop offset="100%">
+            <animate attributeName="stop-color" values={`${colors.c2};${colors.c4};${colors.c1};${colors.c3};${colors.c2}`} dur="6s" repeatCount="indefinite" />
+          </stop>
+        </linearGradient>
+      </defs>
+      <rect width="100%" height="100%" fill={`url(#shift-${uniqueId})`} />
+    </svg>
+  )
+}
+
+// ─── SVG Milestone Marker ───────────────────────────────────────────────────
+
+function SvgMilestoneMarker({ isReached, isNext, isFinal }: { isReached: boolean; isNext: boolean; isFinal: boolean }) {
+  if (isReached) {
+    // Animated checkmark with ring burst
+    return (
+      <svg viewBox="0 0 28 28" className="w-full h-full">
+        <defs>
+          <linearGradient id="checkGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor={isFinal ? '#a855f7' : '#f59e0b'} />
+            <stop offset="100%" stopColor={isFinal ? '#ec4899' : '#ef4444'} />
+          </linearGradient>
+        </defs>
+        {/* Success ring burst */}
+        <circle cx="14" cy="14" r="10" fill="none" stroke={isFinal ? '#a855f7' : '#f59e0b'} strokeWidth="1" opacity="0">
+          <animate attributeName="r" values="8;16" dur="1.5s" repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0.6;0" dur="1.5s" repeatCount="indefinite" />
+        </circle>
+        {/* Background circle */}
+        <circle cx="14" cy="14" r="10" fill="url(#checkGrad)" />
+        {/* White border */}
+        <circle cx="14" cy="14" r="10" fill="none" stroke="white" strokeWidth="1.5" strokeOpacity="0.5" />
+        {/* Checkmark */}
+        <path d="M9 14 L12.5 17.5 L19 11" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <animate attributeName="stroke-dasharray" values="0 20;20 0" dur="0.4s" fill="freeze" />
+        </path>
+      </svg>
+    )
+  }
+
+  if (isNext) {
+    // Beacon pulse for next milestone
+    return (
+      <svg viewBox="0 0 28 28" className="w-full h-full">
+        {/* Pulsing beacon rings */}
+        <circle cx="14" cy="14" r="10" fill="none" stroke="#94a3b8" strokeWidth="1" opacity="0">
+          <animate attributeName="r" values="6;13" dur="1.8s" repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0.5;0" dur="1.8s" repeatCount="indefinite" />
+        </circle>
+        <circle cx="14" cy="14" r="7" fill="none" stroke="#94a3b8" strokeWidth="1" opacity="0">
+          <animate attributeName="r" values="6;13" dur="1.8s" begin="0.6s" repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0.3;0" dur="1.8s" begin="0.6s" repeatCount="indefinite" />
+        </circle>
+        {/* Target circle */}
+        <circle cx="14" cy="14" r="8" fill="white" stroke={isFinal ? '#8b5cf6' : '#64748b'} strokeWidth="2" />
+        <circle cx="14" cy="14" r="4.5" fill="none" stroke={isFinal ? '#8b5cf6' : '#64748b'} strokeWidth="1.5" opacity="0.5" />
+        <circle cx="14" cy="14" r="2" fill={isFinal ? '#8b5cf6' : '#64748b'}>
+          <animate attributeName="r" values="1.5;2.5;1.5" dur="1.5s" repeatCount="indefinite" />
+        </circle>
+      </svg>
+    )
+  }
+
+  // Unreached: flag icon (simplified)
+  return (
+    <svg viewBox="0 0 28 28" className="w-full h-full">
+      <circle cx="14" cy="14" r="9" fill="white" stroke={isFinal ? '#c084fc' : '#cbd5e1'} strokeWidth="1.5" />
+      {/* Simplified flag shape */}
+      <path d="M11 8 L11 20 M11 8 L18 11 L11 14" fill={isFinal ? '#c084fc' : '#cbd5e1'} stroke={isFinal ? '#a855f7' : '#94a3b8'} strokeWidth="1" strokeLinejoin="round" fillOpacity="0.3" />
+    </svg>
+  )
+}
+
+// ─── Celebration Overlay with Lottie Confetti ────────────────────────────────
 
 function CelebrationOverlay({ milestone, onClose, t }: { milestone: Milestone; onClose: () => void; t: TFunc }) {
   useEffect(() => {
-    const timer = setTimeout(onClose, 4000)
+    const timer = setTimeout(onClose, 5000)
     return () => clearTimeout(timer)
   }, [onClose])
 
@@ -230,7 +429,22 @@ function CelebrationOverlay({ milestone, onClose, t }: { milestone: Milestone; o
       className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 animate-fade-in"
       onClick={onClose}
     >
-      <div className="text-center animate-bounce-in">
+      {/* Lottie confetti bursts — positioned around the center */}
+      <Suspense fallback={null}>
+        <div className="absolute inset-0 pointer-events-none overflow-hidden">
+          <div className="absolute top-1/4 left-1/4 w-48 h-48 -translate-x-1/2 -translate-y-1/2">
+            <LottiePlayer animationData={confettiAnimation} loop={false} autoplay style={{ width: '100%', height: '100%' }} />
+          </div>
+          <div className="absolute top-1/4 right-1/4 w-48 h-48 translate-x-1/2 -translate-y-1/2">
+            <LottiePlayer animationData={confettiAnimation} loop={false} autoplay style={{ width: '100%', height: '100%' }} />
+          </div>
+          <div className="absolute top-1/3 left-1/2 w-56 h-56 -translate-x-1/2 -translate-y-1/2">
+            <LottiePlayer animationData={confettiAnimation} loop={false} autoplay style={{ width: '100%', height: '100%' }} />
+          </div>
+        </div>
+      </Suspense>
+      {/* Content */}
+      <div className="text-center animate-bounce-in relative z-10">
         <div className="text-6xl mb-4">{milestone.emoji}</div>
         <h2 className="text-3xl font-bold text-white mb-2">{milestone.message}</h2>
         <p className="text-slate-300">
@@ -800,16 +1014,22 @@ export const MilestoneProgress = memo(function MilestoneProgress({
             {/* SVG shine gradient */}
             <svg className="absolute inset-0 w-full h-full rounded-full pointer-events-none" preserveAspectRatio="none">
               <defs>
-                <linearGradient id="shineGrad" x1="0" y1="0" x2="0" y2="1">
+                <linearGradient id="shineGradMP" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor="white" stopOpacity="0.3" />
                   <stop offset="50%" stopColor="white" stopOpacity="0" />
                 </linearGradient>
               </defs>
-              <rect width="100%" height="100%" fill="url(#shineGrad)" />
+              <rect width="100%" height="100%" fill="url(#shineGradMP)" />
             </svg>
 
+            {/* Color-shifting gradient overlay */}
+            {metrics.progress > 5 && <SvgColorShiftGradient uniqueId="mp" themeColor={metrics.themeColor} />}
+
             {/* SVG animated shimmer sweep */}
-            <SvgShimmer />
+            <SvgShimmer uniqueId="mp" />
+
+            {/* Traveling light orbs */}
+            {metrics.progress > 10 && <SvgTravelingOrbs uniqueId="mp" />}
 
             {/* SVG sparkle stars */}
             {metrics.progress > 5 && sparkles.map(sparkle => (
@@ -818,31 +1038,20 @@ export const MilestoneProgress = memo(function MilestoneProgress({
 
             {/* SVG floating bubbles */}
             {metrics.progress > 10 && <SvgFloatingBubbles />}
+
+            {/* Liquid wave on top edge */}
+            {metrics.progress > 3 && <SvgLiquidWave themeColor={metrics.themeColor} />}
           </div>
 
           {/* SVG leading edge glow */}
           <SvgLeadingEdge progress={metrics.progress} themeColor={metrics.themeColor} />
 
-          {/* Milestone Markers */}
+          {/* Milestone Markers — SVG animated */}
           {milestones.map((m, index) => {
             const position = (m.amount / metrics.maxMilestone) * 100
             const isReached = effectiveRevenue >= m.amount
             const isNext = index === metrics.currentIndex + 1
-
-            // Tier colors with gradients
-            // Unreached = blue, Reached = amber/orange, Final goal = purple
-            let markerBg = 'bg-gradient-to-br from-blue-400 to-blue-600'
-            let markerBorder = 'border-blue-300'
-            if (isReached) {
-              // Reached milestone - amber/orange
-              markerBg = 'bg-gradient-to-br from-amber-400 to-amber-600'
-              markerBorder = 'border-amber-300'
-            }
-            if (index === milestones.length - 1) {
-              // Final goal marker - purple (whether reached or not)
-              markerBg = 'bg-gradient-to-br from-purple-400 to-purple-600'
-              markerBorder = 'border-purple-300'
-            }
+            const isFinal = index === milestones.length - 1
 
             return (
               <div
@@ -855,24 +1064,18 @@ export const MilestoneProgress = memo(function MilestoneProgress({
                   zIndex: isNext ? 20 : 10,
                 }}
               >
-                {/* Larger hit area for better interaction */}
                 <div
                   className={`
-                    w-6 h-6 rounded-full border-2 transition-all duration-300 cursor-pointer
-                    flex items-center justify-center
-                    ${markerBg} ${markerBorder}
-                    ${isReached ? 'scale-110 shadow-lg ring-2 ring-white' : 'opacity-50 scale-90'}
-                    ${isNext ? 'animate-pulse ring-2 ring-offset-2 ring-offset-slate-100 ring-slate-400/50' : ''}
-                    hover:scale-150 hover:shadow-xl hover:opacity-100 hover:z-30
+                    w-7 h-7 transition-all duration-300 cursor-pointer
+                    ${isReached ? 'scale-110' : isNext ? '' : 'opacity-60 scale-90'}
+                    hover:scale-150 hover:opacity-100 hover:z-30
                   `}
                   title={`${formatAmount(m.amount)} - ${m.message}`}
                   role="button"
                   tabIndex={0}
                   aria-label={`Milestone: ${formatAmount(m.amount)}`}
                 >
-                  {isReached && (
-                    <Check className="w-3 h-3 text-white" />
-                  )}
+                  <SvgMilestoneMarker isReached={isReached} isNext={isNext} isFinal={isFinal} />
                 </div>
               </div>
             )
