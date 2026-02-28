@@ -32,6 +32,7 @@ import type {
   StockSummaryResponse,
   InventoryTrendResponse,
   InventoryAnalysisResponse,
+  InventoryTurnoverResponse,
   StockAction,
   RestockAlert,
   TrafficAnalyticsResponse,
@@ -87,6 +88,7 @@ export const queryKeys = {
   inventoryTrend: (days: number, granularity: string) => ['inventoryTrend', days, granularity] as const,
   // V2 inventory analysis
   inventoryAnalysis: () => ['inventoryAnalysis'] as const,
+  inventoryTurnover: (days: number) => ['inventoryTurnover', days] as const,
   stockActions: () => ['stockActions'] as const,
   restockAlerts: () => ['restockAlerts'] as const,
   // Traffic analytics
@@ -516,6 +518,14 @@ export function useRestockAlerts() {
   return useQuery<RestockAlert[]>({
     queryKey: queryKeys.restockAlerts(),
     queryFn: () => api.getRestockAlerts(),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useInventoryTurnover(days = 30) {
+  return useQuery<InventoryTurnoverResponse>({
+    queryKey: queryKeys.inventoryTurnover(days),
+    queryFn: () => api.getInventoryTurnover(days),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

@@ -33,6 +33,7 @@ import type {
   StockSummaryResponse,
   InventoryTrendResponse,
   InventoryAnalysisResponse,
+  InventoryTurnoverResponse,
   StockAction,
   RestockAlert,
   CurrentUserResponse,
@@ -542,6 +543,9 @@ export const api = {
 
   getInventoryTrend: (days = 90, granularity: 'daily' | 'monthly' = 'daily', options?: FetchOptions) =>
     fetchApi<InventoryTrendResponse>('/stocks/trend', `days=${days}&granularity=${granularity}`, options),
+
+  getInventoryTurnover: (days = 30, options?: FetchOptions) =>
+    fetchApi<InventoryTurnoverResponse>('/stocks/turnover', `days=${days}`, options),
 
   // V2 Inventory Analysis (view-based)
   getInventoryAnalysis: (options?: FetchOptions) =>

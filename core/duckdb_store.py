@@ -1219,6 +1219,130 @@ class DuckDBStore(
         ORDER BY date;
 
         -- ═══════════════════════════════════════════════════════════════════════
+        -- LAYER 3b: Turnover & ABC Analytics Views
+        -- ═══════════════════════════════════════════════════════════════════════
+
+        -- View: Per-SKU sell-through (joins inventory with actual sales from gold_daily_products)
+        CREATE OR REPLACE VIEW v_sku_sell_through AS
+        SELECT
+            s.offer_id,
+            s.product_id,
+            s.sku,
+            s.name,
+            s.brand,
+            s.category_id,
+            s.category_name,
+            s.available,
+            s.available_value,
+            s.price,
+            s.purchased_price,
+            s.days_since_sale,
+            s.days_in_stock,
+            COALESCE(g30.qty_sold_30d, 0) as qty_sold_30d,
+            COALESCE(g30.revenue_30d, 0) as revenue_30d,
+            COALESCE(g30.orders_30d, 0) as orders_30d,
+            COALESCE(g90.qty_sold_90d, 0) as qty_sold_90d,
+            COALESCE(g90.revenue_90d, 0) as revenue_90d,
+            CASE WHEN (COALESCE(g30.qty_sold_30d, 0) + s.available) > 0
+                 THEN ROUND(100.0 * COALESCE(g30.qty_sold_30d, 0) /
+                      (COALESCE(g30.qty_sold_30d, 0) + s.available), 1)
+                 ELSE 0
+            END as sell_through_rate_30d,
+            CASE WHEN COALESCE(g30.qty_sold_30d, 0) > 0
+                 THEN ROUND(s.available / (g30.qty_sold_30d / 30.0), 0)
+                 ELSE NULL
+            END as days_of_supply,
+            CASE WHEN COALESCE(g30.qty_sold_30d, 0) > 0
+                 THEN ROUND(g30.qty_sold_30d / 30.0, 2)
+                 ELSE 0
+            END as avg_daily_sales
+        FROM v_sku_analysis s
+        LEFT JOIN (
+            SELECT product_id,
+                   SUM(quantity_sold) as qty_sold_30d,
+                   SUM(product_revenue) as revenue_30d,
+                   SUM(order_count) as orders_30d
+            FROM gold_daily_products
+            WHERE date >= CURRENT_DATE - INTERVAL '30 days'
+            GROUP BY product_id
+        ) g30 ON s.product_id = g30.product_id
+        LEFT JOIN (
+            SELECT product_id,
+                   SUM(quantity_sold) as qty_sold_90d,
+                   SUM(product_revenue) as revenue_90d
+            FROM gold_daily_products
+            WHERE date >= CURRENT_DATE - INTERVAL '90 days'
+            GROUP BY product_id
+        ) g90 ON s.product_id = g90.product_id
+        WHERE s.quantity > 0;
+
+        -- View: ABC classification by cumulative revenue (Pareto)
+        CREATE OR REPLACE VIEW v_abc_classification AS
+        WITH product_revenue AS (
+            SELECT
+                product_id,
+                SUM(product_revenue) as total_revenue,
+                SUM(quantity_sold) as total_qty_sold
+            FROM gold_daily_products
+            WHERE date >= CURRENT_DATE - INTERVAL '90 days'
+            GROUP BY product_id
+        ),
+        ranked AS (
+            SELECT
+                s.offer_id,
+                s.product_id,
+                s.sku,
+                s.name,
+                s.brand,
+                s.category_name,
+                s.available,
+                s.available_value,
+                s.price,
+                COALESCE(pr.total_revenue, 0) as revenue_90d,
+                COALESCE(pr.total_qty_sold, 0) as qty_sold_90d,
+                SUM(COALESCE(pr.total_revenue, 0)) OVER () as grand_total_revenue,
+                SUM(COALESCE(pr.total_revenue, 0)) OVER (
+                    ORDER BY COALESCE(pr.total_revenue, 0) DESC
+                    ROWS UNBOUNDED PRECEDING
+                ) as cumulative_revenue
+            FROM v_sku_analysis s
+            LEFT JOIN product_revenue pr ON s.product_id = pr.product_id
+            WHERE s.quantity > 0
+        )
+        SELECT
+            *,
+            CASE WHEN grand_total_revenue > 0
+                 THEN ROUND(100.0 * cumulative_revenue / grand_total_revenue, 1)
+                 ELSE 0
+            END as cumulative_pct,
+            CASE
+                WHEN grand_total_revenue > 0
+                     AND cumulative_revenue - COALESCE(revenue_90d, 0) < grand_total_revenue * 0.8
+                    THEN 'A'
+                WHEN grand_total_revenue > 0
+                     AND cumulative_revenue - COALESCE(revenue_90d, 0) < grand_total_revenue * 0.95
+                    THEN 'B'
+                ELSE 'C'
+            END as abc_class
+        FROM ranked;
+
+        -- View: ABC summary (aggregated stats per class)
+        CREATE OR REPLACE VIEW v_abc_summary AS
+        SELECT
+            abc_class,
+            COUNT(*) as sku_count,
+            SUM(available) as total_units,
+            SUM(available_value) as stock_value,
+            SUM(revenue_90d) as revenue,
+            ROUND(100.0 * SUM(available_value) /
+                NULLIF(SUM(SUM(available_value)) OVER (), 0), 1) as stock_value_pct,
+            ROUND(100.0 * SUM(revenue_90d) /
+                NULLIF(SUM(SUM(revenue_90d)) OVER (), 0), 1) as revenue_pct
+        FROM v_abc_classification
+        GROUP BY abc_class
+        ORDER BY abc_class;
+
+        -- ═══════════════════════════════════════════════════════════════════════
         -- LAYER 4: Action Views
         -- ═══════════════════════════════════════════════════════════════════════
 

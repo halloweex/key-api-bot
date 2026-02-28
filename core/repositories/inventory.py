@@ -724,4 +724,189 @@ class InventoryMixin:
             ]
 
 
+    # ─── Inventory Turnover & Optimal Stock ──────────────────────────────────
+
+    async def get_inventory_turnover(self, days: int = 30) -> Dict[str, Any]:
+        """Compute inventory turnover KPIs, ABC analysis, sell-through, and excess stock.
+
+        Runs multiple queries in a single connection and computes derived metrics
+        in Python (DSI, turnover ratio, optimal stock model, frozen capital).
+
+        Args:
+            days: Look-back period for revenue calculation (7-90)
+
+        Returns:
+            Dict with turnover, currentStock, kpis, optimal, excess,
+            sellThrough, abc, and topExcess sections
+        """
+        async with self.connection() as conn:
+            # Q1: Revenue over period (all sales types combined)
+            rev = conn.execute(f"""
+                SELECT COALESCE(SUM(revenue), 0), COUNT(DISTINCT date)
+                FROM gold_daily_revenue
+                WHERE date >= CURRENT_DATE - INTERVAL '{int(days)} days'
+            """).fetchone()
+            total_revenue = float(rev[0])
+            actual_days = rev[1] or 1
+
+            # Q2: Current stock totals
+            stock = conn.execute("""
+                SELECT
+                    COALESCE(SUM(GREATEST(0, quantity - reserve) * price), 0),
+                    COALESCE(SUM(GREATEST(0, quantity - reserve) * COALESCE(purchased_price, 0)), 0),
+                    COALESCE(SUM(GREATEST(0, quantity - reserve)), 0),
+                    COUNT(*) FILTER (WHERE quantity > 0)
+                FROM offer_stocks
+            """).fetchone()
+            stock_value_sale = float(stock[0])
+            stock_value_cost = float(stock[1])
+            stock_units = int(stock[2])
+            active_skus = int(stock[3])
+
+            # Q3: ABC summary
+            abc_rows = conn.execute("SELECT * FROM v_abc_summary").fetchall()
+
+            # Q4: Sell-through distribution
+            st = conn.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE sell_through_rate_30d >= 20),
+                    COUNT(*) FILTER (WHERE sell_through_rate_30d > 0 AND sell_through_rate_30d < 20),
+                    COUNT(*) FILTER (WHERE sell_through_rate_30d = 0 AND available > 0),
+                    AVG(sell_through_rate_30d) FILTER (WHERE sell_through_rate_30d > 0),
+                    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY days_of_supply)
+                        FILTER (WHERE days_of_supply IS NOT NULL)
+                FROM v_sku_sell_through
+            """).fetchone()
+
+            # Q5: Top excess SKUs (biggest capital traps)
+            excess_rows = conn.execute("""
+                SELECT offer_id, sku, name, brand, category_name,
+                       available, available_value, days_of_supply,
+                       sell_through_rate_30d, avg_daily_sales, revenue_90d
+                FROM v_sku_sell_through
+                WHERE days_of_supply > 90 OR (avg_daily_sales = 0 AND available > 0)
+                ORDER BY available_value DESC
+                LIMIT 20
+            """).fetchall()
+
+        # ── Python computations ──────────────────────────────────────────────
+        daily_revenue = total_revenue / actual_days if actual_days > 0 else 0
+        monthly_revenue = daily_revenue * 30
+
+        # Core KPIs
+        dsi = round(stock_value_sale / daily_revenue, 1) if daily_revenue > 0 else 0
+        turnover_ratio = round((daily_revenue * 365) / stock_value_sale, 2) if stock_value_sale > 0 else 0
+        stock_to_sales = round(stock_value_sale / monthly_revenue, 2) if monthly_revenue > 0 else 0
+
+        # Optimal stock model (Korean import defaults)
+        lead_time_days = 14
+        safety_multiplier = 1.5
+        buffer_days = 5
+        safety_days = round(lead_time_days * (safety_multiplier - 1))  # = 7
+        optimal_days = lead_time_days + safety_days + buffer_days       # = 26
+        max_acceptable_days = 60
+
+        optimal_value = daily_revenue * optimal_days
+        max_acceptable_value = daily_revenue * max_acceptable_days
+
+        # Excess / frozen capital
+        excess_value = max(0, stock_value_sale - optimal_value)
+        excess_ratio = round(stock_value_sale / optimal_value, 2) if optimal_value > 0 else 0
+        excess_days = round(dsi - optimal_days, 1) if dsi > optimal_days else 0
+        carrying_cost_annual = round(excess_value * 0.25, 2)
+
+        # ABC dict
+        abc_dict: Dict[str, Any] = {}
+        c_stock_pct = 0.0
+        c_revenue_pct = 0.0
+        for row in abc_rows:
+            cls = row[0]  # abc_class
+            entry = {
+                "skuCount": int(row[1]),
+                "totalUnits": int(row[2] or 0),
+                "stockValue": float(row[3] or 0),
+                "revenue": float(row[4] or 0),
+                "stockPct": float(row[5] or 0),
+                "revenuePct": float(row[6] or 0),
+            }
+            abc_dict[cls] = entry
+            if cls == "C":
+                c_stock_pct = entry["stockPct"]
+                c_revenue_pct = entry["revenuePct"]
+
+        imbalance_score = round(c_stock_pct / c_revenue_pct, 2) if c_revenue_pct > 0 else 0
+
+        # Top excess list
+        top_excess = [
+            {
+                "offerId": r[0],
+                "sku": r[1],
+                "name": r[2],
+                "brand": r[3],
+                "categoryName": r[4],
+                "units": int(r[5] or 0),
+                "value": float(r[6] or 0),
+                "daysOfSupply": int(r[7]) if r[7] is not None else None,
+                "sellThroughRate": float(r[8] or 0),
+                "avgDailySales": float(r[9] or 0),
+                "revenue90d": float(r[10] or 0),
+            }
+            for r in excess_rows
+        ]
+
+        return {
+            "turnover": {
+                "periodDays": days,
+                "totalRevenue": round(total_revenue, 2),
+                "actualDays": actual_days,
+                "dailyRevenue": round(daily_revenue, 2),
+                "monthlyRevenue": round(monthly_revenue, 2),
+            },
+            "currentStock": {
+                "valueSale": round(stock_value_sale, 2),
+                "valueCost": round(stock_value_cost, 2),
+                "units": stock_units,
+                "activeSkus": active_skus,
+            },
+            "kpis": {
+                "dsi": dsi,
+                "turnoverRatio": turnover_ratio,
+                "stockToSales": stock_to_sales,
+                "benchmarks": {
+                    "dsi": [60, 90],
+                    "turnoverRatio": [4, 6],
+                    "stockToSales": [1.0, 2.5],
+                },
+            },
+            "optimal": {
+                "leadTimeDays": lead_time_days,
+                "safetyDays": safety_days,
+                "bufferDays": buffer_days,
+                "totalDays": optimal_days,
+                "totalValue": round(optimal_value, 2),
+                "maxAcceptableDays": max_acceptable_days,
+                "maxAcceptableValue": round(max_acceptable_value, 2),
+            },
+            "excess": {
+                "excessValue": round(excess_value, 2),
+                "excessRatio": excess_ratio,
+                "excessDays": excess_days,
+                "carryingCostAnnual": carrying_cost_annual,
+            },
+            "sellThrough": {
+                "fastMovers": int(st[0] or 0),
+                "slowMovers": int(st[1] or 0),
+                "zeroVelocity": int(st[2] or 0),
+                "avgSellThroughRate": round(float(st[3] or 0), 1),
+                "medianDaysOfSupply": round(float(st[4] or 0), 0) if st[4] is not None else None,
+            },
+            "abc": {
+                "A": abc_dict.get("A", {"skuCount": 0, "totalUnits": 0, "stockValue": 0, "revenue": 0, "stockPct": 0, "revenuePct": 0}),
+                "B": abc_dict.get("B", {"skuCount": 0, "totalUnits": 0, "stockValue": 0, "revenue": 0, "stockPct": 0, "revenuePct": 0}),
+                "C": abc_dict.get("C", {"skuCount": 0, "totalUnits": 0, "stockValue": 0, "revenue": 0, "stockPct": 0, "revenuePct": 0}),
+                "imbalanceScore": imbalance_score,
+            },
+            "topExcess": top_excess,
+        }
+
     # ─── Revenue Predictions ─────────────────────────────────────────────────

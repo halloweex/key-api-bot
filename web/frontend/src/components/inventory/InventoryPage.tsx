@@ -3,6 +3,7 @@ import { SkeletonChart } from '../ui'
 import {
   LazyStockSummaryChart,
   LazyDeadStockChart,
+  LazyInventoryTurnoverChart,
   LazyInventoryTrendChart,
 } from '../charts/lazy'
 
@@ -19,6 +20,13 @@ export const InventoryPage = memo(function InventoryPage() {
           </Suspense>
           <Suspense fallback={<ChartFallback />}>
             <LazyDeadStockChart />
+          </Suspense>
+        </section>
+
+        {/* Inventory Turnover & Optimal Stock */}
+        <section>
+          <Suspense fallback={<ChartFallback />}>
+            <LazyInventoryTurnoverChart />
           </Suspense>
         </section>
 

@@ -63,6 +63,10 @@ export const LazyInventoryTrendChart = lazy(() =>
   import('./InventoryTrendChart').then(m => ({ default: m.InventoryTrendChart }))
 )
 
+export const LazyInventoryTurnoverChart = lazy(() =>
+  import('./InventoryTurnoverChart').then(m => ({ default: m.InventoryTurnoverChart }))
+)
+
 export const LazyManualExpensesTable = lazy(() =>
   import('./ManualExpensesTable').then(m => ({ default: m.ManualExpensesTable }))
 )

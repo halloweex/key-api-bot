@@ -47,6 +47,7 @@ export {
   useInventoryAnalysis,
   useStockActions,
   useRestockAlerts,
+  useInventoryTurnover,
   // Traffic Analytics
   useTrafficAnalytics,
   useTrafficTrend,

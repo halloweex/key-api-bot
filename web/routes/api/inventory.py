@@ -82,6 +82,17 @@ async def refresh_inventory_snapshot(request: Request):
     }
 
 
+@router.get("/stocks/turnover")
+@limiter.limit("30/minute")
+async def get_inventory_turnover(
+    request: Request,
+    days: int = Query(30, ge=7, le=90),
+):
+    """Get inventory turnover KPIs, ABC analysis, and excess stock metrics."""
+    store = await get_store()
+    return await store.get_inventory_turnover(days)
+
+
 @router.get("/stocks/actions")
 @limiter.limit("30/minute")
 async def get_stock_actions(request: Request):

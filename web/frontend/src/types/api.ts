@@ -484,6 +484,86 @@ export interface RestockAlert {
   alertLevel: 'OUT_OF_STOCK' | 'CRITICAL' | 'LOW'
 }
 
+// ─── Inventory Turnover Types ────────────────────────────────────────────────
+
+export interface ABCClassData {
+  skuCount: number
+  totalUnits: number
+  stockValue: number
+  revenue: number
+  stockPct: number
+  revenuePct: number
+}
+
+export interface TopExcessItem {
+  offerId: number
+  sku: string
+  name: string | null
+  brand: string | null
+  categoryName: string | null
+  units: number
+  value: number
+  daysOfSupply: number | null
+  sellThroughRate: number
+  avgDailySales: number
+  revenue90d: number
+}
+
+export interface InventoryTurnoverResponse {
+  turnover: {
+    periodDays: number
+    totalRevenue: number
+    actualDays: number
+    dailyRevenue: number
+    monthlyRevenue: number
+  }
+  currentStock: {
+    valueSale: number
+    valueCost: number
+    units: number
+    activeSkus: number
+  }
+  kpis: {
+    dsi: number
+    turnoverRatio: number
+    stockToSales: number
+    benchmarks: {
+      dsi: [number, number]
+      turnoverRatio: [number, number]
+      stockToSales: [number, number]
+    }
+  }
+  optimal: {
+    leadTimeDays: number
+    safetyDays: number
+    bufferDays: number
+    totalDays: number
+    totalValue: number
+    maxAcceptableDays: number
+    maxAcceptableValue: number
+  }
+  excess: {
+    excessValue: number
+    excessRatio: number
+    excessDays: number
+    carryingCostAnnual: number
+  }
+  sellThrough: {
+    fastMovers: number
+    slowMovers: number
+    zeroVelocity: number
+    avgSellThroughRate: number
+    medianDaysOfSupply: number | null
+  }
+  abc: {
+    A: ABCClassData
+    B: ABCClassData
+    C: ABCClassData
+    imbalanceScore: number
+  }
+  topExcess: TopExcessItem[]
+}
+
 // ─── Cohort Retention Types ─────────────────────────────────────────────────
 
 export interface CohortData {
