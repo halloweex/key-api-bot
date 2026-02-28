@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.21
+
+- Add cohort analysis enhancements: insights, skeletons, i18n, and controls
+
+
 ## 3.0.20
 
 - Add SVG skeleton loaders and improve MilestoneProgress visuals
