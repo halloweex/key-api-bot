@@ -78,7 +78,7 @@ function getErrorInfo(error: Error | null, defaultTitle: string, t: TFunction): 
         title: t('error.tooManyRequests'),
         message: t('error.pleaseWait'),
         icon: 'warning',
-        canAutoRetry: true,
+        canAutoRetry: false,
       }
     }
 
@@ -137,10 +137,15 @@ export const ApiErrorState = memo(function ApiErrorState({
     return () => clearTimeout(timer)
   }, [errorInfo.canAutoRetry, onRetry, retryCount])
 
-  // Reset retry count when error changes
+  // Reset retry count when error type/status genuinely changes
+  // (not on every new object reference from refetch)
+  const errorKey = error instanceof ApiError ? `api-${error.status}` :
+    error instanceof NetworkError ? `net-${error.code}` :
+    error instanceof TimeoutError ? 'timeout' :
+    error ? 'unknown' : 'none'
   useEffect(() => {
     setRetryCount(0)
-  }, [error])
+  }, [errorKey])
 
   const handleManualRetry = useCallback(() => {
     setRetryCount(0)

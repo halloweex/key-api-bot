@@ -422,14 +422,14 @@ class CustomersMixin:
                 if cohort not in cohorts:
                     cohorts[cohort] = {
                         "size": size,
-                        "m0_revenue": m0_rev or 0,
+                        "m0_revenue": float(m0_rev or 0),
                         "retention": {},
                         "revenue_retention": {},
                         "revenue": {}
                     }
-                cohorts[cohort]["retention"][month_num] = pct
-                cohorts[cohort]["revenue_retention"][month_num] = rev_pct
-                cohorts[cohort]["revenue"][month_num] = rev or 0
+                cohorts[cohort]["retention"][month_num] = float(pct) if pct is not None else None
+                cohorts[cohort]["revenue_retention"][month_num] = float(rev_pct) if rev_pct is not None else None
+                cohorts[cohort]["revenue"][month_num] = float(rev or 0)
 
             # Calculate summary metrics
             total_cohort_size = sum(c["size"] for c in cohorts.values())
@@ -519,7 +519,7 @@ class CustomersMixin:
             for c in cohort_list:
                 m1 = c["retention"].get(1)
                 if m1 is not None and c["size"] > 0:
-                    total_w += m1 * c["size"]
+                    total_w += float(m1) * c["size"]
                     total_s += c["size"]
             return round(total_w / total_s, 1) if total_s > 0 else None
 
@@ -552,8 +552,9 @@ class CustomersMixin:
             m1 = c["retention"].get(1)
             if m1 is None:
                 continue
+            m1 = float(m1)
             m3 = c["retention"].get(3)
-            score = round(0.6 * m1 + 0.4 * m3, 1) if m3 is not None else round(m1, 1)
+            score = round(0.6 * m1 + 0.4 * float(m3), 1) if m3 is not None else round(m1, 1)
             quality_scores.append({"month": c["month"], "score": score})
 
         cohort_quality = None
@@ -576,13 +577,13 @@ class CustomersMixin:
             if c["retention"].get(1) is not None and c["size"] > 0
         ]
         if cohorts_with_data:
-            best_m1 = max(c["retention"].get(1, 0) for c in cohorts_with_data)
+            best_m1 = max(float(c["retention"].get(1, 0)) for c in cohorts_with_data)
             total_extra_customers = 0.0
             total_m1_revenue = 0.0
             total_m1_customers = 0
             for c in cohorts_with_data:
-                current_m1 = c["retention"].get(1, 0) or 0
-                m1_rev = c.get("revenue", {}).get(1, 0) or 0
+                current_m1 = float(c["retention"].get(1, 0) or 0)
+                m1_rev = float(c.get("revenue", {}).get(1, 0) or 0)
                 m1_cust_count = round(c["size"] * current_m1 / 100) if current_m1 > 0 else 0
                 total_m1_revenue += m1_rev
                 total_m1_customers += m1_cust_count
@@ -606,25 +607,27 @@ class CustomersMixin:
             }
 
         # ── 5A.5 Decay analysis ──
-        m1_avg = avg_customer_retention.get(1, 0)
+        m1_avg = float(avg_customer_retention.get(1, 0) or 0)
         half_life = None
         if m1_avg > 0:
             for m in range(2, retention_months + 1):
-                if avg_customer_retention.get(m, 0) <= m1_avg / 2:
+                val = float(avg_customer_retention.get(m, 0) or 0)
+                if val <= m1_avg / 2:
                     half_life = m
                     break
 
         stabilization_month = None
         for m in range(2, retention_months + 1):
-            prev = avg_customer_retention.get(m - 1, 0)
-            curr = avg_customer_retention.get(m, 0)
+            prev = float(avg_customer_retention.get(m - 1, 0) or 0)
+            curr = float(avg_customer_retention.get(m, 0) or 0)
             if prev > 0 and abs(prev - curr) < 2:
                 stabilization_month = m
                 break
 
-        terminal = avg_customer_retention.get(retention_months)
-        m3_val = avg_customer_retention.get(3, 0)
-        m1_to_m3_drop = round(m1_avg - m3_val, 1) if m1_avg > 0 and m3_val is not None else 0
+        terminal_raw = avg_customer_retention.get(retention_months)
+        terminal = float(terminal_raw) if terminal_raw is not None else None
+        m3_val = float(avg_customer_retention.get(3, 0) or 0)
+        m1_to_m3_drop = round(m1_avg - m3_val, 1) if m1_avg > 0 and m3_val else 0
 
         decay_analysis = {
             "halfLifeMonth": half_life,
