@@ -1,3 +1,5 @@
+import { useId } from 'react'
+
 interface SkeletonProps {
   className?: string
   /** Use pulse animation instead of shimmer */
@@ -105,4 +107,132 @@ export function SkeletonButton({ size = 'md' }: { size?: 'sm' | 'md' | 'lg' }) {
   }
 
   return <Skeleton className={sizeClasses[size]} rounded="lg" />
+}
+
+/** SVG shimmer gradient defs — reusable across all SVG skeletons */
+function SvgShimmerDefs({ id }: { id: string }) {
+  return (
+    <defs>
+      <linearGradient id={id}>
+        <stop offset="0%" stopColor="#e2e8f0" />
+        <stop offset="50%" stopColor="#f1f5f9" />
+        <stop offset="100%" stopColor="#e2e8f0" />
+        <animateTransform
+          attributeName="gradientTransform"
+          type="translate"
+          from="-2 0"
+          to="2 0"
+          dur="1.5s"
+          repeatCount="indefinite"
+        />
+      </linearGradient>
+    </defs>
+  )
+}
+
+/** Horizontal bar chart skeleton (BrandAffinity, CategoryCombos) */
+export function SkeletonHorizontalBars() {
+  const gid = useId().replace(/:/g, '')
+  const barWidths = [210, 175, 145, 120, 95, 70]
+
+  return (
+    <svg viewBox="0 0 400 280" className="w-full h-[280px]" preserveAspectRatio="xMidYMid meet">
+      <SvgShimmerDefs id={gid} />
+      {barWidths.map((w, i) => {
+        const y = 18 + i * 43
+        return (
+          <g key={i}>
+            <rect x="12" y={y + 4} width="78" height="12" rx="3" fill={`url(#${gid})`} />
+            <rect x="100" y={y} width={w} height="20" rx="4" fill={`url(#${gid})`} />
+          </g>
+        )
+      })}
+    </svg>
+  )
+}
+
+/** Table skeleton (FrequentlyBoughtTogether) */
+export function SkeletonTable() {
+  const gid = useId().replace(/:/g, '')
+  const colX = [16, 160, 320, 410, 500]
+  const colW = [120, 120, 60, 50, 50]
+
+  return (
+    <svg viewBox="0 0 580 230" className="w-full h-[230px]" preserveAspectRatio="xMidYMid meet">
+      <SvgShimmerDefs id={gid} />
+      {/* Header */}
+      <line x1="0" y1="34" x2="580" y2="34" stroke="#f1f5f9" strokeWidth="1" />
+      {colX.map((x, j) => (
+        <rect key={`h${j}`} x={x} y="12" width={colW[j] * 0.7} height="10" rx="3" fill={`url(#${gid})`} />
+      ))}
+      {/* Data rows */}
+      {[...Array(5)].map((_, i) => {
+        const ry = 46 + i * 38
+        return (
+          <g key={i}>
+            <line x1="0" y1={ry + 30} x2="580" y2={ry + 30} stroke="#f8fafc" strokeWidth="1" />
+            {colX.map((x, j) => (
+              <rect key={j} x={x} y={ry + 6} width={colW[j]} height="12" rx="3" fill={`url(#${gid})`} />
+            ))}
+          </g>
+        )
+      })}
+    </svg>
+  )
+}
+
+/** Momentum two-column skeleton (ProductMomentum) */
+export function SkeletonMomentum() {
+  const gid = useId().replace(/:/g, '')
+
+  const renderColumn = (offsetX: number) => (
+    <g>
+      {/* Column title */}
+      <rect x={offsetX} y="8" width="60" height="10" rx="3" fill={`url(#${gid})`} />
+      {/* 3 list items */}
+      {[0, 1, 2].map((i) => {
+        const iy = 30 + i * 56
+        return (
+          <g key={i}>
+            <rect x={offsetX} y={iy} width="200" height="44" rx="6" fill="#f8fafc" />
+            <rect x={offsetX + 8} y={iy + 8} width="140" height="10" rx="3" fill={`url(#${gid})`} />
+            <rect x={offsetX + 8} y={iy + 26} width="90" height="8" rx="3" fill={`url(#${gid})`} />
+            <rect x={offsetX + 160} y={iy + 14} width="32" height="14" rx="3" fill={`url(#${gid})`} />
+          </g>
+        )
+      })}
+    </g>
+  )
+
+  return (
+    <svg viewBox="0 0 440 200" className="w-full h-[200px]" preserveAspectRatio="xMidYMid meet">
+      <SvgShimmerDefs id={gid} />
+      {renderColumn(8)}
+      {renderColumn(228)}
+    </svg>
+  )
+}
+
+/** Vertical bar chart skeleton (BasketDistribution) */
+export function SkeletonVerticalBars() {
+  const gid = useId().replace(/:/g, '')
+  const barHeights = [150, 195, 115, 165, 90, 65]
+
+  return (
+    <svg viewBox="0 0 400 280" className="w-full h-[280px]" preserveAspectRatio="xMidYMid meet">
+      <SvgShimmerDefs id={gid} />
+      {/* Bars */}
+      {barHeights.map((h, i) => {
+        const x = 28 + i * 60
+        return (
+          <g key={i}>
+            <rect x={x} y={240 - h} width="40" height={h} rx="4" fill={`url(#${gid})`} />
+            <rect x={x + 6} y="252" width="28" height="10" rx="3" fill={`url(#${gid})`} />
+          </g>
+        )
+      })}
+      {/* Axis line */}
+      <line x1="20" y1="242" x2="388" y2="242" stroke="#e2e8f0" strokeWidth="1" />
+    </svg>
+  )
 }

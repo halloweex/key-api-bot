@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useProductPairs } from '../../hooks/useApi'
 import { formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
+import { SkeletonTable } from '../ui/Skeleton'
 
 type SortKey = 'coOccurrence' | 'lift' | 'confidenceAtoB' | 'confidenceBtoA'
 
@@ -82,9 +83,7 @@ export const FrequentlyBoughtTogether = memo(function FrequentlyBoughtTogether()
       </div>
 
       {isLoading ? (
-        <div className="p-8 text-center">
-          <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto" />
-        </div>
+        <SkeletonTable />
       ) : !sortedPairs.length ? (
         <div className="p-8 text-center text-sm text-slate-400">{t('products.noPairsFound')}</div>
       ) : (

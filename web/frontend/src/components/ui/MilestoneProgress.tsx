@@ -175,10 +175,10 @@ function SvgShimmer({ uniqueId }: { uniqueId: string }) {
 // ─── SVG Liquid Wave Top Edge ───────────────────────────────────────────────
 
 function SvgLiquidWave({ themeColor }: { themeColor: string }) {
-  const color = themeColor.includes('green') ? '#22c55e'
+  const color = themeColor.includes('purple') ? '#a855f7'
     : themeColor.includes('amber') ? '#f59e0b'
-    : themeColor.includes('purple') ? '#a855f7'
-    : '#3b82f6'
+    : themeColor.includes('teal') ? '#14b8a6'
+    : '#22c55e'
 
   return (
     <svg
@@ -267,10 +267,10 @@ function SvgTravelingOrbs({ uniqueId }: { uniqueId: string }) {
 function SvgLeadingEdge({ progress, themeColor }: { progress: number; themeColor: string }) {
   if (progress <= 0 || progress >= 100) return null
 
-  const color = themeColor.includes('green') ? '#22c55e'
+  const color = themeColor.includes('purple') ? '#a855f7'
     : themeColor.includes('amber') ? '#f59e0b'
-    : themeColor.includes('purple') ? '#a855f7'
-    : '#3b82f6'
+    : themeColor.includes('teal') ? '#14b8a6'
+    : '#22c55e'
 
   return (
     <svg
@@ -331,6 +331,8 @@ function SvgColorShiftGradient({ uniqueId, themeColor }: { uniqueId: string; the
     ? { c1: '#a855f7', c2: '#ec4899', c3: '#8b5cf6', c4: '#d946ef' }
     : themeColor.includes('amber')
     ? { c1: '#f59e0b', c2: '#ef4444', c3: '#f97316', c4: '#eab308' }
+    : themeColor.includes('teal')
+    ? { c1: '#14b8a6', c2: '#06b6d4', c3: '#0d9488', c4: '#0891b2' }
     : { c1: '#22c55e', c2: '#06b6d4', c3: '#10b981', c4: '#14b8a6' }
 
   return (
@@ -384,34 +386,41 @@ function SvgMilestoneMarker({ isReached, isNext, isFinal }: { isReached: boolean
   }
 
   if (isNext) {
-    // Beacon pulse for next milestone
+    const color = isFinal ? '#8b5cf6' : '#64748b'
+    // Pulsing dot inside a white circle
     return (
       <svg viewBox="0 0 28 28" className="w-full h-full">
-        {/* Pulsing beacon rings */}
-        <circle cx="14" cy="14" r="10" fill="none" stroke="#94a3b8" strokeWidth="1" opacity="0">
-          <animate attributeName="r" values="6;13" dur="1.8s" repeatCount="indefinite" />
-          <animate attributeName="opacity" values="0.5;0" dur="1.8s" repeatCount="indefinite" />
+        {/* Soft glow */}
+        <circle cx="14" cy="14" r="10" fill="none" stroke={color} strokeWidth="1" opacity="0">
+          <animate attributeName="r" values="9;13;9" dur="2s" repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0.3;0;0.3" dur="2s" repeatCount="indefinite" />
         </circle>
-        <circle cx="14" cy="14" r="7" fill="none" stroke="#94a3b8" strokeWidth="1" opacity="0">
-          <animate attributeName="r" values="6;13" dur="1.8s" begin="0.6s" repeatCount="indefinite" />
-          <animate attributeName="opacity" values="0.3;0" dur="1.8s" begin="0.6s" repeatCount="indefinite" />
-        </circle>
-        {/* Target circle */}
-        <circle cx="14" cy="14" r="8" fill="white" stroke={isFinal ? '#8b5cf6' : '#64748b'} strokeWidth="2" />
-        <circle cx="14" cy="14" r="4.5" fill="none" stroke={isFinal ? '#8b5cf6' : '#64748b'} strokeWidth="1.5" opacity="0.5" />
-        <circle cx="14" cy="14" r="2" fill={isFinal ? '#8b5cf6' : '#64748b'}>
-          <animate attributeName="r" values="1.5;2.5;1.5" dur="1.5s" repeatCount="indefinite" />
+        {/* White circle */}
+        <circle cx="14" cy="14" r="9" fill="white" stroke={color} strokeWidth="1.5" />
+        {/* Breathing dot */}
+        <circle cx="14" cy="14" r="3" fill={color}>
+          <animate attributeName="r" values="2.5;4;2.5" dur="1.8s" repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0.6;1;0.6" dur="1.8s" repeatCount="indefinite" />
         </circle>
       </svg>
     )
   }
 
-  // Unreached: flag icon (simplified)
+  // Unreached (non-final): small grey dot in a light circle
+  if (!isFinal) {
+    return (
+      <svg viewBox="0 0 28 28" className="w-full h-full">
+        <circle cx="14" cy="14" r="9" fill="white" stroke="#e2e8f0" strokeWidth="1.5" />
+        <circle cx="14" cy="14" r="2.5" fill="#cbd5e1" />
+      </svg>
+    )
+  }
+
+  // Unreached final: flag icon
   return (
     <svg viewBox="0 0 28 28" className="w-full h-full">
-      <circle cx="14" cy="14" r="9" fill="white" stroke={isFinal ? '#c084fc' : '#cbd5e1'} strokeWidth="1.5" />
-      {/* Simplified flag shape */}
-      <path d="M11 8 L11 20 M11 8 L18 11 L11 14" fill={isFinal ? '#c084fc' : '#cbd5e1'} stroke={isFinal ? '#a855f7' : '#94a3b8'} strokeWidth="1" strokeLinejoin="round" fillOpacity="0.3" />
+      <circle cx="14" cy="14" r="9" fill="white" stroke="#c084fc" strokeWidth="1.5" />
+      <path d="M11 8 L11 20 M11 8 L18 11 L11 14" fill="#c084fc" stroke="#a855f7" strokeWidth="1" strokeLinejoin="round" fillOpacity="0.3" />
     </svg>
   )
 }
@@ -775,18 +784,27 @@ export const MilestoneProgress = memo(function MilestoneProgress({
       }
     }
 
-    // Determine theme color with gradients
-    let themeColor = 'bg-gradient-to-r from-green-400 to-green-500' // default
-    let textColor = 'text-green-500'
-    let glowColor = 'shadow-green-500/50'
+    // Determine theme color — dynamic by progress with wide gradients
+    let themeColor: string
+    let textColor: string
+    let glowColor: string
+
     if (allCompleted) {
-      themeColor = 'bg-gradient-to-r from-purple-400 via-purple-500 to-pink-500'
+      themeColor = 'bg-gradient-to-r from-violet-400 via-purple-500 to-pink-500'
       textColor = 'text-purple-500'
       glowColor = 'shadow-purple-500/50'
-    } else if (currentIndex >= 0) {
-      themeColor = 'bg-gradient-to-r from-amber-400 to-orange-500'
-      textColor = 'text-amber-500'
-      glowColor = 'shadow-amber-500/50'
+    } else if (progress >= 75) {
+      themeColor = 'bg-gradient-to-r from-amber-300 via-orange-500 to-rose-500'
+      textColor = 'text-orange-500'
+      glowColor = 'shadow-orange-500/50'
+    } else if (progress >= 40) {
+      themeColor = 'bg-gradient-to-r from-teal-300 via-cyan-400 to-blue-500'
+      textColor = 'text-cyan-500'
+      glowColor = 'shadow-cyan-500/50'
+    } else {
+      themeColor = 'bg-gradient-to-r from-green-300 via-emerald-400 to-teal-500'
+      textColor = 'text-green-500'
+      glowColor = 'shadow-green-500/50'
     }
 
     return {

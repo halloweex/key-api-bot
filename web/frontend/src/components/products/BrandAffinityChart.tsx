@@ -7,6 +7,7 @@ import {
 import { useBrandAffinity } from '../../hooks/useApi'
 import { formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
+import { SkeletonHorizontalBars } from '../ui/Skeleton'
 
 export const BrandAffinityChart = memo(function BrandAffinityChart() {
   const { t } = useTranslation()
@@ -28,9 +29,7 @@ export const BrandAffinityChart = memo(function BrandAffinityChart() {
       </div>
 
       {isLoading ? (
-        <div className="h-[280px] flex items-center justify-center">
-          <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
-        </div>
+        <SkeletonHorizontalBars />
       ) : !chartData.length ? (
         <div className="h-[280px] flex items-center justify-center text-sm text-slate-400">
           {t('chart.noData')}

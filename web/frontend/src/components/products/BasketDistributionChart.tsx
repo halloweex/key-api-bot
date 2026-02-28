@@ -7,6 +7,7 @@ import {
 import { useBasketDistribution } from '../../hooks/useApi'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
+import { SkeletonVerticalBars } from '../ui/Skeleton'
 
 export const BasketDistributionChart = memo(function BasketDistributionChart() {
   const { t } = useTranslation()
@@ -22,9 +23,7 @@ export const BasketDistributionChart = memo(function BasketDistributionChart() {
       </div>
 
       {isLoading ? (
-        <div className="h-[280px] flex items-center justify-center">
-          <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
-        </div>
+        <SkeletonVerticalBars />
       ) : !data?.length ? (
         <div className="h-[280px] flex items-center justify-center text-sm text-slate-400">
           {t('chart.noData')}

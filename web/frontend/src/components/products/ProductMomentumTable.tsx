@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useProductMomentum } from '../../hooks/useApi'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
+import { SkeletonMomentum } from '../ui/Skeleton'
 
 export const ProductMomentumTable = memo(function ProductMomentumTable() {
   const { t } = useTranslation()
@@ -17,9 +18,7 @@ export const ProductMomentumTable = memo(function ProductMomentumTable() {
             <p className="text-xs text-slate-300">{t('products.momentumDesc')}</p>
           </InfoPopover>
         </div>
-        <div className="h-[280px] flex items-center justify-center">
-          <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
-        </div>
+        <SkeletonMomentum />
       </div>
     )
   }

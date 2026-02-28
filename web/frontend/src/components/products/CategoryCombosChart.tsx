@@ -7,6 +7,7 @@ import {
 import { useCategoryCombos } from '../../hooks/useApi'
 import { formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
+import { SkeletonHorizontalBars } from '../ui/Skeleton'
 
 export const CategoryCombosChart = memo(function CategoryCombosChart() {
   const { t } = useTranslation()
@@ -27,9 +28,7 @@ export const CategoryCombosChart = memo(function CategoryCombosChart() {
       </div>
 
       {isLoading ? (
-        <div className="h-[280px] flex items-center justify-center">
-          <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
-        </div>
+        <SkeletonHorizontalBars />
       ) : !chartData.length ? (
         <div className="h-[280px] flex items-center justify-center text-sm text-slate-400">
           {t('chart.noData')}
