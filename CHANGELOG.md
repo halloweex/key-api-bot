@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.20
+
+- Add SVG skeleton loaders and improve MilestoneProgress visuals
+
+
 ## 3.0.19
 
 - Fix date filtering for product pairs & brand affinity endpoints
