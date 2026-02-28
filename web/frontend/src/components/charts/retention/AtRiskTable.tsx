@@ -1,7 +1,9 @@
 import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
+import { AlertTriangle, Users, Clock, TrendingUp } from 'lucide-react'
 import type { AtRiskResponse } from '../../../types/api'
 import { formatNumber, formatCurrency, formatPercent } from '../../../utils/formatters'
+import { SummaryCard } from './SummaryCard'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -18,11 +20,11 @@ function getRiskColor(percent: number): string {
   return 'bg-emerald-100 text-emerald-800'
 }
 
-function getRiskBadge(percent: number): { label: string; color: string } {
-  if (percent >= 50) return { label: 'Critical', color: 'bg-red-500 text-white' }
-  if (percent >= 30) return { label: 'High', color: 'bg-orange-500 text-white' }
-  if (percent >= 20) return { label: 'Medium', color: 'bg-amber-500 text-white' }
-  return { label: 'Low', color: 'bg-emerald-500 text-white' }
+function getRiskBadge(percent: number, t: (key: string) => string): { label: string; color: string } {
+  if (percent >= 50) return { label: t('retention.riskCritical'), color: 'bg-red-500 text-white' }
+  if (percent >= 30) return { label: t('retention.riskHigh'), color: 'bg-orange-500 text-white' }
+  if (percent >= 20) return { label: t('retention.riskMedium'), color: 'bg-amber-500 text-white' }
+  return { label: t('retention.riskLow'), color: 'bg-emerald-500 text-white' }
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -35,36 +37,34 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
     <div>
       {/* Summary Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <div className="bg-gradient-to-br from-red-50 to-red-100/50 border border-red-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">{t('retention.atRiskCustomers')}</p>
-          <p className="text-xl font-bold text-red-800">
-            {formatNumber(data.summary.totalAtRisk)}
-          </p>
-          <p className="text-xs text-slate-500">
-            {formatPercent(data.summary.overallAtRiskPct)} {t('retention.atRiskOfTotal')}
-          </p>
-        </div>
-        <div className="bg-gradient-to-br from-slate-50 to-slate-100/50 border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">{t('customer.totalCustomers')}</p>
-          <p className="text-xl font-bold text-slate-800">
-            {formatNumber(data.summary.totalCustomers)}
-          </p>
-          <p className="text-xs text-slate-500">{t('retention.inLast12Months')}</p>
-        </div>
-        <div className="bg-gradient-to-br from-amber-50 to-amber-100/50 border border-amber-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">{t('retention.atRiskRevenue')}</p>
-          <p className="text-xl font-bold text-amber-800">
-            {formatCurrency(totalAtRiskRevenue)}
-          </p>
-          <p className="text-xs text-slate-500">{t('retention.historicalValue')}</p>
-        </div>
-        <div className="bg-gradient-to-br from-blue-50 to-blue-100/50 border border-blue-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">{t('retention.threshold')}</p>
-          <p className="text-xl font-bold text-blue-800">
-            {data.daysThreshold} {t('retention.days')}
-          </p>
-          <p className="text-xs text-slate-500">{t('retention.sinceLastPurchase')}</p>
-        </div>
+        <SummaryCard
+          label={t('retention.atRiskCustomers')}
+          value={formatNumber(data.summary.totalAtRisk)}
+          subtitle={`${formatPercent(data.summary.overallAtRiskPct)} ${t('retention.atRiskOfTotal')}`}
+          variant="red"
+          icon={<AlertTriangle size={28} />}
+        />
+        <SummaryCard
+          label={t('retention.churnedCustomers')}
+          value={formatNumber(data.summary.totalChurned)}
+          subtitle={`${formatPercent(data.summary.churnPct)} ${t('retention.atRiskOfTotal')}`}
+          variant="red"
+          icon={<Users size={28} />}
+        />
+        <SummaryCard
+          label={t('retention.atRiskRevenue')}
+          value={formatCurrency(totalAtRiskRevenue)}
+          subtitle={t('retention.historicalValue')}
+          variant="amber"
+          icon={<TrendingUp size={28} />}
+        />
+        <SummaryCard
+          label={t('retention.threshold')}
+          value={`${data.daysThreshold} ${t('retention.days')}`}
+          subtitle={t('retention.sinceLastPurchase')}
+          variant="blue"
+          icon={<Clock size={28} />}
+        />
       </div>
 
       {/* Table */}
@@ -72,18 +72,18 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-slate-200">
-              <th className="text-left py-2 px-3 font-medium text-slate-700">Cohort</th>
-              <th className="text-center py-2 px-3 font-medium text-slate-700">Total</th>
-              <th className="text-center py-2 px-3 font-medium text-slate-700">At Risk</th>
-              <th className="text-center py-2 px-3 font-medium text-slate-700">Risk %</th>
-              <th className="text-center py-2 px-3 font-medium text-slate-700">At-Risk Revenue</th>
-              <th className="text-center py-2 px-3 font-medium text-slate-700">Avg Orders</th>
-              <th className="text-center py-2 px-3 font-medium text-slate-700">Status</th>
+              <th className="text-left py-2 px-3 font-medium text-slate-700">{t('retention.cohort')}</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">{t('retention.totalCol')}</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">{t('retention.atRiskCol')}</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">{t('retention.riskPct')}</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">{t('retention.atRiskRevenue')}</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">{t('retention.avgOrders')}</th>
+              <th className="text-center py-2 px-3 font-medium text-slate-700">{t('retention.status')}</th>
             </tr>
           </thead>
           <tbody>
             {data.cohorts.map((cohort) => {
-              const badge = getRiskBadge(cohort.atRiskPct)
+              const badge = getRiskBadge(cohort.atRiskPct, t)
               return (
                 <tr key={cohort.cohort} className="border-b border-slate-100 hover:bg-slate-50">
                   <td className="py-2 px-3 font-medium text-slate-700">{cohort.cohort}</td>
@@ -121,15 +121,13 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
         {data.summary.overallAtRiskPct >= 40 && (
           <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
             <p className="text-sm text-red-800">
-              <strong>Action Required:</strong> {formatPercent(data.summary.overallAtRiskPct)} of customers are at risk.
-              Consider launching a win-back email campaign with special offers for inactive customers.
+              <strong>{t('retention.actionRequired')}</strong> {formatPercent(data.summary.overallAtRiskPct)} {t('retention.actionDesc')}
             </p>
           </div>
         )}
         <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
           <p className="text-sm text-blue-800">
-            <strong>Tip:</strong> Focus on cohorts with high at-risk percentages but also high historical revenue -
-            these customers have demonstrated purchase potential and may respond well to re-engagement.
+            <strong>{t('retention.tip')}</strong> {t('retention.tipDesc')}
           </p>
         </div>
       </div>

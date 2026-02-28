@@ -418,23 +418,25 @@ export const api = {
 
   getCohortLTV: (
     monthsBack = 12,
+    retentionMonths = 12,
     salesType = 'retail',
     options?: FetchOptions
   ) =>
     fetchApi<CohortLTVResponse>(
       '/customers/cohort-ltv',
-      `months_back=${monthsBack}&sales_type=${salesType}`,
+      `months_back=${monthsBack}&retention_months=${retentionMonths}&sales_type=${salesType}`,
       options
     ),
 
   getAtRiskCustomers: (
     daysThreshold = 90,
+    monthsBack = 12,
     salesType = 'retail',
     options?: FetchOptions
   ) =>
     fetchApi<AtRiskResponse>(
       '/customers/at-risk',
-      `days_threshold=${daysThreshold}&sales_type=${salesType}`,
+      `days_threshold=${daysThreshold}&months_back=${monthsBack}&sales_type=${salesType}`,
       options
     ),
 

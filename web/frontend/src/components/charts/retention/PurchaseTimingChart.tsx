@@ -1,4 +1,5 @@
 import { memo, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   BarChart,
   Bar,
@@ -9,6 +10,7 @@ import {
   ResponsiveContainer,
   Cell
 } from 'recharts'
+import { Users, Clock, TrendingUp } from 'lucide-react'
 import type { PurchaseTimingResponse } from '../../../types/api'
 import { formatNumber, formatPercent } from '../../../utils/formatters'
 import {
@@ -19,6 +21,7 @@ import {
   X_AXIS_PROPS,
   Y_AXIS_PROPS,
 } from '../config'
+import { SummaryCard } from './SummaryCard'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -42,40 +45,53 @@ const BUCKET_COLORS = [
 export const PurchaseTimingChart = memo(function PurchaseTimingChart({
   data
 }: PurchaseTimingChartProps) {
+  const { t } = useTranslation()
+
   const chartData = useMemo(() => {
     return data.buckets.map((bucket, index) => ({
-      bucket: bucket.bucket + ' days',
+      bucket: bucket.bucket + ' ' + t('retention.days'),
       customers: bucket.customers,
       percentage: bucket.percentage,
       avgDays: bucket.avgDays,
       color: BUCKET_COLORS[index] || BUCKET_COLORS[BUCKET_COLORS.length - 1]
     }))
-  }, [data.buckets])
+  }, [data.buckets, t])
+
+  const insightText = useMemo(() => {
+    if (data.buckets[0]?.percentage > 30) {
+      return t('retention.insightFast', {
+        pct: formatPercent(data.buckets[0].percentage),
+        defaultValue: `${formatPercent(data.buckets[0].percentage)} of repeat customers return within 30 days - great for consumable products!`
+      })
+    }
+    if (data.summary.medianDays && data.summary.medianDays > 90) {
+      return t('retention.insightText', { days: Math.round(data.summary.medianDays) })
+    }
+    return t('retention.timingTrack')
+  }, [data, t])
 
   return (
     <div>
       {/* Summary Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">
-        <div className="bg-gradient-to-br from-emerald-50 to-emerald-100/50 border border-emerald-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">Repeat Customers</p>
-          <p className="text-xl font-bold text-emerald-800">
-            {formatNumber(data.summary.totalRepeatCustomers)}
-          </p>
-        </div>
-        <div className="bg-gradient-to-br from-slate-50 to-slate-100/50 border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">Median Days</p>
-          <p className="text-xl font-bold text-slate-800">
-            {data.summary.medianDays ?? '-'}
-          </p>
-          <p className="text-xs text-slate-500">to 2nd purchase</p>
-        </div>
-        <div className="bg-gradient-to-br from-slate-50 to-slate-100/50 border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">Average Days</p>
-          <p className="text-xl font-bold text-slate-800">
-            {data.summary.avgDays ? Math.round(data.summary.avgDays) : '-'}
-          </p>
-          <p className="text-xs text-slate-500">to 2nd purchase</p>
-        </div>
+        <SummaryCard
+          label={t('retention.repeatCustomers')}
+          value={formatNumber(data.summary.totalRepeatCustomers)}
+          variant="emerald"
+          icon={<Users size={28} />}
+        />
+        <SummaryCard
+          label={t('retention.medianDays')}
+          value={data.summary.medianDays != null ? String(data.summary.medianDays) : '-'}
+          subtitle={t('retention.to2ndPurchase')}
+          icon={<Clock size={28} />}
+        />
+        <SummaryCard
+          label={t('retention.averageDays')}
+          value={data.summary.avgDays ? String(Math.round(data.summary.avgDays)) : '-'}
+          subtitle={t('retention.to2ndPurchase')}
+          icon={<TrendingUp size={28} />}
+        />
       </div>
 
       {/* Chart */}
@@ -97,11 +113,11 @@ export const PurchaseTimingChart = memo(function PurchaseTimingChart({
               labelStyle={TOOLTIP_LABEL_STYLE}
               formatter={(value) => {
                 if (typeof value === 'number') {
-                  return [formatNumber(value), 'Customers']
+                  return [formatNumber(value), t('retention.customers')]
                 }
-                return [String(value), 'Customers']
+                return [String(value), t('retention.customers')]
               }}
-              labelFormatter={(label) => `Time to 2nd Purchase: ${label}`}
+              labelFormatter={(label) => `${t('retention.timeTo2ndPurchase')} ${label}`}
             />
             <Bar
               dataKey="customers"
@@ -119,13 +135,7 @@ export const PurchaseTimingChart = memo(function PurchaseTimingChart({
       {/* Insights */}
       <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
         <p className="text-sm text-blue-800">
-          <strong>Insight:</strong> {' '}
-          {data.buckets[0]?.percentage > 30
-            ? `${formatPercent(data.buckets[0].percentage)} of repeat customers return within 30 days - great for consumable products!`
-            : data.summary.medianDays && data.summary.medianDays > 90
-            ? `Median repurchase time is ${Math.round(data.summary.medianDays)} days - consider re-engagement campaigns at 60-day mark.`
-            : `Track when customers typically repurchase to optimize your email automation timing.`
-          }
+          <strong>{t('retention.insight')}</strong> {insightText}
         </p>
       </div>
     </div>

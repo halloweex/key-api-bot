@@ -511,6 +511,33 @@ export interface EnhancedCohortData {
   revenue: (number | null)[]           // absolute revenue per month
 }
 
+export interface CohortInsights {
+  retentionTrend: {
+    recentM1: number
+    olderM1: number
+    delta: number
+    direction: 'improving' | 'declining' | 'stable'
+  } | null
+  cohortQualityTrend: {
+    bestCohort: { month: string; score: number }
+    worstCohort: { month: string; score: number }
+    latestScore: number
+    avgScore: number
+  } | null
+  revenueImpact: {
+    bestM1: number
+    potentialExtraCustomers: number
+    potentialExtraRevenue: number
+    monthlyPotential: number
+  } | null
+  decayAnalysis: {
+    halfLifeMonth: number | null
+    stabilizationMonth: number | null
+    terminalRetention: number | null
+    m1ToM3Drop: number
+  } | null
+}
+
 export interface EnhancedCohortRetentionResponse {
   cohorts: EnhancedCohortData[]
   retentionMonths: number
@@ -521,6 +548,7 @@ export interface EnhancedCohortRetentionResponse {
     avgRevenueRetention: Record<number, number> | null
     totalRevenue: number | null
   }
+  insights: CohortInsights
 }
 
 // Days to second purchase (purchase timing)
@@ -565,6 +593,7 @@ export interface AtRiskCohort {
   atRiskPct: number
   atRiskRevenue: number
   avgOrdersAtRisk: number
+  churnedCount: number
 }
 
 export interface AtRiskResponse {
@@ -574,6 +603,8 @@ export interface AtRiskResponse {
     totalAtRisk: number
     totalCustomers: number
     overallAtRiskPct: number
+    totalChurned: number
+    churnPct: number
   }
 }
 

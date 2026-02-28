@@ -279,16 +279,19 @@ class CustomersMixin:
             # Calculate summary metrics
             total_cohort_size = sum(c["size"] for c in cohorts.values())
 
-            # Average retention by month
+            # Weighted average retention by month (weight = cohort size)
             avg_retention = {}
             for m in range(retention_months + 1):
-                values = [
-                    c["retention"].get(m, {}).get("percent", 0)
-                    for c in cohorts.values()
-                    if m in c.get("retention", {})
-                ]
-                if values:
-                    avg_retention[m] = round(sum(values) / len(values), 1)
+                weighted_sum = 0
+                total_weight = 0
+                for c in cohorts.values():
+                    entry = c["retention"].get(m)
+                    if entry is not None:
+                        pct = entry.get("percent", 0)
+                        weighted_sum += pct * c["size"]
+                        total_weight += c["size"]
+                if total_weight > 0:
+                    avg_retention[m] = round(weighted_sum / total_weight, 1)
 
             return {
                 "cohorts": [
@@ -432,24 +435,37 @@ class CustomersMixin:
             total_cohort_size = sum(c["size"] for c in cohorts.values())
             total_revenue = sum(c["m0_revenue"] for c in cohorts.values())
 
-            # Average retention by month (customer and revenue)
+            # Weighted average retention by month (weight = cohort size)
             avg_customer_retention = {}
             avg_revenue_retention = {}
             for m in range(retention_months + 1):
-                cust_values = [
-                    c["retention"].get(m)
-                    for c in cohorts.values()
-                    if c["retention"].get(m) is not None
-                ]
-                rev_values = [
-                    c["revenue_retention"].get(m)
-                    for c in cohorts.values()
-                    if c["revenue_retention"].get(m) is not None
-                ]
-                if cust_values:
-                    avg_customer_retention[m] = round(sum(cust_values) / len(cust_values), 1)
-                if rev_values:
-                    avg_revenue_retention[m] = round(sum(rev_values) / len(rev_values), 1)
+                cust_weighted_sum = 0
+                cust_total_weight = 0
+                rev_weighted_sum = 0
+                rev_total_weight = 0
+                for c in cohorts.values():
+                    cust_pct = c["retention"].get(m)
+                    if cust_pct is not None:
+                        cust_weighted_sum += cust_pct * c["size"]
+                        cust_total_weight += c["size"]
+                    rev_pct = c["revenue_retention"].get(m)
+                    if rev_pct is not None:
+                        rev_weighted_sum += rev_pct * c["size"]
+                        rev_total_weight += c["size"]
+                if cust_total_weight > 0:
+                    avg_customer_retention[m] = round(cust_weighted_sum / cust_total_weight, 1)
+                if rev_total_weight > 0:
+                    avg_revenue_retention[m] = round(rev_weighted_sum / rev_total_weight, 1)
+
+            # ── Compute insights ──────────────────────────────────────
+            sorted_cohort_list = [
+                {"month": k, **v}
+                for k, v in sorted(cohorts.items())
+            ]
+
+            insights = self._compute_cohort_insights(
+                sorted_cohort_list, avg_customer_retention, retention_months
+            )
 
             return {
                 "cohorts": [
@@ -478,8 +494,151 @@ class CustomersMixin:
                     "avgCustomerRetention": avg_customer_retention,
                     "avgRevenueRetention": avg_revenue_retention if include_revenue else None,
                     "totalRevenue": round(total_revenue, 2) if include_revenue else None
-                }
+                },
+                "insights": insights
             }
+
+    @staticmethod
+    def _compute_cohort_insights(
+        sorted_cohorts: list,
+        avg_customer_retention: dict,
+        retention_months: int
+    ) -> dict:
+        """Compute derived insights from cohort retention data."""
+        if not sorted_cohorts:
+            return {
+                "retentionTrend": None,
+                "cohortQualityTrend": None,
+                "revenueImpact": None,
+                "decayAnalysis": None,
+            }
+
+        # Helper: weighted average M1 for a subset of cohorts
+        def weighted_m1(cohort_list):
+            total_w, total_s = 0.0, 0
+            for c in cohort_list:
+                m1 = c["retention"].get(1)
+                if m1 is not None and c["size"] > 0:
+                    total_w += m1 * c["size"]
+                    total_s += c["size"]
+            return round(total_w / total_s, 1) if total_s > 0 else None
+
+        # ── 5A.2 Retention trend ──
+        cohorts_with_m1 = [c for c in sorted_cohorts if c["retention"].get(1) is not None]
+        retention_trend = None
+        if len(cohorts_with_m1) >= 4:
+            recent = cohorts_with_m1[-3:]
+            older = cohorts_with_m1[:3]
+            recent_avg = weighted_m1(recent)
+            older_avg = weighted_m1(older)
+            if recent_avg is not None and older_avg is not None:
+                delta = round(recent_avg - older_avg, 1)
+                if abs(delta) < 1:
+                    direction = "stable"
+                elif delta > 0:
+                    direction = "improving"
+                else:
+                    direction = "declining"
+                retention_trend = {
+                    "recentM1": recent_avg,
+                    "olderM1": older_avg,
+                    "delta": delta,
+                    "direction": direction,
+                }
+
+        # ── 5A.3 Cohort quality trend ──
+        quality_scores = []
+        for c in sorted_cohorts:
+            m1 = c["retention"].get(1)
+            if m1 is None:
+                continue
+            m3 = c["retention"].get(3)
+            score = round(0.6 * m1 + 0.4 * m3, 1) if m3 is not None else round(m1, 1)
+            quality_scores.append({"month": c["month"], "score": score})
+
+        cohort_quality = None
+        if quality_scores:
+            best = max(quality_scores, key=lambda x: x["score"])
+            worst = min(quality_scores, key=lambda x: x["score"])
+            latest = quality_scores[-1]
+            avg_score = round(sum(q["score"] for q in quality_scores) / len(quality_scores), 1)
+            cohort_quality = {
+                "bestCohort": {"month": best["month"], "score": best["score"]},
+                "worstCohort": {"month": worst["month"], "score": worst["score"]},
+                "latestScore": latest["score"],
+                "avgScore": avg_score,
+            }
+
+        # ── 5A.4 Revenue impact ──
+        revenue_impact = None
+        cohorts_with_data = [
+            c for c in sorted_cohorts
+            if c["retention"].get(1) is not None and c["size"] > 0
+        ]
+        if cohorts_with_data:
+            best_m1 = max(c["retention"].get(1, 0) for c in cohorts_with_data)
+            total_extra_customers = 0.0
+            total_m1_revenue = 0.0
+            total_m1_customers = 0
+            for c in cohorts_with_data:
+                current_m1 = c["retention"].get(1, 0) or 0
+                m1_rev = c.get("revenue", {}).get(1, 0) or 0
+                m1_cust_count = round(c["size"] * current_m1 / 100) if current_m1 > 0 else 0
+                total_m1_revenue += m1_rev
+                total_m1_customers += m1_cust_count
+                if current_m1 < best_m1:
+                    extra = c["size"] * (best_m1 - current_m1) / 100
+                    total_extra_customers += extra
+
+            avg_rev_per_cust = (
+                total_m1_revenue / total_m1_customers
+                if total_m1_customers > 0 else 0
+            )
+            potential = round(total_extra_customers * avg_rev_per_cust, 2)
+            num_cohorts = len(cohorts_with_data)
+            monthly_potential = round(potential / num_cohorts, 2) if num_cohorts > 0 else 0
+
+            revenue_impact = {
+                "bestM1": best_m1,
+                "potentialExtraCustomers": round(total_extra_customers),
+                "potentialExtraRevenue": potential,
+                "monthlyPotential": monthly_potential,
+            }
+
+        # ── 5A.5 Decay analysis ──
+        m1_avg = avg_customer_retention.get(1, 0)
+        half_life = None
+        if m1_avg > 0:
+            for m in range(2, retention_months + 1):
+                if avg_customer_retention.get(m, 0) <= m1_avg / 2:
+                    half_life = m
+                    break
+
+        stabilization_month = None
+        for m in range(2, retention_months + 1):
+            prev = avg_customer_retention.get(m - 1, 0)
+            curr = avg_customer_retention.get(m, 0)
+            if prev > 0 and abs(prev - curr) < 2:
+                stabilization_month = m
+                break
+
+        terminal = avg_customer_retention.get(retention_months)
+        m3_val = avg_customer_retention.get(3, 0)
+        m1_to_m3_drop = round(m1_avg - m3_val, 1) if m1_avg > 0 and m3_val is not None else 0
+
+        decay_analysis = {
+            "halfLifeMonth": half_life,
+            "stabilizationMonth": stabilization_month,
+            "terminalRetention": terminal,
+            "m1ToM3Drop": m1_to_m3_drop,
+        }
+
+        return {
+            "retentionTrend": retention_trend,
+            "cohortQualityTrend": cohort_quality,
+            "revenueImpact": revenue_impact,
+            "decayAnalysis": decay_analysis,
+        }
 
     async def get_days_to_second_purchase(
         self,
@@ -524,8 +683,6 @@ class CustomersMixin:
             second_purchase AS (
                 SELECT
                     c1.buyer_id,
-                    c1.order_date AS first_order,
-                    c2.order_date AS second_order,
                     DATEDIFF('day', c1.order_date, c2.order_date) AS days_to_second
                 FROM customer_orders_ranked c1
                 JOIN customer_orders_ranked c2
@@ -554,59 +711,43 @@ class CustomersMixin:
                         ELSE 6
                     END AS bucket_order
                 FROM second_purchase
+            ),
+            global_stats AS (
+                SELECT
+                    MEDIAN(days_to_second) AS median_days,
+                    AVG(days_to_second) AS avg_days,
+                    COUNT(*) AS total_count
+                FROM second_purchase
             )
             SELECT
-                bucket,
+                b.bucket,
                 COUNT(*) AS customers,
-                ROUND(AVG(days_to_second), 1) AS avg_days
-            FROM bucketed
-            GROUP BY bucket, bucket_order
-            ORDER BY bucket_order
+                ROUND(AVG(b.days_to_second), 1) AS avg_days,
+                (SELECT median_days FROM global_stats) AS median_days,
+                (SELECT avg_days FROM global_stats) AS avg_days_overall,
+                (SELECT total_count FROM global_stats) AS total_count
+            FROM bucketed b
+            GROUP BY b.bucket, b.bucket_order
+            ORDER BY b.bucket_order
             """
 
             rows = conn.execute(query).fetchall()
 
+            # Extract global stats from first row
+            median_days = rows[0][3] if rows else None
+            avg_days_overall = rows[0][4] if rows else None
+
             # Calculate totals and percentages
             total_repeat = sum(row[1] for row in rows)
             buckets = []
-            for bucket, customers, avg_days in rows:
+            for row in rows:
+                bucket, customers, avg_days = row[0], row[1], row[2]
                 buckets.append({
                     "bucket": bucket,
                     "customers": customers,
                     "avgDays": avg_days,
                     "percentage": round(100.0 * customers / total_repeat, 1) if total_repeat > 0 else 0
                 })
-
-            # Get median
-            median_query = f"""
-            WITH customer_orders_ranked AS (
-                SELECT
-                    o.buyer_id,
-                    o.order_date,
-                    ROW_NUMBER() OVER (PARTITION BY o.buyer_id ORDER BY o.order_date) AS order_num
-                FROM silver_orders o
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
-                  {sales_type_filter}
-            ),
-            second_purchase AS (
-                SELECT
-                    DATEDIFF('day', c1.order_date, c2.order_date) AS days_to_second
-                FROM customer_orders_ranked c1
-                JOIN customer_orders_ranked c2
-                    ON c1.buyer_id = c2.buyer_id
-                    AND c1.order_num = 1
-                    AND c2.order_num = 2
-                WHERE c1.order_date >= CURRENT_DATE - INTERVAL '{int(months_back)} months'
-            )
-            SELECT
-                MEDIAN(days_to_second) AS median_days,
-                AVG(days_to_second) AS avg_days
-            FROM second_purchase
-            """
-            stats = conn.execute(median_query).fetchone()
-            median_days = stats[0] if stats else None
-            avg_days_overall = stats[1] if stats else None
 
             return {
                 "buckets": buckets,
@@ -620,6 +761,7 @@ class CustomersMixin:
     async def get_cohort_ltv(
         self,
         months_back: int = 12,
+        retention_months: int = 12,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """
@@ -676,7 +818,7 @@ class CustomersMixin:
                     SUM(revenue) AS total_revenue,
                     COUNT(DISTINCT buyer_id) AS active_customers
                 FROM customer_revenue
-                WHERE months_since <= 12
+                WHERE months_since <= ?
                 GROUP BY cohort_month, months_since
             ),
             cohort_sizes AS (
@@ -696,7 +838,7 @@ class CustomersMixin:
             ORDER BY cm.cohort_month DESC, cm.months_since
             """
 
-            rows = conn.execute(query).fetchall()
+            rows = conn.execute(query, [retention_months]).fetchall()
 
             # Build cohort LTV structure with cumulative revenue
             cohorts = {}
@@ -713,17 +855,15 @@ class CustomersMixin:
             for cohort_data in cohorts.values():
                 cumulative = 0
                 cumulative_list = []
-                for m in range(13):  # M0 to M12
+                for m in range(retention_months + 1):  # M0 to Mn
                     cumulative += cohort_data["monthly_revenue"].get(m, 0)
                     cumulative_list.append(round(cumulative, 2))
                 cohort_data["cumulative"] = cumulative_list
 
-            # Calculate average LTV
-            all_ltv = [
-                c["cumulative"][-1] / c["size"] if c["size"] > 0 else 0
-                for c in cohorts.values()
-            ]
-            avg_ltv = round(sum(all_ltv) / len(all_ltv), 2) if all_ltv else 0
+            # Calculate weighted average LTV (weight = cohort size)
+            total_rev = sum(c["cumulative"][-1] for c in cohorts.values())
+            total_size = sum(c["size"] for c in cohorts.values())
+            avg_ltv = round(total_rev / total_size, 2) if total_size > 0 else 0
 
             # Find best cohort
             best_cohort = max(
@@ -752,6 +892,7 @@ class CustomersMixin:
     async def get_at_risk_customers(
         self,
         days_threshold: int = 90,
+        months_back: int = 12,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """
@@ -778,6 +919,8 @@ class CustomersMixin:
             elif sales_type == "b2b":
                 sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
 
+            churn_threshold = days_threshold * 2
+
             query = f"""
             WITH customer_activity AS (
                 SELECT
@@ -796,31 +939,41 @@ class CustomersMixin:
             SELECT
                 strftime(cohort_month, '%Y-%m') AS cohort,
                 COUNT(*) AS total_customers,
-                COUNT(*) FILTER (WHERE days_since_last > ?) AS at_risk_count,
+                COUNT(*) FILTER (WHERE days_since_last > ? AND days_since_last <= ?) AS at_risk_count,
                 ROUND(100.0 * COUNT(*) FILTER (WHERE days_since_last > ?) / COUNT(*), 1) AS at_risk_pct,
                 SUM(total_revenue) FILTER (WHERE days_since_last > ?) AS at_risk_revenue,
-                AVG(total_orders) FILTER (WHERE days_since_last > ?) AS avg_orders_at_risk
+                AVG(total_orders) FILTER (WHERE days_since_last > ?) AS avg_orders_at_risk,
+                COUNT(*) FILTER (WHERE days_since_last > ?) AS churned_count
             FROM customer_activity
-            WHERE cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '12 months'
+            WHERE cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
             GROUP BY cohort_month
             ORDER BY cohort_month DESC
             """
 
-            rows = conn.execute(query, [days_threshold, days_threshold, days_threshold, days_threshold]).fetchall()
+            rows = conn.execute(query, [
+                days_threshold, churn_threshold,  # at_risk_count (between threshold and 2x)
+                days_threshold,  # at_risk_pct (> threshold)
+                days_threshold,  # at_risk_revenue
+                days_threshold,  # avg_orders_at_risk
+                churn_threshold,  # churned_count (> 2x threshold)
+            ]).fetchall()
 
             cohorts = []
             total_at_risk = 0
+            total_churned = 0
             total_customers = 0
-            for cohort, total, at_risk, pct, revenue, avg_orders in rows:
+            for cohort, total, at_risk, pct, revenue, avg_orders, churned in rows:
                 cohorts.append({
                     "cohort": cohort,
                     "totalCustomers": total,
                     "atRiskCount": at_risk,
                     "atRiskPct": pct,
                     "atRiskRevenue": round(revenue, 2) if revenue else 0,
-                    "avgOrdersAtRisk": round(avg_orders, 1) if avg_orders else 0
+                    "avgOrdersAtRisk": round(avg_orders, 1) if avg_orders else 0,
+                    "churnedCount": churned
                 })
                 total_at_risk += at_risk
+                total_churned += churned
                 total_customers += total
 
             return {
@@ -829,6 +982,8 @@ class CustomersMixin:
                 "summary": {
                     "totalAtRisk": total_at_risk,
                     "totalCustomers": total_customers,
-                    "overallAtRiskPct": round(100.0 * total_at_risk / total_customers, 1) if total_customers > 0 else 0
+                    "overallAtRiskPct": round(100.0 * total_at_risk / total_customers, 1) if total_customers > 0 else 0,
+                    "totalChurned": total_churned,
+                    "churnPct": round(100.0 * total_churned / total_customers, 1) if total_customers > 0 else 0
                 }
             }

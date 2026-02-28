@@ -213,6 +213,40 @@ export function SkeletonMomentum() {
   )
 }
 
+/** Retention matrix heatmap skeleton */
+export function SkeletonRetentionMatrix() {
+  const gid = useId().replace(/:/g, '')
+  const rows = 6
+  const cols = 7 // cohort label + size + M0-M4
+
+  return (
+    <svg viewBox="0 0 520 230" className="w-full h-[230px]" preserveAspectRatio="xMidYMid meet">
+      <SvgShimmerDefs id={gid} />
+      {/* Header row */}
+      <rect x="12" y="8" width="60" height="10" rx="3" fill={`url(#${gid})`} />
+      <rect x="82" y="8" width="32" height="10" rx="3" fill={`url(#${gid})`} />
+      {[...Array(5)].map((_, j) => (
+        <rect key={`h${j}`} x={128 + j * 76} y="8" width="28" height="10" rx="3" fill={`url(#${gid})`} />
+      ))}
+      <line x1="0" y1="26" x2="520" y2="26" stroke="#f1f5f9" strokeWidth="1" />
+      {/* Data rows */}
+      {[...Array(rows)].map((_, i) => {
+        const ry = 34 + i * 32
+        return (
+          <g key={i}>
+            <rect x="12" y={ry + 4} width="54" height="12" rx="3" fill={`url(#${gid})`} />
+            <rect x="82" y={ry + 4} width="28" height="12" rx="3" fill={`url(#${gid})`} />
+            {[...Array(cols - 2)].map((_, j) => (
+              <rect key={j} x={124 + j * 76} y={ry} width="64" height="20" rx="4" fill={`url(#${gid})`} />
+            ))}
+            <line x1="0" y1={ry + 28} x2="520" y2={ry + 28} stroke="#f8fafc" strokeWidth="1" />
+          </g>
+        )
+      })}
+    </svg>
+  )
+}
+
 /** Vertical bar chart skeleton (BasketDistribution) */
 export function SkeletonVerticalBars() {
   const gid = useId().replace(/:/g, '')

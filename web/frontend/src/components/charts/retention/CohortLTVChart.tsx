@@ -1,4 +1,5 @@
 import { memo, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   LineChart,
   Line,
@@ -9,6 +10,7 @@ import {
   ResponsiveContainer,
   Legend,
 } from 'recharts'
+import { DollarSign, TrendingUp, Users } from 'lucide-react'
 import type { CohortLTVResponse } from '../../../types/api'
 import { formatCurrency, formatNumber } from '../../../utils/formatters'
 import {
@@ -20,6 +22,7 @@ import {
   Y_AXIS_PROPS,
   formatAxisK,
 } from '../config'
+import { SummaryCard } from './SummaryCard'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -49,18 +52,24 @@ const COHORT_COLORS = [
 export const CohortLTVChart = memo(function CohortLTVChart({
   data
 }: CohortLTVChartProps) {
-  // Transform data for line chart - each month (M0-M12) is a point on X axis
-  // Each cohort is a separate line
+  const { t } = useTranslation()
+
+  const maxMonth = useMemo(() => {
+    if (!data.cohorts.length) return 12
+    return data.cohorts[0].cumulativeRevenue?.length
+      ? data.cohorts[0].cumulativeRevenue.length
+      : 13
+  }, [data.cohorts])
+
+  // Transform data for line chart
   const chartData = useMemo(() => {
-    const months = Array.from({ length: 13 }, (_, i) => i) // M0 to M12
+    const months = Array.from({ length: maxMonth }, (_, i) => i)
 
     return months.map((monthIndex) => {
       const point: Record<string, number | string> = { month: `M${monthIndex}` }
 
       data.cohorts.slice(0, 8).forEach((cohort) => {
-        // Only include data if the cohort has data for this month
         if (cohort.cumulativeRevenue && cohort.cumulativeRevenue[monthIndex] !== undefined) {
-          // Calculate LTV (cumulative revenue / customer count)
           const ltv = cohort.customerCount > 0
             ? cohort.cumulativeRevenue[monthIndex] / cohort.customerCount
             : 0
@@ -70,37 +79,33 @@ export const CohortLTVChart = memo(function CohortLTVChart({
 
       return point
     })
-  }, [data.cohorts])
+  }, [data.cohorts, maxMonth])
 
-  // Get visible cohorts (first 8 for readability)
   const visibleCohorts = data.cohorts.slice(0, 8)
 
   return (
     <div>
       {/* Summary Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">
-        <div className="bg-gradient-to-br from-blue-50 to-blue-100/50 border border-blue-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">Avg LTV</p>
-          <p className="text-xl font-bold text-blue-800">
-            {formatCurrency(data.summary.avgLTV)}
-          </p>
-          <p className="text-xs text-slate-500">across all cohorts</p>
-        </div>
-        <div className="bg-gradient-to-br from-emerald-50 to-emerald-100/50 border border-emerald-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">Best Cohort</p>
-          <p className="text-xl font-bold text-emerald-800">
-            {data.summary.bestCohort || '-'}
-          </p>
-          <p className="text-xs text-slate-500">
-            LTV: {formatCurrency(data.summary.bestCohortLTV)}
-          </p>
-        </div>
-        <div className="bg-gradient-to-br from-slate-50 to-slate-100/50 border border-slate-200 rounded-xl p-4">
-          <p className="text-xs text-slate-600 font-medium">Cohorts Analyzed</p>
-          <p className="text-xl font-bold text-slate-800">
-            {formatNumber(data.cohorts.length)}
-          </p>
-        </div>
+        <SummaryCard
+          label={t('retention.avgLTV')}
+          value={formatCurrency(data.summary.avgLTV)}
+          subtitle={t('retention.acrossAllCohorts')}
+          variant="blue"
+          icon={<DollarSign size={28} />}
+        />
+        <SummaryCard
+          label={t('retention.bestCohort')}
+          value={data.summary.bestCohort || '-'}
+          subtitle={`LTV: ${formatCurrency(data.summary.bestCohortLTV)}`}
+          variant="emerald"
+          icon={<TrendingUp size={28} />}
+        />
+        <SummaryCard
+          label={t('retention.cohortsAnalyzed')}
+          value={formatNumber(data.cohorts.length)}
+          icon={<Users size={28} />}
+        />
       </div>
 
       {/* Chart */}
@@ -121,7 +126,7 @@ export const CohortLTVChart = memo(function CohortLTVChart({
               contentStyle={TOOLTIP_STYLE}
               labelStyle={TOOLTIP_LABEL_STYLE}
               formatter={(value, name) => [formatCurrency(typeof value === 'number' ? value : 0), String(name)]}
-              labelFormatter={(label) => `Month: ${label}`}
+              labelFormatter={(label) => `${t('retention.month')} ${label}`}
             />
             <Legend
               verticalAlign="top"
@@ -148,9 +153,7 @@ export const CohortLTVChart = memo(function CohortLTVChart({
       {/* Info */}
       <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
         <p className="text-sm text-amber-800">
-          <strong>How to read:</strong> Each line shows how cumulative LTV (lifetime value per customer)
-          grows over time for a specific cohort. Steeper lines = faster value accumulation.
-          Compare cohorts to identify which acquisition periods brought the most valuable customers.
+          <strong>{t('retention.howToRead')}</strong> {t('retention.ltvHowToRead')}
         </p>
       </div>
     </div>

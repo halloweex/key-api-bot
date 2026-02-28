@@ -92,6 +92,7 @@ async def get_purchase_timing(
 async def get_cohort_ltv(
     request: Request,
     months_back: int = Query(12, ge=3, le=24),
+    retention_months: int = Query(12, ge=1, le=24),
     sales_type: Optional[str] = Query("retail"),
 ):
     """Get cumulative lifetime value by cohort."""
@@ -101,7 +102,9 @@ async def get_cohort_ltv(
         raise HTTPException(status_code=400, detail=str(e))
 
     store = await get_store()
-    return await store.get_cohort_ltv(months_back=months_back, sales_type=sales_type)
+    return await store.get_cohort_ltv(
+        months_back=months_back, retention_months=retention_months, sales_type=sales_type,
+    )
 
 
 @router.get("/customers/at-risk")
@@ -109,6 +112,7 @@ async def get_cohort_ltv(
 async def get_at_risk_customers(
     request: Request,
     days_threshold: int = Query(90, ge=30, le=365),
+    months_back: int = Query(12, ge=3, le=24),
     sales_type: Optional[str] = Query("retail"),
 ):
     """Get at-risk customers by cohort (haven't purchased in N days)."""
@@ -119,5 +123,5 @@ async def get_at_risk_customers(
 
     store = await get_store()
     return await store.get_at_risk_customers(
-        days_threshold=days_threshold, sales_type=sales_type,
+        days_threshold=days_threshold, months_back=months_back, sales_type=sales_type,
     )
