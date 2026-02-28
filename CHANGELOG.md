@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.22
+
+- Fix Decimal TypeError in cohort insights and 429 retry storm
+
+
 ## 3.0.21
 
 - Add cohort analysis enhancements: insights, skeletons, i18n, and controls
