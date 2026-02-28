@@ -6,38 +6,6 @@
   <component name="ChangeListManager">
     <list default="true" id="00033ac8-0ff0-4db9-8885-f829ba7bf2ad" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/package-lock.json" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/package-lock.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/package.json" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/package.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/ErrorBoundary.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/ErrorBoundary.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/admin/AdminPermissionsPage.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/admin/AdminPermissionsPage.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/admin/AdminUsersPage.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/admin/AdminUsersPage.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/cards/StatCard.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/cards/StatCard.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/cards/SummaryCards.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/cards/SummaryCards.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/ChartContainer.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/ChartContainer.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/CustomerInsightsChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/CustomerInsightsChart.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/InventoryTrendChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/InventoryTrendChart.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueTrendChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/RevenueTrendChart.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/charts/StockSummaryChart.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/charts/StockSummaryChart.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatHeader.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatHeader.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatInput.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatInput.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatMessage.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatMessage.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatMessages.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatMessages.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatSidebar.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatSidebar.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatToggle.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/chat/ChatToggle.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/filters/DateRangePicker.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/filters/DateRangePicker.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/filters/PeriodFilter.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/filters/PeriodFilter.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/icons/index.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/icons/index.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/navigation/SidebarRail.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/navigation/SidebarRail.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/products/BasketSummaryCards.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/products/BasketSummaryCards.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/traffic/TrafficSummaryCards.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/traffic/TrafficSummaryCards.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/ui/ApiErrorState.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/ui/ApiErrorState.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/ui/InfoPopover.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/ui/InfoPopover.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/ui/MilestoneProgress.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/ui/MilestoneProgress.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/ui/Toast.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/ui/Toast.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/ui/UserProfileDropdown.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/ui/UserProfileDropdown.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/src/components/ui/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/src/components/ui/index.ts" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/tsconfig.app.json" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/tsconfig.app.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web/frontend/vite.config.ts" beforeDir="false" afterPath="$PROJECT_DIR$/web/frontend/vite.config.ts" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
