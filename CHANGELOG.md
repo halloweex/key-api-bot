@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.31
+
+- Add sell-through velocity section title and description (i18n)
+
+
 ## 3.0.30
 
 - Fix days-of-supply: use 90-day velocity instead of 30-day
