@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.23
+
+- Fix TS build errors in InventoryTurnoverChart
+- Add new inventory
+- Add inventory turnover & optimal stock analytics
+
+
 ## 3.0.22
 
 - Fix Decimal TypeError in cohort insights and 429 retry storm
