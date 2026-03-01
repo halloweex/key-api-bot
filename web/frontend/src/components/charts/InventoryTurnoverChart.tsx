@@ -59,7 +59,10 @@ function ABCCard({ cls, data, expanded, onToggle, t }: {
         className="w-full p-3 text-left cursor-pointer hover:opacity-80 transition-opacity"
       >
         <div className="flex items-center justify-between">
-          <span className="text-sm font-bold">{t('inventory.turnover.class')} {cls}</span>
+          <div>
+            <span className="text-sm font-bold">{t('inventory.turnover.class')} {cls}</span>
+            <span className="text-[10px] text-slate-400 ml-1.5">{t(`inventory.turnover.abcDesc${cls}`)}</span>
+          </div>
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-slate-500">{data.skuCount} SKUs</span>
             <svg className={`w-3.5 h-3.5 text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -425,14 +428,19 @@ function InventoryTurnoverChartComponent() {
 
           {/* Section 4: ABC Distribution */}
           <div>
-            <h4 className="text-xs font-semibold text-slate-600 uppercase mb-2">
-              {t('inventory.turnover.abcAnalysis')}
-              {data.abc.imbalanceScore > 3 && (
-                <span className="ml-2 text-red-500 normal-case font-normal">
-                  {t('inventory.turnover.imbalanceWarning')}
-                </span>
-              )}
-            </h4>
+            <div className="flex items-start justify-between mb-2">
+              <div>
+                <h4 className="text-xs font-semibold text-slate-600 uppercase">
+                  {t('inventory.turnover.abcAnalysis')}
+                  {data.abc.imbalanceScore > 3 && (
+                    <span className="ml-2 text-red-500 normal-case font-normal">
+                      {t('inventory.turnover.imbalanceWarning')}
+                    </span>
+                  )}
+                </h4>
+                <p className="text-[11px] text-slate-400 mt-0.5">{t('inventory.turnover.abcDesc')}</p>
+              </div>
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {(['A', 'B', 'C'] as const).map(cls => (
                 <ABCCard
