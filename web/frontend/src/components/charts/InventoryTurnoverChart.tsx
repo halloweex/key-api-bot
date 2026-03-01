@@ -101,19 +101,24 @@ function ExcessRow({ item }: { item: TopExcessItem }) {
 function StockGauge({ optimal, max, current, t }: {
   optimal: number; max: number; current: number; t: (k: string) => string
 }) {
-  const total = Math.max(current, max) * 1.1
-  const optPct = Math.min((optimal / total) * 100, 100)
-  const maxPct = Math.min(((max - optimal) / total) * 100, 100 - optPct)
-  const excessPct = Math.max(0, Math.min(((current - max) / total) * 100, 100 - optPct - maxPct))
-  const markerPct = Math.min((current / total) * 100, 99)
+  const total = Math.max(current, max)
+  const optPct = (optimal / total) * 100
+  const maxPct = ((max - optimal) / total) * 100
+  const excessPct = current > max ? ((current - max) / total) * 100 : 0
+  // Scale to fill 100%: green + yellow + red(if any) = 100%
+  const sum = optPct + maxPct + excessPct
+  const greenW = (optPct / sum) * 100
+  const yellowW = (maxPct / sum) * 100
+  const redW = (excessPct / sum) * 100
+  const markerPct = Math.min((current / total) * 100 / sum * 100, 98)
 
   return (
     <div className="space-y-2">
-      <div className="relative h-6 rounded-full overflow-hidden bg-slate-100 flex">
-        <div className="h-full bg-emerald-400" style={{ width: `${optPct}%` }} />
-        <div className="h-full bg-amber-300" style={{ width: `${maxPct}%` }} />
-        {excessPct > 0 && <div className="h-full bg-red-300" style={{ width: `${excessPct}%` }} />}
-        {/* Current marker */}
+      <div className="relative h-6 rounded-full overflow-hidden flex">
+        <div className="h-full bg-emerald-400" style={{ width: `${greenW}%` }} />
+        <div className="h-full bg-amber-300" style={{ width: `${yellowW}%` }} />
+        {redW > 0 && <div className="h-full bg-red-300" style={{ width: `${redW}%` }} />}
+        {/* Current stock marker */}
         <div
           className="absolute top-0 h-full w-0.5 bg-slate-800"
           style={{ left: `${markerPct}%` }}
@@ -126,6 +131,21 @@ function StockGauge({ optimal, max, current, t }: {
       <div className="flex justify-between text-[10px] text-slate-500">
         <span>{t('inventory.turnover.optimal')}: {formatCurrency(optimal)}</span>
         <span>{t('inventory.turnover.maxAcceptable')}: {formatCurrency(max)}</span>
+      </div>
+      {/* Legend */}
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-slate-500">
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm bg-emerald-400" />
+          {t('inventory.turnover.gaugeGreen')}
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm bg-amber-300" />
+          {t('inventory.turnover.gaugeYellow')}
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm bg-red-300" />
+          {t('inventory.turnover.gaugeRed')}
+        </span>
       </div>
     </div>
   )
