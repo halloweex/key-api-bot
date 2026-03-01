@@ -1161,29 +1161,30 @@ class DuckDBStore(
         HAVING COUNT(*) >= 5;
 
         -- View: SKU status with dead stock + overstocked classification
+        -- Uses 90-day velocity for days_of_supply (more stable than 30d)
         CREATE OR REPLACE VIEW v_sku_status AS
         SELECT
             s.*,
             COALESCE(cv.threshold_days, 180) as threshold_days,
-            CASE WHEN COALESCE(vel.qty_sold_30d, 0) > 0
-                 THEN ROUND((s.quantity - s.reserve) / (vel.qty_sold_30d / 30.0), 0)
+            CASE WHEN COALESCE(vel.qty_sold_90d, 0) > 0
+                 THEN ROUND((s.quantity - s.reserve) / (vel.qty_sold_90d / 90.0), 0)
                  ELSE NULL
             END as days_of_supply,
             CASE
                 WHEN s.last_sale_date IS NULL THEN 'never_sold'
                 WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) THEN 'dead_stock'
                 WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) * 0.7 THEN 'at_risk'
-                WHEN COALESCE(vel.qty_sold_30d, 0) > 0
-                     AND ROUND((s.quantity - s.reserve) / (vel.qty_sold_30d / 30.0), 0) > 90
+                WHEN COALESCE(vel.qty_sold_90d, 0) > 0
+                     AND ROUND((s.quantity - s.reserve) / (vel.qty_sold_90d / 90.0), 0) > 90
                     THEN 'overstocked'
                 ELSE 'healthy'
             END as status
         FROM v_sku_analysis s
         LEFT JOIN v_category_velocity cv ON s.category_id = cv.category_id
         LEFT JOIN (
-            SELECT product_id, SUM(quantity_sold) as qty_sold_30d
+            SELECT product_id, SUM(quantity_sold) as qty_sold_90d
             FROM gold_daily_products
-            WHERE date >= CURRENT_DATE - INTERVAL '30 days'
+            WHERE date >= CURRENT_DATE - INTERVAL '90 days'
             GROUP BY product_id
         ) vel ON s.product_id = vel.product_id
         WHERE s.quantity > 0;
@@ -1261,12 +1262,12 @@ class DuckDBStore(
                       (COALESCE(g30.qty_sold_30d, 0) + s.available), 1)
                  ELSE 0
             END as sell_through_rate_30d,
-            CASE WHEN COALESCE(g30.qty_sold_30d, 0) > 0
-                 THEN ROUND(s.available / (g30.qty_sold_30d / 30.0), 0)
+            CASE WHEN COALESCE(g90.qty_sold_90d, 0) > 0
+                 THEN ROUND(s.available / (g90.qty_sold_90d / 90.0), 0)
                  ELSE NULL
             END as days_of_supply,
-            CASE WHEN COALESCE(g30.qty_sold_30d, 0) > 0
-                 THEN ROUND(g30.qty_sold_30d / 30.0, 2)
+            CASE WHEN COALESCE(g90.qty_sold_90d, 0) > 0
+                 THEN ROUND(g90.qty_sold_90d / 90.0, 2)
                  ELSE 0
             END as avg_daily_sales
         FROM v_sku_analysis s
