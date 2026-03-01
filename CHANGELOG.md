@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.29
+
+- Add ABC classification descriptions
+
+
 ## 3.0.28
 
 - Add overstocked status to Inventory Health
