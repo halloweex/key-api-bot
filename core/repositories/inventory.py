@@ -618,6 +618,7 @@ class InventoryMixin:
             return {
                 "summary": {
                     "healthy": summary_dict.get("healthy", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
+                    "overstocked": summary_dict.get("overstocked", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
                     "atRisk": summary_dict.get("at_risk", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
                     "deadStock": summary_dict.get("dead_stock", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
                     "neverSold": summary_dict.get("never_sold", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
@@ -642,7 +643,8 @@ class InventoryMixin:
                 SELECT
                     offer_id, sku, name, brand, category_name,
                     available, available_value, price,
-                    days_since_sale, days_in_stock, threshold_days, status
+                    days_since_sale, days_in_stock, threshold_days,
+                    days_of_supply, status
                 FROM v_sku_status
                 WHERE status != 'healthy'
                 ORDER BY available_value DESC
@@ -662,7 +664,8 @@ class InventoryMixin:
                     "daysSinceSale": row[8],
                     "daysInStock": row[9],
                     "thresholdDays": row[10],
-                    "status": row[11],
+                    "daysOfSupply": int(row[11]) if row[11] is not None else None,
+                    "status": row[12],
                 }
                 for row in items
             ]

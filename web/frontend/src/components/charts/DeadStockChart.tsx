@@ -26,6 +26,9 @@ function DeadStockChartComponent() {
               <strong className="text-emerald-400">{t('inventory.healthy')}:</strong> {t('inventory.healthInfo4')}
             </p>
             <p className="text-xs text-slate-300">
+              <strong className="text-indigo-400">{t('inventory.overstocked')}:</strong> {t('inventory.healthInfo8')}
+            </p>
+            <p className="text-xs text-slate-300">
               <strong className="text-amber-400">{t('inventory.atRisk')}:</strong> {t('inventory.healthInfo5')}
             </p>
             <p className="text-xs text-slate-300">
@@ -45,13 +48,20 @@ function DeadStockChartComponent() {
       {data && (
         <div className="space-y-4 min-h-[420px]">
           {/* Summary Stats */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
             <StatCard
               label={t('inventory.healthy')}
               value={data.summary.healthy.skuCount}
               subValue={`${data.summary.healthy.valuePercent}%`}
               color="text-emerald-600"
               bgColor="bg-emerald-50"
+            />
+            <StatCard
+              label={t('inventory.overstocked')}
+              value={data.summary.overstocked.skuCount}
+              subValue={`${data.summary.overstocked.valuePercent}%`}
+              color="text-indigo-600"
+              bgColor="bg-indigo-50"
             />
             <StatCard
               label={t('inventory.atRisk')}
@@ -77,7 +87,13 @@ function DeadStockChartComponent() {
           </div>
 
           {/* Value Summary */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-3 gap-3">
+            <div className="text-center py-2 bg-indigo-50 rounded-lg">
+              <div className="text-xl font-bold text-indigo-700">
+                {formatCurrency(data.summary.overstocked.value)}
+              </div>
+              <div className="text-xs text-slate-600 font-medium">{t('inventory.overstockedValue')}</div>
+            </div>
             <div className="text-center py-2 bg-red-50 rounded-lg">
               <div className="text-xl font-bold text-red-700">
                 {formatCurrency(data.summary.deadStock.value + data.summary.neverSold.value)}
@@ -186,6 +202,10 @@ function SummaryTab({ data }: SummaryTabProps) {
             style={{ width: `${data.summary.healthy.valuePercent}%` }}
           />
           <div
+            className="bg-indigo-400 transition-all"
+            style={{ width: `${data.summary.overstocked.valuePercent}%` }}
+          />
+          <div
             className="bg-amber-500 transition-all"
             style={{ width: `${data.summary.atRisk.valuePercent}%` }}
           />
@@ -202,6 +222,10 @@ function SummaryTab({ data }: SummaryTabProps) {
           <span className="flex items-center gap-1">
             <span className="w-2 h-2 bg-emerald-500 rounded-full"></span>
             {t('inventory.healthy')}
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-2 bg-indigo-400 rounded-full"></span>
+            {t('inventory.overstocked')}
           </span>
           <span className="flex items-center gap-1">
             <span className="w-2 h-2 bg-amber-500 rounded-full"></span>
@@ -349,6 +373,8 @@ function ItemsTab({ items }: ItemsTabProps) {
               ? 'bg-slate-100'
               : item.status === 'dead_stock'
               ? 'bg-red-50'
+              : item.status === 'overstocked'
+              ? 'bg-indigo-50'
               : 'bg-amber-50'
           }`}
         >
@@ -366,6 +392,12 @@ function ItemsTab({ items }: ItemsTabProps) {
                   ? `${item.daysSinceSale}${t('inventory.daysAgo')}`
                   : t('inventory.neverSoldLabel')}
               </span>
+              {item.daysOfSupply != null && (
+                <>
+                  <span>·</span>
+                  <span>{item.daysOfSupply}d supply</span>
+                </>
+              )}
             </div>
           </div>
           <div className="text-right whitespace-nowrap">
@@ -374,6 +406,8 @@ function ItemsTab({ items }: ItemsTabProps) {
                 ? 'text-slate-600'
                 : item.status === 'dead_stock'
                 ? 'text-red-600'
+                : item.status === 'overstocked'
+                ? 'text-indigo-600'
                 : 'text-amber-600'
             }`}>
               {formatCurrency(item.value)}

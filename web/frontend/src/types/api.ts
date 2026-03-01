@@ -434,12 +434,14 @@ export interface InventoryAnalysisItem {
   daysSinceSale: number | null
   daysInStock: number | null
   thresholdDays: number
-  status: 'healthy' | 'at_risk' | 'dead_stock' | 'never_sold'
+  daysOfSupply: number | null
+  status: 'healthy' | 'overstocked' | 'at_risk' | 'dead_stock' | 'never_sold'
 }
 
 export interface InventoryAnalysisResponse {
   summary: {
     healthy: DeadStockStatusSummary
+    overstocked: DeadStockStatusSummary
     atRisk: DeadStockStatusSummary
     deadStock: DeadStockStatusSummary
     neverSold: DeadStockStatusSummary
