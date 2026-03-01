@@ -87,10 +87,20 @@ async def refresh_inventory_snapshot(request: Request):
 async def get_inventory_turnover(
     request: Request,
     days: int = Query(30, ge=7, le=90),
+    lead_time: int = Query(14, ge=1, le=90, description="Supplier lead time in days"),
+    safety_multiplier: float = Query(1.5, ge=1.0, le=3.0, description="Safety stock multiplier on lead time"),
+    buffer_days: int = Query(5, ge=0, le=30, description="Extra buffer days (customs, logistics)"),
+    max_acceptable_days: int = Query(60, ge=30, le=365, description="Max acceptable stock days (yellow/red boundary)"),
 ):
     """Get inventory turnover KPIs, ABC analysis, and excess stock metrics."""
     store = await get_store()
-    return await store.get_inventory_turnover(days)
+    return await store.get_inventory_turnover(
+        days,
+        lead_time_days=lead_time,
+        safety_multiplier=safety_multiplier,
+        buffer_days=buffer_days,
+        max_acceptable_days=max_acceptable_days,
+    )
 
 
 @router.get("/stocks/actions")

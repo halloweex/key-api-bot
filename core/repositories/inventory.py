@@ -726,7 +726,15 @@ class InventoryMixin:
 
     # ─── Inventory Turnover & Optimal Stock ──────────────────────────────────
 
-    async def get_inventory_turnover(self, days: int = 30) -> Dict[str, Any]:
+    async def get_inventory_turnover(
+        self,
+        days: int = 30,
+        *,
+        lead_time_days: int = 14,
+        safety_multiplier: float = 1.5,
+        buffer_days: int = 5,
+        max_acceptable_days: int = 60,
+    ) -> Dict[str, Any]:
         """Compute inventory turnover KPIs, ABC analysis, sell-through, and excess stock.
 
         Runs multiple queries in a single connection and computes derived metrics
@@ -734,6 +742,10 @@ class InventoryMixin:
 
         Args:
             days: Look-back period for revenue calculation (7-90)
+            lead_time_days: Supplier lead time in days
+            safety_multiplier: Safety stock multiplier on lead time (e.g. 1.5 = 50% buffer)
+            buffer_days: Extra buffer days for customs/logistics
+            max_acceptable_days: Max acceptable stock days (yellow/red boundary)
 
         Returns:
             Dict with turnover, currentStock, kpis, optimal, excess,
@@ -798,13 +810,9 @@ class InventoryMixin:
         turnover_ratio = round((daily_revenue * 365) / stock_value_sale, 2) if stock_value_sale > 0 else 0
         stock_to_sales = round(stock_value_sale / monthly_revenue, 2) if monthly_revenue > 0 else 0
 
-        # Optimal stock model (Korean import defaults)
-        lead_time_days = 14
-        safety_multiplier = 1.5
-        buffer_days = 5
-        safety_days = round(lead_time_days * (safety_multiplier - 1))  # = 7
-        optimal_days = lead_time_days + safety_days + buffer_days       # = 26
-        max_acceptable_days = 60
+        # Optimal stock model (params from API, defaults: 14d lead + 7d safety + 5d buffer = 26d)
+        safety_days = round(lead_time_days * (safety_multiplier - 1))
+        optimal_days = lead_time_days + safety_days + buffer_days
 
         optimal_value = daily_revenue * optimal_days
         max_acceptable_value = daily_revenue * max_acceptable_days

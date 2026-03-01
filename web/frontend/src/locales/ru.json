@@ -613,6 +613,9 @@
   "inventory.turnover.conclusionWarning": "Уровень запаса выше оптимального, но в допустимых пределах",
   "inventory.turnover.conclusionDanger": "Уровень запаса значительно превышает допустимый диапазон",
   "inventory.turnover.conclusionDetails": "Текущий запас: {{stockValue}} | Оптимальный: {{optimalValue}} | Избыток: {{excessValue}} | DSI: {{dsi}}д (цель: {{targetDays}}д)",
+  "inventory.turnover.settings": "Настройки оптимального запаса",
+  "inventory.turnover.safetyMult": "Множитель безопасности",
+  "inventory.turnover.optimalFormula": "Оптимальный",
 
   "profile.manageUsers": "Управление пользователями",
   "profile.permissions": "Разрешения",

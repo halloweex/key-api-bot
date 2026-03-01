@@ -544,8 +544,18 @@ export const api = {
   getInventoryTrend: (days = 90, granularity: 'daily' | 'monthly' = 'daily', options?: FetchOptions) =>
     fetchApi<InventoryTrendResponse>('/stocks/trend', `days=${days}&granularity=${granularity}`, options),
 
-  getInventoryTurnover: (days = 30, options?: FetchOptions) =>
-    fetchApi<InventoryTurnoverResponse>('/stocks/turnover', `days=${days}`, options),
+  getInventoryTurnover: (params: {
+    days?: number; leadTime?: number; safetyMultiplier?: number;
+    bufferDays?: number; maxAcceptableDays?: number;
+  } = {}, options?: FetchOptions) => {
+    const p = new URLSearchParams()
+    p.set('days', String(params.days ?? 30))
+    if (params.leadTime != null) p.set('lead_time', String(params.leadTime))
+    if (params.safetyMultiplier != null) p.set('safety_multiplier', String(params.safetyMultiplier))
+    if (params.bufferDays != null) p.set('buffer_days', String(params.bufferDays))
+    if (params.maxAcceptableDays != null) p.set('max_acceptable_days', String(params.maxAcceptableDays))
+    return fetchApi<InventoryTurnoverResponse>('/stocks/turnover', p.toString(), options)
+  },
 
   // V2 Inventory Analysis (view-based)
   getInventoryAnalysis: (options?: FetchOptions) =>

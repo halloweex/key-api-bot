@@ -50,6 +50,14 @@ import type {
   ProductMomentumResponse,
 } from '../types/api'
 
+export interface TurnoverParams {
+  days?: number
+  leadTime?: number
+  safetyMultiplier?: number
+  bufferDays?: number
+  maxAcceptableDays?: number
+}
+
 // Query key factory for consistent cache keys
 export const queryKeys = {
   // Goals
@@ -88,7 +96,7 @@ export const queryKeys = {
   inventoryTrend: (days: number, granularity: string) => ['inventoryTrend', days, granularity] as const,
   // V2 inventory analysis
   inventoryAnalysis: () => ['inventoryAnalysis'] as const,
-  inventoryTurnover: (days: number) => ['inventoryTurnover', days] as const,
+  inventoryTurnover: (params: TurnoverParams) => ['inventoryTurnover', params] as const,
   stockActions: () => ['stockActions'] as const,
   restockAlerts: () => ['restockAlerts'] as const,
   // Traffic analytics
@@ -522,10 +530,10 @@ export function useRestockAlerts() {
   })
 }
 
-export function useInventoryTurnover(days = 30) {
+export function useInventoryTurnover(params: TurnoverParams = {}) {
   return useQuery<InventoryTurnoverResponse>({
-    queryKey: queryKeys.inventoryTurnover(days),
-    queryFn: () => api.getInventoryTurnover(days),
+    queryKey: queryKeys.inventoryTurnover(params),
+    queryFn: () => api.getInventoryTurnover(params),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

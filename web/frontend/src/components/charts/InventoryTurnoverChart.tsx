@@ -131,12 +131,43 @@ function StockGauge({ optimal, max, current, t }: {
   )
 }
 
+function SettingInput({ label, value, onChange, min, max, step = 1, suffix }: {
+  label: string; value: number; onChange: (v: number) => void
+  min: number; max: number; step?: number; suffix: string
+}) {
+  return (
+    <div>
+      <label className="block text-[11px] font-medium text-slate-600 mb-1">{label}</label>
+      <div className="flex items-center gap-1.5">
+        <input
+          type="number"
+          value={value}
+          onChange={e => {
+            const v = parseFloat(e.target.value)
+            if (!isNaN(v) && v >= min && v <= max) onChange(step < 1 ? v : Math.round(v))
+          }}
+          min={min} max={max} step={step}
+          className="w-20 px-2 py-1 text-xs border border-slate-300 rounded-md bg-white focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+        />
+        <span className="text-xs text-slate-400">{suffix}</span>
+      </div>
+    </div>
+  )
+}
+
 // ─── Main Component ─────────────────────────────────────────────────────────
 
 function InventoryTurnoverChartComponent() {
   const { t } = useTranslation()
   const [days, setDays] = useState(30)
-  const { data, isLoading, error } = useInventoryTurnover(days)
+  const [showSettings, setShowSettings] = useState(false)
+  const [leadTime, setLeadTime] = useState(14)
+  const [safetyMult, setSafetyMult] = useState(1.5)
+  const [bufferDays, setBufferDays] = useState(5)
+  const [maxDays, setMaxDays] = useState(60)
+  const { data, isLoading, error } = useInventoryTurnover({
+    days, leadTime, safetyMultiplier: safetyMult, bufferDays, maxAcceptableDays: maxDays,
+  })
 
   const periodOptions = [
     { value: 30, label: '30d' },
@@ -160,26 +191,74 @@ function InventoryTurnoverChartComponent() {
       isLoading={isLoading}
       error={error}
       action={
-        <div className="flex gap-1">
-          {periodOptions.map(opt => (
-            <button
-              key={opt.value}
-              onClick={() => setDays(opt.value)}
-              className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
-                days === opt.value
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
+        <div className="flex items-center gap-2">
+          <div className="flex gap-1">
+            {periodOptions.map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => setDays(opt.value)}
+                className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                  days === opt.value
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => setShowSettings(s => !s)}
+            className={`p-1.5 rounded-md transition-colors ${
+              showSettings ? 'bg-indigo-100 text-indigo-700' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'
+            }`}
+            title={t('inventory.turnover.settings')}
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
         </div>
       }
       ariaLabel={t('inventory.turnover.title')}
     >
       {data && (
         <div className="space-y-5">
+          {/* Settings Panel */}
+          {showSettings && (
+            <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 p-4">
+              <h4 className="text-xs font-semibold text-indigo-700 uppercase mb-3">
+                {t('inventory.turnover.settings')}
+              </h4>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <SettingInput
+                  label={t('inventory.turnover.leadTime')}
+                  value={leadTime} onChange={setLeadTime}
+                  min={1} max={90} suffix="d"
+                />
+                <SettingInput
+                  label={t('inventory.turnover.safetyMult')}
+                  value={safetyMult} onChange={setSafetyMult}
+                  min={1.0} max={3.0} step={0.1} suffix="x"
+                />
+                <SettingInput
+                  label={t('inventory.turnover.buffer')}
+                  value={bufferDays} onChange={setBufferDays}
+                  min={0} max={30} suffix="d"
+                />
+                <SettingInput
+                  label={t('inventory.turnover.maxAcceptable')}
+                  value={maxDays} onChange={setMaxDays}
+                  min={30} max={365} suffix="d"
+                />
+              </div>
+              <div className="mt-2 text-[11px] text-slate-500">
+                {t('inventory.turnover.optimalFormula')}: {leadTime}d + {Math.round(leadTime * (safetyMult - 1))}d + {bufferDays}d = {leadTime + Math.round(leadTime * (safetyMult - 1)) + bufferDays}d
+              </div>
+            </div>
+          )}
+
           {/* Section 1: KPI Cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <KpiCard

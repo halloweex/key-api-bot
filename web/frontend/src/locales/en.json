@@ -654,6 +654,9 @@
   "inventory.turnover.conclusionWarning": "Stock level is above optimal but within acceptable range",
   "inventory.turnover.conclusionDanger": "Stock level significantly exceeds acceptable range",
   "inventory.turnover.conclusionDetails": "Current stock: {{stockValue}} | Optimal: {{optimalValue}} | Excess: {{excessValue}} | DSI: {{dsi}}d (target: {{targetDays}}d)",
+  "inventory.turnover.settings": "Optimal stock settings",
+  "inventory.turnover.safetyMult": "Safety multiplier",
+  "inventory.turnover.optimalFormula": "Optimal",
 
   "profile.manageUsers": "Manage Users",
   "profile.permissions": "Permissions",
