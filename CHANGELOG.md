@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.25
+
+- Remove grey gap from stock gauge and add color legend
+
+
 ## 3.0.24
 
 - Make optimal stock params configurable via API and UI
