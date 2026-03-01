@@ -159,7 +159,7 @@ function InventoryTurnoverChartComponent() {
       }
       isLoading={isLoading}
       error={error}
-      headerRight={
+      action={
         <div className="flex gap-1">
           {periodOptions.map(opt => (
             <button
@@ -334,7 +334,7 @@ function InventoryTurnoverChartComponent() {
 
 function ConclusionBox({ data, t }: {
   data: NonNullable<ReturnType<typeof useInventoryTurnover>['data']>
-  t: (k: string) => string
+  t: (k: string, opts?: Record<string, string>) => string
 }) {
   const { kpis, optimal, excess, currentStock } = data
   const dsi = kpis.dsi
