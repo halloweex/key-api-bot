@@ -613,6 +613,7 @@
   "inventory.turnover.conclusionWarning": "Уровень запаса выше оптимального, но в допустимых пределах",
   "inventory.turnover.conclusionDanger": "Уровень запаса значительно превышает допустимый диапазон",
   "inventory.turnover.conclusionDetails": "Текущий запас: {{stockValue}} | Оптимальный: {{optimalValue}} | Избыток: {{excessValue}} | DSI: {{dsi}}д (цель: {{targetDays}}д)",
+  "inventory.turnover.currentStock": "Текущий запас",
   "inventory.turnover.gaugeGreen": "Оптимальный (0 → доставка + страховой + буфер)",
   "inventory.turnover.gaugeYellow": "Допустимый (оптимальный → макс. допустимый)",
   "inventory.turnover.gaugeRed": "Избыток (выше макс. допустимого)",

@@ -130,6 +130,7 @@ function StockGauge({ optimal, max, current, t }: {
       </div>
       <div className="flex justify-between text-[10px] text-slate-500">
         <span>{t('inventory.turnover.optimal')}: {formatCurrency(optimal)}</span>
+        <span className="font-semibold text-slate-700">{t('inventory.turnover.currentStock')}: {formatCurrency(current)}</span>
         <span>{t('inventory.turnover.maxAcceptable')}: {formatCurrency(max)}</span>
       </div>
       {/* Legend */}
