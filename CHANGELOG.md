@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.28
+
+- Add overstocked status to Inventory Health
+
+
 ## 3.0.27
 
 - Add clickable ABC cards with expandable SKU list
