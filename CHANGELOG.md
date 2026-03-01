@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.26
+
+- Show current stock value in gauge labels
+
+
 ## 3.0.25
 
 - Remove grey gap from stock gauge and add color legend
