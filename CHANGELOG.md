@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.32
+
+- Fix inflated avg check in Reports — grand_total was summed per product row
+
+
 ## 3.0.31
 
 - Add sell-through velocity section title and description (i18n)
