@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.30
+
+- Fix days-of-supply: use 90-day velocity instead of 30-day
+
+
 ## 3.0.29
 
 - Add ABC classification descriptions
