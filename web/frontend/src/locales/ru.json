@@ -602,6 +602,8 @@
   "inventory.turnover.abcDescA": "топ 80% выручки",
   "inventory.turnover.abcDescB": "следующие 15% выручки",
   "inventory.turnover.abcDescC": "нижние 5% выручки",
+  "inventory.turnover.sellThroughTitle": "Скорость реализации",
+  "inventory.turnover.sellThroughDesc": "Метрики на основе скорости продаж за 90 дней. Запас дней показывает на сколько дней хватит текущего остатка. STR (Sell-through Rate) = продано / (продано + остаток) × 100%.",
   "inventory.turnover.imbalanceWarning": "Обнаружен дисбаланс класса C",
   "inventory.turnover.class": "Класс",
   "inventory.turnover.stockPct": "Запас %",

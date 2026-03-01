@@ -602,6 +602,8 @@
   "inventory.turnover.abcDescA": "топ 80% виручки",
   "inventory.turnover.abcDescB": "наступні 15% виручки",
   "inventory.turnover.abcDescC": "нижні 5% виручки",
+  "inventory.turnover.sellThroughTitle": "Швидкість реалізації",
+  "inventory.turnover.sellThroughDesc": "Метрики на основі швидкості продажів за 90 днів. Запас днів показує на скільки днів вистачить поточного залишку. STR (Sell-through Rate) = продано / (продано + залишок) × 100%.",
   "inventory.turnover.imbalanceWarning": "Виявлено дисбаланс класу C",
   "inventory.turnover.class": "Клас",
   "inventory.turnover.stockPct": "Запас %",

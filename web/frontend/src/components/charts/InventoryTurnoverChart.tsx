@@ -456,6 +456,10 @@ function InventoryTurnoverChartComponent() {
           </div>
 
           {/* Section 5: Sell-through Velocity */}
+          <div>
+            <h4 className="text-xs font-semibold text-slate-600 uppercase">{t('inventory.turnover.sellThroughTitle')}</h4>
+            <p className="text-[11px] text-slate-400 mb-2">{t('inventory.turnover.sellThroughDesc')}</p>
+          </div>
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
             <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
               <div className="text-[11px] text-slate-500">{t('inventory.turnover.fastMovers')}</div>

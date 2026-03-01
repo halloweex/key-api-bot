@@ -643,6 +643,8 @@
   "inventory.turnover.abcDescA": "top 80% revenue",
   "inventory.turnover.abcDescB": "next 15% revenue",
   "inventory.turnover.abcDescC": "bottom 5% revenue",
+  "inventory.turnover.sellThroughTitle": "Sell-through Velocity",
+  "inventory.turnover.sellThroughDesc": "Metrics based on 90-day sales velocity. Days of Supply shows how long current stock lasts at this pace. STR (Sell-through Rate) = sold / (sold + available) × 100%.",
   "inventory.turnover.imbalanceWarning": "High C-class imbalance detected",
   "inventory.turnover.class": "Class",
   "inventory.turnover.stockPct": "Stock %",
