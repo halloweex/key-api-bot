@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.24
+
+- Make optimal stock params configurable via API and UI
+
+
 ## 3.0.23
 
 - Fix TS build errors in InventoryTurnoverChart
