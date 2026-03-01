@@ -936,26 +936,46 @@ class RevenueMixin:
 
             need_product_filter = bool(category_id or brand)
 
-            product_join = """
-                JOIN order_products op ON s.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
-            """ if need_product_filter else """
-                LEFT JOIN order_products op ON s.id = op.order_id
-            """
-
-            results = conn.execute(f"""
-                SELECT
-                    s.source_id,
-                    COUNT(DISTINCT CASE WHEN NOT s.is_return THEN s.id END) as orders_count,
-                    COALESCE(SUM(CASE WHEN NOT s.is_return THEN op.quantity ELSE 0 END), 0) as products_sold,
-                    COALESCE(SUM(CASE WHEN NOT s.is_return THEN s.grand_total ELSE 0 END), 0) as revenue,
-                    COUNT(DISTINCT CASE WHEN s.is_return THEN s.id END) as returns_count
-                FROM silver_orders s
-                {product_join}
-                WHERE {where_sql}
-                GROUP BY s.source_id
-                ORDER BY revenue DESC
-            """, params).fetchall()
+            if need_product_filter:
+                # Filter orders that contain matching products, then aggregate
+                order_filter_sql = f"""
+                    SELECT DISTINCT s.id
+                    FROM silver_orders s
+                    JOIN order_products op ON s.id = op.order_id
+                    LEFT JOIN products p ON op.product_id = p.id
+                    WHERE {where_sql}
+                """
+                results = conn.execute(f"""
+                    WITH matching_orders AS ({order_filter_sql})
+                    SELECT
+                        s.source_id,
+                        COUNT(CASE WHEN NOT s.is_return THEN 1 END) as orders_count,
+                        COALESCE(SUM(CASE WHEN NOT s.is_return THEN (
+                            SELECT SUM(op2.quantity) FROM order_products op2 WHERE op2.order_id = s.id
+                        ) ELSE 0 END), 0) as products_sold,
+                        COALESCE(SUM(CASE WHEN NOT s.is_return THEN s.grand_total ELSE 0 END), 0) as revenue,
+                        COUNT(CASE WHEN s.is_return THEN 1 END) as returns_count
+                    FROM silver_orders s
+                    WHERE s.id IN (SELECT id FROM matching_orders)
+                    GROUP BY s.source_id
+                    ORDER BY revenue DESC
+                """, params).fetchall()
+            else:
+                # No product filter: aggregate at order level, products_sold via subquery
+                results = conn.execute(f"""
+                    SELECT
+                        s.source_id,
+                        COUNT(CASE WHEN NOT s.is_return THEN 1 END) as orders_count,
+                        COALESCE(SUM(CASE WHEN NOT s.is_return THEN (
+                            SELECT SUM(op.quantity) FROM order_products op WHERE op.order_id = s.id
+                        ) ELSE 0 END), 0) as products_sold,
+                        COALESCE(SUM(CASE WHEN NOT s.is_return THEN s.grand_total ELSE 0 END), 0) as revenue,
+                        COUNT(CASE WHEN s.is_return THEN 1 END) as returns_count
+                    FROM silver_orders s
+                    WHERE {where_sql}
+                    GROUP BY s.source_id
+                    ORDER BY revenue DESC
+                """, params).fetchall()
 
             sources = []
             total_orders = 0
