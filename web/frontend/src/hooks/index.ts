@@ -48,6 +48,7 @@ export {
   useStockActions,
   useRestockAlerts,
   useInventoryTurnover,
+  useAbcSkus,
   // Traffic Analytics
   useTrafficAnalytics,
   useTrafficTrend,

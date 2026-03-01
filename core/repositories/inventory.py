@@ -917,4 +917,33 @@ class InventoryMixin:
             "topExcess": top_excess,
         }
 
+    async def get_abc_skus(self, abc_class: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get SKUs for a specific ABC class, sorted by revenue descending."""
+        async with self.connection() as conn:
+            rows = conn.execute("""
+                SELECT offer_id, sku, name, brand, category_name,
+                       available, available_value, price,
+                       revenue_90d, qty_sold_90d
+                FROM v_abc_classification
+                WHERE abc_class = ?
+                ORDER BY revenue_90d DESC
+                LIMIT ?
+            """, [abc_class, limit]).fetchall()
+
+        return [
+            {
+                "offerId": r[0],
+                "sku": r[1],
+                "name": r[2],
+                "brand": r[3],
+                "categoryName": r[4],
+                "units": int(r[5] or 0),
+                "value": float(r[6] or 0),
+                "price": float(r[7] or 0),
+                "revenue90d": float(r[8] or 0),
+                "qtySold90d": int(r[9] or 0),
+            }
+            for r in rows
+        ]
+
     # ─── Revenue Predictions ─────────────────────────────────────────────────

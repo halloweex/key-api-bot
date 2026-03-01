@@ -97,6 +97,7 @@ export const queryKeys = {
   // V2 inventory analysis
   inventoryAnalysis: () => ['inventoryAnalysis'] as const,
   inventoryTurnover: (params: TurnoverParams) => ['inventoryTurnover', params] as const,
+  abcSkus: (abcClass: string) => ['abcSkus', abcClass] as const,
   stockActions: () => ['stockActions'] as const,
   restockAlerts: () => ['restockAlerts'] as const,
   // Traffic analytics
@@ -535,6 +536,15 @@ export function useInventoryTurnover(params: TurnoverParams = {}) {
     queryKey: queryKeys.inventoryTurnover(params),
     queryFn: () => api.getInventoryTurnover(params),
     staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useAbcSkus(abcClass: string | null) {
+  return useQuery<import('../types/api').ABCSkuItem[]>({
+    queryKey: queryKeys.abcSkus(abcClass!),
+    queryFn: () => api.getAbcSkus(abcClass!),
+    staleTime: CACHE_TTL.STANDARD,
+    enabled: !!abcClass,
   })
 }
 

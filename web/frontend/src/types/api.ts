@@ -495,6 +495,19 @@ export interface ABCClassData {
   revenuePct: number
 }
 
+export interface ABCSkuItem {
+  offerId: number
+  sku: string
+  name: string
+  brand: string | null
+  categoryName: string | null
+  units: number
+  value: number
+  price: number
+  revenue90d: number
+  qtySold90d: number
+}
+
 export interface TopExcessItem {
   offerId: number
   sku: string

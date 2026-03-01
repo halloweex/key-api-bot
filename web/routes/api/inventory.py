@@ -103,6 +103,22 @@ async def get_inventory_turnover(
     )
 
 
+@router.get("/stocks/abc/{abc_class}")
+@limiter.limit("30/minute")
+async def get_abc_skus(
+    request: Request,
+    abc_class: str,
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Get SKUs for a specific ABC class."""
+    abc_class = abc_class.upper()
+    if abc_class not in ("A", "B", "C"):
+        from fastapi import HTTPException
+        raise HTTPException(400, "abc_class must be A, B, or C")
+    store = await get_store()
+    return await store.get_abc_skus(abc_class, limit)
+
+
 @router.get("/stocks/actions")
 @limiter.limit("30/minute")
 async def get_stock_actions(request: Request):

@@ -2,9 +2,9 @@ import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
 import { InfoPopover } from '../ui/InfoPopover'
-import { useInventoryTurnover } from '../../hooks'
+import { useInventoryTurnover, useAbcSkus } from '../../hooks'
 import { formatNumber, formatCurrency } from '../../utils/formatters'
-import type { TopExcessItem, ABCClassData } from '../../types/api'
+import type { TopExcessItem, ABCClassData, ABCSkuItem } from '../../types/api'
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -43,35 +43,95 @@ function KpiCard({ label, value, subLabel, severity }: {
   )
 }
 
-function ABCCard({ cls, data, t }: { cls: string; data: ABCClassData; t: (k: string) => string }) {
+function ABCCard({ cls, data, expanded, onToggle, t }: {
+  cls: string; data: ABCClassData; expanded: boolean
+  onToggle: () => void; t: (k: string) => string
+}) {
   const colors: Record<string, string> = {
     A: 'border-emerald-300 bg-emerald-50',
     B: 'border-amber-300 bg-amber-50',
     C: 'border-red-300 bg-red-50',
   }
   return (
-    <div className={`rounded-lg border p-3 ${colors[cls] || 'border-slate-200 bg-slate-50'}`}>
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-bold">{t('inventory.turnover.class')} {cls}</span>
-        <span className="text-xs text-slate-500">{data.skuCount} SKUs</span>
+    <div className={`rounded-lg border ${colors[cls] || 'border-slate-200 bg-slate-50'}`}>
+      <button
+        onClick={onToggle}
+        className="w-full p-3 text-left cursor-pointer hover:opacity-80 transition-opacity"
+      >
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-bold">{t('inventory.turnover.class')} {cls}</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-slate-500">{data.skuCount} SKUs</span>
+            <svg className={`w-3.5 h-3.5 text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+          <div>
+            <div className="text-slate-500">{t('inventory.turnover.stockPct')}</div>
+            <div className="font-semibold">{data.stockPct}%</div>
+          </div>
+          <div>
+            <div className="text-slate-500">{t('inventory.turnover.revenuePct')}</div>
+            <div className="font-semibold">{data.revenuePct}%</div>
+          </div>
+          <div>
+            <div className="text-slate-500">{t('inventory.turnover.stockVal')}</div>
+            <div className="font-semibold">{formatCurrency(data.stockValue)}</div>
+          </div>
+          <div>
+            <div className="text-slate-500">{t('inventory.turnover.revenue')}</div>
+            <div className="font-semibold">{formatCurrency(data.revenue)}</div>
+          </div>
+        </div>
+      </button>
+      {expanded && <ABCSkuList abcClass={cls} t={t} />}
+    </div>
+  )
+}
+
+function ABCSkuList({ abcClass, t }: { abcClass: string; t: (k: string) => string }) {
+  const { data: skus, isLoading } = useAbcSkus(abcClass)
+
+  if (isLoading) {
+    return (
+      <div className="px-3 pb-3">
+        <div className="animate-pulse space-y-2">
+          {[1, 2, 3].map(i => <div key={i} className="h-8 bg-slate-200/50 rounded" />)}
+        </div>
       </div>
-      <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-        <div>
-          <div className="text-slate-500">{t('inventory.turnover.stockPct')}</div>
-          <div className="font-semibold">{data.stockPct}%</div>
-        </div>
-        <div>
-          <div className="text-slate-500">{t('inventory.turnover.revenuePct')}</div>
-          <div className="font-semibold">{data.revenuePct}%</div>
-        </div>
-        <div>
-          <div className="text-slate-500">{t('inventory.turnover.stockVal')}</div>
-          <div className="font-semibold">{formatCurrency(data.stockValue)}</div>
-        </div>
-        <div>
-          <div className="text-slate-500">{t('inventory.turnover.revenue')}</div>
-          <div className="font-semibold">{formatCurrency(data.revenue)}</div>
-        </div>
+    )
+  }
+
+  if (!skus?.length) return null
+
+  return (
+    <div className="border-t border-slate-200/60 px-3 pb-3">
+      <div className="max-h-[250px] overflow-y-auto">
+        <table className="w-full text-[11px]">
+          <thead>
+            <tr className="text-slate-400 text-left">
+              <th className="py-1.5 font-medium">{t('inventory.turnover.skuName')}</th>
+              <th className="py-1.5 font-medium text-right">{t('inventory.turnover.revenue')}</th>
+              <th className="py-1.5 font-medium text-right">{t('inventory.turnover.stockVal')}</th>
+              <th className="py-1.5 font-medium text-right">Qty</th>
+            </tr>
+          </thead>
+          <tbody>
+            {skus.map((sku: ABCSkuItem) => (
+              <tr key={sku.offerId} className="border-t border-slate-100">
+                <td className="py-1.5 pr-2">
+                  <div className="font-medium truncate max-w-[140px]">{sku.name || sku.sku}</div>
+                  {sku.brand && <div className="text-slate-400 truncate">{sku.brand}</div>}
+                </td>
+                <td className="py-1.5 text-right whitespace-nowrap">{formatCurrency(sku.revenue90d)}</td>
+                <td className="py-1.5 text-right whitespace-nowrap">{formatCurrency(sku.value)}</td>
+                <td className="py-1.5 text-right">{sku.units}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   )
@@ -182,6 +242,7 @@ function InventoryTurnoverChartComponent() {
   const { t } = useTranslation()
   const [days, setDays] = useState(30)
   const [showSettings, setShowSettings] = useState(false)
+  const [expandedAbc, setExpandedAbc] = useState<string | null>(null)
   const [leadTime, setLeadTime] = useState(14)
   const [safetyMult, setSafetyMult] = useState(1.5)
   const [bufferDays, setBufferDays] = useState(5)
@@ -373,9 +434,16 @@ function InventoryTurnoverChartComponent() {
               )}
             </h4>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <ABCCard cls="A" data={data.abc.A} t={t} />
-              <ABCCard cls="B" data={data.abc.B} t={t} />
-              <ABCCard cls="C" data={data.abc.C} t={t} />
+              {(['A', 'B', 'C'] as const).map(cls => (
+                <ABCCard
+                  key={cls}
+                  cls={cls}
+                  data={data.abc[cls]}
+                  expanded={expandedAbc === cls}
+                  onToggle={() => setExpandedAbc(expandedAbc === cls ? null : cls)}
+                  t={t}
+                />
+              ))}
             </div>
           </div>
 

@@ -58,6 +58,7 @@ import type {
   CategoryCombo,
   BrandAffinityPair,
   ProductMomentumResponse,
+  ABCSkuItem,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -556,6 +557,9 @@ export const api = {
     if (params.maxAcceptableDays != null) p.set('max_acceptable_days', String(params.maxAcceptableDays))
     return fetchApi<InventoryTurnoverResponse>('/stocks/turnover', p.toString(), options)
   },
+
+  getAbcSkus: (abcClass: string, options?: FetchOptions) =>
+    fetchApi<ABCSkuItem[]>(`/stocks/abc/${abcClass}`, undefined, options),
 
   // V2 Inventory Analysis (view-based)
   getInventoryAnalysis: (options?: FetchOptions) =>
