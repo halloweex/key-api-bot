@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.33
+
+- Fix monthly goal using wrong YoY growth — exclude incomplete months/years
+
+
 ## 3.0.32
 
 - Fix inflated avg check in Reports — grand_total was summed per product row
