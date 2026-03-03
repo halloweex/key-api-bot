@@ -457,15 +457,21 @@ class GoalsMixin:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             sales_filter = self._build_sales_type_filter(sales_type)
 
-            # Get yearly totals
+            # Get yearly totals — only full years (12 months with orders)
+            # to avoid startup partial year and current incomplete year
             yearly_sql = f"""
-                SELECT
-                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                    SUM(o.grand_total) as revenue
-                FROM orders o
-                WHERE o.status_id NOT IN {return_statuses}
-                    AND {sales_filter}
-                GROUP BY EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')})
+                WITH yearly_data AS (
+                    SELECT
+                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
+                        SUM(o.grand_total) as revenue,
+                        COUNT(DISTINCT EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})) as months_active
+                    FROM orders o
+                    WHERE o.status_id NOT IN {return_statuses}
+                        AND {sales_filter}
+                    GROUP BY EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')})
+                )
+                SELECT year, revenue FROM yearly_data
+                WHERE months_active >= 11
                 ORDER BY year
             """
             yearly_results = conn.execute(yearly_sql).fetchall()
@@ -482,18 +488,22 @@ class GoalsMixin:
             overall_yoy = sum(yoy_rates) / len(yoy_rates) if yoy_rates else 0.10
 
             # Calculate monthly YoY for each month
+            # Exclude incomplete months (current month of current year, startup partial year)
+            # by requiring at least 25 days with orders in each month
             monthly_yoy_sql = f"""
                 WITH monthly_by_year AS (
                     SELECT
                         EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
                         EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
-                        SUM(o.grand_total) as revenue
+                        SUM(o.grand_total) as revenue,
+                        COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
                     FROM orders o
                     WHERE o.status_id NOT IN {return_statuses}
                         AND {sales_filter}
                     GROUP BY
                         EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
                         EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
+                    HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
                 )
                 SELECT
                     curr.month,
