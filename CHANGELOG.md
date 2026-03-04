@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.34
+
+- Improve monthly goal algorithm — weighted blend, ML signal, dynamic caps
+
+
 ## 3.0.33
 
 - Fix monthly goal using wrong YoY growth — exclude incomplete months/years
