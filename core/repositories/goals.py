@@ -671,67 +671,74 @@ class GoalsMixin:
             logger.info(f"Calculated weekly patterns for {len(patterns)} months")
             return patterns
 
-    async def _get_ml_forecast_total(
-        self, target_year: int, target_month: int, sales_type: str = "retail"
+    def _get_ml_forecast_total(
+        self, conn, target_year: int, target_month: int, sales_type: str = "retail"
     ) -> float:
-        """Sum ML predictions for a target month.
+        """Sum ML predictions for a target month using an existing connection.
 
         Returns 0 if no predictions are available.
         """
         first_day = date(target_year, target_month, 1)
         last_day = date(target_year, target_month, calendar.monthrange(target_year, target_month)[1])
         try:
-            predictions = await self.get_predictions(first_day, last_day, sales_type)
-            if not predictions:
+            rows = conn.execute(
+                """SELECT SUM(predicted_revenue) as total
+                   FROM revenue_predictions
+                   WHERE sales_type = ?
+                     AND prediction_date >= ?
+                     AND prediction_date <= ?""",
+                [sales_type, first_day.isoformat(), last_day.isoformat()]
+            ).fetchone()
+            if not rows or rows[0] is None:
                 return 0.0
-            return sum(p["predicted_revenue"] for p in predictions)
+            return float(rows[0])
         except Exception:
             logger.debug("ML predictions unavailable for %d-%02d", target_year, target_month)
             return 0.0
 
-    async def _get_dynamic_growth_cap(
-        self, target_month: int, sales_type: str = "retail"
+    def _get_dynamic_growth_cap(
+        self, conn, target_month: int, sales_type: str = "retail"
     ) -> float:
         """Calculate per-month dynamic growth cap from historical YoY variance.
 
+        Uses an existing connection to avoid re-entrant lock deadlock.
         Returns max(0.10, min(0.50, avg_yoy + 1.5 * stddev_yoy)).
         Falls back to 0.35 if insufficient data.
         """
-        async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type)
+        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+        sales_filter = self._build_sales_type_filter(sales_type)
 
-            sql = f"""
-                WITH monthly_by_year AS (
-                    SELECT
-                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                        SUM(o.grand_total) as revenue,
-                        COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
-                    FROM orders o
-                    WHERE EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) = ?
-                        AND o.status_id NOT IN {return_statuses}
-                        AND {sales_filter}
-                    GROUP BY EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')})
-                    HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
-                ),
-                yoy_pairs AS (
-                    SELECT
-                        (curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0) as yoy
-                    FROM monthly_by_year curr
-                    JOIN monthly_by_year prev ON curr.year = prev.year + 1
-                )
-                SELECT AVG(yoy) as avg_yoy, STDDEV(yoy) as std_yoy, COUNT(*) as cnt
-                FROM yoy_pairs
-            """
-            row = conn.execute(sql, [target_month]).fetchone()
+        sql = f"""
+            WITH monthly_by_year AS (
+                SELECT
+                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
+                    SUM(o.grand_total) as revenue,
+                    COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
+                FROM orders o
+                WHERE EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) = ?
+                    AND o.status_id NOT IN {return_statuses}
+                    AND {sales_filter}
+                GROUP BY EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')})
+                HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
+            ),
+            yoy_pairs AS (
+                SELECT
+                    (curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0) as yoy
+                FROM monthly_by_year curr
+                JOIN monthly_by_year prev ON curr.year = prev.year + 1
+            )
+            SELECT AVG(yoy) as avg_yoy, STDDEV(yoy) as std_yoy, COUNT(*) as cnt
+            FROM yoy_pairs
+        """
+        row = conn.execute(sql, [target_month]).fetchone()
 
-            if not row or not row[2] or row[2] < 1 or row[0] is None:
-                return 0.35  # fallback
+        if not row or not row[2] or row[2] < 1 or row[0] is None:
+            return 0.35  # fallback
 
-            avg_yoy = float(row[0])
-            std_yoy = float(row[1] or 0)
-            cap = avg_yoy + 1.5 * std_yoy
-            return max(0.10, min(0.50, cap))
+        avg_yoy = float(row[0])
+        std_yoy = float(row[1] or 0)
+        cap = avg_yoy + 1.5 * std_yoy
+        return max(0.10, min(0.50, cap))
 
     async def generate_smart_goals(
         self,
@@ -758,19 +765,21 @@ class GoalsMixin:
         Returns:
             Smart goals with monthly total and weekly breakdown
         """
+        # Recalculate indices BEFORE acquiring the connection lock to avoid
+        # re-entrant deadlock (each of these methods opens its own connection)
         async with self.connection() as conn:
-            # Recalculate indices if needed or not cached
             indices_exist = conn.execute(
                 "SELECT COUNT(*) FROM seasonal_indices"
             ).fetchone()[0]
 
-            if recalculate or indices_exist < 12:
-                await self.calculate_seasonality_indices(sales_type)
-                await self.calculate_yoy_growth(sales_type)
-                await self.calculate_weekly_patterns(sales_type)
+        if recalculate or indices_exist < 12:
+            await self.calculate_seasonality_indices(sales_type)
+            await self.calculate_yoy_growth(sales_type)
+            await self.calculate_weekly_patterns(sales_type)
 
+        async with self.connection() as conn:
             # Dynamic growth cap per-month (replaces flat 0.35)
-            dynamic_cap = await self._get_dynamic_growth_cap(target_month, sales_type)
+            dynamic_cap = self._get_dynamic_growth_cap(conn, target_month, sales_type)
 
             # Get seasonality index for target month
             seasonality_result = conn.execute("""
@@ -850,7 +859,7 @@ class GoalsMixin:
                 recent_goal = recent_3_month_avg * seasonality_index
 
             # ── Signal 3: ML forecast
-            ml_forecast_goal = await self._get_ml_forecast_total(target_year, target_month, sales_type)
+            ml_forecast_goal = self._get_ml_forecast_total(conn, target_year, target_month, sales_type)
 
             # ── Weighted blend (replaces MAX)
             # Confidence-based weight tables
