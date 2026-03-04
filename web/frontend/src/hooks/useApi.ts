@@ -63,7 +63,7 @@ export const queryKeys = {
   // Goals
   goals: (salesType: string) => ['goals', salesType] as const,
   goalHistory: (periodType: string, weeksBack: number, salesType: string) => ['goalHistory', periodType, weeksBack, salesType] as const,
-  smartGoals: (salesType: string) => ['smartGoals', salesType] as const,
+  smartGoals: (salesType: string, year?: number, month?: number) => ['smartGoals', salesType, year, month] as const,
   seasonality: (salesType: string) => ['seasonality', salesType] as const,
   growthMetrics: (salesType: string) => ['growthMetrics', salesType] as const,
   weeklyPatterns: (salesType: string) => ['weeklyPatterns', salesType] as const,
@@ -420,12 +420,12 @@ export function useResetGoal() {
 
 // ─── Smart Goals ────────────────────────────────────────────────────────────
 
-export function useSmartGoals() {
+export function useSmartGoals(year?: number, month?: number) {
   const salesType = useFilterStore(selectSalesType)
 
   return useQuery<SmartGoalsResponse>({
-    queryKey: queryKeys.smartGoals(salesType),
-    queryFn: () => api.getSmartGoals(salesType),
+    queryKey: queryKeys.smartGoals(salesType, year, month),
+    queryFn: () => api.getSmartGoals(salesType, year, month),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

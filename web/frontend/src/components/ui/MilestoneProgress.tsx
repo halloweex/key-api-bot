@@ -58,6 +58,37 @@ function getPeriodType(period: string): string | null {
   return null
 }
 
+// Resolve which month's goal to fetch based on the selected period
+function resolveGoalMonth(period: string): { year?: number; month?: number } {
+  const now = new Date()
+
+  if (period === 'last_month') {
+    // Always show previous month's goal
+    const d = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+    return { year: d.getFullYear(), month: d.getMonth() + 1 }
+  }
+
+  if (period === 'yesterday') {
+    const yesterday = new Date(now)
+    yesterday.setDate(yesterday.getDate() - 1)
+    if (yesterday.getMonth() !== now.getMonth()) {
+      return { year: yesterday.getFullYear(), month: yesterday.getMonth() + 1 }
+    }
+  }
+
+  if (period === 'last_week') {
+    // Check if the midpoint of last week falls in previous month
+    const midpoint = new Date(now)
+    midpoint.setDate(midpoint.getDate() - 4) // ~midpoint of 7-day-ago window
+    if (midpoint.getMonth() !== now.getMonth()) {
+      return { year: midpoint.getFullYear(), month: midpoint.getMonth() + 1 }
+    }
+  }
+
+  // All other periods: current month (undefined = server default)
+  return {}
+}
+
 // Format amount for display
 function formatAmount(amount: number): string {
   if (amount >= 1000000) {
@@ -659,8 +690,11 @@ export const MilestoneProgress = memo(function MilestoneProgress({
     return () => observer.disconnect()
   }, [])
 
+  // Resolve which month's goal to fetch based on selected period
+  const { year: goalYear, month: goalMonth } = resolveGoalMonth(period)
+
   // Fetch smart goals from API (with seasonality and weekly breakdown)
-  const { data: goalsData, isLoading: isLoadingGoals } = useSmartGoals()
+  const { data: goalsData, isLoading: isLoadingGoals } = useSmartGoals(goalYear, goalMonth)
 
   // Fetch revenue trend data to calculate current month revenue for last_28_days
   const { data: trendData } = useRevenueTrend()
@@ -926,12 +960,15 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   const recent3MonthAvg = monthlyGoalData?.recent3MonthAvg
   const calculationMethod = monthlyGoalData?.calculationMethod
   const seasonalityIndex = monthlyGoalData?.seasonalityIndex
+  const mlForecastGoal = monthlyGoalData?.mlForecastGoal
+  const blendWeights = monthlyGoalData?.blendWeights
 
   // Format calculation method for display
   const getMethodLabel = (method?: string): string => {
     switch (method) {
       case 'yoy_growth': return t('goal.methodYoy')
       case 'recent_trend': return t('goal.methodTrend')
+      case 'ml_forecast': return t('goal.methodMl', 'ML Forecast')
       case 'historical_avg': return t('goal.methodHistorical')
       case 'fallback': return t('goal.methodDefault')
       default: return t('goal.methodAuto')
@@ -978,6 +1015,12 @@ export const MilestoneProgress = memo(function MilestoneProgress({
                   {seasonalityIndex && (
                     <p className="text-xs text-slate-300">
                       <strong className="text-orange-400">{t('goal.seasonality')}</strong> {seasonalityIndex.toFixed(2)}x
+                    </p>
+                  )}
+                  {mlForecastGoal != null && mlForecastGoal > 0 && (
+                    <p className="text-xs text-slate-300">
+                      <strong className="text-cyan-400">{t('goal.mlForecast', 'ML Forecast')}</strong> {formatAmount(mlForecastGoal)}
+                      {blendWeights?.ml != null && ` (${(blendWeights.ml * 100).toFixed(0)}%)`}
                     </p>
                   )}
                   {calculationMethod && (

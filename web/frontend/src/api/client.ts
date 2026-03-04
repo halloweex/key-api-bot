@@ -503,8 +503,12 @@ export const api = {
     ),
 
   // Smart Goals
-  getSmartGoals: (salesType = 'retail', options?: FetchOptions) =>
-    fetchApi<SmartGoalsResponse>('/goals/smart', `sales_type=${salesType}`, options),
+  getSmartGoals: (salesType = 'retail', year?: number, month?: number, options?: FetchOptions) => {
+    let params = `sales_type=${salesType}`
+    if (year != null) params += `&year=${year}`
+    if (month != null) params += `&month=${month}`
+    return fetchApi<SmartGoalsResponse>('/goals/smart', params, options)
+  },
 
   getSeasonality: (salesType = 'retail', options?: FetchOptions) =>
     fetchApi<Record<number, SeasonalityIndex>>('/goals/seasonality', `sales_type=${salesType}`, options),

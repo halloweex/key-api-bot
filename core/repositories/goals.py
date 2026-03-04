@@ -1,7 +1,9 @@
 """DuckDBStore goals and forecast methods."""
 from __future__ import annotations
 
+import calendar
 import logging
+from collections import defaultdict
 from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any
 from zoneinfo import ZoneInfo
@@ -476,7 +478,8 @@ class GoalsMixin:
             """
             yearly_results = conn.execute(yearly_sql).fetchall()
 
-            # Calculate YoY growth between consecutive years
+            # Calculate YoY growth between consecutive years with recency weighting
+            # Oldest pair gets weight 1.0, newest gets 2.0 (linear interpolation)
             yoy_rates = []
             for i in range(1, len(yearly_results)):
                 prev_year = yearly_results[i-1][1]
@@ -485,11 +488,18 @@ class GoalsMixin:
                     yoy_rate = (curr_year - prev_year) / prev_year
                     yoy_rates.append(yoy_rate)
 
-            overall_yoy = sum(yoy_rates) / len(yoy_rates) if yoy_rates else 0.10
+            if yoy_rates:
+                n = len(yoy_rates)
+                if n == 1:
+                    overall_yoy = yoy_rates[0]
+                else:
+                    weights = [1.0 + (i / (n - 1)) for i in range(n)]
+                    overall_yoy = sum(r * w for r, w in zip(yoy_rates, weights)) / sum(weights)
+            else:
+                overall_yoy = 0.10
 
-            # Calculate monthly YoY for each month
-            # Exclude incomplete months (current month of current year, startup partial year)
-            # by requiring at least 25 days with orders in each month
+            # Calculate monthly YoY for each month with recency weighting
+            # Return per-year-pair rows so we can apply recency weights in Python
             monthly_yoy_sql = f"""
                 WITH monthly_by_year AS (
                     SELECT
@@ -507,20 +517,33 @@ class GoalsMixin:
                 )
                 SELECT
                     curr.month,
-                    AVG((curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0)) as avg_yoy_growth
+                    curr.year as curr_year,
+                    (curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0) as yoy_growth
                 FROM monthly_by_year curr
                 JOIN monthly_by_year prev
                     ON curr.month = prev.month
                     AND curr.year = prev.year + 1
-                GROUP BY curr.month
-                ORDER BY curr.month
+                ORDER BY curr.month, curr.year
             """
             monthly_yoy_results = conn.execute(monthly_yoy_sql).fetchall()
 
-            monthly_yoy = {
-                int(row[0]): round(float(row[1] or 0), 4)
-                for row in monthly_yoy_results
-            }
+            # Group by month, apply recency-weighted average
+            month_pairs: dict[int, list[float]] = defaultdict(list)
+            for row in monthly_yoy_results:
+                month_num = int(row[0])
+                yoy_val = float(row[2]) if row[2] is not None else None
+                if yoy_val is not None:
+                    month_pairs[month_num].append(yoy_val)
+
+            monthly_yoy: dict[int, float] = {}
+            for month_num, rates in month_pairs.items():
+                n = len(rates)
+                if n == 1:
+                    monthly_yoy[month_num] = round(rates[0], 4)
+                else:
+                    weights = [1.0 + (i / (n - 1)) for i in range(n)]
+                    weighted = sum(r * w for r, w in zip(rates, weights)) / sum(weights)
+                    monthly_yoy[month_num] = round(weighted, 4)
 
             # Store metrics
             min_date = conn.execute(f"SELECT MIN({_date_in_kyiv('ordered_at')}) FROM orders").fetchone()[0]
@@ -648,6 +671,68 @@ class GoalsMixin:
             logger.info(f"Calculated weekly patterns for {len(patterns)} months")
             return patterns
 
+    async def _get_ml_forecast_total(
+        self, target_year: int, target_month: int, sales_type: str = "retail"
+    ) -> float:
+        """Sum ML predictions for a target month.
+
+        Returns 0 if no predictions are available.
+        """
+        first_day = date(target_year, target_month, 1)
+        last_day = date(target_year, target_month, calendar.monthrange(target_year, target_month)[1])
+        try:
+            predictions = await self.get_predictions(first_day, last_day, sales_type)
+            if not predictions:
+                return 0.0
+            return sum(p["predicted_revenue"] for p in predictions)
+        except Exception:
+            logger.debug("ML predictions unavailable for %d-%02d", target_year, target_month)
+            return 0.0
+
+    async def _get_dynamic_growth_cap(
+        self, target_month: int, sales_type: str = "retail"
+    ) -> float:
+        """Calculate per-month dynamic growth cap from historical YoY variance.
+
+        Returns max(0.10, min(0.50, avg_yoy + 1.5 * stddev_yoy)).
+        Falls back to 0.35 if insufficient data.
+        """
+        async with self.connection() as conn:
+            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+            sales_filter = self._build_sales_type_filter(sales_type)
+
+            sql = f"""
+                WITH monthly_by_year AS (
+                    SELECT
+                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
+                        SUM(o.grand_total) as revenue,
+                        COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
+                    FROM orders o
+                    WHERE EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) = ?
+                        AND o.status_id NOT IN {return_statuses}
+                        AND {sales_filter}
+                    GROUP BY EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')})
+                    HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
+                ),
+                yoy_pairs AS (
+                    SELECT
+                        (curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0) as yoy
+                    FROM monthly_by_year curr
+                    JOIN monthly_by_year prev ON curr.year = prev.year + 1
+                )
+                SELECT AVG(yoy) as avg_yoy, STDDEV(yoy) as std_yoy, COUNT(*) as cnt
+                FROM yoy_pairs
+            """
+            row = conn.execute(sql, [target_month]).fetchone()
+
+            if not row or not row[2] or row[2] < 1 or row[0] is None:
+                return 0.35  # fallback
+
+            avg_yoy = float(row[0])
+            std_yoy = float(row[1] or 0)
+            cap = avg_yoy + 1.5 * std_yoy
+            return max(0.10, min(0.50, cap))
+
     async def generate_smart_goals(
         self,
         target_year: int,
@@ -684,9 +769,8 @@ class GoalsMixin:
                 await self.calculate_yoy_growth(sales_type)
                 await self.calculate_weekly_patterns(sales_type)
 
-            # Cap growth rate to reasonable maximum (35%)
-            # Used as default when no historical data available
-            MAX_GROWTH_RATE = 0.35
+            # Dynamic growth cap per-month (replaces flat 0.35)
+            dynamic_cap = await self._get_dynamic_growth_cap(target_month, sales_type)
 
             # Get seasonality index for target month
             seasonality_result = conn.execute("""
@@ -698,19 +782,19 @@ class GoalsMixin:
             if seasonality_result:
                 seasonality_index = float(seasonality_result[0] or 1.0)
                 historical_avg = float(seasonality_result[1] or 0)
-                monthly_yoy = float(seasonality_result[2] or MAX_GROWTH_RATE)
+                monthly_yoy = float(seasonality_result[2] or dynamic_cap)
                 confidence = seasonality_result[3] or "low"
             else:
                 seasonality_index = 1.0
                 historical_avg = 0
-                monthly_yoy = MAX_GROWTH_RATE
+                monthly_yoy = dynamic_cap
                 confidence = "low"
 
             # Get overall YoY growth
             yoy_result = conn.execute("""
                 SELECT value FROM growth_metrics WHERE metric_type = 'yoy_overall'
             """).fetchone()
-            overall_yoy = float(yoy_result[0] or MAX_GROWTH_RATE) if yoy_result else MAX_GROWTH_RATE
+            overall_yoy = float(yoy_result[0] or dynamic_cap) if yoy_result else dynamic_cap
 
             # Get last year's same month revenue
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
@@ -751,42 +835,61 @@ class GoalsMixin:
             recent_avg_result = conn.execute(recent_avg_sql).fetchone()
             recent_3_month_avg = float(recent_avg_result[0] or 0) if recent_avg_result[0] else 0
 
-            # Calculate goals using both methods
-            yoy_goal = 0
-            recent_goal = 0
-
-            # Apply growth rate cap
+            # Apply growth rate with dynamic cap
             raw_growth_rate = monthly_yoy if monthly_yoy > 0 else overall_yoy
-            growth_rate = min(raw_growth_rate, MAX_GROWTH_RATE)
+            growth_rate = min(raw_growth_rate, dynamic_cap)
 
-            # Method 1: YoY growth (last year same month × growth)
+            # ── Signal 1: YoY growth (last year same month × growth)
+            yoy_goal = 0.0
             if last_year_revenue > 0:
                 yoy_goal = last_year_revenue * (1 + growth_rate)
 
-            # Method 2: Recent baseline adjusted for seasonality
-            # recent_3_month_avg × seasonality_index
-            # seasonality_index < 1 means this month is typically below average
-            # seasonality_index > 1 means this month is typically above average
+            # ── Signal 2: Recent baseline adjusted for seasonality
+            recent_goal = 0.0
             if recent_3_month_avg > 0 and seasonality_index > 0:
                 recent_goal = recent_3_month_avg * seasonality_index
 
-            # Take the MAX of both methods (never set goal below recent performance)
-            if yoy_goal > 0 and recent_goal > 0:
-                monthly_goal = max(yoy_goal, recent_goal)
-                calculation_method = "yoy_growth" if yoy_goal >= recent_goal else "recent_trend"
-            elif recent_goal > 0:
-                monthly_goal = recent_goal
-                calculation_method = "recent_trend"
-            elif yoy_goal > 0:
-                monthly_goal = yoy_goal
-                calculation_method = "yoy_growth"
+            # ── Signal 3: ML forecast
+            ml_forecast_goal = await self._get_ml_forecast_total(target_year, target_month, sales_type)
+
+            # ── Weighted blend (replaces MAX)
+            # Confidence-based weight tables
+            weight_tables = {
+                "high":   {"yoy": 0.40, "recent": 0.30, "ml": 0.30},
+                "medium": {"yoy": 0.30, "recent": 0.35, "ml": 0.35},
+                "low":    {"yoy": 0.20, "recent": 0.40, "ml": 0.40},
+            }
+            base_weights = weight_tables.get(confidence, weight_tables["low"])
+
+            # Build signal dict (only non-zero signals)
+            signals = {}
+            if yoy_goal > 0:
+                signals["yoy"] = yoy_goal
+            if recent_goal > 0:
+                signals["recent"] = recent_goal
+            if ml_forecast_goal > 0:
+                signals["ml"] = ml_forecast_goal
+
+            if signals:
+                # Redistribute unavailable signal weights proportionally
+                available_weight = sum(base_weights[k] for k in signals)
+                blend_weights = {k: base_weights[k] / available_weight for k in signals}
+
+                monthly_goal = sum(signals[k] * blend_weights[k] for k in signals)
+
+                # Determine primary method
+                dominant = max(blend_weights, key=lambda k: blend_weights[k] * signals[k])
+                method_map = {"yoy": "yoy_growth", "recent": "recent_trend", "ml": "ml_forecast"}
+                calculation_method = method_map[dominant]
             elif historical_avg > 0:
                 monthly_goal = historical_avg * (1 + growth_rate)
                 calculation_method = "historical_avg"
+                blend_weights = {}
             else:
                 monthly_goal = 3000000  # 3M UAH default
-                growth_rate = MAX_GROWTH_RATE
+                growth_rate = dynamic_cap
                 calculation_method = "fallback"
+                blend_weights = {}
 
             # Round to nice number
             monthly_goal = round(monthly_goal / 100000) * 100000
@@ -810,18 +913,25 @@ class GoalsMixin:
             if total_weight > 0:
                 weekly_weights = {k: v / total_weight for k, v in weekly_weights.items()}
 
-            # Calculate weekly goals
+            # Calculate weekly goals with residual adjustment
             weekly_goals = {
                 week: round(monthly_goal * weight / 10000) * 10000
                 for week, weight in weekly_weights.items()
             }
+            # Distribute residual so weekly goals sum exactly to monthly
+            residual = monthly_goal - sum(weekly_goals.values())
+            if residual != 0 and weekly_goals:
+                # Add residual to the largest week
+                largest_week = max(weekly_goals, key=lambda k: weekly_goals[k])
+                weekly_goals[largest_week] += residual
 
-            # Calculate daily goal (monthly / ~22 working days or 30 days)
-            days_in_month = 30 if target_month in [4, 6, 9, 11] else 31 if target_month != 2 else 28
+            # Fix: use calendar.monthrange for correct days (handles leap years)
+            days_in_month = calendar.monthrange(target_year, target_month)[1]
             daily_goal = round(monthly_goal / days_in_month / 10000) * 10000
 
-            # Calculate weekly goal (monthly / 4.3 weeks on average)
-            weekly_goal = round(monthly_goal / 4.3 / 50000) * 50000
+            # Calculate weekly goal (monthly / actual weeks)
+            weeks_in_month = days_in_month / 7.0
+            weekly_goal = round(monthly_goal / weeks_in_month / 50000) * 50000
 
             return {
                 "targetYear": target_year,
@@ -833,10 +943,13 @@ class GoalsMixin:
                     "historicalAvg": round(historical_avg, 2),
                     "yoyGoal": round(yoy_goal, 2),
                     "recentGoal": round(recent_goal, 2),
+                    "mlForecastGoal": round(ml_forecast_goal, 2),
                     "growthRate": round(growth_rate, 4),
+                    "growthCap": round(dynamic_cap, 4),
                     "seasonalityIndex": seasonality_index,
                     "confidence": confidence,
-                    "calculationMethod": calculation_method
+                    "calculationMethod": calculation_method,
+                    "blendWeights": {k: round(v, 4) for k, v in blend_weights.items()} if blend_weights else None,
                 },
                 "weekly": {
                     "goal": weekly_goal,  # Average weekly goal
@@ -854,25 +967,29 @@ class GoalsMixin:
                 }
             }
 
-    async def get_smart_goals(self, sales_type: str = "retail") -> Dict[str, Dict[str, Any]]:
+    async def get_smart_goals(
+        self,
+        sales_type: str = "retail",
+        year: int | None = None,
+        month: int | None = None,
+    ) -> Dict[str, Dict[str, Any]]:
         """
-        Get smart goals for the current period using seasonality.
-
-        This is an enhanced version of get_goals() that uses the smart
-        goal generation system with seasonality and growth factors.
+        Get smart goals for a specific or current month using seasonality.
 
         Args:
             sales_type: 'retail', 'b2b', or 'all'
+            year: Target year (defaults to current)
+            month: Target month 1-12 (defaults to current)
 
         Returns:
             Goals for daily, weekly, and monthly periods with calculation details
         """
         now = datetime.now(DEFAULT_TZ)
-        current_year = now.year
-        current_month = now.month
+        target_year = year if year is not None else now.year
+        target_month = month if month is not None else now.month
 
-        # Generate smart goals for current month
-        smart = await self.generate_smart_goals(current_year, current_month, sales_type)
+        # Generate smart goals for target month
+        smart = await self.generate_smart_goals(target_year, target_month, sales_type)
 
         # Check for custom overrides
         async with self.connection() as conn:
@@ -888,7 +1005,7 @@ class GoalsMixin:
                 "amount": custom_goals.get("daily", smart["daily"]["goal"]),
                 "isCustom": "daily" in custom_goals,
                 "suggestedAmount": smart["daily"]["goal"],
-                "basedOnAverage": smart["monthly"]["historicalAvg"] / 30,
+                "basedOnAverage": smart["monthly"]["historicalAvg"] / smart["daily"]["daysInMonth"],
                 "trend": smart["metadata"]["monthlyYoY"] * 100,
                 "confidence": smart["monthly"]["confidence"]
             },
@@ -896,7 +1013,7 @@ class GoalsMixin:
                 "amount": custom_goals.get("weekly", smart["weekly"]["goal"]),
                 "isCustom": "weekly" in custom_goals,
                 "suggestedAmount": smart["weekly"]["goal"],
-                "basedOnAverage": smart["monthly"]["historicalAvg"] / 4.3,
+                "basedOnAverage": smart["monthly"]["historicalAvg"] / (smart["daily"]["daysInMonth"] / 7.0),
                 "trend": smart["metadata"]["monthlyYoY"] * 100,
                 "confidence": smart["monthly"]["confidence"],
                 "weeklyBreakdown": smart["weekly"]["breakdown"]
@@ -907,11 +1024,14 @@ class GoalsMixin:
                 "suggestedAmount": smart["monthly"]["goal"],
                 "basedOnAverage": smart["monthly"]["historicalAvg"],
                 "lastYearRevenue": smart["monthly"]["lastYearRevenue"],
+                "recent3MonthAvg": smart["monthly"]["recent3MonthAvg"],
                 "growthRate": smart["monthly"]["growthRate"],
                 "seasonalityIndex": smart["monthly"]["seasonalityIndex"],
                 "trend": smart["metadata"]["monthlyYoY"] * 100,
                 "confidence": smart["monthly"]["confidence"],
-                "calculationMethod": smart["monthly"]["calculationMethod"]
+                "calculationMethod": smart["monthly"]["calculationMethod"],
+                "mlForecastGoal": smart["monthly"]["mlForecastGoal"],
+                "blendWeights": smart["monthly"]["blendWeights"],
             },
             "metadata": smart["metadata"]
         }

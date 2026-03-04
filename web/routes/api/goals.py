@@ -88,15 +88,21 @@ async def reset_goal(
 async def get_smart_goals(
     request: Request,
     sales_type: Optional[str] = Query("retail"),
+    year: Optional[int] = Query(None, ge=2020, le=2030),
+    month: Optional[int] = Query(None, ge=1, le=12),
 ):
-    """Get smart revenue goals using seasonality and YoY growth."""
+    """Get smart revenue goals using seasonality and YoY growth.
+
+    Optionally pass year/month to get goals for a specific month
+    (e.g. for 'last_month' period). Defaults to current month.
+    """
     try:
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     store = await get_store()
-    return await store.get_smart_goals(sales_type)
+    return await store.get_smart_goals(sales_type, year=year, month=month)
 
 
 @router.get("/goals/seasonality")

@@ -267,9 +267,11 @@ export interface SmartGoalData extends GoalData {
   recent3MonthAvg?: number
   yoyGoal?: number
   recentGoal?: number
+  mlForecastGoal?: number
   growthRate?: number
   seasonalityIndex?: number
-  calculationMethod?: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'fallback'
+  calculationMethod?: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'ml_forecast' | 'fallback'
+  blendWeights?: Record<string, number>
 }
 
 export interface SmartGoalsResponse {
@@ -280,9 +282,11 @@ export interface SmartGoalsResponse {
     recent3MonthAvg: number
     yoyGoal: number
     recentGoal: number
+    mlForecastGoal: number
     growthRate: number
     seasonalityIndex: number
-    calculationMethod: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'fallback'
+    calculationMethod: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'ml_forecast' | 'fallback'
+    blendWeights: Record<string, number> | null
   }
   metadata: {
     overallYoY: number
@@ -322,7 +326,9 @@ export interface GoalForecastResponse {
     growthRate: number
     seasonalityIndex: number
     confidence: 'high' | 'medium' | 'low'
-    calculationMethod: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'fallback'
+    calculationMethod: 'yoy_growth' | 'recent_trend' | 'historical_avg' | 'ml_forecast' | 'fallback'
+    mlForecastGoal: number
+    blendWeights: Record<string, number> | null
   }
   weekly: {
     goal: number
