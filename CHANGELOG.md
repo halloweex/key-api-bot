@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.35
+
+- Fix DuckDB deadlock — pass conn to helper methods instead of re-acquiring lock
+
+
 ## 3.0.34
 
 - Improve monthly goal algorithm — weighted blend, ML signal, dynamic caps
