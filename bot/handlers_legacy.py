@@ -1973,6 +1973,44 @@ async def check_and_broadcast_milestones(context: ContextTypes.DEFAULT_TYPE) -> 
             if not database.mark_milestone_celebrated(period_type, period_key, highest_milestone["amount"], total_revenue):
                 continue
 
+            # Fetch last year's revenue for the equivalent period
+            # Use ISO week alignment so we compare same weekdays
+            # e.g. daily: same weekday in same ISO week last year
+            #      weekly: same ISO week last year (Mon-Sun)
+            #      monthly: same calendar month last year
+            yoy_line = ""
+            try:
+                if period_type == "monthly":
+                    ly_start = period["start"].replace(year=period["start"].year - 1)
+                    # Use same day count as current period for fair comparison
+                    ly_end = ly_start + (period["end"] - period["start"])
+                else:
+                    # ISO week-based: find the same ISO weekday/week last year
+                    iso_year, iso_week, iso_dow = period["start"].isocalendar()
+                    from datetime import date
+                    # Same ISO week, same weekday, previous year
+                    ly_start = date.fromisocalendar(iso_year - 1, iso_week, iso_dow)
+                    ly_end = ly_start + (period["end"] - period["start"])
+                _, _, ly_total_orders, ly_revenue_by_source, _ = (
+                    await asyncio.to_thread(
+                        report_service.aggregate_sales_data,
+                        target_date=(ly_start.strftime('%Y-%m-%d'), ly_end.strftime('%Y-%m-%d')),
+                        tz_name=DEFAULT_TIMEZONE,
+                        telegram_manager_ids=TELEGRAM_MANAGER_IDS
+                    )
+                )
+                ly_revenue = sum(ly_revenue_by_source.values())
+                if ly_revenue > 0:
+                    growth_pct = (total_revenue - ly_revenue) / ly_revenue * 100
+                    sign = "+" if growth_pct >= 0 else ""
+                    arrow = "📈" if growth_pct >= 0 else "📉"
+                    yoy_line = (
+                        f"\n{arrow} YoY: {bold(f'{sign}{growth_pct:.0f}%')}"
+                        f" (₴{ly_revenue:,.0f} last year)"
+                    )
+            except (ValueError, Exception) as e:
+                logger.warning(f"Failed to fetch YoY data for milestone: {e}")
+
             # Format congratulations message
             amount = highest_milestone["amount"]
             if amount >= 1000000:
@@ -1989,7 +2027,7 @@ async def check_and_broadcast_milestones(context: ContextTypes.DEFAULT_TYPE) -> 
                 f"🏆 {bold(message)}\n\n"
                 f"📅 {period['label']}\n"
                 f"💰 Revenue: {bold(f'₴{total_revenue:,.0f}')}\n"
-                f"📦 Orders: {bold(str(total_orders))}\n\n"
+                f"📦 Orders: {bold(str(total_orders))}{yoy_line}\n\n"
                 f"{'🎊' * 8}"
             )
 

@@ -184,10 +184,9 @@ class MilestoneConfig:
 
     milestones: Dict[str, List[Dict]] = field(default_factory=lambda: {
         "daily": [
-            {"amount": 200000, "message": "200K Daily Revenue!", "emoji": "🎉"},
+            {"amount": 300000, "message": "300K Daily Revenue!", "emoji": "🎉"},
         ],
         "weekly": [
-            {"amount": 800000, "message": "800K Weekly Revenue!", "emoji": "🔥"},
             {"amount": 1000000, "message": "1 MILLION Weekly!", "emoji": "🚀🎆"},
             {"amount": 2000000, "message": "2 MILLION Weekly!", "emoji": "💎🎇"},
         ],
