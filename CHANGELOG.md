@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.36
+
+- Update milestones — daily 300K, remove weekly 800K, add YoY comparison
+
+
 ## 3.0.35
 
 - Fix DuckDB deadlock — pass conn to helper methods instead of re-acquiring lock
