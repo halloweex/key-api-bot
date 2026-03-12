@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.38
+
+- Fix sku_inventory_status same PK issue — DELETE+INSERT with temp table
+
+
 ## 3.0.37
 
 - Fix stale stock data — use DELETE+INSERT instead of INSERT OR REPLACE
