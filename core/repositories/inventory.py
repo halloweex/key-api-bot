@@ -98,14 +98,22 @@ class InventoryMixin:
                             mtype = "reserve_change"
                         movements.append((offer_id, pid, mtype,
                                           old[0], new_qty, delta, old[1], new_rsv))
-
-                    conn.execute("""
-                        INSERT OR REPLACE INTO offer_stocks
-                        (id, sku, price, purchased_price, quantity, reserve, synced_at)
-                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, [offer_id, stock.get("sku"), stock.get("price"),
-                          stock.get("purchased_price"), new_qty, new_rsv])
                     count += 1
+
+                # DELETE + INSERT instead of INSERT OR REPLACE
+                # Fixes stale data when offer_stocks table lacks PK constraint
+                # (CREATE TABLE IF NOT EXISTS doesn't alter existing tables)
+                conn.execute("DELETE FROM offer_stocks")
+                conn.executemany("""
+                    INSERT INTO offer_stocks
+                    (id, sku, price, purchased_price, quantity, reserve, synced_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, [
+                    (s.get("id"), s.get("sku"), s.get("price"),
+                     s.get("purchased_price"), s.get("quantity", 0),
+                     s.get("reserve", 0))
+                    for s in stocks
+                ])
 
                 if movements:
                     conn.executemany("""
