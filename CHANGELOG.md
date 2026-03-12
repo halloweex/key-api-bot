@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.37
+
+- Fix stale stock data — use DELETE+INSERT instead of INSERT OR REPLACE
+
+
 ## 3.0.36
 
 - Update milestones — daily 300K, remove weekly 800K, add YoY comparison
