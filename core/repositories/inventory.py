@@ -145,8 +145,11 @@ class InventoryMixin:
         async with self.connection() as conn:
             # Calculate last sale date per product (using offer_id from order_products)
             # Then merge with stock data
+            # Save first_seen_at before rebuild (self-referencing subquery needs it)
+            conn.execute("CREATE TEMP TABLE _tmp_first_seen AS SELECT offer_id, first_seen_at FROM sku_inventory_status")
+            conn.execute("DELETE FROM sku_inventory_status")
             conn.execute("""
-                INSERT OR REPLACE INTO sku_inventory_status
+                INSERT INTO sku_inventory_status
                 SELECT
                     os.id as offer_id,
                     COALESCE(o.product_id, 0) as product_id,
@@ -160,7 +163,7 @@ class InventoryMixin:
                     os.purchased_price,
                     pls.last_sale_date,
                     COALESCE(
-                        (SELECT first_seen_at FROM sku_inventory_status WHERE offer_id = os.id),
+                        (SELECT first_seen_at FROM _tmp_first_seen WHERE offer_id = os.id),
                         fod.first_order_date,
                         CURRENT_DATE
                     ) as first_seen_at,
@@ -195,6 +198,8 @@ class InventoryMixin:
                     GROUP BY offer_id
                 ) smo ON os.id = smo.offer_id
             """)
+
+            conn.execute("DROP TABLE IF EXISTS _tmp_first_seen")
 
             count = conn.execute("SELECT COUNT(*) FROM sku_inventory_status").fetchone()[0]
             logger.info(f"Refreshed sku_inventory_status: {count} SKUs")
