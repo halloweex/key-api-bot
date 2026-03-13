@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.39
+
+- Add promocode filter to dashboard — full stack (API → DuckDB → React)
+
+
 ## 3.0.38
 
 - Fix sku_inventory_status same PK issue — DELETE+INSERT with temp table
