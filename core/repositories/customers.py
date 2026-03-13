@@ -15,7 +15,8 @@ class CustomersMixin:
         end_date: date,
         source_id: Optional[int] = None,
         brand: Optional[str] = None,
-        sales_type: str = "retail"
+        sales_type: str = "retail",
+        promocode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get customer insights: new vs returning, AOV trend (from Gold/Silver layers)."""
         async with self.connection() as conn:
@@ -107,6 +108,9 @@ class CustomersMixin:
             if sales_type != "all":
                 pf_where.append("s.sales_type = ?")
                 pf_params.append(sales_type)
+            if promocode:
+                pf_where.append("UPPER(s.promocode) = UPPER(?)")
+                pf_params.append(promocode)
             pf_result = conn.execute(f"""
                 SELECT
                     COUNT(DISTINCT s.buyer_id),

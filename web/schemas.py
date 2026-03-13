@@ -23,6 +23,11 @@ class BrandResponse(BaseModel):
     name: str
 
 
+class PromocodeResponse(BaseModel):
+    """Promocode data."""
+    name: str
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ═══════════════════════════════════════════════════════════════════════════════

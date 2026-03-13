@@ -10,6 +10,7 @@ export interface FilterState {
   sourceId: number | null
   categoryId: number | null
   brand: string | null
+  promocode: string | null
 }
 
 export interface FilterActions {
@@ -19,6 +20,7 @@ export interface FilterActions {
   setSourceId: (sourceId: number | null) => void
   setCategoryId: (categoryId: number | null) => void
   setBrand: (brand: string | null) => void
+  setPromocode: (promocode: string | null) => void
   resetFilters: () => void
 }
 

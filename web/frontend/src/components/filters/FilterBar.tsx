@@ -3,6 +3,7 @@ import { SalesTypeFilter } from './SalesTypeFilter'
 import { SourceFilter } from './SourceFilter'
 import { CategoryFilter } from './CategoryFilter'
 import { BrandFilter } from './BrandFilter'
+import { PromocodeFilter } from './PromocodeFilter'
 
 export function FilterBar() {
   return (
@@ -18,6 +19,7 @@ export function FilterBar() {
         <SourceFilter />
         <CategoryFilter />
         <BrandFilter />
+        <PromocodeFilter />
       </div>
     </div>
   )

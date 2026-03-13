@@ -292,6 +292,7 @@ class Order:
     manager: Optional[Manager] = None
     products: List[OrderProduct] = field(default_factory=list)
     manager_comment: Optional[str] = None  # Contains UTM data for Shopify orders
+    promocode: Optional[str] = None  # Discount promo code applied to order
 
     @classmethod
     def from_api(cls, data: Dict[str, Any]) -> "Order":
@@ -345,6 +346,7 @@ class Order:
             manager=Manager.from_api(data.get("manager")),
             products=products,
             manager_comment=data.get("manager_comment"),
+            promocode=data.get("promocode") or None,
         )
 
     @property

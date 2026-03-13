@@ -18,11 +18,12 @@ class RevenueMixin:
         source_id: Optional[int] = None,
         category_id: Optional[int] = None,
         brand: Optional[str] = None,
-        sales_type: str = "retail"
+        sales_type: str = "retail",
+        promocode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get summary statistics for a date range (from Gold/Silver layers)."""
         async with self.connection() as conn:
-            if category_id or brand:
+            if category_id or brand or promocode:
                 # Use Silver layer with JOINs for correct distinct order counts
                 # (gold_daily_products can't deduplicate orders with multiple matching products)
                 params = [start_date, end_date]
@@ -45,6 +46,10 @@ class RevenueMixin:
                 if brand:
                     where_clauses.append("LOWER(p.brand) = LOWER(?)")
                     params.append(brand)
+
+                if promocode:
+                    where_clauses.append("UPPER(s.promocode) = UPPER(?)")
+                    params.append(promocode)
 
                 where_sql = " AND ".join(where_clauses)
 
@@ -263,6 +268,7 @@ class RevenueMixin:
         source_id: Optional[int] = None,
         category_ids: Optional[List[int]] = None,
         brand: Optional[str] = None,
+        promocode: Optional[str] = None,
     ) -> Tuple[str, list]:
         """Build a query against Silver layer for revenue trend with product filters.
 
@@ -288,6 +294,10 @@ class RevenueMixin:
             where_clauses.append("LOWER(p.brand) = LOWER(?)")
             params.append(brand)
 
+        if promocode:
+            where_clauses.append("UPPER(s.promocode) = UPPER(?)")
+            params.append(promocode)
+
         where_sql = " AND ".join(where_clauses)
         sql = f"""
             SELECT s.order_date AS day,
@@ -311,7 +321,8 @@ class RevenueMixin:
         brand: Optional[str] = None,
         include_comparison: bool = True,
         sales_type: str = "retail",
-        compare_type: str = "previous_period"
+        compare_type: str = "previous_period",
+        promocode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get daily revenue trend for chart (from Gold layer)."""
         async with self.connection() as conn:
@@ -319,11 +330,11 @@ class RevenueMixin:
             if category_id:
                 cat_ids = await self._get_category_with_children(conn, category_id)
 
-            use_products = bool(category_id or brand)
+            use_products = bool(category_id or brand or promocode)
 
             if use_products:
                 sql, params = self._build_silver_products_revenue_query(
-                    start_date, end_date, sales_type, source_id, cat_ids, brand
+                    start_date, end_date, sales_type, source_id, cat_ids, brand, promocode
                 )
             else:
                 sql, params = self._build_gold_revenue_query(
@@ -373,7 +384,7 @@ class RevenueMixin:
 
                 if use_products:
                     prev_sql, prev_params = self._build_silver_products_revenue_query(
-                        prev_start, prev_end, sales_type, source_id, cat_ids, brand
+                        prev_start, prev_end, sales_type, source_id, cat_ids, brand, promocode
                     )
                 else:
                     prev_sql, prev_params = self._build_gold_revenue_query(
@@ -441,6 +452,7 @@ class RevenueMixin:
         end_date: date,
         category_id: Optional[int] = None,
         brand: Optional[str] = None,
+        promocode: Optional[str] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get sales breakdown by source (from Gold/Silver layers)."""
@@ -448,7 +460,7 @@ class RevenueMixin:
             source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
             source_colors = {1: "#7C3AED", 2: "#2563EB", 4: "#eb4200"}
 
-            if category_id or brand:
+            if category_id or brand or promocode:
                 # Use Silver layer with JOINs for correct distinct order counts
                 params = [start_date, end_date]
                 where_clauses = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
@@ -465,6 +477,10 @@ class RevenueMixin:
                 if brand:
                     where_clauses.append("LOWER(p.brand) = LOWER(?)")
                     params.append(brand)
+
+                if promocode:
+                    where_clauses.append("UPPER(s.promocode) = UPPER(?)")
+                    params.append(promocode)
 
                 where_sql = " AND ".join(where_clauses)
 
@@ -538,44 +554,79 @@ class RevenueMixin:
         source_id: Optional[int] = None,
         category_id: Optional[int] = None,
         brand: Optional[str] = None,
+        promocode: Optional[str] = None,
         limit: int = 10,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get top products by quantity (from Gold layer)."""
         async with self.connection() as conn:
-            params = [start_date, end_date]
-            where_clauses = ["g.date BETWEEN ? AND ?"]
+            if promocode:
+                # Silver path: gold_daily_products lacks promocode
+                silver_params = [start_date, end_date]
+                silver_where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+                if sales_type != "all":
+                    silver_where.append("s.sales_type = ?")
+                    silver_params.append(sales_type)
+                if source_id:
+                    silver_where.append("s.source_id = ?")
+                    silver_params.append(source_id)
+                if category_id:
+                    cat_ids = await self._get_category_with_children(conn, category_id)
+                    silver_where.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                    silver_params.extend(cat_ids)
+                if brand:
+                    silver_where.append("LOWER(p.brand) = LOWER(?)")
+                    silver_params.append(brand)
+                silver_where.append("UPPER(s.promocode) = UPPER(?)")
+                silver_params.append(promocode)
+                silver_params.append(limit)
+                silver_sql = " AND ".join(silver_where)
+                results = conn.execute(f"""
+                    SELECT
+                        ANY_VALUE(op.name) as product_name,
+                        SUM(op.quantity) as total_qty
+                    FROM silver_orders s
+                    JOIN order_products op ON s.id = op.order_id
+                    LEFT JOIN products p ON op.product_id = p.id
+                    WHERE {silver_sql}
+                    GROUP BY COALESCE(CAST(op.product_id AS VARCHAR), op.name)
+                    ORDER BY total_qty DESC
+                    LIMIT ?
+                """, silver_params).fetchall()
+            else:
+                params = [start_date, end_date]
+                where_clauses = ["g.date BETWEEN ? AND ?"]
 
-            if sales_type != "all":
-                where_clauses.append("g.sales_type = ?")
-                params.append(sales_type)
+                if sales_type != "all":
+                    where_clauses.append("g.sales_type = ?")
+                    params.append(sales_type)
 
-            if source_id:
-                where_clauses.append("g.source_id = ?")
-                params.append(source_id)
+                if source_id:
+                    where_clauses.append("g.source_id = ?")
+                    params.append(source_id)
 
-            if category_id:
-                cat_ids = await self._get_category_with_children(conn, category_id)
-                where_clauses.append(f"g.category_id IN ({','.join('?' * len(cat_ids))})")
-                params.extend(cat_ids)
+                if category_id:
+                    cat_ids = await self._get_category_with_children(conn, category_id)
+                    where_clauses.append(f"g.category_id IN ({','.join('?' * len(cat_ids))})")
+                    params.extend(cat_ids)
 
-            if brand:
-                where_clauses.append("LOWER(g.brand) = LOWER(?)")
-                params.append(brand)
+                if brand:
+                    where_clauses.append("LOWER(g.brand) = LOWER(?)")
+                    params.append(brand)
 
-            params.append(limit)
-            where_sql = " AND ".join(where_clauses)
+                params.append(limit)
+                where_sql = " AND ".join(where_clauses)
 
-            results = conn.execute(f"""
-                SELECT
-                    ANY_VALUE(g.product_name) as product_name,
-                    SUM(g.quantity_sold) as total_qty
-                FROM gold_daily_products g
-                WHERE {where_sql}
-                GROUP BY COALESCE(CAST(g.product_id AS VARCHAR), g.product_name)
-                ORDER BY total_qty DESC
-                LIMIT ?
-            """, params).fetchall()
+                results = conn.execute(f"""
+                    SELECT
+                        ANY_VALUE(g.product_name) as product_name,
+                        SUM(g.quantity_sold) as total_qty
+                    FROM gold_daily_products g
+                    WHERE {where_sql}
+                    GROUP BY COALESCE(CAST(g.product_id AS VARCHAR), g.product_name)
+                    ORDER BY total_qty DESC
+                    LIMIT ?
+                """, params).fetchall()
 
             raw_labels = [row[0] or "Unknown" for row in results]
             labels = [self._wrap_label(row[0]) for row in results]
@@ -618,6 +669,16 @@ class RevenueMixin:
                 SELECT DISTINCT brand FROM products
                 WHERE brand IS NOT NULL AND brand != ''
                 ORDER BY brand
+            """).fetchall()
+            return [{"name": row[0]} for row in results]
+
+    async def get_promocodes(self) -> List[Dict[str, str]]:
+        """Get all unique promocodes for filter dropdown."""
+        async with self.connection() as conn:
+            results = conn.execute("""
+                SELECT DISTINCT promocode FROM silver_orders
+                WHERE promocode IS NOT NULL AND promocode != ''
+                ORDER BY promocode
             """).fetchall()
             return [{"name": row[0]} for row in results]
 
@@ -678,59 +739,98 @@ class RevenueMixin:
         end_date: date,
         source_id: Optional[int] = None,
         brand: Optional[str] = None,
+        promocode: Optional[str] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get product performance: top by revenue, category breakdown (from Gold layer)."""
         async with self.connection() as conn:
-            params = [start_date, end_date]
-            where_clauses = ["g.date BETWEEN ? AND ?"]
+            if promocode:
+                # Silver path: gold_daily_products lacks promocode
+                silver_params = [start_date, end_date]
+                silver_where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+                if sales_type != "all":
+                    silver_where.append("s.sales_type = ?")
+                    silver_params.append(sales_type)
+                if source_id:
+                    silver_where.append("s.source_id = ?")
+                    silver_params.append(source_id)
+                if brand:
+                    silver_where.append("LOWER(p.brand) = LOWER(?)")
+                    silver_params.append(brand)
+                silver_where.append("UPPER(s.promocode) = UPPER(?)")
+                silver_params.append(promocode)
+                silver_sql = " AND ".join(silver_where)
 
-            if sales_type != "all":
-                where_clauses.append("g.sales_type = ?")
-                params.append(sales_type)
+                top_results = conn.execute(f"""
+                    SELECT
+                        ANY_VALUE(op.name) as product_name,
+                        SUM(op.price_sold * op.quantity) as revenue,
+                        SUM(op.quantity) as quantity
+                    FROM silver_orders s
+                    JOIN order_products op ON s.id = op.order_id
+                    LEFT JOIN products p ON op.product_id = p.id
+                    WHERE {silver_sql}
+                    GROUP BY COALESCE(CAST(op.product_id AS VARCHAR), op.name)
+                    ORDER BY revenue DESC
+                    LIMIT 10
+                """, silver_params).fetchall()
 
-            if source_id:
-                where_clauses.append("g.source_id = ?")
-                params.append(source_id)
+                cat_results = conn.execute(f"""
+                    SELECT
+                        COALESCE(pc.name, c.name, 'Other') as category_name,
+                        SUM(op.price_sold * op.quantity) as revenue,
+                        SUM(op.quantity) as quantity
+                    FROM silver_orders s
+                    JOIN order_products op ON s.id = op.order_id
+                    LEFT JOIN products p ON op.product_id = p.id
+                    LEFT JOIN categories c ON p.category_id = c.id
+                    LEFT JOIN categories pc ON c.parent_id = pc.id
+                    WHERE {silver_sql}
+                    GROUP BY COALESCE(pc.name, c.name, 'Other')
+                    ORDER BY revenue DESC
+                """, silver_params).fetchall()
+            else:
+                params = [start_date, end_date]
+                where_clauses = ["g.date BETWEEN ? AND ?"]
 
-            if brand:
-                where_clauses.append("LOWER(g.brand) = LOWER(?)")
-                params.append(brand)
+                if sales_type != "all":
+                    where_clauses.append("g.sales_type = ?")
+                    params.append(sales_type)
 
-            where_sql = " AND ".join(where_clauses)
+                if source_id:
+                    where_clauses.append("g.source_id = ?")
+                    params.append(source_id)
 
-            # Top products by revenue
-            top_results = conn.execute(f"""
-                SELECT
-                    g.product_name,
-                    SUM(g.product_revenue) as revenue,
-                    SUM(g.quantity_sold) as quantity
-                FROM gold_daily_products g
-                WHERE {where_sql}
-                GROUP BY g.product_name
-                ORDER BY revenue DESC
-                LIMIT 10
-            """, params).fetchall()
+                if brand:
+                    where_clauses.append("LOWER(g.brand) = LOWER(?)")
+                    params.append(brand)
 
-            top_by_revenue = {
-                "labels": [row[0] or "Unknown" for row in top_results],
-                "wrappedLabels": [self._wrap_label(row[0]) for row in top_results],
-                "data": [round(float(row[1]), 2) for row in top_results],
-                "quantities": [int(row[2]) for row in top_results],
-                "backgroundColor": "#16A34A"
-            }
+                where_sql = " AND ".join(where_clauses)
 
-            # Category breakdown (use parent_category_name, fall back to category_name)
-            cat_results = conn.execute(f"""
-                SELECT
-                    COALESCE(g.parent_category_name, g.category_name, 'Other') as category_name,
-                    SUM(g.product_revenue) as revenue,
-                    SUM(g.quantity_sold) as quantity
-                FROM gold_daily_products g
-                WHERE {where_sql}
-                GROUP BY COALESCE(g.parent_category_name, g.category_name, 'Other')
-                ORDER BY revenue DESC
-            """, params).fetchall()
+                # Top products by revenue
+                top_results = conn.execute(f"""
+                    SELECT
+                        g.product_name,
+                        SUM(g.product_revenue) as revenue,
+                        SUM(g.quantity_sold) as quantity
+                    FROM gold_daily_products g
+                    WHERE {where_sql}
+                    GROUP BY g.product_name
+                    ORDER BY revenue DESC
+                    LIMIT 10
+                """, params).fetchall()
+
+                # Category breakdown (use parent_category_name, fall back to category_name)
+                cat_results = conn.execute(f"""
+                    SELECT
+                        COALESCE(g.parent_category_name, g.category_name, 'Other') as category_name,
+                        SUM(g.product_revenue) as revenue,
+                        SUM(g.quantity_sold) as quantity
+                    FROM gold_daily_products g
+                    WHERE {where_sql}
+                    GROUP BY COALESCE(g.parent_category_name, g.category_name, 'Other')
+                    ORDER BY revenue DESC
+                """, params).fetchall()
 
             category_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4"]
             category_breakdown = {
@@ -761,6 +861,7 @@ class RevenueMixin:
         parent_category_name: str,
         source_id: Optional[int] = None,
         brand: Optional[str] = None,
+        promocode: Optional[str] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get sales breakdown by subcategories for a given parent category."""
@@ -787,6 +888,12 @@ class RevenueMixin:
                 brand_filter = "AND LOWER(p.brand) = LOWER(?)"
                 brand_params.append(brand)
 
+            promocode_filter = ""
+            promocode_params = []
+            if promocode:
+                promocode_filter = "AND UPPER(o.promocode) = UPPER(?)"
+                promocode_params.append(promocode)
+
             # Get subcategories for the parent category
             subcategory_sql = f"""
                 SELECT
@@ -801,11 +908,12 @@ class RevenueMixin:
                 WHERE {where_sql}
                     AND (parent_c.name = ? OR (c.name = ? AND c.parent_id IS NULL))
                     {brand_filter}
+                    {promocode_filter}
                 GROUP BY c.name
                 ORDER BY revenue DESC
             """
-            # Build final params: base params + parent_category (twice) + brand
-            final_params = params + [parent_category_name, parent_category_name] + brand_params
+            # Build final params: base params + parent_category (twice) + brand + promocode
+            final_params = params + [parent_category_name, parent_category_name] + brand_params + promocode_params
 
             results = conn.execute(subcategory_sql, final_params).fetchall()
 

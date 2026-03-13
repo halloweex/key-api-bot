@@ -21,6 +21,7 @@ import type {
   CategoryBreakdown,
   Category,
   Brand,
+  Promocode,
   ExpenseType,
   HealthResponse,
   GoalsResponse,
@@ -445,6 +446,9 @@ export const api = {
   // Brands
   getBrands: (options?: FetchOptions) =>
     fetchApi<Brand[]>('/brands', undefined, options),
+
+  getPromocodes: (options?: FetchOptions) =>
+    fetchApi<Promocode[]>('/promocodes', undefined, options),
 
   getBrandAnalytics: (params: string, options?: FetchOptions) =>
     fetchApi<BrandAnalyticsResponse>('/brands/analytics', params, options),

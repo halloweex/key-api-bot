@@ -38,7 +38,8 @@ async def get_revenue_trend(
     brand: Optional[str] = None,
     source_id: Optional[int] = None,
     sales_type: str = "retail",
-    compare_type: str = "previous_period"
+    compare_type: str = "previous_period",
+    promocode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get revenue data over time for line chart."""
     start, end = _parse_dates(start_date, end_date)
@@ -50,7 +51,8 @@ async def get_revenue_trend(
         brand=brand,
         include_comparison=include_comparison,
         sales_type=sales_type,
-        compare_type=compare_type
+        compare_type=compare_type,
+        promocode=promocode,
     )
 
 
@@ -110,7 +112,8 @@ async def get_sales_by_source(
     category_id: Optional[int] = None,
     brand: Optional[str] = None,
     source_id: Optional[int] = None,
-    sales_type: str = "retail"
+    sales_type: str = "retail",
+    promocode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get sales data aggregated by source for bar/pie chart."""
     start, end = _parse_dates(start_date, end_date)
@@ -119,7 +122,8 @@ async def get_sales_by_source(
         start, end,
         category_id=category_id,
         brand=brand,
-        sales_type=sales_type
+        sales_type=sales_type,
+        promocode=promocode,
     )
 
 
@@ -130,7 +134,8 @@ async def get_top_products(
     limit: int = 10,
     category_id: Optional[int] = None,
     brand: Optional[str] = None,
-    sales_type: str = "retail"
+    sales_type: str = "retail",
+    promocode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get top products for horizontal bar chart."""
     start, end = _parse_dates(start_date, end_date)
@@ -141,7 +146,8 @@ async def get_top_products(
         category_id=category_id,
         brand=brand,
         limit=limit,
-        sales_type=sales_type
+        sales_type=sales_type,
+        promocode=promocode,
     )
 
 
@@ -151,7 +157,8 @@ async def get_summary_stats(
     category_id: Optional[int] = None,
     brand: Optional[str] = None,
     source_id: Optional[int] = None,
-    sales_type: str = "retail"
+    sales_type: str = "retail",
+    promocode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get summary statistics for dashboard cards."""
     start, end = _parse_dates(start_date, end_date)
@@ -161,7 +168,8 @@ async def get_summary_stats(
         source_id=source_id,
         category_id=category_id,
         brand=brand,
-        sales_type=sales_type
+        sales_type=sales_type,
+        promocode=promocode,
     )
 
 
@@ -170,7 +178,8 @@ async def get_customer_insights(
     end_date: str,
     brand: Optional[str] = None,
     source_id: Optional[int] = None,
-    sales_type: str = "retail"
+    sales_type: str = "retail",
+    promocode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get customer insights: new vs returning, AOV trend, repeat rate."""
     start, end = _parse_dates(start_date, end_date)
@@ -179,7 +188,8 @@ async def get_customer_insights(
         start, end,
         source_id=source_id,
         brand=brand,
-        sales_type=sales_type
+        sales_type=sales_type,
+        promocode=promocode,
     )
 
 
@@ -188,7 +198,8 @@ async def get_product_performance(
     end_date: str,
     brand: Optional[str] = None,
     source_id: Optional[int] = None,
-    sales_type: str = "retail"
+    sales_type: str = "retail",
+    promocode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get product performance: top by revenue, category breakdown."""
     start, end = _parse_dates(start_date, end_date)
@@ -197,7 +208,8 @@ async def get_product_performance(
         start, end,
         source_id=source_id,
         brand=brand,
-        sales_type=sales_type
+        sales_type=sales_type,
+        promocode=promocode,
     )
 
 
@@ -214,7 +226,8 @@ async def get_subcategory_breakdown(
     parent_category: str,
     source_id: Optional[int] = None,
     brand: Optional[str] = None,
-    sales_type: str = "retail"
+    sales_type: str = "retail",
+    promocode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get sales breakdown by subcategories for a given parent category."""
     start, end = _parse_dates(start_date, end_date)
@@ -224,7 +237,8 @@ async def get_subcategory_breakdown(
         parent_category_name=parent_category,
         source_id=source_id,
         brand=brand,
-        sales_type=sales_type
+        sales_type=sales_type,
+        promocode=promocode,
     )
 
 

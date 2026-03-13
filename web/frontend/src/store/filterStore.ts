@@ -10,6 +10,7 @@ const initialState = {
   sourceId: null,
   categoryId: null,
   brand: null,
+  promocode: null,
 }
 
 export const useFilterStore = create<FilterStore>((set) => ({
@@ -33,13 +34,16 @@ export const useFilterStore = create<FilterStore>((set) => ({
   setBrand: (brand: string | null) =>
     set({ brand }),
 
+  setPromocode: (promocode: string | null) =>
+    set({ promocode }),
+
   resetFilters: () =>
     set(initialState),
 }))
 
 // Selector to build query string from filter state (memoized to prevent re-renders)
 export const useQueryParams = () => {
-  const { period, startDate, endDate, salesType, sourceId, categoryId, brand } =
+  const { period, startDate, endDate, salesType, sourceId, categoryId, brand, promocode } =
     useFilterStore()
 
   // Memoize URLSearchParams construction to prevent unnecessary re-renders
@@ -58,7 +62,8 @@ export const useQueryParams = () => {
     if (sourceId) params.set('source_id', String(sourceId))
     if (categoryId) params.set('category_id', String(categoryId))
     if (brand) params.set('brand', brand)
+    if (promocode) params.set('promocode', promocode)
 
     return params.toString()
-  }, [period, startDate, endDate, salesType, sourceId, categoryId, brand])
+  }, [period, startDate, endDate, salesType, sourceId, categoryId, brand, promocode])
 }

@@ -6,6 +6,7 @@ from web.services import dashboard_service
 from ._deps import (
     limiter, get_store,
     validate_period, validate_source_id, validate_brand_name, validate_sales_type,
+    validate_promocode,
     ValidationError,
 )
 
@@ -21,6 +22,7 @@ async def get_customer_insights(
     end_date: Optional[str] = Query(None),
     source_id: Optional[int] = Query(None),
     brand: Optional[str] = Query(None),
+    promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
 ):
     """Get customer insights: new vs returning, AOV trend, repeat rate."""
@@ -28,6 +30,7 @@ async def get_customer_insights(
         validate_period(period)
         validate_source_id(source_id)
         brand = validate_brand_name(brand)
+        promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -35,6 +38,7 @@ async def get_customer_insights(
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_customer_insights(
         start, end, brand=brand, source_id=source_id, sales_type=sales_type,
+        promocode=promocode,
     )
 
 

@@ -286,6 +286,7 @@ class DuckDBStore(
             buyer_id INTEGER,
             manager_id INTEGER,
             manager_comment TEXT,  -- Contains UTM data for Shopify orders
+            promocode VARCHAR,  -- Discount promo code applied to order
             synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -623,7 +624,8 @@ class DuckDBStore(
             is_active_source BOOLEAN NOT NULL,
             source_name VARCHAR NOT NULL,
             is_new_customer BOOLEAN NOT NULL DEFAULT FALSE,
-            buyer_first_order_date DATE
+            buyer_first_order_date DATE,
+            promocode VARCHAR
         );
 
         -- Silver orders indexes (defined in consolidated block below)
@@ -1122,6 +1124,18 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (user_preferences language): {e}")
 
+        # Migration: Add promocode column to orders and silver_orders
+        try:
+            self._connection.execute(
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS promocode VARCHAR"
+            )
+            self._connection.execute(
+                "ALTER TABLE silver_orders ADD COLUMN IF NOT EXISTS promocode VARCHAR"
+            )
+            logger.debug("Migration: promocode column added/verified on orders and silver_orders")
+        except Exception as e:
+            logger.debug(f"Migration note (promocode): {e}")
+
     async def _create_inventory_views(self) -> None:
         """Create Layer 3 & 4 analytics views for inventory."""
         views_sql = """
@@ -1506,7 +1520,8 @@ class DuckDBStore(
                                      AND {_date_in_kyiv('o.ordered_at')} = fo.first_order_date
                                 THEN TRUE ELSE FALSE
                             END AS is_new_customer,
-                            fo.first_order_date AS buyer_first_order_date
+                            fo.first_order_date AS buyer_first_order_date,
+                            o.promocode
                         FROM orders o
                         LEFT JOIN (
                             SELECT
@@ -2012,6 +2027,7 @@ class DuckDBStore(
                 "buyer_id": order.buyer.id if order.buyer else None,
                 "manager_id": order.manager.id if order.manager else None,
                 "manager_comment": order.manager_comment,
+                "promocode": order.promocode,
             })
 
             # Build product rows
@@ -2036,8 +2052,9 @@ class DuckDBStore(
         for col in ["ordered_at", "created_at", "updated_at"]:
             orders_df[col] = pd.to_datetime(orders_df[col], utc=True)
 
-        # Ensure manager_comment is proper nullable string type for DuckDB
+        # Ensure nullable string columns are proper type for DuckDB
         orders_df["manager_comment"] = orders_df["manager_comment"].astype(pd.StringDtype())
+        orders_df["promocode"] = orders_df["promocode"].astype(pd.StringDtype())
 
         # Get order IDs for use in queries (avoids DuckDB FK bug with subqueries)
         order_ids = orders_df["id"].tolist()
@@ -2080,8 +2097,8 @@ class DuckDBStore(
 
                 # 4. Insert all orders from staging (new ones + updated ones that were deleted)
                 conn.execute("""
-                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, synced_at)
-                    SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, now()
+                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at)
+                    SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, now()
                     FROM stg_orders stg
                     WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.id = stg.id)
                 """)

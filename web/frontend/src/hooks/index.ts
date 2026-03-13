@@ -23,6 +23,7 @@ export {
   useAtRiskCustomers,
   // Brands
   useBrands,
+  usePromocodes,
   useBrandAnalytics,
   // Expenses
   useExpenseTypes,

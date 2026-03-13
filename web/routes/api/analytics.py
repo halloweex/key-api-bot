@@ -19,6 +19,7 @@ from ._deps import (
     limiter, get_store,
     validate_period, validate_source_id, validate_category_id,
     validate_brand_name, validate_limit, validate_sales_type,
+    validate_promocode,
     ValidationError,
 )
 
@@ -56,6 +57,14 @@ async def get_brands(request: Request):
     return await store.get_brands()
 
 
+@router.get("/promocodes")
+@limiter.limit("60/minute")
+async def get_promocodes(request: Request):
+    """Get list of unique promocodes for filter dropdown."""
+    store = await get_store()
+    return await store.get_promocodes()
+
+
 # ─── Revenue ───────────────────────────────────────────────────────────────────
 
 @router.get("/revenue/trend")
@@ -68,6 +77,7 @@ async def get_revenue_trend(
     source_id: Optional[int] = Query(None, description="Filter by source ID"),
     category_id: Optional[int] = Query(None, description="Filter by category ID"),
     brand: Optional[str] = Query(None, description="Filter by brand name"),
+    promocode: Optional[str] = Query(None, description="Filter by promocode"),
     sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all"),
     compare_type: Optional[str] = Query("previous_period", description="Comparison type: previous_period, year_ago, month_ago"),
     include_forecast: Optional[bool] = Query(False, description="Include ML forecast for remaining month days"),
@@ -78,6 +88,7 @@ async def get_revenue_trend(
         validate_source_id(source_id)
         validate_category_id(category_id)
         brand = validate_brand_name(brand)
+        promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
         if compare_type not in ("previous_period", "year_ago", "month_ago"):
             compare_type = "previous_period"
@@ -87,7 +98,7 @@ async def get_revenue_trend(
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     result = await dashboard_service.get_revenue_trend(
         start, end, category_id=category_id, brand=brand, source_id=source_id,
-        sales_type=sales_type, compare_type=compare_type,
+        sales_type=sales_type, compare_type=compare_type, promocode=promocode,
     )
 
     # Attach forecast data when requested (no filters applied)
@@ -95,7 +106,7 @@ async def get_revenue_trend(
     has_future = end > today.isoformat()
     is_current_period = period in ("month", "week")
     allow_forecast = is_current_period or has_future
-    if include_forecast and allow_forecast and not category_id and not brand and not source_id:
+    if include_forecast and allow_forecast and not category_id and not brand and not promocode and not source_id:
         try:
             if period == "month":
                 forecast = await dashboard_service.get_forecast_data(sales_type)
@@ -234,6 +245,7 @@ async def get_sales_by_source(
     source_id: Optional[int] = Query(None),
     category_id: Optional[int] = Query(None),
     brand: Optional[str] = Query(None),
+    promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
 ):
     """Get sales data by source for bar/pie chart."""
@@ -242,6 +254,7 @@ async def get_sales_by_source(
         validate_source_id(source_id)
         validate_category_id(category_id)
         brand = validate_brand_name(brand)
+        promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -249,6 +262,7 @@ async def get_sales_by_source(
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_sales_by_source(
         start, end, category_id, brand=brand, source_id=source_id, sales_type=sales_type,
+        promocode=promocode,
     )
 
 
@@ -262,6 +276,7 @@ async def get_top_products(
     source_id: Optional[int] = Query(None),
     category_id: Optional[int] = Query(None),
     brand: Optional[str] = Query(None),
+    promocode: Optional[str] = Query(None),
     limit: int = Query(10, description="Number of products to return"),
     sales_type: Optional[str] = Query("retail"),
 ):
@@ -271,6 +286,7 @@ async def get_top_products(
         validate_source_id(source_id)
         validate_category_id(category_id)
         brand = validate_brand_name(brand)
+        promocode = validate_promocode(promocode)
         limit = validate_limit(limit, max_value=50)
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
@@ -279,6 +295,7 @@ async def get_top_products(
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_top_products(
         start, end, source_id, limit, category_id, brand=brand, sales_type=sales_type,
+        promocode=promocode,
     )
 
 
@@ -292,6 +309,7 @@ async def get_summary(
     source_id: Optional[int] = Query(None),
     category_id: Optional[int] = Query(None),
     brand: Optional[str] = Query(None),
+    promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
 ):
     """Get summary statistics for dashboard cards."""
@@ -302,12 +320,13 @@ async def get_summary(
         validate_source_id(source_id)
         validate_category_id(category_id)
         brand = validate_brand_name(brand)
+        promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    cache_key = f"summary:{start}:{end}:{source_id or ''}:{category_id or ''}:{brand or ''}:{sales_type}"
+    cache_key = f"summary:{start}:{end}:{source_id or ''}:{category_id or ''}:{brand or ''}:{sales_type}:{promocode or ''}"
 
     try:
         cached = await cache.get(cache_key)
@@ -318,6 +337,7 @@ async def get_summary(
 
     result = await dashboard_service.get_summary_stats(
         start, end, category_id, brand=brand, source_id=source_id, sales_type=sales_type,
+        promocode=promocode,
     )
 
     try:
@@ -364,6 +384,7 @@ async def get_product_performance(
     end_date: Optional[str] = Query(None),
     source_id: Optional[int] = Query(None),
     brand: Optional[str] = Query(None),
+    promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
 ):
     """Get product performance: top by revenue, category breakdown."""
@@ -371,6 +392,7 @@ async def get_product_performance(
         validate_period(period)
         validate_source_id(source_id)
         brand = validate_brand_name(brand)
+        promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -378,6 +400,7 @@ async def get_product_performance(
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_product_performance(
         start, end, brand=brand, source_id=source_id, sales_type=sales_type,
+        promocode=promocode,
     )
 
 
@@ -411,6 +434,7 @@ async def get_subcategory_breakdown(
     end_date: Optional[str] = Query(None),
     source_id: Optional[int] = Query(None),
     brand: Optional[str] = Query(None),
+    promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
 ):
     """Get sales breakdown by subcategories for a given parent category."""
@@ -418,6 +442,7 @@ async def get_subcategory_breakdown(
         validate_period(period)
         validate_source_id(source_id)
         brand = validate_brand_name(brand)
+        promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -429,4 +454,5 @@ async def get_subcategory_breakdown(
         source_id=source_id,
         brand=brand,
         sales_type=sales_type,
+        promocode=promocode,
     )

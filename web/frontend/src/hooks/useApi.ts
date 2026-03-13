@@ -22,6 +22,7 @@ import type {
   ProfitAnalysisResponse,
   Category,
   Brand,
+  Promocode,
   ExpenseType,
   GoalsResponse,
   GoalHistoryResponse,
@@ -91,6 +92,7 @@ export const queryKeys = {
   childCategories: (parentId: number) => ['categories', parentId, 'children'] as const,
   categoryBreakdown: (parent: string, params: string) => ['categoryBreakdown', parent, params] as const,
   brands: () => ['brands'] as const,
+  promocodes: () => ['promocodes'] as const,
   expenseTypes: () => ['expenseTypes'] as const,
   stockSummary: (limit: number) => ['stockSummary', limit] as const,
   inventoryTrend: (days: number, granularity: string) => ['inventoryTrend', days, granularity] as const,
@@ -154,7 +156,7 @@ export function useReturns(enabled = false) {
 
 export function useRevenueTrend(compareType: string = 'previous_period') {
   const queryParams = useQueryParams()
-  const { period, sourceId, categoryId, brand } = useFilterStore()
+  const { period, sourceId, categoryId, brand, promocode } = useFilterStore()
 
   // Append compare_type to query params
   let fullParams = compareType !== 'previous_period'
@@ -165,7 +167,7 @@ export function useRevenueTrend(compareType: string = 'previous_period') {
   const { endDate } = useFilterStore()
   const hasFutureDates = period === 'custom' && endDate && endDate > new Date().toISOString().split('T')[0]
   const isCurrentPeriod = period === 'month' || period === 'week'
-  const wantsForecast = (isCurrentPeriod || hasFutureDates) && !sourceId && !categoryId && !brand
+  const wantsForecast = (isCurrentPeriod || hasFutureDates) && !sourceId && !categoryId && !brand && !promocode
   if (wantsForecast) {
     fullParams += '&include_forecast=true'
   }
@@ -322,6 +324,14 @@ export function useBrands() {
   return useQuery<Brand[]>({
     queryKey: queryKeys.brands(),
     queryFn: () => api.getBrands(),
+    staleTime: CACHE_TTL.STATIC,
+  })
+}
+
+export function usePromocodes() {
+  return useQuery<Promocode[]>({
+    queryKey: queryKeys.promocodes(),
+    queryFn: () => api.getPromocodes(),
     staleTime: CACHE_TTL.STATIC,
   })
 }

@@ -204,6 +204,10 @@ export interface Brand {
   name: string
 }
 
+export interface Promocode {
+  name: string
+}
+
 export interface ExpenseType {
   id: number
   name: string

@@ -219,6 +219,28 @@ def validate_brand_name(
     return value
 
 
+def validate_promocode(
+    value: Optional[str],
+    field: str = "promocode",
+    allow_none: bool = True
+) -> Optional[str]:
+    """Validate a promocode filter value."""
+    if value is None or value == "":
+        if allow_none:
+            return None
+        raise ValidationError(field, "Promocode is required")
+
+    if not isinstance(value, str):
+        raise ValidationError(field, "Must be a string", value)
+
+    value = value.strip()
+
+    if len(value) > 100:
+        raise ValidationError(field, "Promocode too long (max 100 characters)", value)
+
+    return value
+
+
 def validate_category_id(
     value: Optional[int],
     field: str = "category_id",

@@ -13,6 +13,7 @@ from core.validators import (
     validate_brand_name,
     validate_limit,
     validate_sales_type,
+    validate_promocode,
 )
 from core.exceptions import ValidationError
 
