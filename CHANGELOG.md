@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.42
+
+- Extend default sync to 730 days for accurate YoY comparisons
+
+
 ## 3.0.41
 
 - Fix OOM during DuckDB sync — limit memory, reduce chunk size, increase container limit
