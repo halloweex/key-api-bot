@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.45
+
+- Fix NameError in get_product_performance — build top_by_revenue dict
+
+
 ## 3.0.44
 
 - Add promocode performance overview to dashboard
