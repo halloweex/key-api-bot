@@ -467,7 +467,7 @@ class SyncService:
             logger.error(f"Meilisearch sync error: {e}")
             return stats
 
-    async def full_sync(self, days_back: int = 365) -> Dict[str, Any]:
+    async def full_sync(self, days_back: int = 730) -> Dict[str, Any]:
         """
         Perform full sync of all data from KeyCRM.
 
@@ -896,7 +896,7 @@ async def get_sync_service() -> SyncService:
     return _sync_service
 
 
-async def init_and_sync(full_sync_days: int = 365) -> None:
+async def init_and_sync(full_sync_days: int = 730) -> None:
     """
     Initialize store and perform initial sync if needed.
 
@@ -944,7 +944,7 @@ async def init_and_sync(full_sync_days: int = 365) -> None:
     # - seasonality_calc: Monday 4 AM
 
 
-async def force_resync(days_back: int = 365) -> dict:
+async def force_resync(days_back: int = 730) -> dict:
     """
     Force a complete resync by clearing orders and re-fetching from API.
 
