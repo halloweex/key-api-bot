@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.41
+
+- Fix OOM during DuckDB sync — limit memory, reduce chunk size, increase container limit
+
+
 ## 3.0.40
 
 - Fix DuckDB WAL corruption on aarch64 — add checkpoint after each sync chunk
