@@ -74,6 +74,10 @@ class DuckDBStore(
         async with self._lock:
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
+                # Force frequent WAL checkpoints to prevent WAL corruption
+                # on aarch64/Python 3.14 (DuckDB 1.4.x bug)
+                self._connection.execute("SET wal_autocheckpoint='2MB'")
+
                 await self._init_schema()
 
                 # Thread pool for offloading blocking operations

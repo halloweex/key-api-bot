@@ -557,6 +557,10 @@ class SyncService:
                     stats["expenses"] += expense_count
                     logger.info(f"  Chunk {chunk_num}: Saved {order_count} orders, {expense_count} expenses")
 
+                    # Force WAL checkpoint after each chunk to prevent WAL corruption
+                    # on aarch64 (DuckDB 1.4.x bug with large WAL files)
+                    await self.store.checkpoint()
+
                 current_start = current_end + timedelta(days=1)
 
             logger.info(f"All chunks complete. Total: {stats['orders']} orders, {stats['expenses']} expenses")
