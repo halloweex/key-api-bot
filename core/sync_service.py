@@ -533,7 +533,7 @@ class SyncService:
             # IMPORTANT: Save each chunk immediately to preserve progress on timeout/crash
             logger.info("Syncing orders...")
             final_end_date = datetime.now(DEFAULT_TZ) + timedelta(days=1)
-            chunk_days = 90  # Sync in 3-month chunks to stay under 5000 orders per chunk
+            chunk_days = 30  # Sync in 1-month chunks to limit memory usage during bulk insert
             chunk_num = 0
 
             current_start = datetime.now(DEFAULT_TZ) - timedelta(days=days_back)
