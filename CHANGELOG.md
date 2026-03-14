@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.44
+
+- Add promocode performance overview to dashboard
+
+
 ## 3.0.43
 
 - Fix hardcoded 365-day sync in web/main.py — change to 730 days
