@@ -840,6 +840,14 @@ class RevenueMixin:
                 "backgroundColor": category_colors[:len(cat_results)]
             }
 
+            product_colors = "#7C3AED"
+            top_by_revenue = {
+                "labels": [row[0] for row in top_results],
+                "data": [round(float(row[1]), 2) for row in top_results],
+                "quantities": [int(row[2]) for row in top_results],
+                "backgroundColor": product_colors
+            }
+
             total_revenue = sum(float(row[1]) for row in top_results) if top_results else 0
             total_quantity = sum(int(row[2]) for row in top_results) if top_results else 0
 
