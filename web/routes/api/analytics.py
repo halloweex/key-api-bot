@@ -424,6 +424,26 @@ async def get_brand_analytics(
     return await dashboard_service.get_brand_analytics(start, end, sales_type=sales_type)
 
 
+@router.get("/promocodes/analytics")
+@limiter.limit("30/minute")
+async def get_promocode_analytics(
+    request: Request,
+    period: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    sales_type: Optional[str] = Query("retail"),
+):
+    """Get promocode performance overview."""
+    try:
+        validate_period(period)
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    return await dashboard_service.get_promocode_analytics(start, end, sales_type=sales_type)
+
+
 @router.get("/categories/breakdown")
 @limiter.limit("30/minute")
 async def get_subcategory_breakdown(

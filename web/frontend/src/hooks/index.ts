@@ -25,6 +25,7 @@ export {
   useBrands,
   usePromocodes,
   useBrandAnalytics,
+  usePromocodeAnalytics,
   // Expenses
   useExpenseTypes,
   useExpenseSummary,

@@ -16,6 +16,7 @@ import type {
   CohortLTVResponse,
   AtRiskResponse,
   BrandAnalyticsResponse,
+  PromocodeAnalyticsResponse,
   ExpenseSummaryResponse,
   ProfitAnalysisResponse,
   CategoryBreakdown,
@@ -452,6 +453,9 @@ export const api = {
 
   getBrandAnalytics: (params: string, options?: FetchOptions) =>
     fetchApi<BrandAnalyticsResponse>('/brands/analytics', params, options),
+
+  getPromocodeAnalytics: (params: string, options?: FetchOptions) =>
+    fetchApi<PromocodeAnalyticsResponse>('/promocodes/analytics', params, options),
 
   // Expenses
   getExpenseTypes: (options?: FetchOptions) =>

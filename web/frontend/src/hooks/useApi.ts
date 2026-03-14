@@ -18,6 +18,7 @@ import type {
   CohortLTVResponse,
   AtRiskResponse,
   BrandAnalyticsResponse,
+  PromocodeAnalyticsResponse,
   ExpenseSummaryResponse,
   ProfitAnalysisResponse,
   Category,
@@ -86,6 +87,7 @@ export const queryKeys = {
   atRiskCustomers: (daysThreshold: number, monthsBack: number, salesType: string) =>
     ['atRiskCustomers', daysThreshold, monthsBack, salesType] as const,
   brandAnalytics: (params: string) => ['brandAnalytics', params] as const,
+  promocodeAnalytics: (params: string) => ['promocodeAnalytics', params] as const,
   expenseSummary: (params: string) => ['expenseSummary', params] as const,
   profitAnalysis: (params: string) => ['profitAnalysis', params] as const,
   categories: () => ['categories'] as const,
@@ -342,6 +344,16 @@ export function useBrandAnalytics() {
   return useQuery<BrandAnalyticsResponse>({
     queryKey: queryKeys.brandAnalytics(queryParams),
     queryFn: () => api.getBrandAnalytics(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function usePromocodeAnalytics() {
+  const queryParams = useQueryParams()
+
+  return useQuery<PromocodeAnalyticsResponse>({
+    queryKey: queryKeys.promocodeAnalytics(queryParams),
+    queryFn: () => api.getPromocodeAnalytics(queryParams),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

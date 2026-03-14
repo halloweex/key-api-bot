@@ -170,6 +170,38 @@ export interface BrandAnalyticsResponse {
   }
 }
 
+export interface PromocodeAnalyticsResponse {
+  topByRevenue: {
+    labels: string[]
+    data: number[]
+    orders: number[]
+    backgroundColor: string[]
+  }
+  topByOrders: {
+    labels: string[]
+    data: number[]
+    revenue: number[]
+    backgroundColor: string[]
+  }
+  table: Array<{
+    promocode: string
+    orders: number
+    revenue: number
+    uniqueCustomers: number
+    aov: number
+  }>
+  metrics: {
+    totalCodes: number
+    topCode: string
+    topCodeShare: number
+    promoOrders: number
+    promoRevenue: number
+    promoOrderShare: number
+    promoCustomers: number
+    promoAov: number
+  }
+}
+
 export interface ExpenseSummaryResponse {
   byType: {
     labels: string[]

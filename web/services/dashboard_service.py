@@ -220,6 +220,13 @@ async def get_brand_analytics(start_date: str, end_date: str, sales_type: str = 
     return await store.get_brand_analytics(start, end, sales_type=sales_type)
 
 
+async def get_promocode_analytics(start_date: str, end_date: str, sales_type: str = "retail") -> Dict[str, Any]:
+    """Get promocode performance overview."""
+    start, end = _parse_dates(start_date, end_date)
+    store = await get_store()
+    return await store.get_promocode_analytics(start, end, sales_type=sales_type)
+
+
 async def get_subcategory_breakdown(
     start_date: str,
     end_date: str,

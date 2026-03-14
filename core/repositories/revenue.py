@@ -1244,4 +1244,118 @@ class RevenueMixin:
 
             return by_source
 
+    # ─── Promocode Analytics ─────────────────────────────────────────────────
+
+    async def get_promocode_analytics(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "retail",
+    ) -> Dict[str, Any]:
+        """Get promocode performance overview: top codes by revenue, orders, AOV."""
+        async with self.connection() as conn:
+            params = [start_date, end_date]
+            where_clauses = [
+                "s.order_date BETWEEN ? AND ?",
+                "NOT s.is_return",
+                "s.is_active_source",
+                "s.promocode IS NOT NULL",
+                "s.promocode != ''",
+            ]
+
+            if sales_type != "all":
+                where_clauses.append("s.sales_type = ?")
+                params.append(sales_type)
+
+            where_sql = " AND ".join(where_clauses)
+
+            # Per-promocode stats
+            results = conn.execute(f"""
+                SELECT
+                    s.promocode,
+                    COUNT(DISTINCT s.id) as orders,
+                    COALESCE(SUM(s.grand_total), 0) as revenue,
+                    COUNT(DISTINCT s.buyer_id) as unique_customers
+                FROM silver_orders s
+                WHERE {where_sql}
+                GROUP BY s.promocode
+                ORDER BY revenue DESC
+            """, params).fetchall()
+
+            # Total orders (with and without promo) for share calculation
+            total_params = [start_date, end_date]
+            total_where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+            if sales_type != "all":
+                total_where.append("s.sales_type = ?")
+                total_params.append(sales_type)
+            totals = conn.execute(f"""
+                SELECT COUNT(DISTINCT s.id), COALESCE(SUM(s.grand_total), 0)
+                FROM silver_orders s
+                WHERE {" AND ".join(total_where)}
+            """, total_params).fetchone()
+
+            total_all_orders = int(totals[0] or 0)
+            total_all_revenue = float(totals[1] or 0)
+
+            promo_colors = [
+                "#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200",
+                "#EC4899", "#8B5CF6", "#06B6D4", "#14B8A6", "#EF4444",
+            ]
+
+            promo_total_orders = sum(int(row[1]) for row in results)
+            promo_total_revenue = sum(float(row[2]) for row in results)
+            promo_total_customers = sum(int(row[3]) for row in results)
+
+            # Top 10 by revenue
+            top_revenue = results[:10]
+            top_by_revenue = {
+                "labels": [row[0] for row in top_revenue],
+                "data": [round(float(row[2]), 2) for row in top_revenue],
+                "orders": [int(row[1]) for row in top_revenue],
+                "backgroundColor": promo_colors[:len(top_revenue)],
+            }
+
+            # Top 10 by orders
+            sorted_by_orders = sorted(results, key=lambda x: x[1], reverse=True)[:10]
+            top_by_orders = {
+                "labels": [row[0] for row in sorted_by_orders],
+                "data": [int(row[1]) for row in sorted_by_orders],
+                "revenue": [round(float(row[2]), 2) for row in sorted_by_orders],
+                "backgroundColor": promo_colors[:len(sorted_by_orders)],
+            }
+
+            # Table: all codes with full metrics
+            table = []
+            for row in results:
+                orders = int(row[1])
+                revenue = float(row[2])
+                table.append({
+                    "promocode": row[0],
+                    "orders": orders,
+                    "revenue": round(revenue, 2),
+                    "uniqueCustomers": int(row[3]),
+                    "aov": round(revenue / orders, 2) if orders > 0 else 0,
+                })
+
+            top_code = results[0][0] if results else "N/A"
+            top_code_revenue = float(results[0][2]) if results else 0
+            top_code_share = (top_code_revenue / total_all_revenue * 100) if total_all_revenue > 0 else 0
+            promo_order_share = (promo_total_orders / total_all_orders * 100) if total_all_orders > 0 else 0
+
+            return {
+                "topByRevenue": top_by_revenue,
+                "topByOrders": top_by_orders,
+                "table": table,
+                "metrics": {
+                    "totalCodes": len(results),
+                    "topCode": top_code,
+                    "topCodeShare": round(top_code_share, 1),
+                    "promoOrders": promo_total_orders,
+                    "promoRevenue": round(promo_total_revenue, 2),
+                    "promoOrderShare": round(promo_order_share, 1),
+                    "promoCustomers": promo_total_customers,
+                    "promoAov": round(promo_total_revenue / promo_total_orders, 2) if promo_total_orders > 0 else 0,
+                },
+            }
+
     # ─── Expense Methods ─────────────────────────────────────────────────────
