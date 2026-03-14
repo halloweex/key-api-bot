@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.43
+
+- Fix hardcoded 365-day sync in web/main.py — change to 730 days
+
+
 ## 3.0.42
 
 - Extend default sync to 730 days for accurate YoY comparisons
