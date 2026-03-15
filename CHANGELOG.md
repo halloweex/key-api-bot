@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.47
+
+- Fix revenue trend showing wrong data for sales_type=all
+
+
 ## 3.0.46
 
 - Fix ML forecast total using actual + predicted revenue
