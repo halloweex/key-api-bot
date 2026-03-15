@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.46
+
+- Fix ML forecast total using actual + predicted revenue
+
+
 ## 3.0.45
 
 - Fix NameError in get_product_performance — build top_by_revenue dict
