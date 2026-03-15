@@ -674,24 +674,55 @@ class GoalsMixin:
     def _get_ml_forecast_total(
         self, conn, target_year: int, target_month: int, sales_type: str = "retail"
     ) -> float:
-        """Sum ML predictions for a target month using an existing connection.
+        """Estimate full-month revenue using actual data + ML predictions.
 
-        Returns 0 if no predictions are available.
+        For past days (before today): uses actual revenue from gold_daily_revenue.
+        For today and future days: uses ML predictions from revenue_predictions.
+        Returns 0 if no predictions are available for the future portion.
         """
         first_day = date(target_year, target_month, 1)
         last_day = date(target_year, target_month, calendar.monthrange(target_year, target_month)[1])
+        today = datetime.now(DEFAULT_TZ).date()
+
         try:
-            rows = conn.execute(
+            # Get actual revenue for past days of the month
+            actual_revenue = 0.0
+            if first_day < today:
+                actual_end = min(today - timedelta(days=1), last_day)
+                sales_filter = "retail" if sales_type == "retail" else ("b2b" if sales_type == "b2b" else None)
+                if sales_filter:
+                    actual_row = conn.execute(
+                        """SELECT COALESCE(SUM(revenue), 0)
+                           FROM gold_daily_revenue
+                           WHERE date BETWEEN ? AND ?
+                             AND sales_type = ?""",
+                        [first_day.isoformat(), actual_end.isoformat(), sales_filter]
+                    ).fetchone()
+                else:
+                    actual_row = conn.execute(
+                        """SELECT COALESCE(SUM(revenue), 0)
+                           FROM gold_daily_revenue
+                           WHERE date BETWEEN ? AND ?""",
+                        [first_day.isoformat(), actual_end.isoformat()]
+                    ).fetchone()
+                actual_revenue = float(actual_row[0]) if actual_row else 0.0
+
+            # Get predicted revenue for today onwards
+            predict_start = max(first_day, today)
+            predicted_row = conn.execute(
                 """SELECT SUM(predicted_revenue) as total
                    FROM revenue_predictions
                    WHERE sales_type = ?
                      AND prediction_date >= ?
                      AND prediction_date <= ?""",
-                [sales_type, first_day.isoformat(), last_day.isoformat()]
+                [sales_type, predict_start.isoformat(), last_day.isoformat()]
             ).fetchone()
-            if not rows or rows[0] is None:
-                return 0.0
-            return float(rows[0])
+            predicted_revenue = float(predicted_row[0]) if predicted_row and predicted_row[0] else 0.0
+
+            if predicted_revenue == 0.0:
+                return 0.0  # No predictions available
+
+            return actual_revenue + predicted_revenue
         except Exception:
             logger.debug("ML predictions unavailable for %d-%02d", target_year, target_month)
             return 0.0
