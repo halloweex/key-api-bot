@@ -229,9 +229,11 @@ class RevenueMixin:
         """Build a query against gold_daily_revenue for a date range.
 
         Returns (sql, params) tuple that SELECTs day, revenue, order_count.
+        When sales_type='all', aggregates across sales types with GROUP BY.
         """
         params = [start_date, end_date]
         where_clauses = ["date BETWEEN ? AND ?"]
+        needs_group_by = sales_type == "all"
 
         if sales_type != "all":
             where_clauses.append("sales_type = ?")
@@ -243,21 +245,39 @@ class RevenueMixin:
             source_col_map = {1: "instagram", 2: "telegram", 4: "shopify"}
             src = source_col_map.get(source_id)
             if src:
+                if needs_group_by:
+                    sql = f"""
+                        SELECT date AS day, SUM({src}_revenue) AS revenue, SUM({src}_orders) AS order_count
+                        FROM gold_daily_revenue
+                        WHERE {where_sql}
+                        GROUP BY date
+                        ORDER BY date
+                    """
+                else:
+                    sql = f"""
+                        SELECT date AS day, {src}_revenue AS revenue, {src}_orders AS order_count
+                        FROM gold_daily_revenue
+                        WHERE {where_sql}
+                        ORDER BY date
+                    """
+            else:
+                sql = f"SELECT NULL::DATE, 0, 0 WHERE FALSE"
+        else:
+            if needs_group_by:
                 sql = f"""
-                    SELECT date AS day, {src}_revenue AS revenue, {src}_orders AS order_count
+                    SELECT date AS day, SUM(revenue) AS revenue, SUM(orders_count) AS order_count
+                    FROM gold_daily_revenue
+                    WHERE {where_sql}
+                    GROUP BY date
+                    ORDER BY date
+                """
+            else:
+                sql = f"""
+                    SELECT date AS day, revenue, orders_count AS order_count
                     FROM gold_daily_revenue
                     WHERE {where_sql}
                     ORDER BY date
                 """
-            else:
-                sql = f"SELECT NULL::DATE, 0, 0 WHERE FALSE"
-        else:
-            sql = f"""
-                SELECT date AS day, revenue, orders_count AS order_count
-                FROM gold_daily_revenue
-                WHERE {where_sql}
-                ORDER BY date
-            """
         return sql, params
 
     def _build_silver_products_revenue_query(
