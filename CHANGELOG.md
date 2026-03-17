@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.48
+
+- Fix login denied for users not yet in DuckDB
+
+
 ## 3.0.47
 
 - Fix revenue trend showing wrong data for sales_type=all
