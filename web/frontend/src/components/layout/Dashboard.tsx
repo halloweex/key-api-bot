@@ -11,7 +11,6 @@ import {
   LazyCustomerInsightsChart,
   LazyCohortRetentionChart,
   LazyBrandAnalyticsChart,
-  LazyPromocodeAnalyticsChart,
   LazyManualExpensesTable,
 } from '../charts/lazy'
 
@@ -108,11 +107,6 @@ export const Dashboard = memo(function Dashboard() {
       {/* Brand Analytics - Full Width */}
       <ChartSection>
         <LazyBrandAnalyticsChart />
-      </ChartSection>
-
-      {/* Promocode Analytics - Full Width */}
-      <ChartSection>
-        <LazyPromocodeAnalyticsChart />
       </ChartSection>
 
       {/* Manual Expenses Table - Admin Only */}

@@ -1,6 +1,8 @@
-import { memo } from 'react'
+import { memo, Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ROICalculator } from '../ui/ROICalculator'
+import { SkeletonChart } from '../ui'
+import { LazyPromocodeAnalyticsChart } from '../charts/lazy'
 
 export default memo(function MarketingPage() {
   const { t } = useTranslation()
@@ -10,6 +12,12 @@ export default memo(function MarketingPage() {
       <h1 className="text-xl sm:text-2xl font-bold text-slate-800">
         {t('nav.marketing')}
       </h1>
+
+      <section>
+        <Suspense fallback={<SkeletonChart />}>
+          <LazyPromocodeAnalyticsChart />
+        </Suspense>
+      </section>
 
       <section>
         <ROICalculator />
