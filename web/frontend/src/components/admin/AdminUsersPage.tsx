@@ -265,14 +265,14 @@ export function AdminUsersPage() {
               No users found.
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
               <table className="w-full">
-                <thead>
+                <thead className="sticky top-0 z-10 bg-white">
                   <tr className="border-b border-slate-200 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                    <th className="py-3 px-4">User</th>
-                    <th className="py-3 px-4">Role</th>
-                    <th className="py-3 px-4">Status</th>
-                    <th className="py-3 px-4">Last Activity</th>
+                    <th className="py-3 px-4 bg-white">User</th>
+                    <th className="py-3 px-4 bg-white">Role</th>
+                    <th className="py-3 px-4 bg-white">Status</th>
+                    <th className="py-3 px-4 bg-white">Last Activity</th>
                   </tr>
                 </thead>
                 <tbody>
