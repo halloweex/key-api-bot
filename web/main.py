@@ -153,6 +153,12 @@ async def startup_event():
         logger.error(f"DuckDB initialization failed: {e}", exc_info=True)
         raise  # Fail fast - DuckDB is required
 
+    # Migrate users from SQLite to DuckDB (one-time, idempotent)
+    try:
+        await _migrate_sqlite_users_to_duckdb(store)
+    except Exception as e:
+        logger.warning(f"User migration from SQLite skipped: {e}")
+
     # Start background job scheduler (replaces old asyncio background sync)
     try:
         await start_scheduler()
@@ -188,6 +194,40 @@ async def startup_event():
         logger.warning(f"Redis cache initialization failed: {e}")
 
     logger.info("Dashboard ready - all queries use DuckDB")
+
+
+async def _migrate_sqlite_users_to_duckdb(store):
+    """Migrate users from SQLite authorized_users to DuckDB users table (idempotent)."""
+    import sqlite3
+    db_path = "data/bot.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT user_id, username, first_name, last_name, status, requested_at, "
+            "reviewed_at, reviewed_by, last_activity, denial_count FROM authorized_users"
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return  # SQLite not available or table doesn't exist
+
+    migrated = 0
+    for row in rows:
+        user_id, username, first_name, last_name, status, requested_at, \
+            reviewed_at, reviewed_by, last_activity, denial_count = row
+        existing = await store.get_user(user_id)
+        if not existing:
+            await store.create_user(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                status=status,
+                role="admin" if status == "approved" else "viewer",
+            )
+            migrated += 1
+
+    if migrated:
+        logger.info(f"Migrated {migrated} users from SQLite to DuckDB")
 
 
 async def _train_prediction_model():
