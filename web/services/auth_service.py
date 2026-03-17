@@ -298,12 +298,26 @@ async def check_user_access_async(user_id: int, auth_data: Dict[str, Any] = None
                 "user_info": None
             }
 
-        return {
-            "authorized": False,
-            "status": "not_found",
-            "role": "viewer",
-            "user_info": None
-        }
+        # User not in DuckDB — fall back to SQLite (migration period)
+        sqlite_result = check_user_access(user_id)
+        if sqlite_result['authorized']:
+            # Auto-migrate approved user to DuckDB
+            role = sqlite_result.get('role', 'viewer')
+            if auth_data:
+                try:
+                    await store.create_user(
+                        user_id=user_id,
+                        username=auth_data.get('username'),
+                        first_name=auth_data.get('first_name'),
+                        last_name=auth_data.get('last_name'),
+                        photo_url=auth_data.get('photo_url'),
+                        role=role,
+                        status='approved',
+                    )
+                    logger.info(f"Auto-migrated user {user_id} from SQLite to DuckDB")
+                except Exception:
+                    pass  # Non-critical, they still get access
+        return sqlite_result
 
     except Exception as e:
         logger.warning(f"Error checking user access: {e}")
