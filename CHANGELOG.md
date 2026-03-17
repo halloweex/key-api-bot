@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.49
+
+- Migrate SQLite users to DuckDB on startup
+
+
 ## 3.0.48
 
 - Fix login denied for users not yet in DuckDB
