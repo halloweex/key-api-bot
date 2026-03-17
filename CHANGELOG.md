@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.50
+
+- Make User Management table header sticky
+
+
 ## 3.0.49
 
 - Migrate SQLite users to DuckDB on startup
