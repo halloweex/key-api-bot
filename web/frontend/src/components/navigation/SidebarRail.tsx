@@ -192,12 +192,12 @@ export const SidebarRail = memo(function SidebarRail() {
         className={`absolute top-14 left-0 right-0 hidden sm:flex flex-col items-center gap-1 pt-2 px-1
           ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
       >
-        <CollapsedNavIcon href="/v2" icon={<BarChart3 className="w-5 h-5" />} label={t('nav.salesDashboard')} />
-        <CollapsedNavIcon href="/v2/products" icon={<Lightbulb className="w-5 h-5" />} label={t('nav.productIntelligence')} />
-        <CollapsedNavIcon href="/v2/traffic" icon={<Activity className="w-5 h-5" />} label={t('nav.trafficAnalytics')} />
-        <CollapsedNavIcon href="/v2/inventory" icon={<Box className="w-5 h-5" />} label={t('nav.inventory')} />
-        <CollapsedNavIcon href="/v2/reports" icon={<ClipboardList className="w-5 h-5" />} label={t('nav.reports')} />
-        <CollapsedNavIcon href="/v2/marketing" icon={<Rocket className="w-5 h-5" />} label={t('nav.marketing')} />
+        <CollapsedNavIcon href="/" icon={<BarChart3 className="w-5 h-5" />} label={t('nav.salesDashboard')} />
+        <CollapsedNavIcon href="//products" icon={<Lightbulb className="w-5 h-5" />} label={t('nav.productIntelligence')} />
+        <CollapsedNavIcon href="//traffic" icon={<Activity className="w-5 h-5" />} label={t('nav.trafficAnalytics')} />
+        <CollapsedNavIcon href="//inventory" icon={<Box className="w-5 h-5" />} label={t('nav.inventory')} />
+        <CollapsedNavIcon href="//reports" icon={<ClipboardList className="w-5 h-5" />} label={t('nav.reports')} />
+        <CollapsedNavIcon href="//marketing" icon={<Rocket className="w-5 h-5" />} label={t('nav.marketing')} />
       </div>
 
       {/* Expanded content */}
@@ -207,25 +207,25 @@ export const SidebarRail = memo(function SidebarRail() {
       >
         {/* Main navigation */}
         <nav className="space-y-1" aria-label="Dashboard pages">
-          <NavLink href="/v2" icon={<BarChart3 className="w-5 h-5" />}>
+          <NavLink href="/" icon={<BarChart3 className="w-5 h-5" />}>
             {t('nav.salesDashboard')}
           </NavLink>
-          <NavLink href="/v2/products" icon={<Lightbulb className="w-5 h-5" />}>
+          <NavLink href="//products" icon={<Lightbulb className="w-5 h-5" />}>
             {t('nav.productIntelligence')}
           </NavLink>
-          <NavLink href="/v2/traffic" icon={<Activity className="w-5 h-5" />}>
+          <NavLink href="//traffic" icon={<Activity className="w-5 h-5" />}>
             {t('nav.trafficAnalytics')}
           </NavLink>
-          <NavLink href="/v2/inventory" icon={<Box className="w-5 h-5" />}>
+          <NavLink href="//inventory" icon={<Box className="w-5 h-5" />}>
             {t('nav.inventory')}
           </NavLink>
-          <NavLink href="/v2/reports" icon={<ClipboardList className="w-5 h-5" />}>
+          <NavLink href="//reports" icon={<ClipboardList className="w-5 h-5" />}>
             {t('nav.reports')}
           </NavLink>
-          <NavLink href="/v2/marketing" icon={<Rocket className="w-5 h-5" />}>
+          <NavLink href="//marketing" icon={<Rocket className="w-5 h-5" />}>
             {t('nav.marketing')}
           </NavLink>
-          <NavLink href="/v2/financial" icon={<CircleDollarSign className="w-5 h-5" />} disabled>
+          <NavLink href="//financial" icon={<CircleDollarSign className="w-5 h-5" />} disabled>
             {t('nav.financial')}
           </NavLink>
         </nav>
@@ -237,10 +237,10 @@ export const SidebarRail = memo(function SidebarRail() {
               {t('nav.admin')}
             </p>
             <nav className="space-y-1" aria-label="Admin pages">
-              <NavLink href="/v2/admin/users" icon={<Users className="w-5 h-5" />}>
+              <NavLink href="//admin/users" icon={<Users className="w-5 h-5" />}>
                 {t('nav.manageUsers')}
               </NavLink>
-              <NavLink href="/v2/admin/permissions" icon={<ShieldCheck className="w-5 h-5" />}>
+              <NavLink href="//admin/permissions" icon={<ShieldCheck className="w-5 h-5" />}>
                 {t('nav.permissions')}
               </NavLink>
             </nav>

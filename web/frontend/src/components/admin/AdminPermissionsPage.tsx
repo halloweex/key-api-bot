@@ -260,14 +260,14 @@ export function AdminPermissionsPage() {
         </div>
         <div className="flex gap-3">
           <a
-            href="/v2/admin/users"
+            href="/admin/users"
             className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
           >
             <Users className="w-4 h-4" />
             Users
           </a>
           <a
-            href="/v2"
+            href="/"
             className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />

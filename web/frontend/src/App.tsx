@@ -125,7 +125,7 @@ const AdminGuard = memo(function AdminGuard({ children }: { children: ReactNode 
   }
 
   if (!isAdmin) {
-    navigate('/v2')
+    navigate('/')
     return null
   }
 
