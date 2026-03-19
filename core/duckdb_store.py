@@ -2052,7 +2052,8 @@ class DuckDBStore(
             return 0
 
         # Create DataFrame for orders (products use executemany for simplicity)
-        orders_df = pd.DataFrame(order_rows)
+        # Deduplicate by id - API can return same order twice in paginated responses
+        orders_df = pd.DataFrame(order_rows).drop_duplicates(subset=["id"], keep="last")
 
         # Convert datetime columns to proper pandas datetime type for DuckDB
         for col in ["ordered_at", "created_at", "updated_at"]:
