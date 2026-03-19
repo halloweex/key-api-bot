@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.55
+
+- Fix DuckDB upsert: use temp table instead of registered DataFrame view
+
+
 ## 3.0.54
 
 - Add INSERT OR IGNORE as safety net for duplicate order inserts
