@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.53
+
+- Fix duplicate key crash in upsert_orders during startup sync
+
+
 ## 3.0.52
 
 - Remove /v2 prefix from all navigation links
