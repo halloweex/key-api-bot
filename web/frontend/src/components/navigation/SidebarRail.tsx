@@ -193,11 +193,11 @@ export const SidebarRail = memo(function SidebarRail() {
           ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
       >
         <CollapsedNavIcon href="/" icon={<BarChart3 className="w-5 h-5" />} label={t('nav.salesDashboard')} />
-        <CollapsedNavIcon href="//products" icon={<Lightbulb className="w-5 h-5" />} label={t('nav.productIntelligence')} />
-        <CollapsedNavIcon href="//traffic" icon={<Activity className="w-5 h-5" />} label={t('nav.trafficAnalytics')} />
-        <CollapsedNavIcon href="//inventory" icon={<Box className="w-5 h-5" />} label={t('nav.inventory')} />
-        <CollapsedNavIcon href="//reports" icon={<ClipboardList className="w-5 h-5" />} label={t('nav.reports')} />
-        <CollapsedNavIcon href="//marketing" icon={<Rocket className="w-5 h-5" />} label={t('nav.marketing')} />
+        <CollapsedNavIcon href="/products" icon={<Lightbulb className="w-5 h-5" />} label={t('nav.productIntelligence')} />
+        <CollapsedNavIcon href="/traffic" icon={<Activity className="w-5 h-5" />} label={t('nav.trafficAnalytics')} />
+        <CollapsedNavIcon href="/inventory" icon={<Box className="w-5 h-5" />} label={t('nav.inventory')} />
+        <CollapsedNavIcon href="/reports" icon={<ClipboardList className="w-5 h-5" />} label={t('nav.reports')} />
+        <CollapsedNavIcon href="/marketing" icon={<Rocket className="w-5 h-5" />} label={t('nav.marketing')} />
       </div>
 
       {/* Expanded content */}
@@ -210,22 +210,22 @@ export const SidebarRail = memo(function SidebarRail() {
           <NavLink href="/" icon={<BarChart3 className="w-5 h-5" />}>
             {t('nav.salesDashboard')}
           </NavLink>
-          <NavLink href="//products" icon={<Lightbulb className="w-5 h-5" />}>
+          <NavLink href="/products" icon={<Lightbulb className="w-5 h-5" />}>
             {t('nav.productIntelligence')}
           </NavLink>
-          <NavLink href="//traffic" icon={<Activity className="w-5 h-5" />}>
+          <NavLink href="/traffic" icon={<Activity className="w-5 h-5" />}>
             {t('nav.trafficAnalytics')}
           </NavLink>
-          <NavLink href="//inventory" icon={<Box className="w-5 h-5" />}>
+          <NavLink href="/inventory" icon={<Box className="w-5 h-5" />}>
             {t('nav.inventory')}
           </NavLink>
-          <NavLink href="//reports" icon={<ClipboardList className="w-5 h-5" />}>
+          <NavLink href="/reports" icon={<ClipboardList className="w-5 h-5" />}>
             {t('nav.reports')}
           </NavLink>
-          <NavLink href="//marketing" icon={<Rocket className="w-5 h-5" />}>
+          <NavLink href="/marketing" icon={<Rocket className="w-5 h-5" />}>
             {t('nav.marketing')}
           </NavLink>
-          <NavLink href="//financial" icon={<CircleDollarSign className="w-5 h-5" />} disabled>
+          <NavLink href="/financial" icon={<CircleDollarSign className="w-5 h-5" />} disabled>
             {t('nav.financial')}
           </NavLink>
         </nav>
@@ -237,10 +237,10 @@ export const SidebarRail = memo(function SidebarRail() {
               {t('nav.admin')}
             </p>
             <nav className="space-y-1" aria-label="Admin pages">
-              <NavLink href="//admin/users" icon={<Users className="w-5 h-5" />}>
+              <NavLink href="/admin/users" icon={<Users className="w-5 h-5" />}>
                 {t('nav.manageUsers')}
               </NavLink>
-              <NavLink href="//admin/permissions" icon={<ShieldCheck className="w-5 h-5" />}>
+              <NavLink href="/admin/permissions" icon={<ShieldCheck className="w-5 h-5" />}>
                 {t('nav.permissions')}
               </NavLink>
             </nav>
