@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.56
+
+- Fix double-slash paths in sidebar navigation
+
+
 ## 3.0.55
 
 - Fix DuckDB upsert: use temp table instead of registered DataFrame view
