@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.54
+
+- Add INSERT OR IGNORE as safety net for duplicate order inserts
+
+
 ## 3.0.53
 
 - Fix duplicate key crash in upsert_orders during startup sync
