@@ -2103,8 +2103,9 @@ class DuckDBStore(
                     conn.execute(f"DELETE FROM orders WHERE id IN ({placeholders})", update_ids)
 
                 # 4. Insert all orders from staging (new ones + updated ones that were deleted)
+                # Use OR IGNORE to handle any remaining duplicates (e.g. from DuckDB registered view edge cases)
                 conn.execute("""
-                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at)
+                    INSERT OR IGNORE INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at)
                     SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, now()
                     FROM stg_orders stg
                     WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.id = stg.id)
