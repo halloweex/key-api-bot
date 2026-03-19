@@ -2069,46 +2069,34 @@ class DuckDBStore(
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
-                # Register DataFrame as view
-                conn.register("stg_orders", orders_df)
+                # Materialize DataFrame into temp table (registered views can expose
+                # duplicate rows and cause PK violations despite Python-level dedup)
+                conn.register("_raw_stg", orders_df)
+                conn.execute("""
+                    CREATE OR REPLACE TEMP TABLE stg_orders AS
+                    SELECT * FROM _raw_stg
+                    QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY updated_at DESC NULLS LAST) = 1
+                """)
+                conn.unregister("_raw_stg")
 
                 # 1. Delete existing products using explicit ID list
                 if order_ids:
                     placeholders = ",".join("?" * len(order_ids))
                     conn.execute(f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids)
 
-                # 2. Find orders that need to be updated
-                if force_update:
-                    # Force update: update ALL existing orders (for status refresh)
-                    # KeyCRM doesn't update updated_at when status changes, so we must
-                    # force-update to catch status changes like orders marked as returns
-                    orders_to_update = conn.execute("""
-                        SELECT o.id FROM orders o
-                        JOIN stg_orders stg ON o.id = stg.id
-                    """).fetchall()
-                else:
-                    # Normal update: only update if staging has newer data
-                    orders_to_update = conn.execute("""
-                        SELECT o.id FROM orders o
-                        JOIN stg_orders stg ON o.id = stg.id
-                        WHERE stg.updated_at > o.updated_at
-                           OR o.updated_at IS NULL
-                           OR stg.updated_at IS NULL
-                    """).fetchall()
-                update_ids = [row[0] for row in orders_to_update]
+                # 2. Delete ALL staging orders from main table then re-insert
+                # Simpler than selective update and avoids DuckDB subquery issues
+                staging_ids = conn.execute("SELECT id FROM stg_orders").fetchall()
+                if staging_ids:
+                    ids = [row[0] for row in staging_ids]
+                    placeholders = ",".join("?" * len(ids))
+                    conn.execute(f"DELETE FROM orders WHERE id IN ({placeholders})", ids)
 
-                # 3. Delete orders that will be re-inserted with updated data
-                if update_ids:
-                    placeholders = ",".join("?" * len(update_ids))
-                    conn.execute(f"DELETE FROM orders WHERE id IN ({placeholders})", update_ids)
-
-                # 4. Insert all orders from staging (new ones + updated ones that were deleted)
-                # Use OR IGNORE to handle any remaining duplicates (e.g. from DuckDB registered view edge cases)
+                # 3. Insert all orders from staging
                 conn.execute("""
-                    INSERT OR IGNORE INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at)
+                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at)
                     SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, now()
-                    FROM stg_orders stg
-                    WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.id = stg.id)
+                    FROM stg_orders
                 """)
 
                 # 5. Insert new products in batch (use OR REPLACE to handle ID collisions from schema change)
@@ -2121,7 +2109,7 @@ class DuckDBStore(
                         for p in product_rows
                     ])
 
-                conn.unregister("stg_orders")
+                conn.execute("DROP TABLE IF EXISTS stg_orders")
                 conn.execute("COMMIT")
 
                 count = len(order_rows)
