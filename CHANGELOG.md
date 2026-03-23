@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.60
+
+- Fix offer_stocks: add PK migration, switch to INSERT OR REPLACE
+
+
 ## 3.0.59
 
 - Harden DuckDB: safe ROLLBACK, fix sync gaps, fix customer metrics
