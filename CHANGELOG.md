@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.59
+
+- Harden DuckDB: safe ROLLBACK, fix sync gaps, fix customer metrics
+
+
 ## 3.0.58
 
 - Fix DuckDB write-write conflict: use INSERT OR REPLACE for order upsert
