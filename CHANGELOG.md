@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.58
+
+- Fix DuckDB write-write conflict: use INSERT OR REPLACE for order upsert
+
+
 ## 3.0.57
 
 - Fix Today/Yesterday showing no data: use Kyiv timezone for date calculations
