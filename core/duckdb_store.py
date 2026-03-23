@@ -159,8 +159,9 @@ class DuckDBStore(
         """
         async with self.connection() as conn:
             try:
+                loop = asyncio.get_running_loop()
                 await asyncio.wait_for(
-                    asyncio.to_thread(conn.execute, query, params or []),
+                    loop.run_in_executor(self._executor, conn.execute, query, params or []),
                     timeout=timeout
                 )
             except asyncio.TimeoutError:
@@ -191,7 +192,7 @@ class DuckDBStore(
         async with self.connection() as conn:
             self._total_queries += 1
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
 
                 def _run():
                     return conn.execute(query, params or []).fetchone()
@@ -228,7 +229,7 @@ class DuckDBStore(
         async with self.connection() as conn:
             self._total_queries += 1
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
 
                 def _run():
                     return conn.execute(query, params or []).fetchall()
@@ -265,7 +266,7 @@ class DuckDBStore(
         async with self.connection() as conn:
             self._total_queries += 1
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
 
                 def _run():
                     return conn.execute(query, params or []).fetchdf()
@@ -2084,17 +2085,9 @@ class DuckDBStore(
                     placeholders = ",".join("?" * len(order_ids))
                     conn.execute(f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids)
 
-                # 2. Delete ALL staging orders from main table then re-insert
-                # Simpler than selective update and avoids DuckDB subquery issues
-                staging_ids = conn.execute("SELECT id FROM stg_orders").fetchall()
-                if staging_ids:
-                    ids = [row[0] for row in staging_ids]
-                    placeholders = ",".join("?" * len(ids))
-                    conn.execute(f"DELETE FROM orders WHERE id IN ({placeholders})", ids)
-
-                # 3. Insert all orders from staging
+                # 2. Upsert orders from staging (INSERT OR REPLACE avoids write-write conflicts)
                 conn.execute("""
-                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at)
+                    INSERT OR REPLACE INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at)
                     SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, now()
                     FROM stg_orders
                 """)
@@ -2117,7 +2110,10 @@ class DuckDBStore(
                 return count
 
             except Exception:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass  # Transaction already rolled back by DuckDB
                 raise
 
     async def upsert_products(self, products: List[Dict[str, Any]]) -> int:
