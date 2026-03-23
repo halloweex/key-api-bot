@@ -1104,6 +1104,51 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (order_products BIGINT): {e}")
 
+        # Migration: Recreate offer_stocks with PRIMARY KEY if missing
+        # (CREATE TABLE IF NOT EXISTS doesn't alter existing tables, so old tables
+        # may lack PK constraint. This enables INSERT OR REPLACE instead of DELETE+INSERT.)
+        try:
+            has_pk = False
+            try:
+                result = self._connection.execute("""
+                    SELECT COUNT(*) FROM duckdb_constraints()
+                    WHERE table_name = 'offer_stocks' AND constraint_type = 'PRIMARY KEY'
+                """).fetchone()
+                has_pk = result[0] > 0
+            except Exception:
+                pass
+
+            if not has_pk:
+                logger.info("Migration: Adding PRIMARY KEY to offer_stocks...")
+                self._connection.execute("BEGIN TRANSACTION")
+                try:
+                    self._connection.execute("ALTER TABLE offer_stocks RENAME TO _offer_stocks_old")
+                    self._connection.execute("""
+                        CREATE TABLE offer_stocks (
+                            id INTEGER PRIMARY KEY,
+                            sku VARCHAR,
+                            price DECIMAL(12, 2),
+                            purchased_price DECIMAL(12, 2),
+                            quantity INTEGER DEFAULT 0,
+                            reserve INTEGER DEFAULT 0,
+                            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    self._connection.execute("""
+                        INSERT INTO offer_stocks SELECT * FROM _offer_stocks_old
+                    """)
+                    self._connection.execute("DROP TABLE _offer_stocks_old")
+                    self._connection.execute("COMMIT")
+                    logger.info("Migration: offer_stocks PRIMARY KEY migration complete")
+                except Exception as e:
+                    try:
+                        self._connection.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    logger.error(f"Migration failed (offer_stocks PK), rolling back: {e}")
+        except Exception as e:
+            logger.debug(f"Migration note (offer_stocks PK): {e}")
+
         # Migration: Add last_stock_out_at column to sku_inventory_status
         try:
             self._connection.execute(
