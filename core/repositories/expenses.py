@@ -50,7 +50,10 @@ class ExpensesMixin:
                 return count
 
             except Exception:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
                 raise
 
     async def upsert_expenses(self, order_id: int, expenses: List[Dict[str, Any]]) -> int:
@@ -83,7 +86,10 @@ class ExpensesMixin:
                 return count
 
             except Exception:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
                 raise
 
     async def upsert_expenses_batch(self, orders_with_expenses: List[Dict[str, Any]]) -> int:
@@ -129,7 +135,10 @@ class ExpensesMixin:
                 return len(all_expenses)
 
             except Exception:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
                 raise
 
     async def get_expense_types(self) -> List[Dict[str, Any]]:

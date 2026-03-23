@@ -1524,6 +1524,7 @@ class DuckDBStore(
                             END AS source_name,
                             CASE
                                 WHEN o.buyer_id IS NOT NULL
+                                     AND o.status_id NOT IN {return_statuses}
                                      AND {_date_in_kyiv('o.ordered_at')} = fo.first_order_date
                                 THEN TRUE ELSE FALSE
                             END AS is_new_customer,
@@ -1543,7 +1544,10 @@ class DuckDBStore(
                     """)
                     conn.execute("COMMIT")
                 except Exception:
-                    conn.execute("ROLLBACK")
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
                     raise
 
             # ── Determine affected dates for incremental Gold rebuild ──
@@ -1568,6 +1572,36 @@ class DuckDBStore(
                     affected_dates = None  # Fall back to full rebuild
 
             # ── Step 2: Gold daily revenue (lock acquired + released) ──
+            # Single SQL template for both incremental and full rebuild
+            _GOLD_REVENUE_SQL = """
+                INSERT INTO gold_daily_revenue
+                SELECT
+                    order_date AS date,
+                    sales_type,
+                    COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0) AS revenue,
+                    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) AS orders_count,
+                    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND buyer_id IS NOT NULL THEN buyer_id END) AS unique_customers,
+                    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND is_new_customer THEN buyer_id END) AS new_customers,
+                    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END) AS returning_customers,
+                    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 1 THEN grand_total END), 0) AS instagram_revenue,
+                    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 2 THEN grand_total END), 0) AS telegram_revenue,
+                    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 4 THEN grand_total END), 0) AS shopify_revenue,
+                    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 1 THEN id END) AS instagram_orders,
+                    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 2 THEN id END) AS telegram_orders,
+                    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 4 THEN id END) AS shopify_orders,
+                    COUNT(DISTINCT CASE WHEN is_return AND is_active_source THEN id END) AS returns_count,
+                    COALESCE(SUM(CASE WHEN is_return AND is_active_source THEN grand_total END), 0) AS returns_revenue,
+                    CASE
+                        WHEN COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) > 0
+                        THEN COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0)
+                             / COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END)
+                        ELSE 0
+                    END AS avg_order_value
+                FROM silver_orders
+                WHERE {date_filter}
+                GROUP BY order_date, sales_type
+            """
+
             gold_revenue_rows = 0
             async with self.connection() as conn:
                 conn.execute("BEGIN TRANSACTION")
@@ -1576,71 +1610,49 @@ class DuckDBStore(
                         date_params = list(affected_dates)
                         date_placeholders = ",".join("?" * len(date_params))
                         conn.execute(f"DELETE FROM gold_daily_revenue WHERE date IN ({date_placeholders})", date_params)
-                        conn.execute(f"""
-                            INSERT INTO gold_daily_revenue
-                            SELECT
-                                order_date AS date,
-                                sales_type,
-                                COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0) AS revenue,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) AS orders_count,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN buyer_id END) AS unique_customers,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND is_new_customer THEN buyer_id END) AS new_customers,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END) AS returning_customers,
-                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 1 THEN grand_total END), 0) AS instagram_revenue,
-                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 2 THEN grand_total END), 0) AS telegram_revenue,
-                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 4 THEN grand_total END), 0) AS shopify_revenue,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 1 THEN id END) AS instagram_orders,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 2 THEN id END) AS telegram_orders,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 4 THEN id END) AS shopify_orders,
-                                COUNT(DISTINCT CASE WHEN is_return AND is_active_source THEN id END) AS returns_count,
-                                COALESCE(SUM(CASE WHEN is_return AND is_active_source THEN grand_total END), 0) AS returns_revenue,
-                                CASE
-                                    WHEN COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) > 0
-                                    THEN COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0)
-                                         / COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END)
-                                    ELSE 0
-                                END AS avg_order_value
-                            FROM silver_orders
-                            WHERE order_date IN ({date_placeholders})
-                            GROUP BY order_date, sales_type
-                        """, date_params)
+                        conn.execute(_GOLD_REVENUE_SQL.format(date_filter=f"order_date IN ({date_placeholders})"), date_params)
                     else:
                         conn.execute("DELETE FROM gold_daily_revenue")
-                        conn.execute("""
-                            INSERT INTO gold_daily_revenue
-                            SELECT
-                                order_date AS date,
-                                sales_type,
-                                COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0) AS revenue,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) AS orders_count,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN buyer_id END) AS unique_customers,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND is_new_customer THEN buyer_id END) AS new_customers,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END) AS returning_customers,
-                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 1 THEN grand_total END), 0) AS instagram_revenue,
-                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 2 THEN grand_total END), 0) AS telegram_revenue,
-                                COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 4 THEN grand_total END), 0) AS shopify_revenue,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 1 THEN id END) AS instagram_orders,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 2 THEN id END) AS telegram_orders,
-                                COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 4 THEN id END) AS shopify_orders,
-                                COUNT(DISTINCT CASE WHEN is_return AND is_active_source THEN id END) AS returns_count,
-                                COALESCE(SUM(CASE WHEN is_return AND is_active_source THEN grand_total END), 0) AS returns_revenue,
-                                CASE
-                                    WHEN COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) > 0
-                                    THEN COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0)
-                                         / COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END)
-                                    ELSE 0
-                                END AS avg_order_value
-                            FROM silver_orders
-                            WHERE order_date IS NOT NULL
-                            GROUP BY order_date, sales_type
-                        """)
+                        conn.execute(_GOLD_REVENUE_SQL.format(date_filter="order_date IS NOT NULL"))
                     gold_revenue_rows = conn.execute("SELECT COUNT(*) FROM gold_daily_revenue").fetchone()[0]
                     conn.execute("COMMIT")
                 except Exception:
-                    conn.execute("ROLLBACK")
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
                     raise
 
             # ── Step 3: Gold daily products (lock acquired + released) ──
+            _GOLD_PRODUCTS_SQL = """
+                INSERT INTO gold_daily_products
+                SELECT
+                    s.order_date AS date,
+                    s.sales_type,
+                    s.source_id,
+                    op.product_id,
+                    op.name AS product_name,
+                    p.brand,
+                    p.category_id,
+                    c.name AS category_name,
+                    parent_c.name AS parent_category_name,
+                    SUM(op.quantity) AS quantity_sold,
+                    SUM(op.price_sold * op.quantity) AS product_revenue,
+                    COUNT(DISTINCT s.id) AS order_count
+                FROM silver_orders s
+                JOIN order_products op ON s.id = op.order_id
+                LEFT JOIN products p ON op.product_id = p.id
+                LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
+                WHERE NOT s.is_return
+                  AND s.is_active_source
+                  AND {date_filter}
+                GROUP BY
+                    s.order_date, s.sales_type, s.source_id,
+                    op.product_id, op.name, p.brand, p.category_id,
+                    c.name, parent_c.name
+            """
+
             gold_products_rows = 0
             async with self.connection() as conn:
                 conn.execute("BEGIN TRANSACTION")
@@ -1649,68 +1661,17 @@ class DuckDBStore(
                         date_params = list(affected_dates)
                         date_placeholders = ",".join("?" * len(date_params))
                         conn.execute(f"DELETE FROM gold_daily_products WHERE date IN ({date_placeholders})", date_params)
-                        conn.execute(f"""
-                            INSERT INTO gold_daily_products
-                            SELECT
-                                s.order_date AS date,
-                                s.sales_type,
-                                s.source_id,
-                                op.product_id,
-                                op.name AS product_name,
-                                p.brand,
-                                p.category_id,
-                                c.name AS category_name,
-                                parent_c.name AS parent_category_name,
-                                SUM(op.quantity) AS quantity_sold,
-                                SUM(op.price_sold * op.quantity) AS product_revenue,
-                                COUNT(DISTINCT s.id) AS order_count
-                            FROM silver_orders s
-                            JOIN order_products op ON s.id = op.order_id
-                            LEFT JOIN products p ON op.product_id = p.id
-                            LEFT JOIN categories c ON p.category_id = c.id
-                            LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
-                            WHERE NOT s.is_return
-                              AND s.is_active_source
-                              AND s.order_date IN ({date_placeholders})
-                            GROUP BY
-                                s.order_date, s.sales_type, s.source_id,
-                                op.product_id, op.name, p.brand, p.category_id,
-                                c.name, parent_c.name
-                        """, date_params)
+                        conn.execute(_GOLD_PRODUCTS_SQL.format(date_filter=f"s.order_date IN ({date_placeholders})"), date_params)
                     else:
                         conn.execute("DELETE FROM gold_daily_products")
-                        conn.execute("""
-                            INSERT INTO gold_daily_products
-                            SELECT
-                                s.order_date AS date,
-                                s.sales_type,
-                                s.source_id,
-                                op.product_id,
-                                op.name AS product_name,
-                                p.brand,
-                                p.category_id,
-                                c.name AS category_name,
-                                parent_c.name AS parent_category_name,
-                                SUM(op.quantity) AS quantity_sold,
-                                SUM(op.price_sold * op.quantity) AS product_revenue,
-                                COUNT(DISTINCT s.id) AS order_count
-                            FROM silver_orders s
-                            JOIN order_products op ON s.id = op.order_id
-                            LEFT JOIN products p ON op.product_id = p.id
-                            LEFT JOIN categories c ON p.category_id = c.id
-                            LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
-                            WHERE NOT s.is_return
-                              AND s.is_active_source
-                              AND s.order_date IS NOT NULL
-                            GROUP BY
-                                s.order_date, s.sales_type, s.source_id,
-                                op.product_id, op.name, p.brand, p.category_id,
-                                c.name, parent_c.name
-                        """)
+                        conn.execute(_GOLD_PRODUCTS_SQL.format(date_filter="s.order_date IS NOT NULL"))
                     gold_products_rows = conn.execute("SELECT COUNT(*) FROM gold_daily_products").fetchone()[0]
                     conn.execute("COMMIT")
                 except Exception:
-                    conn.execute("ROLLBACK")
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
                     raise
 
             # ── Step 3.5: Gold product pairs (always full rebuild) ──
@@ -2153,7 +2114,10 @@ class DuckDBStore(
                 return count
 
             except Exception:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
                 raise
 
     async def upsert_categories(self, categories: List[Dict[str, Any]]) -> int:
@@ -2181,7 +2145,10 @@ class DuckDBStore(
                 return count
 
             except Exception:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
                 raise
 
     async def upsert_managers(self, managers: List[Dict[str, Any]]) -> int:
@@ -2219,7 +2186,10 @@ class DuckDBStore(
                 return count
 
             except Exception:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
                 raise
 
     async def upsert_buyers(self, buyers: List["Buyer"]) -> int:
@@ -2302,7 +2272,10 @@ class DuckDBStore(
                 return count
 
             except Exception:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
                 raise
 
     async def get_missing_buyer_ids(self, limit: int = 100) -> List[int]:

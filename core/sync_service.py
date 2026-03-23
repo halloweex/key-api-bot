@@ -52,8 +52,8 @@ def _get_max_updated_at(orders: list) -> Optional[datetime]:
                 updated = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
                 if max_updated is None or updated > max_updated:
                     max_updated = updated
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Skipping unparseable updated_at '{updated_str}': {e}")
 
     return max_updated
 
@@ -655,7 +655,12 @@ class SyncService:
                 stats["expenses"] = expense_count
                 # Use max(updated_at) from SOURCE data, not now()
                 max_updated = _get_max_updated_at(orders)
-                await self.store.set_last_sync_time("orders", max_updated)
+                # Guard against checkpoint rollback — never go backward
+                if max_updated and (not last_orders_sync or max_updated >= last_orders_sync):
+                    await self.store.set_last_sync_time("orders", max_updated)
+                else:
+                    # Source returned stale timestamps; advance to sync_to instead
+                    await self.store.set_last_sync_time("orders", sync_to)
                 logger.info(f"Incremental sync: {stats['orders']} orders, {stats['expenses']} expenses, checkpoint: {max_updated}")
 
                 # Emit orders synced event
@@ -664,6 +669,9 @@ class SyncService:
                     "expenses": expense_count,
                     "checkpoint": max_updated.isoformat() if max_updated else None,
                 })
+            else:
+                # No new orders — still advance checkpoint to avoid re-scanning the same window
+                await self.store.set_last_sync_time("orders", sync_to)
 
             # Sync products less frequently (every hour)
             if not last_products_sync or (datetime.now(DEFAULT_TZ) - last_products_sync).total_seconds() > 3600:
@@ -971,7 +979,10 @@ async def force_resync(days_back: int = 730) -> dict:
             conn.execute("DELETE FROM sync_metadata WHERE key LIKE 'last_sync_orders%'")
             conn.execute("COMMIT")
         except Exception:
-            conn.execute("ROLLBACK")
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
             raise
         logger.info("Cleared orders, order_products, expenses tables")
 

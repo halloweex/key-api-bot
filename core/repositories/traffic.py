@@ -273,7 +273,7 @@ class TrafficMixin:
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
-                if affected_dates:
+                if affected_dates and len(affected_dates) > 0:
                     date_params = list(affected_dates)
                     date_placeholders = ",".join("?" * len(date_params))
                     conn.execute(f"DELETE FROM gold_daily_traffic WHERE date IN ({date_placeholders})", date_params)
@@ -294,7 +294,10 @@ class TrafficMixin:
                 row_count = conn.execute("SELECT COUNT(*) FROM gold_daily_traffic").fetchone()[0]
                 conn.execute("COMMIT")
             except Exception:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
                 raise
 
             logger.info(f"Refreshed gold_daily_traffic: {row_count} rows"

@@ -45,7 +45,10 @@ class InventoryMixin:
                 return count
 
             except Exception:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
                 raise
 
     async def upsert_stocks(self, stocks: List[Dict[str, Any]]) -> int:
@@ -130,7 +133,10 @@ class InventoryMixin:
                 return count
 
             except Exception:
-                conn.execute("ROLLBACK")
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
                 raise
 
     async def refresh_sku_inventory_status(self) -> int:
