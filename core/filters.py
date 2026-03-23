@@ -6,6 +6,10 @@ Shared between bot and web services to avoid duplication.
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
+from zoneinfo import ZoneInfo
+
+# DuckDB stores dates in Kyiv timezone, so all period calculations must use it
+_KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 
 @dataclass
@@ -69,7 +73,7 @@ def parse_period(
         >>> parse_period(start_date="2026-01-01", end_date="2026-01-31")
         DateRange(start=date(2026, 1, 1), end=date(2026, 1, 31))
     """
-    today = reference_date or date.today()
+    today = reference_date or datetime.now(_KYIV_TZ).date()
 
     # Normalize period aliases
     if period:

@@ -1,6 +1,9 @@
 """Revenue, summary, returns, sales-by-source, products, brands, categories endpoints."""
 import logging
 from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
+from zoneinfo import ZoneInfo
+
+_KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 from fastapi import APIRouter, Query, Request, HTTPException
 from typing import Optional, List
@@ -102,7 +105,7 @@ async def get_revenue_trend(
     )
 
     # Attach forecast data when requested (no filters applied)
-    today = _date.today()
+    today = _datetime.now(_KYIV_TZ).date()
     has_future = end > today.isoformat()
     is_current_period = period in ("month", "week")
     allow_forecast = is_current_period or has_future
