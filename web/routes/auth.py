@@ -9,7 +9,7 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 from core.config import config
-from core.permissions import get_permissions_for_role, is_hardcoded_admin
+from core.permissions import is_hardcoded_admin
 from web.services.auth_service import (
     verify_telegram_auth,
     verify_webapp_auth,
@@ -203,11 +203,12 @@ async def logout(response: Response):
     return response
 
 
-def get_current_user(request: Request) -> dict | None:
+async def get_current_user(request: Request) -> dict | None:
     """
     Get current user from session cookie.
 
     Returns user data dict or None if not authenticated.
+    Re-reads role from DuckDB on every request so admin changes take effect immediately.
     """
     session = request.cookies.get(SESSION_COOKIE)
     if not session:
@@ -220,7 +221,26 @@ def get_current_user(request: Request) -> dict | None:
         if not user_id:
             return None
 
-        # Verify user is still authorized
+        # Hardcoded admins always authorized
+        if is_hardcoded_admin(user_id):
+            session_data['role'] = 'admin'
+            return session_data
+
+        # Verify user is still authorized via DuckDB (primary)
+        try:
+            from core.duckdb_store import get_store
+            store = await get_store()
+            user = await store.get_user(user_id)
+            if user:
+                if user.get('status') != 'approved':
+                    return None
+                # Always use fresh role from DB, not stale session cookie
+                session_data['role'] = user.get('role', 'viewer')
+                return session_data
+        except Exception as e:
+            logger.warning(f"DuckDB user check failed, falling back to SQLite: {e}")
+
+        # Fallback to SQLite during migration
         access = check_user_access(user_id)
         if not access['authorized']:
             return None
@@ -231,13 +251,13 @@ def get_current_user(request: Request) -> dict | None:
         return None
 
 
-def require_auth(request: Request) -> RedirectResponse | None:
+async def require_auth(request: Request) -> RedirectResponse | None:
     """
     Check if user is authenticated.
 
     Returns RedirectResponse to login if not authenticated, None if OK.
     """
-    user = get_current_user(request)
+    user = await get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
     return None
@@ -249,14 +269,14 @@ async def require_admin(request: Request) -> dict:
 
     Returns user data if authenticated and admin, raises HTTPException otherwise.
     """
-    user = get_current_user(request)
+    user = await get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
 
     user_id = user.get('user_id')
     role = user.get('role', 'viewer')
 
-    # Check role from session or hardcoded admin list
+    # Check role from session (already refreshed from DB by get_current_user)
     if role != 'admin' and not is_hardcoded_admin(user_id):
         raise HTTPException(status_code=403, detail="Admin access required")
 
@@ -267,15 +287,17 @@ def require_permission(feature: str, action: str = "view"):
     """
     FastAPI dependency factory for permission-based access control.
 
+    Uses DB-backed permissions (falls back to hardcoded if DB unavailable).
+
     Usage:
         @router.get("/expenses")
         async def get_expenses(user = Depends(require_permission("expenses", "view"))):
             ...
     """
-    from core.permissions import can
+    from core.permissions import get_permissions_for_role_async
 
     async def check_permission(request: Request) -> dict:
-        user = get_current_user(request)
+        user = await get_current_user(request)
         if not user:
             raise HTTPException(status_code=401, detail="Authentication required")
 
@@ -286,7 +308,10 @@ def require_permission(feature: str, action: str = "view"):
         if is_hardcoded_admin(user_id):
             return user
 
-        if not can(role, feature, action):
+        # Check DB-backed permissions (async)
+        permissions = await get_permissions_for_role_async(role)
+        feature_perms = permissions.get(feature, {})
+        if not feature_perms.get(action, False):
             raise HTTPException(
                 status_code=403,
                 detail=f"No {action} access to {feature}"
@@ -307,16 +332,13 @@ async def get_current_user_info(request: Request):
     from core.permissions import get_permissions_for_role_async
     from core.duckdb_store import get_store
 
-    user = get_current_user(request)
+    user = await get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
 
     user_id = user.get('user_id')
+    # Role is already fresh from DB (get_current_user refreshes it)
     role = user.get('role', 'viewer')
-
-    # Ensure hardcoded admins get admin role
-    if is_hardcoded_admin(user_id):
-        role = 'admin'
 
     # Get permissions for role from database (async)
     permissions = await get_permissions_for_role_async(role)
@@ -357,7 +379,7 @@ async def update_preferences(request: Request):
     """Update user preferences (language, etc.)."""
     from core.duckdb_store import get_store
 
-    user = get_current_user(request)
+    user = await get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
 

@@ -28,12 +28,12 @@ async def root_redirect():
 async def dashboard_v1(request: Request):
     """Serve the legacy v1 dashboard page (protected)."""
     # Check authentication
-    redirect = require_auth(request)
+    redirect = await require_auth(request)
     if redirect:
         return redirect
 
     # Get current user for display
-    user = get_current_user(request)
+    user = await get_current_user(request)
 
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
@@ -103,7 +103,7 @@ npm run dev
 async def dashboard_v2(request: Request):
     """Serve the React-based dashboard (v2)."""
     # Check authentication
-    redirect = require_auth(request)
+    redirect = await require_auth(request)
     if redirect:
         return redirect
 
@@ -117,7 +117,7 @@ async def dashboard_v2_spa(request: Request, path: str):
     This ensures deep links and browser refresh work correctly.
     """
     # Check authentication
-    redirect = require_auth(request)
+    redirect = await require_auth(request)
     if redirect:
         return redirect
 

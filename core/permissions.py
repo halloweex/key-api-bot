@@ -42,28 +42,31 @@ class Action(str, Enum):
 
 ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
     Role.ADMIN: {
-        Feature.DASHBOARD: {Action.VIEW},
+        Feature.DASHBOARD: {Action.VIEW, Action.EDIT},
         Feature.EXPENSES: {Action.VIEW, Action.EDIT, Action.DELETE},
         Feature.INVENTORY: {Action.VIEW, Action.EDIT, Action.DELETE},
-        Feature.ANALYTICS: {Action.VIEW},
-        Feature.CUSTOMERS: {Action.VIEW},
+        Feature.ANALYTICS: {Action.VIEW, Action.EDIT},
+        Feature.CUSTOMERS: {Action.VIEW, Action.EDIT},
         Feature.REPORTS: {Action.VIEW, Action.EDIT},
         Feature.USER_MANAGEMENT: {Action.VIEW, Action.EDIT, Action.DELETE},
     },
     Role.EDITOR: {
-        Feature.DASHBOARD: {Action.VIEW},
+        Feature.DASHBOARD: {Action.VIEW, Action.EDIT},
         Feature.EXPENSES: {Action.VIEW, Action.EDIT},
         Feature.INVENTORY: {Action.VIEW, Action.EDIT},
         Feature.ANALYTICS: {Action.VIEW},
         Feature.CUSTOMERS: {Action.VIEW},
         Feature.REPORTS: {Action.VIEW},
+        Feature.USER_MANAGEMENT: set(),
     },
     Role.VIEWER: {
         Feature.DASHBOARD: {Action.VIEW},
+        Feature.EXPENSES: set(),
         Feature.INVENTORY: {Action.VIEW},
         Feature.ANALYTICS: {Action.VIEW},
         Feature.CUSTOMERS: {Action.VIEW},
         Feature.REPORTS: {Action.VIEW},
+        Feature.USER_MANAGEMENT: set(),
     },
 }
 
@@ -173,6 +176,12 @@ async def get_permissions_for_role_async(role: str) -> Dict[str, Dict[str, bool]
                     result[feature.value] = db_perms[feature.value]
                 else:
                     result[feature.value] = {"view": False, "edit": False, "delete": False}
+
+            # Update cache for this role
+            if _permissions_cache is None:
+                _permissions_cache = {}
+            _permissions_cache[role] = result
+
             return result
 
     except Exception as e:

@@ -199,6 +199,8 @@ async def startup_event():
 async def _migrate_sqlite_users_to_duckdb(store):
     """Migrate users from SQLite authorized_users to DuckDB users table (idempotent)."""
     import sqlite3
+    from core.permissions import ADMIN_USER_IDS
+
     db_path = "data/bot.db"
     try:
         conn = sqlite3.connect(db_path)
@@ -216,18 +218,31 @@ async def _migrate_sqlite_users_to_duckdb(store):
             reviewed_at, reviewed_by, last_activity, denial_count = row
         existing = await store.get_user(user_id)
         if not existing:
+            role = "admin" if user_id in ADMIN_USER_IDS else "viewer"
             await store.create_user(
                 user_id=user_id,
                 username=username,
                 first_name=first_name,
                 last_name=last_name,
                 status=status,
-                role="admin" if status == "approved" else "viewer",
+                role=role,
             )
             migrated += 1
 
     if migrated:
         logger.info(f"Migrated {migrated} users from SQLite to DuckDB")
+
+    # Fix users who were incorrectly given admin role by previous migration bug
+    async with store.connection() as conn:
+        admin_ids = tuple(ADMIN_USER_IDS)
+        placeholders = ", ".join("?" for _ in admin_ids)
+        fixed = conn.execute(f"""
+            UPDATE users SET role = 'viewer'
+            WHERE role = 'admin' AND user_id NOT IN ({placeholders})
+            RETURNING user_id
+        """, list(admin_ids)).fetchall()
+        if fixed:
+            logger.info(f"Fixed {len(fixed)} users incorrectly set as admin: {[r[0] for r in fixed]}")
 
 
 async def _train_prediction_model():
