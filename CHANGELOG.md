@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.62
+
+- Add /admin/* SPA route so admin page links work on direct access
+
+
 ## 3.0.61
 
 - Fix user management: enforce viewer default, use DB-backed permissions
