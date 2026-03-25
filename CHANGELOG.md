@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.61
+
+- Fix user management: enforce viewer default, use DB-backed permissions
+
+
 ## 3.0.60
 
 - Fix offer_stocks: add PK migration, switch to INSERT OR REPLACE
