@@ -116,6 +116,20 @@ async def dashboard_v2_spa(request: Request, path: str):
     Handle all /v2/* routes for React SPA client-side routing.
     This ensures deep links and browser refresh work correctly.
     """
+    return await _serve_spa_route(request, path)
+
+
+@router.get("/admin/{path:path}", response_class=HTMLResponse)
+async def admin_spa(request: Request, path: str):
+    """
+    Handle /admin/* routes for React SPA (user management, permissions).
+    React app checks both /admin/* and /v2/admin/* paths.
+    """
+    return await _serve_spa_route(request, path)
+
+
+async def _serve_spa_route(request: Request, path: str) -> HTMLResponse:
+    """Serve React SPA for authenticated users, handling static assets."""
     # Check authentication
     redirect = await require_auth(request)
     if redirect:
