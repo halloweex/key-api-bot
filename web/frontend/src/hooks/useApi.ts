@@ -50,6 +50,12 @@ import type {
   CategoryCombo,
   BrandAffinityPair,
   ProductMomentumResponse,
+  MarginOverviewResponse,
+  MarginByBrandItem,
+  MarginByCategoryItem,
+  MarginTrendItem,
+  MarginBrandCategoryItem,
+  MarginAlertItem,
 } from '../types/api'
 
 export interface TurnoverParams {
@@ -119,6 +125,13 @@ export const queryKeys = {
   categoryCombos: (params: string) => ['categoryCombos', params] as const,
   brandAffinity: (params: string) => ['brandAffinity', params] as const,
   productMomentum: (params: string) => ['productMomentum', params] as const,
+  // Margin analysis
+  marginOverview: (params: string) => ['marginOverview', params] as const,
+  marginByBrand: (params: string) => ['marginByBrand', params] as const,
+  marginByCategory: (params: string) => ['marginByCategory', params] as const,
+  marginTrend: (params: string) => ['marginTrend', params] as const,
+  marginBrandCategory: (params: string) => ['marginBrandCategory', params] as const,
+  marginAlerts: (params: string) => ['marginAlerts', params] as const,
 }
 
 // Cache TTL constants (in milliseconds)
@@ -734,6 +747,68 @@ export function useProductMomentum() {
   return useQuery<ProductMomentumResponse>({
     queryKey: queryKeys.productMomentum(queryParams),
     queryFn: () => api.getProductMomentum(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+// ─── Margin Analysis ───────────────────────────────────────────────────────
+
+export function useMarginOverview() {
+  const queryParams = useQueryParams()
+
+  return useQuery<MarginOverviewResponse>({
+    queryKey: queryKeys.marginOverview(queryParams),
+    queryFn: () => api.getMarginOverview(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useMarginByBrand() {
+  const queryParams = useQueryParams()
+
+  return useQuery<MarginByBrandItem[]>({
+    queryKey: queryKeys.marginByBrand(queryParams),
+    queryFn: () => api.getMarginByBrand(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useMarginByCategory() {
+  const queryParams = useQueryParams()
+
+  return useQuery<MarginByCategoryItem[]>({
+    queryKey: queryKeys.marginByCategory(queryParams),
+    queryFn: () => api.getMarginByCategory(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useMarginTrend() {
+  const queryParams = useQueryParams()
+
+  return useQuery<MarginTrendItem[]>({
+    queryKey: queryKeys.marginTrend(queryParams),
+    queryFn: () => api.getMarginTrend(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useMarginBrandCategory() {
+  const queryParams = useQueryParams()
+
+  return useQuery<MarginBrandCategoryItem[]>({
+    queryKey: queryKeys.marginBrandCategory(queryParams),
+    queryFn: () => api.getMarginBrandCategory(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useMarginAlerts() {
+  const queryParams = useQueryParams()
+
+  return useQuery<MarginAlertItem[]>({
+    queryKey: queryKeys.marginAlerts(queryParams),
+    queryFn: () => api.getMarginAlerts(queryParams),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

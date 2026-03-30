@@ -7,7 +7,7 @@ services:
     volumes:
       - meili_data:/meili_data
     environment:
-      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY:-masterkey123}
+      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY:?MEILI_MASTER_KEY must be set in .env}
       - MEILI_NO_ANALYTICS=true
     restart: unless-stopped
     mem_limit: 256m
@@ -32,9 +32,6 @@ services:
       - ./data:/app/data
     mem_limit: 512m
     cpus: 0.5
-    # Enable remote debugging with debugwand (Python 3.14 sys.remote_exec)
-    cap_add:
-      - SYS_PTRACE
     healthcheck:
       test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/data/bot.db') else 1)"]
       interval: 30s
@@ -59,9 +56,6 @@ services:
         condition: service_healthy
     mem_limit: 3g
     cpus: 1.0
-    # Enable remote debugging with debugwand (Python 3.14 sys.remote_exec)
-    cap_add:
-      - SYS_PTRACE
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
       interval: 30s

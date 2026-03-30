@@ -2,7 +2,7 @@ import { memo, useEffect, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import {
-  BarChart3, Lightbulb, Activity, Box, ClipboardList, Rocket,
+  BarChart3, Lightbulb, Activity, Box, ClipboardList, Rocket, Percent,
   CircleDollarSign, Users, ShieldCheck, PanelLeft, User,
 } from 'lucide-react'
 import { useNavStore } from '../../store/navStore'
@@ -198,6 +198,7 @@ export const SidebarRail = memo(function SidebarRail() {
         <CollapsedNavIcon href="/inventory" icon={<Box className="w-5 h-5" />} label={t('nav.inventory')} />
         <CollapsedNavIcon href="/reports" icon={<ClipboardList className="w-5 h-5" />} label={t('nav.reports')} />
         <CollapsedNavIcon href="/marketing" icon={<Rocket className="w-5 h-5" />} label={t('nav.marketing')} />
+        <CollapsedNavIcon href="/margin" icon={<Percent className="w-5 h-5" />} label={t('nav.margin')} />
       </div>
 
       {/* Expanded content */}
@@ -224,6 +225,9 @@ export const SidebarRail = memo(function SidebarRail() {
           </NavLink>
           <NavLink href="/marketing" icon={<Rocket className="w-5 h-5" />}>
             {t('nav.marketing')}
+          </NavLink>
+          <NavLink href="/margin" icon={<Percent className="w-5 h-5" />}>
+            {t('nav.margin')}
           </NavLink>
           <NavLink href="/financial" icon={<CircleDollarSign className="w-5 h-5" />} disabled>
             {t('nav.financial')}

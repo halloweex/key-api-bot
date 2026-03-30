@@ -36,6 +36,7 @@ from core.duckdb_constants import (
 from core.repositories import (
     UsersMixin, TrafficMixin, CustomersMixin, GoalsMixin,
     InventoryMixin, ExpensesMixin, RevenueMixin, ProductsIntelMixin,
+    MarginMixin,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ logger = logging.getLogger(__name__)
 class DuckDBStore(
     UsersMixin, TrafficMixin, CustomersMixin, GoalsMixin,
     InventoryMixin, ExpensesMixin, RevenueMixin, ProductsIntelMixin,
+    MarginMixin,
 ):
     """
     Async-compatible DuckDB store for analytics data.
@@ -75,7 +77,9 @@ class DuckDBStore(
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
                 # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM)
-                self._connection.execute("SET memory_limit='1GB'")
+                self._connection.execute("SET memory_limit='2GB'")
+                # Reduce memory usage for bulk operations
+                self._connection.execute("SET preserve_insertion_order=false")
                 # Force frequent WAL checkpoints to prevent WAL corruption
                 # on aarch64/Python 3.14 (DuckDB 1.4.x bug)
                 self._connection.execute("SET wal_autocheckpoint='2MB'")

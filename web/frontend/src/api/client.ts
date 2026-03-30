@@ -61,6 +61,12 @@ import type {
   BrandAffinityPair,
   ProductMomentumResponse,
   ABCSkuItem,
+  MarginOverviewResponse,
+  MarginByBrandItem,
+  MarginByCategoryItem,
+  MarginTrendItem,
+  MarginBrandCategoryItem,
+  MarginAlertItem,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -685,6 +691,25 @@ export const api = {
 
   getProductMomentum: (params: string, options?: FetchOptions) =>
     fetchApi<ProductMomentumResponse>('/products/intel/momentum', params, options),
+
+  // Margin Analysis
+  getMarginOverview: (params: string, options?: FetchOptions) =>
+    fetchApi<MarginOverviewResponse>('/margin/overview', params, options),
+
+  getMarginByBrand: (params: string, options?: FetchOptions) =>
+    fetchApi<MarginByBrandItem[]>('/margin/by-brand', params, options),
+
+  getMarginByCategory: (params: string, options?: FetchOptions) =>
+    fetchApi<MarginByCategoryItem[]>('/margin/by-category', params, options),
+
+  getMarginTrend: (params: string, options?: FetchOptions) =>
+    fetchApi<MarginTrendItem[]>('/margin/trend', params, options),
+
+  getMarginBrandCategory: (params: string, options?: FetchOptions) =>
+    fetchApi<MarginBrandCategoryItem[]>('/margin/brand-category', params, options),
+
+  getMarginAlerts: (params: string, options?: FetchOptions) =>
+    fetchApi<MarginAlertItem[]>('/margin/alerts', params, options),
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────

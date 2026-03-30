@@ -119,6 +119,12 @@ async def dashboard_v2_spa(request: Request, path: str):
     return await _serve_spa_route(request, path)
 
 
+@router.get("/margin", response_class=HTMLResponse)
+async def margin_spa(request: Request):
+    """Handle /margin route for React SPA."""
+    return await _serve_spa_route(request, "margin")
+
+
 @router.get("/admin/{path:path}", response_class=HTMLResponse)
 async def admin_spa(request: Request, path: str):
     """

@@ -14,6 +14,7 @@ const ProductIntelPage = lazy(() => import('./components/products/ProductIntelPa
 const InventoryPage = lazy(() => import('./components/inventory/InventoryPage'))
 const ReportsPage = lazy(() => import('./components/reports/ReportsPage'))
 const MarketingPage = lazy(() => import('./components/marketing/MarketingPage'))
+const MarginPage = lazy(() => import('./components/margin/MarginPage'))
 
 // ─── Welcome Toast Hook ──────────────────────────────────────────────────────
 
@@ -189,6 +190,17 @@ function App() {
       <AppShell>
         <Suspense fallback={<PageSpinner />}>
           <MarketingPage />
+        </Suspense>
+      </AppShell>
+    )
+  }
+
+  // Margin Analysis
+  if (path === '/v2/margin' || path === '/margin') {
+    return (
+      <AppShell>
+        <Suspense fallback={<PageSpinner />}>
+          <MarginPage />
         </Suspense>
       </AppShell>
     )

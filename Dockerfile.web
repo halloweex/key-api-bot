@@ -47,10 +47,13 @@ COPY web/templates/ ./web/templates/
 # Copy built React app from frontend stage
 COPY --from=frontend-builder /app/web/static-v2 ./web/static-v2
 
-# Create data directory for shared SQLite database
-RUN mkdir -p /app/data
+# Create non-root user and data directory
+RUN groupadd -r appuser && useradd -r -g appuser -d /app appuser \
+    && mkdir -p /app/data && chown -R appuser:appuser /app
 
 VOLUME ["/app/data"]
+
+USER appuser
 
 # Expose port
 EXPOSE 8080

@@ -42,6 +42,7 @@ async def refresh_order_statuses(
     request: Request,
     days: int = Query(30, ge=1, le=90, description="Days to look back for status changes"),
     background: bool = Query(True, description="Run in background (recommended)"),
+    admin: dict = Depends(require_admin),
 ):
     """Refresh order statuses from KeyCRM API."""
     from core.sync_service import get_sync_service

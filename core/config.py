@@ -95,7 +95,7 @@ class MeilisearchConfig:
         default_factory=lambda: os.getenv("MEILI_URL", "http://meilisearch:7700")
     )
     master_key: str = field(
-        default_factory=lambda: os.getenv("MEILI_MASTER_KEY", "masterkey123")
+        default_factory=lambda: os.getenv("MEILI_MASTER_KEY", "")
     )
 
 

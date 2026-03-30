@@ -1024,6 +1024,78 @@ export interface BrandAffinityPair {
   productPairs: number
 }
 
+// ─── Margin Analysis Types ──────────────────────────────────────────────────
+
+export interface MarginOverviewResponse {
+  total_revenue: number
+  costed_revenue: number
+  cogs: number
+  profit: number
+  margin_pct: number
+  coverage_pct: number
+  skus_with_cost: number
+  total_skus: number
+  total_units: number
+}
+
+export interface MarginByBrandItem {
+  brand: string
+  total_units: number
+  total_revenue: number
+  costed_units: number
+  costed_revenue: number
+  cogs: number
+  profit: number
+  margin_pct: number | null
+  coverage_pct: number
+}
+
+export interface MarginByCategoryItem {
+  category: string
+  total_units: number
+  total_revenue: number
+  costed_revenue: number
+  cogs: number
+  profit: number
+  margin_pct: number | null
+  coverage_pct: number
+  rev_share_pct: number
+}
+
+export interface MarginTrendItem {
+  month: string
+  revenue: number
+  cogs: number
+  profit: number
+  margin_pct: number
+  total_revenue: number
+  coverage_pct: number
+}
+
+export interface MarginBrandCategoryItem {
+  brand: string
+  category: string
+  total_units: number
+  total_revenue: number
+  costed_revenue: number
+  cogs: number
+  profit: number
+  margin_pct: number | null
+  coverage_pct: number
+}
+
+export interface MarginAlertItem {
+  brand: string
+  total_units: number
+  total_revenue: number
+  costed_revenue: number
+  cogs: number
+  profit: number
+  margin_pct: number
+  margin_floor: number
+  impact: number
+}
+
 export interface MomentumProduct {
   productId: number | null
   productName: string

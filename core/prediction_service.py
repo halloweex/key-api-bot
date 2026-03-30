@@ -1175,6 +1175,7 @@ class PredictionService:
         self._clip_ratio: float = 1.0
         self._last_trained: Optional[str] = None
         self._training = False
+        self._training_lock = asyncio.Lock()
 
     @property
     def is_ready(self) -> bool:
@@ -1277,10 +1278,18 @@ class PredictionService:
 
     async def train(self, sales_type: str = "retail") -> Dict[str, Any]:
         """Train model on historical daily revenue data from DuckDB."""
-        if self._training:
+        if self._training_lock.locked():
             return {"status": "already_training"}
 
-        self._training = True
+        async with self._training_lock:
+            self._training = True
+            try:
+                return await self._train_impl(sales_type)
+            finally:
+                self._training = False
+
+    async def _train_impl(self, sales_type: str) -> Dict[str, Any]:
+        """Internal training implementation."""
         try:
             from core.duckdb_store import get_store
             store = await get_store()
@@ -1330,8 +1339,6 @@ class PredictionService:
         except Exception as e:
             logger.error(f"Model training failed: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
-        finally:
-            self._training = False
 
     async def predict_month(
         self,

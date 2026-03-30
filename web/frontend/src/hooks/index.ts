@@ -58,6 +58,13 @@ export {
   useTrafficROAS,
   useCreateExpense,
   useDeleteExpense,
+  // Margin Analysis
+  useMarginOverview,
+  useMarginByBrand,
+  useMarginByCategory,
+  useMarginTrend,
+  useMarginBrandCategory,
+  useMarginAlerts,
 } from './useApi'
 
 // Shared chart hooks

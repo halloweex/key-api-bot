@@ -17,6 +17,7 @@ from .traffic import router as traffic_router
 from .users import router as users_router
 from .reports import router as reports_router
 from .products_intel import router as products_intel_router
+from .margin import router as margin_router
 
 router = APIRouter(tags=["api"])
 
@@ -31,3 +32,4 @@ router.include_router(traffic_router)
 router.include_router(users_router)
 router.include_router(reports_router)
 router.include_router(products_intel_router)
+router.include_router(margin_router)

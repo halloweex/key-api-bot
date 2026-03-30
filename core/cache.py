@@ -101,6 +101,7 @@ class RedisCache:
         self._connected = False
         self._stats = CacheStats()
         self._lock = asyncio.Lock()
+        self._key_locks: dict[str, asyncio.Lock] = {}  # Per-key locks for get_or_set
 
     async def connect(self) -> bool:
         """
@@ -296,6 +297,9 @@ class RedisCache:
         """
         Get from cache, or compute and set if missing.
 
+        Uses per-key locking to prevent thundering herd: concurrent requests
+        for the same key will wait for the first computation to finish.
+
         Args:
             key: Cache key
             factory: Async function to compute value if not cached
@@ -304,21 +308,33 @@ class RedisCache:
         Returns:
             Cached or computed value
         """
-        # Try to get from cache
+        # Fast path: check cache without lock
         value = await self.get(key)
         if value is not None:
             return value
 
-        # Compute value
-        if inspect.iscoroutinefunction(factory):
-            value = await factory()
-        else:
-            value = factory()
+        # Get or create a per-key lock to serialize computation
+        async with self._lock:
+            if key not in self._key_locks:
+                self._key_locks[key] = asyncio.Lock()
+            key_lock = self._key_locks[key]
 
-        # Cache it
-        await self.set(key, value, ttl)
+        async with key_lock:
+            # Re-check cache (another coroutine may have populated it)
+            value = await self.get(key)
+            if value is not None:
+                return value
 
-        return value
+            # Compute value
+            if inspect.iscoroutinefunction(factory):
+                value = await factory()
+            else:
+                value = factory()
+
+            # Cache it
+            await self.set(key, value, ttl)
+
+            return value
 
     def cached(
         self,

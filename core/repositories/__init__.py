@@ -3,6 +3,7 @@ from .customers import CustomersMixin
 from .expenses import ExpensesMixin
 from .goals import GoalsMixin
 from .inventory import InventoryMixin
+from .margin import MarginMixin
 from .products_intel import ProductsIntelMixin
 from .revenue import RevenueMixin
 from .traffic import TrafficMixin
@@ -13,6 +14,7 @@ __all__ = [
     "ExpensesMixin",
     "GoalsMixin",
     "InventoryMixin",
+    "MarginMixin",
     "ProductsIntelMixin",
     "RevenueMixin",
     "TrafficMixin",
