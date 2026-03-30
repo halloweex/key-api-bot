@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.63
+
+- Restrict Margin Analysis page to admin users only
+- Add Margin Analysis page with full frontend and backend
+
+
 ## 3.0.62
 
 - Add /admin/* SPA route so admin page links work on direct access
