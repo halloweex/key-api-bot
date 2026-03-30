@@ -195,14 +195,16 @@ function App() {
     )
   }
 
-  // Margin Analysis
+  // Margin Analysis (admin only)
   if (path === '/v2/margin' || path === '/margin') {
     return (
-      <AppShell>
-        <Suspense fallback={<PageSpinner />}>
-          <MarginPage />
-        </Suspense>
-      </AppShell>
+      <AdminGuard>
+        <AppShell>
+          <Suspense fallback={<PageSpinner />}>
+            <MarginPage />
+          </Suspense>
+        </AppShell>
+      </AdminGuard>
     )
   }
 

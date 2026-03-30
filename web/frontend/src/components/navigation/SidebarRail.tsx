@@ -198,7 +198,6 @@ export const SidebarRail = memo(function SidebarRail() {
         <CollapsedNavIcon href="/inventory" icon={<Box className="w-5 h-5" />} label={t('nav.inventory')} />
         <CollapsedNavIcon href="/reports" icon={<ClipboardList className="w-5 h-5" />} label={t('nav.reports')} />
         <CollapsedNavIcon href="/marketing" icon={<Rocket className="w-5 h-5" />} label={t('nav.marketing')} />
-        <CollapsedNavIcon href="/margin" icon={<Percent className="w-5 h-5" />} label={t('nav.margin')} />
       </div>
 
       {/* Expanded content */}
@@ -226,9 +225,6 @@ export const SidebarRail = memo(function SidebarRail() {
           <NavLink href="/marketing" icon={<Rocket className="w-5 h-5" />}>
             {t('nav.marketing')}
           </NavLink>
-          <NavLink href="/margin" icon={<Percent className="w-5 h-5" />}>
-            {t('nav.margin')}
-          </NavLink>
           <NavLink href="/financial" icon={<CircleDollarSign className="w-5 h-5" />} disabled>
             {t('nav.financial')}
           </NavLink>
@@ -246,6 +242,9 @@ export const SidebarRail = memo(function SidebarRail() {
               </NavLink>
               <NavLink href="/admin/permissions" icon={<ShieldCheck className="w-5 h-5" />}>
                 {t('nav.permissions')}
+              </NavLink>
+              <NavLink href="/margin" icon={<Percent className="w-5 h-5" />}>
+                {t('nav.margin')}
               </NavLink>
             </nav>
           </div>
