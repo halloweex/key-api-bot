@@ -77,7 +77,7 @@ class DuckDBStore(
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
                 # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM)
-                self._connection.execute("SET memory_limit='2GB'")
+                self._connection.execute("SET memory_limit='2.5GB'")
                 # Reduce memory usage for bulk operations
                 self._connection.execute("SET preserve_insertion_order=false")
                 # Force frequent WAL checkpoints to prevent WAL corruption
@@ -1546,58 +1546,131 @@ class DuckDBStore(
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
 
         try:
-            # ── Step 1: Silver rebuild (always full — is_new_customer depends on global min) ──
-            async with self.connection() as conn:
-                conn.execute("BEGIN TRANSACTION")
-                try:
-                    conn.execute("DELETE FROM silver_orders")
-                    conn.execute(f"""
-                        INSERT INTO silver_orders
-                        SELECT
-                            o.id,
-                            o.source_id,
-                            o.status_id,
-                            o.grand_total,
-                            o.ordered_at,
-                            o.buyer_id,
-                            o.manager_id,
-                            {_date_in_kyiv('o.ordered_at')} AS order_date,
-                            o.status_id IN {return_statuses} AS is_return,
-                            CASE {retail_filter} END AS sales_type,
-                            o.source_id IN (1, 2, 4) AS is_active_source,
-                            CASE o.source_id
-                                WHEN 1 THEN 'Instagram'
-                                WHEN 2 THEN 'Telegram'
-                                WHEN 4 THEN 'Shopify'
-                                ELSE 'Other'
-                            END AS source_name,
-                            CASE
-                                WHEN o.buyer_id IS NOT NULL
-                                     AND o.status_id NOT IN {return_statuses}
-                                     AND {_date_in_kyiv('o.ordered_at')} = fo.first_order_date
-                                THEN TRUE ELSE FALSE
-                            END AS is_new_customer,
-                            fo.first_order_date AS buyer_first_order_date,
-                            o.promocode
-                        FROM orders o
-                        LEFT JOIN (
-                            SELECT
-                                buyer_id,
-                                MIN({_date_in_kyiv('ordered_at')}) AS first_order_date
-                            FROM orders
-                            WHERE buyer_id IS NOT NULL
-                              AND source_id IN (1, 2, 4)
-                              AND status_id NOT IN {return_statuses}
-                            GROUP BY buyer_id
-                        ) fo ON o.buyer_id = fo.buyer_id
-                    """)
-                    conn.execute("COMMIT")
-                except Exception:
+            # ── Step 1: Silver layer ──
+            if changed_order_ids:
+                # Incremental: only rebuild changed orders + cascade buyer fields.
+                # Much lighter than full DELETE+INSERT of all 36K orders — avoids
+                # OOM during the daily 5 AM status refresh.
+                async with self.connection() as conn:
+                    conn.execute("BEGIN TRANSACTION")
                     try:
-                        conn.execute("ROLLBACK")
+                        placeholders = ",".join("?" * len(changed_order_ids))
+                        ids = list(changed_order_ids)
+
+                        # 1a. Remove stale Silver rows for changed orders
+                        conn.execute(
+                            f"DELETE FROM silver_orders WHERE id IN ({placeholders})", ids
+                        )
+
+                        # 1b. Re-insert with fresh computed columns
+                        conn.execute(f"""
+                            INSERT INTO silver_orders
+                            SELECT
+                                o.id, o.source_id, o.status_id, o.grand_total,
+                                o.ordered_at, o.buyer_id, o.manager_id,
+                                {_date_in_kyiv('o.ordered_at')} AS order_date,
+                                o.status_id IN {return_statuses} AS is_return,
+                                CASE {retail_filter} END AS sales_type,
+                                o.source_id IN (1, 2, 4) AS is_active_source,
+                                CASE o.source_id
+                                    WHEN 1 THEN 'Instagram'
+                                    WHEN 2 THEN 'Telegram'
+                                    WHEN 4 THEN 'Shopify'
+                                    ELSE 'Other'
+                                END AS source_name,
+                                FALSE AS is_new_customer,
+                                NULL  AS buyer_first_order_date,
+                                o.promocode
+                            FROM orders o
+                            WHERE o.id IN ({placeholders})
+                        """, ids)
+
+                        # 1c. Recompute buyer_first_order_date for affected buyers
+                        #     (status flip to/from return can shift first non-return order)
+                        conn.execute(f"""
+                            UPDATE silver_orders SET
+                                buyer_first_order_date = fo.first_order_date,
+                                is_new_customer = CASE
+                                    WHEN silver_orders.buyer_id IS NOT NULL
+                                         AND NOT silver_orders.is_return
+                                         AND silver_orders.is_active_source
+                                         AND silver_orders.order_date = fo.first_order_date
+                                    THEN TRUE ELSE FALSE
+                                END
+                            FROM (
+                                SELECT buyer_id, MIN(order_date) AS first_order_date
+                                FROM silver_orders
+                                WHERE buyer_id IS NOT NULL
+                                  AND NOT is_return AND is_active_source
+                                GROUP BY buyer_id
+                            ) fo
+                            WHERE silver_orders.buyer_id = fo.buyer_id
+                              AND silver_orders.buyer_id IN (
+                                  SELECT DISTINCT buyer_id FROM orders
+                                  WHERE id IN ({placeholders}) AND buyer_id IS NOT NULL
+                              )
+                        """, ids)
+
+                        conn.execute("COMMIT")
                     except Exception:
-                        pass
-                    raise
+                        try:
+                            conn.execute("ROLLBACK")
+                        except Exception:
+                            pass
+                        raise
+            else:
+                # Full rebuild (startup, full_sync, manual)
+                async with self.connection() as conn:
+                    conn.execute("BEGIN TRANSACTION")
+                    try:
+                        conn.execute("DELETE FROM silver_orders")
+                        conn.execute(f"""
+                            INSERT INTO silver_orders
+                            SELECT
+                                o.id,
+                                o.source_id,
+                                o.status_id,
+                                o.grand_total,
+                                o.ordered_at,
+                                o.buyer_id,
+                                o.manager_id,
+                                {_date_in_kyiv('o.ordered_at')} AS order_date,
+                                o.status_id IN {return_statuses} AS is_return,
+                                CASE {retail_filter} END AS sales_type,
+                                o.source_id IN (1, 2, 4) AS is_active_source,
+                                CASE o.source_id
+                                    WHEN 1 THEN 'Instagram'
+                                    WHEN 2 THEN 'Telegram'
+                                    WHEN 4 THEN 'Shopify'
+                                    ELSE 'Other'
+                                END AS source_name,
+                                CASE
+                                    WHEN o.buyer_id IS NOT NULL
+                                         AND o.status_id NOT IN {return_statuses}
+                                         AND {_date_in_kyiv('o.ordered_at')} = fo.first_order_date
+                                    THEN TRUE ELSE FALSE
+                                END AS is_new_customer,
+                                fo.first_order_date AS buyer_first_order_date,
+                                o.promocode
+                            FROM orders o
+                            LEFT JOIN (
+                                SELECT
+                                    buyer_id,
+                                    MIN({_date_in_kyiv('ordered_at')}) AS first_order_date
+                                FROM orders
+                                WHERE buyer_id IS NOT NULL
+                                  AND source_id IN (1, 2, 4)
+                                  AND status_id NOT IN {return_statuses}
+                                GROUP BY buyer_id
+                            ) fo ON o.buyer_id = fo.buyer_id
+                        """)
+                        conn.execute("COMMIT")
+                    except Exception:
+                        try:
+                            conn.execute("ROLLBACK")
+                        except Exception:
+                            pass
+                        raise
 
             # ── Determine affected dates for incremental Gold rebuild ──
             affected_dates: set[date] | None = None
@@ -1723,107 +1796,115 @@ class DuckDBStore(
                         pass
                     raise
 
-            # ── Step 3.5: Gold product pairs (always full rebuild) ──
+            # ── Step 3.5: Gold product pairs (full rebuild, skip for status refresh) ──
             # Uses staged temp tables to keep peak memory low (avoids OOM
             # in 1GB containers with 35K+ orders). Each step runs separately
             # so DuckDB can release intermediate memory between statements.
+            # Skipped for status_refresh: status changes rarely affect co-purchase
+            # patterns, and the self-join is the most memory-intensive step.
             gold_pairs_rows = 0
-            async with self.connection() as conn:
-                try:
-                    # Stage 1: Minimal temp table — just IDs for the self-join
-                    conn.execute("DROP TABLE IF EXISTS _tmp_order_items")
-                    conn.execute("""
-                        CREATE TEMP TABLE _tmp_order_items AS
-                        SELECT s.id AS order_id, s.sales_type,
-                               COALESCE(op.product_id, op.id) AS product_id
-                        FROM silver_orders s
-                        JOIN order_products op ON s.id = op.order_id
-                        WHERE NOT s.is_return AND s.is_active_source
-                          AND s.sales_type IN ('retail', 'b2b')
-                    """)
-
-                    # Stage 2: Filter to multi-item orders only
-                    conn.execute("DROP TABLE IF EXISTS _tmp_multi")
-                    conn.execute("""
-                        CREATE TEMP TABLE _tmp_multi AS
-                        SELECT oi.*
-                        FROM _tmp_order_items oi
-                        WHERE oi.order_id IN (
-                            SELECT order_id FROM _tmp_order_items
-                            GROUP BY order_id
-                            HAVING COUNT(DISTINCT product_id) >= 2
-                        )
-                    """)
-
-                    # Stage 3: Self-join for co-occurrence pairs (memory-intensive step)
-                    conn.execute("DROP TABLE IF EXISTS _tmp_pairs")
-                    conn.execute("""
-                        CREATE TEMP TABLE _tmp_pairs AS
-                        SELECT a.sales_type,
-                               a.product_id AS pa_id,
-                               b.product_id AS pb_id,
-                               COUNT(DISTINCT a.order_id) AS co_occurrence
-                        FROM _tmp_multi a
-                        JOIN _tmp_multi b ON a.order_id = b.order_id
-                            AND a.sales_type = b.sales_type AND a.product_id < b.product_id
-                        GROUP BY a.sales_type, a.product_id, b.product_id
-                        HAVING COUNT(DISTINCT a.order_id) >= 3
-                    """)
-
-                    # Stage 4: Final insert with metrics + product names
-                    conn.execute("BEGIN TRANSACTION")
-                    conn.execute("DELETE FROM gold_product_pairs")
-                    conn.execute("""
-                        INSERT INTO gold_product_pairs
-                        SELECT p.sales_type,
-                            p.pa_id,
-                            COALESCE(na.name, opa.name, 'Unknown'),
-                            p.pb_id,
-                            COALESCE(nb.name, opb.name, 'Unknown'),
-                            p.co_occurrence, ca.orders, cb.orders, t.total,
-                            CAST(p.co_occurrence AS DOUBLE) / t.total,
-                            CAST(p.co_occurrence AS DOUBLE) / ca.orders,
-                            CAST(p.co_occurrence AS DOUBLE) / cb.orders,
-                            (CAST(p.co_occurrence AS DOUBLE) * t.total) / (CAST(ca.orders AS DOUBLE) * cb.orders)
-                        FROM _tmp_pairs p
-                        JOIN (
-                            SELECT sales_type, product_id, COUNT(DISTINCT order_id) AS orders
-                            FROM _tmp_order_items GROUP BY sales_type, product_id
-                        ) ca ON p.sales_type = ca.sales_type AND p.pa_id = ca.product_id
-                        JOIN (
-                            SELECT sales_type, product_id, COUNT(DISTINCT order_id) AS orders
-                            FROM _tmp_order_items GROUP BY sales_type, product_id
-                        ) cb ON p.sales_type = cb.sales_type AND p.pb_id = cb.product_id
-                        JOIN (
-                            SELECT sales_type, COUNT(DISTINCT order_id) AS total
-                            FROM _tmp_multi GROUP BY sales_type
-                        ) t ON p.sales_type = t.sales_type
-                        LEFT JOIN products na ON p.pa_id = na.id
-                        LEFT JOIN products nb ON p.pb_id = nb.id
-                        LEFT JOIN (
-                            SELECT COALESCE(product_id, id) AS pid, ANY_VALUE(name) AS name
-                            FROM order_products GROUP BY COALESCE(product_id, id)
-                        ) opa ON p.pa_id = opa.pid
-                        LEFT JOIN (
-                            SELECT COALESCE(product_id, id) AS pid, ANY_VALUE(name) AS name
-                            FROM order_products GROUP BY COALESCE(product_id, id)
-                        ) opb ON p.pb_id = opb.pid
-                    """)
-                    gold_pairs_rows = conn.execute("SELECT COUNT(*) FROM gold_product_pairs").fetchone()[0]
-                    conn.execute("COMMIT")
-                except Exception:
+            if trigger == "status_refresh":
+                # Skip: status changes don't affect co-purchase patterns,
+                # and the self-join is the most memory-intensive step.
+                # Pairs will be refreshed on the next full/incremental sync.
+                pass
+            else:
+                async with self.connection() as conn:
                     try:
-                        conn.execute("ROLLBACK")
+                        # Stage 1: Minimal temp table — just IDs for the self-join
+                        conn.execute("DROP TABLE IF EXISTS _tmp_order_items")
+                        conn.execute("""
+                            CREATE TEMP TABLE _tmp_order_items AS
+                            SELECT s.id AS order_id, s.sales_type,
+                                   COALESCE(op.product_id, op.id) AS product_id
+                            FROM silver_orders s
+                            JOIN order_products op ON s.id = op.order_id
+                            WHERE NOT s.is_return AND s.is_active_source
+                              AND s.sales_type IN ('retail', 'b2b')
+                        """)
+
+                        # Stage 2: Filter to multi-item orders only
+                        conn.execute("DROP TABLE IF EXISTS _tmp_multi")
+                        conn.execute("""
+                            CREATE TEMP TABLE _tmp_multi AS
+                            SELECT oi.*
+                            FROM _tmp_order_items oi
+                            WHERE oi.order_id IN (
+                                SELECT order_id FROM _tmp_order_items
+                                GROUP BY order_id
+                                HAVING COUNT(DISTINCT product_id) >= 2
+                            )
+                        """)
+
+                        # Stage 3: Self-join for co-occurrence pairs (memory-intensive step)
+                        conn.execute("DROP TABLE IF EXISTS _tmp_pairs")
+                        conn.execute("""
+                            CREATE TEMP TABLE _tmp_pairs AS
+                            SELECT a.sales_type,
+                                   a.product_id AS pa_id,
+                                   b.product_id AS pb_id,
+                                   COUNT(DISTINCT a.order_id) AS co_occurrence
+                            FROM _tmp_multi a
+                            JOIN _tmp_multi b ON a.order_id = b.order_id
+                                AND a.sales_type = b.sales_type AND a.product_id < b.product_id
+                            GROUP BY a.sales_type, a.product_id, b.product_id
+                            HAVING COUNT(DISTINCT a.order_id) >= 3
+                        """)
+
+                        # Stage 4: Final insert with metrics + product names
+                        conn.execute("BEGIN TRANSACTION")
+                        conn.execute("DELETE FROM gold_product_pairs")
+                        conn.execute("""
+                            INSERT INTO gold_product_pairs
+                            SELECT p.sales_type,
+                                p.pa_id,
+                                COALESCE(na.name, opa.name, 'Unknown'),
+                                p.pb_id,
+                                COALESCE(nb.name, opb.name, 'Unknown'),
+                                p.co_occurrence, ca.orders, cb.orders, t.total,
+                                CAST(p.co_occurrence AS DOUBLE) / t.total,
+                                CAST(p.co_occurrence AS DOUBLE) / ca.orders,
+                                CAST(p.co_occurrence AS DOUBLE) / cb.orders,
+                                (CAST(p.co_occurrence AS DOUBLE) * t.total) / (CAST(ca.orders AS DOUBLE) * cb.orders)
+                            FROM _tmp_pairs p
+                            JOIN (
+                                SELECT sales_type, product_id, COUNT(DISTINCT order_id) AS orders
+                                FROM _tmp_order_items GROUP BY sales_type, product_id
+                            ) ca ON p.sales_type = ca.sales_type AND p.pa_id = ca.product_id
+                            JOIN (
+                                SELECT sales_type, product_id, COUNT(DISTINCT order_id) AS orders
+                                FROM _tmp_order_items GROUP BY sales_type, product_id
+                            ) cb ON p.sales_type = cb.sales_type AND p.pb_id = cb.product_id
+                            JOIN (
+                                SELECT sales_type, COUNT(DISTINCT order_id) AS total
+                                FROM _tmp_multi GROUP BY sales_type
+                            ) t ON p.sales_type = t.sales_type
+                            LEFT JOIN products na ON p.pa_id = na.id
+                            LEFT JOIN products nb ON p.pb_id = nb.id
+                            LEFT JOIN (
+                                SELECT COALESCE(product_id, id) AS pid, ANY_VALUE(name) AS name
+                                FROM order_products GROUP BY COALESCE(product_id, id)
+                            ) opa ON p.pa_id = opa.pid
+                            LEFT JOIN (
+                                SELECT COALESCE(product_id, id) AS pid, ANY_VALUE(name) AS name
+                                FROM order_products GROUP BY COALESCE(product_id, id)
+                            ) opb ON p.pb_id = opb.pid
+                        """)
+                        gold_pairs_rows = conn.execute("SELECT COUNT(*) FROM gold_product_pairs").fetchone()[0]
+                        conn.execute("COMMIT")
                     except Exception:
-                        pass
-                    raise
-                finally:
-                    # Always clean up temp tables
-                    for t in ("_tmp_pairs", "_tmp_multi", "_tmp_order_items"):
                         try:
-                            conn.execute(f"DROP TABLE IF EXISTS {t}")
+                            conn.execute("ROLLBACK")
                         except Exception:
                             pass
+                        raise
+                    finally:
+                        # Always clean up temp tables
+                        for t in ("_tmp_pairs", "_tmp_multi", "_tmp_order_items"):
+                            try:
+                                conn.execute(f"DROP TABLE IF EXISTS {t}")
+                            except Exception:
+                                pass
 
             # ── Step 4: Validation + audit log ──
             async with self.connection() as conn:

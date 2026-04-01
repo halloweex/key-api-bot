@@ -831,6 +831,8 @@ class SyncService:
             orders = list(orders_by_id.values())
 
             if orders:
+                order_ids = [o["id"] for o in orders if "id" in o]
+
                 # Use force_update=True because KeyCRM doesn't update updated_at on status changes
                 # Without this, orders with changed status but same updated_at won't be updated
                 order_count, expense_count = await self._upsert_orders_with_expenses(
@@ -840,8 +842,12 @@ class SyncService:
                 stats["expenses"] = expense_count
                 logger.info(f"Status refresh: force-updated {order_count} orders, {expense_count} expenses")
 
-                # Refresh warehouse layers (Silver → Gold)
-                await self.store.refresh_warehouse_layers(trigger="status_refresh")
+                # Incremental warehouse refresh — only rebuild Silver for changed
+                # orders instead of DELETE+INSERT all 36K rows (prevents OOM)
+                await self.store.refresh_warehouse_layers(
+                    trigger="status_refresh",
+                    changed_order_ids=order_ids,
+                )
 
         except KeyCRMConnectionError as e:
             logger.warning(f"Status refresh connection error (will retry): {e}")
