@@ -195,16 +195,16 @@ function App() {
     )
   }
 
-  // Margin Analysis (admin only)
+  // Margin Analysis (admin only — guard inside AppShell to keep sidebar)
   if (path === '/v2/margin' || path === '/margin') {
     return (
-      <AdminGuard>
-        <AppShell>
+      <AppShell>
+        <AdminGuard>
           <Suspense fallback={<PageSpinner />}>
             <MarginPage />
           </Suspense>
-        </AppShell>
-      </AdminGuard>
+        </AdminGuard>
+      </AppShell>
     )
   }
 
