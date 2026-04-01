@@ -77,7 +77,7 @@ class DuckDBStore(
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
                 # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM)
-                self._connection.execute("SET memory_limit='2.5GB'")
+                self._connection.execute("SET memory_limit='3GB'")
                 # Reduce memory usage for bulk operations
                 self._connection.execute("SET preserve_insertion_order=false")
                 # Force frequent WAL checkpoints to prevent WAL corruption
