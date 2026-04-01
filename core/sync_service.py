@@ -842,12 +842,60 @@ class SyncService:
                 stats["expenses"] = expense_count
                 logger.info(f"Status refresh: force-updated {order_count} orders, {expense_count} expenses")
 
+                # Log return orders from API for diagnostics
+                api_returns = {
+                    o["id"]: o.get("status_id")
+                    for o in orders
+                    if o.get("status_id") in (19, 21, 22, 23)
+                }
+                if api_returns:
+                    logger.info(
+                        f"Status refresh: {len(api_returns)} return orders from API "
+                        f"(sample: {dict(list(api_returns.items())[:5])})"
+                    )
+
                 # Incremental warehouse refresh — only rebuild Silver for changed
                 # orders instead of DELETE+INSERT all 36K rows (prevents OOM)
                 await self.store.refresh_warehouse_layers(
                     trigger="status_refresh",
                     changed_order_ids=order_ids,
                 )
+
+                # Post-refresh verification: check Silver matches API for return orders
+                if api_returns:
+                    sample_ids = list(api_returns.keys())[:20]
+                    placeholders = ",".join("?" * len(sample_ids))
+                    async with self.store.connection() as conn:
+                        bronze_rows = conn.execute(
+                            f"SELECT id, status_id FROM orders WHERE id IN ({placeholders})",
+                            sample_ids,
+                        ).fetchall()
+                        silver_rows = conn.execute(
+                            f"SELECT id, status_id, is_return FROM silver_orders WHERE id IN ({placeholders})",
+                            sample_ids,
+                        ).fetchall()
+                    bronze_map = {r[0]: r[1] for r in bronze_rows}
+                    silver_map = {r[0]: (r[1], r[2]) for r in silver_rows}
+                    problems = []
+                    for oid, api_status in list(api_returns.items())[:20]:
+                        b_status = bronze_map.get(oid, "MISSING")
+                        s_status, s_return = silver_map.get(oid, ("MISSING", None))
+                        if b_status != api_status or s_status != api_status:
+                            problems.append(
+                                f"#{oid}: API={api_status} Bronze={b_status} Silver={s_status} is_return={s_return}"
+                            )
+                    if problems:
+                        logger.error(
+                            f"STATUS REFRESH VERIFICATION FAILED — {len(problems)} mismatches:\n"
+                            + "\n".join(problems)
+                        )
+                        stats["verification_failed"] = len(problems)
+                        stats["verification_details"] = problems
+                    else:
+                        logger.info(
+                            f"Status refresh verification OK: {len(sample_ids)} return orders "
+                            f"match across API → Bronze → Silver"
+                        )
 
         except KeyCRMConnectionError as e:
             logger.warning(f"Status refresh connection error (will retry): {e}")

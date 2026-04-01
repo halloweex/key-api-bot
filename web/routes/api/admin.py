@@ -306,6 +306,145 @@ async def get_sync_stats(request: Request):
         return {"status": "error", "error": str(e)}
 
 
+@router.get("/debug/stale-returns")
+@limiter.limit("30/minute")
+async def debug_stale_returns(
+    request: Request,
+    days: int = Query(30, ge=1, le=90, description="Days to check"),
+    admin: dict = Depends(require_admin),
+):
+    """
+    Compare Bronze vs Silver for return-status orders and optionally verify against KeyCRM API.
+
+    Returns orders where Bronze or Silver disagree with each other on return status.
+    """
+    store = await get_store()
+
+    async with store.connection() as conn:
+        # Find orders where Bronze has return status but Silver doesn't (or vice versa)
+        rows = conn.execute(f"""
+            SELECT
+                o.id,
+                o.status_id AS bronze_status,
+                o.grand_total,
+                o.source_id,
+                s.status_id AS silver_status,
+                s.is_return AS silver_is_return,
+                s.order_date
+            FROM orders o
+            LEFT JOIN silver_orders s ON o.id = s.id
+            WHERE o.ordered_at >= CURRENT_DATE - INTERVAL '{int(days)} days'
+              AND (
+                  -- Bronze says return but Silver says active
+                  (o.status_id IN (19, 21, 22, 23) AND (s.status_id IS NULL OR s.status_id NOT IN (19, 21, 22, 23)))
+                  OR
+                  -- Silver says return but Bronze says active
+                  (o.status_id NOT IN (19, 21, 22, 23) AND s.status_id IN (19, 21, 22, 23))
+              )
+            ORDER BY o.id DESC
+            LIMIT 50
+        """).fetchall()
+
+        # Also count total returns in Bronze vs Silver
+        bronze_returns = conn.execute(f"""
+            SELECT COUNT(*) FROM orders
+            WHERE status_id IN (19, 21, 22, 23)
+              AND ordered_at >= CURRENT_DATE - INTERVAL '{int(days)} days'
+        """).fetchone()[0]
+        silver_returns = conn.execute(f"""
+            SELECT COUNT(*) FROM silver_orders
+            WHERE is_return = TRUE
+              AND order_date >= CURRENT_DATE - INTERVAL '{int(days)} days'
+        """).fetchone()[0]
+
+    mismatches = [
+        {
+            "order_id": r[0],
+            "bronze_status": r[1],
+            "grand_total": float(r[2]),
+            "source_id": r[3],
+            "silver_status": r[4],
+            "silver_is_return": r[5],
+            "order_date": str(r[6]) if r[6] else None,
+        }
+        for r in rows
+    ]
+
+    return {
+        "days_checked": days,
+        "bronze_return_count": bronze_returns,
+        "silver_return_count": silver_returns,
+        "mismatches": mismatches,
+        "mismatch_count": len(mismatches),
+    }
+
+
+@router.get("/debug/order-status/{order_id}")
+@limiter.limit("60/minute")
+async def debug_order_status(
+    request: Request,
+    order_id: int,
+    fetch_api: bool = Query(False, description="Also fetch current status from KeyCRM API"),
+    admin: dict = Depends(require_admin),
+):
+    """Compare a single order's status across Bronze, Silver, and optionally KeyCRM API."""
+    store = await get_store()
+
+    result = {"order_id": order_id}
+
+    async with store.connection() as conn:
+        bronze = conn.execute(
+            "SELECT id, status_id, source_id, grand_total, ordered_at, updated_at, synced_at "
+            "FROM orders WHERE id = ?", [order_id]
+        ).fetchone()
+        if bronze:
+            result["bronze"] = {
+                "status_id": bronze[1], "source_id": bronze[2],
+                "grand_total": float(bronze[3]),
+                "ordered_at": str(bronze[4]) if bronze[4] else None,
+                "updated_at": str(bronze[5]) if bronze[5] else None,
+                "synced_at": str(bronze[6]) if bronze[6] else None,
+            }
+        else:
+            result["bronze"] = None
+
+        silver = conn.execute(
+            "SELECT id, status_id, is_return, sales_type, order_date "
+            "FROM silver_orders WHERE id = ?", [order_id]
+        ).fetchone()
+        if silver:
+            result["silver"] = {
+                "status_id": silver[1], "is_return": silver[2],
+                "sales_type": silver[3], "order_date": str(silver[4]) if silver[4] else None,
+            }
+        else:
+            result["silver"] = None
+
+    if fetch_api:
+        try:
+            from core.keycrm import get_async_client
+            client = await get_async_client()
+            api_order = await client.get(f"order/{order_id}", params={"include": "manager"})
+            result["api"] = {
+                "status_id": api_order.get("status_id"),
+                "source_id": api_order.get("source_id"),
+                "grand_total": api_order.get("grand_total"),
+                "updated_at": api_order.get("updated_at"),
+            }
+        except Exception as e:
+            result["api"] = {"error": str(e)}
+
+    # Highlight discrepancies
+    if result["bronze"] and result.get("api"):
+        if result["bronze"]["status_id"] != result["api"]["status_id"]:
+            result["discrepancy"] = (
+                f"Bronze status_id={result['bronze']['status_id']} "
+                f"!= API status_id={result['api']['status_id']}"
+            )
+
+    return result
+
+
 @router.get("/events")
 @limiter.limit("60/minute")
 async def get_events(

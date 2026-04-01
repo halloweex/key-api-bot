@@ -2198,6 +2198,38 @@ class DuckDBStore(
 
                 count = len(order_rows)
                 logger.info(f"Upserted {count} orders to DuckDB (DataFrame bulk insert)")
+
+                # Verify return-status orders were actually written (debug stale returns)
+                if force_update:
+                    return_ids_from_api = [
+                        r["id"] for r in order_rows
+                        if r["status_id"] in (19, 21, 22, 23)
+                    ]
+                    if return_ids_from_api:
+                        sample_ids = return_ids_from_api[:10]
+                        placeholders = ",".join("?" * len(sample_ids))
+                        rows = conn.execute(
+                            f"SELECT id, status_id FROM orders WHERE id IN ({placeholders})",
+                            sample_ids,
+                        ).fetchall()
+                        bronze_map = {r[0]: r[1] for r in rows}
+                        mismatches = []
+                        for r in order_rows:
+                            if r["id"] in bronze_map and bronze_map[r["id"]] != r["status_id"]:
+                                mismatches.append(
+                                    f"#{r['id']}: API={r['status_id']} Bronze={bronze_map[r['id']]}"
+                                )
+                        if mismatches:
+                            logger.error(
+                                f"STALE RETURNS BUG: {len(mismatches)} orders have wrong status_id "
+                                f"in Bronze after INSERT OR REPLACE: {mismatches}"
+                            )
+                        else:
+                            logger.info(
+                                f"Status verification OK: {len(return_ids_from_api)} return orders "
+                                f"in API batch, sample of {len(sample_ids)} verified in Bronze"
+                            )
+
                 return count
 
             except Exception:

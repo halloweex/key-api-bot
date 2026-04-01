@@ -54,7 +54,7 @@ services:
     depends_on:
       meilisearch:
         condition: service_healthy
-    mem_limit: 5g
+    mem_limit: 6g
     cpus: 1.0
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
