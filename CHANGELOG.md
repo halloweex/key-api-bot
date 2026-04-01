@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.67
+
+- Bump container mem_limit to 5g — 4g OOM-killed during status refresh
+
+
 ## 3.0.66
 
 - Fix margin page: render AppShell outside AdminGuard so sidebar shows
