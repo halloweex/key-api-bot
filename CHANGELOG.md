@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.64
+
+- Fix status refresh OOM: incremental Silver rebuild + memory bump
+
+
 ## 3.0.63
 
 - Restrict Margin Analysis page to admin users only
