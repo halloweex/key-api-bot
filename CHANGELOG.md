@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.65
+
+- Bump DuckDB memory_limit to 3GB — 2.5GB still OOMs on 60-day status refresh
+
+
 ## 3.0.64
 
 - Fix status refresh OOM: incremental Silver rebuild + memory bump
