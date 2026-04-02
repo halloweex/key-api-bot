@@ -212,7 +212,9 @@ class SyncService:
 
         return list(orders_by_id.values())
 
-    async def _upsert_orders_with_expenses(self, orders: list, force_update: bool = False) -> tuple:
+    async def _upsert_orders_with_expenses(
+        self, orders: list, force_update: bool = False, skip_products: bool = False,
+    ) -> tuple:
         """Upsert orders and their expenses.
 
         Args:
@@ -220,11 +222,15 @@ class SyncService:
             force_update: If True, force update all orders regardless of updated_at.
                          Use for status refresh since KeyCRM doesn't update updated_at
                          when order status changes.
+            skip_products: If True, skip product deletion/insertion to avoid OOM
+                          during status refresh (~2000 orders worth of products).
 
         Returns:
             Tuple of (order_count, expense_count)
         """
-        order_count = await self.store.upsert_orders(orders, force_update=force_update)
+        order_count = await self.store.upsert_orders(
+            orders, force_update=force_update, skip_products=skip_products,
+        )
 
         # Batch upsert all expenses in a single transaction
         orders_with_expenses = [o for o in orders if o.get("expenses")]
@@ -836,7 +842,7 @@ class SyncService:
                 # Use force_update=True because KeyCRM doesn't update updated_at on status changes
                 # Without this, orders with changed status but same updated_at won't be updated
                 order_count, expense_count = await self._upsert_orders_with_expenses(
-                    orders, force_update=True
+                    orders, force_update=True, skip_products=True,
                 )
                 stats["orders"] = order_count
                 stats["expenses"] = expense_count

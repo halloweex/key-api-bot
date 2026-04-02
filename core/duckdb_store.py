@@ -2082,7 +2082,12 @@ class DuckDBStore(
                 VALUES (?, ?, CURRENT_TIMESTAMP)
             """, [f"last_sync_{key}", timestamp.isoformat()])
 
-    async def upsert_orders(self, orders: List[Dict[str, Any]], force_update: bool = False) -> int:
+    async def upsert_orders(
+        self,
+        orders: List[Dict[str, Any]],
+        force_update: bool = False,
+        skip_products: bool = False,
+    ) -> int:
         """
         Insert or update orders from API response (idempotent).
 
@@ -2096,6 +2101,10 @@ class DuckDBStore(
             force_update: If True, update all orders regardless of updated_at timestamp.
                          Use this for status refresh since KeyCRM doesn't update
                          updated_at when status changes.
+            skip_products: If True, skip product deletion/insertion.
+                          Use this for status refresh where only order-level
+                          fields (status_id, etc.) change — avoids OOM on
+                          executemany for ~2000 orders worth of product rows.
 
         Returns:
             Number of orders upserted
@@ -2128,17 +2137,18 @@ class DuckDBStore(
                 "promocode": order.promocode,
             })
 
-            # Build product rows
-            # ID generation: order_id * 1000 + position (supports up to 1000 products/order, order IDs up to ~2M)
-            for i, prod in enumerate(order.products):
-                product_rows.append({
-                    "id": order.id * 1000 + i,
-                    "order_id": order.id,
-                    "product_id": prod.product_id,
-                    "name": prod.name,
-                    "quantity": prod.quantity,
-                    "price_sold": float(prod.price_sold),
-                })
+            # Build product rows (skip for status-only refresh to avoid OOM)
+            if not skip_products:
+                # ID generation: order_id * 1000 + position (supports up to 1000 products/order, order IDs up to ~2M)
+                for i, prod in enumerate(order.products):
+                    product_rows.append({
+                        "id": order.id * 1000 + i,
+                        "order_id": order.id,
+                        "product_id": prod.product_id,
+                        "name": prod.name,
+                        "quantity": prod.quantity,
+                        "price_sold": float(prod.price_sold),
+                    })
 
         if not order_rows:
             return 0
@@ -2172,7 +2182,8 @@ class DuckDBStore(
                 conn.unregister("_raw_stg")
 
                 # 1. Delete existing products using explicit ID list
-                if order_ids:
+                #    (skip for status-only refresh — products unchanged, avoids OOM)
+                if not skip_products and order_ids:
                     placeholders = ",".join("?" * len(order_ids))
                     conn.execute(f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids)
 
@@ -2183,8 +2194,9 @@ class DuckDBStore(
                     FROM stg_orders
                 """)
 
-                # 5. Insert new products in batch (use OR REPLACE to handle ID collisions from schema change)
-                if product_rows:
+                # 3. Insert new products in batch (use OR REPLACE to handle ID collisions)
+                #    (skip for status-only refresh — products unchanged, avoids OOM)
+                if not skip_products and product_rows:
                     conn.executemany("""
                         INSERT OR REPLACE INTO order_products (id, order_id, product_id, name, quantity, price_sold)
                         VALUES (?, ?, ?, ?, ?, ?)
