@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.69
+
+- Fix stale returns: skip product re-insertion during status refresh
+
+
 ## 3.0.68
 
 - Add stale returns diagnostics and bump container mem_limit to 6g
