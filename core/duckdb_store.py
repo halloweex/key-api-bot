@@ -2187,12 +2187,40 @@ class DuckDBStore(
                     placeholders = ",".join("?" * len(order_ids))
                     conn.execute(f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids)
 
-                # 2. Upsert orders from staging (INSERT OR REPLACE avoids write-write conflicts)
-                conn.execute("""
-                    INSERT OR REPLACE INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at)
-                    SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, now()
-                    FROM stg_orders
-                """)
+                # 2. Upsert orders from staging
+                if skip_products:
+                    # Status refresh path: UPDATE existing rows then INSERT new ones.
+                    # INSERT OR REPLACE from temp tables has a known issue in DuckDB
+                    # where some rows silently fail to update. Two-step approach is reliable.
+                    conn.execute("""
+                        UPDATE orders SET
+                            source_id = s.source_id,
+                            status_id = s.status_id,
+                            grand_total = s.grand_total,
+                            ordered_at = s.ordered_at,
+                            created_at = s.created_at,
+                            updated_at = s.updated_at,
+                            buyer_id = s.buyer_id,
+                            manager_id = s.manager_id,
+                            manager_comment = s.manager_comment,
+                            promocode = s.promocode,
+                            synced_at = now()
+                        FROM stg_orders s
+                        WHERE orders.id = s.id
+                    """)
+                    conn.execute("""
+                        INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at)
+                        SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, now()
+                        FROM stg_orders s
+                        WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.id = s.id)
+                    """)
+                else:
+                    # Normal path: INSERT OR REPLACE (works for fresh inserts + small batches)
+                    conn.execute("""
+                        INSERT OR REPLACE INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at)
+                        SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, now()
+                        FROM stg_orders
+                    """)
 
                 # 3. Insert new products in batch (use OR REPLACE to handle ID collisions)
                 #    (skip for status-only refresh — products unchanged, avoids OOM)
