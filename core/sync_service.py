@@ -684,8 +684,10 @@ class SyncService:
                     "checkpoint": max_updated.isoformat() if max_updated else None,
                 })
             else:
-                # No new orders — still advance checkpoint to avoid re-scanning the same window
-                await self.store.set_last_sync_time("orders", sync_to)
+                # No new orders — do NOT advance checkpoint.
+                # The 24h buffer in sync_from already prevents re-scanning old data,
+                # and advancing here risks skipping orders created during the window.
+                logger.debug("No new orders in sync window, checkpoint unchanged")
 
             # Sync products less frequently (every hour)
             if not last_products_sync or (datetime.now(DEFAULT_TZ) - last_products_sync).total_seconds() > 3600:
