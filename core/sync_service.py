@@ -80,7 +80,6 @@ class SyncService:
     def __init__(self, store: DuckDBStore):
         self.store = store
         self._sync_task: Optional[asyncio.Task] = None
-        self._stop_sync = False
         # Track if ordered_between filter is supported
         self._use_ordered_between: Optional[bool] = None
 
@@ -917,51 +916,18 @@ class SyncService:
 
         return stats
 
-    async def start_background_sync(self, interval_seconds: int = 60) -> None:
-        """
-        Start background sync task.
-
-        Args:
-            interval_seconds: Seconds between sync cycles
-        """
-        self._stop_sync = False
-
-        async def sync_loop():
-            logger.info("Background sync started")
-            while not self._stop_sync:
-                try:
-                    await self.sync_today()
-                except KeyCRMConnectionError as e:
-                    logger.debug(f"Background sync connection error (will retry): {e}")
-                except KeyCRMError as e:
-                    logger.warning(f"Background sync error: {e}")
-
-                # Wait for next cycle
-                for _ in range(interval_seconds):
-                    if self._stop_sync:
-                        break
-                    await asyncio.sleep(1)
-
-            logger.info("Background sync stopped")
-
-        self._sync_task = asyncio.create_task(sync_loop())
-
-    def stop_background_sync(self) -> None:
-        """Stop background sync task."""
-        self._stop_sync = True
-        if self._sync_task and not self._sync_task.done():
-            self._sync_task.cancel()
-
-    async def reconcile_with_api(self, days_back: int = 14) -> list[dict]:
+    async def reconcile_with_api(self, days_back: int = 14, auto_resync: bool = True) -> list[dict]:
         """Compare order counts between DuckDB and KeyCRM API for recent days.
 
         Checks each day individually and logs results to reconciliation_log.
+        When auto_resync=True, automatically re-fetches orders for drifted dates.
         Returns list of per-day results with status 'ok' or 'drift'.
         """
         from datetime import date
 
         client = await get_async_client()
         results = []
+        drift_dates = []
         today = date.today()
 
         for offset in range(days_back):
@@ -981,13 +947,43 @@ class SyncService:
                         f"Reconciliation drift on {date_str}: API={api_count} DB={db_count} "
                         f"({entry['discrepancy_pct']}%)"
                     )
+                    drift_dates.append(date_str)
             except Exception as e:
                 logger.error(f"Reconciliation check failed for {date_str}: {e}")
 
+        # Auto-resync drifted dates
+        resync_count = 0
+        if drift_dates and auto_resync:
+            resync_count = await self._resync_dates(client, drift_dates)
+
         ok_count = sum(1 for r in results if r["status"] == "ok")
         drift_count = sum(1 for r in results if r["status"] == "drift")
-        logger.info(f"Reconciliation complete: {ok_count} ok, {drift_count} drift out of {len(results)} days")
+        logger.info(
+            f"Reconciliation complete: {ok_count} ok, {drift_count} drift, "
+            f"{resync_count} orders resynced"
+        )
         return results
+
+    async def _resync_dates(self, client, dates: list[str]) -> int:
+        """Re-fetch and upsert orders for specific dates to fix drift."""
+        total = 0
+        for date_str in dates:
+            start = f"{date_str} 00:00:00"
+            end = f"{date_str} 23:59:59"
+            try:
+                orders = await self._fetch_orders_with_date_filter(
+                    client, start, end, include_updated=False,
+                )
+                if orders:
+                    count, _ = await self._upsert_orders_with_expenses(orders)
+                    total += count
+                    logger.info(f"Resync {date_str}: {count} orders upserted")
+            except Exception as e:
+                logger.error(f"Resync failed for {date_str}: {e}")
+
+        if total > 0:
+            await self.store.mark_warehouse_dirty(None)
+        return total
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

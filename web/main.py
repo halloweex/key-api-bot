@@ -17,7 +17,7 @@ from web.routes import api, pages, auth, chat, batch, websocket
 from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
 from bot.database import init_database
 from core.duckdb_store import get_store, close_store
-from core.sync_service import init_and_sync, get_sync_service
+from core.sync_service import init_and_sync
 from core.config import validate_config, ConfigurationError
 from core.observability import setup_logging, get_logger
 from core.scheduler import start_scheduler, stop_scheduler
@@ -361,10 +361,8 @@ async def shutdown_event():
     except Exception as e:
         logger.warning(f"Error disconnecting Redis: {e}")
 
-    # Stop legacy background sync (if running) and close DuckDB
+    # Close DuckDB
     try:
-        sync_service = await get_sync_service()
-        sync_service.stop_background_sync()
         await close_store()
         logger.info("DuckDB closed")
     except Exception as e:

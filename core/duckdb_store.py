@@ -1837,114 +1837,9 @@ class DuckDBStore(
 
             # ── Step 3.5: Gold product pairs (full rebuild, skip for status refresh) ──
             # Uses staged temp tables to keep peak memory low (avoids OOM
-            # in 1GB containers with 35K+ orders). Each step runs separately
-            # so DuckDB can release intermediate memory between statements.
-            # Skipped for status_refresh: status changes rarely affect co-purchase
-            # patterns, and the self-join is the most memory-intensive step.
+            # gold_product_pairs is never read — API computes pairs on the fly
+            # via CTE in get_frequently_bought_together(). Skip rebuild entirely.
             gold_pairs_rows = 0
-            if trigger != "full_sync":
-                # Skip: the self-join is the most memory-intensive step (~1-2GB peak).
-                # gold_product_pairs is never read — API computes pairs on the fly
-                # via CTE in get_frequently_bought_together(). Only rebuild on
-                # weekly full_sync to keep the table populated as a cache.
-                pass
-            else:
-                async with self.connection() as conn:
-                    try:
-                        # Stage 1: Minimal temp table — just IDs for the self-join
-                        conn.execute("DROP TABLE IF EXISTS _tmp_order_items")
-                        conn.execute("""
-                            CREATE TEMP TABLE _tmp_order_items AS
-                            SELECT s.id AS order_id, s.sales_type,
-                                   COALESCE(op.product_id, op.id) AS product_id
-                            FROM silver_orders s
-                            JOIN order_products op ON s.id = op.order_id
-                            WHERE NOT s.is_return AND s.is_active_source
-                              AND s.sales_type IN ('retail', 'b2b')
-                        """)
-
-                        # Stage 2: Filter to multi-item orders only
-                        conn.execute("DROP TABLE IF EXISTS _tmp_multi")
-                        conn.execute("""
-                            CREATE TEMP TABLE _tmp_multi AS
-                            SELECT oi.*
-                            FROM _tmp_order_items oi
-                            WHERE oi.order_id IN (
-                                SELECT order_id FROM _tmp_order_items
-                                GROUP BY order_id
-                                HAVING COUNT(DISTINCT product_id) >= 2
-                            )
-                        """)
-
-                        # Stage 3: Self-join for co-occurrence pairs (memory-intensive step)
-                        conn.execute("DROP TABLE IF EXISTS _tmp_pairs")
-                        conn.execute("""
-                            CREATE TEMP TABLE _tmp_pairs AS
-                            SELECT a.sales_type,
-                                   a.product_id AS pa_id,
-                                   b.product_id AS pb_id,
-                                   COUNT(DISTINCT a.order_id) AS co_occurrence
-                            FROM _tmp_multi a
-                            JOIN _tmp_multi b ON a.order_id = b.order_id
-                                AND a.sales_type = b.sales_type AND a.product_id < b.product_id
-                            GROUP BY a.sales_type, a.product_id, b.product_id
-                            HAVING COUNT(DISTINCT a.order_id) >= 3
-                        """)
-
-                        # Stage 4: Final insert with metrics + product names
-                        conn.execute("BEGIN TRANSACTION")
-                        conn.execute("DELETE FROM gold_product_pairs")
-                        conn.execute("""
-                            INSERT INTO gold_product_pairs
-                            SELECT p.sales_type,
-                                p.pa_id,
-                                COALESCE(na.name, opa.name, 'Unknown'),
-                                p.pb_id,
-                                COALESCE(nb.name, opb.name, 'Unknown'),
-                                p.co_occurrence, ca.orders, cb.orders, t.total,
-                                CAST(p.co_occurrence AS DOUBLE) / t.total,
-                                CAST(p.co_occurrence AS DOUBLE) / ca.orders,
-                                CAST(p.co_occurrence AS DOUBLE) / cb.orders,
-                                (CAST(p.co_occurrence AS DOUBLE) * t.total) / (CAST(ca.orders AS DOUBLE) * cb.orders)
-                            FROM _tmp_pairs p
-                            JOIN (
-                                SELECT sales_type, product_id, COUNT(DISTINCT order_id) AS orders
-                                FROM _tmp_order_items GROUP BY sales_type, product_id
-                            ) ca ON p.sales_type = ca.sales_type AND p.pa_id = ca.product_id
-                            JOIN (
-                                SELECT sales_type, product_id, COUNT(DISTINCT order_id) AS orders
-                                FROM _tmp_order_items GROUP BY sales_type, product_id
-                            ) cb ON p.sales_type = cb.sales_type AND p.pb_id = cb.product_id
-                            JOIN (
-                                SELECT sales_type, COUNT(DISTINCT order_id) AS total
-                                FROM _tmp_multi GROUP BY sales_type
-                            ) t ON p.sales_type = t.sales_type
-                            LEFT JOIN products na ON p.pa_id = na.id
-                            LEFT JOIN products nb ON p.pb_id = nb.id
-                            LEFT JOIN (
-                                SELECT COALESCE(product_id, id) AS pid, ANY_VALUE(name) AS name
-                                FROM order_products GROUP BY COALESCE(product_id, id)
-                            ) opa ON p.pa_id = opa.pid
-                            LEFT JOIN (
-                                SELECT COALESCE(product_id, id) AS pid, ANY_VALUE(name) AS name
-                                FROM order_products GROUP BY COALESCE(product_id, id)
-                            ) opb ON p.pb_id = opb.pid
-                        """)
-                        gold_pairs_rows = conn.execute("SELECT COUNT(*) FROM gold_product_pairs").fetchone()[0]
-                        conn.execute("COMMIT")
-                    except Exception:
-                        try:
-                            conn.execute("ROLLBACK")
-                        except Exception:
-                            pass
-                        raise
-                    finally:
-                        # Always clean up temp tables
-                        for t in ("_tmp_pairs", "_tmp_multi", "_tmp_order_items"):
-                            try:
-                                conn.execute(f"DROP TABLE IF EXISTS {t}")
-                            except Exception:
-                                pass
 
             # ── Step 4: Validation + audit log ──
             async with self.connection() as conn:
@@ -1975,12 +1870,28 @@ class DuckDBStore(
                 validation_passed = checksum_match and row_count_match and product_checksum_match
 
                 if not validation_passed:
-                    logger.warning(
-                        f"Warehouse validation failed: "
-                        f"rows={bronze_orders}→{silver_rows} (match={row_count_match}), "
-                        f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match}), "
-                        f"product_revenue={bronze_product_revenue:.2f}→{gold_product_revenue:.2f} (match={product_checksum_match})"
-                    )
+                    # Check if last refresh also failed (consecutive failure = don't retry again)
+                    last_status = conn.execute(
+                        "SELECT validation_passed FROM warehouse_refreshes ORDER BY refreshed_at DESC LIMIT 1"
+                    ).fetchone()
+                    is_consecutive_failure = last_status and last_status[0] is False
+
+                    if not is_consecutive_failure:
+                        logger.warning(
+                            f"Warehouse validation failed — scheduling full retry: "
+                            f"rows={bronze_orders}→{silver_rows} (match={row_count_match}), "
+                            f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match}), "
+                            f"product_revenue={bronze_product_revenue:.2f}→{gold_product_revenue:.2f} (match={product_checksum_match})"
+                        )
+                        # Mark dirty for a full retry (next warehouse_refresh cycle picks it up)
+                        await self.mark_warehouse_dirty(None)
+                    else:
+                        logger.error(
+                            f"Warehouse validation failed AGAIN (consecutive): "
+                            f"rows={bronze_orders}→{silver_rows}, "
+                            f"revenue={silver_revenue:.2f}→{gold_revenue:.2f}, "
+                            f"product_revenue={bronze_product_revenue:.2f}→{gold_product_revenue:.2f}"
+                        )
 
                 duration_ms = (time.perf_counter() - start_time) * 1000
 
