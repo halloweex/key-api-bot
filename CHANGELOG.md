@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.75
+
+- Increase DuckDB memory limit to 4GB (checkpoint OOMs at 2GB on 9GB DB)
+
+
 ## 3.0.74
 
 - Fix OOM on startup: remove DEFAULT from ALTER TABLE migration
