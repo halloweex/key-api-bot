@@ -1199,12 +1199,14 @@ class DuckDBStore(
             logger.debug(f"Migration note (promocode): {e}")
 
         # Migration: Add audit columns to orders (first_seen_at, update_count)
+        # No DEFAULT in ALTER — avoids full table rewrite on 9GB+ DB (OOM).
+        # CREATE TABLE schema has defaults for new rows; existing rows get NULL/NULL.
         try:
             self._connection.execute(
-                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP"
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMP WITH TIME ZONE"
             )
             self._connection.execute(
-                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS update_count INTEGER DEFAULT 0"
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS update_count INTEGER"
             )
             logger.debug("Migration: audit columns (first_seen_at, update_count) added/verified on orders")
         except Exception as e:
@@ -2223,7 +2225,7 @@ class DuckDBStore(
                         manager_comment = s.manager_comment,
                         promocode = s.promocode,
                         synced_at = now(),
-                        update_count = orders.update_count + 1
+                        update_count = COALESCE(orders.update_count, 0) + 1
                     FROM stg_orders s
                     WHERE orders.id = s.id
                 """)
