@@ -88,6 +88,13 @@ class BackgroundScheduler:
         scheduler.shutdown()
     """
 
+    # Jobs that consume significant DuckDB/Python memory.
+    # Only one heavy job runs at a time to prevent compounding OOM.
+    _HEAVY_JOBS = frozenset({
+        "incremental_sync", "full_sync_weekly", "order_status_refresh",
+        "revenue_prediction_train", "meilisearch_sync",
+    })
+
     def __init__(self):
         self._scheduler: Optional[AsyncIOScheduler] = None
         self._job_history: Dict[str, List[JobExecution]] = {}
@@ -97,6 +104,8 @@ class BackgroundScheduler:
         # Protects _job_info and _job_history: APScheduler event listeners
         # are called from its internal thread, not the asyncio event loop.
         self._state_lock = threading.Lock()
+        # Serializes memory-heavy jobs to prevent OOM from compounding
+        self._heavy_job_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Start the scheduler and register all jobs."""
@@ -283,33 +292,35 @@ class BackgroundScheduler:
 
     async def _run_incremental_sync(self) -> Dict[str, Any]:
         """Run incremental sync job."""
-        with correlation_context() as corr_id:
-            logger.debug("Starting incremental sync job")
+        async with self._heavy_job_lock:
+            with correlation_context() as corr_id:
+                logger.debug("Starting incremental sync job")
 
-            from core.sync_service import get_sync_service
-            sync_service = await get_sync_service()
-            stats = await sync_service.incremental_sync()
+                from core.sync_service import get_sync_service
+                sync_service = await get_sync_service()
+                stats = await sync_service.incremental_sync()
 
-            logger.debug(
-                "Incremental sync job complete",
-                extra={"stats": stats}
-            )
-            return stats
+                logger.debug(
+                    "Incremental sync job complete",
+                    extra={"stats": stats}
+                )
+                return stats
 
     async def _run_full_sync(self) -> Dict[str, Any]:
         """Run full sync job (90 days)."""
-        with correlation_context() as corr_id:
-            logger.info("Starting weekly full sync job")
+        async with self._heavy_job_lock:
+            with correlation_context() as corr_id:
+                logger.info("Starting weekly full sync job")
 
-            from core.sync_service import get_sync_service
-            sync_service = await get_sync_service()
-            stats = await sync_service.full_sync(days_back=365)
+                from core.sync_service import get_sync_service
+                sync_service = await get_sync_service()
+                stats = await sync_service.full_sync(days_back=365)
 
-            logger.info(
-                "Weekly full sync job complete",
-                extra={"stats": stats}
-            )
-            return stats
+                logger.info(
+                    "Weekly full sync job complete",
+                    extra={"stats": stats}
+                )
+                return stats
 
     async def _run_inventory_snapshot(self) -> Dict[str, Any]:
         """Run inventory snapshot job."""
@@ -356,19 +367,20 @@ class BackgroundScheduler:
 
     async def _run_revenue_prediction(self) -> Dict[str, Any]:
         """Train revenue prediction model and generate forecasts."""
-        with correlation_context() as corr_id:
-            logger.info("Starting revenue prediction training job")
+        async with self._heavy_job_lock:
+            with correlation_context() as corr_id:
+                logger.info("Starting revenue prediction training job")
 
-            from core.prediction_service import get_prediction_service
-            service = get_prediction_service()
+                from core.prediction_service import get_prediction_service
+                service = get_prediction_service()
 
-            result = await service.train(sales_type="retail")
+                result = await service.train(sales_type="retail")
 
-            logger.info(
-                "Revenue prediction job complete",
-                extra={"result": result}
-            )
-            return result
+                logger.info(
+                    "Revenue prediction job complete",
+                    extra={"result": result}
+                )
+                return result
 
     async def _run_seasonality_calc(self) -> Dict[str, Any]:
         """Run seasonality calculation job."""
@@ -408,42 +420,44 @@ class BackgroundScheduler:
         so the incremental sync misses these. This job re-fetches the last 30 days
         of orders to ensure all status changes are captured.
         """
-        with correlation_context() as corr_id:
-            logger.info("Starting order status refresh job")
+        async with self._heavy_job_lock:
+            with correlation_context() as corr_id:
+                logger.info("Starting order status refresh job")
 
-            from core.sync_service import get_sync_service
-            sync_service = await get_sync_service()
-            stats = await sync_service.refresh_order_statuses(days_back=30)
+                from core.sync_service import get_sync_service
+                sync_service = await get_sync_service()
+                stats = await sync_service.refresh_order_statuses(days_back=30)
 
-            logger.info(
-                "Order status refresh job complete",
-                extra={"stats": stats}
-            )
-            return stats
+                logger.info(
+                    "Order status refresh job complete",
+                    extra={"stats": stats}
+                )
+                return stats
 
     async def _run_meilisearch_sync(self) -> Dict[str, Any]:
         """Sync data to Meilisearch for chat search."""
-        with correlation_context() as corr_id:
-            logger.debug("Starting Meilisearch sync job")
+        async with self._heavy_job_lock:
+            with correlation_context() as corr_id:
+                logger.debug("Starting Meilisearch sync job")
 
-            from core.sync_service import get_sync_service
-            from core.meilisearch_client import get_meili_client
+                from core.sync_service import get_sync_service
+                from core.meilisearch_client import get_meili_client
 
-            # Check if Meilisearch is available
-            meili = get_meili_client()
-            health = await meili.health_check()
-            if health.get("status") != "available":
-                logger.debug("Meilisearch not available, skipping sync")
-                return {"skipped": True, "reason": "Meilisearch not available"}
+                # Check if Meilisearch is available
+                meili = get_meili_client()
+                health = await meili.health_check()
+                if health.get("status") != "available":
+                    logger.debug("Meilisearch not available, skipping sync")
+                    return {"skipped": True, "reason": "Meilisearch not available"}
 
-            sync_service = await get_sync_service()
-            stats = await sync_service.sync_to_meilisearch()
+                sync_service = await get_sync_service()
+                stats = await sync_service.sync_to_meilisearch()
 
-            logger.debug(
-                "Meilisearch sync job complete",
-                extra={"stats": stats}
-            )
-            return stats
+                logger.debug(
+                    "Meilisearch sync job complete",
+                    extra={"stats": stats}
+                )
+                return stats
 
     async def _run_duckdb_checkpoint(self) -> Dict[str, Any]:
         """

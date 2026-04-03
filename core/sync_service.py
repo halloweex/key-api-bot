@@ -415,36 +415,44 @@ class SyncService:
                     buyers = buyers_df.to_dict('records')
                     stats["buyers"] = await meili.index_buyers(buyers)
 
-            # Sync orders with buyer name
-            async with self.store.connection() as conn:
-                orders_df = conn.execute("""
-                    SELECT
-                        o.id,
-                        o.grand_total,
-                        o.ordered_at,
-                        o.status_id,
-                        o.source_name,
-                        o.buyer_id,
-                        o.order_date,
-                        b.full_name as buyer_name
-                    FROM silver_orders o
-                    LEFT JOIN buyers b ON o.buyer_id = b.id
-                    ORDER BY o.ordered_at DESC
-                    LIMIT 50000
-                """).fetchdf()
+            # Sync orders with buyer name — chunked to limit peak memory
+            MEILI_CHUNK = 10_000
+            offset = 0
+            while True:
+                async with self.store.connection() as conn:
+                    orders_df = conn.execute("""
+                        SELECT
+                            o.id,
+                            o.grand_total,
+                            o.ordered_at,
+                            o.status_id,
+                            o.source_name,
+                            o.buyer_id,
+                            o.order_date,
+                            b.full_name as buyer_name
+                        FROM silver_orders o
+                        LEFT JOIN buyers b ON o.buyer_id = b.id
+                        ORDER BY o.ordered_at DESC
+                        LIMIT ? OFFSET ?
+                    """, [MEILI_CHUNK, offset]).fetchdf()
 
-                if not orders_df.empty:
-                    # Convert datetime/date to ISO string
-                    if 'ordered_at' in orders_df.columns:
-                        orders_df['ordered_at'] = orders_df['ordered_at'].apply(
-                            lambda x: x.isoformat() if x else None
-                        )
-                    if 'order_date' in orders_df.columns:
-                        orders_df['order_date'] = orders_df['order_date'].apply(
-                            lambda x: x.isoformat() if x else None
-                        )
-                    orders = orders_df.to_dict('records')
-                    stats["orders"] = await meili.index_orders(orders)
+                if orders_df.empty:
+                    break
+
+                if 'ordered_at' in orders_df.columns:
+                    orders_df['ordered_at'] = orders_df['ordered_at'].apply(
+                        lambda x: x.isoformat() if x else None
+                    )
+                if 'order_date' in orders_df.columns:
+                    orders_df['order_date'] = orders_df['order_date'].apply(
+                        lambda x: x.isoformat() if x else None
+                    )
+                orders = orders_df.to_dict('records')
+                stats["orders"] += await meili.index_orders(orders)
+                offset += MEILI_CHUNK
+
+                if len(orders_df) < MEILI_CHUNK:
+                    break  # Last chunk
 
             # Sync products with category name
             async with self.store.connection() as conn:

@@ -77,12 +77,16 @@ class DuckDBStore(
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
                 # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM)
-                self._connection.execute("SET memory_limit='3GB'")
+                self._connection.execute("SET memory_limit='2GB'")
                 # Reduce memory usage for bulk operations
                 self._connection.execute("SET preserve_insertion_order=false")
                 # Force frequent WAL checkpoints to prevent WAL corruption
                 # on aarch64/Python 3.14 (DuckDB 1.4.x bug)
                 self._connection.execute("SET wal_autocheckpoint='2MB'")
+                # Enable disk spilling: DuckDB writes to disk instead of OOM crash
+                tmp_dir = Path(self.db_path).parent / "duckdb_tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                self._connection.execute(f"SET temp_directory='{tmp_dir}'")
 
                 await self._init_schema()
 
@@ -1803,10 +1807,11 @@ class DuckDBStore(
             # Skipped for status_refresh: status changes rarely affect co-purchase
             # patterns, and the self-join is the most memory-intensive step.
             gold_pairs_rows = 0
-            if trigger == "status_refresh":
-                # Skip: status changes don't affect co-purchase patterns,
-                # and the self-join is the most memory-intensive step.
-                # Pairs will be refreshed on the next full/incremental sync.
+            if trigger != "full_sync":
+                # Skip: the self-join is the most memory-intensive step (~1-2GB peak).
+                # gold_product_pairs is never read — API computes pairs on the fly
+                # via CTE in get_frequently_bought_together(). Only rebuild on
+                # weekly full_sync to keep the table populated as a cache.
                 pass
             else:
                 async with self.connection() as conn:
