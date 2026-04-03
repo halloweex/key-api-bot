@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.73
+
+- Add Tier 3: validation retry, auto-resync on drift, dead code cleanup, reconciliation API
+
+
 ## 3.0.72
 
 - Add warehouse robustness Tier 2: audit columns, reconciliation, dirty flag decoupling
