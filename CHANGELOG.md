@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.71
+
+- Prevent DuckDB OOM: skip unused self-join, enable disk spilling, serialize heavy jobs
+
+
 ## 3.0.70
 
 - Fix stale returns: use UPDATE instead of INSERT OR REPLACE for status refresh
