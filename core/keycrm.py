@@ -422,6 +422,24 @@ class KeyCRMClient:
 
         return await self._request("GET", "order", params=params)
 
+    async def get_order_count(self, created_between: str) -> int:
+        """Get total order count from API for a date range (uses limit=1 to minimize data).
+
+        Args:
+            created_between: Date range string, e.g. "2026-04-01 00:00:00, 2026-04-02 00:00:00"
+
+        Returns:
+            Total order count from API pagination metadata
+        """
+        response = await self._request("GET", "order", params={
+            "limit": 1,
+            "filter[created_between]": created_between,
+        })
+        # KeyCRM returns pagination in 'meta' or at top level
+        if "meta" in response:
+            return response["meta"].get("total", 0)
+        return response.get("total", len(response.get("data", [])))
+
     # ═══════════════════════════════════════════════════════════════════════════
     # PAGINATION HELPERS
     # ═══════════════════════════════════════════════════════════════════════════

@@ -302,7 +302,9 @@ class DuckDBStore(
             manager_id INTEGER,
             manager_comment TEXT,  -- Contains UTM data for Shopify orders
             promocode VARCHAR,  -- Discount promo code applied to order
-            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            first_seen_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            update_count INTEGER DEFAULT 0
         );
 
         -- Orders indexes for common queries
@@ -1196,6 +1198,39 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (promocode): {e}")
 
+        # Migration: Add audit columns to orders (first_seen_at, update_count)
+        try:
+            self._connection.execute(
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP"
+            )
+            self._connection.execute(
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS update_count INTEGER DEFAULT 0"
+            )
+            logger.debug("Migration: audit columns (first_seen_at, update_count) added/verified on orders")
+        except Exception as e:
+            logger.debug(f"Migration note (audit columns): {e}")
+
+        # Migration: Add reconciliation_log table
+        try:
+            self._connection.execute(
+                "CREATE SEQUENCE IF NOT EXISTS reconciliation_seq START 1"
+            )
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS reconciliation_log (
+                    id INTEGER DEFAULT(nextval('reconciliation_seq')),
+                    check_date DATE NOT NULL,
+                    api_count INTEGER NOT NULL,
+                    db_count INTEGER NOT NULL,
+                    discrepancy INTEGER NOT NULL,
+                    discrepancy_pct DECIMAL(6, 2) NOT NULL,
+                    status VARCHAR NOT NULL,
+                    checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            logger.debug("Migration: reconciliation_log table added/verified")
+        except Exception as e:
+            logger.debug(f"Migration note (reconciliation_log): {e}")
+
     async def _create_inventory_views(self) -> None:
         """Create Layer 3 & 4 analytics views for inventory."""
         views_sql = """
@@ -2087,6 +2122,75 @@ class DuckDBStore(
                 VALUES (?, ?, CURRENT_TIMESTAMP)
             """, [f"last_sync_{key}", timestamp.isoformat()])
 
+    async def mark_warehouse_dirty(self, changed_order_ids: list[int] | None = None) -> None:
+        """Set dirty flag so the warehouse refresh job picks it up."""
+        import json
+        value = json.dumps(changed_order_ids) if changed_order_ids else "full"
+        async with self.connection() as conn:
+            # Merge with existing dirty state (another sync may have run before refresh)
+            existing = conn.execute(
+                "SELECT value FROM sync_metadata WHERE key = 'warehouse_dirty'"
+            ).fetchone()
+            if existing and existing[0]:
+                old = existing[0]
+                if old == "full" or value == "full":
+                    value = "full"
+                else:
+                    # Merge ID lists
+                    old_ids = json.loads(old)
+                    new_ids = changed_order_ids or []
+                    merged = list(set(old_ids + new_ids))
+                    value = json.dumps(merged)
+            conn.execute("""
+                INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
+                VALUES ('warehouse_dirty', ?, CURRENT_TIMESTAMP)
+            """, [value])
+
+    async def consume_warehouse_dirty(self) -> tuple[bool, list[int] | None]:
+        """Atomically read and clear the dirty flag. Returns (is_dirty, changed_ids_or_None)."""
+        import json
+        async with self.connection() as conn:
+            result = conn.execute(
+                "SELECT value FROM sync_metadata WHERE key = 'warehouse_dirty'"
+            ).fetchone()
+            if not result or not result[0]:
+                return False, None
+            conn.execute("DELETE FROM sync_metadata WHERE key = 'warehouse_dirty'")
+            value = result[0]
+            if value == "full":
+                return True, None
+            return True, json.loads(value)
+
+    async def get_order_count_for_date(self, date_str: str) -> int:
+        """Get count of orders in DuckDB for a specific date (in Kyiv timezone)."""
+        async with self.connection() as conn:
+            result = conn.execute(f"""
+                SELECT COUNT(*) FROM orders
+                WHERE {_date_in_kyiv('ordered_at')} = ?
+            """, [date_str]).fetchone()
+            return result[0] if result else 0
+
+    async def log_reconciliation(self, check_date: str, api_count: int, db_count: int) -> dict:
+        """Log reconciliation result and return the entry."""
+        discrepancy = abs(api_count - db_count)
+        discrepancy_pct = round((discrepancy / api_count * 100) if api_count > 0 else 0, 2)
+        status = "ok" if discrepancy_pct <= 1.0 else "drift"
+
+        async with self.connection() as conn:
+            conn.execute("""
+                INSERT INTO reconciliation_log (check_date, api_count, db_count, discrepancy, discrepancy_pct, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, [check_date, api_count, db_count, discrepancy, discrepancy_pct, status])
+
+        return {
+            "check_date": check_date,
+            "api_count": api_count,
+            "db_count": db_count,
+            "discrepancy": discrepancy,
+            "discrepancy_pct": discrepancy_pct,
+            "status": status,
+        }
+
     async def upsert_orders(
         self,
         orders: List[Dict[str, Any]],
@@ -2207,13 +2311,14 @@ class DuckDBStore(
                         manager_id = s.manager_id,
                         manager_comment = s.manager_comment,
                         promocode = s.promocode,
-                        synced_at = now()
+                        synced_at = now(),
+                        update_count = orders.update_count + 1
                     FROM stg_orders s
                     WHERE orders.id = s.id
                 """)
                 conn.execute("""
-                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at)
-                    SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, now()
+                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at, first_seen_at, update_count)
+                    SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, now(), now(), 0
                     FROM stg_orders s
                     WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.id = s.id)
                 """)

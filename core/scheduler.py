@@ -248,6 +248,31 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Warehouse refresh (every 2 minutes, picks up dirty flag)
+        # Decoupled from sync — sync writes Bronze + sets dirty flag,
+        # this job rebuilds Silver/Gold independently
+        self._add_job(
+            job_id="warehouse_refresh",
+            name="Warehouse Refresh",
+            description="Rebuild Silver/Gold layers when dirty flag is set",
+            func=self._run_warehouse_refresh,
+            trigger=IntervalTrigger(minutes=2),
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Job: Reconciliation check (daily at 6 AM)
+        # Compares order counts between DuckDB and KeyCRM API for last 14 days
+        self._add_job(
+            job_id="reconciliation_check",
+            name="Reconciliation Check",
+            description="Compare DuckDB order counts with KeyCRM API",
+            func=self._run_reconciliation,
+            trigger=CronTrigger(hour=6, minute=0),
+            max_instances=1,
+            coalesce=True,
+        )
+
         logger.info(f"Registered {len(self._job_info)} background jobs")
 
     def _add_job(
@@ -478,6 +503,40 @@ class BackgroundScheduler:
 
             result = {"checkpointed": True}
             logger.info("DuckDB checkpoint job complete")
+            return result
+
+    async def _run_warehouse_refresh(self) -> Dict[str, Any]:
+        """Check dirty flag and rebuild Silver/Gold if needed."""
+        from core.duckdb_store import get_store
+        store = await get_store()
+
+        is_dirty, changed_ids = await store.consume_warehouse_dirty()
+        if not is_dirty:
+            return {"skipped": True, "reason": "not dirty"}
+
+        with correlation_context() as corr_id:
+            logger.info(f"Warehouse dirty — refreshing (changed_ids={'full' if changed_ids is None else len(changed_ids)})")
+            result = await store.refresh_warehouse_layers(
+                trigger="dirty_flag",
+                changed_order_ids=changed_ids,
+            )
+            logger.info("Warehouse refresh complete")
+            return result
+
+    async def _run_reconciliation(self) -> Dict[str, Any]:
+        """Run daily reconciliation check against KeyCRM API."""
+        with correlation_context() as corr_id:
+            logger.info("Starting reconciliation check job")
+
+            from core.sync_service import get_sync_service
+            sync_service = await get_sync_service()
+            results = await sync_service.reconcile_with_api(days_back=14)
+
+            ok = sum(1 for r in results if r["status"] == "ok")
+            drift = sum(1 for r in results if r["status"] == "drift")
+
+            result = {"checked_days": len(results), "ok": ok, "drift": drift}
+            logger.info("Reconciliation check job complete", extra=result)
             return result
 
     # ═══════════════════════════════════════════════════════════════════════════

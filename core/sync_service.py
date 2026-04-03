@@ -733,14 +733,11 @@ class SyncService:
                 # Emit inventory updated event
                 await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
 
-            # Refresh warehouse layers (Silver → Gold) only when data changed
+            # Mark warehouse dirty if data changed (separate job handles refresh)
             data_changed = stats["orders"] > 0 or stats["products"] > 0 or stats["managers"] > 0
             if data_changed:
                 changed_ids = order_ids if stats["orders"] > 0 else None
-                await self.store.refresh_warehouse_layers(
-                    trigger="incremental_sync",
-                    changed_order_ids=changed_ids,
-                )
+                await self.store.mark_warehouse_dirty(changed_ids)
 
             # Update adaptive backoff based on orders found
             self._update_backoff(stats["orders"])
@@ -954,6 +951,43 @@ class SyncService:
         self._stop_sync = True
         if self._sync_task and not self._sync_task.done():
             self._sync_task.cancel()
+
+    async def reconcile_with_api(self, days_back: int = 14) -> list[dict]:
+        """Compare order counts between DuckDB and KeyCRM API for recent days.
+
+        Checks each day individually and logs results to reconciliation_log.
+        Returns list of per-day results with status 'ok' or 'drift'.
+        """
+        from datetime import date
+
+        client = await get_async_client()
+        results = []
+        today = date.today()
+
+        for offset in range(days_back):
+            check_date = today - timedelta(days=offset + 1)
+            date_str = check_date.isoformat()
+            start = f"{date_str} 00:00:00"
+            end = f"{date_str} 23:59:59"
+
+            try:
+                api_count = await client.get_order_count(f"{start}, {end}")
+                db_count = await self.store.get_order_count_for_date(date_str)
+                entry = await self.store.log_reconciliation(date_str, api_count, db_count)
+                results.append(entry)
+
+                if entry["status"] == "drift":
+                    logger.warning(
+                        f"Reconciliation drift on {date_str}: API={api_count} DB={db_count} "
+                        f"({entry['discrepancy_pct']}%)"
+                    )
+            except Exception as e:
+                logger.error(f"Reconciliation check failed for {date_str}: {e}")
+
+        ok_count = sum(1 for r in results if r["status"] == "ok")
+        drift_count = sum(1 for r in results if r["status"] == "drift")
+        logger.info(f"Reconciliation complete: {ok_count} ok, {drift_count} drift out of {len(results)} days")
+        return results
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
