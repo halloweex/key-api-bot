@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.72
+
+- Add warehouse robustness Tier 2: audit columns, reconciliation, dirty flag decoupling
+- Fix data consistency: use UPDATE+INSERT for all order upserts, stop advancing empty checkpoint
+
+
 ## 3.0.71
 
 - Prevent DuckDB OOM: skip unused self-join, enable disk spilling, serialize heavy jobs
