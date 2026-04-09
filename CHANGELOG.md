@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.76
+
+- Fix silver_orders OOM: two-pass rebuild, skip warehouse refresh on non-order changes
+- Add all-products breakdown with search to Reports tab
+
+
 ## 3.0.75
 
 - Increase DuckDB memory limit to 4GB (checkpoint OOMs at 2GB on 9GB DB)
