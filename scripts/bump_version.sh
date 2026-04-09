@@ -49,16 +49,26 @@ BODY=$(tail -n +4 "$CHANGELOG_FILE")
 # 5. Write new version
 echo "$NEW_VERSION" > "$VERSION_FILE"
 
-# 6. Commit with [skip ci]
+# 6. Pull latest to avoid conflicts from concurrent CI runs
+git fetch origin main
+git rebase origin/main || { echo "Rebase failed — another CI run may have bumped already"; exit 0; }
+
+# 7. Check if this version was already bumped by another CI run
+if git ls-remote --tags origin "refs/tags/v$NEW_VERSION" | grep -q .; then
+    echo "Tag v$NEW_VERSION already exists on remote — skipping bump (concurrent CI run already handled it)"
+    exit 0
+fi
+
+# 8. Commit with [skip ci]
 git config user.name "github-actions[bot]"
 git config user.email "github-actions[bot]@users.noreply.github.com"
 git add "$VERSION_FILE" "$CHANGELOG_FILE"
 git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
 
-# 7. Create git tag
+# 9. Create git tag
 git tag "v$NEW_VERSION"
 
-# 8. Push commit + tag
+# 10. Push commit + tag
 git push origin main
 git push origin "v$NEW_VERSION"
 
