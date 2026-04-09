@@ -732,11 +732,12 @@ class SyncService:
                 # Emit inventory updated event
                 await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
 
-            # Mark warehouse dirty if data changed (separate job handles refresh)
-            data_changed = stats["orders"] > 0 or stats["products"] > 0 or stats["managers"] > 0
-            if data_changed:
-                changed_ids = order_ids if stats["orders"] > 0 else None
-                await self.store.mark_warehouse_dirty(changed_ids)
+            # Mark warehouse dirty if ORDER data changed (separate job handles refresh).
+            # Product/manager-only changes don't need Silver rebuild (Silver only
+            # reads from `orders`). Gold will pick up product metadata changes on
+            # the next order-triggered refresh (every 1-5 min).
+            if stats["orders"] > 0:
+                await self.store.mark_warehouse_dirty(order_ids)
 
             # Update adaptive backoff based on orders found
             self._update_backoff(stats["orders"])

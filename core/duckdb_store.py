@@ -1662,6 +1662,10 @@ class DuckDBStore(
                         raise
             else:
                 # Full rebuild (startup, full_sync, manual)
+                # Two-pass approach to avoid OOM: the old single-query LEFT JOIN
+                # double-scanned `orders` and built a hash table that exceeded 4GB.
+                # Pass 1: INSERT without buyer fields (single scan, no join).
+                # Pass 2: UPDATE buyer_first_order_date from silver_orders itself.
                 async with self.connection() as conn:
                     conn.execute("BEGIN TRANSACTION")
                     try:
@@ -1686,25 +1690,30 @@ class DuckDBStore(
                                     WHEN 4 THEN 'Shopify'
                                     ELSE 'Other'
                                 END AS source_name,
-                                CASE
-                                    WHEN o.buyer_id IS NOT NULL
-                                         AND o.status_id NOT IN {return_statuses}
-                                         AND {_date_in_kyiv('o.ordered_at')} = fo.first_order_date
-                                    THEN TRUE ELSE FALSE
-                                END AS is_new_customer,
-                                fo.first_order_date AS buyer_first_order_date,
+                                FALSE AS is_new_customer,
+                                NULL  AS buyer_first_order_date,
                                 o.promocode
                             FROM orders o
-                            LEFT JOIN (
-                                SELECT
-                                    buyer_id,
-                                    MIN({_date_in_kyiv('ordered_at')}) AS first_order_date
-                                FROM orders
+                        """)
+                        # Pass 2: compute buyer first-order dates from silver_orders
+                        conn.execute("""
+                            UPDATE silver_orders SET
+                                buyer_first_order_date = fo.first_order_date,
+                                is_new_customer = CASE
+                                    WHEN silver_orders.buyer_id IS NOT NULL
+                                         AND NOT silver_orders.is_return
+                                         AND silver_orders.is_active_source
+                                         AND silver_orders.order_date = fo.first_order_date
+                                    THEN TRUE ELSE FALSE
+                                END
+                            FROM (
+                                SELECT buyer_id, MIN(order_date) AS first_order_date
+                                FROM silver_orders
                                 WHERE buyer_id IS NOT NULL
-                                  AND source_id IN (1, 2, 4)
-                                  AND status_id NOT IN {return_statuses}
+                                  AND NOT is_return AND is_active_source
                                 GROUP BY buyer_id
-                            ) fo ON o.buyer_id = fo.buyer_id
+                            ) fo
+                            WHERE silver_orders.buyer_id = fo.buyer_id
                         """)
                         conn.execute("COMMIT")
                     except Exception:
