@@ -118,6 +118,7 @@ export const queryKeys = {
   // Reports
   reportSummary: (params: string) => ['reportSummary', params] as const,
   reportTopProducts: (params: string) => ['reportTopProducts', params] as const,
+  reportAllProducts: (params: string) => ['reportAllProducts', params] as const,
   // Product Intelligence
   basketSummary: (params: string) => ['basketSummary', params] as const,
   productPairs: (params: string) => ['productPairs', params] as const,
@@ -681,6 +682,20 @@ export function useReportTopProducts(sourceId: number | null, limit: number) {
   return useQuery<ReportTopProductsResponse>({
     queryKey: [...queryKeys.reportTopProducts(queryParams), sourceId, limit],
     queryFn: () => api.getReportTopProducts(paramsStr),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useReportAllProducts(sourceId: number | null) {
+  const queryParams = useQueryParams()
+
+  const fullParams = new URLSearchParams(queryParams)
+  if (sourceId) fullParams.set('source_id', String(sourceId))
+  const paramsStr = fullParams.toString()
+
+  return useQuery<ReportTopProductsResponse>({
+    queryKey: [...queryKeys.reportAllProducts(queryParams), sourceId],
+    queryFn: () => api.getReportAllProducts(paramsStr),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

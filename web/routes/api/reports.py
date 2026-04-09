@@ -85,6 +85,30 @@ async def get_report_top_products(
     return await store.get_report_top_products(s, e, st, src, cat, br, limit)
 
 
+@router.get("/all-products")
+@limiter.limit("30/minute")
+async def get_report_all_products(
+    request: Request,
+    period: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    source_id: Optional[int] = Query(None),
+    category_id: Optional[int] = Query(None),
+    brand: Optional[str] = Query(None),
+    sales_type: Optional[str] = Query("retail"),
+):
+    """Get all products (no limit) for full breakdown report."""
+    try:
+        s, e, src, cat, br, st = _parse_common_params(
+            period, start_date, end_date, source_id, category_id, brand, sales_type,
+        )
+    except ValidationError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+    store = await get_store()
+    return await store.get_report_top_products(s, e, st, src, cat, br, limit=5000)
+
+
 @router.get("/export/csv")
 @limiter.limit("10/minute")
 async def export_report_csv(
@@ -108,7 +132,7 @@ async def export_report_csv(
             period, start_date, end_date, source_id, category_id, brand, sales_type,
         )
         if type == "top_products":
-            limit = validate_limit(limit, max_value=50)
+            limit = validate_limit(limit, max_value=5000)
     except ValidationError as ex:
         raise HTTPException(status_code=400, detail=str(ex))
 
@@ -158,7 +182,7 @@ async def export_report_csv(
 
     output.seek(0)
     return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
+        iter([output.getvalue().encode("utf-8-sig")]),
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
