@@ -2275,7 +2275,23 @@ class DuckDBStore(
                         update_count = excluded.update_count
                 """
                 for params in insert_rows:
-                    conn.execute(upsert_sql, list(params))
+                    try:
+                        conn.execute(upsert_sql, list(params))
+                    except Exception as e:
+                        if "Duplicate key" in str(e):
+                            # DuckDB 1.5 ON CONFLICT bug — fall back to UPDATE
+                            oid = params[0]
+                            conn.execute("""
+                                UPDATE orders SET source_id=?, status_id=?, grand_total=?,
+                                    ordered_at=?, created_at=?, updated_at=?, buyer_id=?,
+                                    manager_id=?, manager_comment=?, promocode=?,
+                                    synced_at=now(), update_count=?
+                                WHERE id=?
+                            """, [params[1], params[2], params[3], params[4], params[5],
+                                  params[6], params[7], params[8], params[9], params[10],
+                                  params[12], oid])
+                        else:
+                            raise
 
                 # 3. Insert new products in batch (use OR REPLACE to handle ID collisions)
                 #    (skip for status-only refresh — products unchanged, avoids OOM)
