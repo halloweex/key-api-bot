@@ -676,10 +676,10 @@ export const api = {
   getReportAllProducts: (params: string, options?: FetchOptions) =>
     fetchApi<ReportTopProductsResponse>('/reports/all-products', params, options),
 
-  getMarketingReport: (year: number, month: number, salesType: string, options?: FetchOptions) =>
+  getMarketingReport: (params: string, options?: FetchOptions) =>
     fetchApi<import('../types/api').MarketingReportResponse>(
       '/reports/marketing-summary',
-      `year=${year}&month=${month}&sales_type=${salesType}`,
+      params,
       options
     ),
 

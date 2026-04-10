@@ -120,7 +120,7 @@ export const queryKeys = {
   reportSummary: (params: string) => ['reportSummary', params] as const,
   reportTopProducts: (params: string) => ['reportTopProducts', params] as const,
   reportAllProducts: (params: string) => ['reportAllProducts', params] as const,
-  marketingReport: (year: number, month: number, salesType: string) => ['marketingReport', year, month, salesType] as const,
+  marketingReport: (params: string) => ['marketingReport', params] as const,
   // Product Intelligence
   basketSummary: (params: string) => ['basketSummary', params] as const,
   productPairs: (params: string) => ['productPairs', params] as const,
@@ -704,12 +704,12 @@ export function useReportAllProducts(sourceId: number | null) {
 
 // ─── Marketing Report ────────────────────────────────────────────────────
 
-export function useMarketingReport(year: number, month: number) {
-  const salesType = useFilterStore(selectSalesType)
+export function useMarketingReport() {
+  const queryParams = useQueryParams()
 
   return useQuery<MarketingReportResponse>({
-    queryKey: queryKeys.marketingReport(year, month, salesType),
-    queryFn: () => api.getMarketingReport(year, month, salesType),
+    queryKey: queryKeys.marketingReport(queryParams),
+    queryFn: () => api.getMarketingReport(queryParams),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

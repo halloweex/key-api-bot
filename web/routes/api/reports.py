@@ -39,28 +39,25 @@ def _parse_common_params(
 @limiter.limit("30/minute")
 async def get_marketing_summary(
     request: Request,
-    year: Optional[int] = Query(None),
-    month: Optional[int] = Query(None),
+    period: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
 ):
-    """Get monthly marketing report: general sales, brands, sources."""
-    from datetime import date as _d
-    from zoneinfo import ZoneInfo
-    now = _datetime.now(ZoneInfo("Europe/Kyiv"))
-    y = year or now.year
-    m = month or now.month
-    if not (1 <= m <= 12):
-        raise HTTPException(status_code=400, detail="month must be 1-12")
-    if not (2020 <= y <= 2100):
-        raise HTTPException(status_code=400, detail="year out of range")
-
+    """Get marketing report for any date range with previous period and YoY comparison."""
     try:
         st = validate_sales_type(sales_type)
+        if period:
+            validate_period(period)
     except ValidationError as ex:
         raise HTTPException(status_code=400, detail=str(ex))
 
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    start_dt = _datetime.strptime(start, "%Y-%m-%d").date()
+    end_dt = _datetime.strptime(end, "%Y-%m-%d").date()
+
     store = await get_store()
-    return await store.get_marketing_report(y, m, st)
+    return await store.get_marketing_report_by_dates(start_dt, end_dt, st)
 
 
 # ─── Ukrainian month names for CSV export ────────────────────────────────
@@ -94,57 +91,49 @@ def _fmt_goal(v) -> str:
 @limiter.limit("10/minute")
 async def export_marketing_csv(
     request: Request,
-    year: Optional[int] = Query(None),
-    month: Optional[int] = Query(None),
-    months: int = Query(3, ge=1, le=6),
+    period: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
 ):
-    """Export marketing report as CSV — multiple months side by side."""
-    from zoneinfo import ZoneInfo
-    now = _datetime.now(ZoneInfo("Europe/Kyiv"))
-    start_year = year or now.year
-    start_month = month or now.month
-
+    """Export marketing report as CSV for the selected period."""
     try:
         st = validate_sales_type(sales_type)
+        if period:
+            validate_period(period)
     except ValidationError as ex:
         raise HTTPException(status_code=400, detail=str(ex))
 
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    start_dt = _datetime.strptime(start, "%Y-%m-%d").date()
+    end_dt = _datetime.strptime(end, "%Y-%m-%d").date()
+
     store = await get_store()
+    report = await store.get_marketing_report_by_dates(start_dt, end_dt, st)
 
-    # Fetch data for each month
-    reports = []
-    y, m = start_year, start_month
-    for _ in range(months):
-        reports.append(await store.get_marketing_report(y, m, st))
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
+    def _fmt_range(sd: str, ed: str) -> str:
+        if sd == ed:
+            return sd
+        return f"{sd} — {ed}"
 
-    # Build CSV — months side by side, separated by empty column
+    cur_label = _fmt_range(report["start_date"], report["end_date"])
+    prev_label = _fmt_range(report["prev_start_date"], report["prev_end_date"])
+    yoy_label = _fmt_range(report["yoy_start_date"], report["yoy_end_date"])
+
     output = io.StringIO()
     writer = csv.writer(output)
-    cols_per_month = 7  # 7 data columns per month
-    gap = 1  # 1 empty column between months
 
-    def _row(*month_cells):
-        """Build a row with month blocks side by side."""
-        row = []
-        for i, cells in enumerate(month_cells):
-            row.extend(cells)
-            # Pad to cols_per_month
-            row.extend([""] * (cols_per_month - len(cells)))
-            if i < len(month_cells) - 1:
-                row.extend([""] * gap)
-        writer.writerow(row)
-
-    # Row 1: Month names
-    _row(*[[_MONTH_NAMES_UK[r["month"] - 1]] for r in reports])
+    # Header
+    writer.writerow([f"Маркетинговий звіт: {cur_label}"])
+    writer.writerow([])
 
     # Section 1: General Sales
-    _row(*[["1. ЗАГАЛЬНІ ПРОДАЖІ"] for _ in reports])
-    _row(*[["Показник", "Поточний місяць", "Попередній місяць", "Зміна, %", "Рік тому", "Зміна YoY", "Ціль місяця"] for _ in reports])
+    writer.writerow(["1. ЗАГАЛЬНІ ПРОДАЖІ"])
+    has_goal = report["general_sales"]["monthly_goal"] is not None
+    header = ["Показник", cur_label, prev_label, "Зміна, %", yoy_label, "Зміна YoY"]
+    if has_goal:
+        header.append("Ціль місяця")
+    writer.writerow(header)
 
     general_rows = [
         ("Виручка (грн)", "revenue", _fmt_currency, True),
@@ -156,54 +145,32 @@ async def export_marketing_csv(
         ("% повернення", "return_rate", lambda v: f"{v:.0f}%", False),
     ]
     for label, key, fmt, show_goal in general_rows:
-        cells_per_month = []
-        for r in reports:
-            cur = r["general_sales"]["current"][key]
-            prev = r["general_sales"]["previous"][key]
-            yoy = r["general_sales"]["year_ago"][key]
-            goal_str = _fmt_goal(r["general_sales"]["monthly_goal"]) if show_goal else ""
-            cells_per_month.append([label, fmt(cur), fmt(prev), _fmt_pct_change(cur, prev), fmt(yoy), _fmt_pct_change(cur, yoy), goal_str])
-        _row(*cells_per_month)
+        cur = report["general_sales"]["current"][key]
+        prev = report["general_sales"]["previous"][key]
+        yoy = report["general_sales"]["year_ago"][key]
+        row = [label, fmt(cur), fmt(prev), _fmt_pct_change(cur, prev), fmt(yoy), _fmt_pct_change(cur, yoy)]
+        if has_goal:
+            row.append(_fmt_goal(report["general_sales"]["monthly_goal"]) if show_goal else "")
+        writer.writerow(row)
 
-    # Empty row
     writer.writerow([])
 
     # Section 2: Brands
-    _row(*[["2. ПРОДАЖІ ПО БРЕНДАХ"] for _ in reports])
-    _row(*[["Бренд", "Виручка (грн)", "К-сть замовлень", "Ср. чек (грн)", "% від загального"] for _ in reports])
+    writer.writerow(["2. ПРОДАЖІ ПО БРЕНДАХ"])
+    writer.writerow(["Бренд", "Виручка (грн)", "К-сть замовлень", "Ср. чек (грн)", "% від загального"])
+    for b in report["brands"]:
+        writer.writerow([b["brand"], _fmt_currency(b["revenue"]), f"{b['orders']:,}", _fmt_currency(b["avg_check"]), f"{b['share_pct']}%"])
 
-    max_brands = max(len(r["brands"]) for r in reports) if reports else 0
-    for i in range(max_brands):
-        cells_per_month = []
-        for r in reports:
-            if i < len(r["brands"]):
-                b = r["brands"][i]
-                cells_per_month.append([b["brand"], _fmt_currency(b["revenue"]), f"{b['orders']:,}", _fmt_currency(b["avg_check"]), f"{b['share_pct']}%"])
-            else:
-                cells_per_month.append(["", "", "", "", ""])
-        _row(*cells_per_month)
-
-    # Empty row
     writer.writerow([])
 
     # Section 3: Sources
-    _row(*[["3. КАНАЛИ / ДЖЕРЕЛА"] for _ in reports])
-    _row(*[["Канал", "К-сть замовлень", "Виручка (грн)", "% замовлень", "% виручки"] for _ in reports])
-
-    max_sources = max(len(r["sources"]) for r in reports) if reports else 0
-    for i in range(max_sources):
-        cells_per_month = []
-        for r in reports:
-            if i < len(r["sources"]):
-                s = r["sources"][i]
-                cells_per_month.append([s["source_name"], f"{s['orders']:,}", _fmt_currency(s["revenue"]), f"{s['orders_pct']}%", f"{s['revenue_pct']}%"])
-            else:
-                cells_per_month.append(["", "", "", "", ""])
-        _row(*cells_per_month)
+    writer.writerow(["3. КАНАЛИ / ДЖЕРЕЛА"])
+    writer.writerow(["Канал", "К-сть замовлень", "Виручка (грн)", "% замовлень", "% виручки"])
+    for s in report["sources"]:
+        writer.writerow([s["source_name"], f"{s['orders']:,}", _fmt_currency(s["revenue"]), f"{s['orders_pct']}%", f"{s['revenue_pct']}%"])
 
     output.seek(0)
-    m_start = _MONTH_NAMES_UK[start_month - 1].lower()
-    filename = f"marketing_report_{m_start}_{start_year}.csv"
+    filename = f"marketing_report_{start}_{end}.csv"
     return StreamingResponse(
         iter([output.getvalue().encode("utf-8-sig")]),
         media_type="text/csv; charset=utf-8",

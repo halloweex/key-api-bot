@@ -1394,23 +1394,31 @@ class RevenueMixin:
         month: int,
         sales_type: str = "retail",
     ) -> Dict[str, Any]:
-        """Get monthly marketing report: general sales vs prev month, brands, sources."""
+        """Get monthly marketing report (legacy month-based)."""
         from calendar import monthrange
-
-        _, last_day = monthrange(year, month)
         start_date = date(year, month, 1)
+        _, last_day = monthrange(year, month)
         end_date = date(year, month, last_day)
+        return await self.get_marketing_report_by_dates(start_date, end_date, sales_type)
 
-        prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
-        _, prev_last_day = monthrange(prev_year, prev_month)
-        prev_start = date(prev_year, prev_month, 1)
-        prev_end = date(prev_year, prev_month, prev_last_day)
+    async def get_marketing_report_by_dates(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "retail",
+    ) -> Dict[str, Any]:
+        """Get marketing report for arbitrary date range with previous period and YoY comparison."""
+        from datetime import timedelta
 
-        # Same month previous year
-        yoy_year = year - 1
-        _, yoy_last_day = monthrange(yoy_year, month)
-        yoy_start = date(yoy_year, month, 1)
-        yoy_end = date(yoy_year, month, yoy_last_day)
+        period_days = (end_date - start_date).days + 1
+
+        # Previous period: same duration immediately before
+        prev_end = start_date - timedelta(days=1)
+        prev_start = prev_end - timedelta(days=period_days - 1)
+
+        # Year ago: same dates shifted back 1 year
+        yoy_start = start_date.replace(year=start_date.year - 1)
+        yoy_end = end_date.replace(year=end_date.year - 1)
 
         async with self.connection() as conn:
             sales_where = "sales_type = ?" if sales_type != "all" else "1=1"
@@ -1509,14 +1517,27 @@ class RevenueMixin:
             })
         sources.sort(key=lambda x: x["revenue"], reverse=True)
 
+        # Check if this is a full calendar month (for goal display)
+        from calendar import monthrange
+        is_full_month = (
+            start_date.day == 1
+            and end_date.day == monthrange(end_date.year, end_date.month)[1]
+            and start_date.month == end_date.month
+            and start_date.year == end_date.year
+        )
+
         return {
-            "month": month,
-            "year": year,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "prev_start_date": prev_start.isoformat(),
+            "prev_end_date": prev_end.isoformat(),
+            "yoy_start_date": yoy_start.isoformat(),
+            "yoy_end_date": yoy_end.isoformat(),
             "general_sales": {
                 "current": current,
                 "previous": previous,
                 "year_ago": year_ago,
-                "monthly_goal": monthly_goal,
+                "monthly_goal": monthly_goal if is_full_month else None,
             },
             "brands": brands,
             "sources": sources,

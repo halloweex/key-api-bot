@@ -1140,8 +1140,12 @@ export interface MarketingSourceRow {
 }
 
 export interface MarketingReportResponse {
-  month: number
-  year: number
+  start_date: string
+  end_date: string
+  prev_start_date: string
+  prev_end_date: string
+  yoy_start_date: string
+  yoy_end_date: string
   general_sales: {
     current: MarketingMonthStats
     previous: MarketingMonthStats

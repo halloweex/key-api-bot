@@ -562,6 +562,7 @@
   "marketing.generalSales": "1. General Sales",
   "marketing.metric": "Metric",
   "marketing.currentMonth": "Current Month",
+  "marketing.currentPeriod": "Current Period",
   "marketing.previousMonth": "Previous Month",
   "marketing.change": "Change, %",
   "marketing.yearAgo": "Year Ago",

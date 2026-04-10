@@ -525,6 +525,7 @@
   "marketing.generalSales": "1. Общие продажи",
   "marketing.metric": "Показатель",
   "marketing.currentMonth": "Текущий месяц",
+  "marketing.currentPeriod": "Текущий период",
   "marketing.previousMonth": "Предыдущий месяц",
   "marketing.change": "Изменение, %",
   "marketing.yearAgo": "Год назад",

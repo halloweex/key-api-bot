@@ -1,4 +1,4 @@
-import { memo, useState, useMemo, useCallback } from 'react'
+import { memo, useMemo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card'
 import { SkeletonChart, ApiErrorState } from '../ui'
@@ -10,10 +10,26 @@ import type { MarketingMonthStats, MarketingBrandRow, MarketingSourceRow } from 
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-function getMonthName(year: number, month: number): string {
+function formatDateRange(startDate: string, endDate: string): string {
   const locale = LANGUAGE_LOCALES[i18n.language as SupportedLanguage] || 'uk-UA'
-  const d = new Date(year, month - 1, 1)
-  return new Intl.DateTimeFormat(locale, { month: 'long' }).format(d).toUpperCase()
+  const start = new Date(startDate + 'T00:00:00')
+  const end = new Date(endDate + 'T00:00:00')
+
+  // Check if it's a full calendar month
+  const sameMonth = start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear()
+  const isFirstDay = start.getDate() === 1
+  const lastDayOfMonth = new Date(end.getFullYear(), end.getMonth() + 1, 0).getDate()
+  const isLastDay = end.getDate() === lastDayOfMonth
+
+  if (sameMonth && isFirstDay && isLastDay) {
+    // Full month — show "APRIL 2026"
+    return new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric' }).format(start).toUpperCase()
+  }
+
+  // Range — show "01.04 – 10.04.2026"
+  const fmtStart = new Intl.DateTimeFormat(locale, { day: '2-digit', month: '2-digit' }).format(start)
+  const fmtEnd = new Intl.DateTimeFormat(locale, { day: '2-digit', month: '2-digit', year: 'numeric' }).format(end)
+  return `${fmtStart} – ${fmtEnd}`
 }
 
 function pctChange(cur: number, prev: number): string {
@@ -38,51 +54,6 @@ function formatGoal(value: number | null, t: (k: string) => string): string {
   return formatCurrency(value)
 }
 
-// ─── Month Selector ───────────────────────────────────────────────────────
-
-const MonthSelector = memo(function MonthSelector({
-  year, month, onChange,
-}: {
-  year: number
-  month: number
-  onChange: (y: number, m: number) => void
-}) {
-  const prev = () => {
-    if (month === 1) onChange(year - 1, 12)
-    else onChange(year, month - 1)
-  }
-  const next = () => {
-    if (month === 12) onChange(year + 1, 1)
-    else onChange(year, month + 1)
-  }
-
-  const label = useMemo(() => `${getMonthName(year, month)} ${year}`, [year, month])
-
-  return (
-    <div className="flex items-center gap-3">
-      <button
-        onClick={prev}
-        className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 transition-colors"
-      >
-        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-        </svg>
-      </button>
-      <span className="text-sm font-bold text-slate-800 min-w-[160px] text-center">
-        {label}
-      </span>
-      <button
-        onClick={next}
-        className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 transition-colors"
-      >
-        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-        </svg>
-      </button>
-    </div>
-  )
-})
-
 // ─── Section 1: General Sales ─────────────────────────────────────────────
 
 const GENERAL_ROWS: {
@@ -102,11 +73,14 @@ const GENERAL_ROWS: {
 
 const GeneralSalesSection = memo(function GeneralSalesSection({
   current, previous, yearAgo, monthlyGoal,
+  prevLabel, yoyLabel,
 }: {
   current: MarketingMonthStats
   previous: MarketingMonthStats
   yearAgo: MarketingMonthStats
   monthlyGoal: number | null
+  prevLabel: string
+  yoyLabel: string
 }) {
   const { t } = useTranslation()
 
@@ -121,12 +95,14 @@ const GeneralSalesSection = memo(function GeneralSalesSection({
             <thead>
               <tr className="border-b border-slate-200 text-left">
                 <th className="py-2.5 px-3 font-semibold text-slate-600">{t('marketing.metric')}</th>
-                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">{t('marketing.currentMonth')}</th>
-                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{t('marketing.previousMonth')}</th>
+                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">{t('marketing.currentPeriod')}</th>
+                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{prevLabel}</th>
                 <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{t('marketing.change')}</th>
-                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">{t('marketing.yearAgo')}</th>
+                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">{yoyLabel}</th>
                 <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">{t('marketing.changeYoY')}</th>
-                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden md:table-cell">{t('marketing.monthGoal')}</th>
+                {monthlyGoal != null && (
+                  <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden md:table-cell">{t('marketing.monthGoal')}</th>
+                )}
               </tr>
             </thead>
             <tbody>
@@ -152,9 +128,11 @@ const GeneralSalesSection = memo(function GeneralSalesSection({
                     <td className={`py-2.5 px-3 text-right tabular-nums font-medium hidden lg:table-cell ${changeColor(curVal, yoyVal)}`}>
                       {pctChange(curVal, yoyVal)}
                     </td>
-                    <td className="py-2.5 px-3 text-right tabular-nums text-slate-500 hidden md:table-cell">
-                      {row.showGoal ? formatGoal(monthlyGoal, t) : ''}
-                    </td>
+                    {monthlyGoal != null && (
+                      <td className="py-2.5 px-3 text-right tabular-nums text-slate-500 hidden md:table-cell">
+                        {row.showGoal ? formatGoal(monthlyGoal, t) : ''}
+                      </td>
+                    )}
                   </tr>
                 )
               })}
@@ -250,39 +228,54 @@ const SourcesSection = memo(function SourcesSection({ sources }: { sources: Mark
 
 export const MonthlyReport = memo(function MonthlyReport() {
   const { t } = useTranslation()
-  const now = new Date()
-  const [year, setYear] = useState(now.getFullYear())
-  const [month, setMonth] = useState(now.getMonth() + 1)
   const salesType = useFilterStore((s) => s.salesType)
+  const period = useFilterStore((s) => s.period)
+  const startDate = useFilterStore((s) => s.startDate)
+  const endDate = useFilterStore((s) => s.endDate)
 
-  const { data, isLoading, error, refetch } = useMarketingReport(year, month)
+  const { data, isLoading, error, refetch } = useMarketingReport()
 
   const downloadCsv = useCallback(() => {
-    const params = new URLSearchParams({
-      year: String(year),
-      month: String(month),
-      months: '3',
-      sales_type: salesType,
-    })
+    const params = new URLSearchParams({ sales_type: salesType })
+    if (period !== 'custom') {
+      params.set('period', period)
+    } else if (startDate && endDate) {
+      params.set('start_date', startDate)
+      params.set('end_date', endDate)
+    }
     window.open(`/api/reports/marketing-summary/export/csv?${params}`, '_blank')
-  }, [year, month, salesType])
+  }, [period, startDate, endDate, salesType])
+
+  // Dynamic labels for comparison columns
+  const { periodLabel, prevLabel, yoyLabel } = useMemo(() => {
+    if (!data) return { periodLabel: '', prevLabel: '', yoyLabel: '' }
+    return {
+      periodLabel: formatDateRange(data.start_date, data.end_date),
+      prevLabel: formatDateRange(data.prev_start_date, data.prev_end_date),
+      yoyLabel: formatDateRange(data.yoy_start_date, data.yoy_end_date),
+    }
+  }, [data])
 
   return (
     <div className="space-y-4">
-      {/* Header with month selector and export */}
+      {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <h2 className="text-lg font-bold text-slate-800">
-          {t('marketing.monthlyReport')}
-        </h2>
         <div className="flex items-center gap-3">
-          <button
-            onClick={downloadCsv}
-            className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
-          >
-            {t('reports.exportCsv')}
-          </button>
-          <MonthSelector year={year} month={month} onChange={(y, m) => { setYear(y); setMonth(m) }} />
+          <h2 className="text-lg font-bold text-slate-800">
+            {t('marketing.monthlyReport')}
+          </h2>
+          {data && (
+            <span className="text-sm text-slate-500 font-medium">
+              {periodLabel}
+            </span>
+          )}
         </div>
+        <button
+          onClick={downloadCsv}
+          className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
+        >
+          {t('reports.exportCsv')}
+        </button>
       </div>
 
       {isLoading && <SkeletonChart />}
@@ -294,6 +287,8 @@ export const MonthlyReport = memo(function MonthlyReport() {
             previous={data.general_sales.previous}
             yearAgo={data.general_sales.year_ago}
             monthlyGoal={data.general_sales.monthly_goal}
+            prevLabel={prevLabel}
+            yoyLabel={yoyLabel}
           />
           <BrandsSection brands={data.brands} />
           <SourcesSection sources={data.sources} />
