@@ -101,10 +101,11 @@ const GENERAL_ROWS: {
 ]
 
 const GeneralSalesSection = memo(function GeneralSalesSection({
-  current, previous, monthlyGoal,
+  current, previous, yearAgo, monthlyGoal,
 }: {
   current: MarketingMonthStats
   previous: MarketingMonthStats
+  yearAgo: MarketingMonthStats
   monthlyGoal: number | null
 }) {
   const { t } = useTranslation()
@@ -123,6 +124,8 @@ const GeneralSalesSection = memo(function GeneralSalesSection({
                 <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">{t('marketing.currentMonth')}</th>
                 <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{t('marketing.previousMonth')}</th>
                 <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{t('marketing.change')}</th>
+                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">{t('marketing.yearAgo')}</th>
+                <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden lg:table-cell">{t('marketing.changeYoY')}</th>
                 <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden md:table-cell">{t('marketing.monthGoal')}</th>
               </tr>
             </thead>
@@ -130,6 +133,7 @@ const GeneralSalesSection = memo(function GeneralSalesSection({
               {GENERAL_ROWS.map((row) => {
                 const curVal = current[row.key]
                 const prevVal = previous[row.key]
+                const yoyVal = yearAgo[row.key]
                 return (
                   <tr key={row.key} className="border-b border-slate-100 hover:bg-slate-50/50">
                     <td className="py-2.5 px-3 font-medium text-slate-800">{t(row.labelKey)}</td>
@@ -141,6 +145,12 @@ const GeneralSalesSection = memo(function GeneralSalesSection({
                     </td>
                     <td className={`py-2.5 px-3 text-right tabular-nums font-medium hidden sm:table-cell ${changeColor(curVal, prevVal)}`}>
                       {pctChange(curVal, prevVal)}
+                    </td>
+                    <td className="py-2.5 px-3 text-right tabular-nums text-slate-500 hidden lg:table-cell">
+                      {row.format(yoyVal)}
+                    </td>
+                    <td className={`py-2.5 px-3 text-right tabular-nums font-medium hidden lg:table-cell ${changeColor(curVal, yoyVal)}`}>
+                      {pctChange(curVal, yoyVal)}
                     </td>
                     <td className="py-2.5 px-3 text-right tabular-nums text-slate-500 hidden md:table-cell">
                       {row.showGoal ? formatGoal(monthlyGoal, t) : ''}
@@ -282,6 +292,7 @@ export const MonthlyReport = memo(function MonthlyReport() {
           <GeneralSalesSection
             current={data.general_sales.current}
             previous={data.general_sales.previous}
+            yearAgo={data.general_sales.year_ago}
             monthlyGoal={data.general_sales.monthly_goal}
           />
           <BrandsSection brands={data.brands} />

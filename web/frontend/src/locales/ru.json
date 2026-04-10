@@ -527,6 +527,8 @@
   "marketing.currentMonth": "Текущий месяц",
   "marketing.previousMonth": "Предыдущий месяц",
   "marketing.change": "Изменение, %",
+  "marketing.yearAgo": "Год назад",
+  "marketing.changeYoY": "Изменение YoY",
   "marketing.mln": "млн",
   "marketing.monthGoal": "Цель месяца",
   "marketing.revenue": "Выручка (грн)",

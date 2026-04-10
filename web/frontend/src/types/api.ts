@@ -1145,6 +1145,7 @@ export interface MarketingReportResponse {
   general_sales: {
     current: MarketingMonthStats
     previous: MarketingMonthStats
+    year_ago: MarketingMonthStats
     monthly_goal: number | null
   }
   brands: MarketingBrandRow[]

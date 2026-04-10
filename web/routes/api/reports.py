@@ -125,7 +125,7 @@ async def export_marketing_csv(
     # Build CSV — months side by side, separated by empty column
     output = io.StringIO()
     writer = csv.writer(output)
-    cols_per_month = 5  # 5 data columns per month
+    cols_per_month = 7  # 7 data columns per month
     gap = 1  # 1 empty column between months
 
     def _row(*month_cells):
@@ -144,7 +144,7 @@ async def export_marketing_csv(
 
     # Section 1: General Sales
     _row(*[["1. ЗАГАЛЬНІ ПРОДАЖІ"] for _ in reports])
-    _row(*[["Показник", "Поточний місяць", "Попередній місяць", "Зміна, %", "Ціль місяця"] for _ in reports])
+    _row(*[["Показник", "Поточний місяць", "Попередній місяць", "Зміна, %", "Рік тому", "Зміна YoY", "Ціль місяця"] for _ in reports])
 
     general_rows = [
         ("Виручка (грн)", "revenue", _fmt_currency, True),
@@ -160,8 +160,9 @@ async def export_marketing_csv(
         for r in reports:
             cur = r["general_sales"]["current"][key]
             prev = r["general_sales"]["previous"][key]
+            yoy = r["general_sales"]["year_ago"][key]
             goal_str = _fmt_goal(r["general_sales"]["monthly_goal"]) if show_goal else ""
-            cells_per_month.append([label, fmt(cur), fmt(prev), _fmt_pct_change(cur, prev), goal_str])
+            cells_per_month.append([label, fmt(cur), fmt(prev), _fmt_pct_change(cur, prev), fmt(yoy), _fmt_pct_change(cur, yoy), goal_str])
         _row(*cells_per_month)
 
     # Empty row

@@ -1406,6 +1406,12 @@ class RevenueMixin:
         prev_start = date(prev_year, prev_month, 1)
         prev_end = date(prev_year, prev_month, prev_last_day)
 
+        # Same month previous year
+        yoy_year = year - 1
+        _, yoy_last_day = monthrange(yoy_year, month)
+        yoy_start = date(yoy_year, month, 1)
+        yoy_end = date(yoy_year, month, yoy_last_day)
+
         async with self.connection() as conn:
             sales_where = "sales_type = ?" if sales_type != "all" else "1=1"
             sales_params = [sales_type] if sales_type != "all" else []
@@ -1451,6 +1457,7 @@ class RevenueMixin:
 
             current, cur_sources = _fetch_month(start_date, end_date)
             previous, _ = _fetch_month(prev_start, prev_end)
+            year_ago, _ = _fetch_month(yoy_start, yoy_end)
 
             # Brands - current month from gold_daily_products
             brand_where = "g.sales_type = ?" if sales_type != "all" else "1=1"
@@ -1508,6 +1515,7 @@ class RevenueMixin:
             "general_sales": {
                 "current": current,
                 "previous": previous,
+                "year_ago": year_ago,
                 "monthly_goal": monthly_goal,
             },
             "brands": brands,

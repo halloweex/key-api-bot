@@ -564,6 +564,8 @@
   "marketing.currentMonth": "Current Month",
   "marketing.previousMonth": "Previous Month",
   "marketing.change": "Change, %",
+  "marketing.yearAgo": "Year Ago",
+  "marketing.changeYoY": "Change YoY",
   "marketing.mln": "M",
   "marketing.monthGoal": "Monthly Goal",
   "marketing.revenue": "Revenue (UAH)",
