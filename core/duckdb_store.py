@@ -2205,97 +2205,57 @@ class DuckDBStore(
         # Get order IDs for use in queries (avoids DuckDB FK bug with subqueries)
         order_ids = orders_df["id"].tolist()
 
+        # Helper: pd.NA → None for DuckDB compatibility
+        def _int_or_none(v):
+            return None if pd.isna(v) else int(v)
+
+        insert_rows = []
+        for _, row in orders_df.iterrows():
+            insert_rows.append((
+                int(row["id"]), _int_or_none(row["source_id"]),
+                _int_or_none(row["status_id"]),
+                float(row["grand_total"]),
+                row["ordered_at"], row["created_at"], row["updated_at"],
+                _int_or_none(row["buyer_id"]),
+                _int_or_none(row["manager_id"]),
+                row["manager_comment"],
+                row["promocode"],
+            ))
+
         async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                # 1. Delete existing products using explicit ID list
-                #    (skip for status-only refresh — products unchanged, avoids OOM)
-                if not skip_products and order_ids:
-                    placeholders = ",".join("?" * len(order_ids))
-                    conn.execute(f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids)
+            # 1. Delete existing products (skip for status-only refresh)
+            if not skip_products and order_ids:
+                placeholders = ",".join("?" * len(order_ids))
+                conn.execute(f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids)
 
-                # 2. Upsert orders: DELETE existing + INSERT all (parameterized)
-                # Avoids DuckDB temp table / registered view bugs that cause
-                # write-write conflicts and PK violations (gh duckdb/duckdb#7640).
-                existing_meta = {}
-                if order_ids:
-                    placeholders_o = ",".join("?" * len(order_ids))
+            # 2. Upsert orders one-by-one in autocommit mode.
+            # DuckDB 1.5: ON CONFLICT inside explicit transactions is broken
+            # (PK violation poisons transaction). Autocommit per-row works.
+            upsert_sql = """
+                INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at,
+                                   buyer_id, manager_id, manager_comment, promocode, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+                ON CONFLICT (id) DO UPDATE SET
+                    source_id = excluded.source_id,
+                    status_id = excluded.status_id,
+                    grand_total = excluded.grand_total,
+                    ordered_at = excluded.ordered_at,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    buyer_id = excluded.buyer_id,
+                    manager_id = excluded.manager_id,
+                    manager_comment = excluded.manager_comment,
+                    promocode = excluded.promocode,
+                    synced_at = now(),
+                    update_count = orders.update_count + 1
+            """
+            for params in insert_rows:
+                conn.execute(upsert_sql, list(params))
 
-                    # Capture existing metadata before delete
-                    for row in conn.execute(
-                        f"SELECT id, first_seen_at, COALESCE(update_count, 0) FROM orders WHERE id IN ({placeholders_o})",
-                        order_ids,
-                    ).fetchall():
-                        existing_meta[row[0]] = (row[1], row[2])
-
-                    # Delete existing orders
-                    conn.execute(f"DELETE FROM orders WHERE id IN ({placeholders_o})", order_ids)
-
-                # Build insert rows from DataFrame
-                # Helper: pd.NA → None for DuckDB executemany compatibility
-                def _int_or_none(v):
-                    return None if pd.isna(v) else int(v)
-
-                insert_rows = []
-                for _, row in orders_df.iterrows():
-                    oid = int(row["id"])
-                    meta = existing_meta.get(oid)
-                    first_seen = meta[0] if meta else None
-                    update_cnt = (meta[1] + 1) if meta else 0
-                    insert_rows.append((
-                        oid, _int_or_none(row["source_id"]),
-                        _int_or_none(row["status_id"]),
-                        float(row["grand_total"]),
-                        row["ordered_at"], row["created_at"], row["updated_at"],
-                        _int_or_none(row["buyer_id"]),
-                        _int_or_none(row["manager_id"]),
-                        row["manager_comment"],
-                        row["promocode"], first_seen, update_cnt,
-                    ))
-
-                # DuckDB 1.5: executemany + ON CONFLICT is broken (PK violation
-                # even after DELETE). Use per-row execute as workaround.
-                upsert_sql = """
-                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at,
-                                       buyer_id, manager_id, manager_comment, promocode, synced_at, first_seen_at, update_count)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), COALESCE(?, now()), ?)
-                    ON CONFLICT (id) DO UPDATE SET
-                        source_id = excluded.source_id,
-                        status_id = excluded.status_id,
-                        grand_total = excluded.grand_total,
-                        ordered_at = excluded.ordered_at,
-                        created_at = excluded.created_at,
-                        updated_at = excluded.updated_at,
-                        buyer_id = excluded.buyer_id,
-                        manager_id = excluded.manager_id,
-                        manager_comment = excluded.manager_comment,
-                        promocode = excluded.promocode,
-                        synced_at = now(),
-                        first_seen_at = orders.first_seen_at,
-                        update_count = excluded.update_count
-                """
-                for params in insert_rows:
-                    try:
-                        conn.execute(upsert_sql, list(params))
-                    except Exception as e:
-                        if "Duplicate key" in str(e):
-                            # DuckDB 1.5 ON CONFLICT bug — fall back to UPDATE
-                            oid = params[0]
-                            conn.execute("""
-                                UPDATE orders SET source_id=?, status_id=?, grand_total=?,
-                                    ordered_at=?, created_at=?, updated_at=?, buyer_id=?,
-                                    manager_id=?, manager_comment=?, promocode=?,
-                                    synced_at=now(), update_count=?
-                                WHERE id=?
-                            """, [params[1], params[2], params[3], params[4], params[5],
-                                  params[6], params[7], params[8], params[9], params[10],
-                                  params[12], oid])
-                        else:
-                            raise
-
-                # 3. Insert new products in batch (use OR REPLACE to handle ID collisions)
-                #    (skip for status-only refresh — products unchanged, avoids OOM)
-                if not skip_products and product_rows:
+            # 3. Insert products (skip for status-only refresh)
+            if not skip_products and product_rows:
+                conn.execute("BEGIN TRANSACTION")
+                try:
                     conn.executemany("""
                         INSERT OR REPLACE INTO order_products (id, order_id, product_id, name, quantity, price_sold)
                         VALUES (?, ?, ?, ?, ?, ?)
@@ -2303,51 +2263,17 @@ class DuckDBStore(
                         (p["id"], p["order_id"], p["product_id"], p["name"], p["quantity"], p["price_sold"])
                         for p in product_rows
                     ])
-
-                conn.execute("COMMIT")
-
-                count = len(order_rows)
-                logger.info(f"Upserted {count} orders to DuckDB (DataFrame bulk insert)")
-
-                # Verify return-status orders were actually written (debug stale returns)
-                if force_update:
-                    return_ids_from_api = [
-                        r["id"] for r in order_rows
-                        if r["status_id"] in (19, 21, 22, 23)
-                    ]
-                    if return_ids_from_api:
-                        sample_ids = return_ids_from_api[:10]
-                        placeholders = ",".join("?" * len(sample_ids))
-                        rows = conn.execute(
-                            f"SELECT id, status_id FROM orders WHERE id IN ({placeholders})",
-                            sample_ids,
-                        ).fetchall()
-                        bronze_map = {r[0]: r[1] for r in rows}
-                        mismatches = []
-                        for r in order_rows:
-                            if r["id"] in bronze_map and bronze_map[r["id"]] != r["status_id"]:
-                                mismatches.append(
-                                    f"#{r['id']}: API={r['status_id']} Bronze={bronze_map[r['id']]}"
-                                )
-                        if mismatches:
-                            logger.error(
-                                f"STALE RETURNS BUG: {len(mismatches)} orders have wrong status_id "
-                                f"in Bronze after INSERT OR REPLACE: {mismatches}"
-                            )
-                        else:
-                            logger.info(
-                                f"Status verification OK: {len(return_ids_from_api)} return orders "
-                                f"in API batch, sample of {len(sample_ids)} verified in Bronze"
-                            )
-
-                return count
-
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
+                    conn.execute("COMMIT")
                 except Exception:
-                    pass  # Transaction already rolled back by DuckDB
-                raise
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    raise
+
+            count = len(order_rows)
+            logger.info(f"Upserted {count} orders to DuckDB")
+            return count
 
     async def upsert_products(self, products: List[Dict[str, Any]]) -> int:
         """Insert or update products from API response."""
