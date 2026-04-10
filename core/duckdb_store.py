@@ -2253,7 +2253,9 @@ class DuckDBStore(
                         row["promocode"], first_seen, update_cnt,
                     ))
 
-                conn.executemany("""
+                # DuckDB 1.5: executemany + ON CONFLICT is broken (PK violation
+                # even after DELETE). Use per-row execute as workaround.
+                upsert_sql = """
                     INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at,
                                        buyer_id, manager_id, manager_comment, promocode, synced_at, first_seen_at, update_count)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), COALESCE(?, now()), ?)
@@ -2271,7 +2273,9 @@ class DuckDBStore(
                         synced_at = now(),
                         first_seen_at = orders.first_seen_at,
                         update_count = excluded.update_count
-                """, insert_rows)
+                """
+                for params in insert_rows:
+                    conn.execute(upsert_sql, list(params))
 
                 # 3. Insert new products in batch (use OR REPLACE to handle ID collisions)
                 #    (skip for status-only refresh — products unchanged, avoids OOM)
