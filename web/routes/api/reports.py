@@ -140,11 +140,11 @@ async def export_marketing_csv(
         writer.writerow(row)
 
     # Row 1: Month names
-    _row(*([_MONTH_NAMES_UK[r["month"] - 1]] for r in reports))
+    _row(*[[_MONTH_NAMES_UK[r["month"] - 1]] for r in reports])
 
     # Section 1: General Sales
-    _row(*["1. ЗАГАЛЬНІ ПРОДАЖІ"] for _ in reports)
-    _row(*(["Показник", "Поточний місяць", "Попередній місяць", "Зміна, %", "Ціль місяця"] for _ in reports))
+    _row(*[["1. ЗАГАЛЬНІ ПРОДАЖІ"] for _ in reports])
+    _row(*[["Показник", "Поточний місяць", "Попередній місяць", "Зміна, %", "Ціль місяця"] for _ in reports])
 
     general_rows = [
         ("Виручка (грн)", "revenue", _fmt_currency, True),
@@ -168,8 +168,8 @@ async def export_marketing_csv(
     writer.writerow([])
 
     # Section 2: Brands
-    _row(*["2. ПРОДАЖІ ПО БРЕНДАХ"] for _ in reports)
-    _row(*(["Бренд", "Виручка (грн)", "К-сть замовлень", "Ср. чек (грн)", "% від загального"] for _ in reports))
+    _row(*[["2. ПРОДАЖІ ПО БРЕНДАХ"] for _ in reports])
+    _row(*[["Бренд", "Виручка (грн)", "К-сть замовлень", "Ср. чек (грн)", "% від загального"] for _ in reports])
 
     max_brands = max(len(r["brands"]) for r in reports) if reports else 0
     for i in range(max_brands):
@@ -186,8 +186,8 @@ async def export_marketing_csv(
     writer.writerow([])
 
     # Section 3: Sources
-    _row(*["3. КАНАЛИ / ДЖЕРЕЛА"] for _ in reports)
-    _row(*(["Канал", "К-сть замовлень", "Виручка (грн)", "% замовлень", "% виручки"] for _ in reports))
+    _row(*[["3. КАНАЛИ / ДЖЕРЕЛА"] for _ in reports])
+    _row(*[["Канал", "К-сть замовлень", "Виручка (грн)", "% замовлень", "% виручки"] for _ in reports])
 
     max_sources = max(len(r["sources"]) for r in reports) if reports else 0
     for i in range(max_sources):
