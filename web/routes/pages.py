@@ -14,14 +14,6 @@ router = APIRouter(tags=["pages"])
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
-# ─── Root Redirect to V2 Dashboard ────────────────────────────────────────────
-
-@router.get("/")
-async def root_redirect():
-    """Redirect root to v2 dashboard."""
-    return RedirectResponse(url="/v2", status_code=302)
-
-
 # ─── V1 Dashboard (Jinja2 Templates) - Legacy ─────────────────────────────────
 
 @router.get("/v1", response_class=HTMLResponse)
@@ -45,7 +37,7 @@ async def dashboard_v1(request: Request):
     )
 
 
-# ─── V2 Dashboard (React SPA) ─────────────────────────────────────────────────
+# ─── React SPA ────────────────────────────────────────────────────────────────
 
 def _serve_react_app() -> HTMLResponse:
     """Serve the React SPA index.html."""
@@ -102,38 +94,39 @@ npm run dev
     )
 
 
-@router.get("/v2", response_class=HTMLResponse)
-async def dashboard_v2(request: Request):
-    """Serve the React-based dashboard (v2)."""
-    # Check authentication
+@router.get("/", response_class=HTMLResponse)
+async def root_spa(request: Request):
+    """Serve the React SPA at root."""
     redirect = await require_auth(request)
     if redirect:
         return redirect
+    return _serve_react_app()
 
+
+@router.get("/v2", response_class=HTMLResponse)
+async def dashboard_v2(request: Request):
+    """Serve the React SPA (legacy /v2 alias)."""
+    redirect = await require_auth(request)
+    if redirect:
+        return redirect
     return _serve_react_app()
 
 
 @router.get("/v2/{path:path}", response_class=HTMLResponse)
 async def dashboard_v2_spa(request: Request, path: str):
-    """
-    Handle all /v2/* routes for React SPA client-side routing.
-    This ensures deep links and browser refresh work correctly.
-    """
+    """Handle /v2/* deep links (legacy alias)."""
     return await _serve_spa_route(request, path)
-
-
-@router.get("/margin", response_class=HTMLResponse)
-async def margin_spa(request: Request):
-    """Handle /margin route for React SPA."""
-    return await _serve_spa_route(request, "margin")
 
 
 @router.get("/admin/{path:path}", response_class=HTMLResponse)
 async def admin_spa(request: Request, path: str):
-    """
-    Handle /admin/* routes for React SPA (user management, permissions).
-    React app checks both /admin/* and /v2/admin/* paths.
-    """
+    """Handle /admin/* routes for React SPA."""
+    return await _serve_spa_route(request, path)
+
+
+@router.get("/{path:path}", response_class=HTMLResponse)
+async def catch_all_spa(request: Request, path: str):
+    """Catch-all: serve React SPA for any unmatched route (client-side routing)."""
     return await _serve_spa_route(request, path)
 
 

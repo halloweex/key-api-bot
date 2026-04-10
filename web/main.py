@@ -112,13 +112,13 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 STATIC_V2_DIR.mkdir(exist_ok=True)
 app.mount("/static-v2", StaticFiles(directory=str(STATIC_V2_DIR)), name="static-v2")
 
-# Include routers
+# Include routers (pages router LAST — it has a catch-all /{path:path})
 app.include_router(auth.router)  # Auth routes first (login, logout, callback)
-app.include_router(pages.router)
 app.include_router(api.router, prefix="/api")
 app.include_router(batch.router, prefix="/api")
 app.include_router(websocket.router)  # WebSocket routes (no /api prefix)
 app.include_router(chat.router, prefix="/api")
+app.include_router(pages.router)  # SPA catch-all must be last
 
 
 @app.on_event("startup")
