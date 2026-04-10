@@ -2193,6 +2193,11 @@ class DuckDBStore(
         for col in ["ordered_at", "created_at", "updated_at"]:
             orders_df[col] = pd.to_datetime(orders_df[col], utc=True)
 
+        # Ensure nullable integer columns use Int64 so None stays pd.NA, not float NaN
+        # (DuckDB 1.5+ rejects float NaN → INT32 in executemany)
+        for col in ["source_id", "status_id", "buyer_id", "manager_id"]:
+            orders_df[col] = orders_df[col].astype("Int64")
+
         # Ensure nullable string columns are proper type for DuckDB
         orders_df["manager_comment"] = orders_df["manager_comment"].astype(pd.StringDtype())
         orders_df["promocode"] = orders_df["promocode"].astype(pd.StringDtype())
@@ -2227,6 +2232,10 @@ class DuckDBStore(
                     conn.execute(f"DELETE FROM orders WHERE id IN ({placeholders_o})", order_ids)
 
                 # Build insert rows from DataFrame
+                # Helper: pd.NA → None for DuckDB executemany compatibility
+                def _int_or_none(v):
+                    return None if pd.isna(v) else int(v)
+
                 insert_rows = []
                 for _, row in orders_df.iterrows():
                     oid = int(row["id"])
@@ -2234,9 +2243,13 @@ class DuckDBStore(
                     first_seen = meta[0] if meta else None
                     update_cnt = (meta[1] + 1) if meta else 0
                     insert_rows.append((
-                        oid, row["source_id"], row["status_id"], float(row["grand_total"]),
+                        oid, _int_or_none(row["source_id"]),
+                        _int_or_none(row["status_id"]),
+                        float(row["grand_total"]),
                         row["ordered_at"], row["created_at"], row["updated_at"],
-                        row["buyer_id"], row["manager_id"], row["manager_comment"],
+                        _int_or_none(row["buyer_id"]),
+                        _int_or_none(row["manager_id"]),
+                        row["manager_comment"],
                         row["promocode"], first_seen, update_cnt,
                     ))
 
