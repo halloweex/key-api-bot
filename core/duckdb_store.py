@@ -2254,9 +2254,23 @@ class DuckDBStore(
                     ))
 
                 conn.executemany("""
-                    INSERT OR REPLACE INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at,
+                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at,
                                        buyer_id, manager_id, manager_comment, promocode, synced_at, first_seen_at, update_count)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), COALESCE(?, now()), ?)
+                    ON CONFLICT (id) DO UPDATE SET
+                        source_id = excluded.source_id,
+                        status_id = excluded.status_id,
+                        grand_total = excluded.grand_total,
+                        ordered_at = excluded.ordered_at,
+                        created_at = excluded.created_at,
+                        updated_at = excluded.updated_at,
+                        buyer_id = excluded.buyer_id,
+                        manager_id = excluded.manager_id,
+                        manager_comment = excluded.manager_comment,
+                        promocode = excluded.promocode,
+                        synced_at = now(),
+                        first_seen_at = orders.first_seen_at,
+                        update_count = excluded.update_count
                 """, insert_rows)
 
                 # 3. Insert new products in batch (use OR REPLACE to handle ID collisions)
