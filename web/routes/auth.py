@@ -66,13 +66,16 @@ async def login_page(request: Request, error: str = None, status: str = None):
     # Build callback URL
     callback_url = str(request.url_for('telegram_callback'))
 
-    return templates.TemplateResponse("login.html", {
-        "request": request,
-        "bot_username": BOT_USERNAME,
-        "callback_url": callback_url,
-        "error": error,
-        "status": status
-    })
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {
+            "bot_username": BOT_USERNAME,
+            "callback_url": callback_url,
+            "error": error,
+            "status": status,
+        },
+    )
 
 
 @router.get("/auth/telegram/callback")

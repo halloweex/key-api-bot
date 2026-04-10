@@ -35,11 +35,14 @@ async def dashboard_v1(request: Request):
     # Get current user for display
     user = await get_current_user(request)
 
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
-        "version": VERSION,
-        "user": user
-    })
+    return templates.TemplateResponse(
+        request,
+        "dashboard.html",
+        {
+            "version": VERSION,
+            "user": user,
+        },
+    )
 
 
 # ─── V2 Dashboard (React SPA) ─────────────────────────────────────────────────
