@@ -2254,7 +2254,7 @@ class DuckDBStore(
                     ))
 
                 conn.executemany("""
-                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at,
+                    INSERT OR REPLACE INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at,
                                        buyer_id, manager_id, manager_comment, promocode, synced_at, first_seen_at, update_count)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), COALESCE(?, now()), ?)
                 """, insert_rows)
