@@ -1,8 +1,9 @@
-import { memo, useState, useMemo } from 'react'
+import { memo, useState, useMemo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card'
 import { SkeletonChart, ApiErrorState } from '../ui'
 import { useMarketingReport } from '../../hooks/useApi'
+import { useFilterStore } from '../../store/filterStore'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
 import i18n, { LANGUAGE_LOCALES, type SupportedLanguage } from '../../lib/i18n'
 import type { MarketingMonthStats, MarketingBrandRow, MarketingSourceRow } from '../../types/api'
@@ -242,17 +243,36 @@ export const MonthlyReport = memo(function MonthlyReport() {
   const now = new Date()
   const [year, setYear] = useState(now.getFullYear())
   const [month, setMonth] = useState(now.getMonth() + 1)
+  const salesType = useFilterStore((s) => s.salesType)
 
   const { data, isLoading, error, refetch } = useMarketingReport(year, month)
 
+  const downloadCsv = useCallback(() => {
+    const params = new URLSearchParams({
+      year: String(year),
+      month: String(month),
+      months: '3',
+      sales_type: salesType,
+    })
+    window.open(`/api/reports/marketing-summary/export/csv?${params}`, '_blank')
+  }, [year, month, salesType])
+
   return (
     <div className="space-y-4">
-      {/* Header with month selector */}
-      <div className="flex items-center justify-between">
+      {/* Header with month selector and export */}
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h2 className="text-lg font-bold text-slate-800">
           {t('marketing.monthlyReport')}
         </h2>
-        <MonthSelector year={year} month={month} onChange={(y, m) => { setYear(y); setMonth(m) }} />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={downloadCsv}
+            className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
+          >
+            {t('reports.exportCsv')}
+          </button>
+          <MonthSelector year={year} month={month} onChange={(y, m) => { setYear(y); setMonth(m) }} />
+        </div>
       </div>
 
       {isLoading && <SkeletonChart />}

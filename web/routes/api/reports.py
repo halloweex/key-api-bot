@@ -63,6 +63,153 @@ async def get_marketing_summary(
     return await store.get_marketing_report(y, m, st)
 
 
+# ─── Ukrainian month names for CSV export ────────────────────────────────
+
+_MONTH_NAMES_UK = [
+    "СІЧЕНЬ", "ЛЮТИЙ", "БЕРЕЗЕНЬ", "КВІТЕНЬ", "ТРАВЕНЬ", "ЧЕРВЕНЬ",
+    "ЛИПЕНЬ", "СЕРПЕНЬ", "ВЕРЕСЕНЬ", "ЖОВТЕНЬ", "ЛИСТОПАД", "ГРУДЕНЬ",
+]
+
+
+def _fmt_currency(v: float) -> str:
+    return f"₴{v:,.0f}"
+
+
+def _fmt_pct_change(cur: float, prev: float) -> str:
+    if prev == 0:
+        return "+100%" if cur > 0 else "0%"
+    return f"{(cur - prev) / prev * 100:.2f}%"
+
+
+def _fmt_goal(v) -> str:
+    if v is None:
+        return ""
+    if v >= 1_000_000:
+        m = v / 1_000_000
+        return f"₴{m:.1f} млн" if m % 1 else f"₴{m:.0f} млн"
+    return _fmt_currency(v)
+
+
+@router.get("/marketing-summary/export/csv")
+@limiter.limit("10/minute")
+async def export_marketing_csv(
+    request: Request,
+    year: Optional[int] = Query(None),
+    month: Optional[int] = Query(None),
+    months: int = Query(3, ge=1, le=6),
+    sales_type: Optional[str] = Query("retail"),
+):
+    """Export marketing report as CSV — multiple months side by side."""
+    from zoneinfo import ZoneInfo
+    now = _datetime.now(ZoneInfo("Europe/Kyiv"))
+    start_year = year or now.year
+    start_month = month or now.month
+
+    try:
+        st = validate_sales_type(sales_type)
+    except ValidationError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+    store = await get_store()
+
+    # Fetch data for each month
+    reports = []
+    y, m = start_year, start_month
+    for _ in range(months):
+        reports.append(await store.get_marketing_report(y, m, st))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+
+    # Build CSV — months side by side, separated by empty column
+    output = io.StringIO()
+    writer = csv.writer(output)
+    cols_per_month = 5  # 5 data columns per month
+    gap = 1  # 1 empty column between months
+
+    def _row(*month_cells):
+        """Build a row with month blocks side by side."""
+        row = []
+        for i, cells in enumerate(month_cells):
+            row.extend(cells)
+            # Pad to cols_per_month
+            row.extend([""] * (cols_per_month - len(cells)))
+            if i < len(month_cells) - 1:
+                row.extend([""] * gap)
+        writer.writerow(row)
+
+    # Row 1: Month names
+    _row(*([_MONTH_NAMES_UK[r["month"] - 1]] for r in reports))
+
+    # Section 1: General Sales
+    _row(*["1. ЗАГАЛЬНІ ПРОДАЖІ"] for _ in reports)
+    _row(*(["Показник", "Поточний місяць", "Попередній місяць", "Зміна, %", "Ціль місяця"] for _ in reports))
+
+    general_rows = [
+        ("Виручка (грн)", "revenue", _fmt_currency, True),
+        ("К-сть замовлень", "orders", lambda v: f"{v:,}", False),
+        ("Середній чек (грн)", "avg_check", _fmt_currency, False),
+        ("К-сть клієнтів", "customers", lambda v: f"{v:,}", False),
+        ("Нові клієнти", "new_customers", lambda v: f"{v:,}", False),
+        ("Клієнти, що повернулись", "returning_customers", lambda v: f"{v:,}", False),
+        ("% повернення", "return_rate", lambda v: f"{v:.0f}%", False),
+    ]
+    for label, key, fmt, show_goal in general_rows:
+        cells_per_month = []
+        for r in reports:
+            cur = r["general_sales"]["current"][key]
+            prev = r["general_sales"]["previous"][key]
+            goal_str = _fmt_goal(r["general_sales"]["monthly_goal"]) if show_goal else ""
+            cells_per_month.append([label, fmt(cur), fmt(prev), _fmt_pct_change(cur, prev), goal_str])
+        _row(*cells_per_month)
+
+    # Empty row
+    writer.writerow([])
+
+    # Section 2: Brands
+    _row(*["2. ПРОДАЖІ ПО БРЕНДАХ"] for _ in reports)
+    _row(*(["Бренд", "Виручка (грн)", "К-сть замовлень", "Ср. чек (грн)", "% від загального"] for _ in reports))
+
+    max_brands = max(len(r["brands"]) for r in reports) if reports else 0
+    for i in range(max_brands):
+        cells_per_month = []
+        for r in reports:
+            if i < len(r["brands"]):
+                b = r["brands"][i]
+                cells_per_month.append([b["brand"], _fmt_currency(b["revenue"]), f"{b['orders']:,}", _fmt_currency(b["avg_check"]), f"{b['share_pct']}%"])
+            else:
+                cells_per_month.append(["", "", "", "", ""])
+        _row(*cells_per_month)
+
+    # Empty row
+    writer.writerow([])
+
+    # Section 3: Sources
+    _row(*["3. КАНАЛИ / ДЖЕРЕЛА"] for _ in reports)
+    _row(*(["Канал", "К-сть замовлень", "Виручка (грн)", "% замовлень", "% виручки"] for _ in reports))
+
+    max_sources = max(len(r["sources"]) for r in reports) if reports else 0
+    for i in range(max_sources):
+        cells_per_month = []
+        for r in reports:
+            if i < len(r["sources"]):
+                s = r["sources"][i]
+                cells_per_month.append([s["source_name"], f"{s['orders']:,}", _fmt_currency(s["revenue"]), f"{s['orders_pct']}%", f"{s['revenue_pct']}%"])
+            else:
+                cells_per_month.append(["", "", "", "", ""])
+        _row(*cells_per_month)
+
+    output.seek(0)
+    m_start = _MONTH_NAMES_UK[start_month - 1].lower()
+    filename = f"marketing_report_{m_start}_{start_year}.csv"
+    return StreamingResponse(
+        iter([output.getvalue().encode("utf-8-sig")]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 @router.get("/summary")
 @limiter.limit("30/minute")
 async def get_report_summary(
