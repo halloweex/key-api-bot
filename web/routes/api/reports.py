@@ -35,6 +35,34 @@ def _parse_common_params(
     return start_dt, end_dt, source_id, category_id, brand, sales_type
 
 
+@router.get("/marketing-summary")
+@limiter.limit("30/minute")
+async def get_marketing_summary(
+    request: Request,
+    year: Optional[int] = Query(None),
+    month: Optional[int] = Query(None),
+    sales_type: Optional[str] = Query("retail"),
+):
+    """Get monthly marketing report: general sales, brands, sources."""
+    from datetime import date as _d
+    from zoneinfo import ZoneInfo
+    now = _datetime.now(ZoneInfo("Europe/Kyiv"))
+    y = year or now.year
+    m = month or now.month
+    if not (1 <= m <= 12):
+        raise HTTPException(status_code=400, detail="month must be 1-12")
+    if not (2020 <= y <= 2100):
+        raise HTTPException(status_code=400, detail="year out of range")
+
+    try:
+        st = validate_sales_type(sales_type)
+    except ValidationError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+    store = await get_store()
+    return await store.get_marketing_report(y, m, st)
+
+
 @router.get("/summary")
 @limiter.limit("30/minute")
 async def get_report_summary(

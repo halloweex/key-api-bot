@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
 from core.duckdb_constants import _date_in_kyiv
@@ -1385,5 +1385,133 @@ class RevenueMixin:
                     "promoAov": round(promo_total_revenue / promo_total_orders, 2) if promo_total_orders > 0 else 0,
                 },
             }
+
+    # ─── Marketing Report ────────────────────────────────────────────────────
+
+    async def get_marketing_report(
+        self,
+        year: int,
+        month: int,
+        sales_type: str = "retail",
+    ) -> Dict[str, Any]:
+        """Get monthly marketing report: general sales vs prev month, brands, sources."""
+        from calendar import monthrange
+
+        _, last_day = monthrange(year, month)
+        start_date = date(year, month, 1)
+        end_date = date(year, month, last_day)
+
+        prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
+        _, prev_last_day = monthrange(prev_year, prev_month)
+        prev_start = date(prev_year, prev_month, 1)
+        prev_end = date(prev_year, prev_month, prev_last_day)
+
+        async with self.connection() as conn:
+            sales_where = "sales_type = ?" if sales_type != "all" else "1=1"
+            sales_params = [sales_type] if sales_type != "all" else []
+
+            def _fetch_month(sd, ed):
+                params = [sd, ed] + sales_params
+                row = conn.execute(f"""
+                    SELECT
+                        COALESCE(SUM(revenue), 0),
+                        COALESCE(SUM(orders_count), 0),
+                        COALESCE(SUM(unique_customers), 0),
+                        COALESCE(SUM(new_customers), 0),
+                        COALESCE(SUM(returning_customers), 0),
+                        COALESCE(SUM(instagram_revenue), 0),
+                        COALESCE(SUM(telegram_revenue), 0),
+                        COALESCE(SUM(shopify_revenue), 0),
+                        COALESCE(SUM(instagram_orders), 0),
+                        COALESCE(SUM(telegram_orders), 0),
+                        COALESCE(SUM(shopify_orders), 0)
+                    FROM gold_daily_revenue
+                    WHERE date BETWEEN ? AND ? AND {sales_where}
+                """, params).fetchone()
+
+                revenue = float(row[0])
+                orders = int(row[1])
+                customers = int(row[2])
+                new_cust = int(row[3])
+                ret_cust = int(row[4])
+
+                return {
+                    "revenue": round(revenue, 2),
+                    "orders": orders,
+                    "avg_check": round(revenue / orders, 2) if orders > 0 else 0,
+                    "customers": customers,
+                    "new_customers": new_cust,
+                    "returning_customers": ret_cust,
+                    "return_rate": round(ret_cust / customers * 100, 1) if customers > 0 else 0,
+                }, {
+                    "instagram": {"revenue": round(float(row[5]), 2), "orders": int(row[8])},
+                    "telegram": {"revenue": round(float(row[6]), 2), "orders": int(row[9])},
+                    "shopify": {"revenue": round(float(row[7]), 2), "orders": int(row[10])},
+                }
+
+            current, cur_sources = _fetch_month(start_date, end_date)
+            previous, _ = _fetch_month(prev_start, prev_end)
+
+            # Brands - current month from gold_daily_products
+            brand_where = "g.sales_type = ?" if sales_type != "all" else "1=1"
+            brand_params = [start_date, end_date] + sales_params
+            brand_results = conn.execute(f"""
+                SELECT
+                    COALESCE(g.brand, 'Unknown') as brand_name,
+                    SUM(g.product_revenue) as revenue,
+                    SUM(g.order_count) as orders,
+                    SUM(g.quantity_sold) as quantity
+                FROM gold_daily_products g
+                WHERE g.date BETWEEN ? AND ? AND {brand_where}
+                GROUP BY COALESCE(g.brand, 'Unknown')
+                HAVING revenue > 0
+                ORDER BY revenue DESC
+            """, brand_params).fetchall()
+
+            total_brand_revenue = sum(float(r[1]) for r in brand_results)
+            brands = []
+            for r in brand_results:
+                rev = float(r[1])
+                ord_count = int(r[2])
+                brands.append({
+                    "brand": r[0],
+                    "revenue": round(rev, 2),
+                    "orders": ord_count,
+                    "avg_check": round(rev / ord_count, 2) if ord_count > 0 else 0,
+                    "share_pct": round(rev / total_brand_revenue * 100, 1) if total_brand_revenue > 0 else 0,
+                })
+
+            # Monthly goal
+            goal_row = conn.execute(
+                "SELECT goal_amount FROM revenue_goals WHERE period_type = 'monthly'"
+            ).fetchone()
+            monthly_goal = float(goal_row[0]) if goal_row else None
+
+        # Build sources list
+        total_orders = current["orders"]
+        total_revenue = current["revenue"]
+        sources = []
+        for key, name in [("shopify", "Сайт"), ("telegram", "Telegram"), ("instagram", "Instagram")]:
+            s = cur_sources[key]
+            sources.append({
+                "source_name": name,
+                "orders": s["orders"],
+                "revenue": round(s["revenue"], 2),
+                "orders_pct": round(s["orders"] / total_orders * 100, 1) if total_orders > 0 else 0,
+                "revenue_pct": round(s["revenue"] / total_revenue * 100, 1) if total_revenue > 0 else 0,
+            })
+        sources.sort(key=lambda x: x["revenue"], reverse=True)
+
+        return {
+            "month": month,
+            "year": year,
+            "general_sales": {
+                "current": current,
+                "previous": previous,
+                "monthly_goal": monthly_goal,
+            },
+            "brands": brands,
+            "sources": sources,
+        }
 
     # ─── Expense Methods ─────────────────────────────────────────────────────

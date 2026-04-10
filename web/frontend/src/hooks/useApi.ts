@@ -56,6 +56,7 @@ import type {
   MarginTrendItem,
   MarginBrandCategoryItem,
   MarginAlertItem,
+  MarketingReportResponse,
 } from '../types/api'
 
 export interface TurnoverParams {
@@ -119,6 +120,7 @@ export const queryKeys = {
   reportSummary: (params: string) => ['reportSummary', params] as const,
   reportTopProducts: (params: string) => ['reportTopProducts', params] as const,
   reportAllProducts: (params: string) => ['reportAllProducts', params] as const,
+  marketingReport: (year: number, month: number, salesType: string) => ['marketingReport', year, month, salesType] as const,
   // Product Intelligence
   basketSummary: (params: string) => ['basketSummary', params] as const,
   productPairs: (params: string) => ['productPairs', params] as const,
@@ -696,6 +698,18 @@ export function useReportAllProducts(sourceId: number | null) {
   return useQuery<ReportTopProductsResponse>({
     queryKey: [...queryKeys.reportAllProducts(queryParams), sourceId],
     queryFn: () => api.getReportAllProducts(paramsStr),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+// ─── Marketing Report ────────────────────────────────────────────────────
+
+export function useMarketingReport(year: number, month: number) {
+  const salesType = useFilterStore(selectSalesType)
+
+  return useQuery<MarketingReportResponse>({
+    queryKey: queryKeys.marketingReport(year, month, salesType),
+    queryFn: () => api.getMarketingReport(year, month, salesType),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

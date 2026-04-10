@@ -1110,3 +1110,43 @@ export interface ProductMomentumResponse {
   gainers: MomentumProduct[]
   losers: MomentumProduct[]
 }
+
+// ─── Marketing Report ──────────────────────────────────────────────────────
+
+export interface MarketingMonthStats {
+  revenue: number
+  orders: number
+  avg_check: number
+  customers: number
+  new_customers: number
+  returning_customers: number
+  return_rate: number
+}
+
+export interface MarketingBrandRow {
+  brand: string
+  revenue: number
+  orders: number
+  avg_check: number
+  share_pct: number
+}
+
+export interface MarketingSourceRow {
+  source_name: string
+  orders: number
+  revenue: number
+  orders_pct: number
+  revenue_pct: number
+}
+
+export interface MarketingReportResponse {
+  month: number
+  year: number
+  general_sales: {
+    current: MarketingMonthStats
+    previous: MarketingMonthStats
+    monthly_goal: number | null
+  }
+  brands: MarketingBrandRow[]
+  sources: MarketingSourceRow[]
+}
