@@ -2203,48 +2203,48 @@ class DuckDBStore(
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
-                # Materialize DataFrame into temp table (registered views can expose
-                # duplicate rows and cause PK violations despite Python-level dedup)
-                conn.register("_raw_stg", orders_df)
-                conn.execute("""
-                    CREATE OR REPLACE TEMP TABLE stg_orders AS
-                    SELECT * FROM _raw_stg
-                    QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY updated_at DESC NULLS LAST) = 1
-                """)
-                conn.unregister("_raw_stg")
-
                 # 1. Delete existing products using explicit ID list
                 #    (skip for status-only refresh — products unchanged, avoids OOM)
                 if not skip_products and order_ids:
                     placeholders = ",".join("?" * len(order_ids))
                     conn.execute(f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids)
 
-                # 2. Upsert orders from staging (UPDATE existing + INSERT new)
-                # INSERT OR REPLACE from temp tables has a known issue in DuckDB
-                # where some rows silently fail to update. Two-step approach is reliable.
-                conn.execute("""
-                    UPDATE orders SET
-                        source_id = s.source_id,
-                        status_id = s.status_id,
-                        grand_total = s.grand_total,
-                        ordered_at = s.ordered_at,
-                        created_at = s.created_at,
-                        updated_at = s.updated_at,
-                        buyer_id = s.buyer_id,
-                        manager_id = s.manager_id,
-                        manager_comment = s.manager_comment,
-                        promocode = s.promocode,
-                        synced_at = now(),
-                        update_count = COALESCE(orders.update_count, 0) + 1
-                    FROM stg_orders s
-                    WHERE orders.id = s.id
-                """)
-                conn.execute("""
-                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, synced_at, first_seen_at, update_count)
-                    SELECT id, source_id, status_id, grand_total, ordered_at, created_at, updated_at, buyer_id, manager_id, manager_comment, promocode, now(), now(), 0
-                    FROM stg_orders s
-                    WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.id = s.id)
-                """)
+                # 2. Upsert orders: DELETE existing + INSERT all (parameterized)
+                # Avoids DuckDB temp table / registered view bugs that cause
+                # write-write conflicts and PK violations (gh duckdb/duckdb#7640).
+                existing_meta = {}
+                if order_ids:
+                    placeholders_o = ",".join("?" * len(order_ids))
+
+                    # Capture existing metadata before delete
+                    for row in conn.execute(
+                        f"SELECT id, first_seen_at, COALESCE(update_count, 0) FROM orders WHERE id IN ({placeholders_o})",
+                        order_ids,
+                    ).fetchall():
+                        existing_meta[row[0]] = (row[1], row[2])
+
+                    # Delete existing orders
+                    conn.execute(f"DELETE FROM orders WHERE id IN ({placeholders_o})", order_ids)
+
+                # Build insert rows from DataFrame
+                insert_rows = []
+                for _, row in orders_df.iterrows():
+                    oid = int(row["id"])
+                    meta = existing_meta.get(oid)
+                    first_seen = meta[0] if meta else None
+                    update_cnt = (meta[1] + 1) if meta else 0
+                    insert_rows.append((
+                        oid, row["source_id"], row["status_id"], float(row["grand_total"]),
+                        row["ordered_at"], row["created_at"], row["updated_at"],
+                        row["buyer_id"], row["manager_id"], row["manager_comment"],
+                        row["promocode"], first_seen, update_cnt,
+                    ))
+
+                conn.executemany("""
+                    INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at,
+                                       buyer_id, manager_id, manager_comment, promocode, synced_at, first_seen_at, update_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), COALESCE(?, now()), ?)
+                """, insert_rows)
 
                 # 3. Insert new products in batch (use OR REPLACE to handle ID collisions)
                 #    (skip for status-only refresh — products unchanged, avoids OOM)
@@ -2257,7 +2257,6 @@ class DuckDBStore(
                         for p in product_rows
                     ])
 
-                conn.execute("DROP TABLE IF EXISTS stg_orders")
                 conn.execute("COMMIT")
 
                 count = len(order_rows)

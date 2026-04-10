@@ -150,8 +150,13 @@ async def startup_event():
             f"{stats['db_size_mb']} MB"
         )
     except Exception as e:
-        logger.error(f"DuckDB initialization failed: {e}", exc_info=True)
-        raise  # Fail fast - DuckDB is required
+        logger.error(f"DuckDB sync failed on startup: {e}", exc_info=True)
+        # Don't crash if store has data — serve stale data, scheduler will retry sync
+        store = await get_store()
+        stats = await store.get_stats()
+        if stats.get("orders", 0) == 0:
+            raise  # Fail fast only if DuckDB has no data at all
+        logger.warning(f"Serving stale data ({stats['orders']} orders) — sync will retry via scheduler")
 
     # Migrate users from SQLite to DuckDB (one-time, idempotent)
     try:
