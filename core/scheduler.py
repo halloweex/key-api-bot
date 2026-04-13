@@ -92,7 +92,7 @@ class BackgroundScheduler:
     # Only one heavy job runs at a time to prevent compounding OOM.
     _HEAVY_JOBS = frozenset({
         "incremental_sync", "full_sync_weekly", "order_status_refresh",
-        "revenue_prediction_train", "meilisearch_sync",
+        "revenue_prediction_train", "meilisearch_sync", "warehouse_refresh",
     })
 
     def __init__(self):
@@ -507,21 +507,22 @@ class BackgroundScheduler:
 
     async def _run_warehouse_refresh(self) -> Dict[str, Any]:
         """Check dirty flag and rebuild Silver/Gold if needed."""
-        from core.duckdb_store import get_store
-        store = await get_store()
+        async with self._heavy_job_lock:
+            from core.duckdb_store import get_store
+            store = await get_store()
 
-        is_dirty, changed_ids = await store.consume_warehouse_dirty()
-        if not is_dirty:
-            return {"skipped": True, "reason": "not dirty"}
+            is_dirty, changed_ids = await store.consume_warehouse_dirty()
+            if not is_dirty:
+                return {"skipped": True, "reason": "not dirty"}
 
-        with correlation_context() as corr_id:
-            logger.info(f"Warehouse dirty — refreshing (changed_ids={'full' if changed_ids is None else len(changed_ids)})")
-            result = await store.refresh_warehouse_layers(
-                trigger="dirty_flag",
-                changed_order_ids=changed_ids,
-            )
-            logger.info("Warehouse refresh complete")
-            return result
+            with correlation_context() as corr_id:
+                logger.info(f"Warehouse dirty — refreshing (changed_ids={'full' if changed_ids is None else len(changed_ids)})")
+                result = await store.refresh_warehouse_layers(
+                    trigger="dirty_flag",
+                    changed_order_ids=changed_ids,
+                )
+                logger.info("Warehouse refresh complete")
+                return result
 
     async def _run_reconciliation(self) -> Dict[str, Any]:
         """Run daily reconciliation check against KeyCRM API."""

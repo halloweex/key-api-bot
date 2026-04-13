@@ -16,7 +16,7 @@ nest-asyncio>=1.6.0
 slowapi>=0.1.9
 
 # DuckDB analytics
-duckdb>=1.1.0,<1.6.0
+duckdb==1.5.1
 pandas>=2.0.0
 
 # Job scheduling

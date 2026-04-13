@@ -81,9 +81,10 @@ class DuckDBStore(
                 self._connection.execute("SET memory_limit='4GB'")
                 # Reduce memory usage for bulk operations
                 self._connection.execute("SET preserve_insertion_order=false")
-                # Force frequent WAL checkpoints to prevent WAL corruption
-                # on aarch64/Python 3.14 (DuckDB 1.4.x bug)
-                self._connection.execute("SET wal_autocheckpoint='2MB'")
+                # Large WAL threshold; rely on the explicit 6h CHECKPOINT job.
+                # 2MB caused checkpoint-during-write races on DuckDB 1.5.x
+                # (corrupted in-memory column: row group rows mismatched column rows).
+                self._connection.execute("SET wal_autocheckpoint='1GB'")
                 # Enable disk spilling: DuckDB writes to disk instead of OOM crash
                 tmp_dir = Path(self.db_path).parent / "duckdb_tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -2246,8 +2247,7 @@ class DuckDBStore(
                     manager_id = excluded.manager_id,
                     manager_comment = excluded.manager_comment,
                     promocode = excluded.promocode,
-                    synced_at = now(),
-                    update_count = orders.update_count + 1
+                    synced_at = now()
             """
             for params in insert_rows:
                 conn.execute(upsert_sql, list(params))
