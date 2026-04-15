@@ -2224,14 +2224,11 @@ class DuckDBStore(
             ))
 
         async with self.connection() as conn:
-            # 1. Delete existing products (skip for status-only refresh)
-            if not skip_products and order_ids:
-                placeholders = ",".join("?" * len(order_ids))
-                conn.execute(f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids)
-
-            # 2. Upsert orders one-by-one in autocommit mode.
+            # 1. Upsert orders one-by-one in autocommit mode with row-level fault isolation.
             # DuckDB 1.5: ON CONFLICT inside explicit transactions is broken
-            # (PK violation poisons transaction). Autocommit per-row works.
+            # (PK violation poisons transaction). Autocommit per-row works for most rows,
+            # but occasional rows hit write-write conflicts. Skip them and continue —
+            # the 24h sync_from buffer will retry on the next cycle.
             upsert_sql = """
                 INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at,
                                    buyer_id, manager_id, manager_comment, promocode, synced_at)
@@ -2249,30 +2246,61 @@ class DuckDBStore(
                     promocode = excluded.promocode,
                     synced_at = now()
             """
+            success_ids: List[int] = []
+            failed: List[tuple] = []  # (order_id, error_str)
             for params in insert_rows:
-                conn.execute(upsert_sql, list(params))
-
-            # 3. Insert products (skip for status-only refresh)
-            if not skip_products and product_rows:
-                conn.execute("BEGIN TRANSACTION")
+                order_id = int(params[0])
                 try:
-                    conn.executemany("""
-                        INSERT OR REPLACE INTO order_products (id, order_id, product_id, name, quantity, price_sold)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, [
-                        (p["id"], p["order_id"], p["product_id"], p["name"], p["quantity"], p["price_sold"])
-                        for p in product_rows
-                    ])
-                    conn.execute("COMMIT")
-                except Exception:
+                    conn.execute(upsert_sql, list(params))
+                    success_ids.append(order_id)
+                except duckdb.TransactionException as e:
+                    failed.append((order_id, str(e)))
                     try:
                         conn.execute("ROLLBACK")
                     except Exception:
                         pass
-                    raise
 
-            count = len(order_rows)
-            logger.info(f"Upserted {count} orders to DuckDB")
+            # 2. Delete stale products only for orders we actually updated.
+            # Failed orders keep their existing products — the orders row wasn't
+            # updated either, so consistency is preserved.
+            if not skip_products and success_ids:
+                placeholders = ",".join("?" * len(success_ids))
+                conn.execute(
+                    f"DELETE FROM order_products WHERE order_id IN ({placeholders})",
+                    success_ids,
+                )
+
+            # 3. Insert products for successful orders only
+            if not skip_products and product_rows and success_ids:
+                success_set = set(success_ids)
+                products_to_insert = [p for p in product_rows if p["order_id"] in success_set]
+                if products_to_insert:
+                    conn.execute("BEGIN TRANSACTION")
+                    try:
+                        conn.executemany("""
+                            INSERT OR REPLACE INTO order_products (id, order_id, product_id, name, quantity, price_sold)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, [
+                            (p["id"], p["order_id"], p["product_id"], p["name"], p["quantity"], p["price_sold"])
+                            for p in products_to_insert
+                        ])
+                        conn.execute("COMMIT")
+                    except Exception:
+                        try:
+                            conn.execute("ROLLBACK")
+                        except Exception:
+                            pass
+                        raise
+
+            if failed:
+                sample = ", ".join(str(oid) for oid, _ in failed[:5])
+                logger.error(
+                    f"Skipped {len(failed)} poisoned orders (first 5: {sample}). "
+                    f"First error: {failed[0][1]}"
+                )
+
+            count = len(success_ids)
+            logger.info(f"Upserted {count}/{len(insert_rows)} orders to DuckDB")
             return count
 
     async def upsert_products(self, products: List[Dict[str, Any]]) -> int:
