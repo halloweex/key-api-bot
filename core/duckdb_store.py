@@ -2246,6 +2246,14 @@ class DuckDBStore(
                     promocode = excluded.promocode,
                     synced_at = now()
             """
+            update_sql = """
+                UPDATE orders SET
+                    source_id = ?, status_id = ?, grand_total = ?,
+                    ordered_at = ?, created_at = ?, updated_at = ?,
+                    buyer_id = ?, manager_id = ?, manager_comment = ?,
+                    promocode = ?, synced_at = now()
+                WHERE id = ?
+            """
             success_ids: List[int] = []
             failed: List[tuple] = []  # (order_id, error_str)
             for params in insert_rows:
@@ -2253,6 +2261,27 @@ class DuckDBStore(
                 try:
                     conn.execute(upsert_sql, list(params))
                     success_ids.append(order_id)
+                except duckdb.ConstraintException as e:
+                    # DuckDB 1.5 ON CONFLICT bug: PK violation despite ON CONFLICT clause.
+                    # Fallback to explicit UPDATE — row already exists, we just need to
+                    # refresh its fields.
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute(update_sql, [
+                            params[1], params[2], params[3], params[4], params[5],
+                            params[6], params[7], params[8], params[9], params[10],
+                            order_id,
+                        ])
+                        success_ids.append(order_id)
+                    except Exception as e2:
+                        failed.append((order_id, f"PK+UPDATE failed: {e2}"))
+                        try:
+                            conn.execute("ROLLBACK")
+                        except Exception:
+                            pass
                 except duckdb.TransactionException as e:
                     failed.append((order_id, str(e)))
                     try:
