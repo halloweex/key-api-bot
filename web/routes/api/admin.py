@@ -104,6 +104,94 @@ async def refresh_warehouse(
     return await store.refresh_warehouse_layers(trigger="manual")
 
 
+@router.post("/duckdb/purge-orders")
+@limiter.limit("2/minute")
+async def purge_orders(
+    request: Request,
+    ids: str = Query(..., description="Comma-separated order IDs to purge"),
+    admin: dict = Depends(require_admin),
+):
+    """
+    Purge poisoned orders from DuckDB and CHECKPOINT to clear MVCC state.
+
+    Use for DuckDB 1.5 rows stuck in write-write conflict or PK violation.
+    Next incremental_sync will re-create them as clean INSERTs.
+    """
+    try:
+        order_ids = [int(x.strip()) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid ids (must be comma-separated ints)")
+
+    if not order_ids or len(order_ids) > 100:
+        raise HTTPException(status_code=400, detail="Provide 1-100 IDs")
+
+    store = await get_store()
+    placeholders = ",".join("?" * len(order_ids))
+    result = {"requested": order_ids, "deleted": {}}
+
+    async with store.connection() as conn:
+        # Count before
+        before_orders = conn.execute(
+            f"SELECT COUNT(*) FROM orders WHERE id IN ({placeholders})", order_ids
+        ).fetchone()[0]
+        before_silver = conn.execute(
+            f"SELECT COUNT(*) FROM silver_orders WHERE id IN ({placeholders})", order_ids
+        ).fetchone()[0]
+
+        # Each DELETE in its own autocommit statement (no explicit BEGIN) —
+        # DuckDB 1.5 DELETE+INSERT in a transaction has visibility bugs.
+        try:
+            conn.execute(
+                f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids
+            )
+        except Exception as e:
+            logger.warning(f"order_products delete failed: {e}")
+
+        try:
+            conn.execute(
+                f"DELETE FROM expenses WHERE order_id IN ({placeholders})", order_ids
+            )
+        except Exception as e:
+            logger.warning(f"expenses delete failed: {e}")
+
+        try:
+            conn.execute(
+                f"DELETE FROM silver_orders WHERE id IN ({placeholders})", order_ids
+            )
+        except Exception as e:
+            logger.warning(f"silver_orders delete failed: {e}")
+
+        try:
+            conn.execute(
+                f"DELETE FROM orders WHERE id IN ({placeholders})", order_ids
+            )
+        except Exception as e:
+            logger.warning(f"orders delete failed: {e}")
+
+        # Force WAL flush + MVCC cleanup
+        conn.execute("CHECKPOINT")
+
+        # Count after
+        after_orders = conn.execute(
+            f"SELECT COUNT(*) FROM orders WHERE id IN ({placeholders})", order_ids
+        ).fetchone()[0]
+        after_silver = conn.execute(
+            f"SELECT COUNT(*) FROM silver_orders WHERE id IN ({placeholders})", order_ids
+        ).fetchone()[0]
+
+    result["deleted"] = {
+        "orders": before_orders - after_orders,
+        "silver_orders": before_silver - after_silver,
+    }
+    result["remaining"] = {
+        "orders": after_orders,
+        "silver_orders": after_silver,
+    }
+    result["checkpoint"] = "done"
+    logger.info(f"Purged orders: {result}")
+    return result
+
+
 # ─── Buyer Sync ────────────────────────────────────────────────────────────────
 
 @router.post("/duckdb/sync-buyers")
