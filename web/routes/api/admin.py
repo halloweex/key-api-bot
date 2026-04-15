@@ -104,6 +104,94 @@ async def refresh_warehouse(
     return await store.refresh_warehouse_layers(trigger="manual")
 
 
+@router.post("/warehouse/rebuild-silver")
+@limiter.limit("1/minute")
+async def rebuild_silver_from_scratch(
+    request: Request,
+    admin: dict = Depends(require_admin),
+):
+    """
+    DROP + CREATE + INSERT silver_orders from bronze. Bypasses MVCC —
+    use when silver has corrupted rows blocking DELETE+INSERT rebuild.
+    """
+    from core.config import B2B_MANAGER_ID, RETAIL_MANAGER_IDS
+    from core.models import OrderStatus
+    from core.duckdb_store import _date_in_kyiv
+
+    store = await get_store()
+    manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
+    retail_filter = f"""
+        WHEN o.manager_id IS NULL THEN 'retail'
+        WHEN o.manager_id = {B2B_MANAGER_ID} THEN 'b2b'
+        WHEN o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'
+        WHEN NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
+             AND o.manager_id IN ({manager_list}) THEN 'retail'
+        ELSE 'other'
+    """
+    return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+
+    async with store.connection() as conn:
+        conn.execute("DROP TABLE IF EXISTS silver_orders")
+        conn.execute("""
+            CREATE TABLE silver_orders (
+                id INTEGER PRIMARY KEY,
+                source_id INTEGER NOT NULL,
+                status_id INTEGER NOT NULL,
+                grand_total DECIMAL(12, 2) NOT NULL,
+                ordered_at TIMESTAMP WITH TIME ZONE,
+                buyer_id INTEGER,
+                manager_id INTEGER,
+                order_date DATE NOT NULL,
+                is_return BOOLEAN NOT NULL,
+                sales_type VARCHAR NOT NULL,
+                is_active_source BOOLEAN NOT NULL,
+                source_name VARCHAR NOT NULL,
+                is_new_customer BOOLEAN NOT NULL DEFAULT FALSE,
+                buyer_first_order_date DATE,
+                promocode VARCHAR
+            )
+        """)
+        conn.execute(f"""
+            INSERT INTO silver_orders
+            SELECT
+                o.id, o.source_id, o.status_id, o.grand_total,
+                o.ordered_at, o.buyer_id, o.manager_id,
+                {_date_in_kyiv('o.ordered_at')} AS order_date,
+                o.status_id IN {return_statuses} AS is_return,
+                CASE {retail_filter} END AS sales_type,
+                o.source_id IN (1, 2, 4) AS is_active_source,
+                CASE o.source_id WHEN 1 THEN 'Instagram' WHEN 2 THEN 'Telegram'
+                    WHEN 4 THEN 'Shopify' ELSE 'Other' END AS source_name,
+                FALSE AS is_new_customer,
+                NULL AS buyer_first_order_date,
+                o.promocode
+            FROM orders o
+        """)
+        conn.execute("""
+            UPDATE silver_orders SET
+                buyer_first_order_date = fo.first_order_date,
+                is_new_customer = CASE
+                    WHEN silver_orders.buyer_id IS NOT NULL
+                         AND NOT silver_orders.is_return
+                         AND silver_orders.is_active_source
+                         AND silver_orders.order_date = fo.first_order_date
+                    THEN TRUE ELSE FALSE
+                END
+            FROM (
+                SELECT buyer_id, MIN(order_date) AS first_order_date
+                FROM silver_orders
+                WHERE buyer_id IS NOT NULL AND NOT is_return AND is_active_source
+                GROUP BY buyer_id
+            ) fo
+            WHERE silver_orders.buyer_id = fo.buyer_id
+        """)
+        count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
+        max_date = conn.execute("SELECT MAX(order_date) FROM silver_orders").fetchone()[0]
+
+    logger.info(f"Rebuilt silver_orders from scratch: {count} rows, max_date={max_date}")
+    return {"status": "ok", "silver_rows": count, "max_order_date": str(max_date)}
+
+
 @router.post("/duckdb/purge-orders")
 @limiter.limit("2/minute")
 async def purge_orders(
