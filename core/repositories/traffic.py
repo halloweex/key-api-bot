@@ -159,16 +159,19 @@ class TrafficMixin:
         # 15. No tracking data at all
         return 'unknown', 'other'
 
+    _UTM_BATCH_SIZE = 1000
+
     async def refresh_utm_silver_layer(self) -> int:
         """Parse UTM data from orders and populate silver_order_utm table.
+
+        Processes in batches of _UTM_BATCH_SIZE, releasing the DB lock
+        between batches so health checks and other queries aren't blocked.
 
         Returns:
             Number of orders processed
         """
+        # Step 1: fetch IDs + comments that need parsing (short lock)
         async with self.connection() as conn:
-            # Get orders that need UTM parsing:
-            # - never parsed (no silver_order_utm row)
-            # - stale (order updated after last parse)
             orders = conn.execute("""
                 SELECT o.id, o.manager_comment
                 FROM orders o
@@ -181,60 +184,49 @@ class TrafficMixin:
                   )
             """).fetchall()
 
-            if not orders:
-                return 0
+        if not orders:
+            return 0
 
-            utm_rows = []
-            for order_id, comment in orders:
-                utm_data = self._parse_utm_from_comment(comment)
+        # Step 2: parse UTM in Python — no lock held
+        utm_rows = []
+        for order_id, comment in orders:
+            utm_data = self._parse_utm_from_comment(comment)
 
-                # Skip if no UTM data parsed
-                if not utm_data:
-                    # Still insert a record with unknown type for tracking
-                    utm_rows.append({
-                        'order_id': order_id,
-                        'traffic_type': 'unknown',
-                        'platform': 'other',
-                    })
-                    continue
+            if not utm_data:
+                utm_rows.append((
+                    order_id, None, None, None, None, None,
+                    None, None, None, None, None, 'unknown', 'other',
+                ))
+                continue
 
-                traffic_type, platform = self._classify_traffic(utm_data)
+            traffic_type, platform = self._classify_traffic(utm_data)
+            utm_rows.append((
+                order_id,
+                utm_data.get('utm_source'), utm_data.get('utm_medium'),
+                utm_data.get('utm_campaign'), utm_data.get('utm_content'),
+                utm_data.get('utm_term'), utm_data.get('utm_lang'),
+                utm_data.get('_fbp'), utm_data.get('_fbc'),
+                utm_data.get('ttp'), utm_data.get('fbclid'),
+                traffic_type, platform,
+            ))
 
-                utm_rows.append({
-                    'order_id': order_id,
-                    'utm_source': utm_data.get('utm_source'),
-                    'utm_medium': utm_data.get('utm_medium'),
-                    'utm_campaign': utm_data.get('utm_campaign'),
-                    'utm_content': utm_data.get('utm_content'),
-                    'utm_term': utm_data.get('utm_term'),
-                    'utm_lang': utm_data.get('utm_lang'),
-                    'fbp': utm_data.get('_fbp'),
-                    'fbc': utm_data.get('_fbc'),
-                    'ttp': utm_data.get('ttp'),
-                    'fbclid': utm_data.get('fbclid'),
-                    'traffic_type': traffic_type,
-                    'platform': platform,
-                })
-
-            # Batch insert
-            if utm_rows:
+        # Step 3: write in batches, releasing lock between each
+        total = 0
+        for i in range(0, len(utm_rows), self._UTM_BATCH_SIZE):
+            batch = utm_rows[i : i + self._UTM_BATCH_SIZE]
+            async with self.connection() as conn:
                 conn.executemany("""
                     INSERT OR REPLACE INTO silver_order_utm
                         (order_id, utm_source, utm_medium, utm_campaign, utm_content,
-                         utm_term, utm_lang, fbp, fbc, ttp, fbclid, traffic_type, platform, parsed_at)
+                         utm_term, utm_lang, fbp, fbc, ttp, fbclid,
+                         traffic_type, platform, parsed_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, [
-                    (
-                        r['order_id'], r.get('utm_source'), r.get('utm_medium'),
-                        r.get('utm_campaign'), r.get('utm_content'), r.get('utm_term'),
-                        r.get('utm_lang'), r.get('fbp'), r.get('fbc'), r.get('ttp'),
-                        r.get('fbclid'), r['traffic_type'], r['platform']
-                    )
-                    for r in utm_rows
-                ])
+                """, batch)
+            total += len(batch)
 
-            logger.info(f"Parsed UTM data for {len(utm_rows)} orders")
-            return len(utm_rows)
+        num_batches = (len(utm_rows) + self._UTM_BATCH_SIZE - 1) // self._UTM_BATCH_SIZE
+        logger.info(f"Parsed UTM data for {total} orders ({num_batches} batches)")
+        return total
 
     async def refresh_traffic_gold_layer(
         self, affected_dates: set[date] | None = None,
