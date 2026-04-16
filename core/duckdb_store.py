@@ -2189,22 +2189,13 @@ class DuckDBStore(
             # (PK violation poisons transaction). Autocommit per-row works for most rows,
             # but occasional rows hit write-write conflicts. Skip them and continue —
             # the 24h sync_from buffer will retry on the next cycle.
-            upsert_sql = """
+            # P2-1: Explicit SELECT→UPDATE/INSERT instead of ON CONFLICT.
+            # DuckDB 1.5.x has MVCC bugs in ON CONFLICT that cause write-write
+            # conflicts on "poisoned" rows. Explicit check avoids that code path.
+            insert_sql = """
                 INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at,
                                    buyer_id, manager_id, manager_comment, promocode, synced_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
-                ON CONFLICT (id) DO UPDATE SET
-                    source_id = excluded.source_id,
-                    status_id = excluded.status_id,
-                    grand_total = excluded.grand_total,
-                    ordered_at = excluded.ordered_at,
-                    created_at = excluded.created_at,
-                    updated_at = excluded.updated_at,
-                    buyer_id = excluded.buyer_id,
-                    manager_id = excluded.manager_id,
-                    manager_comment = excluded.manager_comment,
-                    promocode = excluded.promocode,
-                    synced_at = now()
             """
             update_sql = """
                 UPDATE orders SET
@@ -2214,35 +2205,31 @@ class DuckDBStore(
                     promocode = ?, synced_at = now()
                 WHERE id = ?
             """
+
+            # Batch-check which IDs already exist (one query, no ON CONFLICT)
+            all_ids = [int(p[0]) for p in insert_rows]
+            placeholders = ",".join("?" * len(all_ids))
+            existing = set(
+                row[0] for row in conn.execute(
+                    f"SELECT id FROM orders WHERE id IN ({placeholders})", all_ids
+                ).fetchall()
+            )
+
             success_ids: List[int] = []
             failed: List[tuple] = []  # (order_id, error_str)
             for params in insert_rows:
                 order_id = int(params[0])
                 try:
-                    conn.execute(upsert_sql, list(params))
-                    success_ids.append(order_id)
-                except duckdb.ConstraintException as e:
-                    # DuckDB 1.5 ON CONFLICT bug: PK violation despite ON CONFLICT clause.
-                    # Fallback to explicit UPDATE — row already exists, we just need to
-                    # refresh its fields.
-                    try:
-                        conn.execute("ROLLBACK")
-                    except Exception:
-                        pass
-                    try:
+                    if order_id in existing:
                         conn.execute(update_sql, [
                             params[1], params[2], params[3], params[4], params[5],
                             params[6], params[7], params[8], params[9], params[10],
                             order_id,
                         ])
-                        success_ids.append(order_id)
-                    except Exception as e2:
-                        failed.append((order_id, f"PK+UPDATE failed: {e2}"))
-                        try:
-                            conn.execute("ROLLBACK")
-                        except Exception:
-                            pass
-                except duckdb.TransactionException as e:
+                    else:
+                        conn.execute(insert_sql, list(params))
+                    success_ids.append(order_id)
+                except (duckdb.TransactionException, duckdb.ConstraintException) as e:
                     failed.append((order_id, str(e)))
                     try:
                         conn.execute("ROLLBACK")
