@@ -1808,6 +1808,7 @@ class DuckDBStore(
             gold_pairs_rows = 0
 
             # ── Step 4: Validation + audit log ──
+            needs_full_retry = False
             async with self.connection() as conn:
                 checksums = conn.execute("""
                     SELECT
@@ -1849,8 +1850,7 @@ class DuckDBStore(
                             f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match}), "
                             f"product_revenue={bronze_product_revenue:.2f}→{gold_product_revenue:.2f} (match={product_checksum_match})"
                         )
-                        # Mark dirty for a full retry (next warehouse_refresh cycle picks it up)
-                        await self.mark_warehouse_dirty(None)
+                        needs_full_retry = True
                     else:
                         logger.error(
                             f"Warehouse validation failed AGAIN (consecutive): "
@@ -1873,6 +1873,11 @@ class DuckDBStore(
                     round(silver_revenue, 2), round(gold_revenue, 2),
                     checksum_match, validation_passed, None
                 ])
+
+            # Mark dirty OUTSIDE the connection block to avoid deadlock
+            # (mark_warehouse_dirty also acquires self._lock via self.connection())
+            if needs_full_retry:
+                await self.mark_warehouse_dirty(None)
 
             incremental_info = ""
             if affected_dates:
