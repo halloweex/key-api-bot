@@ -262,6 +262,11 @@ class TrafficMixin:
               AND s.order_date IS NOT NULL
         """
 
+        # GROUP BY must use the same COALESCE expressions as SELECT,
+        # otherwise NULL u.platform groups separately from literal 'other'
+        # but both produce 'other' after COALESCE → PK violation.
+        _group_by = "GROUP BY s.order_date, s.source_id, s.sales_type, platform, traffic_type"
+
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
@@ -273,14 +278,14 @@ class TrafficMixin:
                         INSERT INTO gold_daily_traffic
                         {_traffic_select}
                           AND s.order_date IN ({date_placeholders})
-                        GROUP BY s.order_date, s.source_id, s.sales_type, u.platform, u.traffic_type
+                        {_group_by}
                     """, date_params)
                 else:
                     conn.execute("DELETE FROM gold_daily_traffic")
                     conn.execute(f"""
                         INSERT INTO gold_daily_traffic
                         {_traffic_select}
-                        GROUP BY s.order_date, s.source_id, s.sales_type, u.platform, u.traffic_type
+                        {_group_by}
                     """)
 
                 row_count = conn.execute("SELECT COUNT(*) FROM gold_daily_traffic").fetchone()[0]
