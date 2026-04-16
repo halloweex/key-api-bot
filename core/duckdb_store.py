@@ -1235,6 +1235,35 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (reconciliation_log): {e}")
 
+        # Migration: Fix sequences after EXPORT/IMPORT compaction.
+        # DuckDB doesn't support ALTER SEQUENCE, and IMPORT resets sequences to
+        # START value (1) even though tables already have rows. Fix by DROP+CREATE
+        # with START = max(id) + 1.
+        _seq_table_map = [
+            ("warehouse_refresh_seq", "warehouse_refreshes", "id"),
+            ("reconciliation_seq", "reconciliation_log", "id"),
+            ("seq_stock_movements_id", "stock_movements", "id"),
+            ("seq_buyer_contacts_id", "buyer_contacts", "id"),
+            ("seq_manual_expenses_id", "manual_expenses", "id"),
+            ("seq_report_history_id", "report_history", "id"),
+        ]
+        for seq_name, table_name, col in _seq_table_map:
+            try:
+                row = self._connection.execute(
+                    f"SELECT COALESCE(MAX({col}), 0) FROM {table_name}"
+                ).fetchone()
+                max_id = row[0] if row else 0
+                if max_id > 0:
+                    # Check current sequence value by peeking at nextval
+                    cur = self._connection.execute(f"SELECT nextval('{seq_name}')").fetchone()[0]
+                    if cur <= max_id:
+                        new_start = max_id + 1
+                        self._connection.execute(f"DROP SEQUENCE {seq_name}")
+                        self._connection.execute(f"CREATE SEQUENCE {seq_name} START {new_start}")
+                        logger.info(f"Sequence {seq_name} reset: {cur} → {new_start}")
+            except Exception as e:
+                logger.debug(f"Sequence fix note ({seq_name}): {e}")
+
     async def _create_inventory_views(self) -> None:
         """Create Layer 3 & 4 analytics views for inventory."""
         views_sql = """
@@ -1558,12 +1587,9 @@ class DuckDBStore(
     ) -> Dict[str, Any]:
         """Rebuild Silver and Gold warehouse layers from Bronze tables.
 
-        Uses transactional DELETE+INSERT (preserves indexes and PKs).
-        Split locking: releases the asyncio lock between Silver and each Gold
-        rebuild so queued read queries can execute between steps.
-
-        When changed_order_ids is provided, Gold layers are rebuilt only for
-        affected dates (incremental). Otherwise full rebuild (startup, full_sync).
+        Silver is always fully rebuilt (37K rows, <1s). Gold is rebuilt
+        incrementally when changed_order_ids is provided (only affected dates),
+        or fully otherwise.
 
         Args:
             trigger: What triggered the refresh
@@ -1589,140 +1615,67 @@ class DuckDBStore(
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
 
         try:
-            # ── Step 1: Silver layer ──
-            if changed_order_ids:
-                # Incremental: only rebuild changed orders + cascade buyer fields.
-                # Much lighter than full DELETE+INSERT of all 36K orders — avoids
-                # OOM during the daily 5 AM status refresh.
-                async with self.connection() as conn:
-                    conn.execute("BEGIN TRANSACTION")
+            # ── Step 1: Silver layer — always full rebuild ──
+            # 37K rows rebuilds in <1s. Incremental (DELETE+INSERT by changed_ids)
+            # was fragile: DuckDB MVCC poisoned rows could corrupt the transaction,
+            # and after EXPORT/IMPORT compaction the incremental path dropped Silver
+            # from 37K to only the changed_ids count (267). Full rebuild is safe.
+            async with self.connection() as conn:
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    conn.execute("DELETE FROM silver_orders")
+                    conn.execute(f"""
+                        INSERT INTO silver_orders
+                        SELECT
+                            o.id,
+                            o.source_id,
+                            o.status_id,
+                            o.grand_total,
+                            o.ordered_at,
+                            o.buyer_id,
+                            o.manager_id,
+                            {_date_in_kyiv('o.ordered_at')} AS order_date,
+                            o.status_id IN {return_statuses} AS is_return,
+                            CASE {retail_filter} END AS sales_type,
+                            o.source_id IN (1, 2, 4) AS is_active_source,
+                            CASE o.source_id
+                                WHEN 1 THEN 'Instagram'
+                                WHEN 2 THEN 'Telegram'
+                                WHEN 4 THEN 'Shopify'
+                                ELSE 'Other'
+                            END AS source_name,
+                            FALSE AS is_new_customer,
+                            NULL  AS buyer_first_order_date,
+                            o.promocode
+                        FROM orders o
+                    """)
+                    # Pass 2: compute buyer first-order dates from silver_orders
+                    conn.execute("""
+                        UPDATE silver_orders SET
+                            buyer_first_order_date = fo.first_order_date,
+                            is_new_customer = CASE
+                                WHEN silver_orders.buyer_id IS NOT NULL
+                                     AND NOT silver_orders.is_return
+                                     AND silver_orders.is_active_source
+                                     AND silver_orders.order_date = fo.first_order_date
+                                THEN TRUE ELSE FALSE
+                            END
+                        FROM (
+                            SELECT buyer_id, MIN(order_date) AS first_order_date
+                            FROM silver_orders
+                            WHERE buyer_id IS NOT NULL
+                              AND NOT is_return AND is_active_source
+                            GROUP BY buyer_id
+                        ) fo
+                        WHERE silver_orders.buyer_id = fo.buyer_id
+                    """)
+                    conn.execute("COMMIT")
+                except Exception:
                     try:
-                        placeholders = ",".join("?" * len(changed_order_ids))
-                        ids = list(changed_order_ids)
-
-                        # 1a. Remove stale Silver rows for changed orders
-                        conn.execute(
-                            f"DELETE FROM silver_orders WHERE id IN ({placeholders})", ids
-                        )
-
-                        # 1b. Re-insert with fresh computed columns
-                        conn.execute(f"""
-                            INSERT INTO silver_orders
-                            SELECT
-                                o.id, o.source_id, o.status_id, o.grand_total,
-                                o.ordered_at, o.buyer_id, o.manager_id,
-                                {_date_in_kyiv('o.ordered_at')} AS order_date,
-                                o.status_id IN {return_statuses} AS is_return,
-                                CASE {retail_filter} END AS sales_type,
-                                o.source_id IN (1, 2, 4) AS is_active_source,
-                                CASE o.source_id
-                                    WHEN 1 THEN 'Instagram'
-                                    WHEN 2 THEN 'Telegram'
-                                    WHEN 4 THEN 'Shopify'
-                                    ELSE 'Other'
-                                END AS source_name,
-                                FALSE AS is_new_customer,
-                                NULL  AS buyer_first_order_date,
-                                o.promocode
-                            FROM orders o
-                            WHERE o.id IN ({placeholders})
-                        """, ids)
-
-                        # 1c. Recompute buyer_first_order_date for affected buyers
-                        #     (status flip to/from return can shift first non-return order)
-                        conn.execute(f"""
-                            UPDATE silver_orders SET
-                                buyer_first_order_date = fo.first_order_date,
-                                is_new_customer = CASE
-                                    WHEN silver_orders.buyer_id IS NOT NULL
-                                         AND NOT silver_orders.is_return
-                                         AND silver_orders.is_active_source
-                                         AND silver_orders.order_date = fo.first_order_date
-                                    THEN TRUE ELSE FALSE
-                                END
-                            FROM (
-                                SELECT buyer_id, MIN(order_date) AS first_order_date
-                                FROM silver_orders
-                                WHERE buyer_id IS NOT NULL
-                                  AND NOT is_return AND is_active_source
-                                GROUP BY buyer_id
-                            ) fo
-                            WHERE silver_orders.buyer_id = fo.buyer_id
-                              AND silver_orders.buyer_id IN (
-                                  SELECT DISTINCT buyer_id FROM orders
-                                  WHERE id IN ({placeholders}) AND buyer_id IS NOT NULL
-                              )
-                        """, ids)
-
-                        conn.execute("COMMIT")
+                        conn.execute("ROLLBACK")
                     except Exception:
-                        try:
-                            conn.execute("ROLLBACK")
-                        except Exception:
-                            pass
-                        raise
-            else:
-                # Full rebuild (startup, full_sync, manual)
-                # Two-pass approach to avoid OOM: the old single-query LEFT JOIN
-                # double-scanned `orders` and built a hash table that exceeded 4GB.
-                # Pass 1: INSERT without buyer fields (single scan, no join).
-                # Pass 2: UPDATE buyer_first_order_date from silver_orders itself.
-                async with self.connection() as conn:
-                    conn.execute("BEGIN TRANSACTION")
-                    try:
-                        conn.execute("DELETE FROM silver_orders")
-                        conn.execute(f"""
-                            INSERT INTO silver_orders
-                            SELECT
-                                o.id,
-                                o.source_id,
-                                o.status_id,
-                                o.grand_total,
-                                o.ordered_at,
-                                o.buyer_id,
-                                o.manager_id,
-                                {_date_in_kyiv('o.ordered_at')} AS order_date,
-                                o.status_id IN {return_statuses} AS is_return,
-                                CASE {retail_filter} END AS sales_type,
-                                o.source_id IN (1, 2, 4) AS is_active_source,
-                                CASE o.source_id
-                                    WHEN 1 THEN 'Instagram'
-                                    WHEN 2 THEN 'Telegram'
-                                    WHEN 4 THEN 'Shopify'
-                                    ELSE 'Other'
-                                END AS source_name,
-                                FALSE AS is_new_customer,
-                                NULL  AS buyer_first_order_date,
-                                o.promocode
-                            FROM orders o
-                        """)
-                        # Pass 2: compute buyer first-order dates from silver_orders
-                        conn.execute("""
-                            UPDATE silver_orders SET
-                                buyer_first_order_date = fo.first_order_date,
-                                is_new_customer = CASE
-                                    WHEN silver_orders.buyer_id IS NOT NULL
-                                         AND NOT silver_orders.is_return
-                                         AND silver_orders.is_active_source
-                                         AND silver_orders.order_date = fo.first_order_date
-                                    THEN TRUE ELSE FALSE
-                                END
-                            FROM (
-                                SELECT buyer_id, MIN(order_date) AS first_order_date
-                                FROM silver_orders
-                                WHERE buyer_id IS NOT NULL
-                                  AND NOT is_return AND is_active_source
-                                GROUP BY buyer_id
-                            ) fo
-                            WHERE silver_orders.buyer_id = fo.buyer_id
-                        """)
-                        conn.execute("COMMIT")
-                    except Exception:
-                        try:
-                            conn.execute("ROLLBACK")
-                        except Exception:
-                            pass
-                        raise
+                        pass
+                    raise
 
             # ── Determine affected dates for incremental Gold rebuild ──
             affected_dates: set[date] | None = None
