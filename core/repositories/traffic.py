@@ -262,10 +262,15 @@ class TrafficMixin:
               AND s.order_date IS NOT NULL
         """
 
-        # GROUP BY must use the same COALESCE expressions as SELECT,
-        # otherwise NULL u.platform groups separately from literal 'other'
-        # but both produce 'other' after COALESCE → PK violation.
-        _group_by = "GROUP BY s.order_date, s.source_id, s.sales_type, platform, traffic_type"
+        # GROUP BY must repeat the COALESCE expressions explicitly.
+        # Using just the alias name is ambiguous in DuckDB (may resolve
+        # to the raw u.platform column), and NULL != 'other' creates
+        # separate groups that both map to 'other' after COALESCE → PK violation.
+        _platform_expr = """COALESCE(u.platform,
+            CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END)"""
+        _traffic_type_expr = """COALESCE(u.traffic_type,
+            CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END)"""
+        _group_by = f"GROUP BY s.order_date, s.source_id, s.sales_type, {_platform_expr}, {_traffic_type_expr}"
 
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
