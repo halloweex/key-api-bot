@@ -1896,8 +1896,10 @@ class DuckDBStore(
             traffic_rows = 0
             try:
                 utm_count = await self.refresh_utm_silver_layer()
+                # Always full rebuild: UTM parsing may touch dates outside
+                # affected_dates, causing PK conflicts on incremental insert
                 traffic_rows = await self.refresh_traffic_gold_layer(
-                    affected_dates=affected_dates,
+                    affected_dates=None,
                 )
             except Exception as utm_error:
                 logger.warning(f"UTM layer refresh failed (non-critical): {utm_error}")
