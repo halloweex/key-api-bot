@@ -273,6 +273,19 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Memory monitor (every 30 minutes)
+        # Reads cgroup memory stats and alerts admin via Telegram
+        # when usage crosses warning/critical thresholds
+        self._add_job(
+            job_id="memory_monitor",
+            name="Memory Monitor",
+            description="Monitor container memory and alert admin when upgrade needed",
+            func=self._run_memory_monitor,
+            trigger=IntervalTrigger(minutes=30),
+            max_instances=1,
+            coalesce=True,
+        )
+
         logger.info(f"Registered {len(self._job_info)} background jobs")
 
     def _add_job(
@@ -539,6 +552,184 @@ class BackgroundScheduler:
             result = {"checked_days": len(results), "ok": ok, "drift": drift}
             logger.info("Reconciliation check job complete", extra=result)
             return result
+
+    # ─── Memory Monitor ───────────────────────────────────────────────────────
+
+    # Thresholds (fraction of container memory limit)
+    _MEM_WARN_THRESHOLD = 0.75   # 75% → warning (once per 24h)
+    _MEM_CRITICAL_THRESHOLD = 0.90  # 90% → critical (once per 6h)
+
+    # Cooldowns per level to avoid alert spam (seconds)
+    _MEM_ALERT_COOLDOWNS = {
+        "warning": 86400,   # 24 hours
+        "critical": 21600,  # 6 hours
+    }
+    _mem_last_alert: Dict[str, float] = {}
+
+    @staticmethod
+    def _read_cgroup_memory() -> Optional[Dict[str, int]]:
+        """Read memory stats from cgroup v2 filesystem.
+
+        Returns dict with current, peak, max (bytes) or None if not in a container.
+        """
+        import pathlib
+
+        try:
+            cgroup = pathlib.Path("/sys/fs/cgroup")
+            current = int((cgroup / "memory.current").read_text().strip())
+            max_mem = (cgroup / "memory.max").read_text().strip()
+            max_bytes = int(max_mem) if max_mem != "max" else None
+
+            # Peak since container start
+            peak_path = cgroup / "memory.peak"
+            peak = int(peak_path.read_text().strip()) if peak_path.exists() else current
+
+            # OOM event count
+            events_path = cgroup / "memory.events"
+            oom_count = 0
+            if events_path.exists():
+                for line in events_path.read_text().splitlines():
+                    if line.startswith("oom_kill "):
+                        oom_count = int(line.split()[1])
+
+            return {
+                "current": current,
+                "peak": peak,
+                "max": max_bytes,
+                "oom_kills": oom_count,
+            }
+        except (FileNotFoundError, PermissionError, ValueError):
+            return None
+
+    @staticmethod
+    def _get_db_size_mb() -> Optional[float]:
+        """Get DuckDB file size in MB."""
+        import pathlib
+
+        for path in [
+            pathlib.Path("/app/data/analytics.duckdb"),
+            pathlib.Path("data/analytics.duckdb"),
+        ]:
+            if path.exists():
+                return path.stat().st_size / (1024 * 1024)
+        return None
+
+    async def _send_admin_telegram(self, message: str) -> None:
+        """Send a Telegram message to all admin users."""
+        import os
+
+        bot_token = os.getenv("BOT_TOKEN", "")
+        admin_str = os.getenv("ADMIN_USER_IDS", "")
+        if not bot_token or not admin_str:
+            logger.warning("BOT_TOKEN or ADMIN_USER_IDS not set, skipping alert")
+            return
+
+        admin_ids = [
+            uid.strip() for uid in admin_str.split(",") if uid.strip().isdigit()
+        ]
+
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            for uid in admin_ids:
+                try:
+                    resp = await client.post(
+                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                        json={
+                            "chat_id": uid,
+                            "text": message,
+                            "parse_mode": "HTML",
+                        },
+                    )
+                    if resp.status_code != 200:
+                        logger.error(f"Telegram alert to {uid} failed: {resp.text}")
+                except Exception as e:
+                    logger.error(f"Telegram alert to {uid} error: {e}")
+
+    async def _run_memory_monitor(self) -> Dict[str, Any]:
+        """Check container memory usage and alert admin if thresholds crossed."""
+        mem = self._read_cgroup_memory()
+        if not mem or not mem["max"]:
+            return {"skipped": True, "reason": "not in cgroup or no limit"}
+
+        current = mem["current"]
+        peak = mem["peak"]
+        limit = mem["max"]
+        usage_pct = current / limit
+        peak_pct = peak / limit
+
+        result = {
+            "current_mb": round(current / (1024 * 1024)),
+            "peak_mb": round(peak / (1024 * 1024)),
+            "limit_mb": round(limit / (1024 * 1024)),
+            "usage_pct": round(usage_pct * 100, 1),
+            "peak_pct": round(peak_pct * 100, 1),
+            "oom_kills": mem["oom_kills"],
+        }
+
+        db_size = self._get_db_size_mb()
+        if db_size:
+            result["db_size_mb"] = round(db_size)
+
+        now = datetime.now(SCHEDULER_TIMEZONE).timestamp()
+
+        # Determine alert level
+        level = None
+        if usage_pct >= self._MEM_CRITICAL_THRESHOLD:
+            level = "critical"
+        elif peak_pct >= self._MEM_WARN_THRESHOLD:
+            level = "warning"
+
+        if level:
+            cooldown = self._MEM_ALERT_COOLDOWNS[level]
+            last = self._mem_last_alert.get(level, 0)
+
+            if now - last >= cooldown:
+                self._mem_last_alert[level] = now
+
+                cur_gb = current / (1024 ** 3)
+                peak_gb = peak / (1024 ** 3)
+                limit_gb = limit / (1024 ** 3)
+                headroom_gb = (limit - peak) / (1024 ** 3)
+
+                icon = "\u26a0\ufe0f" if level == "warning" else "\U0001f6a8"
+                title = "Memory Warning" if level == "warning" else "MEMORY CRITICAL"
+
+                lines = [
+                    f"{icon} <b>{title}</b>",
+                    "",
+                    f"<b>Current:</b> {cur_gb:.1f} GB / {limit_gb:.1f} GB ({usage_pct:.0%})",
+                    f"<b>Peak:</b> {peak_gb:.1f} GB ({peak_pct:.0%})",
+                    f"<b>Headroom:</b> {headroom_gb:.1f} GB",
+                ]
+
+                if db_size:
+                    lines.append(f"<b>DuckDB:</b> {db_size:.0f} MB")
+
+                if mem["oom_kills"] > 0:
+                    lines.append(f"\U0001f4a5 <b>OOM kills:</b> {mem['oom_kills']}")
+
+                if level == "critical":
+                    lines += [
+                        "",
+                        "\U0001f449 <b>Action needed:</b> upgrade Hetzner instance",
+                        "or reduce DuckDB <code>memory_limit</code>",
+                    ]
+                else:
+                    lines += [
+                        "",
+                        "\U0001f4c8 Memory trending high — plan upgrade soon",
+                    ]
+
+                await self._send_admin_telegram("\n".join(lines))
+                result["alert_sent"] = level
+                logger.warning(f"Memory {level}: {usage_pct:.0%} used, peak {peak_pct:.0%}")
+            else:
+                result["alert_suppressed"] = level
+        else:
+            result["status"] = "ok"
+
+        return result
 
     # ═══════════════════════════════════════════════════════════════════════════
     # EVENT HANDLERS
