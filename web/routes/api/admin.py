@@ -672,19 +672,39 @@ async def run_reconciliation(
     request: Request,
     days_back: int = Query(14, ge=1, le=90, description="Days to check"),
     auto_resync: bool = Query(True, description="Auto-resync drifted dates"),
+    background: bool = Query(True, description="Run in background (recommended for days_back > 3)"),
     _=Depends(require_admin),
 ):
     """Manually trigger reconciliation check."""
     from core.sync_service import get_sync_service
-    sync_service = await get_sync_service()
-    results = await sync_service.reconcile_with_api(
-        days_back=days_back, auto_resync=auto_resync,
-    )
-    ok = sum(1 for r in results if r["status"] == "ok")
-    drift = sum(1 for r in results if r["status"] == "drift")
-    return {
-        "checked_days": len(results),
-        "ok": ok,
-        "drift": drift,
-        "results": results,
-    }
+
+    async def run_check():
+        sync_service = await get_sync_service()
+        results = await sync_service.reconcile_with_api(
+            days_back=days_back, auto_resync=auto_resync,
+        )
+        ok = sum(1 for r in results if r["status"] == "ok")
+        drift = sum(1 for r in results if r["status"] == "drift")
+        logger.info(
+            f"Reconciliation complete: checked={len(results)} ok={ok} drift={drift}"
+        )
+        return {
+            "checked_days": len(results),
+            "ok": ok,
+            "drift": drift,
+            "results": results,
+        }
+
+    if background:
+        task = asyncio.create_task(run_check(), name=f"reconcile_{days_back}d")
+        task.add_done_callback(
+            lambda t: logger.error(f"Reconciliation task failed: {t.exception()}")
+            if t.exception() else None
+        )
+        return {
+            "status": "started",
+            "message": f"Reconciliation started in background ({days_back} days)",
+            "note": "Check /api/reconciliation for results or logs for progress",
+        }
+
+    return await run_check()
