@@ -77,13 +77,18 @@ class TrafficMixin:
         if source in ['klaviyo', 'email'] or medium in ['email', 'klaviyo']:
             return 'organic', 'email'
 
-        # 3. Facebook Ads - explicit fbads patterns
-        if (source.startswith('fbads') or medium.startswith('fbads') or
-                campaign.startswith('fbads') or 'facebook_ua' in content):
+        # 3. Facebook Ads - fbads/fb_ads/fbsales/Advantage+ patterns
+        if (source.startswith('fbads') or source.startswith('fb_ads') or
+                source in ('fbsales', 'salesfb') or
+                medium.startswith('fbads') or medium.startswith('facebook_ads') or
+                medium in ('fbsales', 'salescpcfb', 'cpcfb') or
+                campaign.startswith('fbads') or 'facebook_ua' in content or
+                'advantage' in source or 'advantage' in campaign or
+                'adventage' in source or 'adventage' in campaign):
             return 'paid_confirmed', 'facebook'
 
-        # 4. Facebook Ads - explicit UTM (source=facebook, medium=paid/cpc)
-        if source == 'facebook' and medium in ['paid', 'cpc']:
+        # 4. Facebook Ads - explicit UTM (source=facebook/fb, medium=paid/cpc/paid_social/sales)
+        if source in ('facebook', 'fb') and medium in ('paid', 'cpc', 'paid_social', 'sales'):
             return 'paid_confirmed', 'facebook'
 
         # 5. TikTok Ads - campaign patterns (TOF/MOF/BOF = funnel stages)
@@ -98,8 +103,8 @@ class TrafficMixin:
         if source == 'tiktok' and medium in ['paid', 'cpc']:
             return 'paid_confirmed', 'tiktok'
 
-        # 7. Google Ads (source=google, medium=cpc OR campaign is numeric)
-        if source == 'google' and (medium == 'cpc' or (campaign and campaign.isdigit())):
+        # 7. Google Ads (source=google, medium starts with cpc, or numeric campaign)
+        if source == 'google' and (medium.startswith('cpc') or (campaign and campaign.isdigit())):
             return 'paid_confirmed', 'google'
 
         # 8. Google Shopping organic (source=google, medium=product_sync)
@@ -124,7 +129,7 @@ class TrafficMixin:
             # Infer platform from source (token-based to avoid substring false positives)
             platform = 'other'
             source_tokens = set(re.split(r'[_\-\s]', source))
-            if 'facebook' in source_tokens or source_tokens & {'fb', 'fbads'}:
+            if 'facebook' in source_tokens or source_tokens & {'fb', 'fbads', 'fbsales', 'salesfb'}:
                 platform = 'facebook'
             elif 'tiktok' in source_tokens or source_tokens & {'tt', 'ttads'}:
                 platform = 'tiktok'
@@ -132,10 +137,12 @@ class TrafficMixin:
                 platform = 'google'
             elif source_tokens & {'instagram', 'insta', 'ig'}:
                 platform = 'instagram'
+            elif source_tokens & {'telegram'}:
+                platform = 'telegram'
 
-            if medium in ['cpc', 'paid', 'ppc']:
+            if medium in ('cpc', 'paid', 'ppc') or medium.startswith('cpc') or medium.startswith('paid'):
                 return 'paid_likely', platform
-            elif medium in ['social', 'organic', 'referral']:
+            elif medium in ('social', 'organic', 'referral'):
                 return 'organic', platform
             else:
                 return 'unknown', platform
@@ -193,9 +200,11 @@ class TrafficMixin:
             utm_data = self._parse_utm_from_comment(comment)
 
             if not utm_data:
+                # No UTM data found — use NULLs so the gold layer COALESCE
+                # falls through to source_id-based defaults (instagram/telegram/etc.)
                 utm_rows.append((
                     order_id, None, None, None, None, None,
-                    None, None, None, None, None, 'unknown', 'other',
+                    None, None, None, None, None, None, None,
                 ))
                 continue
 
