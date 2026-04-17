@@ -918,44 +918,112 @@ class SyncService:
         return stats
 
     async def reconcile_with_api(self, days_back: int = 14, auto_resync: bool = True) -> list[dict]:
-        """Compare order counts between DuckDB and KeyCRM API for recent days.
+        """Compare orders between DuckDB and KeyCRM API per day.
 
-        Checks each day individually and logs results to reconciliation_log.
-        When auto_resync=True, automatically re-fetches orders for drifted dates.
+        Fetches actual orders from API, groups by ordered_at in Kyiv TZ,
+        and compares with DuckDB per-order (count, status, revenue).
+        When auto_resync=True, re-fetches stale orders individually.
         Returns list of per-day results with status 'ok' or 'drift'.
         """
+        from collections import defaultdict
         from datetime import date
+
+        KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
         client = await get_async_client()
         results = []
-        drift_dates = []
         today = date.today()
+        start_date = today - timedelta(days=days_back)
 
+        # ── 1. Fetch all API orders for the window (one batch) ──
+        # Pad start by 30 days to catch backdated B2B orders
+        # (ordered_at may be weeks after created_at).
+        # Include full data so we can upsert stale orders without refetching.
+        api_start = (start_date - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
+        api_end = today.strftime("%Y-%m-%d 23:59:59")
+
+        # api_by_date: summary for comparison; api_full: full order dict for resync
+        api_by_date: dict[date, dict[int, dict]] = defaultdict(dict)
+        api_full: dict[int, dict] = {}
+        params = {
+            "include": "products.offer,manager,buyer,expenses",
+            "filter[created_between]": f"{api_start}, {api_end}",
+        }
+        total_fetched = 0
+        async for batch in client.paginate("order", params=params, page_size=50):
+            for order in batch:
+                ordered_at_str = order.get("ordered_at")
+                if not ordered_at_str:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(ordered_at_str)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=ZoneInfo("Etc/GMT-4"))
+                    d = dt.astimezone(KYIV_TZ).date()
+                except (ValueError, TypeError):
+                    continue
+                if start_date <= d < today:
+                    oid = order["id"]
+                    api_by_date[d][oid] = {
+                        "status_id": order.get("status_id"),
+                        "grand_total": float(order.get("grand_total", 0)),
+                    }
+                    api_full[oid] = order
+            total_fetched += len(batch)
+
+        logger.info(f"Reconciliation: fetched {total_fetched} API orders for {days_back} days")
+
+        # ── 2. Get DB order summaries for the whole window ──
+        db_by_date = await self.store.get_order_summaries_by_date(
+            start_date.isoformat(), (today - timedelta(days=1)).isoformat(),
+        )
+
+        # ── 3. Compare per day ──
+        stale_order_ids: list[int] = []
         for offset in range(days_back):
             check_date = today - timedelta(days=offset + 1)
+            if check_date < start_date:
+                break
             date_str = check_date.isoformat()
-            start = f"{date_str} 00:00:00"
-            end = f"{date_str} 23:59:59"
 
-            try:
-                api_count = await client.get_order_count(f"{start}, {end}")
-                db_count = await self.store.get_order_count_for_date(date_str)
-                entry = await self.store.log_reconciliation(date_str, api_count, db_count)
-                results.append(entry)
+            api_orders = api_by_date.get(check_date, {})
+            db_orders = db_by_date.get(check_date, {})
 
-                if entry["status"] == "drift":
-                    logger.warning(
-                        f"Reconciliation drift on {date_str}: API={api_count} DB={db_count} "
-                        f"({entry['discrepancy_pct']}%)"
-                    )
-                    drift_dates.append(date_str)
-            except Exception as e:
-                logger.error(f"Reconciliation check failed for {date_str}: {e}")
+            api_count = len(api_orders)
+            db_count = len(db_orders)
 
-        # Auto-resync drifted dates
+            # Find order-level mismatches
+            day_stale: list[int] = []
+            # Orders in API but missing from DB
+            for oid in api_orders.keys() - db_orders.keys():
+                day_stale.append(oid)
+            # Orders in both but with status or revenue drift
+            for oid in api_orders.keys() & db_orders.keys():
+                api_o = api_orders[oid]
+                db_o = db_orders[oid]
+                if (api_o["status_id"] != db_o["status_id"]
+                        or abs(api_o["grand_total"] - db_o["grand_total"]) > 0.01):
+                    day_stale.append(oid)
+
+            stale_order_ids.extend(day_stale)
+
+            entry = await self.store.log_reconciliation(date_str, api_count, db_count)
+            results.append(entry)
+
+            if entry["status"] == "drift" or day_stale:
+                detail = f" ({len(day_stale)} stale orders)" if day_stale else ""
+                logger.warning(
+                    f"Reconciliation drift on {date_str}: API={api_count} DB={db_count}{detail}"
+                )
+
+        # ── 4. Auto-resync stale orders from already-fetched data ──
         resync_count = 0
-        if drift_dates and auto_resync:
-            resync_count = await self._resync_dates(client, drift_dates)
+        if stale_order_ids and auto_resync:
+            stale_orders = [api_full[oid] for oid in set(stale_order_ids) if oid in api_full]
+            if stale_orders:
+                resync_count, _ = await self._upsert_orders_with_expenses(stale_orders)
+                logger.info(f"Resynced {resync_count} stale orders")
+                await self.store.mark_warehouse_dirty(None)
 
         ok_count = sum(1 for r in results if r["status"] == "ok")
         drift_count = sum(1 for r in results if r["status"] == "drift")
@@ -965,26 +1033,6 @@ class SyncService:
         )
         return results
 
-    async def _resync_dates(self, client, dates: list[str]) -> int:
-        """Re-fetch and upsert orders for specific dates to fix drift."""
-        total = 0
-        for date_str in dates:
-            start = f"{date_str} 00:00:00"
-            end = f"{date_str} 23:59:59"
-            try:
-                orders = await self._fetch_orders_with_date_filter(
-                    client, start, end, include_updated=False,
-                )
-                if orders:
-                    count, _ = await self._upsert_orders_with_expenses(orders)
-                    total += count
-                    logger.info(f"Resync {date_str}: {count} orders upserted")
-            except Exception as e:
-                logger.error(f"Resync failed for {date_str}: {e}")
-
-        if total > 0:
-            await self.store.mark_warehouse_dirty(None)
-        return total
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
