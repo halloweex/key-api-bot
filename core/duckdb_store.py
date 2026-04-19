@@ -14,6 +14,7 @@ Domain-specific query methods are organized into repository mixins:
 - RevenueMixin: Revenue trends, sales analytics, products
 """
 import asyncio
+import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -904,6 +905,36 @@ class DuckDBStore(
         );
 
         CREATE INDEX IF NOT EXISTS idx_role_permissions_role ON role_permissions(role);
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- H3: Bronze order events (append-only audit log)
+        -- Phase 1 — written alongside upsert_orders as shadow write.
+        -- Phase 3 — becomes the only ingest path; promotion job reads this and
+        -- produces orders in a single-writer batch. Rows are never deleted within
+        -- the 7-day replay window, only tagged with processed_at.
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE SEQUENCE IF NOT EXISTS seq_bronze_order_events_id START 1;
+
+        CREATE TABLE IF NOT EXISTS bronze_order_events (
+            id BIGINT PRIMARY KEY DEFAULT nextval('seq_bronze_order_events_id'),
+            order_id INTEGER NOT NULL,
+            payload JSON NOT NULL,
+            source VARCHAR NOT NULL,
+            event_ts TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            processed_at TIMESTAMP WITH TIME ZONE
+        );
+
+        -- Promotion job scans unprocessed events ordered by time
+        CREATE INDEX IF NOT EXISTS idx_bronze_processed_at
+            ON bronze_order_events(processed_at);
+
+        -- Replay and latest-per-order lookups
+        CREATE INDEX IF NOT EXISTS idx_bronze_order
+            ON bronze_order_events(order_id, event_ts DESC);
+
+        -- Retention prune scans by event_ts
+        CREATE INDEX IF NOT EXISTS idx_bronze_event_ts
+            ON bronze_order_events(event_ts);
         """
         self._connection.execute(schema_sql)
 
@@ -2303,6 +2334,85 @@ class DuckDBStore(
             count = len(success_ids)
             logger.info(f"Upserted {count}/{len(insert_rows)} orders to DuckDB")
             return count
+
+    # ─── H3: bronze order events (append-only audit log) ───────────────────────
+
+    async def append_bronze_events(
+        self,
+        orders: List[Dict[str, Any]],
+        source: str,
+    ) -> int:
+        """Append raw KeyCRM order payloads to bronze_order_events.
+
+        Pure INSERT — by construction cannot write-write conflict on hot keys.
+        Phase 1 shadow write; Phase 3 becomes the only ingest path.
+
+        Args:
+            orders: Raw KeyCRM order dicts. Payloads with no numeric `id`
+                field are silently skipped.
+            source: Origin tag, e.g. 'sync_delta', 'sync_status',
+                'reconciliation', 'manual'. Used for audit and replay filtering.
+
+        Returns:
+            Number of events written.
+        """
+        if not orders:
+            return 0
+
+        rows = []
+        for o in orders:
+            oid = o.get("id")
+            if oid is None:
+                continue
+            try:
+                oid_int = int(oid)
+            except (TypeError, ValueError):
+                continue
+            rows.append((oid_int, json.dumps(o, default=str, ensure_ascii=False), source))
+
+        if not rows:
+            return 0
+
+        async with self.connection() as conn:
+            conn.executemany(
+                "INSERT INTO bronze_order_events (order_id, payload, source) "
+                "VALUES (?, ?, ?)",
+                rows,
+            )
+        return len(rows)
+
+    async def get_bronze_stats(self) -> Dict[str, Any]:
+        """Return health metrics for bronze_order_events.
+
+        Fields:
+            total: total rows ever written (within retention window).
+            unprocessed: rows with processed_at IS NULL.
+            oldest_unprocessed_age_s: seconds since the oldest unprocessed
+                event was written (None if queue empty).
+            latest_event_ts: ISO timestamp of newest event (None if empty).
+        """
+        async with self.connection() as conn:
+            row = conn.execute("""
+                SELECT
+                    COUNT(*)                                                  AS total,
+                    COUNT(*) FILTER (WHERE processed_at IS NULL)              AS unprocessed,
+                    MIN(event_ts) FILTER (WHERE processed_at IS NULL)         AS oldest_unprocessed,
+                    MAX(event_ts)                                             AS latest
+                FROM bronze_order_events
+            """).fetchone()
+
+        total, unprocessed, oldest_unprocessed, latest = row or (0, 0, None, None)
+        age_s: Optional[float] = None
+        if oldest_unprocessed is not None:
+            now = datetime.now(oldest_unprocessed.tzinfo) if oldest_unprocessed.tzinfo else datetime.utcnow()
+            age_s = max(0.0, (now - oldest_unprocessed).total_seconds())
+
+        return {
+            "total": int(total or 0),
+            "unprocessed": int(unprocessed or 0),
+            "oldest_unprocessed_age_s": age_s,
+            "latest_event_ts": latest.isoformat() if latest else None,
+        }
 
     async def upsert_products(self, products: List[Dict[str, Any]]) -> int:
         """Insert or update products from API response."""

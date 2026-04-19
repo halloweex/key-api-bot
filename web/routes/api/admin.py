@@ -481,6 +481,22 @@ async def get_sync_stats(request: Request):
         return {"status": "error", "error": str(e)}
 
 
+@router.get("/bronze/stats")
+@limiter.limit("60/minute")
+async def get_bronze_stats(request: Request):
+    """Return bronze_order_events health metrics (H3 Phase 1+).
+
+    Shape:
+        total, unprocessed, oldest_unprocessed_age_s, latest_event_ts
+    """
+    try:
+        store = await get_store()
+        return {"status": "ok", **(await store.get_bronze_stats())}
+    except Exception as e:
+        logger.exception("Bronze stats failed")
+        return {"status": "error", "error": str(e)}
+
+
 @router.get("/debug/stale-returns")
 @limiter.limit("30/minute")
 async def debug_stale_returns(

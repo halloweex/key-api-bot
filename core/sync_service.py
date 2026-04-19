@@ -213,6 +213,7 @@ class SyncService:
 
     async def _upsert_orders_with_expenses(
         self, orders: list, force_update: bool = False, skip_products: bool = False,
+        bronze_source: str = "sync_delta",
     ) -> tuple:
         """Upsert orders and their expenses.
 
@@ -223,10 +224,25 @@ class SyncService:
                          when order status changes.
             skip_products: If True, skip product deletion/insertion to avoid OOM
                           during status refresh (~2000 orders worth of products).
+            bronze_source: Origin tag written to bronze_order_events for audit/
+                          replay. H3 Phase 1 captures every upsert to the bronze
+                          log as a shadow write — failures are logged only.
 
         Returns:
             Tuple of (order_count, expense_count)
         """
+        # H3 shadow write — append raw payloads to the bronze audit log BEFORE
+        # the main upsert path runs. Shadow: failures are non-blocking, and the
+        # old path remains authoritative until Phase 3 cutover.
+        try:
+            bronze_count = await self.store.append_bronze_events(orders, bronze_source)
+            if bronze_count:
+                logger.debug(
+                    f"Bronze: appended {bronze_count} events (source={bronze_source})"
+                )
+        except Exception as e:
+            logger.warning(f"Bronze append failed (non-blocking): {e}")
+
         order_count = await self.store.upsert_orders(
             orders, force_update=force_update, skip_products=skip_products,
         )
@@ -565,7 +581,9 @@ class SyncService:
 
                 # Save chunk immediately to preserve progress
                 if chunk_orders:
-                    order_count, expense_count = await self._upsert_orders_with_expenses(chunk_orders)
+                    order_count, expense_count = await self._upsert_orders_with_expenses(
+                        chunk_orders, bronze_source="sync_full",
+                    )
                     stats["orders"] += order_count
                     stats["expenses"] += expense_count
                     logger.info(f"  Chunk {chunk_num}: Saved {order_count} orders, {expense_count} expenses")
@@ -791,7 +809,9 @@ class SyncService:
             )
 
             if orders:
-                order_count, expense_count = await self._upsert_orders_with_expenses(orders)
+                order_count, expense_count = await self._upsert_orders_with_expenses(
+                    orders, bronze_source="sync_today",
+                )
                 stats["orders"] = order_count
                 stats["expenses"] = expense_count
                 logger.debug(f"Today sync: {stats['orders']} orders, {stats['expenses']} expenses")
@@ -850,6 +870,7 @@ class SyncService:
                 # Without this, orders with changed status but same updated_at won't be updated
                 order_count, expense_count = await self._upsert_orders_with_expenses(
                     orders, force_update=True, skip_products=True,
+                    bronze_source="sync_status",
                 )
                 stats["orders"] = order_count
                 stats["expenses"] = expense_count
@@ -1021,7 +1042,9 @@ class SyncService:
         if stale_order_ids and auto_resync:
             stale_orders = [api_full[oid] for oid in set(stale_order_ids) if oid in api_full]
             if stale_orders:
-                resync_count, _ = await self._upsert_orders_with_expenses(stale_orders)
+                resync_count, _ = await self._upsert_orders_with_expenses(
+                    stale_orders, bronze_source="reconciliation",
+                )
                 logger.info(f"Resynced {resync_count} stale orders")
                 await self.store.mark_warehouse_dirty(None)
 
