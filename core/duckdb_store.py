@@ -935,6 +935,28 @@ class DuckDBStore(
         -- Retention prune scans by event_ts
         CREATE INDEX IF NOT EXISTS idx_bronze_event_ts
             ON bronze_order_events(event_ts);
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- H3 Phase 2: Shadow orders table for promotion job validation.
+        -- Same schema as `orders`. Promotion writes here; automated diff
+        -- compares orders_v2 vs orders to prove correctness before cutover.
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS orders_v2 (
+            id INTEGER PRIMARY KEY,
+            source_id INTEGER NOT NULL,
+            status_id INTEGER NOT NULL,
+            grand_total DECIMAL(12, 2) NOT NULL,
+            ordered_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE,
+            updated_at TIMESTAMP WITH TIME ZONE,
+            buyer_id INTEGER,
+            manager_id INTEGER,
+            manager_comment TEXT,
+            promocode VARCHAR,
+            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            first_seen_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            update_count INTEGER DEFAULT 0
+        );
         """
         self._connection.execute(schema_sql)
 
@@ -2412,6 +2434,154 @@ class DuckDBStore(
             "unprocessed": int(unprocessed or 0),
             "oldest_unprocessed_age_s": age_s,
             "latest_event_ts": latest.isoformat() if latest else None,
+        }
+
+    async def promote_bronze_to_shadow(self, batch_size: int = 2000) -> Dict[str, Any]:
+        """Promote unprocessed bronze events to orders_v2 (shadow table).
+
+        Single-transaction batch: for each order_id takes the latest event,
+        parses JSON payload, DELETE+INSERT into orders_v2, marks processed_at.
+
+        Returns:
+            Dict with promoted count, skipped, errors.
+        """
+        async with self.connection() as conn:
+            # 1. Grab unprocessed events, latest per order_id
+            rows = conn.execute(f"""
+                WITH ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY order_id ORDER BY event_ts DESC
+                    ) AS rn
+                    FROM bronze_order_events
+                    WHERE processed_at IS NULL
+                )
+                SELECT id, order_id, payload
+                FROM ranked WHERE rn = 1
+                LIMIT {int(batch_size)}
+            """).fetchall()
+
+            if not rows:
+                return {"promoted": 0, "skipped": 0, "batch_event_ids": 0}
+
+            # 2. Parse payloads and build insert params
+            insert_params = []
+            event_ids_to_mark = []
+            skipped = 0
+            for event_id, order_id, payload_json in rows:
+                try:
+                    o = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
+                    insert_params.append((
+                        int(o["id"]),
+                        o.get("source_id"), o.get("status_id"),
+                        float(o.get("grand_total", 0)),
+                        o.get("ordered_at"), o.get("created_at"), o.get("updated_at"),
+                        o.get("buyer", {}).get("id") if isinstance(o.get("buyer"), dict) else o.get("buyer_id"),
+                        o.get("manager", {}).get("id") if isinstance(o.get("manager"), dict) else o.get("manager_id"),
+                        o.get("manager_comment"),
+                        o.get("promocode"),
+                    ))
+                except (KeyError, TypeError, ValueError):
+                    skipped += 1
+                    continue
+                event_ids_to_mark.append(event_id)
+
+            if not insert_params:
+                return {"promoted": 0, "skipped": skipped, "batch_event_ids": 0}
+
+            # 3. Collect ALL event IDs for these order_ids (not just latest)
+            order_ids = [p[0] for p in insert_params]
+            ph = ",".join("?" * len(order_ids))
+            all_event_ids = [r[0] for r in conn.execute(
+                f"SELECT id FROM bronze_order_events WHERE order_id IN ({ph}) AND processed_at IS NULL",
+                order_ids,
+            ).fetchall()]
+
+            # 4. Batch DELETE+INSERT into orders_v2 in single transaction
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                conn.execute(
+                    f"DELETE FROM orders_v2 WHERE id IN ({ph})", order_ids
+                )
+                conn.executemany("""
+                    INSERT INTO orders_v2 (id, source_id, status_id, grand_total,
+                        ordered_at, created_at, updated_at, buyer_id, manager_id,
+                        manager_comment, promocode, synced_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+                """, insert_params)
+
+                # 5. Mark all events for these orders as processed
+                eid_ph = ",".join("?" * len(all_event_ids))
+                conn.execute(
+                    f"UPDATE bronze_order_events SET processed_at = now() WHERE id IN ({eid_ph})",
+                    all_event_ids,
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+
+            return {
+                "promoted": len(insert_params),
+                "skipped": skipped,
+                "batch_event_ids": len(all_event_ids),
+            }
+
+    async def diff_orders_v2(self, limit: int = 100) -> Dict[str, Any]:
+        """Compare orders vs orders_v2, return mismatches.
+
+        Checks: row count diff, missing IDs in either direction,
+        and column-level diffs on shared rows.
+        """
+        async with self.connection() as conn:
+            # Counts
+            c1 = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+            c2 = conn.execute("SELECT COUNT(*) FROM orders_v2").fetchone()[0]
+
+            # IDs only in orders (not yet promoted or pruned from bronze)
+            only_in_orders = conn.execute(f"""
+                SELECT id FROM orders WHERE id NOT IN (SELECT id FROM orders_v2)
+                LIMIT {int(limit)}
+            """).fetchall()
+
+            # IDs only in orders_v2 (shouldn't happen normally)
+            only_in_v2 = conn.execute(f"""
+                SELECT id FROM orders_v2 WHERE id NOT IN (SELECT id FROM orders)
+                LIMIT {int(limit)}
+            """).fetchall()
+
+            # Column diffs on shared rows
+            diffs = conn.execute(f"""
+                SELECT o.id,
+                    CASE WHEN o.status_id != v.status_id THEN 'status_id' END,
+                    CASE WHEN o.grand_total != v.grand_total THEN 'grand_total' END,
+                    CASE WHEN o.source_id != v.source_id THEN 'source_id' END,
+                    CASE WHEN o.buyer_id IS DISTINCT FROM v.buyer_id THEN 'buyer_id' END,
+                    CASE WHEN o.manager_id IS DISTINCT FROM v.manager_id THEN 'manager_id' END
+                FROM orders o
+                JOIN orders_v2 v ON o.id = v.id
+                WHERE o.status_id != v.status_id
+                   OR o.grand_total != v.grand_total
+                   OR o.source_id != v.source_id
+                   OR o.buyer_id IS DISTINCT FROM v.buyer_id
+                   OR o.manager_id IS DISTINCT FROM v.manager_id
+                LIMIT {int(limit)}
+            """).fetchall()
+
+            mismatched = []
+            for row in diffs:
+                fields = [f for f in row[1:] if f is not None]
+                mismatched.append({"id": row[0], "diff_fields": fields})
+
+        return {
+            "orders_count": c1,
+            "orders_v2_count": c2,
+            "only_in_orders": len(only_in_orders),
+            "only_in_v2": len(only_in_v2),
+            "mismatched_rows": len(mismatched),
+            "mismatches_sample": mismatched[:20],
         }
 
     async def upsert_products(self, products: List[Dict[str, Any]]) -> int:
