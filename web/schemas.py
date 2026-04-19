@@ -59,6 +59,7 @@ class HealthResponse(BaseModel):
     version: str = Field(description="Application version")
     uptime_seconds: int = Field(description="Uptime in seconds")
     correlation_id: Optional[str] = Field(None, description="Request correlation ID")
+    sync_mode: str = Field("legacy", description="Sync pipeline mode: legacy or staging")
     duckdb: DuckDBStats
     sync: Optional[SyncStatus] = Field(None, description="Background sync service status")
 
