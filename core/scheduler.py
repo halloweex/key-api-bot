@@ -93,6 +93,7 @@ class BackgroundScheduler:
     _HEAVY_JOBS = frozenset({
         "incremental_sync", "full_sync_weekly", "order_status_refresh",
         "revenue_prediction_train", "meilisearch_sync", "warehouse_refresh",
+        "bronze_promotion",
     })
 
     def __init__(self):
@@ -257,6 +258,31 @@ class BackgroundScheduler:
             description="Rebuild Silver/Gold layers when dirty flag is set",
             func=self._run_warehouse_refresh,
             trigger=IntervalTrigger(minutes=2),
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Job: Bronze promotion (every 2 min, staging mode only)
+        # Promotes unprocessed bronze events → orders table.
+        # Only active when SYNC_MODE=staging; no-ops in legacy mode.
+        self._add_job(
+            job_id="bronze_promotion",
+            name="Bronze Promotion",
+            description="Promote bronze events to orders table (staging mode)",
+            func=self._run_bronze_promotion,
+            trigger=IntervalTrigger(minutes=2),
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Job: Bronze prune (daily at 4 AM)
+        # Deletes processed bronze events older than 7 days
+        self._add_job(
+            job_id="bronze_prune",
+            name="Bronze Prune",
+            description="Delete old processed bronze events (7-day retention)",
+            func=self._run_bronze_prune,
+            trigger=CronTrigger(hour=4, minute=0),
             max_instances=1,
             coalesce=True,
         )
@@ -552,6 +578,79 @@ class BackgroundScheduler:
             result = {"checked_days": len(results), "ok": ok, "drift": drift}
             logger.info("Reconciliation check job complete", extra=result)
             return result
+
+    # ─── Bronze Promotion & Prune ────────────────────────────────────────────
+
+    async def _run_bronze_promotion(self) -> Dict[str, Any]:
+        """Promote unprocessed bronze events → orders (staging mode only).
+
+        In legacy mode, this is a no-op. In staging mode, this is the ONLY
+        writer to the orders table — enforcing the single-writer invariant.
+        After promotion, sets the warehouse dirty flag so Silver/Gold rebuild.
+        """
+        from core.config import config
+
+        if not config.sync.is_staging:
+            return {"skipped": True, "reason": "legacy mode"}
+
+        async with self._heavy_job_lock:
+            with correlation_context() as corr_id:
+                from core.duckdb_store import get_store
+                store = await get_store()
+
+                result = await store.promote_bronze_to_orders(batch_size=2000)
+
+                if result["promoted"] > 0:
+                    logger.info(
+                        f"Bronze promotion: {result['promoted']} orders promoted, "
+                        f"{result['skipped']} skipped, {result['batch_event_ids']} events marked"
+                    )
+                    # Trigger warehouse rebuild
+                    await store.mark_warehouse_dirty(None)
+                else:
+                    logger.debug("Bronze promotion: no unprocessed events")
+
+                # Check for bronze backlog and alert if concerning
+                stats = await store.get_bronze_stats()
+                age_s = stats.get("oldest_unprocessed_age_s")
+                if stats["unprocessed"] > 1000 or (age_s and age_s > 300):
+                    await self._send_bronze_alert(stats)
+
+                return result
+
+    async def _run_bronze_prune(self) -> Dict[str, Any]:
+        """Delete processed bronze events older than 7 days."""
+        with correlation_context() as corr_id:
+            logger.info("Starting bronze prune job")
+
+            from core.duckdb_store import get_store
+            store = await get_store()
+
+            deleted = await store.prune_bronze_events(retention_days=7)
+
+            result = {"deleted": deleted}
+            if deleted > 0:
+                logger.info(f"Bronze prune: deleted {deleted} old events")
+            return result
+
+    async def _send_bronze_alert(self, stats: Dict[str, Any]) -> None:
+        """Send Telegram alert when bronze backlog is concerning."""
+        try:
+            from bot.main import send_admin_message
+            unprocessed = stats["unprocessed"]
+            age_s = stats.get("oldest_unprocessed_age_s")
+            age_str = f"{int(age_s)}s" if age_s else "unknown"
+
+            msg = (
+                "\u26a0\ufe0f **Bronze Backlog Alert**\n"
+                f"Unprocessed events: {unprocessed}\n"
+                f"Oldest age: {age_str}\n\n"
+                "Promotion may be falling behind. "
+                "Check `/api/bronze/stats` and scheduler jobs."
+            )
+            await send_admin_message(msg)
+        except Exception as e:
+            logger.warning(f"Failed to send bronze alert: {e}")
 
     # ─── Memory Monitor ───────────────────────────────────────────────────────
 

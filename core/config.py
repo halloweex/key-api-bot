@@ -201,6 +201,21 @@ class MilestoneConfig:
 
 
 @dataclass(frozen=True)
+class SyncConfig:
+    """Sync pipeline configuration (H3 staging-merge)."""
+
+    # "legacy" = direct upsert (old path, default)
+    # "staging" = write ONLY to bronze, promotion job writes to orders
+    mode: str = field(
+        default_factory=lambda: os.getenv("SYNC_MODE", "legacy")
+    )
+
+    @property
+    def is_staging(self) -> bool:
+        return self.mode == "staging"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Main application configuration."""
 
@@ -214,6 +229,7 @@ class AppConfig:
     milestones: MilestoneConfig = field(default_factory=MilestoneConfig)
     meilisearch: MeilisearchConfig = field(default_factory=MeilisearchConfig)
     chat: ChatConfig = field(default_factory=ChatConfig)
+    sync: SyncConfig = field(default_factory=SyncConfig)
 
 
 # Global config instance
@@ -236,6 +252,7 @@ TELEGRAM_MANAGER_IDS = config.orders.telegram_manager_ids
 API_PAGE_LIMIT = config.api.page_limit
 API_REQUEST_DELAY = config.api.rate_limit_delay
 CACHE_TTL_SECONDS = config.cache.ttl_seconds
+SYNC_MODE = config.sync.mode
 
 
 def is_admin(user_id: int) -> bool:

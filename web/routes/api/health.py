@@ -75,11 +75,14 @@ async def health_check(request: Request):
     except Exception as e:
         logger.debug(f"Could not get sync status: {e}")
 
+    from core.config import config as app_config
+
     return {
         "status": "healthy" if duckdb_stats else "degraded",
         "version": VERSION,
         "uptime_seconds": uptime_seconds,
         "correlation_id": get_correlation_id(),
+        "sync_mode": app_config.sync.mode,
         "duckdb": {
             "status": duckdb_status,
             "latency_ms": db_latency_ms,

@@ -2584,6 +2584,219 @@ class DuckDBStore(
             "mismatches_sample": mismatched[:20],
         }
 
+    async def backfill_bronze_from_orders(self, batch_size: int = 5000) -> Dict[str, Any]:
+        """Backfill bronze_order_events from existing orders table.
+
+        One-time operation to populate bronze with all historical orders
+        so that orders_v2 (or orders in staging mode) can be fully rebuilt
+        from bronze alone. Skips order_ids that already have events.
+
+        Returns:
+            Dict with inserted count, skipped (already in bronze), total orders.
+        """
+        async with self.connection() as conn:
+            # 1. Get all order IDs already in bronze to avoid duplicates
+            existing = set(r[0] for r in conn.execute(
+                "SELECT DISTINCT order_id FROM bronze_order_events WHERE source = 'backfill'"
+            ).fetchall())
+
+            # 2. Read all orders and build JSON payloads
+            rows = conn.execute("""
+                SELECT id, source_id, status_id, grand_total,
+                       ordered_at, created_at, updated_at,
+                       buyer_id, manager_id, manager_comment, promocode
+                FROM orders
+                ORDER BY id
+            """).fetchall()
+
+            total = len(rows)
+            insert_rows = []
+            skipped = 0
+
+            for r in rows:
+                oid = r[0]
+                if oid in existing:
+                    skipped += 1
+                    continue
+
+                payload = {
+                    "id": oid,
+                    "source_id": r[1],
+                    "status_id": r[2],
+                    "grand_total": float(r[3]) if r[3] is not None else 0,
+                    "ordered_at": r[4].isoformat() if r[4] else None,
+                    "created_at": r[5].isoformat() if r[5] else None,
+                    "updated_at": r[6].isoformat() if r[6] else None,
+                    "buyer_id": r[7],
+                    "manager_id": r[8],
+                    "manager_comment": r[9],
+                    "promocode": r[10],
+                }
+                insert_rows.append((
+                    oid,
+                    json.dumps(payload, default=str, ensure_ascii=False),
+                    "backfill",
+                ))
+
+            # 3. Batch insert
+            if insert_rows:
+                for i in range(0, len(insert_rows), batch_size):
+                    chunk = insert_rows[i:i + batch_size]
+                    conn.executemany(
+                        "INSERT INTO bronze_order_events (order_id, payload, source) "
+                        "VALUES (?, ?, ?)",
+                        chunk,
+                    )
+
+            return {
+                "total_orders": total,
+                "inserted": len(insert_rows),
+                "skipped_existing": skipped,
+            }
+
+    async def promote_bronze_to_orders(self, batch_size: int = 2000) -> Dict[str, Any]:
+        """Promote unprocessed bronze events to the real orders table.
+
+        Phase 3 production path: same logic as promote_bronze_to_shadow()
+        but writes to `orders` instead of `orders_v2`.
+
+        Single-transaction batch: for each order_id takes the latest event,
+        parses JSON payload, DELETE+INSERT into orders, marks processed_at.
+
+        Returns:
+            Dict with promoted count, skipped, errors.
+        """
+        async with self.connection() as conn:
+            # 1. Grab unprocessed events, latest per order_id
+            rows = conn.execute(f"""
+                WITH ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY order_id ORDER BY event_ts DESC
+                    ) AS rn
+                    FROM bronze_order_events
+                    WHERE processed_at IS NULL
+                )
+                SELECT id, order_id, payload
+                FROM ranked WHERE rn = 1
+                LIMIT {int(batch_size)}
+            """).fetchall()
+
+            if not rows:
+                return {"promoted": 0, "skipped": 0, "batch_event_ids": 0}
+
+            # 2. Parse payloads and build insert params
+            insert_params = []
+            event_ids_to_mark = []
+            skipped = 0
+            for event_id, order_id, payload_json in rows:
+                try:
+                    o = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
+                    insert_params.append((
+                        int(o["id"]),
+                        o.get("source_id"), o.get("status_id"),
+                        float(o.get("grand_total", 0)),
+                        o.get("ordered_at"), o.get("created_at"), o.get("updated_at"),
+                        o.get("buyer", {}).get("id") if isinstance(o.get("buyer"), dict) else o.get("buyer_id"),
+                        o.get("manager", {}).get("id") if isinstance(o.get("manager"), dict) else o.get("manager_id"),
+                        o.get("manager_comment"),
+                        o.get("promocode"),
+                    ))
+                except (KeyError, TypeError, ValueError):
+                    skipped += 1
+                    continue
+                event_ids_to_mark.append(event_id)
+
+            if not insert_params:
+                return {"promoted": 0, "skipped": skipped, "batch_event_ids": 0}
+
+            # 3. Collect ALL event IDs for these order_ids (not just latest)
+            order_ids = [p[0] for p in insert_params]
+            ph = ",".join("?" * len(order_ids))
+            all_event_ids = [r[0] for r in conn.execute(
+                f"SELECT id FROM bronze_order_events WHERE order_id IN ({ph}) AND processed_at IS NULL",
+                order_ids,
+            ).fetchall()]
+
+            # 4. Batch DELETE+INSERT into orders in single transaction
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                conn.execute(
+                    f"DELETE FROM orders WHERE id IN ({ph})", order_ids
+                )
+                conn.executemany("""
+                    INSERT INTO orders (id, source_id, status_id, grand_total,
+                        ordered_at, created_at, updated_at, buyer_id, manager_id,
+                        manager_comment, promocode, synced_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+                """, insert_params)
+
+                # 5. Mark all events for these orders as processed
+                eid_ph = ",".join("?" * len(all_event_ids))
+                conn.execute(
+                    f"UPDATE bronze_order_events SET processed_at = now() WHERE id IN ({eid_ph})",
+                    all_event_ids,
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+
+            return {
+                "promoted": len(insert_params),
+                "skipped": skipped,
+                "batch_event_ids": len(all_event_ids),
+            }
+
+    async def prune_bronze_events(self, retention_days: int = 7) -> int:
+        """Delete processed bronze events older than retention window.
+
+        Only deletes events that have been successfully promoted
+        (processed_at IS NOT NULL) and are older than retention_days.
+
+        Returns:
+            Number of rows deleted.
+        """
+        async with self.connection() as conn:
+            result = conn.execute(f"""
+                DELETE FROM bronze_order_events
+                WHERE processed_at IS NOT NULL
+                  AND event_ts < now() - INTERVAL '{int(retention_days)} days'
+                RETURNING id
+            """).fetchall()
+            return len(result)
+
+    async def replay_bronze_events(self, since: Optional[datetime] = None,
+                                   source: Optional[str] = None) -> int:
+        """Reset processed_at to NULL for bronze events to trigger re-promotion.
+
+        Args:
+            since: Only replay events with event_ts >= since. Required.
+            source: Optionally filter by source tag.
+
+        Returns:
+            Number of events marked for replay.
+        """
+        if since is None:
+            raise ValueError("'since' parameter is required for replay")
+
+        conditions = ["event_ts >= ?"]
+        params: list = [since]
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+
+        where = " AND ".join(conditions)
+
+        async with self.connection() as conn:
+            result = conn.execute(
+                f"UPDATE bronze_order_events SET processed_at = NULL WHERE {where} RETURNING id",
+                params,
+            ).fetchall()
+            return len(result)
+
     async def upsert_products(self, products: List[Dict[str, Any]]) -> int:
         """Insert or update products from API response."""
         if not products:

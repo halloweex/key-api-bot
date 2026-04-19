@@ -125,6 +125,10 @@ app.include_router(pages.router)  # SPA catch-all must be last
 async def startup_event():
     logger.info("KoreanStory Dashboard starting...")
 
+    # Log sync mode for visibility
+    from core.config import config as app_config
+    logger.info(f"Sync mode: {app_config.sync.mode}")
+
     # Validate configuration early - fail fast with clear errors
     try:
         validate_config(require_bot=False, require_api=True)

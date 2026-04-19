@@ -510,6 +510,74 @@ async def promote_bronze(request: Request, batch_size: int = Query(2000, ge=1, l
         return {"status": "error", "error": str(e)}
 
 
+@router.post("/bronze/promote-live")
+@limiter.limit("10/minute")
+async def promote_bronze_live(
+    request: Request,
+    batch_size: int = Query(2000, ge=1, le=10000),
+    admin: dict = Depends(require_admin),
+):
+    """Run one promotion cycle: bronze_order_events → orders (production).
+
+    Phase 3 staging mode: this is what the scheduler calls every 2 min.
+    Can also be triggered manually for testing.
+    """
+    try:
+        store = await get_store()
+        result = await store.promote_bronze_to_orders(batch_size=batch_size)
+        return {"status": "ok", **result}
+    except Exception as e:
+        logger.exception("Bronze live promotion failed")
+        return {"status": "error", "error": str(e)}
+
+
+@router.post("/bronze/backfill")
+@limiter.limit("1/minute")
+async def backfill_bronze(
+    request: Request,
+    admin: dict = Depends(require_admin),
+):
+    """One-time backfill: copy all orders → bronze_order_events (source='backfill').
+
+    Skips order_ids that already have backfill events. Idempotent.
+    """
+    try:
+        store = await get_store()
+        result = await store.backfill_bronze_from_orders()
+        return {"status": "ok", **result}
+    except Exception as e:
+        logger.exception("Bronze backfill failed")
+        return {"status": "error", "error": str(e)}
+
+
+@router.post("/bronze/replay")
+@limiter.limit("5/minute")
+async def replay_bronze(
+    request: Request,
+    since: str = Query(..., description="ISO datetime — replay events from this time"),
+    source: Optional[str] = Query(None, description="Filter by source tag"),
+    admin: dict = Depends(require_admin),
+):
+    """Reset processed_at=NULL for bronze events since a given time.
+
+    This makes them eligible for re-promotion. The next promotion cycle
+    will pick them up and re-write to orders.
+    """
+    from datetime import datetime as dt
+    try:
+        since_dt = dt.fromisoformat(since)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid datetime: {since}")
+
+    try:
+        store = await get_store()
+        count = await store.replay_bronze_events(since=since_dt, source=source)
+        return {"status": "ok", "replayed": count}
+    except Exception as e:
+        logger.exception("Bronze replay failed")
+        return {"status": "error", "error": str(e)}
+
+
 @router.get("/bronze/diff")
 @limiter.limit("30/minute")
 async def diff_orders(request: Request, limit: int = Query(100, ge=1, le=1000)):

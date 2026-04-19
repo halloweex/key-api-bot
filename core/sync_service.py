@@ -230,10 +230,14 @@ class SyncService:
 
         Returns:
             Tuple of (order_count, expense_count)
+
+        Behavior depends on SYNC_MODE:
+        - legacy (default): bronze shadow write + direct upsert to orders
+        - staging: bronze write ONLY. Promotion job handles orders table.
         """
-        # H3 shadow write — append raw payloads to the bronze audit log BEFORE
-        # the main upsert path runs. Shadow: failures are non-blocking, and the
-        # old path remains authoritative until Phase 3 cutover.
+        from core.config import config
+
+        # Bronze write — always happens regardless of mode
         try:
             bronze_count = await self.store.append_bronze_events(orders, bronze_source)
             if bronze_count:
@@ -241,8 +245,22 @@ class SyncService:
                     f"Bronze: appended {bronze_count} events (source={bronze_source})"
                 )
         except Exception as e:
-            logger.warning(f"Bronze append failed (non-blocking): {e}")
+            if config.sync.is_staging:
+                # In staging mode bronze is the ONLY ingest path — failure is critical
+                logger.error(f"Bronze append FAILED in staging mode: {e}")
+                raise
+            else:
+                logger.warning(f"Bronze append failed (non-blocking): {e}")
 
+        if config.sync.is_staging:
+            # Staging mode: bronze is the only write path.
+            # Promotion job will batch-write to orders.
+            # Still upsert expenses directly — they're not in the bronze pipeline.
+            orders_with_expenses = [o for o in orders if o.get("expenses")]
+            expense_count = await self.store.upsert_expenses_batch(orders_with_expenses)
+            return bronze_count, expense_count
+
+        # Legacy mode: direct upsert to orders table
         order_count = await self.store.upsert_orders(
             orders, force_update=force_update, skip_products=skip_products,
         )
