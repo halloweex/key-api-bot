@@ -237,14 +237,16 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
-        # Job: DuckDB WAL checkpoint (every 6 hours)
-        # Prevents WAL file from growing too large by flushing changes to main DB
+        # Job: DuckDB WAL checkpoint (hourly)
+        # Silver full-rebuild every 2 min + Gold incremental rewrites push WAL
+        # past 600MB between 6h checkpoints. Hourly keeps MVCC tombstones
+        # reaped and RAM pressure lower.
         self._add_job(
             job_id="duckdb_checkpoint",
             name="DuckDB Checkpoint",
             description="Flush WAL to main database file",
             func=self._run_duckdb_checkpoint,
-            trigger=IntervalTrigger(hours=6),
+            trigger=IntervalTrigger(hours=1),
             max_instances=1,
             coalesce=True,
         )
@@ -772,11 +774,14 @@ class BackgroundScheduler:
 
         now = datetime.now(SCHEDULER_TIMEZONE).timestamp()
 
-        # Determine alert level
+        # Determine alert level from current usage. memory.peak in cgroup v2
+        # is monotonic for the container lifetime, so triggering on peak_pct
+        # fires every 24h forever once it crosses the threshold — even if
+        # current usage has dropped back to normal.
         level = None
         if usage_pct >= self._MEM_CRITICAL_THRESHOLD:
             level = "critical"
-        elif peak_pct >= self._MEM_WARN_THRESHOLD:
+        elif usage_pct >= self._MEM_WARN_THRESHOLD:
             level = "warning"
 
         if level:
