@@ -506,17 +506,21 @@ class SyncService:
                         """, [MEILI_CHUNK, offset]).fetchdf()
                     else:
                         # silver_orders doesn't have synced_at; join to bronze orders.
+                        # Also catch orders whose buyer was renamed (buyers.synced_at moved)
+                        # so buyer_name in the Meili index doesn't go stale until that
+                        # buyer places another order.
                         orders_df = conn.execute("""
                             SELECT
                                 o.id, o.grand_total, o.ordered_at, o.status_id,
                                 o.source_name, o.buyer_id, o.order_date,
                                 b.full_name as buyer_name
                             FROM silver_orders o
-                            JOIN orders src ON src.id = o.id AND src.synced_at > ?
+                            LEFT JOIN orders src ON src.id = o.id
                             LEFT JOIN buyers b ON o.buyer_id = b.id
+                            WHERE src.synced_at > ? OR b.synced_at > ?
                             ORDER BY o.ordered_at DESC
                             LIMIT ? OFFSET ?
-                        """, [last_sync, MEILI_CHUNK, offset]).fetchdf()
+                        """, [last_sync, last_sync, MEILI_CHUNK, offset]).fetchdf()
 
                 if orders_df.empty:
                     break
