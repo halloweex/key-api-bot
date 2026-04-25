@@ -1668,61 +1668,128 @@ class DuckDBStore(
         """
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
 
+        # ── Silver SELECT clause — shared by full and incremental paths ──
+        _silver_select_cols = f"""
+            o.id, o.source_id, o.status_id, o.grand_total,
+            o.ordered_at, o.buyer_id, o.manager_id,
+            {_date_in_kyiv('o.ordered_at')} AS order_date,
+            o.status_id IN {return_statuses} AS is_return,
+            CASE {retail_filter} END AS sales_type,
+            o.source_id IN (1, 2, 4) AS is_active_source,
+            CASE o.source_id
+                WHEN 1 THEN 'Instagram'
+                WHEN 2 THEN 'Telegram'
+                WHEN 4 THEN 'Shopify'
+                ELSE 'Other'
+            END AS source_name,
+            FALSE AS is_new_customer,
+            NULL  AS buyer_first_order_date,
+            o.promocode
+        """
+        # Pass 2 SQL — recomputes is_new_customer from per-buyer MIN(order_date).
+        # When buyer_filter is empty string, runs on all silver rows (full mode).
+        # Otherwise scoped to affected buyers (incremental mode) — bounded write set.
+        def _silver_pass2_sql(buyer_filter: str = "") -> str:
+            inner_filter = "buyer_id IS NOT NULL" if not buyer_filter else f"buyer_id IN ({buyer_filter})"
+            outer_filter = "" if not buyer_filter else f"AND silver_orders.buyer_id IN ({buyer_filter})"
+            return f"""
+                UPDATE silver_orders SET
+                    buyer_first_order_date = fo.first_order_date,
+                    is_new_customer = CASE
+                        WHEN silver_orders.buyer_id IS NOT NULL
+                             AND NOT silver_orders.is_return
+                             AND silver_orders.is_active_source
+                             AND silver_orders.order_date = fo.first_order_date
+                        THEN TRUE ELSE FALSE
+                    END
+                FROM (
+                    SELECT buyer_id, MIN(order_date) AS first_order_date
+                    FROM silver_orders
+                    WHERE {inner_filter}
+                      AND NOT is_return AND is_active_source
+                    GROUP BY buyer_id
+                ) fo
+                WHERE silver_orders.buyer_id = fo.buyer_id
+                  {outer_filter}
+            """
+
         try:
-            # ── Step 1: Silver layer — always full rebuild ──
-            # 37K rows rebuilds in <1s. Incremental (DELETE+INSERT by changed_ids)
-            # was fragile: DuckDB MVCC poisoned rows could corrupt the transaction,
-            # and after EXPORT/IMPORT compaction the incremental path dropped Silver
-            # from 37K to only the changed_ids count (267). Full rebuild is safe.
+            # ── Step 1: Silver layer ──
+            # Incremental rebuild scopes writes to changed orders + cascade
+            # (other orders of the same buyers, since is_new_customer depends on
+            # the buyer's MIN(order_date) across all their orders).
+            #
+            # Falls back to full rebuild when:
+            #   (a) silver < 95% of orders — post-compact recovery, baseline rebuild
+            #   (b) no changed_order_ids — manual trigger, startup, drift retry
+            #   (c) cascade scope > 50% of orders — full is cheaper at that point
+            silver_scope_ids: list[int] = []
+            silver_affected_buyers: list[int] = []
+            silver_mode = "full"
+
             async with self.connection() as conn:
+                silver_count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
+                orders_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+                silver_populated = orders_count > 0 and silver_count >= orders_count * 0.95
+
+                if changed_order_ids and silver_populated:
+                    ph = ",".join("?" * len(changed_order_ids))
+                    ids = list(changed_order_ids)
+                    # Affected buyers = NEW (orders) ∪ OLD (silver) — covers buyer reassignment
+                    silver_affected_buyers = [r[0] for r in conn.execute(f"""
+                        SELECT DISTINCT b FROM (
+                            SELECT buyer_id AS b FROM orders
+                            WHERE id IN ({ph}) AND buyer_id IS NOT NULL
+                            UNION
+                            SELECT buyer_id AS b FROM silver_orders
+                            WHERE id IN ({ph}) AND buyer_id IS NOT NULL
+                        )
+                    """, ids + ids).fetchall()]
+                    # Scope = changed_ids ∪ all orders of affected buyers (cascade)
+                    if silver_affected_buyers:
+                        bph = ",".join("?" * len(silver_affected_buyers))
+                        silver_scope_ids = [r[0] for r in conn.execute(f"""
+                            SELECT id FROM orders WHERE id IN ({ph})
+                            UNION
+                            SELECT id FROM orders WHERE buyer_id IN ({bph})
+                        """, ids + silver_affected_buyers).fetchall()]
+                    else:
+                        silver_scope_ids = list(ids)  # null-buyer orders, no cascade
+                    # Guardrail: large scope → full rebuild is cheaper
+                    if len(silver_scope_ids) > orders_count * 0.5:
+                        silver_scope_ids = []
+                        silver_affected_buyers = []
+                    elif silver_scope_ids:
+                        silver_mode = f"incremental_{len(silver_scope_ids)}"
+
                 conn.execute("BEGIN TRANSACTION")
                 try:
-                    conn.execute("DELETE FROM silver_orders")
-                    conn.execute(f"""
-                        INSERT INTO silver_orders
-                        SELECT
-                            o.id,
-                            o.source_id,
-                            o.status_id,
-                            o.grand_total,
-                            o.ordered_at,
-                            o.buyer_id,
-                            o.manager_id,
-                            {_date_in_kyiv('o.ordered_at')} AS order_date,
-                            o.status_id IN {return_statuses} AS is_return,
-                            CASE {retail_filter} END AS sales_type,
-                            o.source_id IN (1, 2, 4) AS is_active_source,
-                            CASE o.source_id
-                                WHEN 1 THEN 'Instagram'
-                                WHEN 2 THEN 'Telegram'
-                                WHEN 4 THEN 'Shopify'
-                                ELSE 'Other'
-                            END AS source_name,
-                            FALSE AS is_new_customer,
-                            NULL  AS buyer_first_order_date,
-                            o.promocode
-                        FROM orders o
-                    """)
-                    # Pass 2: compute buyer first-order dates from silver_orders
-                    conn.execute("""
-                        UPDATE silver_orders SET
-                            buyer_first_order_date = fo.first_order_date,
-                            is_new_customer = CASE
-                                WHEN silver_orders.buyer_id IS NOT NULL
-                                     AND NOT silver_orders.is_return
-                                     AND silver_orders.is_active_source
-                                     AND silver_orders.order_date = fo.first_order_date
-                                THEN TRUE ELSE FALSE
-                            END
-                        FROM (
-                            SELECT buyer_id, MIN(order_date) AS first_order_date
-                            FROM silver_orders
-                            WHERE buyer_id IS NOT NULL
-                              AND NOT is_return AND is_active_source
-                            GROUP BY buyer_id
-                        ) fo
-                        WHERE silver_orders.buyer_id = fo.buyer_id
-                    """)
+                    if silver_mode != "full":
+                        sph = ",".join("?" * len(silver_scope_ids))
+                        conn.execute(
+                            f"DELETE FROM silver_orders WHERE id IN ({sph})",
+                            silver_scope_ids,
+                        )
+                        conn.execute(f"""
+                            INSERT INTO silver_orders
+                            SELECT {_silver_select_cols}
+                            FROM orders o
+                            WHERE o.id IN ({sph})
+                        """, silver_scope_ids)
+                        if silver_affected_buyers:
+                            bph = ",".join("?" * len(silver_affected_buyers))
+                            conn.execute(
+                                _silver_pass2_sql(buyer_filter=bph),
+                                silver_affected_buyers + silver_affected_buyers,
+                            )
+                    else:
+                        conn.execute("DELETE FROM silver_orders")
+                        conn.execute(f"""
+                            INSERT INTO silver_orders
+                            SELECT {_silver_select_cols}
+                            FROM orders o
+                        """)
+                        conn.execute(_silver_pass2_sql())
                     conn.execute("COMMIT")
                 except Exception:
                     try:
@@ -1935,11 +2002,11 @@ class DuckDBStore(
 
             incremental_info = ""
             if affected_dates:
-                incremental_info = f", incremental={len(affected_dates)} dates"
+                incremental_info = f", gold_dates={len(affected_dates)}"
 
             logger.info(
                 f"Warehouse layers refreshed ({trigger}): "
-                f"silver={silver_rows}, gold_rev={gold_revenue_rows}, "
+                f"silver={silver_rows} ({silver_mode}), gold_rev={gold_revenue_rows}, "
                 f"gold_prod={gold_products_rows}, gold_pairs={gold_pairs_rows}, "
                 f"duration={duration_ms:.0f}ms, valid={validation_passed}"
                 f"{incremental_info}"
