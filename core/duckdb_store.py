@@ -1745,16 +1745,28 @@ class DuckDBStore(
                             WHERE id IN ({ph}) AND buyer_id IS NOT NULL
                         )
                     """, ids + ids).fetchall()]
-                    # Scope = changed_ids ∪ all orders of affected buyers (cascade)
+                    # Scope = changed_ids ∪ all orders of affected buyers (cascade).
+                    # UNION over BOTH orders and silver_orders so DELETE catches
+                    # orphan silver rows (orders deleted via admin/purge or H3
+                    # bronze promotion). Without the silver-side branch, an
+                    # orphan tied to an affected buyer would never get cleaned —
+                    # full rebuild used to wipe these implicitly via DELETE *.
                     if silver_affected_buyers:
                         bph = ",".join("?" * len(silver_affected_buyers))
                         silver_scope_ids = [r[0] for r in conn.execute(f"""
-                            SELECT id FROM orders WHERE id IN ({ph})
+                            SELECT id FROM orders        WHERE id IN ({ph})
                             UNION
-                            SELECT id FROM orders WHERE buyer_id IN ({bph})
-                        """, ids + silver_affected_buyers).fetchall()]
+                            SELECT id FROM orders        WHERE buyer_id IN ({bph})
+                            UNION
+                            SELECT id FROM silver_orders WHERE id IN ({ph})
+                            UNION
+                            SELECT id FROM silver_orders WHERE buyer_id IN ({bph})
+                        """, ids + silver_affected_buyers + ids + silver_affected_buyers).fetchall()]
                     else:
-                        silver_scope_ids = list(ids)  # null-buyer orders, no cascade
+                        # No buyer cascade. list(ids) covers both sides:
+                        # DELETE removes silver rows for these ids (cleans orphans),
+                        # INSERT only re-adds rows that exist in orders.
+                        silver_scope_ids = list(ids)
                     # Guardrail: large scope → full rebuild is cheaper
                     if len(silver_scope_ids) > orders_count * 0.5:
                         silver_scope_ids = []
