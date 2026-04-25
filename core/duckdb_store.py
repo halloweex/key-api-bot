@@ -1299,6 +1299,7 @@ class DuckDBStore(
             ("seq_buyer_contacts_id", "buyer_contacts", "id"),
             ("seq_manual_expenses_id", "manual_expenses", "id"),
             ("seq_report_history_id", "report_history", "id"),
+            ("seq_bronze_order_events_id", "bronze_order_events", "id"),
         ]
         for seq_name, table_name, col in _seq_table_map:
             try:

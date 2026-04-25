@@ -37,6 +37,9 @@ COPY bot/ ./bot/
 # Copy core modules (models, exceptions, etc.)
 COPY core/ ./core/
 
+# Copy maintenance scripts (compact_duckdb.py etc.) — used via sidecar `docker run`
+COPY scripts/ ./scripts/
+
 # Copy web application (excluding frontend source)
 COPY web/__init__.py web/config.py web/main.py web/schemas.py web/middleware.py ./web/
 COPY web/routes/ ./web/routes/
