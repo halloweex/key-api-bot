@@ -5,6 +5,7 @@ import {
   LazyDeadStockChart,
   LazyInventoryTurnoverChart,
   LazyInventoryTrendChart,
+  LazyBrandRotationCard,
 } from '../charts/lazy'
 
 const ChartFallback = () => <SkeletonChart />
@@ -27,6 +28,13 @@ export const InventoryPage = memo(function InventoryPage() {
         <section>
           <Suspense fallback={<ChartFallback />}>
             <LazyInventoryTurnoverChart />
+          </Suspense>
+        </section>
+
+        {/* Brand rotation scorecard */}
+        <section>
+          <Suspense fallback={<ChartFallback />}>
+            <LazyBrandRotationCard />
           </Suspense>
         </section>
 

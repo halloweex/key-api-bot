@@ -685,6 +685,291 @@ class InventoryMixin:
                 for row in items
             ]
 
+    async def get_dead_stock_deep(
+        self,
+        limit: int = 100,
+        carrying_rate: float = 0.25,
+        liquidation_discount: float = 0.50,
+    ) -> Dict[str, Any]:
+        """Dead-stock analysis with cost basis, GMROI, and NPV-based recommendation.
+
+        Args:
+            limit: Max items in the items list (sorted by excess capital cost)
+            carrying_rate: Annual carrying cost as fraction of cost basis (default 25%)
+            liquidation_discount: Discount fraction for liquidation NPV (default 0.5 = -50%)
+
+        Returns:
+            Dict with items, quadrantMatrix, concentration, costQuality, gmroiDistribution
+        """
+        # Velocity tier ordering — used everywhere we render the matrix
+        TIERS = ["hot", "healthy", "warm", "cold", "frozen"]
+        ABCS = ["A", "B", "C"]
+        OPTIMAL_DAYS = 60  # baseline for excess_capital_cost
+
+        async with self.connection() as conn:
+            rows = conn.execute("""
+                SELECT
+                    offer_id, sku, name, brand, category_name,
+                    available, price, purchased_price, effective_unit_cost, cost_quality,
+                    sale_value, cost_basis,
+                    days_since_sale, days_in_stock, last_sale_date,
+                    qty_sold_30d, qty_sold_90d, revenue_30d, revenue_90d,
+                    avg_daily_sales_30d, avg_daily_sales_90d,
+                    days_of_supply, velocity_tier, velocity_ratio_30_90,
+                    abc_class, annual_gross_profit, gmroi
+                FROM v_sku_dead_stock_v2
+            """).fetchall()
+
+        items_full: List[Dict[str, Any]] = []
+        for r in rows:
+            (offer_id, sku, name, brand, category_name,
+             available, price, purchased_price, effective_unit_cost, cost_quality,
+             sale_value, cost_basis,
+             days_since_sale, days_in_stock, last_sale_date,
+             qty_sold_30d, qty_sold_90d, revenue_30d, revenue_90d,
+             avg_daily_sales_30d, avg_daily_sales_90d,
+             days_of_supply, velocity_tier, velocity_ratio_30_90,
+             abc_class, annual_gross_profit, gmroi) = r
+
+            available = available or 0
+            cost_basis = float(cost_basis or 0)
+            sale_value = float(sale_value or 0)
+            adv90 = float(avg_daily_sales_90d or 0)
+            dos = float(days_of_supply) if days_of_supply is not None else None
+
+            # Excess capital cost (above OPTIMAL_DAYS supply)
+            excess_units = max(0, available - adv90 * OPTIMAL_DAYS)
+            unit_cost = float(effective_unit_cost or 0)
+            excess_capital_cost = excess_units * unit_cost
+
+            # NPV: hold for 1 year vs liquidate now at discount
+            # Liquidate: sale at (1 - discount), recover cash immediately
+            liq_revenue = sale_value * (1 - liquidation_discount)
+            liq_npv = liq_revenue - cost_basis
+
+            # Hold: gross profit from natural sell-through over 1 year, minus carrying
+            if dos is not None and dos <= 365 and adv90 > 0:
+                # All units sell within a year
+                hold_gross_profit = float(annual_gross_profit or 0) * (min(dos, 365) / 365.0)
+                # Approx avg capital tied up = cost_basis × (months_until_sold / 12) × 0.5
+                months = min(12.0, dos / 30.0)
+                hold_carry_cost = cost_basis * carrying_rate * (months / 12.0) * 0.5
+                hold_npv = hold_gross_profit - hold_carry_cost
+            elif adv90 > 0:
+                # Only fraction sells in 1 year, rest stays frozen
+                units_sold_yr = adv90 * 365
+                fraction_sold = min(1.0, units_sold_yr / available) if available > 0 else 0
+                hold_gross_profit = float(annual_gross_profit or 0)
+                hold_carry_cost = cost_basis * carrying_rate
+                hold_npv = hold_gross_profit - hold_carry_cost
+            else:
+                # No sales at all — pure burn
+                hold_npv = -cost_basis * carrying_rate
+
+            # Decision logic: liquidate if NPV-positive AND velocity is bad
+            if velocity_tier in ("frozen", "cold") and liq_npv > hold_npv:
+                decision = "LIQUIDATE"
+            elif velocity_tier in ("frozen", "cold"):
+                decision = "PROMO"
+            elif velocity_tier == "warm" and dos is not None and dos > 180:
+                decision = "PROMO"
+            else:
+                decision = "HOLD"
+
+            items_full.append({
+                "offerId": offer_id,
+                "sku": sku,
+                "name": name,
+                "brand": brand,
+                "categoryName": category_name,
+                "abcClass": abc_class,
+                "velocityTier": velocity_tier,
+                "units": available,
+                "price": float(price or 0),
+                "purchasedPrice": float(purchased_price) if purchased_price else None,
+                "effectiveUnitCost": unit_cost,
+                "costQuality": cost_quality,  # 'actual' or 'fallback'
+                "saleValue": sale_value,
+                "costBasis": cost_basis,
+                "excessCapitalCost": excess_capital_cost,
+                "daysSinceSale": days_since_sale,
+                "daysInStock": days_in_stock,
+                "daysOfSupply": int(dos) if dos is not None else None,
+                "qtySold30d": qty_sold_30d or 0,
+                "qtySold90d": qty_sold_90d or 0,
+                "revenue30d": float(revenue_30d or 0),
+                "revenue90d": float(revenue_90d or 0),
+                "avgDailySales30d": float(avg_daily_sales_30d or 0),
+                "avgDailySales90d": adv90,
+                "velocityRatio30to90": float(velocity_ratio_30_90) if velocity_ratio_30_90 is not None else None,
+                "annualGrossProfit": float(annual_gross_profit or 0),
+                "gmroi": float(gmroi) if gmroi is not None else None,
+                "npvHold": hold_npv,
+                "npvLiquidate": liq_npv,
+                "decision": decision,
+            })
+
+        # ─── Build aggregates ─────────────────────────────────────────────────
+        # Quadrant matrix: ABC × velocity_tier
+        matrix = {a: {t: {"skuCount": 0, "units": 0, "costBasis": 0.0,
+                          "saleValue": 0.0, "revenue90d": 0.0}
+                      for t in TIERS} for a in ABCS}
+        for it in items_full:
+            cell = matrix[it["abcClass"]][it["velocityTier"]]
+            cell["skuCount"] += 1
+            cell["units"] += it["units"]
+            cell["costBasis"] += it["costBasis"]
+            cell["saleValue"] += it["saleValue"]
+            cell["revenue90d"] += it["revenue90d"]
+
+        # Concentration / Pareto over excess_capital_cost
+        items_by_excess = sorted(items_full, key=lambda x: x["excessCapitalCost"], reverse=True)
+        total_excess = sum(it["excessCapitalCost"] for it in items_full)
+        total_cost_basis = sum(it["costBasis"] for it in items_full)
+
+        def _share(n: int) -> Dict[str, Any]:
+            head = items_by_excess[:n]
+            head_sum = sum(it["excessCapitalCost"] for it in head)
+            return {
+                "topN": n,
+                "excessCapitalCost": head_sum,
+                "share": (head_sum / total_excess) if total_excess > 0 else 0,
+            }
+
+        concentration = {
+            "totalExcessCapitalCost": total_excess,
+            "totalCostBasis": total_cost_basis,
+            "top10": _share(10),
+            "top20": _share(20),
+            "top50": _share(50),
+        }
+
+        # Cost quality
+        actual_count = sum(1 for it in items_full if it["costQuality"] == "actual")
+        fallback_count = len(items_full) - actual_count
+        actual_basis = sum(it["costBasis"] for it in items_full if it["costQuality"] == "actual")
+        cost_quality = {
+            "actualSkus": actual_count,
+            "fallbackSkus": fallback_count,
+            "actualPct": round(100.0 * actual_count / len(items_full), 1) if items_full else 0,
+            "actualCostBasis": actual_basis,
+            "fallbackCostBasis": total_cost_basis - actual_basis,
+        }
+
+        # GMROI distribution
+        gmrois = [it["gmroi"] for it in items_full if it["gmroi"] is not None and it["gmroi"] > 0]
+        gmrois.sort()
+        if gmrois:
+            n = len(gmrois)
+            median = gmrois[n // 2]
+            p25 = gmrois[n // 4]
+            p75 = gmrois[(3 * n) // 4]
+        else:
+            median = p25 = p75 = 0
+        under_100_skus = [it for it in items_full
+                          if it["gmroi"] is not None and it["gmroi"] < 1.0 and it["costBasis"] > 0]
+        gmroi_distribution = {
+            "median": median,
+            "p25": p25,
+            "p75": p75,
+            "under100Count": len(under_100_skus),
+            "under100CostBasis": sum(it["costBasis"] for it in under_100_skus),
+            "benchmarkRange": [2.0, 4.0],  # 200-400% benchmark for cosmetics
+        }
+
+        # Liquidation queue summary (decision == LIQUIDATE)
+        liq = [it for it in items_full if it["decision"] == "LIQUIDATE"]
+        liquidation_summary = {
+            "skuCount": len(liq),
+            "costBasis": sum(it["costBasis"] for it in liq),
+            "saleValue": sum(it["saleValue"] for it in liq),
+            "recoveryAtDiscount": sum(it["saleValue"] * (1 - liquidation_discount) for it in liq),
+            "carryingCostSavedPerYear": sum(it["costBasis"] * carrying_rate for it in liq),
+            "discount": liquidation_discount,
+        }
+
+        return {
+            "items": items_by_excess[:limit],
+            "quadrantMatrix": matrix,
+            "concentration": concentration,
+            "costQuality": cost_quality,
+            "gmroiDistribution": gmroi_distribution,
+            "liquidationSummary": liquidation_summary,
+            "params": {
+                "carryingRate": carrying_rate,
+                "liquidationDiscount": liquidation_discount,
+                "optimalDays": OPTIMAL_DAYS,
+            },
+        }
+
+    async def get_brand_rotation(self, min_skus: int = 1) -> List[Dict[str, Any]]:
+        """Brand-level rotation scorecard from v_sku_dead_stock_v2.
+
+        Returns list of brands sorted by frozen capital (descending).
+        Each brand: rotation days, GMROI, cost basis, sale value, 90d revenue,
+        SKU count, frozen SKU share.
+        """
+        async with self.connection() as conn:
+            rows = conn.execute("""
+                SELECT
+                    COALESCE(NULLIF(brand, ''), '—') as brand,
+                    COUNT(*) as sku_count,
+                    SUM(CASE WHEN velocity_tier IN ('frozen','cold') THEN 1 ELSE 0 END) as frozen_skus,
+                    SUM(available) as units,
+                    SUM(cost_basis) as cost_basis,
+                    SUM(sale_value) as sale_value,
+                    SUM(revenue_90d) as revenue_90d,
+                    SUM(qty_sold_90d) as qty_sold_90d,
+                    SUM(annual_gross_profit) as annual_gross_profit
+                FROM v_sku_dead_stock_v2
+                GROUP BY 1
+                HAVING COUNT(*) >= ?
+                ORDER BY cost_basis DESC
+            """, [min_skus]).fetchall()
+
+        result = []
+        for r in rows:
+            (brand, sku_count, frozen_skus, units, cost_basis, sale_value,
+             revenue_90d, qty_sold_90d, gross_profit) = r
+            cost_basis = float(cost_basis or 0)
+            sale_value = float(sale_value or 0)
+            revenue_90d = float(revenue_90d or 0)
+            gross_profit = float(gross_profit or 0)
+
+            # Days to rotate at current 90d sales pace (cost_basis terms)
+            cogs_90d = revenue_90d * (cost_basis / sale_value) if sale_value > 0 else 0
+            rotation_days = (cost_basis / (cogs_90d / 90.0)) if cogs_90d > 0 else None
+            gmroi = (gross_profit / cost_basis) if cost_basis > 0 else None
+
+            # Health score: 0=red 1=green based on rotation_days
+            if rotation_days is None or rotation_days > 365:
+                health = "critical"
+            elif rotation_days > 200:
+                health = "poor"
+            elif rotation_days > 120:
+                health = "warning"
+            elif rotation_days > 60:
+                health = "ok"
+            else:
+                health = "great"
+
+            result.append({
+                "brand": brand,
+                "skuCount": sku_count,
+                "frozenSkus": frozen_skus or 0,
+                "frozenShare": (frozen_skus / sku_count) if sku_count else 0,
+                "units": units or 0,
+                "costBasis": cost_basis,
+                "saleValue": sale_value,
+                "revenue90d": revenue_90d,
+                "qtySold90d": qty_sold_90d or 0,
+                "annualGrossProfit": gross_profit,
+                "rotationDays": int(rotation_days) if rotation_days is not None else None,
+                "gmroi": gmroi,
+                "health": health,
+            })
+        return result
+
     async def get_recommended_actions(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get recommended actions for dead stock using Layer 4 view.
 

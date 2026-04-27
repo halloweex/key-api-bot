@@ -35,6 +35,7 @@ import type {
   InventoryTrendResponse,
   InventoryAnalysisResponse,
   InventoryTurnoverResponse,
+  BrandRotationItem,
   StockAction,
   RestockAlert,
   TrafficAnalyticsResponse,
@@ -110,6 +111,7 @@ export const queryKeys = {
   inventoryTurnover: (params: TurnoverParams) => ['inventoryTurnover', params] as const,
   abcSkus: (abcClass: string) => ['abcSkus', abcClass] as const,
   stockActions: () => ['stockActions'] as const,
+  brandRotation: () => ['brandRotation'] as const,
   restockAlerts: () => ['restockAlerts'] as const,
   // Traffic analytics
   trafficAnalytics: (params: string) => ['trafficAnalytics', params] as const,
@@ -557,6 +559,14 @@ export function useStockActions() {
   return useQuery<StockAction[]>({
     queryKey: queryKeys.stockActions(),
     queryFn: () => api.getStockActions(),
+    staleTime: CACHE_TTL.STATIC,
+  })
+}
+
+export function useBrandRotation() {
+  return useQuery<BrandRotationItem[]>({
+    queryKey: queryKeys.brandRotation(),
+    queryFn: () => api.getBrandRotation(),
     staleTime: CACHE_TTL.STATIC,
   })
 }

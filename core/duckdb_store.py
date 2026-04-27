@@ -1599,6 +1599,112 @@ class DuckDBStore(
         WHERE available <= 10
           AND (days_since_sale IS NULL OR days_since_sale <= 90)
         ORDER BY available ASC;
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- LAYER 5: Dead Stock v2 — cost-basis ranking + velocity + ABC + decision
+        -- ═══════════════════════════════════════════════════════════════════════
+
+        -- View: per-SKU dead stock analysis with cost basis, GMROI inputs, and
+        -- velocity tiers. NPV decision is computed in Python (so carrying rate
+        -- and liquidation discount can be tuned without rebuilding the view).
+        CREATE OR REPLACE VIEW v_sku_dead_stock_v2 AS
+        WITH cost_ratio AS (
+            -- Portfolio-wide cost-to-sale ratio for fallback when purchased_price is missing
+            SELECT
+                COALESCE(
+                    SUM(quantity * NULLIF(purchased_price, 0)) /
+                    NULLIF(SUM(quantity * NULLIF(price, 0)), 0),
+                    0.5
+                ) as ratio
+            FROM offer_stocks
+            WHERE quantity > 0
+        ),
+        sales_90 AS (
+            SELECT product_id,
+                   SUM(quantity_sold) as qty_sold_90d,
+                   SUM(product_revenue) as revenue_90d
+            FROM gold_daily_products
+            WHERE date >= CURRENT_DATE - INTERVAL '90 days'
+            GROUP BY product_id
+        ),
+        sales_30 AS (
+            SELECT product_id,
+                   SUM(quantity_sold) as qty_sold_30d,
+                   SUM(product_revenue) as revenue_30d
+            FROM gold_daily_products
+            WHERE date >= CURRENT_DATE - INTERVAL '30 days'
+            GROUP BY product_id
+        ),
+        base AS (
+            SELECT
+                s.offer_id,
+                s.product_id,
+                s.sku,
+                s.name,
+                s.brand,
+                s.category_id,
+                s.category_name,
+                s.available,
+                s.price,
+                s.purchased_price,
+                s.days_since_sale,
+                s.days_in_stock,
+                s.last_sale_date,
+                COALESCE(
+                    NULLIF(s.purchased_price, 0),
+                    s.price * (SELECT ratio FROM cost_ratio)
+                ) as effective_unit_cost,
+                CASE
+                    WHEN s.purchased_price IS NULL OR s.purchased_price = 0
+                        THEN 'fallback'
+                    ELSE 'actual'
+                END as cost_quality,
+                COALESCE(s90.qty_sold_90d, 0) as qty_sold_90d,
+                COALESCE(s90.revenue_90d, 0) as revenue_90d,
+                COALESCE(s30.qty_sold_30d, 0) as qty_sold_30d,
+                COALESCE(s30.revenue_30d, 0) as revenue_30d,
+                COALESCE(a.abc_class, 'C') as abc_class
+            FROM v_sku_analysis s
+            LEFT JOIN sales_90 s90 ON s.product_id = s90.product_id
+            LEFT JOIN sales_30 s30 ON s.product_id = s30.product_id
+            LEFT JOIN v_abc_classification a ON s.offer_id = a.offer_id
+            WHERE s.quantity > 0
+        )
+        SELECT
+            b.*,
+            b.available * b.price as sale_value,
+            b.available * b.effective_unit_cost as cost_basis,
+            CASE WHEN b.qty_sold_90d > 0
+                 THEN ROUND(b.available / (b.qty_sold_90d / 90.0), 0)
+                 ELSE NULL
+            END as days_of_supply,
+            CASE WHEN b.qty_sold_90d > 0 THEN ROUND(b.qty_sold_90d / 90.0, 3) ELSE 0 END as avg_daily_sales_90d,
+            CASE WHEN b.qty_sold_30d > 0 THEN ROUND(b.qty_sold_30d / 30.0, 3) ELSE 0 END as avg_daily_sales_30d,
+            CASE
+                WHEN b.qty_sold_90d = 0 THEN 'frozen'
+                WHEN b.available / (b.qty_sold_90d / 90.0) > 365 THEN 'frozen'
+                WHEN b.available / (b.qty_sold_90d / 90.0) > 180 THEN 'cold'
+                WHEN b.available / (b.qty_sold_90d / 90.0) > 90 THEN 'warm'
+                WHEN b.available / (b.qty_sold_90d / 90.0) > 30 THEN 'healthy'
+                ELSE 'hot'
+            END as velocity_tier,
+            -- Velocity decay: 30d rate vs 90d rate. <0.7 = slowing, >1.3 = accelerating
+            CASE WHEN b.qty_sold_90d > 0 AND (b.qty_sold_90d / 90.0) > 0
+                 THEN ROUND((b.qty_sold_30d / 30.0) / (b.qty_sold_90d / 90.0), 2)
+                 ELSE NULL
+            END as velocity_ratio_30_90,
+            -- Annualized gross profit per SKU (revenue × 4 × margin)
+            CASE WHEN b.price > 0
+                 THEN b.revenue_90d * 4.0 * ((b.price - b.effective_unit_cost) / b.price)
+                 ELSE 0
+            END as annual_gross_profit,
+            -- GMROI annualized: gross profit / cost_basis (avg inventory proxy = current)
+            CASE WHEN (b.available * b.effective_unit_cost) > 0 AND b.price > 0
+                 THEN b.revenue_90d * 4.0 * ((b.price - b.effective_unit_cost) / b.price)
+                      / (b.available * b.effective_unit_cost)
+                 ELSE NULL
+            END as gmroi
+        FROM base b;
         """
         self._connection.execute(views_sql)
         logger.info("Inventory analytics views created")

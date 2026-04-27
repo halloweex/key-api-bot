@@ -36,6 +36,7 @@ import type {
   InventoryTrendResponse,
   InventoryAnalysisResponse,
   InventoryTurnoverResponse,
+  BrandRotationItem,
   StockAction,
   RestockAlert,
   CurrentUserResponse,
@@ -582,6 +583,9 @@ export const api = {
   // V2 Inventory Analysis (view-based)
   getInventoryAnalysis: (options?: FetchOptions) =>
     fetchApi<InventoryAnalysisResponse>('/stocks/analysis', undefined, options),
+
+  getBrandRotation: (options?: FetchOptions) =>
+    fetchApi<BrandRotationItem[]>('/stocks/brand-rotation', undefined, options),
 
   getStockActions: (options?: FetchOptions) =>
     fetchApi<StockAction[]>('/stocks/actions', undefined, options),

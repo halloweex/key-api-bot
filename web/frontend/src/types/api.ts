@@ -464,20 +464,118 @@ export interface CategoryVelocity {
   thresholdDays: number
 }
 
+export type VelocityTier = 'hot' | 'healthy' | 'warm' | 'cold' | 'frozen'
+export type AbcClass = 'A' | 'B' | 'C'
+export type DeadStockDecision = 'HOLD' | 'PROMO' | 'LIQUIDATE'
+
 export interface InventoryAnalysisItem {
-  id: number
+  // Identity
+  offerId: number
   sku: string
   name: string | null
   brand: string | null
   categoryName: string | null
-  quantity: number
-  value: number
+  abcClass: AbcClass
+  velocityTier: VelocityTier
+  // Stock
+  units: number
   price: number
+  purchasedPrice: number | null
+  effectiveUnitCost: number
+  costQuality: 'actual' | 'fallback'
+  saleValue: number
+  costBasis: number
+  excessCapitalCost: number
+  // Aging
   daysSinceSale: number | null
   daysInStock: number | null
-  thresholdDays: number
   daysOfSupply: number | null
-  status: 'healthy' | 'overstocked' | 'at_risk' | 'dead_stock' | 'never_sold'
+  // Sales
+  qtySold30d: number
+  qtySold90d: number
+  revenue30d: number
+  revenue90d: number
+  avgDailySales30d: number
+  avgDailySales90d: number
+  velocityRatio30to90: number | null
+  // Profitability
+  annualGrossProfit: number
+  gmroi: number | null
+  npvHold: number
+  npvLiquidate: number
+  decision: DeadStockDecision
+  // Back-compat aliases (legacy code uses these)
+  id?: number
+  quantity?: number
+  value?: number
+  status?: 'healthy' | 'overstocked' | 'at_risk' | 'dead_stock' | 'never_sold'
+  thresholdDays?: number
+}
+
+export interface QuadrantCell {
+  skuCount: number
+  units: number
+  costBasis: number
+  saleValue: number
+  revenue90d: number
+}
+
+export type QuadrantMatrix = Record<AbcClass, Record<VelocityTier, QuadrantCell>>
+
+export interface ConcentrationBand {
+  topN: number
+  excessCapitalCost: number
+  share: number
+}
+
+export interface Concentration {
+  totalExcessCapitalCost: number
+  totalCostBasis: number
+  top10: ConcentrationBand
+  top20: ConcentrationBand
+  top50: ConcentrationBand
+}
+
+export interface CostQuality {
+  actualSkus: number
+  fallbackSkus: number
+  actualPct: number
+  actualCostBasis: number
+  fallbackCostBasis: number
+}
+
+export interface GmroiDistribution {
+  median: number
+  p25: number
+  p75: number
+  under100Count: number
+  under100CostBasis: number
+  benchmarkRange: [number, number]
+}
+
+export interface BrandRotationItem {
+  brand: string
+  skuCount: number
+  frozenSkus: number
+  frozenShare: number
+  units: number
+  costBasis: number
+  saleValue: number
+  revenue90d: number
+  qtySold90d: number
+  annualGrossProfit: number
+  rotationDays: number | null
+  gmroi: number | null
+  health: 'great' | 'ok' | 'warning' | 'poor' | 'critical'
+}
+
+export interface LiquidationSummary {
+  skuCount: number
+  costBasis: number
+  saleValue: number
+  recoveryAtDiscount: number
+  carryingCostSavedPerYear: number
+  discount: number
 }
 
 export interface InventoryAnalysisResponse {
@@ -496,11 +594,23 @@ export interface InventoryAnalysisResponse {
   agingBuckets: AgingBucket[]
   categoryThresholds: CategoryVelocity[]
   items: InventoryAnalysisItem[]
+  quadrantMatrix: QuadrantMatrix
+  concentration: Concentration
+  costQuality: CostQuality
+  gmroiDistribution: GmroiDistribution
+  liquidationSummary: LiquidationSummary
+  params: {
+    carryingRate: number
+    liquidationDiscount: number
+    optimalDays: number
+  }
   methodology: {
     description: string
     minimumThreshold: number
     defaultThreshold: number
     atRiskMultiplier: number
+    velocityTiers: Record<VelocityTier, string>
+    optimalDays: number
   }
 }
 

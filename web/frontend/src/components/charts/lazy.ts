@@ -67,6 +67,10 @@ export const LazyInventoryTurnoverChart = lazy(() =>
   import('./InventoryTurnoverChart').then(m => ({ default: m.InventoryTurnoverChart }))
 )
 
+export const LazyBrandRotationCard = lazy(() =>
+  import('./BrandRotationCard').then(m => ({ default: m.BrandRotationCard }))
+)
+
 export const LazyPromocodeAnalyticsChart = lazy(() =>
   import('./PromocodeAnalyticsChart').then(m => ({ default: m.PromocodeAnalyticsChart }))
 )

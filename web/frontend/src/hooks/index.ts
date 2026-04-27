@@ -48,6 +48,7 @@ export {
   // V2 Inventory Analysis
   useInventoryAnalysis,
   useStockActions,
+  useBrandRotation,
   useRestockAlerts,
   useInventoryTurnover,
   useAbcSkus,

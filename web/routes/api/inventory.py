@@ -52,20 +52,44 @@ async def get_inventory_trend(
 
 @router.get("/stocks/analysis")
 @limiter.limit("30/minute")
-async def get_inventory_analysis(request: Request):
-    """Get comprehensive inventory analysis using Layer 3 views."""
+async def get_inventory_analysis(
+    request: Request,
+    carrying_rate: float = Query(0.25, ge=0.05, le=0.50,
+                                 description="Annual inventory carrying cost (fraction of cost basis)"),
+    liquidation_discount: float = Query(0.50, ge=0.20, le=0.80,
+                                        description="Discount used in liquidation NPV calculation"),
+):
+    """Comprehensive inventory analysis with cost basis, GMROI, NPV decision."""
     store = await get_store()
     summary = await store.get_inventory_summary_v2()
-    items = await store.get_dead_stock_items_v2(limit=100)
+    deep = await store.get_dead_stock_deep(
+        limit=100,
+        carrying_rate=carrying_rate,
+        liquidation_discount=liquidation_discount,
+    )
 
     return {
         **summary,
-        "items": items,
+        "items": deep["items"],
+        "quadrantMatrix": deep["quadrantMatrix"],
+        "concentration": deep["concentration"],
+        "costQuality": deep["costQuality"],
+        "gmroiDistribution": deep["gmroiDistribution"],
+        "liquidationSummary": deep["liquidationSummary"],
+        "params": deep["params"],
         "methodology": {
             "description": "Dynamic thresholds per category using P75, minimum 90 days, maximum 365 days",
             "minimumThreshold": 90,
             "defaultThreshold": 180,
             "atRiskMultiplier": 0.7,
+            "velocityTiers": {
+                "hot": "DOS ≤ 30",
+                "healthy": "30 < DOS ≤ 90",
+                "warm": "90 < DOS ≤ 180",
+                "cold": "180 < DOS ≤ 365",
+                "frozen": "DOS > 365 or no sales in 90d",
+            },
+            "optimalDays": deep["params"]["optimalDays"],
         },
     }
 
@@ -101,6 +125,17 @@ async def get_inventory_turnover(
         buffer_days=buffer_days,
         max_acceptable_days=max_acceptable_days,
     )
+
+
+@router.get("/stocks/brand-rotation")
+@limiter.limit("30/minute")
+async def get_brand_rotation(
+    request: Request,
+    min_skus: int = Query(1, ge=1, le=20, description="Minimum SKUs per brand to include"),
+):
+    """Per-brand rotation scorecard: rotation_days, GMROI, frozen capital share."""
+    store = await get_store()
+    return await store.get_brand_rotation(min_skus=min_skus)
 
 
 @router.get("/stocks/abc/{abc_class}")
