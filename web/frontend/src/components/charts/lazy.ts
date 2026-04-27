@@ -71,6 +71,10 @@ export const LazyBrandRotationCard = lazy(() =>
   import('./BrandRotationCard').then(m => ({ default: m.BrandRotationCard }))
 )
 
+export const LazySkuRotationTable = lazy(() =>
+  import('./SkuRotationTable').then(m => ({ default: m.SkuRotationTable }))
+)
+
 export const LazyPromocodeAnalyticsChart = lazy(() =>
   import('./PromocodeAnalyticsChart').then(m => ({ default: m.PromocodeAnalyticsChart }))
 )

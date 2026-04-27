@@ -36,6 +36,7 @@ import type {
   InventoryAnalysisResponse,
   InventoryTurnoverResponse,
   BrandRotationItem,
+  SkuRotationItem,
   StockAction,
   RestockAlert,
   TrafficAnalyticsResponse,
@@ -112,6 +113,7 @@ export const queryKeys = {
   abcSkus: (abcClass: string) => ['abcSkus', abcClass] as const,
   stockActions: () => ['stockActions'] as const,
   brandRotation: () => ['brandRotation'] as const,
+  skuRotation: () => ['skuRotation'] as const,
   restockAlerts: () => ['restockAlerts'] as const,
   // Traffic analytics
   trafficAnalytics: (params: string) => ['trafficAnalytics', params] as const,
@@ -567,6 +569,14 @@ export function useBrandRotation() {
   return useQuery<BrandRotationItem[]>({
     queryKey: queryKeys.brandRotation(),
     queryFn: () => api.getBrandRotation(),
+    staleTime: CACHE_TTL.STATIC,
+  })
+}
+
+export function useSkuRotation() {
+  return useQuery<SkuRotationItem[]>({
+    queryKey: queryKeys.skuRotation(),
+    queryFn: () => api.getSkus(),
     staleTime: CACHE_TTL.STATIC,
   })
 }

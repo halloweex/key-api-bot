@@ -127,6 +127,24 @@ async def get_inventory_turnover(
     )
 
 
+@router.get("/stocks/skus")
+@limiter.limit("30/minute")
+async def get_all_skus(
+    request: Request,
+    carrying_rate: float = Query(0.25, ge=0.05, le=0.50),
+    liquidation_discount: float = Query(0.50, ge=0.20, le=0.80),
+):
+    """All SKUs with cost basis, GMROI, NPV decision — for SKU rotation table.
+
+    Client-side filters/sorts. Same params as /stocks/analysis.
+    """
+    store = await get_store()
+    return await store.get_all_skus_deep(
+        carrying_rate=carrying_rate,
+        liquidation_discount=liquidation_discount,
+    )
+
+
 @router.get("/stocks/brand-rotation")
 @limiter.limit("30/minute")
 async def get_brand_rotation(

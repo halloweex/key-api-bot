@@ -685,9 +685,26 @@ class InventoryMixin:
                 for row in items
             ]
 
+    async def get_all_skus_deep(
+        self,
+        carrying_rate: float = 0.25,
+        liquidation_discount: float = 0.50,
+    ) -> List[Dict[str, Any]]:
+        """All SKUs with full NPV/decision computation, sorted by excess capital desc.
+
+        Same per-SKU enrichment as get_dead_stock_deep, but returns only the items
+        list (no aggregates). Used by the SKU rotation table — client filters/sorts.
+        """
+        full = await self.get_dead_stock_deep(
+            limit=None,
+            carrying_rate=carrying_rate,
+            liquidation_discount=liquidation_discount,
+        )
+        return full["items"]
+
     async def get_dead_stock_deep(
         self,
-        limit: int = 100,
+        limit: int | None = 100,
         carrying_rate: float = 0.25,
         liquidation_discount: float = 0.50,
     ) -> Dict[str, Any]:
@@ -889,7 +906,7 @@ class InventoryMixin:
         }
 
         return {
-            "items": items_by_excess[:limit],
+            "items": items_by_excess if limit is None else items_by_excess[:limit],
             "quadrantMatrix": matrix,
             "concentration": concentration,
             "costQuality": cost_quality,

@@ -553,6 +553,9 @@ export interface GmroiDistribution {
   benchmarkRange: [number, number]
 }
 
+// Same shape as InventoryAnalysisItem — re-exported for clarity in SKU table consumers
+export type SkuRotationItem = InventoryAnalysisItem
+
 export interface BrandRotationItem {
   brand: string
   skuCount: number

@@ -1,4 +1,4 @@
-import { Suspense, memo } from 'react'
+import { Suspense, memo, useState } from 'react'
 import { SkeletonChart } from '../ui'
 import {
   LazyStockSummaryChart,
@@ -6,15 +6,31 @@ import {
   LazyInventoryTurnoverChart,
   LazyInventoryTrendChart,
   LazyBrandRotationCard,
+  LazySkuRotationTable,
 } from '../charts/lazy'
 
 const ChartFallback = () => <SkeletonChart />
 
+type SkuPreset = 'all' | 'discount' | 'reorder' | 'skip' | 'decelerating'
+
 export const InventoryPage = memo(function InventoryPage() {
+  const [skuBrandFilter, setSkuBrandFilter] = useState<string | null>(null)
+  const [skuPreset, setSkuPreset] = useState<SkuPreset | null>(null)
+
+  // Click on brand row in BrandRotationCard → drill into Discount preset filtered to that brand
+  const onBrandClick = (brand: string) => {
+    setSkuBrandFilter(brand)
+    setSkuPreset('discount')
+  }
+
+  const onClearExternalFilter = () => {
+    setSkuBrandFilter(null)
+    setSkuPreset(null)
+  }
+
   return (
     <main className="flex-1 py-3 px-1 sm:py-4 sm:px-1.5 lg:py-6 lg:px-2 overflow-auto">
       <div className="max-w-[1800px] mx-auto space-y-4 sm:space-y-6">
-        {/* {t('inventory.title')} */}
         <section className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
           <Suspense fallback={<ChartFallback />}>
             <LazyStockSummaryChart />
@@ -24,21 +40,28 @@ export const InventoryPage = memo(function InventoryPage() {
           </Suspense>
         </section>
 
-        {/* Inventory Turnover & Optimal Stock */}
         <section>
           <Suspense fallback={<ChartFallback />}>
             <LazyInventoryTurnoverChart />
           </Suspense>
         </section>
 
-        {/* Brand rotation scorecard */}
         <section>
           <Suspense fallback={<ChartFallback />}>
-            <LazyBrandRotationCard />
+            <LazyBrandRotationCard onBrandClick={onBrandClick} />
           </Suspense>
         </section>
 
-        {/* {t('inventory.trendTitle')} */}
+        <section>
+          <Suspense fallback={<ChartFallback />}>
+            <LazySkuRotationTable
+              brandFilter={skuBrandFilter}
+              presetOverride={skuPreset}
+              onClearExternalFilter={onClearExternalFilter}
+            />
+          </Suspense>
+        </section>
+
         <section>
           <Suspense fallback={<ChartFallback />}>
             <LazyInventoryTrendChart />

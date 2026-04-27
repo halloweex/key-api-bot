@@ -28,25 +28,63 @@ function DeadStockChartComponent() {
       title={t('inventory.health')}
       titleExtra={
         <InfoPopover title={t('inventory.health')}>
-          <div className="space-y-2">
-            <p className="text-xs text-slate-300">{t('inventory.healthInfo1')}</p>
-            <p className="text-xs text-slate-300">{t('inventory.healthInfo2')}</p>
-            <p className="text-xs text-slate-300">{t('inventory.healthInfo3')}</p>
-            <p className="text-xs text-slate-300">
-              <strong className="text-emerald-400">{t('inventory.healthy')}:</strong> {t('inventory.healthInfo4')}
-            </p>
-            <p className="text-xs text-slate-300">
-              <strong className="text-indigo-400">{t('inventory.overstocked')}:</strong> {t('inventory.healthInfo8')}
-            </p>
-            <p className="text-xs text-slate-300">
-              <strong className="text-amber-400">{t('inventory.atRisk')}:</strong> {t('inventory.healthInfo5')}
-            </p>
-            <p className="text-xs text-slate-300">
-              <strong className="text-red-400">{t('inventory.deadStock')}:</strong> {t('inventory.healthInfo6')}
-            </p>
-            <p className="text-xs text-slate-300">
-              <strong className="text-slate-400">{t('inventory.neverSold')}:</strong> {t('inventory.healthInfo7')}
-            </p>
+          <div className="space-y-3 max-w-md">
+            <div className="space-y-1">
+              <p className="text-xs text-slate-300 font-semibold">Что считаем</p>
+              <p className="text-[11px] text-slate-300">
+                <strong className="text-blue-300">Cost basis</strong> — реально замороженный кэш (units × purchased_price).
+                Если purchased_price нет, fallback на portfolio cost ratio (помечено `~est`).
+              </p>
+              <p className="text-[11px] text-slate-300">
+                <strong className="text-blue-300">Excess capital</strong> — стоимость остатков сверх 60-дневного оптимального запаса (cost basis).
+              </p>
+              <p className="text-[11px] text-slate-300">
+                <strong className="text-blue-300">DOS</strong> — days of supply, на сколько дней хватит остатков при темпе продаж за 90 дней.
+              </p>
+              <p className="text-[11px] text-slate-300">
+                <strong className="text-blue-300">GMROI</strong> — annualized gross profit / cost basis.
+                {' '}&lt;100% = SKU теряет деньги на хранении. Бенчмарк cosmetics 200–400%.
+              </p>
+            </div>
+
+            <div className="space-y-1 border-t border-slate-700 pt-2">
+              <p className="text-xs text-slate-300 font-semibold">Velocity tiers</p>
+              <p className="text-[11px] text-slate-300">
+                <strong className="text-emerald-400">hot</strong> ≤30d · <strong className="text-emerald-400">healthy</strong> 30–90 ·{' '}
+                <strong className="text-amber-400">warm</strong> 90–180 ·{' '}
+                <strong className="text-orange-400">cold</strong> 180–365 ·{' '}
+                <strong className="text-red-400">frozen</strong> &gt;365 (или 0 продаж 90д)
+              </p>
+            </div>
+
+            <div className="space-y-1 border-t border-slate-700 pt-2">
+              <p className="text-xs text-slate-300 font-semibold">Decision (NPV-based)</p>
+              <p className="text-[11px] text-slate-300">
+                <strong className="text-slate-300">HOLD</strong> — натуральный sell-through выгоднее ликвидации
+              </p>
+              <p className="text-[11px] text-slate-300">
+                <strong className="text-amber-400">PROMO</strong> — frozen/cold, но hold-NPV пока выше — нужно стимулировать
+              </p>
+              <p className="text-[11px] text-slate-300">
+                <strong className="text-red-400">LIQUIDATE</strong> — продать со скидкой выгоднее: NPV(liq @ -50%) &gt; NPV(hold)
+              </p>
+              <p className="text-[10px] text-slate-400">
+                Carrying cost 25%/год. Tunable через query: `?carrying_rate=0.25&liquidation_discount=0.50`.
+              </p>
+            </div>
+
+            <div className="space-y-1 border-t border-slate-700 pt-2">
+              <p className="text-xs text-slate-300 font-semibold">Старые статусы (legacy)</p>
+              <p className="text-[11px] text-slate-300">
+                <strong className="text-emerald-400">{t('inventory.healthy')}:</strong> {t('inventory.healthInfo4')}
+              </p>
+              <p className="text-[11px] text-slate-300">
+                <strong className="text-indigo-400">{t('inventory.overstocked')}:</strong> {t('inventory.healthInfo8')}
+              </p>
+              <p className="text-[11px] text-slate-300">
+                <strong className="text-red-400">{t('inventory.deadStock')}:</strong> {t('inventory.healthInfo6')}
+              </p>
+            </div>
           </div>
         </InfoPopover>
       }
@@ -464,11 +502,19 @@ function ItemsTab({ items }: ItemsTabProps) {
       {/* Header row */}
       <div className="grid grid-cols-12 gap-2 text-[10px] uppercase tracking-wide text-slate-400 px-2 pb-1 border-b border-slate-100 sticky top-0 bg-white">
         <div className="col-span-5">SKU / Brand</div>
-        <div className="col-span-1 text-right">Units</div>
-        <div className="col-span-2 text-right">Cost ₴</div>
-        <div className="col-span-1 text-right">DOS</div>
-        <div className="col-span-1 text-right">GMROI</div>
-        <div className="col-span-2 text-right">Decision</div>
+        <div className="col-span-1 text-right" title="Доступные единицы (units − reserved)">Units</div>
+        <div className="col-span-2 text-right" title="Замороженный капитал по себестоимости (units × purchased_price). Под cost basis — excess сверх 60-дневной нормы.">
+          Cost ₴
+        </div>
+        <div className="col-span-1 text-right" title="Days of supply: на сколько дней хватит остатков при темпе продаж за 90 дней">
+          DOS
+        </div>
+        <div className="col-span-1 text-right" title="Annualized gross profit / cost basis. Бенчмарк 200-400% для cosmetics. <100% = убыточно при carrying cost 25%.">
+          GMROI
+        </div>
+        <div className="col-span-2 text-right" title="HOLD: hold-NPV выше · PROMO: нужно подтолкнуть · LIQUIDATE: NPV(liq @ -50%) > NPV(hold)">
+          Decision
+        </div>
       </div>
 
       {items.map((item) => {

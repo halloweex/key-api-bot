@@ -5,6 +5,10 @@ import { useBrandRotation } from '../../hooks'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
 import type { BrandRotationItem } from '../../types/api'
 
+interface BrandRotationCardProps {
+  onBrandClick?: (brand: string) => void
+}
+
 const HEALTH_STYLE: Record<BrandRotationItem['health'], { row: string; chip: string; label: string }> = {
   great:    { row: 'bg-emerald-50',  chip: 'bg-emerald-100 text-emerald-800',  label: '< 60d' },
   ok:       { row: 'bg-emerald-50/60', chip: 'bg-emerald-50 text-emerald-700', label: '60-120d' },
@@ -13,7 +17,7 @@ const HEALTH_STYLE: Record<BrandRotationItem['health'], { row: string; chip: str
   critical: { row: 'bg-red-50',      chip: 'bg-red-100 text-red-800',         label: '> 365d' },
 }
 
-function BrandRotationCardComponent() {
+function BrandRotationCardComponent({ onBrandClick }: BrandRotationCardProps) {
   const { data, isLoading, error } = useBrandRotation()
 
   return (
@@ -66,9 +70,15 @@ function BrandRotationCardComponent() {
                 const frozenPct = Math.round(b.frozenShare * 100)
 
                 return (
-                  <tr key={b.brand} className={`${style.row} border-b border-white`}>
+                  <tr
+                    key={b.brand}
+                    className={`${style.row} border-b border-white ${onBrandClick ? 'cursor-pointer hover:brightness-95' : ''}`}
+                    onClick={() => onBrandClick?.(b.brand)}
+                    title={onBrandClick ? `Drill into ${b.brand} SKUs` : undefined}
+                  >
                     <td className="py-1.5 px-1 font-medium text-slate-700 truncate max-w-[180px]" title={b.brand}>
                       {b.brand}
+                      {onBrandClick && <span className="ml-1 text-blue-500 text-[10px]">→</span>}
                     </td>
                     <td className="py-1.5 px-1 text-right text-slate-600 tabular-nums">
                       {b.skuCount}

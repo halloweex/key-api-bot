@@ -49,6 +49,7 @@ export {
   useInventoryAnalysis,
   useStockActions,
   useBrandRotation,
+  useSkuRotation,
   useRestockAlerts,
   useInventoryTurnover,
   useAbcSkus,
