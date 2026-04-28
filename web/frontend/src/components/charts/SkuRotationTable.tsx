@@ -449,7 +449,7 @@ function SkuRotationTableComponent({
 
     return (
       <div className={`border-b border-white/60 ${TIER_BG[it.velocityTier]} hover:brightness-95 transition`}>
-        <div className="grid grid-cols-[28px_minmax(220px,2.5fr)_minmax(80px,0.7fr)_minmax(40px,0.4fr)_minmax(70px,0.5fr)_minmax(60px,0.45fr)_minmax(110px,0.85fr)_minmax(60px,0.5fr)_minmax(70px,0.55fr)_minmax(70px,0.55fr)_minmax(90px,0.7fr)_minmax(150px,1fr)] gap-2 items-center px-3 py-1.5 text-sm">
+        <div className="grid grid-cols-[28px_minmax(200px,2.4fr)_minmax(80px,0.7fr)_minmax(40px,0.4fr)_minmax(70px,0.5fr)_minmax(60px,0.45fr)_minmax(110px,0.85fr)_minmax(60px,0.5fr)_minmax(75px,0.6fr)_minmax(70px,0.55fr)_minmax(70px,0.55fr)_minmax(90px,0.7fr)_minmax(150px,1fr)] gap-2 items-center px-3 py-1.5 text-sm">
           <button
             onClick={() => toggleSetItem(expanded, it.offerId, setExpanded)}
             className="text-slate-400 hover:text-slate-700 text-xs"
@@ -490,6 +490,17 @@ function SkuRotationTableComponent({
           </div>
           <span className="text-right tabular-nums text-slate-600">
             {it.daysOfSupply != null ? `${it.daysOfSupply}d` : '—'}
+          </span>
+          <span
+            className={`text-right tabular-nums ${
+              it.daysSinceSale == null ? 'text-slate-400' :
+              it.daysSinceSale <= 30 ? 'text-emerald-700' :
+              it.daysSinceSale <= 90 ? 'text-amber-600' :
+              'text-red-600 font-medium'
+            }`}
+            title={it.daysSinceSale != null ? `Last sale ${it.daysSinceSale} days ago` : 'Never sold'}
+          >
+            {it.daysSinceSale != null ? `${it.daysSinceSale}d` : 'never'}
           </span>
           <span className={`text-right font-medium tabular-nums ${gmroiColor}`}>
             {gmroiPct != null ? `${gmroiPct}%` : '—'}
@@ -658,7 +669,7 @@ function SkuRotationTableComponent({
 
           {/* Table header */}
           <div className="border border-slate-200 rounded overflow-hidden">
-            <div className="grid grid-cols-[28px_minmax(220px,2.5fr)_minmax(80px,0.7fr)_minmax(40px,0.4fr)_minmax(70px,0.5fr)_minmax(60px,0.45fr)_minmax(110px,0.85fr)_minmax(60px,0.5fr)_minmax(70px,0.55fr)_minmax(70px,0.55fr)_minmax(90px,0.7fr)_minmax(150px,1fr)] gap-2 px-3 py-2 bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500 font-medium">
+            <div className="grid grid-cols-[28px_minmax(200px,2.4fr)_minmax(80px,0.7fr)_minmax(40px,0.4fr)_minmax(70px,0.5fr)_minmax(60px,0.45fr)_minmax(110px,0.85fr)_minmax(60px,0.5fr)_minmax(75px,0.6fr)_minmax(70px,0.55fr)_minmax(70px,0.55fr)_minmax(90px,0.7fr)_minmax(150px,1fr)] gap-2 px-3 py-2 bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500 font-medium">
               <div></div>
               <SortHeader label="Name" sortKey="name" current={sortKey} dir={sortDir} onSort={onSort} />
               <SortHeader label="Brand" sortKey="brand" current={sortKey} dir={sortDir} onSort={onSort} />
@@ -667,6 +678,7 @@ function SkuRotationTableComponent({
               <SortHeader label="Units" sortKey="units" current={sortKey} dir={sortDir} onSort={onSort} align="right" />
               <SortHeader label="Cost ₴" sortKey="costBasis" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Cost basis = units × purchased_price (или fallback)" />
               <SortHeader label="DOS" sortKey="daysOfSupply" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Days of supply at 90d sales pace" />
+              <SortHeader label="Last sale" sortKey="daysSinceSale" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Days since last actual sale (0d = today, 'never' = no sales recorded)" />
               <SortHeader label="GMROI" sortKey="gmroi" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Annualized gross profit / cost basis" />
               <SortHeader label="Δ30/90" sortKey="velocityRatio30to90" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="30d daily rate / 90d daily rate. <0.7 = deceleration" />
               <SortHeader label="Decision" sortKey="decision" current={sortKey} dir={sortDir} onSort={onSort} align="right" />
