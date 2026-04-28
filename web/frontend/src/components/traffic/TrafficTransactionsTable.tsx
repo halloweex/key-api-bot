@@ -35,6 +35,7 @@ const PLATFORMS = [
   { value: 'tiktok', labelKey: 'traffic.tiktok' },
   { value: 'email', labelKey: 'traffic.email' },
   { value: 'telegram', labelKey: 'traffic.telegram' },
+  { value: 'ai', labelKey: 'traffic.ai' },
   { value: 'manager', labelKey: 'traffic.manager' },
   { value: 'other', labelKey: 'traffic.otherPlatform' },
 ] as const

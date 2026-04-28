@@ -123,6 +123,16 @@ class TrafficMixin:
         if source == 'tiktok' and medium in ['social', 'organic', '']:
             return 'organic', 'tiktok'
 
+        # 12. AI assistants — only ChatGPT auto-tags utm_source today
+        # (others arrive untagged via Referer and can't be detected here).
+        # Substring match because chatgpt.com is one token after split on _/-/space.
+        ai_prefixes = ('chatgpt', 'openai', 'perplexity', 'claude', 'gemini',
+                       'copilot', 'meta.ai', 'you.com')
+        if any(source.startswith(p) for p in ai_prefixes):
+            if medium in ('cpc', 'paid', 'ppc') or medium.startswith('paid'):
+                return 'paid_confirmed', 'ai'
+            return 'organic', 'ai'
+
         # ─── Generic UTM fallback (has source/medium but no known pattern) ──────
 
         if source or medium:

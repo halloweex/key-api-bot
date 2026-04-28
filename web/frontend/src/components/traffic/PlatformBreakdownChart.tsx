@@ -26,6 +26,7 @@ const PLATFORM_COLORS: Record<string, string> = {
   instagram: '#EC4899', // pink
   email: '#10B981',     // green
   telegram: '#0EA5E9',  // sky blue
+  ai: '#A855F7',        // violet
   manager: '#14B8A6',   // teal
   other: '#6B7280',     // gray
 }
@@ -42,6 +43,7 @@ const formatPlatformName = (platform: string): string => {
     instagram: 'Instagram',
     email: 'Email',
     telegram: 'Telegram',
+    ai: 'AI',
     manager: 'Manager',
   }
   return names[platform.toLowerCase()] || platform.charAt(0).toUpperCase() + platform.slice(1)
