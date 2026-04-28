@@ -483,7 +483,12 @@ function SkuRotationTableComponent({
           </span>
           <span className="text-right tabular-nums text-slate-700">{formatNumber(it.units)}</span>
           <div className="text-right tabular-nums">
-            <div className="font-medium text-slate-800">{formatCurrency(it.costBasis)}</div>
+            <div className="font-medium text-slate-800" title="Cost basis (units × purchased_price)">
+              {formatCurrency(it.costBasis)}
+            </div>
+            <div className="text-[10px] text-slate-500" title="Retail value (units × sale price)">
+              retail {formatCurrency(it.saleValue)}
+            </div>
             {it.excessCapitalCost > 0 && (
               <div className="text-[10px] text-red-600">excess {formatCurrency(it.excessCapitalCost)}</div>
             )}
@@ -676,7 +681,7 @@ function SkuRotationTableComponent({
               <SortHeader label="ABC" sortKey="abcClass" current={sortKey} dir={sortDir} onSort={onSort} align="center" />
               <SortHeader label="Velocity" sortKey="velocityTier" current={sortKey} dir={sortDir} onSort={onSort} align="center" />
               <SortHeader label="Units" sortKey="units" current={sortKey} dir={sortDir} onSort={onSort} align="right" />
-              <SortHeader label="Cost ₴" sortKey="costBasis" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Cost basis = units × purchased_price (или fallback)" />
+              <SortHeader label="Cost / retail" sortKey="costBasis" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Top: cost basis (units × purchased_price). Bottom: retail value (units × sale price). Sort by cost basis." />
               <SortHeader label="DOS" sortKey="daysOfSupply" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Days of supply at 90d sales pace" />
               <SortHeader label="Last sale" sortKey="daysSinceSale" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Days since last actual sale (0d = today, 'never' = no sales recorded)" />
               <SortHeader label="GMROI" sortKey="gmroi" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Annualized gross profit / cost basis" />
