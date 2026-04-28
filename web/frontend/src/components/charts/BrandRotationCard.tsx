@@ -27,11 +27,14 @@ function BrandRotationCardComponent({ onBrandClick }: BrandRotationCardProps) {
         <InfoPopover title="Brand rotation">
           <div className="space-y-2 text-xs text-slate-300">
             <p>
-              Скорость оборота капитала по бренду. Rotation days = cost basis / (COGS in 90d / 90).
-              Цель — &lt; 120 дней. Бренды с &gt; 365 — кандидаты на стоп-закупки.
+              Скорость оборота склада по бренду. Цель — Rotation &lt; 120 дней.
+              Бренды с &gt; 365 — кандидаты на стоп-закупки.
             </p>
             <p>
-              <strong className="text-emerald-400">GMROI</strong> = annualized gross profit / cost basis.
+              <strong className="text-blue-300">Retail ₴</strong> — стоимость склада бренда по розничным ценам.
+            </p>
+            <p>
+              <strong className="text-emerald-400">GMROI</strong> = annualized gross profit / capital invested.
               Бенчмарк для cosmetics: 200–400%. Ниже 100% = убыточный бренд.
             </p>
             <p>
@@ -52,7 +55,7 @@ function BrandRotationCardComponent({ onBrandClick }: BrandRotationCardProps) {
                 <th className="text-left py-2 px-1 font-medium">Brand</th>
                 <th className="text-right py-2 px-1 font-medium">SKU</th>
                 <th className="text-right py-2 px-1 font-medium">Frozen</th>
-                <th className="text-right py-2 px-1 font-medium">Cost basis</th>
+                <th className="text-right py-2 px-1 font-medium" title="Стоимость склада бренда по розничным ценам">Retail ₴</th>
                 <th className="text-right py-2 px-1 font-medium">90d revenue</th>
                 <th className="text-right py-2 px-1 font-medium">GMROI</th>
                 <th className="text-right py-2 px-1 font-medium">Rotation</th>
@@ -89,7 +92,7 @@ function BrandRotationCardComponent({ onBrandClick }: BrandRotationCardProps) {
                       </span>
                     </td>
                     <td className="py-1.5 px-1 text-right text-slate-700 tabular-nums">
-                      {formatCurrency(b.costBasis)}
+                      {formatCurrency(b.saleValue)}
                     </td>
                     <td className="py-1.5 px-1 text-right text-slate-600 tabular-nums">
                       {formatCurrency(b.revenue90d)}

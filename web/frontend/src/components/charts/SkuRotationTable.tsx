@@ -116,7 +116,7 @@ const PRESETS: PresetDef[] = [
 
 type SortKey =
   | 'sku' | 'name' | 'brand' | 'abcClass' | 'velocityTier'
-  | 'units' | 'costBasis' | 'excessCapitalCost' | 'daysOfSupply' | 'gmroi'
+  | 'units' | 'saleValue' | 'excessCapitalCost' | 'daysOfSupply' | 'gmroi'
   | 'velocityRatio30to90' | 'decision' | 'qtySold30d' | 'qtySold90d'
   | 'revenue90d' | 'daysSinceSale'
 
@@ -150,7 +150,7 @@ function suggestedReorderQty(it: SkuRotationItem): { qty: number; daysCover: num
 function exportCsv(rows: SkuRotationItem[], preset: PresetKey, filename: string) {
   const baseHeaders = [
     'SKU', 'Name', 'Brand', 'Category', 'ABC', 'Velocity', 'Units',
-    'Cost ₴', 'Sale ₴', 'Excess ₴', 'DOS',
+    'Retail ₴', 'Excess retail ₴', 'DOS',
     'Days since sale', 'Qty sold 30d', 'Qty sold 90d', 'Revenue 90d ₴',
     '30/90 ratio', 'GMROI %', 'Decision',
   ]
@@ -174,10 +174,12 @@ function exportCsv(rows: SkuRotationItem[], preset: PresetKey, filename: string)
 
   const lines = [headers.join(',')]
   for (const it of rows) {
+    const excessUnits = Math.max(0, it.units - it.avgDailySales90d * 60)
+    const excessRetail = excessUnits * it.price
     const base = [
       it.sku, it.name ?? '', it.brand ?? '', it.categoryName ?? '',
       it.abcClass, it.velocityTier, it.units,
-      Math.round(it.costBasis), Math.round(it.saleValue), Math.round(it.excessCapitalCost),
+      Math.round(it.saleValue), Math.round(excessRetail),
       it.daysOfSupply ?? '',
       it.daysSinceSale ?? '', it.qtySold30d, it.qtySold90d,
       Math.round(it.revenue90d),
@@ -325,12 +327,18 @@ function SkuRotationTableComponent({
     return out as Record<PresetKey, number>
   }, [skus])
 
-  // Action footer aggregates
+  // Action footer aggregates (retail-based)
   const aggregates = useMemo(() => {
-    const totalCost = filtered.reduce((s, it) => s + it.costBasis, 0)
-    const totalExcess = filtered.reduce((s, it) => s + it.excessCapitalCost, 0)
+    const totalRetail = filtered.reduce((s, it) => s + it.saleValue, 0)
+    const totalExcessRetail = filtered.reduce((s, it) => {
+      const excessUnits = Math.max(0, it.units - it.avgDailySales90d * 60)
+      return s + excessUnits * it.price
+    }, 0)
     const totalUnits = filtered.reduce((s, it) => s + it.units, 0)
     const totalRev90 = filtered.reduce((s, it) => s + it.revenue90d, 0)
+    // Carrying cost is intrinsically tied to actual capital invested (cost basis),
+    // computed but never displayed as cost basis — only as a savings metric.
+    const totalCarryingSaved = filtered.reduce((s, it) => s + it.costBasis * 0.25, 0)
 
     if (preset === 'discount') {
       let recovery = 0
@@ -341,29 +349,26 @@ function SkuRotationTableComponent({
         pctSum += s.pct
       }
       const avgPct = filtered.length > 0 ? pctSum / filtered.length : 0
-      const carrySaved = totalCost * 0.25
-      return { kind: 'discount' as const, count: filtered.length, totalCost, totalExcess, recovery, avgPct, carrySaved }
+      return { kind: 'discount' as const, count: filtered.length, totalRetail, totalExcessRetail, recovery, avgPct, carrySaved: totalCarryingSaved }
     }
     if (preset === 'reorder') {
       let qty = 0
-      let cost = 0
+      let retail = 0
       for (const it of filtered) {
         const s = suggestedReorderQty(it)
         qty += s.qty
-        cost += s.qty * it.effectiveUnitCost
+        retail += s.qty * it.price
       }
       const projectedRev30d = filtered.reduce((s, it) => s + it.avgDailySales30d * 30 * it.price, 0)
-      return { kind: 'reorder' as const, count: filtered.length, qty, cost, projectedRev30d }
+      return { kind: 'reorder' as const, count: filtered.length, qty, retail, projectedRev30d }
     }
     if (preset === 'skip') {
-      const carrySaved = totalCost * 0.25
-      return { kind: 'skip' as const, count: filtered.length, totalCost, totalExcess, carrySaved }
+      return { kind: 'skip' as const, count: filtered.length, totalRetail, totalExcessRetail, carrySaved: totalCarryingSaved }
     }
     if (preset === 'decelerating') {
-      const atRisk = filtered.reduce((s, it) => s + it.costBasis, 0)
-      return { kind: 'decelerating' as const, count: filtered.length, atRisk, totalUnits }
+      return { kind: 'decelerating' as const, count: filtered.length, atRisk: totalRetail, totalUnits }
     }
-    return { kind: 'all' as const, count: filtered.length, totalCost, totalRev90, totalUnits }
+    return { kind: 'all' as const, count: filtered.length, totalRetail, totalRev90, totalUnits }
   }, [filtered, preset])
 
   // Sort helper
@@ -466,7 +471,7 @@ function SkuRotationTableComponent({
               <span>·</span>
               <span>{it.categoryName ?? '—'}</span>
               {it.costQuality === 'fallback' && (
-                <span className="text-amber-600" title="Cost basis оценочно — нет purchased_price">~est</span>
+                <span className="text-amber-600" title="Закупочная цена не задана — внутренние расчёты используют оценку по портфельному ratio">~est</span>
               )}
             </div>
           </div>
@@ -482,17 +487,22 @@ function SkuRotationTableComponent({
             {it.velocityTier}
           </span>
           <span className="text-right tabular-nums text-slate-700">{formatNumber(it.units)}</span>
-          <div className="text-right tabular-nums">
-            <div className="font-medium text-slate-800" title="Cost basis (units × purchased_price)">
-              {formatCurrency(it.costBasis)}
-            </div>
-            <div className="text-[10px] text-slate-500" title="Retail value (units × sale price)">
-              retail {formatCurrency(it.saleValue)}
-            </div>
-            {it.excessCapitalCost > 0 && (
-              <div className="text-[10px] text-red-600">excess {formatCurrency(it.excessCapitalCost)}</div>
-            )}
-          </div>
+          {(() => {
+            const excessUnits = Math.max(0, it.units - it.avgDailySales90d * 60)
+            const excessRetail = excessUnits * it.price
+            return (
+              <div className="text-right tabular-nums">
+                <div className="font-medium text-slate-800" title="Retail value = units × sale price">
+                  {formatCurrency(it.saleValue)}
+                </div>
+                {excessRetail > 0 && (
+                  <div className="text-[10px] text-red-600" title="Стоимость остатков сверх 60-дневной нормы (по retail)">
+                    excess {formatCurrency(excessRetail)}
+                  </div>
+                )}
+              </div>
+            )
+          })()}
           <span className="text-right tabular-nums text-slate-600">
             {it.daysOfSupply != null ? `${it.daysOfSupply}d` : '—'}
           </span>
@@ -553,8 +563,14 @@ function SkuRotationTableComponent({
                 Price: <strong>{formatCurrency(it.price)}</strong>
               </div>
               <div className="text-slate-700">
-                Cost: <strong>{formatCurrency(it.effectiveUnitCost)}</strong>
-                {it.costQuality === 'fallback' && <span className="text-amber-600 ml-1">~est</span>}
+                Margin: <strong>
+                  {it.price > 0
+                    ? `${Math.round((1 - it.effectiveUnitCost / it.price) * 100)}%`
+                    : '—'}
+                </strong>
+                {it.costQuality === 'fallback' && (
+                  <span className="text-amber-600 ml-1" title="оценочно">~est</span>
+                )}
               </div>
             </div>
             <div>
@@ -681,10 +697,10 @@ function SkuRotationTableComponent({
               <SortHeader label="ABC" sortKey="abcClass" current={sortKey} dir={sortDir} onSort={onSort} align="center" />
               <SortHeader label="Velocity" sortKey="velocityTier" current={sortKey} dir={sortDir} onSort={onSort} align="center" />
               <SortHeader label="Units" sortKey="units" current={sortKey} dir={sortDir} onSort={onSort} align="right" />
-              <SortHeader label="Cost / retail" sortKey="costBasis" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Top: cost basis (units × purchased_price). Bottom: retail value (units × sale price). Sort by cost basis." />
+              <SortHeader label="Retail ₴" sortKey="saleValue" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Розничная стоимость остатка (units × sale price). Excess строкой ниже — что сверх 60-дневной нормы." />
               <SortHeader label="DOS" sortKey="daysOfSupply" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Days of supply at 90d sales pace" />
               <SortHeader label="Last sale" sortKey="daysSinceSale" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Days since last actual sale (0d = today, 'never' = no sales recorded)" />
-              <SortHeader label="GMROI" sortKey="gmroi" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Annualized gross profit / cost basis" />
+              <SortHeader label="GMROI" sortKey="gmroi" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="Annualized gross profit / capital invested. <100% = SKU теряет деньги на хранении. Бенчмарк cosmetics 200-400%." />
               <SortHeader label="Δ30/90" sortKey="velocityRatio30to90" current={sortKey} dir={sortDir} onSort={onSort} align="right" tooltip="30d daily rate / 90d daily rate. <0.7 = deceleration" />
               <SortHeader label="Decision" sortKey="decision" current={sortKey} dir={sortDir} onSort={onSort} align="right" />
               <div className="text-right">{
@@ -870,10 +886,10 @@ interface ActionFooterProps {
 // Helper for aggregates type narrowing
 function buildAggregates() {
   return {} as
-    | { kind: 'all'; count: number; totalCost: number; totalRev90: number; totalUnits: number }
-    | { kind: 'discount'; count: number; totalCost: number; totalExcess: number; recovery: number; avgPct: number; carrySaved: number }
-    | { kind: 'reorder'; count: number; qty: number; cost: number; projectedRev30d: number }
-    | { kind: 'skip'; count: number; totalCost: number; totalExcess: number; carrySaved: number }
+    | { kind: 'all'; count: number; totalRetail: number; totalRev90: number; totalUnits: number }
+    | { kind: 'discount'; count: number; totalRetail: number; totalExcessRetail: number; recovery: number; avgPct: number; carrySaved: number }
+    | { kind: 'reorder'; count: number; qty: number; retail: number; projectedRev30d: number }
+    | { kind: 'skip'; count: number; totalRetail: number; totalExcessRetail: number; carrySaved: number }
     | { kind: 'decelerating'; count: number; atRisk: number; totalUnits: number }
 }
 
@@ -890,7 +906,7 @@ function ActionFooter({ aggregates }: ActionFooterProps) {
     return wrap(
       <div className="flex flex-wrap gap-x-4 gap-y-1 items-center">
         <span><strong>{aggregates.count}</strong> SKU</span>
-        <span>· замороженный кэш <strong className="text-red-700">{formatCurrency(aggregates.totalCost)}</strong></span>
+        <span>· retail <strong className="text-red-700">{formatCurrency(aggregates.totalRetail)}</strong></span>
         <span>· avg discount <strong>{Math.round(aggregates.avgPct * 100)}%</strong></span>
         <span>· recovery <strong className="text-emerald-700">{formatCurrency(aggregates.recovery)}</strong></span>
         <span>· экономит carrying <strong className="text-emerald-700">{formatCurrency(aggregates.carrySaved)}/yr</strong></span>
@@ -903,7 +919,7 @@ function ActionFooter({ aggregates }: ActionFooterProps) {
       <div className="flex flex-wrap gap-x-4 gap-y-1 items-center">
         <span><strong>{aggregates.count}</strong> SKU нужно дозаказать</span>
         <span>· total qty <strong>{formatNumber(aggregates.qty)}</strong> units</span>
-        <span>· cost <strong>{formatCurrency(aggregates.cost)}</strong></span>
+        <span>· retail <strong>{formatCurrency(aggregates.retail)}</strong></span>
         <span>· projected revenue 30d <strong className="text-emerald-700">{formatCurrency(aggregates.projectedRev30d)}</strong></span>
       </div>,
       'border-emerald-400'
@@ -913,8 +929,8 @@ function ActionFooter({ aggregates }: ActionFooterProps) {
     return wrap(
       <div className="flex flex-wrap gap-x-4 gap-y-1 items-center">
         <span><strong>{aggregates.count}</strong> SKU не закупать</span>
-        <span>· замороженный кэш <strong className="text-red-700">{formatCurrency(aggregates.totalCost)}</strong></span>
-        <span>· excess <strong>{formatCurrency(aggregates.totalExcess)}</strong></span>
+        <span>· retail <strong className="text-red-700">{formatCurrency(aggregates.totalRetail)}</strong></span>
+        <span>· excess <strong>{formatCurrency(aggregates.totalExcessRetail)}</strong></span>
         <span>· экономит <strong className="text-emerald-700">{formatCurrency(aggregates.carrySaved)}/yr</strong> carrying</span>
       </div>,
       'border-slate-400'
@@ -924,7 +940,7 @@ function ActionFooter({ aggregates }: ActionFooterProps) {
     return wrap(
       <div className="flex flex-wrap gap-x-4 gap-y-1 items-center">
         <span><strong>{aggregates.count}</strong> SKU замедляются (30d/90d &lt; 0.7)</span>
-        <span>· под риском <strong className="text-amber-700">{formatCurrency(aggregates.atRisk)}</strong></span>
+        <span>· под риском <strong className="text-amber-700">{formatCurrency(aggregates.atRisk)}</strong> retail</span>
         <span>· {formatNumber(aggregates.totalUnits)} units на складе</span>
       </div>,
       'border-amber-400'
@@ -933,7 +949,7 @@ function ActionFooter({ aggregates }: ActionFooterProps) {
   return wrap(
     <div className="flex flex-wrap gap-x-4 gap-y-1 items-center">
       <span><strong>{aggregates.count}</strong> SKU</span>
-      <span>· total cost <strong>{formatCurrency(aggregates.totalCost)}</strong></span>
+      <span>· total retail <strong>{formatCurrency(aggregates.totalRetail)}</strong></span>
       <span>· 90d revenue <strong>{formatCurrency(aggregates.totalRev90)}</strong></span>
       <span>· {formatNumber(aggregates.totalUnits)} units</span>
     </div>,
