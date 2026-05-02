@@ -77,9 +77,12 @@ class DuckDBStore(
         async with self._lock:
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
-                # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM)
-                # 4GB needed for checkpoint on 9GB+ DB (2GB OOMs during WAL flush)
-                self._connection.execute("SET memory_limit='4GB'")
+                # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM).
+                # 3GB verified safe for checkpoint on 19GB DB via compact_duckdb.py spike runs
+                # (also exercises full export). 2GB OOMs WAL flush — keep 3GB as floor.
+                # Lowered from 4GB → 3GB to free headroom for Python/Meili sync DataFrames
+                # on a 7g container; combined with temp_directory spill, query slowdown is bounded.
+                self._connection.execute("SET memory_limit='3GB'")
                 # Reduce memory usage for bulk operations
                 self._connection.execute("SET preserve_insertion_order=false")
                 # Large WAL threshold; rely on the explicit 6h CHECKPOINT job.
