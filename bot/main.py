@@ -15,11 +15,12 @@ from telegram.ext import (
     filters,
 )
 
-from bot.config import BOT_TOKEN, KEYCRM_API_KEY, ConversationState
+from bot.config import BOT_TOKEN, KEYCRM_API_KEY, ADMIN_USER_IDS, DASHBOARD_URL, ConversationState
 from core.keycrm import SyncKeyCRMClient as KeyCRMClient
 from bot.services import ReportService
 from bot import handlers, handlers_legacy
 from bot import database
+from bot.canary import CanaryState, run_canary, format_alert, format_recovery
 from core.config import validate_config, ConfigurationError
 
 # Configure logging
@@ -28,6 +29,32 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+# Holds the running Application so module-level helpers (e.g. send_admin_message,
+# imported by core/scheduler.py) can reach the bot without a circular import.
+_application: Application | None = None
+
+
+async def send_admin_message(text: str, parse_mode: str = "HTML") -> None:
+    """Broadcast `text` to every admin in ADMIN_USER_IDS.
+
+    Imported by core/scheduler.py for memory/bronze alerts. Silently logs and
+    skips if the bot hasn't initialized yet or no admins are configured.
+    """
+    if _application is None:
+        logger.warning("send_admin_message called before bot init; dropping: %s", text[:80])
+        return
+    if not ADMIN_USER_IDS:
+        return
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await _application.bot.send_message(
+                chat_id=admin_id, text=text, parse_mode=parse_mode,
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            logger.warning("Failed to send admin message to %s: %s", admin_id, exc)
 
 
 async def setup_command_menu(application: Application) -> None:
@@ -149,6 +176,8 @@ def main() -> None:
 
     # Create the Application
     application = Application.builder().token(BOT_TOKEN).build()
+    global _application
+    _application = application
 
     logger.info("Registering command handlers...")
 
@@ -208,6 +237,30 @@ def main() -> None:
         if revoked_count > 0:
             logger.info(f"Revoked {revoked_count} inactive users (45+ days)")
 
+    # Internal canary: probe the public dashboard from the bot every 15 min.
+    # Runs in a separate container, so it catches outages a self-check would miss.
+    canary_state = CanaryState()
+
+    async def canary_job(context):
+        try:
+            result = await run_canary(DASHBOARD_URL)
+        except Exception as exc:
+            logger.error("Canary job crashed: %s", exc, exc_info=True)
+            return
+
+        decision = canary_state.decide(result)
+        if decision == "alert":
+            logger.warning("Canary alerting: %s", result.failures)
+            await send_admin_message(format_alert(result, DASHBOARD_URL))
+        elif decision == "recovery":
+            logger.info("Canary recovery")
+            await send_admin_message(format_recovery(result, DASHBOARD_URL))
+        else:
+            logger.debug(
+                "Canary OK: cert_days=%s sync_age=%s",
+                result.cert_days_remaining, result.sync_seconds_since,
+            )
+
     # Set up command menu at startup
     application.job_queue.run_once(set_commands, 1)
 
@@ -230,6 +283,13 @@ def main() -> None:
 
     # Run inactive user revocation daily (86400 seconds = 24 hours)
     application.job_queue.run_repeating(revoke_inactive_users, interval=86400, first=300)
+
+    # Run canary every 15 minutes; first probe 90s after startup so the web
+    # container has time to come up after a co-deploy.
+    application.job_queue.run_repeating(
+        canary_job, interval=900, first=90, name="dashboard_canary"
+    )
+    logger.info(f"Dashboard canary scheduled every 15min on {DASHBOARD_URL}")
 
     logger.info("Bot initialized. Starting polling...")
 
