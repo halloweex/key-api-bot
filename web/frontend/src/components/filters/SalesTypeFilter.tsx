@@ -23,10 +23,9 @@ export function SalesTypeFilter() {
       {SALES_TYPES.map(({ value, labelKey }) => (
         <Button
           key={value}
-          size="sm"
+          size="pill"
           variant={salesType === value ? 'primary' : 'ghost'}
           onClick={() => handleChange(value)}
-          className={`${salesType === value ? 'shadow-sm' : ''} text-xs sm:text-sm px-2 sm:px-3 py-1 sm:py-1.5`}
         >
           {t(labelKey)}
         </Button>

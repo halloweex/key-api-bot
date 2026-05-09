@@ -7,7 +7,7 @@ import {
 import { useBasketDistribution } from '../../hooks/useApi'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
-import { SkeletonVerticalBars } from '../ui/Skeleton'
+import { SkeletonVerticalBars } from '../ui'
 
 export const BasketDistributionChart = memo(function BasketDistributionChart() {
   const { t } = useTranslation()

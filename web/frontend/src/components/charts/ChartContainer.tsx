@@ -2,6 +2,7 @@ import { type ReactNode, useCallback, memo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent, SkeletonChart, ApiErrorState } from '../ui'
 import { LottieAnimation } from '../ui/LottieAnimation'
+import { Wrapper } from '../Wrapper'
 import emptyDataAnimation from '../../assets/animations/empty-data.json'
 import { CHART_DIMENSIONS, type ChartHeight } from './config'
 
@@ -20,8 +21,6 @@ interface ChartContainerProps {
   error?: Error | null
   /** Retry function for error recovery */
   onRetry?: () => void
-  /** Additional CSS classes */
-  className?: string
   /** Action button/element in header */
   action?: ReactNode
   /** Chart height preset or 'auto' for dynamic height */
@@ -76,10 +75,9 @@ const EmptyState = memo(function EmptyState({ message, height }: EmptyStateProps
       className="flex flex-col items-center justify-center animate-fade-in"
       style={{ height }}
     >
-      <LottieAnimation
-        animationData={emptyDataAnimation}
-        className="w-24 h-24 mb-2"
-      />
+      <Wrapper marginBottom="sm">
+        <LottieAnimation animationData={emptyDataAnimation} size="lg" />
+      </Wrapper>
       <p className="text-sm text-slate-600 font-medium">{message}</p>
       <p className="text-xs text-slate-400 mt-1.5">{t('chart.adjustFilters')}</p>
     </div>
@@ -95,7 +93,6 @@ export const ChartContainer = memo(function ChartContainer({
   isLoading = false,
   error = null,
   onRetry,
-  className = '',
   action,
   height = 'lg',
   ariaLabel,
@@ -127,13 +124,15 @@ export const ChartContainer = memo(function ChartContainer({
   }
 
   return (
-    <Card className={`animate-chart-in ${className}`}>
-      <CardHeader className="flex flex-row items-center gap-1.5">
-        <div className="flex items-center gap-1">
-          <CardTitle>{title}</CardTitle>
-          {titleExtra}
-        </div>
-        {action}
+    <Card animate="chart-in">
+      <CardHeader>
+        <Wrapper dir="row" align="center" gap="xs">
+          <Wrapper dir="row" align="center" gap="xs">
+            <CardTitle>{title}</CardTitle>
+            {titleExtra}
+          </Wrapper>
+          {action}
+        </Wrapper>
       </CardHeader>
       <CardContent>
         <figure

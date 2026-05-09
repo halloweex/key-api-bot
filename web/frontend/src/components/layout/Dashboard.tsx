@@ -24,15 +24,11 @@ const ChartFallback = memo(function ChartFallback() {
 
 interface ChartSectionProps {
   children: React.ReactNode
-  className?: string
 }
 
-const ChartSection = memo(function ChartSection({
-  children,
-  className = '',
-}: ChartSectionProps) {
+const ChartSection = memo(function ChartSection({ children }: ChartSectionProps) {
   return (
-    <section className={className}>
+    <section>
       <Suspense fallback={<ChartFallback />}>
         {children}
       </Suspense>

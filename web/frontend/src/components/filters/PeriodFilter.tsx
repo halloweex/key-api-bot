@@ -49,19 +49,17 @@ export function PeriodFilter() {
         {PERIODS.map(({ value, labelKey }) => (
           <Button
             key={value}
-            size="sm"
+            size="pill"
             variant={period === value ? 'primary' : 'ghost'}
             onClick={() => handlePeriodChange(value)}
-            className={`${period === value ? 'shadow-sm' : ''} whitespace-nowrap text-[10px] sm:text-xs md:text-sm px-1.5 sm:px-2 md:px-3 py-1 sm:py-1.5`}
           >
             {t(labelKey)}
           </Button>
         ))}
         <Button
-          size="sm"
+          size="pill"
           variant={period === 'custom' ? 'primary' : 'ghost'}
           onClick={handleCustomClick}
-          className={`${period === 'custom' ? 'shadow-sm' : ''} whitespace-nowrap text-[10px] sm:text-xs md:text-sm px-1.5 sm:px-2 md:px-3 py-1 sm:py-1.5 flex items-center gap-1`}
         >
           <Calendar className="w-3 h-3 sm:w-4 sm:h-4" />
           <span className="hidden sm:inline">{customLabel}</span>

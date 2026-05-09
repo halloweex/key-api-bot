@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useProductPairs } from '../../hooks/useApi'
 import { formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
-import { SkeletonTable } from '../ui/Skeleton'
+import { SkeletonTable } from '../ui'
 
 type SortKey = 'coOccurrence' | 'lift' | 'confidenceAtoB' | 'confidenceBtoA'
 

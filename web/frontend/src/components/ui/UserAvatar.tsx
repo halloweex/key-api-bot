@@ -6,16 +6,16 @@ const AVATAR_COLORS = ['#8B5CF6', '#2563EB', '#7C3AED', '#3B82F6', '#6366F1']
 interface UserAvatarProps {
   name: string
   photoUrl?: string | null
+  /** Avatar diameter in pixels. */
   size?: number
-  className?: string
 }
 
-export function UserAvatar({ name, photoUrl, size = 32, className = '' }: UserAvatarProps) {
+export function UserAvatar({ name, photoUrl, size = 32 }: UserAvatarProps) {
   const [imageError, setImageError] = useState(false)
 
   return (
     <div
-      className={`relative flex-shrink-0 ${className}`}
+      className="relative flex-shrink-0"
       style={{ width: size, height: size }}
     >
       {/* Generated avatar — always rendered as base layer */}

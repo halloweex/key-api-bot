@@ -18,7 +18,7 @@ import {
   SummaryCard,
   RetentionInsights
 } from './retention'
-import { SkeletonCard, SkeletonRetentionMatrix, SkeletonVerticalBars, SkeletonTable } from '../ui/Skeleton'
+import { SkeletonCard, SkeletonRetentionMatrix, SkeletonVerticalBars, SkeletonTable } from '../ui'
 
 // ─── Tab Types ───────────────────────────────────────────────────────────────
 

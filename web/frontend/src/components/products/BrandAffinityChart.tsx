@@ -7,7 +7,7 @@ import {
 import { useBrandAffinity } from '../../hooks/useApi'
 import { formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
-import { SkeletonHorizontalBars } from '../ui/Skeleton'
+import { SkeletonHorizontalBars } from '../ui'
 
 export const BrandAffinityChart = memo(function BrandAffinityChart() {
   const { t } = useTranslation()

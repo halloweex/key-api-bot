@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { TrendingUp, TrendingDown, Minus, ChevronDown } from 'lucide-react'
-import { AnimatedNumber } from '../ui/AnimatedNumber'
+import { useAnimatedNumber } from '../../hooks/useAnimatedNumber'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -98,6 +98,7 @@ export const StatCard = memo(function StatCard({
 }: StatCardProps) {
   const trendKey = trend === 1 ? 'up' : trend === -1 ? 'down' : 'neutral'
   const showTrend = trend !== undefined && trend !== 0 && trendValue !== undefined
+  const animatedDisplay = useAnimatedNumber(value, formatter, animationDuration)
 
   return (
     <div
@@ -133,12 +134,12 @@ export const StatCard = memo(function StatCard({
 
             {/* Value with animation */}
             <div className={`flex items-baseline gap-2 ${icon ? "" : "justify-center"} min-w-0`}>
-              <AnimatedNumber
-                value={value}
-                formatter={formatter}
-                duration={animationDuration}
+              <span
+                aria-live="polite"
                 className={`text-lg sm:text-xl lg:text-2xl font-bold tracking-tight truncate ${variantStyles[variant]}`}
-              />
+              >
+                {animatedDisplay}
+              </span>
 
               {/* Trend indicator */}
               {showTrend && (

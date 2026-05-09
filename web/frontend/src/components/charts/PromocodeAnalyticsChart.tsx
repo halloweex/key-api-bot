@@ -23,6 +23,7 @@ import {
   truncateText,
 } from './config'
 import { usePromocodeAnalytics } from '../../hooks'
+import { MetricCard } from '../MetricCard'
 import { formatCurrency, formatNumber, formatPercent } from '../../utils/formatters'
 import { COLORS } from '../../utils/colors'
 
@@ -57,26 +58,6 @@ const formatShortCurrency = (value: number): string => {
   if (value >= 1000) return `₴${(value / 1000).toFixed(0)}K`
   return `₴${value}`
 }
-
-// ─── Metric Card ─────────────────────────────────────────────────────────────
-
-interface MetricCardProps {
-  label: string
-  value: string
-  sub?: string
-  colorClass: string
-  bgClass: string
-}
-
-const MetricCard = memo(function MetricCard({ label, value, sub, colorClass, bgClass }: MetricCardProps) {
-  return (
-    <div className={`rounded-xl p-3 sm:p-4 border ${bgClass}`}>
-      <p className="text-xs text-slate-600 font-medium">{label}</p>
-      <p className={`text-lg sm:text-xl font-bold truncate ${colorClass}`}>{value}</p>
-      {sub && <p className="text-[11px] text-slate-500 mt-0.5">{sub}</p>}
-    </div>
-  )
-})
 
 // ─── Sort Options ───────────────────────────────────────────────────────────
 
@@ -137,31 +118,31 @@ export const PromocodeAnalyticsChart = memo(function PromocodeAnalyticsChart() {
       {metrics && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 mb-4">
           <MetricCard
+            surface="tile-gradient"
+            tone="purple"
             label={t('chart.promoTotalCodes')}
             value={formatNumber(metrics.totalCodes)}
-            colorClass="text-purple-600"
-            bgClass="bg-gradient-to-br from-purple-100 to-purple-50 border-purple-200"
           />
           <MetricCard
+            surface="tile-gradient"
+            tone="blue"
             label={t('chart.promoTopCode')}
             value={metrics.topCode}
             sub={`${formatPercent(metrics.topCodeShare)} ${t('chart.promoOfRevenue')}`}
-            colorClass="text-blue-600"
-            bgClass="bg-gradient-to-br from-blue-100 to-blue-50 border-blue-200"
           />
           <MetricCard
+            surface="tile-gradient"
+            tone="green"
             label={t('chart.promoOrderShare')}
             value={formatPercent(metrics.promoOrderShare)}
             sub={`${formatNumber(metrics.promoOrders)} ${t('common.orders')}`}
-            colorClass="text-green-600"
-            bgClass="bg-gradient-to-br from-green-100 to-green-50 border-green-200"
           />
           <MetricCard
+            surface="tile-gradient"
+            tone="orange"
             label={t('chart.promoAov')}
             value={formatCurrency(metrics.promoAov)}
             sub={`${formatNumber(metrics.promoCustomers)} ${t('chart.promoCustomers')}`}
-            colorClass="text-amber-600"
-            bgClass="bg-gradient-to-br from-amber-100 to-amber-50 border-amber-200"
           />
         </div>
       )}

@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ApiError, NetworkError, TimeoutError } from '../../api/client'
 import { LottieAnimation } from './LottieAnimation'
+import { Wrapper } from '../Wrapper'
 import errorAnimation from '../../assets/animations/error-state.json'
 import type { TFunction } from 'i18next'
 
@@ -157,11 +158,9 @@ export const ApiErrorState = memo(function ApiErrorState({
       role="alert"
       className="bg-gradient-to-br from-slate-50 to-slate-100/50 border border-slate-200 rounded-xl p-8 flex flex-col items-center text-center animate-fade-in"
     >
-      <LottieAnimation
-        animationData={errorAnimation}
-        loop={false}
-        className="w-20 h-20 mb-2"
-      />
+      <Wrapper marginBottom="sm">
+        <LottieAnimation animationData={errorAnimation} loop={false} size="md" />
+      </Wrapper>
       <h3 className="text-slate-900 font-semibold text-lg mb-1">{errorInfo.title}</h3>
       <p className="text-slate-500 text-sm mb-5 max-w-xs">{errorInfo.message}</p>
 

@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import { BarChart3 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { InfoPopover } from '../ui/InfoPopover'
+import { MetricCard } from '../MetricCard'
 import {
   ComposedChart,
   Line,
@@ -58,7 +59,6 @@ function InventoryTrendChartComponent() {
       }
       isLoading={isLoading}
       error={error}
-      className="col-span-1"
       ariaLabel={t('inventory.trendDesc')}
     >
       {data && (
@@ -98,27 +98,31 @@ function InventoryTrendChartComponent() {
           {/* Summary Stats */}
           {data.summary && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <StatCard
+              <MetricCard
+                surface="tile-tinted"
+                tone="neutral"
                 label={t('inventory.startValue')}
                 value={formatCurrency(data.summary.startValue)}
-                color="text-slate-600"
               />
-              <StatCard
+              <MetricCard
+                surface="tile-tinted"
+                tone="neutral"
                 label={t('inventory.endValue')}
                 value={formatCurrency(data.summary.endValue)}
-                color="text-slate-600"
               />
-              <StatCard
+              <MetricCard
+                surface="tile-tinted"
+                tone={data.summary.change >= 0 ? 'green' : 'red'}
                 label={t('inventory.change')}
                 value={formatCurrency(data.summary.change)}
-                subValue={`${data.summary.changePercent >= 0 ? '+' : ''}${data.summary.changePercent}%`}
-                color={data.summary.change >= 0 ? 'text-emerald-600' : 'text-red-600'}
+                sub={`${data.summary.changePercent >= 0 ? '+' : ''}${data.summary.changePercent}%`}
               />
-              <StatCard
+              <MetricCard
+                surface="tile-tinted"
+                tone="blue"
                 label={t('inventory.dataPoints')}
-                value={data.dataPoints}
-                subValue={`${data.granularity}`}
-                color="text-blue-600"
+                value={String(data.dataPoints)}
+                sub={`${data.granularity}`}
               />
             </div>
           )}
@@ -234,23 +238,6 @@ function GranularityButton({ active, onClick, children }: PeriodButtonProps) {
     >
       {children}
     </button>
-  )
-}
-
-interface StatCardProps {
-  label: string
-  value: string | number
-  subValue?: string
-  color: string
-}
-
-function StatCard({ label, value, subValue, color }: StatCardProps) {
-  return (
-    <div className="bg-slate-50 rounded-lg p-3 text-center">
-      <div className={`text-xl font-bold ${color}`}>{value}</div>
-      <div className="text-xs text-slate-600 font-medium">{label}</div>
-      {subValue && <div className="text-xs text-slate-500">{subValue}</div>}
-    </div>
   )
 }
 

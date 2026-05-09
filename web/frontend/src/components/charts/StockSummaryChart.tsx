@@ -3,6 +3,7 @@ import { AlertTriangle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
 import { InfoPopover } from '../ui/InfoPopover'
+import { MetricCard } from '../MetricCard'
 import { useStockSummary } from '../../hooks'
 import { formatNumber, formatCurrency } from '../../utils/formatters'
 
@@ -38,66 +39,58 @@ function StockSummaryChartComponent() {
       }
       isLoading={isLoading}
       error={error}
-      className="col-span-1"
       ariaLabel={t('inventory.stockLevelsDesc')}
     >
       {data && (
         <div className="space-y-4 min-h-[420px]">
           {/* Summary Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <StatCard
+            <MetricCard
+              surface="tile-tinted"
+              tone="green"
               label={t('inventory.inStock')}
-              value={data.summary.inStockCount}
-              color="text-emerald-600"
-              bgColor="bg-emerald-50"
+              value={String(data.summary.inStockCount)}
             />
-            <StatCard
+            <MetricCard
+              surface="tile-tinted"
+              tone="orange"
               label={t('inventory.lowStock')}
-              value={data.summary.lowStockCount}
-              color="text-amber-600"
-              bgColor="bg-amber-50"
+              value={String(data.summary.lowStockCount)}
             />
-            <StatCard
+            <MetricCard
+              surface="tile-tinted"
+              tone="red"
               label={t('inventory.outOfStock')}
-              value={data.summary.outOfStockCount}
-              color="text-red-600"
-              bgColor="bg-red-50"
+              value={String(data.summary.outOfStockCount)}
             />
-            <StatCard
+            <MetricCard
+              surface="tile-tinted"
+              tone="blue"
               label={t('inventory.available')}
               value={formatNumber(data.summary.totalQuantity)}
-              subValue={`${formatNumber(data.summary.totalReserve)} ${t('inventory.reserved')}`}
-              color="text-blue-600"
-              bgColor="bg-blue-50"
+              sub={`${formatNumber(data.summary.totalReserve)} ${t('inventory.reserved')}`}
             />
           </div>
 
           {/* Value Stats */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="text-center py-2 bg-slate-50 rounded-lg">
-              <div className="text-xl font-bold text-slate-700">
-                {formatCurrency(data.summary.totalValue)}
-              </div>
-              <div className="text-xs text-slate-600 font-medium">{t('inventory.stockValue')}</div>
-              {data.summary.reserveValue > 0 && (
-                <div className="text-xs text-slate-500 mt-0.5">
-                  {formatCurrency(data.summary.reserveValue)} {t('inventory.reserved')}
-                </div>
-              )}
-            </div>
-            <div className="text-center py-2 bg-purple-50 rounded-lg">
-              <div className="text-xl font-bold text-purple-700">
-                {formatCurrency(data.summary.averageValue)}
-              </div>
-              <div className="text-xs text-slate-600 font-medium">
-                {t('inventory.avgInventory30d')}
-                {data.summary.avgDataPoints > 0 && (
-                  <span className="text-slate-500 ml-1">
-                    · {data.summary.avgDataPoints} {t('inventory.pts')}
-                  </span>
-                )}
-              </div>
-            </div>
+            <MetricCard
+              surface="tile-tinted"
+              tone="neutral"
+              label={t('inventory.stockValue')}
+              value={formatCurrency(data.summary.totalValue)}
+              sub={data.summary.reserveValue > 0 ? `${formatCurrency(data.summary.reserveValue)} ${t('inventory.reserved')}` : undefined}
+            />
+            <MetricCard
+              surface="tile-tinted"
+              tone="purple"
+              label={
+                data.summary.avgDataPoints > 0
+                  ? `${t('inventory.avgInventory30d')} · ${data.summary.avgDataPoints} ${t('inventory.pts')}`
+                  : t('inventory.avgInventory30d')
+              }
+              value={formatCurrency(data.summary.averageValue)}
+            />
           </div>
 
           {/* Lists */}
@@ -170,26 +163,6 @@ function StockSummaryChartComponent() {
         </div>
       )}
     </ChartContainer>
-  )
-}
-
-// ─── Stat Card Component ─────────────────────────────────────────────────────
-
-interface StatCardProps {
-  label: string
-  value: number | string
-  subValue?: string
-  color: string
-  bgColor: string
-}
-
-function StatCard({ label, value, subValue, color, bgColor }: StatCardProps) {
-  return (
-    <div className={`${bgColor} rounded-lg p-3 text-center`}>
-      <div className={`text-xl font-bold ${color}`}>{value}</div>
-      <div className="text-xs text-slate-600 font-medium">{label}</div>
-      {subValue && <div className="text-xs text-slate-500 mt-0.5">{subValue}</div>}
-    </div>
   )
 }
 

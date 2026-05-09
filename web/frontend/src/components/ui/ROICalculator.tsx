@@ -1,26 +1,11 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Card, CardHeader, CardTitle, CardContent } from './Card'
+import { Wrapper } from '../Wrapper'
+import { MetricCard } from '../MetricCard'
 import { useSummary } from '../../hooks'
 import { formatCurrency, formatPercent } from '../../utils/formatters'
 import { getStoredExpenses, setStoredExpenses } from '../../utils/localStorage'
 import { CalculatorIcon, InfoIcon } from '../icons'
-
-// ─── Metric Card Component ────────────────────────────────────────────────────
-
-interface MetricCardProps {
-  label: string
-  value: string
-  colorClass: string
-}
-
-function MetricCard({ label, value, colorClass }: MetricCardProps) {
-  return (
-    <div className={`bg-slate-50 rounded-lg p-3 sm:p-4 border border-slate-100`}>
-      <div className="text-xs sm:text-sm text-slate-500 mb-1">{label}</div>
-      <div className={`text-lg sm:text-xl font-semibold ${colorClass}`}>{value}</div>
-    </div>
-  )
-}
 
 // ─── ROI Calculator Component ─────────────────────────────────────────────────
 
@@ -95,30 +80,32 @@ export function ROICalculator() {
 
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="p-2 bg-indigo-50 rounded-lg text-indigo-600">
-            <CalculatorIcon />
-          </div>
-          <CardTitle>ROI Calculator</CardTitle>
-        </div>
-        <div className="relative">
-          <button
-            className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-md transition-colors"
-            onMouseEnter={() => setShowTooltip(true)}
-            onMouseLeave={() => setShowTooltip(false)}
-            onClick={() => setShowTooltip(!showTooltip)}
-            aria-label="Info about ROI Calculator"
-          >
-            <InfoIcon />
-          </button>
-          {showTooltip && (
-            <div className="absolute right-0 top-full mt-2 w-64 p-3 bg-slate-800 text-white text-xs rounded-lg shadow-lg z-10">
-              <p className="mb-2">Enter your custom expenses (advertising, logistics, etc.) to calculate profitability metrics.</p>
-              <p className="text-slate-300">Values are saved automatically and persist across sessions.</p>
+      <CardHeader>
+        <Wrapper dir="row" align="center" justify="between">
+          <Wrapper dir="row" align="center" gap="sm">
+            <div className="p-2 bg-indigo-50 rounded-lg text-indigo-600">
+              <CalculatorIcon />
             </div>
-          )}
-        </div>
+            <CardTitle>ROI Calculator</CardTitle>
+          </Wrapper>
+          <div className="relative">
+            <button
+              className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-md transition-colors"
+              onMouseEnter={() => setShowTooltip(true)}
+              onMouseLeave={() => setShowTooltip(false)}
+              onClick={() => setShowTooltip(!showTooltip)}
+              aria-label="Info about ROI Calculator"
+            >
+              <InfoIcon />
+            </button>
+            {showTooltip && (
+              <div className="absolute right-0 top-full mt-2 w-64 p-3 bg-slate-800 text-white text-xs rounded-lg shadow-lg z-10">
+                <p className="mb-2">Enter your custom expenses (advertising, logistics, etc.) to calculate profitability metrics.</p>
+                <p className="text-slate-300">Values are saved automatically and persist across sessions.</p>
+              </div>
+            )}
+          </div>
+        </Wrapper>
       </CardHeader>
       <CardContent>
         {/* Expenses Input */}
@@ -154,24 +141,28 @@ export function ROICalculator() {
         ) : hasExpenses ? (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
             <MetricCard
+              surface="tile"
               label="Profit"
               value={formatCurrency(metrics.profit)}
-              colorClass={metrics.profit >= 0 ? 'text-green-600' : 'text-red-600'}
+              tone={metrics.profit >= 0 ? 'green' : 'red'}
             />
             <MetricCard
+              surface="tile"
               label="ROI"
               value={formatPercent(metrics.roi, 1)}
-              colorClass="text-blue-600"
+              tone="blue"
             />
             <MetricCard
+              surface="tile"
               label="Profit Margin"
               value={formatPercent(metrics.profitMargin, 1)}
-              colorClass="text-purple-600"
+              tone="purple"
             />
             <MetricCard
+              surface="tile"
               label="Cost per Order"
               value={formatCurrency(metrics.costPerOrder)}
-              colorClass="text-orange-600"
+              tone="orange"
             />
           </div>
         ) : (

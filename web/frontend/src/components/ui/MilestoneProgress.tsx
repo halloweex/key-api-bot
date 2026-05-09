@@ -19,7 +19,6 @@ interface Milestone {
 
 interface MilestoneProgressProps {
   revenue: number
-  className?: string
 }
 
 interface Sparkle {
@@ -651,7 +650,6 @@ function InfoTooltipContent({ onClose, title, children }: {
 
 export const MilestoneProgress = memo(function MilestoneProgress({
   revenue,
-  className = ''
 }: MilestoneProgressProps) {
   const { t } = useTranslation()
   const { period } = useFilterStore()
@@ -921,7 +919,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   // Show skeleton while loading goals
   if (isLoadingGoals && periodType) {
     return (
-      <div className={`bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] p-5 ${className}`}>
+      <div className="bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] p-5">
         <div className="animate-pulse">
           <div className="flex items-center justify-between mb-4">
             <div className="h-5 bg-slate-200 rounded w-24" />
@@ -977,7 +975,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
 
   return (
     <>
-      <div ref={containerRef} className={`bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-card-hover)] transition-all duration-300 p-5 ${className}`}>
+      <div ref={containerRef} className="bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] hover:shadow-[var(--shadow-card-hover)] transition-all duration-300 p-5">
         {/* Header */}
         <div className="flex justify-between items-center mb-4">
           <div className="relative flex items-center gap-1.5">

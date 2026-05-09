@@ -10,6 +10,7 @@ import { api } from '../../api/client'
 import type { AdminUser, UserRole, UserStatus } from '../../types/api'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card'
 import { Select } from '../ui/Select'
+import { Wrapper } from '../Wrapper'
 
 // Role badge styles
 const roleBadgeStyles: Record<UserRole, string> = {
@@ -224,9 +225,9 @@ export function AdminUsersPage() {
 
       <Card>
         <CardHeader>
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <Wrapper dir="row-responsive" align="center" justify="between" gap="lg">
             <CardTitle>Users ({users.length})</CardTitle>
-            <div className="flex gap-3">
+            <Wrapper dir="row" gap="md">
               <Select
                 options={[
                   { value: 'approved', label: 'Approved' },
@@ -248,8 +249,8 @@ export function AdminUsersPage() {
                 allowEmpty={true}
                 emptyLabel="All Roles"
               />
-            </div>
-          </div>
+            </Wrapper>
+          </Wrapper>
         </CardHeader>
         <CardContent>
           {isLoading ? (

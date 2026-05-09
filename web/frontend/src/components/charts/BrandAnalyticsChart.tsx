@@ -23,6 +23,7 @@ import {
   truncateText,
 } from './config'
 import { useBrandAnalytics } from '../../hooks'
+import { MetricCard } from '../MetricCard'
 import { formatCurrency, formatNumber, formatPercent } from '../../utils/formatters'
 import { COLORS } from '../../utils/colors'
 import { TagIcon, TrophyIcon, ChartPieIcon } from '../icons'
@@ -61,33 +62,6 @@ const formatShortNumber = (value: number): string => {
   }
   return String(value)
 }
-
-// ─── Metric Card ─────────────────────────────────────────────────────────────
-
-interface MetricCardProps {
-  icon: React.ReactNode
-  label: string
-  value: string
-  colorClass: string
-  bgClass: string
-  iconBgClass: string
-}
-
-const MetricCard = memo(function MetricCard({ icon, label, value, colorClass, bgClass, iconBgClass }: MetricCardProps) {
-  return (
-    <div className={`rounded-xl p-4 border ${bgClass}`}>
-      <div className="flex items-start gap-3">
-        <div className={`p-2 lg:p-2.5 rounded-lg ${iconBgClass} ${colorClass}`}>
-          {icon}
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-xs text-slate-600 font-medium">{label}</p>
-          <p className={`text-xl font-bold truncate ${colorClass}`}>{value}</p>
-        </div>
-      </div>
-    </div>
-  )
-})
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -138,28 +112,25 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
       {metrics && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3 mb-4">
           <MetricCard
+            surface="tile-gradient"
+            tone="blue"
             icon={<TagIcon />}
             label={t('chart.totalBrands')}
             value={formatNumber(metrics.totalBrands ?? 0)}
-            colorClass="text-blue-600"
-            bgClass="bg-gradient-to-br from-blue-100 to-blue-50 border-blue-200"
-            iconBgClass="bg-blue-200/60"
           />
           <MetricCard
+            surface="tile-gradient"
+            tone="purple"
             icon={<TrophyIcon />}
             label={t('chart.topBrand')}
             value={metrics.topBrand ?? t('chart.na')}
-            colorClass="text-purple-600"
-            bgClass="bg-gradient-to-br from-purple-100 to-purple-50 border-purple-200"
-            iconBgClass="bg-purple-200/60"
           />
           <MetricCard
+            surface="tile-gradient"
+            tone="green"
             icon={<ChartPieIcon />}
             label={t('chart.topBrandShare')}
             value={formatPercent(metrics.topBrandShare ?? 0)}
-            colorClass="text-green-600"
-            bgClass="bg-gradient-to-br from-green-100 to-green-50 border-green-200"
-            iconBgClass="bg-green-200/60"
           />
         </div>
       )}

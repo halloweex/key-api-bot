@@ -1,22 +1,16 @@
-import { useEffect, useRef, useState, memo } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
-interface AnimatedNumberProps {
-  value: number
-  formatter: (value: number) => string
-  duration?: number
-  className?: string
-}
+// ─── useAnimatedNumber ───────────────────────────────────────────────────────
+//
+// Animates a numeric value with eased interpolation. Returns the formatted
+// string for the current frame so the caller can render it inside whatever
+// element/style they need — no JSX is owned by this hook.
 
-/**
- * Animates numeric value changes with easing.
- * Uses requestAnimationFrame for smooth 60fps animation.
- */
-export const AnimatedNumber = memo(function AnimatedNumber({
-  value,
-  formatter,
+export function useAnimatedNumber(
+  value: number,
+  formatter: (value: number) => string,
   duration = 500,
-  className,
-}: AnimatedNumberProps) {
+): string {
   const [displayValue, setDisplayValue] = useState(value)
   const previousValue = useRef(value)
   const animationRef = useRef<number | null>(null)
@@ -26,7 +20,6 @@ export const AnimatedNumber = memo(function AnimatedNumber({
     const endValue = value
     const startTime = performance.now()
 
-    // Skip animation for initial render or zero values
     if (startValue === endValue) {
       return
     }
@@ -34,7 +27,6 @@ export const AnimatedNumber = memo(function AnimatedNumber({
     const animate = (currentTime: number) => {
       const elapsed = currentTime - startTime
       const progress = Math.min(elapsed / duration, 1)
-
       // Ease-out cubic for smooth deceleration
       const easeOut = 1 - Math.pow(1 - progress, 3)
       const current = startValue + (endValue - startValue) * easeOut
@@ -58,9 +50,5 @@ export const AnimatedNumber = memo(function AnimatedNumber({
     }
   }, [value, duration])
 
-  return (
-    <span className={className} aria-live="polite">
-      {formatter(displayValue)}
-    </span>
-  )
-})
+  return formatter(displayValue)
+}

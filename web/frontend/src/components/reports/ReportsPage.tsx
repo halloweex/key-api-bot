@@ -2,6 +2,8 @@ import { memo, useState, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card'
 import { SkeletonChart, ApiErrorState } from '../ui'
+import { Wrapper } from '../Wrapper'
+import { MetricCard } from '../MetricCard'
 import { useReportSummary, useReportTopProducts, useReportAllProducts } from '../../hooks/useApi'
 import type { ReportTopProductsResponse } from '../../types/api'
 import { useQueryParams } from '../../store/filterStore'
@@ -41,24 +43,6 @@ function useDownloadCsv() {
 }
 
 // ─── Summary Tab ──────────────────────────────────────────────────────────────
-
-const MetricCard = memo(function MetricCard({
-  label,
-  value,
-  sub,
-}: {
-  label: string
-  value: string
-  sub?: string
-}) {
-  return (
-    <div className="bg-white rounded-xl border border-slate-200/60 shadow-[var(--shadow-card)] p-4">
-      <p className="text-xs text-slate-500 font-medium mb-1">{label}</p>
-      <p className="text-xl font-bold text-slate-900 tracking-tight">{value}</p>
-      {sub && <p className="text-xs text-slate-400 mt-0.5">{sub}</p>}
-    </div>
-  )
-})
 
 const SourceTable = memo(function SourceTable({ sources }: { sources: ReportSourceRow[] }) {
   const { t } = useTranslation()
@@ -126,16 +110,18 @@ const SummaryTab = memo(function SummaryTab() {
 
       {/* Source Table */}
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>{t('reports.sourceBreakdown')}</CardTitle>
-          <button
-            onClick={() => downloadCsv('summary')}
-            className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
-          >
-            {t('reports.exportCsv')}
-          </button>
+        <CardHeader>
+          <Wrapper dir="row" align="center" justify="between">
+            <CardTitle>{t('reports.sourceBreakdown')}</CardTitle>
+            <button
+              onClick={() => downloadCsv('summary')}
+              className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
+            >
+              {t('reports.exportCsv')}
+            </button>
+          </Wrapper>
         </CardHeader>
-        <CardContent className="!p-0 sm:!px-5 sm:!pb-5">
+        <CardContent padding="table">
           <SourceTable sources={data.sources} />
         </CardContent>
       </Card>
@@ -246,65 +232,69 @@ const TopProductsTab = memo(function TopProductsTab() {
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="flex flex-col sm:flex-row sm:items-center gap-3">
-          <CardTitle className="flex-1">{t('reports.topProducts')}</CardTitle>
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Search */}
-            <div className="relative">
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder={t('reports.searchProducts')}
-                className="w-44 sm:w-56 px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-300 transition-colors"
-              />
-            </div>
+        <CardHeader>
+          <Wrapper dir="row-responsive" align="start" gap="md">
+            <Wrapper flex={1}>
+              <CardTitle>{t('reports.topProducts')}</CardTitle>
+            </Wrapper>
+            <Wrapper dir="row" align="center" gap="sm" wrap>
+              {/* Search */}
+              <div className="relative">
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={t('reports.searchProducts')}
+                  className="w-44 sm:w-56 px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-300 transition-colors"
+                />
+              </div>
 
-            {/* Source filter chips */}
-            <div className="flex gap-1">
-              {SOURCE_FILTERS.map((sf) => (
-                <button
-                  key={sf.label}
-                  onClick={() => setSourceFilter(sf.id)}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
-                    sourceFilter === sf.id
-                      ? 'bg-purple-100 text-purple-700'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  }`}
-                >
-                  {sf.label}
-                </button>
-              ))}
-            </div>
+              {/* Source filter chips */}
+              <Wrapper dir="row" gap="xs">
+                {SOURCE_FILTERS.map((sf) => (
+                  <button
+                    key={sf.label}
+                    onClick={() => setSourceFilter(sf.id)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
+                      sourceFilter === sf.id
+                        ? 'bg-purple-100 text-purple-700'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    {sf.label}
+                  </button>
+                ))}
+              </Wrapper>
 
-            {/* Limit selector */}
-            <select
-              value={limit}
-              onChange={(e) => { setLimit(Number(e.target.value)); setSearch('') }}
-              className="text-xs border border-slate-200 rounded-lg px-2 py-1 bg-white text-slate-600"
-            >
-              {LIMIT_OPTIONS.map((l) => (
-                <option key={l} value={l}>
-                  {l === 0 ? t('reports.allProducts') : `Top ${l}`}
-                </option>
-              ))}
-            </select>
+              {/* Limit selector */}
+              <select
+                value={limit}
+                onChange={(e) => { setLimit(Number(e.target.value)); setSearch('') }}
+                className="text-xs border border-slate-200 rounded-lg px-2 py-1 bg-white text-slate-600"
+              >
+                {LIMIT_OPTIONS.map((l) => (
+                  <option key={l} value={l}>
+                    {l === 0 ? t('reports.allProducts') : `Top ${l}`}
+                  </option>
+                ))}
+              </select>
 
-            {/* CSV download */}
-            <button
-              onClick={() => {
-                const extra = new URLSearchParams()
-                if (sourceFilter) extra.set('source_id', String(sourceFilter))
-                extra.set('limit', isAll ? '5000' : String(limit))
-                downloadCsv('top_products', extra.toString())
-              }}
-              className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
-            >
-              {t('reports.exportCsv')}
-            </button>
-          </div>
+              {/* CSV download */}
+              <button
+                onClick={() => {
+                  const extra = new URLSearchParams()
+                  if (sourceFilter) extra.set('source_id', String(sourceFilter))
+                  extra.set('limit', isAll ? '5000' : String(limit))
+                  downloadCsv('top_products', extra.toString())
+                }}
+                className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
+              >
+                {t('reports.exportCsv')}
+              </button>
+            </Wrapper>
+          </Wrapper>
         </CardHeader>
-        <CardContent className="!p-0 sm:!px-5 sm:!pb-5">
+        <CardContent padding="table">
           {search && (
             <p className="text-xs text-slate-400 px-5 sm:px-0 pb-2">
               {t('reports.showingCount', { count: filtered.length, total: allProducts.length })}

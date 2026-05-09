@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useProductMomentum } from '../../hooks/useApi'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
-import { SkeletonMomentum } from '../ui/Skeleton'
+import { SkeletonMomentum } from '../ui'
 
 export const ProductMomentumTable = memo(function ProductMomentumTable() {
   const { t } = useTranslation()

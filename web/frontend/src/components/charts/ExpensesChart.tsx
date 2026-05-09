@@ -14,7 +14,7 @@ import {
   Legend,
 } from 'recharts'
 import { ChartContainer } from './ChartContainer'
-import { Card, CardContent } from '../ui'
+import { MetricCard } from '../MetricCard'
 import {
   CHART_DIMENSIONS,
   TOOLTIP_STYLE,
@@ -46,25 +46,6 @@ interface ProfitDataPoint {
   expenses: number
   profit: number
 }
-
-// ─── Metric Card ─────────────────────────────────────────────────────────────
-
-interface MetricCardProps {
-  label: string
-  value: string
-  colorClass: string
-}
-
-const MetricCard = memo(function MetricCard({ label, value, colorClass }: MetricCardProps) {
-  return (
-    <Card className="bg-slate-700/50">
-      <CardContent className="py-2 px-3">
-        <p className="text-xs text-slate-600 font-medium">{label}</p>
-        <p className={`text-xl font-bold ${colorClass}`}>{value}</p>
-      </CardContent>
-    </Card>
-  )
-})
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -123,24 +104,28 @@ export const ExpensesChart = memo(function ExpensesChart() {
       {metrics && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
           <MetricCard
+            surface="tile-dark"
             label={t('chart.totalExpenses')}
             value={formatCurrency(metrics.totalExpenses ?? 0)}
-            colorClass="text-red-400"
+            tone="red"
           />
           <MetricCard
+            surface="tile-dark"
             label={t('chart.grossProfit')}
             value={formatCurrency(metrics.grossProfit ?? 0)}
-            colorClass="text-green-400"
+            tone="green"
           />
           <MetricCard
+            surface="tile-dark"
             label={t('chart.profitMargin')}
             value={formatPercent(metrics.profitMargin ?? 0)}
-            colorClass="text-blue-400"
+            tone="blue"
           />
           <MetricCard
+            surface="tile-dark"
             label={t('chart.ordersWithExpenses')}
             value={String(metrics.ordersWithExpenses ?? 0)}
-            colorClass="text-purple-400"
+            tone="purple"
           />
         </div>
       )}

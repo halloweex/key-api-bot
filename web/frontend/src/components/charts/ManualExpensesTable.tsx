@@ -2,6 +2,7 @@ import { memo, useMemo, useState, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ChartContainer } from './ChartContainer'
+import { MetricCard } from '../MetricCard'
 import { formatCurrency } from '../../utils/formatters'
 import { useFilterStore } from '../../store/filterStore'
 import { CurrencyIcon, TrashIcon } from '../icons'
@@ -39,32 +40,14 @@ interface ExpensesResponse {
 
 // ─── Category Configuration ───────────────────────────────────────────────────
 
-const categoryConfig: Record<string, { bg: string; text: string; icon: string }> = {
-  marketing: {
-    bg: 'bg-purple-100',
-    text: 'text-purple-700',
-    icon: '📣',
-  },
-  salary: {
-    bg: 'bg-blue-100',
-    text: 'text-blue-700',
-    icon: '👥',
-  },
-  taxes: {
-    bg: 'bg-red-100',
-    text: 'text-red-700',
-    icon: '🏛️',
-  },
-  logistics: {
-    bg: 'bg-amber-100',
-    text: 'text-amber-700',
-    icon: '📦',
-  },
-  other: {
-    bg: 'bg-slate-100',
-    text: 'text-slate-700',
-    icon: '📋',
-  },
+type CategoryTone = 'purple' | 'blue' | 'red' | 'orange' | 'neutral'
+
+const categoryConfig: Record<string, { bg: string; text: string; icon: string; tone: CategoryTone }> = {
+  marketing: { bg: 'bg-purple-100', text: 'text-purple-700', icon: '📣', tone: 'purple' },
+  salary:    { bg: 'bg-blue-100',   text: 'text-blue-700',   icon: '👥', tone: 'blue' },
+  taxes:     { bg: 'bg-red-100',    text: 'text-red-700',    icon: '🏛️', tone: 'red' },
+  logistics: { bg: 'bg-amber-100',  text: 'text-amber-700',  icon: '📦', tone: 'orange' },
+  other:     { bg: 'bg-slate-100',  text: 'text-slate-700',  icon: '📋', tone: 'neutral' },
 }
 
 const CATEGORIES = ['marketing', 'salary', 'taxes', 'logistics', 'other']
@@ -157,34 +140,6 @@ const DeleteButton = memo(function DeleteButton({ expenseId, onDelete, isDeletin
         <TrashIcon className="w-4 h-4" />
       )}
     </button>
-  )
-})
-
-// ─── Summary Metric Card ──────────────────────────────────────────────────────
-
-interface MetricCardProps {
-  label: string
-  value: string
-  icon?: string
-  colorClass: string
-  bgClass: string
-}
-
-const MetricCard = memo(function MetricCard({ label, value, icon, colorClass, bgClass }: MetricCardProps) {
-  return (
-    <div className={`rounded-xl p-4 border ${bgClass}`}>
-      <div className="flex items-start gap-3">
-        {icon && (
-          <div className={`p-2 rounded-lg bg-white/60 ${colorClass} text-lg`}>
-            {icon}
-          </div>
-        )}
-        <div className="flex-1 min-w-0">
-          <p className="text-xs text-slate-600 font-medium">{label}</p>
-          <p className={`text-xl font-bold truncate ${colorClass}`}>{value}</p>
-        </div>
-      </div>
-    </div>
   )
 })
 
@@ -300,29 +255,29 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
       {data?.summary && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
           <MetricCard
+            surface="tile-gradient"
+            tone="red"
             label={t('chart.totalExpenses')}
             value={formatCurrency(data.summary.total)}
             icon="💰"
-            colorClass="text-red-600"
-            bgClass="bg-gradient-to-br from-red-50 to-red-100/50 border-red-200"
           />
           <MetricCard
+            surface="tile-gradient"
+            tone="neutral"
             label={t('chart.transactions')}
             value={String(data.summary.count)}
             icon="📝"
-            colorClass="text-slate-700"
-            bgClass="bg-gradient-to-br from-slate-50 to-slate-100/50 border-slate-200"
           />
           {topCategories.slice(0, 2).map((cat) => {
             const config = categoryConfig[cat.category] || categoryConfig.other
             return (
               <MetricCard
                 key={cat.category}
+                surface="tile-gradient"
+                tone={config.tone}
                 label={cat.category.charAt(0).toUpperCase() + cat.category.slice(1)}
                 value={formatCurrency(cat.total)}
                 icon={config.icon}
-                colorClass={config.text}
-                bgClass={`bg-gradient-to-br from-white to-slate-50 border-slate-200`}
               />
             )
           })}

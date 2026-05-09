@@ -299,7 +299,7 @@ export function AdminPermissionsPage() {
         <CardHeader>
           <CardTitle>Feature Permissions</CardTitle>
         </CardHeader>
-        <CardContent className="p-0">
+        <CardContent padding="none">
           {isLoading ? (
             <div className="py-12 text-center text-slate-500">
               Loading permissions...

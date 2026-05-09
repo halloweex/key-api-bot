@@ -23,6 +23,7 @@ import {
   formatAxisK,
 } from './config'
 import { useCustomerInsights } from '../../hooks'
+import { MetricCard } from '../MetricCard'
 import { formatCurrency, formatNumber, formatPercent } from '../../utils/formatters'
 import { CUSTOMER_COLORS } from '../../utils/colors'
 import {
@@ -48,43 +49,6 @@ interface AOVDataPoint {
   date: string
   aov: number
 }
-
-// ─── Summary Card ─────────────────────────────────────────────────────────────
-
-interface SummaryCardProps {
-  icon: React.ReactNode
-  label: string
-  value: string
-  subtitle?: string
-  colorClass: string
-  bgClass: string
-}
-
-const SummaryCard = memo(function SummaryCard({
-  icon,
-  label,
-  value,
-  subtitle,
-  colorClass,
-  bgClass
-}: SummaryCardProps) {
-  return (
-    <div className={`rounded-xl p-4 ${bgClass}`}>
-      <div className="flex items-start gap-3">
-        <div className={`p-2 rounded-lg ${colorClass} bg-slate-800/10`}>
-          {icon}
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-xs text-slate-600 font-medium">{label}</p>
-          <p className={`text-xl font-bold ${colorClass}`}>{value}</p>
-          {subtitle && (
-            <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-})
 
 // ─── Info Button ──────────────────────────────────────────────────────────────
 
@@ -173,37 +137,37 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
         <div className="space-y-3 mb-6">
           {/* Row 1: Customer metrics */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <SummaryCard
+            <MetricCard
+              surface="tile-gradient"
+              tone="blue"
               icon={<UserPlusIcon />}
               label={t('customer.newCustomers')}
               value={formatNumber(metrics.newCustomers ?? 0)}
-              subtitle={`${newPercent}% ${t('customer.ofTotal')}`}
-              colorClass="text-blue-600"
-              bgClass="bg-gradient-to-br from-blue-100 to-blue-50 border border-blue-200"
+              sub={`${newPercent}% ${t('customer.ofTotal')}`}
             />
-            <SummaryCard
+            <MetricCard
+              surface="tile-gradient"
+              tone="purple"
               icon={<UserGroupIcon />}
               label={t('customer.returningCustomers')}
               value={formatNumber(metrics.returningCustomers ?? 0)}
-              subtitle={`${returningPercent}% ${t('customer.ofTotal')}`}
-              colorClass="text-purple-600"
-              bgClass="bg-gradient-to-br from-purple-100 to-purple-50 border border-purple-200"
+              sub={`${returningPercent}% ${t('customer.ofTotal')}`}
             />
-            <SummaryCard
+            <MetricCard
+              surface="tile-gradient"
+              tone="green"
               icon={<RefreshIcon />}
               label={t('customer.repeatRate')}
               value={formatPercent(metrics.repeatRate ?? 0)}
-              subtitle={t('customer.ordersFromReturning')}
-              colorClass="text-green-600"
-              bgClass="bg-gradient-to-br from-green-100 to-green-50 border border-green-200"
+              sub={t('customer.ordersFromReturning')}
             />
-            <SummaryCard
+            <MetricCard
+              surface="tile-gradient"
+              tone="orange"
               icon={<CurrencyIcon />}
               label={t('customer.avgOrderValue')}
               value={formatCurrency(metrics.averageOrderValue ?? 0)}
-              subtitle={t('customer.perOrder')}
-              colorClass="text-orange-600"
-              bgClass="bg-gradient-to-br from-orange-100 to-orange-50 border border-orange-200"
+              sub={t('customer.perOrder')}
             />
           </div>
 
@@ -230,37 +194,37 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 )}
               </div>
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                <SummaryCard
+                <MetricCard
+                  surface="tile-gradient"
+                  tone="rose"
                   icon={<HeartIcon />}
                   label={t('customer.clv')}
                   value={formatCurrency(metrics.customerLifetimeValue ?? 0)}
-                  subtitle={t('customer.clvShort')}
-                  colorClass="text-rose-600"
-                  bgClass="bg-gradient-to-br from-rose-100 to-rose-50 border border-rose-200"
+                  sub={t('customer.clvShort')}
                 />
-                <SummaryCard
+                <MetricCard
+                  surface="tile-gradient"
+                  tone="indigo"
                   icon={<ShoppingBagIcon />}
                   label={t('customer.purchaseFrequency')}
                   value={`${(metrics.avgPurchaseFrequency ?? 0).toFixed(1)}x`}
-                  subtitle={t('customer.purchaseFrequencyShort')}
-                  colorClass="text-indigo-600"
-                  bgClass="bg-gradient-to-br from-indigo-100 to-indigo-50 border border-indigo-200"
+                  sub={t('customer.purchaseFrequencyShort')}
                 />
-                <SummaryCard
+                <MetricCard
+                  surface="tile-gradient"
+                  tone="teal"
                   icon={<CalendarIcon />}
                   label={t('customer.customerLifespan')}
                   value={`${Math.round(metrics.avgCustomerLifespanDays ?? 0)} ${t('customer.daysUnit')}`}
-                  subtitle={t('customer.customerLifespanShort')}
-                  colorClass="text-teal-600"
-                  bgClass="bg-gradient-to-br from-teal-100 to-teal-50 border border-teal-200"
+                  sub={t('customer.customerLifespanShort')}
                 />
-                <SummaryCard
+                <MetricCard
+                  surface="tile-gradient"
+                  tone="orange"
                   icon={<RefreshIcon />}
                   label={t('customer.ordersPerCustomer')}
                   value={`${(metrics.purchaseFrequency ?? 0).toFixed(2)}x`}
-                  subtitle={t('customer.inSelectedPeriod')}
-                  colorClass="text-amber-600"
-                  bgClass="bg-gradient-to-br from-amber-100 to-amber-50 border border-amber-200"
+                  sub={t('customer.inSelectedPeriod')}
                 />
               </div>
             </div>
@@ -275,29 +239,29 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 </h4>
               </div>
               <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-                <SummaryCard
+                <MetricCard
+                  surface="tile-gradient"
+                  tone="cyan"
                   icon={<UserGroupIcon />}
                   label={t('customer.totalCustomers')}
                   value={formatNumber(metrics.totalCustomersAllTime ?? 0)}
-                  subtitle={t('customer.uniqueCustomers')}
-                  colorClass="text-cyan-600"
-                  bgClass="bg-gradient-to-br from-cyan-100 to-cyan-50 border border-cyan-200"
+                  sub={t('customer.uniqueCustomers')}
                 />
-                <SummaryCard
+                <MetricCard
+                  surface="tile-gradient"
+                  tone="green"
                   icon={<RefreshIcon />}
                   label={t('customer.trueRepeatRate')}
                   value={formatPercent(metrics.trueRepeatRate ?? 0)}
-                  subtitle={`${formatNumber(metrics.repeatCustomersAllTime ?? 0)} ${t('customer.repeatCustomersCount')}`}
-                  colorClass="text-green-600"
-                  bgClass="bg-gradient-to-br from-green-100 to-green-50 border border-green-200"
+                  sub={`${formatNumber(metrics.repeatCustomersAllTime ?? 0)} ${t('customer.repeatCustomersCount')}`}
                 />
-                <SummaryCard
+                <MetricCard
+                  surface="tile-gradient"
+                  tone="orange"
                   icon={<ShoppingBagIcon />}
                   label={t('customer.ordersPerCustomer')}
                   value={`${(metrics.avgOrdersPerCustomer ?? 0).toFixed(2)}x`}
-                  subtitle={t('customer.average')}
-                  colorClass="text-amber-600"
-                  bgClass="bg-gradient-to-br from-amber-100 to-amber-50 border border-amber-200"
+                  sub={t('customer.average')}
                 />
               </div>
             </div>

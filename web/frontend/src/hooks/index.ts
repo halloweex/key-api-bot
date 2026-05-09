@@ -89,3 +89,6 @@ export {
 
 // Router
 export { useRouter, navigate } from './useRouter'
+
+// Animated number
+export { useAnimatedNumber } from './useAnimatedNumber'

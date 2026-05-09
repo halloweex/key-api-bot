@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
 import { InfoPopover } from '../ui/InfoPopover'
+import { MetricCard } from '../MetricCard'
 import { useInventoryAnalysis, useStockActions } from '../../hooks'
 import { formatNumber, formatCurrency } from '../../utils/formatters'
 import type {
@@ -90,47 +91,46 @@ function DeadStockChartComponent() {
       }
       isLoading={isLoading}
       error={error}
-      className="col-span-1"
       ariaLabel={t('inventory.healthDesc')}
     >
       {data && (
         <div className="space-y-4 min-h-[420px]">
           {/* Summary Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-            <StatCard
+            <MetricCard
+              surface="tile-tinted"
+              tone="green"
               label={t('inventory.healthy')}
-              value={data.summary.healthy.skuCount}
-              subValue={`${data.summary.healthy.valuePercent}%`}
-              color="text-emerald-600"
-              bgColor="bg-emerald-50"
+              value={String(data.summary.healthy.skuCount)}
+              sub={`${data.summary.healthy.valuePercent}%`}
             />
-            <StatCard
+            <MetricCard
+              surface="tile-tinted"
+              tone="indigo"
               label={t('inventory.overstocked')}
-              value={data.summary.overstocked.skuCount}
-              subValue={`${data.summary.overstocked.valuePercent}%`}
-              color="text-indigo-600"
-              bgColor="bg-indigo-50"
+              value={String(data.summary.overstocked.skuCount)}
+              sub={`${data.summary.overstocked.valuePercent}%`}
             />
-            <StatCard
+            <MetricCard
+              surface="tile-tinted"
+              tone="orange"
               label={t('inventory.atRisk')}
-              value={data.summary.atRisk.skuCount}
-              subValue={`${data.summary.atRisk.valuePercent}%`}
-              color="text-amber-600"
-              bgColor="bg-amber-50"
+              value={String(data.summary.atRisk.skuCount)}
+              sub={`${data.summary.atRisk.valuePercent}%`}
             />
-            <StatCard
+            <MetricCard
+              surface="tile-tinted"
+              tone="red"
               label={t('inventory.deadStock')}
-              value={data.summary.deadStock.skuCount}
-              subValue={`${data.summary.deadStock.valuePercent}%`}
-              color="text-red-600"
-              bgColor="bg-red-50"
+              value={String(data.summary.deadStock.skuCount)}
+              sub={`${data.summary.deadStock.valuePercent}%`}
             />
-            <StatCard
+            <MetricCard
+              surface="tile-tinted"
+              tone="neutral"
               label={t('inventory.neverSold')}
-              value={data.summary.neverSold.skuCount}
-              subValue={`${data.summary.neverSold.valuePercent}%`}
-              color="text-slate-600"
-              bgColor="bg-slate-100"
+              value={String(data.summary.neverSold.skuCount)}
+              sub={`${data.summary.neverSold.valuePercent}%`}
             />
           </div>
 
@@ -256,24 +256,6 @@ function CapitalAtRiskPanel({ concentration, costQuality, liquidation, gmroi }: 
 }
 
 // ─── Sub Components ──────────────────────────────────────────────────────────
-
-interface StatCardProps {
-  label: string
-  value: number | string
-  subValue?: string
-  color: string
-  bgColor: string
-}
-
-function StatCard({ label, value, subValue, color, bgColor }: StatCardProps) {
-  return (
-    <div className={`${bgColor} rounded-lg p-3 text-center`}>
-      <div className={`text-xl font-bold ${color}`}>{value}</div>
-      <div className="text-xs text-slate-600 font-medium">{label}</div>
-      {subValue && <div className="text-xs text-slate-500 mt-0.5">{subValue}</div>}
-    </div>
-  )
-}
 
 interface TabButtonProps {
   active: boolean

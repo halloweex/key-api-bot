@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Select } from '../ui'
+import { Wrapper } from '../Wrapper'
 import { useFilterStore } from '../../store/filterStore'
 import { useCategories, useChildCategories } from '../../hooks'
 
@@ -63,7 +64,7 @@ export function CategoryFilter() {
   }, [categoryId, childCategories])
 
   return (
-    <div className="flex items-center gap-2">
+    <Wrapper dir="row" align="center" gap="sm">
       <Select
         options={options}
         value={selectedParentId ? String(selectedParentId) : (categoryId ? String(categoryId) : null)}
@@ -79,6 +80,6 @@ export function CategoryFilter() {
           placeholder={t('filter.allSubcategories')}
         />
       )}
-    </div>
+    </Wrapper>
   )
 }

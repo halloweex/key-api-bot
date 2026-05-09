@@ -17,6 +17,7 @@ import {
 } from 'date-fns'
 import { useTranslation } from 'react-i18next'
 import { Button } from '../ui'
+import { Wrapper } from '../Wrapper'
 import { useFilterStore } from '../../store/filterStore'
 import { useMaxForecastDate } from '../../hooks'
 
@@ -281,27 +282,31 @@ export function DateRangePicker({ onClose }: DateRangePickerProps) {
           </div>
 
           {/* Actions */}
-          <div className="flex items-center gap-2 mt-4">
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={handleApply}
-              disabled={!isValid}
-              className="flex-1"
-            >
-              {t('filter.apply')}
-            </Button>
-            {onClose && (
+          <Wrapper dir="row" align="center" gap="sm" marginTop="lg">
+            <Wrapper flex={1}>
               <Button
                 size="sm"
-                variant="ghost"
-                onClick={onClose}
-                className="flex-1"
+                variant="primary"
+                onClick={handleApply}
+                disabled={!isValid}
+                fullWidth
               >
-                {t('filter.cancel')}
+                {t('filter.apply')}
               </Button>
+            </Wrapper>
+            {onClose && (
+              <Wrapper flex={1}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={onClose}
+                  fullWidth
+                >
+                  {t('filter.cancel')}
+                </Button>
+              </Wrapper>
             )}
-          </div>
+          </Wrapper>
         </div>
       </div>
     </div>

@@ -1,32 +1,30 @@
 import { useId } from 'react'
 
-interface SkeletonProps {
+// ─── Skeleton primitives ─────────────────────────────────────────────────────
+//
+// Public API is the *named* skeletons (SkeletonCard, SkeletonChart, the SVG
+// ones, etc.). The base block and small helpers (Skeleton, SkeletonText,
+// SkeletonAvatar, SkeletonButton) are private composition tools — they are
+// not exported, so consumers can't bypass the named scenes.
+
+interface BaseSkeletonProps {
+  /** Tailwind sizing classes. Internal only; never reached from outside. */
   className?: string
-  /** Use pulse animation instead of shimmer */
-  pulse?: boolean
-  /** Rounded corners variant */
   rounded?: 'sm' | 'md' | 'lg' | 'full'
-  /** Optional inline styles */
+  /** Inline styles for cases where the size is computed (e.g. random heights). Internal only. */
   style?: React.CSSProperties
 }
 
-const roundedStyles = {
+const roundedClass = {
   sm: 'rounded',
   md: 'rounded-lg',
   lg: 'rounded-xl',
   full: 'rounded-full',
-}
+} as const
 
-export function Skeleton({ className = '', pulse = false, rounded = 'md', style }: SkeletonProps) {
+function Skeleton({ className = '', rounded = 'md', style }: BaseSkeletonProps) {
   return (
-    <div
-      className={`
-        ${pulse ? 'animate-skeleton bg-slate-200' : 'animate-shimmer'}
-        ${roundedStyles[rounded]}
-        ${className}
-      `}
-      style={style}
-    />
+    <div className={`animate-shimmer ${roundedClass[rounded]} ${className}`} style={style} />
   )
 }
 
@@ -73,40 +71,6 @@ export function SkeletonChart() {
       </div>
     </div>
   )
-}
-
-export function SkeletonText({ lines = 3, className = '' }: { lines?: number; className?: string }) {
-  return (
-    <div className={`space-y-2 animate-stagger ${className}`}>
-      {[...Array(lines)].map((_, i) => (
-        <Skeleton
-          key={i}
-          className={`h-4 ${i === lines - 1 ? 'w-3/4' : 'w-full'}`}
-          rounded="sm"
-        />
-      ))}
-    </div>
-  )
-}
-
-export function SkeletonAvatar({ size = 'md' }: { size?: 'sm' | 'md' | 'lg' }) {
-  const sizeClasses = {
-    sm: 'h-8 w-8',
-    md: 'h-10 w-10',
-    lg: 'h-12 w-12',
-  }
-
-  return <Skeleton className={sizeClasses[size]} rounded="full" />
-}
-
-export function SkeletonButton({ size = 'md' }: { size?: 'sm' | 'md' | 'lg' }) {
-  const sizeClasses = {
-    sm: 'h-8 w-20',
-    md: 'h-10 w-24',
-    lg: 'h-12 w-32',
-  }
-
-  return <Skeleton className={sizeClasses[size]} rounded="lg" />
 }
 
 /** SVG shimmer gradient defs — reusable across all SVG skeletons */

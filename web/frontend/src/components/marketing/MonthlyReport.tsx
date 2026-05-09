@@ -89,7 +89,7 @@ const GeneralSalesSection = memo(function GeneralSalesSection({
       <CardHeader>
         <CardTitle>{t('marketing.generalSales')}</CardTitle>
       </CardHeader>
-      <CardContent className="!p-0 sm:!px-5 sm:!pb-5">
+      <CardContent padding="table">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -154,7 +154,7 @@ const BrandsSection = memo(function BrandsSection({ brands }: { brands: Marketin
       <CardHeader>
         <CardTitle>{t('marketing.salesByBrand')}</CardTitle>
       </CardHeader>
-      <CardContent className="!p-0 sm:!px-5 sm:!pb-5">
+      <CardContent padding="table">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -194,7 +194,7 @@ const SourcesSection = memo(function SourcesSection({ sources }: { sources: Mark
       <CardHeader>
         <CardTitle>{t('marketing.channels')}</CardTitle>
       </CardHeader>
-      <CardContent className="!p-0 sm:!px-5 sm:!pb-5">
+      <CardContent padding="table">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>

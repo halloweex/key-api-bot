@@ -7,7 +7,7 @@ import {
 import { useCategoryCombos } from '../../hooks/useApi'
 import { formatNumber } from '../../utils/formatters'
 import { InfoPopover } from '../ui/InfoPopover'
-import { SkeletonHorizontalBars } from '../ui/Skeleton'
+import { SkeletonHorizontalBars } from '../ui'
 
 export const CategoryCombosChart = memo(function CategoryCombosChart() {
   const { t } = useTranslation()
