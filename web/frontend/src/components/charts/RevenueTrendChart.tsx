@@ -1,6 +1,6 @@
 import { useMemo, memo, useState } from 'react'
-import { CircleHelp } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { InfoPopover } from '../ui/InfoPopover'
 import {
   ComposedChart,
   Bar,
@@ -336,40 +336,6 @@ function GradientDefs() {
   )
 }
 
-// ─── Info Button ──────────────────────────────────────────────────────────────
-
-function InfoButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className="text-slate-400 hover:text-slate-600 transition-colors"
-      aria-label="Chart information"
-    >
-      <CircleHelp className="w-4 h-4" />
-    </button>
-  )
-}
-
-function InfoTooltipContent({ onClose, title, children }: {
-  onClose: () => void
-  title: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="absolute top-8 left-0 z-50 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-4 min-w-[220px] max-w-[300px]">
-      <button
-        onClick={onClose}
-        className="absolute top-2 right-2 text-slate-400 hover:text-slate-200 text-lg leading-none"
-        aria-label="Close"
-      >
-        ×
-      </button>
-      <h4 className="text-sm font-medium text-slate-200 mb-2">{title}</h4>
-      {children}
-    </div>
-  )
-}
-
 // ─── Compare Type Labels ──────────────────────────────────────────────────────
 
 type CompareType = 'previous_period' | 'year_ago' | 'month_ago'
@@ -399,7 +365,6 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
   const [compareType, setCompareType] = useState<CompareType>('year_ago')
   const { data, isLoading, error, refetch } = useRevenueTrend(compareType)
   const { period } = useFilterStore()
-  const [showInfo, setShowInfo] = useState(false)
 
   const allPeriodLabels = getPeriodLabels(t)
   const basePeriodLabels = allPeriodLabels[period] || allPeriodLabels.custom
@@ -549,32 +514,27 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
     <ChartContainer
       title={t('chart.revenueTrend')}
       titleExtra={
-        <div className="relative flex-shrink-0">
-          <InfoButton onClick={() => setShowInfo(!showInfo)} />
-          {showInfo && (
-            <InfoTooltipContent onClose={() => setShowInfo(false)} title={t('chart.revenueTrend')}>
-              <div className="space-y-2">
-                <p className="text-xs text-slate-300">
-                  <strong className="text-blue-400">{t('chart.rtBarsLabel')}</strong> {t('chart.rtBarsDesc')}
-                </p>
-                {hasForecast && (
-                  <p className="text-xs text-slate-300">
-                    <strong style={{ color: FORECAST_BAR_COLOR }}>{t('chart.rtForecastLabel')}</strong> {t('chart.rtForecastDesc')}
-                  </p>
-                )}
-                <p className="text-xs text-slate-300">
-                  <strong className="text-slate-400">{t('chart.rtDashedLabel')}</strong> {t('chart.rtDashedDesc')}
-                </p>
-                <p className="text-xs text-slate-300">
-                  <strong className="text-emerald-400">{t('chart.rtGrowthLabel')}</strong> {t('chart.rtGrowthDesc')}
-                </p>
-                <p className="text-xs text-slate-300">
-                  <strong className="text-amber-400">{t('chart.rtPeakLabel')}</strong> {t('chart.rtPeakDesc')}
-                </p>
-              </div>
-            </InfoTooltipContent>
-          )}
-        </div>
+        <InfoPopover title={t('chart.revenueTrend')}>
+          <div className="space-y-2">
+            <p className="text-xs text-slate-300">
+              <strong className="text-blue-400">{t('chart.rtBarsLabel')}</strong> {t('chart.rtBarsDesc')}
+            </p>
+            {hasForecast && (
+              <p className="text-xs text-slate-300">
+                <strong style={{ color: FORECAST_BAR_COLOR }}>{t('chart.rtForecastLabel')}</strong> {t('chart.rtForecastDesc')}
+              </p>
+            )}
+            <p className="text-xs text-slate-300">
+              <strong className="text-slate-400">{t('chart.rtDashedLabel')}</strong> {t('chart.rtDashedDesc')}
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-emerald-400">{t('chart.rtGrowthLabel')}</strong> {t('chart.rtGrowthDesc')}
+            </p>
+            <p className="text-xs text-slate-300">
+              <strong className="text-amber-400">{t('chart.rtPeakLabel')}</strong> {t('chart.rtPeakDesc')}
+            </p>
+          </div>
+        </InfoPopover>
       }
       isLoading={isLoading}
       error={error as Error | null}
