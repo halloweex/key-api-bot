@@ -21,7 +21,7 @@ import {
   X_AXIS_PROPS,
   Y_AXIS_PROPS,
 } from '../config'
-import { SummaryCard } from './SummaryCard'
+import { MetricCard } from '../../MetricCard'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -74,23 +74,31 @@ export const PurchaseTimingChart = memo(function PurchaseTimingChart({
     <div>
       {/* Summary Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="green"
+          iconStyle="watermark"
+          icon={<Users size={28} />}
           label={t('retention.repeatCustomers')}
           value={formatNumber(data.summary.totalRepeatCustomers)}
-          variant="emerald"
-          icon={<Users size={28} />}
         />
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="neutral"
+          iconStyle="watermark"
+          icon={<Clock size={28} />}
           label={t('retention.medianDays')}
           value={data.summary.medianDays != null ? String(data.summary.medianDays) : '-'}
-          subtitle={t('retention.to2ndPurchase')}
-          icon={<Clock size={28} />}
+          sub={t('retention.to2ndPurchase')}
         />
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="neutral"
+          iconStyle="watermark"
+          icon={<TrendingUp size={28} />}
           label={t('retention.averageDays')}
           value={data.summary.avgDays ? String(Math.round(data.summary.avgDays)) : '-'}
-          subtitle={t('retention.to2ndPurchase')}
-          icon={<TrendingUp size={28} />}
+          sub={t('retention.to2ndPurchase')}
         />
       </div>
 

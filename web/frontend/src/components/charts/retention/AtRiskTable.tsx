@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { AlertTriangle, Users, Clock, TrendingUp } from 'lucide-react'
 import type { AtRiskResponse } from '../../../types/api'
 import { formatNumber, formatCurrency, formatPercent } from '../../../utils/formatters'
-import { SummaryCard } from './SummaryCard'
+import { MetricCard } from '../../MetricCard'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -37,33 +37,41 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
     <div>
       {/* Summary Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="red"
+          iconStyle="watermark"
+          icon={<AlertTriangle size={28} />}
           label={t('retention.atRiskCustomers')}
           value={formatNumber(data.summary.totalAtRisk)}
-          subtitle={`${formatPercent(data.summary.overallAtRiskPct)} ${t('retention.atRiskOfTotal')}`}
-          variant="red"
-          icon={<AlertTriangle size={28} />}
+          sub={`${formatPercent(data.summary.overallAtRiskPct)} ${t('retention.atRiskOfTotal')}`}
         />
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="red"
+          iconStyle="watermark"
+          icon={<Users size={28} />}
           label={t('retention.churnedCustomers')}
           value={formatNumber(data.summary.totalChurned)}
-          subtitle={`${formatPercent(data.summary.churnPct)} ${t('retention.atRiskOfTotal')}`}
-          variant="red"
-          icon={<Users size={28} />}
+          sub={`${formatPercent(data.summary.churnPct)} ${t('retention.atRiskOfTotal')}`}
         />
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="orange"
+          iconStyle="watermark"
+          icon={<TrendingUp size={28} />}
           label={t('retention.atRiskRevenue')}
           value={formatCurrency(totalAtRiskRevenue)}
-          subtitle={t('retention.historicalValue')}
-          variant="amber"
-          icon={<TrendingUp size={28} />}
+          sub={t('retention.historicalValue')}
         />
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="blue"
+          iconStyle="watermark"
+          icon={<Clock size={28} />}
           label={t('retention.threshold')}
           value={`${data.daysThreshold} ${t('retention.days')}`}
-          subtitle={t('retention.sinceLastPurchase')}
-          variant="blue"
-          icon={<Clock size={28} />}
+          sub={t('retention.sinceLastPurchase')}
         />
       </div>
 

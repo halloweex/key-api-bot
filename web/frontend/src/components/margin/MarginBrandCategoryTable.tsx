@@ -2,6 +2,7 @@ import { memo, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChevronUp, ChevronDown } from 'lucide-react'
 import { ChartContainer } from '../charts/ChartContainer'
+import { Badge } from '../Badge'
 import { useMarginBrandCategory } from '../../hooks'
 import { formatCurrency, formatPercent } from '../../utils/formatters'
 import type { MarginBrandCategoryItem } from '../../types/api'
@@ -106,15 +107,15 @@ export const MarginBrandCategoryTable = memo(function MarginBrandCategoryTable()
                 </td>
                 <td className="py-1.5 px-3 text-right">
                   {item.margin_pct != null ? (
-                    <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-semibold ${
-                      item.margin_pct >= 40
-                        ? 'bg-green-100 text-green-700'
-                        : item.margin_pct >= 25
-                          ? 'bg-yellow-100 text-yellow-700'
-                          : 'bg-red-100 text-red-700'
-                    }`}>
+                    <Badge
+                      tone={
+                        item.margin_pct >= 40 ? 'green'
+                          : item.margin_pct >= 25 ? 'yellow'
+                          : 'red'
+                      }
+                    >
                       {formatPercent(item.margin_pct)}
-                    </span>
+                    </Badge>
                   ) : (
                     <span className="text-slate-400">N/A</span>
                   )}

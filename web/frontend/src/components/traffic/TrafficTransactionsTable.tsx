@@ -1,6 +1,7 @@
 import { memo, useState, useCallback, useRef, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChartContainer } from '../charts/ChartContainer'
+import { Badge } from '../Badge'
 import { formatCurrency } from '../../utils/formatters'
 import { useTrafficTransactions } from '../../hooks'
 import { useQueryParams } from '../../store/filterStore'
@@ -18,13 +19,15 @@ const TRAFFIC_TYPES = [
   { value: 'unknown', labelKey: 'traffic.unknown' },
 ] as const
 
-const trafficBadgeConfig: Record<string, { bg: string; text: string; labelKey: string }> = {
-  paid_confirmed: { bg: 'bg-blue-100', text: 'text-blue-700', labelKey: 'traffic.paid' },
-  paid_likely: { bg: 'bg-blue-50', text: 'text-blue-500', labelKey: 'traffic.paidLikely' },
-  manager: { bg: 'bg-cyan-100', text: 'text-cyan-700', labelKey: 'traffic.manager' },
-  organic: { bg: 'bg-green-100', text: 'text-green-700', labelKey: 'traffic.organic' },
-  pixel_only: { bg: 'bg-orange-100', text: 'text-orange-700', labelKey: 'traffic.pixelOnly' },
-  unknown: { bg: 'bg-purple-100', text: 'text-purple-700', labelKey: 'traffic.unknown' },
+type BadgeTone = 'neutral' | 'green' | 'red' | 'blue' | 'purple' | 'orange' | 'cyan'
+
+const trafficBadgeConfig: Record<string, { tone: BadgeTone; labelKey: string }> = {
+  paid_confirmed: { tone: 'blue', labelKey: 'traffic.paid' },
+  paid_likely:    { tone: 'blue', labelKey: 'traffic.paidLikely' },
+  manager:        { tone: 'cyan', labelKey: 'traffic.manager' },
+  organic:        { tone: 'green', labelKey: 'traffic.organic' },
+  pixel_only:     { tone: 'orange', labelKey: 'traffic.pixelOnly' },
+  unknown:        { tone: 'purple', labelKey: 'traffic.unknown' },
 }
 
 const PLATFORMS = [
@@ -47,11 +50,7 @@ const PAGE_SIZE = 50
 const TrafficBadge = memo(function TrafficBadge({ type }: { type: string }) {
   const { t } = useTranslation()
   const config = trafficBadgeConfig[type] || trafficBadgeConfig.unknown
-  return (
-    <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${config.bg} ${config.text}`}>
-      {t(config.labelKey)}
-    </span>
-  )
+  return <Badge tone={config.tone}>{t(config.labelKey)}</Badge>
 })
 
 const EvidencePills = memo(function EvidencePills({ evidence }: { evidence: TrafficEvidence[] }) {

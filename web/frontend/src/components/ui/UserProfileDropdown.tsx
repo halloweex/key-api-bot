@@ -7,6 +7,7 @@ import { LogIn, LogOut, ChevronDown, Globe, Check, Users, ShieldCheck } from 'lu
 import { useAuth, useUserDisplayName } from '../../hooks/useAuth'
 import { api } from '../../api/client'
 import { UserAvatar } from './UserAvatar'
+import { Badge } from '../Badge'
 import {
   SUPPORTED_LANGUAGES,
   LANGUAGE_LABELS,
@@ -15,11 +16,11 @@ import {
 } from '../../lib/i18n'
 import type { UserRole } from '../../types/api'
 
-// Role badge colors
-const roleBadgeStyles: Record<UserRole, string> = {
-  admin: 'bg-purple-100 text-purple-700',
-  editor: 'bg-blue-100 text-blue-700',
-  viewer: 'bg-slate-100 text-slate-600',
+// Role tone mapping
+const roleTone: Record<UserRole, 'purple' | 'blue' | 'neutral'> = {
+  admin: 'purple',
+  editor: 'blue',
+  viewer: 'neutral',
 }
 
 export function UserProfileDropdown() {
@@ -144,9 +145,7 @@ export function UserProfileDropdown() {
             </div>
             {/* Role badge */}
             <div className="mt-2">
-              <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${roleBadgeStyles[user.role]}`}>
-                {t(roleKey)}
-              </span>
+              <Badge tone={roleTone[user.role]} shape="tag">{t(roleKey)}</Badge>
             </div>
           </div>
 

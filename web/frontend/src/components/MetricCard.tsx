@@ -31,6 +31,8 @@ type MetricTone =
   | 'rose'
   | 'teal'
 
+type IconStyle = 'badge' | 'watermark'
+
 interface MetricCardProps {
   label: string
   value: string
@@ -38,8 +40,16 @@ interface MetricCardProps {
   tone?: MetricTone
   /** Optional secondary line beneath the value (small, muted). */
   sub?: string
-  /** Optional icon shown in a tone-coloured tile to the left of label/value. */
+  /** Optional icon. Layout depends on `iconStyle`. */
   icon?: ReactNode
+  /**
+   * How to render the icon:
+   *   `badge`     — coloured tile to the left of label/value (default)
+   *   `watermark` — large faded glyph in the top-right corner (decorative)
+   */
+  iconStyle?: IconStyle
+  /** Optional element rendered baseline-aligned next to the value (e.g. trend Badge). */
+  valueExtra?: ReactNode
 }
 
 const surfaceClass: Record<MetricSurface, string> = {
@@ -144,6 +154,8 @@ export const MetricCard = memo(function MetricCard({
   tone = 'neutral',
   sub,
   icon,
+  iconStyle = 'badge',
+  valueExtra,
 }: MetricCardProps) {
   const valueClass =
     surface === 'tile-dark' ? valueToneDark[tone]
@@ -152,10 +164,33 @@ export const MetricCard = memo(function MetricCard({
 
   const containerClass =
     surface === 'tile-tinted'
-      ? `${surfaceClass[surface]} ${tintedBgClass[tone]} ${icon ? '' : 'text-center'}`
+      ? `${surfaceClass[surface]} ${tintedBgClass[tone]} ${icon && iconStyle === 'badge' ? '' : 'text-center'}`
       : surface === 'tile-gradient'
       ? `${surfaceClass[surface]} ${gradientBgClass[tone]}`
       : surfaceClass[surface]
+
+  const valueRow = valueExtra ? (
+    <div className="flex items-baseline gap-2">
+      <p className={`text-xl font-bold tracking-tight ${valueClass}`}>{value}</p>
+      {valueExtra}
+    </div>
+  ) : (
+    <p className={`text-xl font-bold tracking-tight ${valueClass}`}>{value}</p>
+  )
+
+  // Watermark icon — decorative, in the corner; main layout stays vertical
+  if (icon && iconStyle === 'watermark') {
+    return (
+      <div className={`relative ${containerClass}`}>
+        <div className="absolute top-3 right-3 opacity-[0.15] pointer-events-none">
+          {icon}
+        </div>
+        <p className={labelClass[surface]}>{label}</p>
+        {valueRow}
+        {sub && <p className="text-xs text-slate-400 mt-0.5">{sub}</p>}
+      </div>
+    )
+  }
 
   if (icon) {
     return (
@@ -166,7 +201,7 @@ export const MetricCard = memo(function MetricCard({
           </div>
           <div className="flex-1 min-w-0">
             <p className={labelClass[surface]}>{label}</p>
-            <p className={`text-xl font-bold tracking-tight truncate ${valueClass}`}>{value}</p>
+            {valueRow}
             {sub && <p className="text-xs text-slate-400 mt-0.5">{sub}</p>}
           </div>
         </div>
@@ -177,7 +212,7 @@ export const MetricCard = memo(function MetricCard({
   return (
     <div className={containerClass}>
       <p className={labelClass[surface]}>{label}</p>
-      <p className={`text-xl font-bold tracking-tight ${valueClass}`}>{value}</p>
+      {valueRow}
       {sub && <p className="text-xs text-slate-400 mt-0.5">{sub}</p>}
     </div>
   )

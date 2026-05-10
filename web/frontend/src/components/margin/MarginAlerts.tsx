@@ -2,6 +2,7 @@ import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { AlertTriangle } from 'lucide-react'
 import { ChartContainer } from '../charts/ChartContainer'
+import { Badge } from '../Badge'
 import { useMarginAlerts } from '../../hooks'
 import { formatCurrency, formatPercent } from '../../utils/formatters'
 
@@ -18,10 +19,9 @@ export const MarginAlerts = memo(function MarginAlerts() {
       title={t('margin.alerts')}
       titleExtra={
         data && data.length > 0 ? (
-          <span className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">
-            <AlertTriangle className="w-3 h-3" />
+          <Badge tone="red" icon={<AlertTriangle className="w-3 h-3" />}>
             {data.length}
-          </span>
+          </Badge>
         ) : null
       }
       isLoading={isLoading}
@@ -63,13 +63,9 @@ export const MarginAlerts = memo(function MarginAlerts() {
                   {formatCurrency(item.total_revenue)}
                 </td>
                 <td className="py-2 px-3 text-right">
-                  <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-semibold ${
-                    item.margin_pct < 15
-                      ? 'bg-red-100 text-red-700'
-                      : 'bg-yellow-100 text-yellow-700'
-                  }`}>
+                  <Badge tone={item.margin_pct < 15 ? 'red' : 'yellow'}>
                     {formatPercent(item.margin_pct)}
-                  </span>
+                  </Badge>
                 </td>
                 <td className="py-2 px-3 text-right text-slate-500">
                   {formatPercent(item.margin_floor)}

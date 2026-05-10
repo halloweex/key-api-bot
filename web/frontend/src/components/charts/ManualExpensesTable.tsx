@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ChartContainer } from './ChartContainer'
 import { MetricCard } from '../MetricCard'
+import { Badge } from '../Badge'
 import { formatCurrency } from '../../utils/formatters'
 import { useFilterStore } from '../../store/filterStore'
 import { CurrencyIcon, TrashIcon } from '../icons'
@@ -42,12 +43,12 @@ interface ExpensesResponse {
 
 type CategoryTone = 'purple' | 'blue' | 'red' | 'orange' | 'neutral'
 
-const categoryConfig: Record<string, { bg: string; text: string; icon: string; tone: CategoryTone }> = {
-  marketing: { bg: 'bg-purple-100', text: 'text-purple-700', icon: '📣', tone: 'purple' },
-  salary:    { bg: 'bg-blue-100',   text: 'text-blue-700',   icon: '👥', tone: 'blue' },
-  taxes:     { bg: 'bg-red-100',    text: 'text-red-700',    icon: '🏛️', tone: 'red' },
-  logistics: { bg: 'bg-amber-100',  text: 'text-amber-700',  icon: '📦', tone: 'orange' },
-  other:     { bg: 'bg-slate-100',  text: 'text-slate-700',  icon: '📋', tone: 'neutral' },
+const categoryConfig: Record<string, { icon: string; tone: CategoryTone }> = {
+  marketing: { icon: '📣', tone: 'purple' },
+  salary:    { icon: '👥', tone: 'blue' },
+  taxes:     { icon: '🏛️', tone: 'red' },
+  logistics: { icon: '📦', tone: 'orange' },
+  other:     { icon: '📋', tone: 'neutral' },
 }
 
 const CATEGORIES = ['marketing', 'salary', 'taxes', 'logistics', 'other']
@@ -57,12 +58,10 @@ const CATEGORIES = ['marketing', 'salary', 'taxes', 'logistics', 'other']
 const CategoryBadge = memo(function CategoryBadge({ category }: { category: string }) {
   const config = categoryConfig[category] || categoryConfig.other
   const displayName = category.charAt(0).toUpperCase() + category.slice(1)
-
   return (
-    <span className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full ${config.bg} ${config.text}`}>
-      <span>{config.icon}</span>
-      <span>{displayName}</span>
-    </span>
+    <Badge tone={config.tone} icon={<span>{config.icon}</span>}>
+      {displayName}
+    </Badge>
   )
 })
 

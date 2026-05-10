@@ -22,7 +22,7 @@ import {
   Y_AXIS_PROPS,
   formatAxisK,
 } from '../config'
-import { SummaryCard } from './SummaryCard'
+import { MetricCard } from '../../MetricCard'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -87,24 +87,31 @@ export const CohortLTVChart = memo(function CohortLTVChart({
     <div>
       {/* Summary Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="blue"
+          iconStyle="watermark"
+          icon={<DollarSign size={28} />}
           label={t('retention.avgLTV')}
           value={formatCurrency(data.summary.avgLTV)}
-          subtitle={t('retention.acrossAllCohorts')}
-          variant="blue"
-          icon={<DollarSign size={28} />}
+          sub={t('retention.acrossAllCohorts')}
         />
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="green"
+          iconStyle="watermark"
+          icon={<TrendingUp size={28} />}
           label={t('retention.bestCohort')}
           value={data.summary.bestCohort || '-'}
-          subtitle={`LTV: ${formatCurrency(data.summary.bestCohortLTV)}`}
-          variant="emerald"
-          icon={<TrendingUp size={28} />}
+          sub={`LTV: ${formatCurrency(data.summary.bestCohortLTV)}`}
         />
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="neutral"
+          iconStyle="watermark"
+          icon={<Users size={28} />}
           label={t('retention.cohortsAnalyzed')}
           value={formatNumber(data.cohorts.length)}
-          icon={<Users size={28} />}
         />
       </div>
 

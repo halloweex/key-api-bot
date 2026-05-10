@@ -15,9 +15,10 @@ import {
   PurchaseTimingChart,
   CohortLTVChart,
   AtRiskTable,
-  SummaryCard,
   RetentionInsights
 } from './retention'
+import { MetricCard } from '../MetricCard'
+import { Badge } from '../Badge'
 import { SkeletonCard, SkeletonRetentionMatrix, SkeletonVerticalBars, SkeletonTable } from '../ui'
 
 // ─── Tab Types ───────────────────────────────────────────────────────────────
@@ -214,41 +215,60 @@ export const CohortRetentionChart = memo(function CohortRetentionChart() {
       ? data.summary.avgCustomerRetention
       : data.summary.avgRevenueRetention
 
+    const m1TrendBadge = activeTab === 'retention' && m1Trend != null && m1Trend !== 0
+      ? (
+        <Badge tone={m1Trend > 0 ? 'green' : 'red'} shape="square">
+          {m1Trend > 0 ? '+' : ''}{m1Trend.toFixed(1)}pp
+        </Badge>
+      )
+      : undefined
+
     return (
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="neutral"
+          iconStyle="watermark"
+          icon={<Users size={28} />}
           label={t('retention.totalCohorts')}
           value={formatNumber(data.summary.totalCohorts)}
-          subtitle={t('retention.lastMonths', { count: monthsBack })}
-          icon={<Users size={28} />}
+          sub={t('retention.lastMonths', { count: monthsBack })}
         />
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="neutral"
+          iconStyle="watermark"
+          icon={<Repeat size={28} />}
           label={t('customer.totalCustomers')}
           value={formatNumber(data.summary.totalCustomers)}
-          subtitle={t('retention.inAnalyzedCohorts')}
-          icon={<Repeat size={28} />}
+          sub={t('retention.inAnalyzedCohorts')}
         />
-        <SummaryCard
+        <MetricCard
+          surface="tile-gradient"
+          tone="green"
+          iconStyle="watermark"
+          icon={<TrendingUp size={28} />}
           label={activeTab === 'revenue' ? t('retention.avgM1RevRetention') : t('retention.avgM1Retention')}
           value={avgRetention?.[1] ? formatPercent(avgRetention[1]) : '-'}
-          subtitle={t('retention.returnIn2ndMonth')}
-          variant="emerald"
-          icon={<TrendingUp size={28} />}
-          trend={activeTab === 'retention' ? m1Trend : null}
+          sub={t('retention.returnIn2ndMonth')}
+          valueExtra={m1TrendBadge}
         />
         {activeTab === 'revenue' && data.summary.totalRevenue != null && (
-          <SummaryCard
+          <MetricCard
+            surface="tile-gradient"
+            tone="blue"
             label={t('chart.totalRevenue')}
             value={formatCurrency(data.summary.totalRevenue)}
-            subtitle={t('retention.m0Revenue')}
-            variant="blue"
+            sub={t('retention.m0Revenue')}
           />
         )}
         {activeTab === 'retention' && (
-          <SummaryCard
+          <MetricCard
+            surface="tile-gradient"
+            tone="neutral"
             label={t('retention.avgM3Retention')}
             value={avgRetention?.[3] ? formatPercent(avgRetention[3]) : '-'}
-            subtitle={t('retention.returnIn4thMonth')}
+            sub={t('retention.returnIn4thMonth')}
           />
         )}
       </div>
