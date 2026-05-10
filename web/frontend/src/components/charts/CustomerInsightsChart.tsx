@@ -1,6 +1,6 @@
-import { useMemo, memo, useState } from 'react'
-import { CircleHelp } from 'lucide-react'
+import { useMemo, memo } from 'react'
 import { useTranslation } from 'react-i18next'
+import { InfoPopover } from '../ui/InfoPopover'
 import {
   PieChart,
   Pie,
@@ -50,50 +50,11 @@ interface AOVDataPoint {
   aov: number
 }
 
-// ─── Info Button ──────────────────────────────────────────────────────────────
-
-function InfoButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className="text-slate-400 hover:text-slate-600 transition-colors"
-      aria-label="How is this calculated?"
-    >
-      <CircleHelp className="w-4 h-4" />
-    </button>
-  )
-}
-
-// ─── Info Tooltip ─────────────────────────────────────────────────────────────
-
-function InfoTooltipContent({ onClose, title, children }: {
-  onClose: () => void
-  title: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="absolute top-8 left-0 z-50 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-4 min-w-[220px] max-w-[300px]">
-      <button
-        onClick={onClose}
-        className="absolute top-2 right-2 text-slate-400 hover:text-slate-200 text-lg leading-none"
-        aria-label="Close"
-      >
-        ×
-      </button>
-      <h4 className="text-sm font-semibold text-slate-200 mb-2">{title}</h4>
-      {children}
-    </div>
-  )
-}
-
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
   const { t } = useTranslation()
   const { data, isLoading, error, refetch } = useCustomerInsights()
-  const [showCustomerInfo, setShowCustomerInfo] = useState(false)
-  const [showAovInfo, setShowAovInfo] = useState(false)
-  const [showClvInfo, setShowClvInfo] = useState(false)
 
   const pieData = useMemo<PieDataPoint[]>(() => {
     if (!data?.newVsReturning?.labels?.length) return []
@@ -178,20 +139,17 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 <h4 className="text-xs font-medium text-slate-500 uppercase tracking-wide">
                   {t('customer.repeatBehavior')}
                 </h4>
-                <InfoButton onClick={() => setShowClvInfo(!showClvInfo)} />
-                {showClvInfo && (
-                  <InfoTooltipContent onClose={() => setShowClvInfo(false)} title={t('customer.repeatBehavior')}>
-                    <p className="text-xs text-slate-300 mb-2">
-                      <strong className="text-rose-400">CLV:</strong> {t('customer.clvDesc').replace('CLV: ', '')}
-                    </p>
-                    <p className="text-xs text-slate-300 mb-2">
-                      <strong className="text-indigo-400">{t('customer.purchaseFrequency')}:</strong> {t('customer.freqDesc').replace('Purchase Frequency: ', '')}
-                    </p>
-                    <p className="text-xs text-slate-300">
-                      <strong className="text-teal-400">{t('customer.customerLifespan')}:</strong> {t('customer.lifespanDesc').replace('Lifespan: ', '')}
-                    </p>
-                  </InfoTooltipContent>
-                )}
+                <InfoPopover title={t('customer.repeatBehavior')}>
+                  <p className="text-xs text-slate-300 mb-2">
+                    <strong className="text-rose-400">CLV:</strong> {t('customer.clvDesc').replace('CLV: ', '')}
+                  </p>
+                  <p className="text-xs text-slate-300 mb-2">
+                    <strong className="text-indigo-400">{t('customer.purchaseFrequency')}:</strong> {t('customer.freqDesc').replace('Purchase Frequency: ', '')}
+                  </p>
+                  <p className="text-xs text-slate-300">
+                    <strong className="text-teal-400">{t('customer.customerLifespan')}:</strong> {t('customer.lifespanDesc').replace('Lifespan: ', '')}
+                  </p>
+                </InfoPopover>
               </div>
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <MetricCard
@@ -273,25 +231,20 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* New vs Returning Pie Chart */}
         <div>
-          <div className="relative">
-            <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
-              {t('customer.customersInPeriod')}
-              <InfoButton onClick={() => setShowCustomerInfo(!showCustomerInfo)} />
-            </h4>
-            {showCustomerInfo && (
-              <InfoTooltipContent onClose={() => setShowCustomerInfo(false)} title={t('customer.periodSplit')}>
-                <p className="text-xs text-slate-300 mb-2">
-                  {t('customer.newDesc')}
-                </p>
-                <p className="text-xs text-slate-300 mb-2">
-                  {t('customer.returningDesc')}
-                </p>
-                <p className="text-xs text-slate-300">
-                  {t('customer.splitNote')}
-                </p>
-              </InfoTooltipContent>
-            )}
-          </div>
+          <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
+            {t('customer.customersInPeriod')}
+            <InfoPopover title={t('customer.periodSplit')}>
+              <p className="text-xs text-slate-300 mb-2">
+                {t('customer.newDesc')}
+              </p>
+              <p className="text-xs text-slate-300 mb-2">
+                {t('customer.returningDesc')}
+              </p>
+              <p className="text-xs text-slate-300">
+                {t('customer.splitNote')}
+              </p>
+            </InfoPopover>
+          </h4>
           <div className="h-[160px] sm:h-[180px]">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
@@ -339,25 +292,20 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
 
         {/* AOV Trend Line Chart */}
         <div>
-          <div className="relative">
-            <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
-              {t('customer.aovTrend')}
-              <InfoButton onClick={() => setShowAovInfo(!showAovInfo)} />
-            </h4>
-            {showAovInfo && (
-              <InfoTooltipContent onClose={() => setShowAovInfo(false)} title={t('customer.aovCalcTitle')}>
-                <p className="text-xs text-slate-300 mb-2">
-                  {t('customer.aovCalcDesc')}
-                </p>
-                <p className="text-xs text-slate-300 mb-2">
-                  {t('customer.aovRevenueDesc')}
-                </p>
-                <p className="text-xs text-slate-300">
-                  {t('customer.aovExcluded')}
-                </p>
-              </InfoTooltipContent>
-            )}
-          </div>
+          <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
+            {t('customer.aovTrend')}
+            <InfoPopover title={t('customer.aovCalcTitle')}>
+              <p className="text-xs text-slate-300 mb-2">
+                {t('customer.aovCalcDesc')}
+              </p>
+              <p className="text-xs text-slate-300 mb-2">
+                {t('customer.aovRevenueDesc')}
+              </p>
+              <p className="text-xs text-slate-300">
+                {t('customer.aovExcluded')}
+              </p>
+            </InfoPopover>
+          </h4>
           <div className="h-[180px] sm:h-[200px]">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={aovData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>

@@ -1,6 +1,7 @@
 import { memo, useMemo, useEffect, useRef, useState, useCallback, lazy, Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
-import { CheckCircle, CircleHelp } from 'lucide-react'
+import { CheckCircle } from 'lucide-react'
+import { InfoPopover } from './InfoPopover'
 import { useFilterStore } from '../../store/filterStore'
 import { formatCurrency } from '../../utils/formatters'
 import { useSmartGoals, useRevenueTrend } from '../../hooks'
@@ -612,39 +613,6 @@ function generateMilestonesFromGoals(input: SmartGoalInput, t: TFunc): Milestone
   }]
 }
 
-// ─── Info Button (click-based, matching CustomerInsights style) ───────────────
-
-function InfoButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className="text-slate-400 hover:text-slate-600 transition-colors"
-      aria-label="Goal calculation details"
-    >
-      <CircleHelp className="w-4 h-4" />
-    </button>
-  )
-}
-
-function InfoTooltipContent({ onClose, title, children }: {
-  onClose: () => void
-  title: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="absolute top-8 left-0 z-50 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-4 min-w-[220px] max-w-[300px]">
-      <button
-        onClick={onClose}
-        className="absolute top-2 right-2 text-slate-400 hover:text-slate-200 text-lg leading-none"
-        aria-label="Close"
-      >
-        ×
-      </button>
-      <h4 className="text-sm font-semibold text-slate-200 mb-2">{title}</h4>
-      {children}
-    </div>
-  )
-}
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
@@ -657,7 +625,6 @@ export const MilestoneProgress = memo(function MilestoneProgress({
   const trackRef = useRef<HTMLDivElement>(null)
   const fillRef = useRef<HTMLDivElement>(null)
   const [celebration, setCelebration] = useState<Milestone | null>(null)
-  const [showGoalInfo, setShowGoalInfo] = useState(false)
   const celebratedRef = useRef<Set<number>>(new Set())
   const [sparkles, setSparkles] = useState<Sparkle[]>([])
   const isInitialMountRef = useRef(true)
@@ -987,13 +954,9 @@ export const MilestoneProgress = memo(function MilestoneProgress({
                 {t('goal.custom')}
               </span>
             )}
-            {/* Info button for auto-calculated goals (click-based) */}
+            {/* Info popover for auto-calculated goals */}
             {!isLoadingGoals && (excludedPrevMonthRevenue > 0 || (!isCustomGoal && (growthRate || recent3MonthAvg || lastYearRevenue))) && (
-              <InfoButton onClick={() => setShowGoalInfo(!showGoalInfo)} />
-            )}
-            {/* Click-based tooltip */}
-            {showGoalInfo && (
-              <InfoTooltipContent onClose={() => setShowGoalInfo(false)} title={t('goal.calcTitle')}>
+              <InfoPopover title={t('goal.calcTitle')}>
                 <div className="space-y-2">
                   {growthRate !== undefined && growthRate > 0 && (
                     <p className="text-xs text-slate-300">
@@ -1032,7 +995,7 @@ export const MilestoneProgress = memo(function MilestoneProgress({
                     </p>
                   )}
                 </div>
-              </InfoTooltipContent>
+              </InfoPopover>
             )}
             {/* Loading indicator */}
             {isLoadingGoals && (
