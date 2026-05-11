@@ -4,6 +4,8 @@ export { Select } from './Select'
 export { Input } from './Input'
 export { Checkbox } from './Checkbox'
 export { Textarea } from './Textarea'
+export { ExportCsvButton } from './ExportCsvButton'
+export { FilterChip } from './FilterChip'
 export { InfoPopover } from './InfoPopover'
 export { LottieAnimation } from './LottieAnimation'
 export {

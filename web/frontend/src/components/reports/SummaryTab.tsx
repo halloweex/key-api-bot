@@ -1,7 +1,7 @@
 import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card'
-import { SkeletonChart, ApiErrorState } from '../ui'
+import { SkeletonChart, ApiErrorState, ExportCsvButton } from '../ui'
 import { Wrapper } from '../Wrapper'
 import { MetricCard } from '../MetricCard'
 import { useReportSummary } from '../../hooks/useApi'
@@ -37,12 +37,9 @@ export const SummaryTab = memo(function SummaryTab() {
         <CardHeader>
           <Wrapper dir="row" align="center" justify="between">
             <CardTitle>{t('reports.sourceBreakdown')}</CardTitle>
-            <button
-              onClick={() => downloadCsv('summary')}
-              className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
-            >
+            <ExportCsvButton onClick={() => downloadCsv('summary')}>
               {t('reports.exportCsv')}
-            </button>
+            </ExportCsvButton>
           </Wrapper>
         </CardHeader>
         <CardContent padding="table">

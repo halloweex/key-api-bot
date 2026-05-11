@@ -1,7 +1,7 @@
 import { memo, useMemo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card'
-import { SkeletonChart, ApiErrorState } from '../ui'
+import { SkeletonChart, ApiErrorState, ExportCsvButton } from '../ui'
 import { useMarketingReport } from '../../hooks/useApi'
 import { useFilterStore } from '../../store/filterStore'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
@@ -270,12 +270,9 @@ export const MonthlyReport = memo(function MonthlyReport() {
             </span>
           )}
         </div>
-        <button
-          onClick={downloadCsv}
-          className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
-        >
+        <ExportCsvButton onClick={downloadCsv}>
           {t('reports.exportCsv')}
-        </button>
+        </ExportCsvButton>
       </div>
 
       {isLoading && <SkeletonChart />}

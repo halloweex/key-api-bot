@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
 import { InfoPopover } from '../ui/InfoPopover'
 import { Input } from '../ui/Input'
+import { FilterChip } from '../ui/FilterChip'
 import { useInventoryTurnover, useAbcSkus } from '../../hooks'
 import { formatNumber, formatCurrency } from '../../utils/formatters'
 import type { TopExcessItem, ABCClassData, ABCSkuItem } from '../../types/api'
@@ -283,17 +284,13 @@ function InventoryTurnoverChartComponent() {
         <div className="flex items-center gap-2">
           <div className="flex gap-1">
             {periodOptions.map(opt => (
-              <button
+              <FilterChip
                 key={opt.value}
+                active={days === opt.value}
                 onClick={() => setDays(opt.value)}
-                className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
-                  days === opt.value
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                }`}
               >
                 {opt.label}
-              </button>
+              </FilterChip>
             ))}
           </div>
           <button

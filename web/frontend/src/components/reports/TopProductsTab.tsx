@@ -1,7 +1,7 @@
 import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card'
-import { SkeletonChart, ApiErrorState, Input } from '../ui'
+import { SkeletonChart, ApiErrorState, Input, ExportCsvButton, FilterChip } from '../ui'
 import { Wrapper } from '../Wrapper'
 import { useReportTopProducts, useReportAllProducts } from '../../hooks/useApi'
 import type { ReportTopProductsResponse } from '../../types/api'
@@ -65,17 +65,13 @@ export const TopProductsTab = memo(function TopProductsTab() {
 
               <Wrapper dir="row" gap="xs">
                 {SOURCE_FILTERS.map((sf) => (
-                  <button
+                  <FilterChip
                     key={sf.label}
+                    active={sourceFilter === sf.id}
                     onClick={() => setSourceFilter(sf.id)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
-                      sourceFilter === sf.id
-                        ? 'bg-purple-100 text-purple-700'
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                    }`}
                   >
                     {sf.label}
-                  </button>
+                  </FilterChip>
                 ))}
               </Wrapper>
 
@@ -91,17 +87,16 @@ export const TopProductsTab = memo(function TopProductsTab() {
                 ))}
               </select>
 
-              <button
+              <ExportCsvButton
                 onClick={() => {
                   const extra = new URLSearchParams()
                   if (sourceFilter) extra.set('source_id', String(sourceFilter))
                   extra.set('limit', isAll ? '5000' : String(limit))
                   downloadCsv('top_products', extra.toString())
                 }}
-                className="text-xs font-medium text-purple-600 hover:text-purple-700 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
               >
                 {t('reports.exportCsv')}
-              </button>
+              </ExportCsvButton>
             </Wrapper>
           </Wrapper>
         </CardHeader>
