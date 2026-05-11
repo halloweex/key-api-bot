@@ -8,7 +8,7 @@ import { lazy } from 'react'
 // ─── Lazy Chart Components ───────────────────────────────────────────────────
 
 export const LazyRevenueTrendChart = lazy(() =>
-  import('./RevenueTrendChart').then(m => ({ default: m.RevenueTrendChart }))
+  import('./revenue-trend/RevenueTrendChart').then(m => ({ default: m.RevenueTrendChart }))
 )
 
 export const LazySalesBySourceChart = lazy(() =>

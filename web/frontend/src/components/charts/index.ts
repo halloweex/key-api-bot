@@ -3,7 +3,7 @@ export * from './config'
 
 // Components (eager loading)
 export { ChartContainer } from './ChartContainer'
-export { RevenueTrendChart } from './RevenueTrendChart'
+export { RevenueTrendChart } from './revenue-trend'
 export { SalesBySourceChart } from './SalesBySourceChart'
 export { OrdersBySourceChart } from './OrdersBySourceChart'
 export { RevenueBySourceChart } from './RevenueBySourceChart'
