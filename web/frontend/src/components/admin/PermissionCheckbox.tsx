@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { Checkbox } from '../ui/Checkbox'
 
 interface PermissionCheckboxProps {
   checked: boolean
@@ -15,13 +16,7 @@ export const PermissionCheckbox = memo(function PermissionCheckbox({
 }: PermissionCheckboxProps) {
   return (
     <label className={`flex items-center gap-1.5 cursor-pointer ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}>
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={onChange}
-        disabled={disabled}
-        className="w-4 h-4 rounded border-slate-300 text-purple-600 focus:ring-purple-500 focus:ring-offset-0 disabled:cursor-not-allowed"
-      />
+      <Checkbox checked={checked} onChange={onChange} disabled={disabled} size="md" />
       <span className="text-xs text-slate-600">{label}</span>
     </label>
   )

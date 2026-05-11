@@ -7,6 +7,7 @@ import { Badge } from '../Badge'
 import { formatCurrency } from '../../utils/formatters'
 import { useFilterStore } from '../../store/filterStore'
 import { CurrencyIcon, TrashIcon } from '../icons'
+import { Select } from '../ui/Select'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -74,24 +75,20 @@ interface CategoryFilterProps {
 
 const CategoryFilter = memo(function CategoryFilter({ value, onChange }: CategoryFilterProps) {
   const { t } = useTranslation()
+  const options = CATEGORIES.map((cat) => {
+    const config = categoryConfig[cat]
+    return {
+      value: cat,
+      label: `${config.icon} ${cat.charAt(0).toUpperCase() + cat.slice(1)}`,
+    }
+  })
   return (
-    <select
-      value={value || ''}
-      onChange={(e) => onChange(e.target.value || null)}
-      className="text-xs px-2 py-1 rounded-lg border border-slate-200 bg-white text-slate-600
-                 focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-300
-                 cursor-pointer hover:border-slate-300 transition-colors"
-    >
-      <option value="">{t('chart.allCategories')}</option>
-      {CATEGORIES.map((cat) => {
-        const config = categoryConfig[cat]
-        return (
-          <option key={cat} value={cat}>
-            {config.icon} {cat.charAt(0).toUpperCase() + cat.slice(1)}
-          </option>
-        )
-      })}
-    </select>
+    <Select
+      options={options}
+      value={value}
+      onChange={onChange}
+      emptyLabel={t('chart.allCategories')}
+    />
   )
 })
 

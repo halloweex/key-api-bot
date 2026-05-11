@@ -1,6 +1,9 @@
 export { Card, CardHeader, CardTitle, CardContent } from './Card'
 export { Button } from './Button'
 export { Select } from './Select'
+export { Input } from './Input'
+export { Checkbox } from './Checkbox'
+export { Textarea } from './Textarea'
 export { InfoPopover } from './InfoPopover'
 export { LottieAnimation } from './LottieAnimation'
 export {

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Card, CardHeader, CardTitle, CardContent } from './Card'
+import { Input } from './Input'
 import { Wrapper } from '../Wrapper'
 import { MetricCard } from '../MetricCard'
 import { useSummary } from '../../hooks'
@@ -27,9 +28,7 @@ export function ROICalculator() {
     return () => clearTimeout(timer)
   }, [expenses])
 
-  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value
-    // Allow only numbers and one decimal point
+  const handleInputChange = useCallback((value: string) => {
     if (value === '' || /^\d*\.?\d*$/.test(value)) {
       setInputValue(value)
       const numValue = parseFloat(value) || 0
@@ -113,22 +112,19 @@ export function ROICalculator() {
           <label htmlFor="expenses-input" className="block text-sm font-medium text-slate-700 mb-2">
             Custom Expenses
           </label>
-          <div className="relative">
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
-              ₴
-            </span>
-            <input
-              id="expenses-input"
-              type="text"
-              inputMode="decimal"
-              value={inputValue}
-              onChange={handleInputChange}
-              onPaste={handlePaste}
-              placeholder="0"
-              className="w-full sm:w-64 pl-8 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-slate-800"
-              disabled={isLoading}
-            />
-          </div>
+          <Input
+            id="expenses-input"
+            type="text"
+            inputMode="decimal"
+            size="md"
+            width="wide"
+            value={inputValue}
+            onChange={handleInputChange}
+            onPaste={handlePaste}
+            placeholder="0"
+            prefix="₴"
+            disabled={isLoading}
+          />
         </div>
 
         {/* Metrics Grid */}

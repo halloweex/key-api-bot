@@ -1,7 +1,7 @@
 import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card'
-import { SkeletonChart, ApiErrorState } from '../ui'
+import { SkeletonChart, ApiErrorState, Input } from '../ui'
 import { Wrapper } from '../Wrapper'
 import { useReportTopProducts, useReportAllProducts } from '../../hooks/useApi'
 import type { ReportTopProductsResponse } from '../../types/api'
@@ -54,15 +54,14 @@ export const TopProductsTab = memo(function TopProductsTab() {
               <CardTitle>{t('reports.topProducts')}</CardTitle>
             </Wrapper>
             <Wrapper dir="row" align="center" gap="sm" wrap>
-              <div className="relative">
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder={t('reports.searchProducts')}
-                  className="w-44 sm:w-56 px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-300 transition-colors"
-                />
-              </div>
+              <Input
+                type="text"
+                size="sm"
+                width="search"
+                value={search}
+                onChange={setSearch}
+                placeholder={t('reports.searchProducts')}
+              />
 
               <Wrapper dir="row" gap="xs">
                 {SOURCE_FILTERS.map((sf) => (

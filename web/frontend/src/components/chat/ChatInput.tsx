@@ -1,13 +1,14 @@
 import { memo, useState, useRef, useCallback, useEffect } from 'react'
 import { Loader2, Send } from 'lucide-react'
 import { useChatStore } from '../../store/chatStore'
+import { Textarea } from '../ui/Textarea'
+import { ChatSendButton } from './ChatSendButton'
 
 /**
  * Chat input with send button and SSE streaming.
  */
 export const ChatInput = memo(function ChatInput() {
   const [input, setInput] = useState('')
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   const {
     addMessage,
@@ -19,14 +20,6 @@ export const ChatInput = memo(function ChatInput() {
     isLoading,
     setError,
   } = useChatStore()
-
-  // Auto-resize textarea
-  useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 120)}px`
-    }
-  }, [input])
 
   // Cleanup EventSource on unmount
   useEffect(() => {
@@ -149,27 +142,20 @@ export const ChatInput = memo(function ChatInput() {
   return (
     <div className="border-t border-slate-200 bg-white px-3 py-4">
       <div className="flex items-end gap-3">
-        {/* Input container */}
         <div className="flex-1 relative">
-          <textarea
-            ref={textareaRef}
+          <Textarea
+            size="md"
+            fullWidth
+            autoResize
+            maxHeight={120}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={setInput}
             onKeyDown={handleKeyDown}
             placeholder="Ask about sales, customers, orders..."
             disabled={isLoading}
             rows={1}
-            className="w-full px-4 py-3 pr-12
-              bg-slate-50 border border-slate-200 rounded-2xl
-              text-sm text-slate-900 placeholder-slate-400
-              resize-none
-              focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent focus:bg-white
-              disabled:bg-slate-100 disabled:cursor-not-allowed
-              min-h-[48px] max-h-[120px]
-              transition-all duration-200"
           />
 
-          {/* Character count */}
           {input.length > 100 && (
             <span className={`absolute right-3 bottom-3 text-[10px] ${
               input.length > 1800 ? 'text-red-400' : 'text-slate-400'
@@ -179,26 +165,12 @@ export const ChatInput = memo(function ChatInput() {
           )}
         </div>
 
-        {/* Send button */}
-        <button
+        <ChatSendButton
           onClick={handleSubmit}
           disabled={!input.trim() || isLoading}
-          className="w-12 h-12 rounded-2xl
-            bg-gradient-to-br from-blue-600 to-blue-700 text-white
-            hover:from-blue-700 hover:to-blue-800
-            disabled:from-slate-300 disabled:to-slate-300 disabled:cursor-not-allowed
-            shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40
-            disabled:shadow-none
-            transition-all duration-200
-            flex items-center justify-center flex-shrink-0"
-          title="Send message (Enter)"
-        >
-          {isLoading ? (
-            <Loader2 className="animate-spin h-5 w-5" />
-          ) : (
-            <Send className="h-5 w-5" />
-          )}
-        </button>
+          ariaLabel="Send message (Enter)"
+          icon={isLoading ? <Loader2 className="animate-spin h-5 w-5" /> : <Send className="h-5 w-5" />}
+        />
       </div>
 
       {/* Helper text */}

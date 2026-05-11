@@ -2,7 +2,7 @@ import { memo, useState, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { ChartContainer } from '../charts/ChartContainer'
-import { Card, CardContent } from '../ui'
+import { Card, CardContent, Input, Select, Button } from '../ui'
 import { TrashIcon } from '../icons'
 import { formatCurrency } from '../../utils/formatters'
 import { useSummary, useTrafficROAS, useCreateExpense, useDeleteExpense } from '../../hooks'
@@ -190,53 +190,47 @@ const AdSpendInput = memo(function AdSpendInput() {
     })
   }, [platform, date, amount, expenseType, createExpense])
 
+  const platformOptions = PLATFORMS.map((p) => ({
+    value: p.value,
+    label: `${p.icon} ${p.label}`,
+  }))
+
   return (
     <form onSubmit={handleSubmit} className="flex flex-wrap items-end gap-2 mt-3">
       <div className="flex-shrink-0">
         <label className="block text-xs text-slate-500 mb-1">{t('common.platform')}</label>
-        <select
+        <Select
+          options={platformOptions}
           value={platform}
-          onChange={(e) => setPlatform(e.target.value)}
-          className="text-sm px-2.5 py-2 rounded-lg border border-slate-200 bg-white
-                     focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300"
-        >
-          {PLATFORMS.map(p => (
-            <option key={p.value} value={p.value}>{p.icon} {p.label}</option>
-          ))}
-        </select>
+          onChange={(v) => setPlatform(v ?? 'facebook')}
+          allowEmpty={false}
+        />
       </div>
       <div className="flex-shrink-0">
         <label className="block text-xs text-slate-500 mb-1">{t('common.date')}</label>
-        <input
-          type="date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-          className="text-sm px-2.5 py-2 rounded-lg border border-slate-200 bg-white
-                     focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300"
-        />
+        <Input type="date" size="md" value={date} onChange={setDate} />
       </div>
       <div className="flex-1 min-w-[120px]">
         <label className="block text-xs text-slate-500 mb-1">{t('traffic.amountUah')}</label>
-        <input
+        <Input
           type="number"
+          size="md"
+          width="full"
           value={amount}
-          onChange={(e) => setAmount(e.target.value)}
+          onChange={setAmount}
           placeholder="e.g. 50000"
-          min="1"
-          step="1"
-          className="w-full text-sm px-2.5 py-2 rounded-lg border border-slate-200 bg-white
-                     focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300"
+          min={1}
+          step={1}
         />
       </div>
-      <button
+      <Button
         type="submit"
+        variant="primary"
+        size="md"
         disabled={createExpense.isPending || !amount || parseFloat(amount) <= 0}
-        className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg
-                   hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed
-                   transition-colors flex-shrink-0"
       >
         {createExpense.isPending ? t('traffic.adding') : t('traffic.add')}
-      </button>
+      </Button>
     </form>
   )
 })

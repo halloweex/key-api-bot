@@ -2,6 +2,7 @@ import { memo, useState, useCallback, useRef, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChartContainer } from '../charts/ChartContainer'
 import { Badge } from '../Badge'
+import { Select } from '../ui/Select'
 import { formatCurrency } from '../../utils/formatters'
 import { useTrafficTransactions } from '../../hooks'
 import { useQueryParams } from '../../store/filterStore'
@@ -98,18 +99,14 @@ const FilterSelect = memo(function FilterSelect({
   options: readonly { value: string; labelKey: string }[]
 }) {
   const { t } = useTranslation()
+  const resolved = options.map((opt) => ({ value: opt.value, label: t(opt.labelKey) }))
   return (
-    <select
+    <Select
+      options={resolved}
       value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="text-xs px-2 py-1 rounded-lg border border-slate-200 bg-white text-slate-600
-                 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300
-                 cursor-pointer hover:border-slate-300 transition-colors"
-    >
-      {options.map((opt) => (
-        <option key={opt.value} value={opt.value}>{t(opt.labelKey)}</option>
-      ))}
-    </select>
+      onChange={(v) => onChange(v ?? options[0].value)}
+      allowEmpty={false}
+    />
   )
 })
 

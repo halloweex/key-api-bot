@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
 import { InfoPopover } from '../ui/InfoPopover'
+import { Input } from '../ui/Input'
 import { useInventoryTurnover, useAbcSkus } from '../../hooks'
 import { formatNumber, formatCurrency } from '../../utils/formatters'
 import type { TopExcessItem, ABCClassData, ABCSkuItem } from '../../types/api'
@@ -223,15 +224,18 @@ function SettingInput({ label, value, onChange, min, max, step = 1, suffix }: {
     <div>
       <label className="block text-[11px] font-medium text-slate-600 mb-1">{label}</label>
       <div className="flex items-center gap-1.5">
-        <input
+        <Input
           type="number"
+          size="xs"
+          width="narrow"
           value={value}
-          onChange={e => {
-            const v = parseFloat(e.target.value)
+          onChange={(raw) => {
+            const v = parseFloat(raw)
             if (!isNaN(v) && v >= min && v <= max) onChange(step < 1 ? v : Math.round(v))
           }}
-          min={min} max={max} step={step}
-          className="w-20 px-2 py-1 text-xs border border-slate-300 rounded-md bg-white focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+          min={min}
+          max={max}
+          step={step}
         />
         <span className="text-xs text-slate-400">{suffix}</span>
       </div>

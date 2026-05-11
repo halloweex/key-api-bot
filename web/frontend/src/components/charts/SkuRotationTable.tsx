@@ -2,6 +2,8 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { ChartContainer } from './ChartContainer'
 import { InfoPopover } from '../ui/InfoPopover'
 import { VirtualList } from '../ui/VirtualList'
+import { Input } from '../ui/Input'
+import { Checkbox } from '../ui/Checkbox'
 import { useSkuRotation } from '../../hooks'
 import { formatCurrency, formatNumber } from '../../utils/formatters'
 import type {
@@ -631,12 +633,13 @@ function SkuRotationTableComponent({
 
           {/* Search + multi-filter chips */}
           <div className="flex flex-wrap gap-2 items-center text-xs">
-            <input
+            <Input
               type="text"
+              size="xs"
+              width="search"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={setSearch}
               placeholder="Search SKU or name…"
-              className="px-2 py-1 border border-slate-200 rounded text-sm w-48 focus:outline-none focus:border-blue-400"
             />
             <FilterChipGroup
               label="ABC"
@@ -839,12 +842,13 @@ function DropdownMultiSelect({ label, options, selected, onChange }: DropdownMul
       </button>
       {open && (
         <div className="absolute z-10 mt-1 w-56 max-h-60 overflow-auto bg-white border border-slate-200 rounded shadow-lg">
-          <input
+          <Input
             type="text"
+            size="xs"
+            width="full"
             placeholder={`Filter ${label.toLowerCase()}…`}
             value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            className="w-full px-2 py-1 border-b border-slate-100 text-xs focus:outline-none"
+            onChange={setFilter}
             onClick={(e) => e.stopPropagation()}
           />
           {filteredOptions.length === 0 && (
@@ -855,11 +859,7 @@ function DropdownMultiSelect({ label, options, selected, onChange }: DropdownMul
               key={opt}
               className="flex items-center gap-2 px-2 py-1 text-xs hover:bg-slate-50 cursor-pointer"
             >
-              <input
-                type="checkbox"
-                checked={selected.has(opt)}
-                onChange={() => toggle(opt)}
-              />
+              <Checkbox size="md" checked={selected.has(opt)} onChange={() => toggle(opt)} />
               <span className="truncate">{opt}</span>
             </label>
           ))}
