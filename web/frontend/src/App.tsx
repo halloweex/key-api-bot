@@ -1,20 +1,22 @@
 import { memo, lazy, Suspense, useEffect, useState, useCallback, type ReactNode } from 'react'
-import { Header, Dashboard } from './components/layout'
-import { ChatSidebar } from './components/chat'
-import { SidebarRail } from './components/navigation'
-import { AdminUsersPage, AdminPermissionsPage } from './components/admin'
+import { Header } from './components/Header'
+import { Dashboard } from './components/Dashboard'
+import { ChatSidebar } from './components/ChatSidebar'
+import { SidebarRail } from './components/SidebarRail'
+import { AdminUsersPage } from './components/AdminUsersPage'
+import { AdminPermissionsPage } from './components/AdminPermissionsPage'
 import { useAuth } from './hooks/useAuth'
-import { useToast } from './components/ui/Toast'
+import { useToast } from './components/Toast'
 import { useRouter, navigate } from './hooks/useRouter'
 import { useNavStore } from './store/navStore'
 
 // Lazy load pages
-const TrafficPage = lazy(() => import('./components/traffic/TrafficPage'))
-const ProductIntelPage = lazy(() => import('./components/products/ProductIntelPage'))
-const InventoryPage = lazy(() => import('./components/inventory/InventoryPage'))
-const ReportsPage = lazy(() => import('./components/reports/ReportsPage'))
-const MarketingPage = lazy(() => import('./components/marketing/MarketingPage'))
-const MarginPage = lazy(() => import('./components/margin/MarginPage'))
+const TrafficPage = lazy(() => import('./components/TrafficPage'))
+const ProductIntelPage = lazy(() => import('./components/ProductIntelPage'))
+const InventoryPage = lazy(() => import('./components/InventoryPage'))
+const ReportsPage = lazy(() => import('./components/ReportsPage'))
+const MarketingPage = lazy(() => import('./components/MarketingPage'))
+const MarginPage = lazy(() => import('./components/MarginPage'))
 
 // ─── Welcome Toast Hook ──────────────────────────────────────────────────────
 
