@@ -10,6 +10,9 @@ import { api } from '../api/client'
 import type { UserRole, UserStatus } from '../types/api'
 import { Card, CardHeader, CardTitle, CardContent } from './Card'
 import { Select } from './Select'
+import { SkeletonTable } from './Skeleton'
+import { ApiErrorState } from './ApiErrorState'
+import { EmptyState } from './EmptyState'
 import { Wrapper } from './Wrapper'
 import { UserRow, roleOptions, statusOptions } from './UserRow'
 
@@ -19,7 +22,7 @@ export function AdminUsersPage() {
   const [roleFilter, setRoleFilter] = useState<string | null>(null)
   const [updatingUsers, setUpdatingUsers] = useState<Set<number>>(new Set())
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['adminUsers', statusFilter, roleFilter],
     queryFn: () => api.getAdminUsers(
       statusFilter as UserStatus | undefined,
@@ -127,17 +130,15 @@ export function AdminUsersPage() {
         </CardHeader>
         <CardContent>
           {isLoading ? (
-            <div className="py-12 text-center text-slate-500">
-              Loading users...
-            </div>
+            <SkeletonTable />
           ) : error ? (
-            <div className="py-12 text-center text-red-500">
-              Error loading users. Please try again.
-            </div>
+            <ApiErrorState
+              error={error as Error}
+              onRetry={refetch}
+              title="Failed to load users"
+            />
           ) : users.length === 0 ? (
-            <div className="py-12 text-center text-slate-500">
-              No users found.
-            </div>
+            <EmptyState message="No users found" />
           ) : (
             <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
               <table className="w-full">

@@ -13,6 +13,8 @@ import { Card, CardHeader, CardTitle, CardContent } from './Card'
 import { useToast } from './Toast'
 import { FeatureRow } from './FeatureRow'
 import type { Action } from './PermissionCell'
+import { SkeletonTable } from './Skeleton'
+import { ApiErrorState } from './ApiErrorState'
 
 const roleConfig: Record<UserRole, { label: string; color: string }> = {
   admin: { label: 'Admin', color: 'bg-purple-100 text-purple-700 border-purple-200' },
@@ -25,7 +27,7 @@ export function AdminPermissionsPage() {
   const { addToast } = useToast()
   const [updatingCells, setUpdatingCells] = useState<Set<string>>(new Set())
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['adminPermissions'],
     queryFn: () => api.getPermissionsMatrix(),
     staleTime: 60 * 1000,
@@ -177,13 +179,13 @@ export function AdminPermissionsPage() {
         </CardHeader>
         <CardContent padding="none">
           {isLoading ? (
-            <div className="py-12 text-center text-slate-500">
-              Loading permissions...
-            </div>
+            <SkeletonTable />
           ) : error ? (
-            <div className="py-12 text-center text-red-500">
-              Error loading permissions. Please try again.
-            </div>
+            <ApiErrorState
+              error={error as Error}
+              onRetry={refetch}
+              title="Failed to load permissions"
+            />
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">

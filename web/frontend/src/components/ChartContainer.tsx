@@ -3,9 +3,8 @@ import { useTranslation } from 'react-i18next'
 import { Card, CardHeader, CardTitle, CardContent } from './Card'
 import { SkeletonChart } from './Skeleton'
 import { ApiErrorState } from './ApiErrorState'
-import { LottieAnimation } from './LottieAnimation'
+import { EmptyState } from './EmptyState'
 import { Wrapper } from './Wrapper'
-import emptyDataAnimation from '../assets/animations/empty-data.json'
 import { CHART_DIMENSIONS, type ChartHeight } from './chartConfig'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -62,27 +61,6 @@ const ErrorStateWrapper = memo(function ErrorStateWrapper({
         />
       </CardContent>
     </Card>
-  )
-})
-
-interface EmptyStateProps {
-  message: string
-  height: number
-}
-
-const EmptyState = memo(function EmptyState({ message, height }: EmptyStateProps) {
-  const { t } = useTranslation()
-  return (
-    <div
-      className="flex flex-col items-center justify-center animate-fade-in"
-      style={{ height }}
-    >
-      <Wrapper marginBottom="sm">
-        <LottieAnimation animationData={emptyDataAnimation} size="lg" />
-      </Wrapper>
-      <p className="text-sm text-slate-600 font-medium">{message}</p>
-      <p className="text-xs text-slate-400 mt-1.5">{t('chart.adjustFilters')}</p>
-    </div>
   )
 })
 
