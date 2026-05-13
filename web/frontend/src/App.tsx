@@ -3,14 +3,14 @@ import { Header } from './components/Header'
 import { Dashboard } from './components/Dashboard'
 import { ChatSidebar } from './components/ChatSidebar'
 import { SidebarRail } from './components/SidebarRail'
-import { AdminUsersPage } from './components/AdminUsersPage'
-import { AdminPermissionsPage } from './components/AdminPermissionsPage'
 import { useAuth } from './hooks/useAuth'
 import { useToast } from './components/Toast'
 import { useRouter, navigate } from './hooks/useRouter'
 import { useNavStore } from './store/navStore'
 
 // Lazy load pages
+const AdminUsersPage = lazy(() => import('./components/AdminUsersPage').then(m => ({ default: m.AdminUsersPage })))
+const AdminPermissionsPage = lazy(() => import('./components/AdminPermissionsPage').then(m => ({ default: m.AdminPermissionsPage })))
 const TrafficPage = lazy(() => import('./components/TrafficPage'))
 const ProductIntelPage = lazy(() => import('./components/ProductIntelPage'))
 const InventoryPage = lazy(() => import('./components/InventoryPage'))
@@ -146,11 +146,23 @@ function App() {
 
   // Admin pages (no AppShell - they have their own layout)
   if (path === '/v2/admin/users' || path === '/admin/users') {
-    return <AdminGuard><AdminUsersPage /></AdminGuard>
+    return (
+      <AdminGuard>
+        <Suspense fallback={<PageSpinner />}>
+          <AdminUsersPage />
+        </Suspense>
+      </AdminGuard>
+    )
   }
 
   if (path === '/v2/admin/permissions' || path === '/admin/permissions') {
-    return <AdminGuard><AdminPermissionsPage /></AdminGuard>
+    return (
+      <AdminGuard>
+        <Suspense fallback={<PageSpinner />}>
+          <AdminPermissionsPage />
+        </Suspense>
+      </AdminGuard>
+    )
   }
 
   // Traffic Analytics
