@@ -1,17 +1,20 @@
 import { memo } from 'react'
 import type { AdminUser, UserRole, UserStatus } from '../types/api'
+import { BadgeSelect } from './BadgeSelect'
 
-const roleBadgeStyles: Record<UserRole, string> = {
-  admin: 'bg-purple-100 text-purple-700 border-purple-200',
-  editor: 'bg-blue-100 text-blue-700 border-blue-200',
-  viewer: 'bg-slate-100 text-slate-600 border-slate-200',
+type Tone = 'purple' | 'blue' | 'slate' | 'green' | 'yellow' | 'red'
+
+const roleTone: Record<UserRole, Tone> = {
+  admin: 'purple',
+  editor: 'blue',
+  viewer: 'slate',
 }
 
-const statusBadgeStyles: Record<UserStatus, string> = {
-  approved: 'bg-green-100 text-green-700 border-green-200',
-  pending: 'bg-yellow-100 text-yellow-700 border-yellow-200',
-  denied: 'bg-red-100 text-red-700 border-red-200',
-  frozen: 'bg-slate-100 text-slate-600 border-slate-200',
+const statusTone: Record<UserStatus, Tone> = {
+  approved: 'green',
+  pending: 'yellow',
+  denied: 'red',
+  frozen: 'slate',
 }
 
 export const roleOptions = [
@@ -79,33 +82,23 @@ export const UserRow = memo(function UserRow({
       </td>
 
       <td className="py-3 px-4">
-        <select
+        <BadgeSelect
+          tone={roleTone[user.role]}
+          options={roleOptions}
           value={user.role}
-          onChange={(e) => onRoleChange(user.user_id, e.target.value as UserRole)}
+          onChange={(v) => onRoleChange(user.user_id, v as UserRole)}
           disabled={isUpdating}
-          className={`px-2 py-1 text-xs font-medium rounded-md border cursor-pointer ${roleBadgeStyles[user.role]}`}
-        >
-          {roleOptions.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
+        />
       </td>
 
       <td className="py-3 px-4">
-        <select
+        <BadgeSelect
+          tone={statusTone[user.status]}
+          options={statusOptions}
           value={user.status}
-          onChange={(e) => onStatusChange(user.user_id, e.target.value as UserStatus)}
+          onChange={(v) => onStatusChange(user.user_id, v as UserStatus)}
           disabled={isUpdating}
-          className={`px-2 py-1 text-xs font-medium rounded-md border cursor-pointer ${statusBadgeStyles[user.status]}`}
-        >
-          {statusOptions.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
+        />
       </td>
 
       <td className="py-3 px-4 text-sm text-slate-600">

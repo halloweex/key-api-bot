@@ -5,6 +5,7 @@
 
 // ─── Primitives ──────────────────────────────────────────────────────────────
 export { Badge } from './Badge'
+export { BadgeSelect } from './BadgeSelect'
 export { Button } from './Button'
 export { Card, CardHeader, CardTitle, CardContent } from './Card'
 export { Checkbox } from './Checkbox'

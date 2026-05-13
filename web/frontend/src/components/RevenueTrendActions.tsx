@@ -1,6 +1,7 @@
 import type { RevenueForecast } from '../types/api'
 import { formatShortCurrency, getCompareTypeOptions } from './revenueTrendHelpers'
 import type { CompareType } from './revenueTrendTypes'
+import { Select } from './Select'
 
 interface GrowthTotals {
   current: number
@@ -47,17 +48,16 @@ export function RevenueTrendActions({
         </div>
       )}
 
-      <select
+      <Select
+        variant="pill"
+        options={getCompareTypeOptions(t).map((opt) => ({
+          value: opt.value,
+          label: `${t('chart.vs')} ${opt.shortLabel}`,
+        }))}
         value={compareType}
-        onChange={(e) => onCompareTypeChange(e.target.value as CompareType)}
-        className="text-[10px] sm:text-xs bg-slate-100 border-0 rounded-lg px-1.5 sm:px-2.5 py-1.5 text-slate-600 font-medium cursor-pointer hover:bg-slate-200 transition-colors focus:ring-2 focus:ring-blue-500 focus:outline-none"
-      >
-        {getCompareTypeOptions(t).map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {t('chart.vs')} {opt.shortLabel}
-          </option>
-        ))}
-      </select>
+        onChange={(v) => v && onCompareTypeChange(v as CompareType)}
+        allowEmpty={false}
+      />
     </div>
   )
 }

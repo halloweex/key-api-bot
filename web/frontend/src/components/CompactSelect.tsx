@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { Select } from './Select'
 
 interface CompactSelectProps {
   label: string
@@ -15,20 +16,20 @@ export const CompactSelect = memo(function CompactSelect({
   onChange,
   suffix,
 }: CompactSelectProps) {
+  const stringOptions = options.map((opt) => ({
+    value: String(opt.value),
+    label: `${opt.label}${suffix ? ` ${suffix}` : ''}`,
+  }))
   return (
     <div className="flex items-center gap-1.5 text-sm">
       <span className="text-slate-500 font-medium">{label}:</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="bg-white border border-slate-200 rounded-md px-2 py-1 text-sm text-slate-700 focus:ring-1 focus:ring-blue-400 focus:border-blue-400 outline-none"
-      >
-        {options.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}{suffix ? ` ${suffix}` : ''}
-          </option>
-        ))}
-      </select>
+      <Select
+        variant="compact"
+        options={stringOptions}
+        value={String(value)}
+        onChange={(v) => v && onChange(Number(v))}
+        allowEmpty={false}
+      />
     </div>
   )
 })

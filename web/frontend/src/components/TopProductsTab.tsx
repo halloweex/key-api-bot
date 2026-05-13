@@ -4,6 +4,7 @@ import { Card, CardHeader, CardTitle, CardContent } from './Card'
 import { SkeletonChart } from './Skeleton'
 import { ApiErrorState } from './ApiErrorState'
 import { Input } from './Input'
+import { Select } from './Select'
 import { ExportCsvButton } from './ExportCsvButton'
 import { FilterChip } from './FilterChip'
 import { Wrapper } from './Wrapper'
@@ -79,17 +80,16 @@ export const TopProductsTab = memo(function TopProductsTab() {
                 ))}
               </Wrapper>
 
-              <select
-                value={limit}
-                onChange={(e) => { setLimit(Number(e.target.value)); setSearch('') }}
-                className="text-xs border border-slate-200 rounded-lg px-2 py-1 bg-white text-slate-600"
-              >
-                {LIMIT_OPTIONS.map((l) => (
-                  <option key={l} value={l}>
-                    {l === 0 ? t('reports.allProducts') : `Top ${l}`}
-                  </option>
-                ))}
-              </select>
+              <Select
+                variant="compact"
+                options={LIMIT_OPTIONS.map((l) => ({
+                  value: String(l),
+                  label: l === 0 ? t('reports.allProducts') : `Top ${l}`,
+                }))}
+                value={String(limit)}
+                onChange={(v) => { if (v) { setLimit(Number(v)); setSearch('') } }}
+                allowEmpty={false}
+              />
 
               <ExportCsvButton
                 onClick={() => {
