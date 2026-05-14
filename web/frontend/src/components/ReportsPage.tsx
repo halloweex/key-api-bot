@@ -1,5 +1,6 @@
 import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { PageShell } from './PageShell'
 import { SummaryTab } from './SummaryTab'
 import { TopProductsTab } from './TopProductsTab'
 
@@ -15,7 +16,7 @@ export const ReportsPage = memo(function ReportsPage() {
   const [activeTab, setActiveTab] = useState<Tab>('summary')
 
   return (
-    <main className="flex-1 py-3 px-1 sm:py-4 sm:px-1.5 lg:py-6 lg:px-2 overflow-auto">
+    <PageShell variant="feature">
       <div className="max-w-[1800px] mx-auto space-y-4 sm:space-y-6">
         <div className="flex gap-1 bg-slate-100 p-1 rounded-xl w-fit">
           {TAB_KEYS.map((tab) => (
@@ -36,7 +37,7 @@ export const ReportsPage = memo(function ReportsPage() {
         {activeTab === 'summary' && <SummaryTab />}
         {activeTab === 'top_products' && <TopProductsTab />}
       </div>
-    </main>
+    </PageShell>
   )
 })
 

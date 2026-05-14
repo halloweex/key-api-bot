@@ -1,5 +1,6 @@
 import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
+import { PageShell } from './PageShell'
 import { TrafficSummaryCards } from './TrafficSummaryCards'
 import { ROASSection } from './ROASSection'
 import { PlatformBreakdownChart } from './PlatformBreakdownChart'
@@ -12,7 +13,7 @@ export const TrafficPage = memo(function TrafficPage() {
   const { t } = useTranslation()
 
   return (
-    <main className="flex-1 py-3 px-1 sm:py-4 sm:px-1.5 lg:py-6 lg:px-2 overflow-auto">
+    <PageShell variant="feature">
       <div className="max-w-[1800px] mx-auto space-y-4 sm:space-y-6">
         {/* Summary Cards */}
         <section aria-label={t('traffic.summary')}>
@@ -39,7 +40,7 @@ export const TrafficPage = memo(function TrafficPage() {
           <ROASSection />
         </section>
       </div>
-    </main>
+    </PageShell>
   )
 })
 

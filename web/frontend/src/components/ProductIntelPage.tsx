@@ -1,5 +1,6 @@
 import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
+import { PageShell } from './PageShell'
 import { BasketSummaryCards } from './BasketSummaryCards'
 import { FrequentlyBoughtTogether } from './FrequentlyBoughtTogether'
 import { BasketDistributionChart } from './BasketDistributionChart'
@@ -10,7 +11,7 @@ import { ProductMomentumTable } from './ProductMomentumTable'
 export const ProductIntelPage = memo(function ProductIntelPage() {
   const { t } = useTranslation()
   return (
-    <main className="flex-1 py-3 px-1 sm:py-4 sm:px-1.5 lg:py-6 lg:px-2 overflow-auto">
+    <PageShell variant="feature">
       <div className="max-w-[1800px] mx-auto space-y-4 sm:space-y-6">
         {/* Summary Cards */}
         <section aria-label={t('products.basketSummary')}>
@@ -42,7 +43,7 @@ export const ProductIntelPage = memo(function ProductIntelPage() {
           </section>
         </div>
       </div>
-    </main>
+    </PageShell>
   )
 })
 

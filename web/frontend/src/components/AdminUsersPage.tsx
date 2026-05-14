@@ -14,6 +14,8 @@ import { SkeletonTable } from './Skeleton'
 import { ApiErrorState } from './ApiErrorState'
 import { EmptyState } from './EmptyState'
 import { PageHeaderLink } from './PageHeaderLink'
+import { PageShell } from './PageShell'
+import { PageHeading } from './PageHeading'
 import { Wrapper } from './Wrapper'
 import { UserRow, roleOptions, statusOptions } from './UserRow'
 
@@ -79,23 +81,21 @@ export function AdminUsersPage() {
   const users = data?.users ?? []
 
   return (
-    <main className="p-3 sm:p-6 lg:p-8 max-w-[1400px] mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">User Management</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Manage user roles and access permissions
-          </p>
-        </div>
-        <div className="flex gap-3">
-          <PageHeaderLink href="/admin/permissions" icon={<ShieldCheck className="w-4 h-4" />}>
-            Permissions
-          </PageHeaderLink>
-          <PageHeaderLink href="/" icon={<ArrowLeft className="w-4 h-4" />}>
-            Dashboard
-          </PageHeaderLink>
-        </div>
-      </div>
+    <PageShell variant="admin">
+      <PageHeading
+        title="User Management"
+        subtitle="Manage user roles and access permissions"
+        actions={
+          <>
+            <PageHeaderLink href="/admin/permissions" icon={<ShieldCheck className="w-4 h-4" />}>
+              Permissions
+            </PageHeaderLink>
+            <PageHeaderLink href="/" icon={<ArrowLeft className="w-4 h-4" />}>
+              Dashboard
+            </PageHeaderLink>
+          </>
+        }
+      />
 
       <Card>
         <CardHeader>
@@ -159,6 +159,6 @@ export function AdminUsersPage() {
           )}
         </CardContent>
       </Card>
-    </main>
+    </PageShell>
   )
 }

@@ -16,6 +16,8 @@ import type { Action } from './PermissionCell'
 import { SkeletonTable } from './Skeleton'
 import { ApiErrorState } from './ApiErrorState'
 import { PageHeaderLink } from './PageHeaderLink'
+import { PageShell } from './PageShell'
+import { PageHeading } from './PageHeading'
 
 const roleConfig: Record<UserRole, { label: string; color: string }> = {
   admin: { label: 'Admin', color: 'bg-purple-100 text-purple-700 border-purple-200' },
@@ -130,23 +132,21 @@ export function AdminPermissionsPage() {
   }
 
   return (
-    <main className="p-3 sm:p-6 lg:p-8 max-w-[1400px] mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Permissions Matrix</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Configure feature access for each role
-          </p>
-        </div>
-        <div className="flex gap-3">
-          <PageHeaderLink href="/admin/users" icon={<Users className="w-4 h-4" />}>
-            Users
-          </PageHeaderLink>
-          <PageHeaderLink href="/" icon={<ArrowLeft className="w-4 h-4" />}>
-            Dashboard
-          </PageHeaderLink>
-        </div>
-      </div>
+    <PageShell variant="admin">
+      <PageHeading
+        title="Permissions Matrix"
+        subtitle="Configure feature access for each role"
+        actions={
+          <>
+            <PageHeaderLink href="/admin/users" icon={<Users className="w-4 h-4" />}>
+              Users
+            </PageHeaderLink>
+            <PageHeaderLink href="/" icon={<ArrowLeft className="w-4 h-4" />}>
+              Dashboard
+            </PageHeaderLink>
+          </>
+        }
+      />
 
       <div className="flex gap-4 mb-6">
         {roles.map((role) => {
@@ -227,6 +227,6 @@ export function AdminPermissionsPage() {
           </div>
         </div>
       </div>
-    </main>
+    </PageShell>
   )
 }

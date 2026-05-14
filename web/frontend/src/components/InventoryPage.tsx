@@ -1,5 +1,6 @@
 import { Suspense, memo, useState } from 'react'
 import { SkeletonChart } from './Skeleton'
+import { PageShell } from './PageShell'
 import {
   LazyStockSummaryChart,
   LazyDeadStockChart,
@@ -29,7 +30,7 @@ export const InventoryPage = memo(function InventoryPage() {
   }
 
   return (
-    <main className="flex-1 py-3 px-1 sm:py-4 sm:px-1.5 lg:py-6 lg:px-2 overflow-auto">
+    <PageShell variant="feature">
       <div className="max-w-[1800px] mx-auto space-y-4 sm:space-y-6">
         <section className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
           <Suspense fallback={<ChartFallback />}>
@@ -68,7 +69,7 @@ export const InventoryPage = memo(function InventoryPage() {
           </Suspense>
         </section>
       </div>
-    </main>
+    </PageShell>
   )
 })
 
