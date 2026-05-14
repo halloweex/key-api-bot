@@ -264,4 +264,5 @@ async def _safe_fetch(section: str, fetcher, params: Dict[str, Any]) -> Dict[str
         return {"error": f"Timeout fetching {section}"}
     except Exception as e:
         logger.error(f"Error fetching {section}: {e}")
-        return {"error": str(e)}
+        # Don't leak internal exception text to the client.
+        return {"error": f"Failed to fetch {section}"}
