@@ -31,44 +31,38 @@ export const InventoryPage = memo(function InventoryPage() {
 
   return (
     <PageShell variant="feature">
-      <div className="max-w-[1800px] mx-auto space-y-4 sm:space-y-6">
-        <section className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-          <Suspense fallback={<ChartFallback />}>
-            <LazyStockSummaryChart />
-          </Suspense>
-          <Suspense fallback={<ChartFallback />}>
-            <LazyDeadStockChart />
-          </Suspense>
-        </section>
-
-        <section>
-          <Suspense fallback={<ChartFallback />}>
-            <LazyInventoryTurnoverChart />
-          </Suspense>
-        </section>
-
-        <section>
-          <Suspense fallback={<ChartFallback />}>
-            <LazyBrandRotationCard onBrandClick={onBrandClick} />
-          </Suspense>
-        </section>
-
-        <section>
-          <Suspense fallback={<ChartFallback />}>
-            <LazySkuRotationTable
-              brandFilter={skuBrandFilter}
-              presetOverride={skuPreset}
-              onClearExternalFilter={onClearExternalFilter}
-            />
-          </Suspense>
-        </section>
-
-        <section>
-          <Suspense fallback={<ChartFallback />}>
-            <LazyInventoryTrendChart />
-          </Suspense>
-        </section>
-      </div>
+      <section className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+        <Suspense fallback={<ChartFallback />}>
+          <LazyStockSummaryChart />
+        </Suspense>
+        <Suspense fallback={<ChartFallback />}>
+          <LazyDeadStockChart />
+        </Suspense>
+      </section>
+      <section>
+        <Suspense fallback={<ChartFallback />}>
+          <LazyInventoryTurnoverChart />
+        </Suspense>
+      </section>
+      <section>
+        <Suspense fallback={<ChartFallback />}>
+          <LazyBrandRotationCard onBrandClick={onBrandClick} />
+        </Suspense>
+      </section>
+      <section>
+        <Suspense fallback={<ChartFallback />}>
+          <LazySkuRotationTable
+            brandFilter={skuBrandFilter}
+            presetOverride={skuPreset}
+            onClearExternalFilter={onClearExternalFilter}
+          />
+        </Suspense>
+      </section>
+      <section>
+        <Suspense fallback={<ChartFallback />}>
+          <LazyInventoryTrendChart />
+        </Suspense>
+      </section>
     </PageShell>
   )
 })

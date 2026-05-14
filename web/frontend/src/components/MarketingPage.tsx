@@ -11,25 +11,20 @@ export const MarketingPage = memo(function MarketingPage() {
 
   return (
     <PageShell variant="feature">
-      <div className="max-w-[1800px] mx-auto space-y-6">
-        <h1 className="text-xl sm:text-2xl font-bold text-slate-800">
-          {t('nav.marketing')}
-        </h1>
-
-        <section>
-          <MonthlyReport />
-        </section>
-
-        <section>
-          <Suspense fallback={<SkeletonChart />}>
-            <LazyPromocodeAnalyticsChart />
-          </Suspense>
-        </section>
-
-        <section>
-          <ROICalculator />
-        </section>
-      </div>
+      <h1 className="text-xl sm:text-2xl font-bold text-slate-800">
+        {t('nav.marketing')}
+      </h1>
+      <section>
+        <MonthlyReport />
+      </section>
+      <section>
+        <Suspense fallback={<SkeletonChart />}>
+          <LazyPromocodeAnalyticsChart />
+        </Suspense>
+      </section>
+      <section>
+        <ROICalculator />
+      </section>
     </PageShell>
   )
 })

@@ -12,7 +12,7 @@ import { PurchaseTimingChart } from './PurchaseTimingChart'
 import { CohortLTVChart } from './CohortLTVChart'
 import { AtRiskTable } from './AtRiskTable'
 import { RetentionInsights } from './RetentionInsights'
-import { CohortTabButton } from './CohortTabButton'
+import { TabBar, TabButton } from './TabBar'
 import { CompactSelect } from './CompactSelect'
 import { CohortTabSkeleton } from './CohortTabSkeleton'
 import { CohortSummaryCards } from './CohortSummaryCards'
@@ -167,16 +167,19 @@ export const CohortRetentionChart = memo(function CohortRetentionChart() {
       height="auto"
       ariaLabel="Cohort analysis with retention, revenue, timing, LTV, and at-risk customer views"
     >
-      <div className="flex flex-wrap gap-2 mb-3">
+      <TabBar variant="bordered" ariaLabel="Cohort analysis views">
         {TABS.map((tab) => (
-          <CohortTabButton
+          <TabButton
             key={tab.id}
-            tab={tab}
-            isActive={activeTab === tab.id}
+            variant="bordered"
+            active={activeTab === tab.id}
             onClick={() => setActiveTab(tab.id)}
-          />
+          >
+            <span className="hidden sm:inline">{t(tab.label)}</span>
+            <span className="sm:hidden">{t(tab.shortLabel)}</span>
+          </TabButton>
         ))}
-      </div>
+      </TabBar>
 
       <div className="flex flex-wrap items-center gap-4 mb-4 px-1">
         {showPeriod && (

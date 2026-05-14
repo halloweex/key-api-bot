@@ -14,32 +14,21 @@ export const TrafficPage = memo(function TrafficPage() {
 
   return (
     <PageShell variant="feature">
-      <div className="max-w-[1800px] mx-auto space-y-4 sm:space-y-6">
-        {/* Summary Cards */}
-        <section aria-label={t('traffic.summary')}>
-          <TrafficSummaryCards />
-        </section>
-
-        {/* Trend Chart - Full Width */}
-        <section aria-label={t('traffic.trend')}>
-          <TrafficTrendChart />
-        </section>
-
-        {/* Platform Breakdown */}
-        <section aria-label={t('traffic.platformBreakdown')}>
-          <PlatformBreakdownChart />
-        </section>
-
-        {/* Order Details Table */}
-        <section aria-label={t('traffic.transactions')}>
-          <TrafficTransactionsTable />
-        </section>
-
-        {/* ROAS Calculator */}
-        <section aria-label={t('traffic.roasCalculator')}>
-          <ROASSection />
-        </section>
-      </div>
+      <section aria-label={t('traffic.summary')}>
+        <TrafficSummaryCards />
+      </section>
+      <section aria-label={t('traffic.trend')}>
+        <TrafficTrendChart />
+      </section>
+      <section aria-label={t('traffic.platformBreakdown')}>
+        <PlatformBreakdownChart />
+      </section>
+      <section aria-label={t('traffic.transactions')}>
+        <TrafficTransactionsTable />
+      </section>
+      <section aria-label={t('traffic.roasCalculator')}>
+        <ROASSection />
+      </section>
     </PageShell>
   )
 })
