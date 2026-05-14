@@ -12,9 +12,8 @@ from typing import Optional
 from fastapi import APIRouter, Query, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
+from web.ratelimit import limiter  # single app-wide limiter instance
 from web.services.search_service import get_search_service
 from web.services.chat_service import get_chat_service
 from web.routes.auth import require_admin
@@ -25,11 +24,13 @@ logger = get_logger(__name__)
 
 router = APIRouter(tags=["chat"])
 
-# Rate limiter for chat endpoints (more restrictive than general API)
-limiter = Limiter(key_func=get_remote_address)
-
-# Dev mode - skip auth for local development
-DEV_MODE = os.getenv("DEV_MODE", "").lower() in ("1", "true", "yes")
+# Dev mode - skip auth for LOCAL development only. Hard-disabled in production
+# (DASHBOARD_URL is https) so a stray DEV_MODE=1 in a prod .env cannot open up
+# the LLM/search endpoints to the world.
+_IS_PROD = os.getenv("DASHBOARD_URL", "").startswith("https://")
+DEV_MODE = os.getenv("DEV_MODE", "").lower() in ("1", "true", "yes") and not _IS_PROD
+if os.getenv("DEV_MODE", "").lower() in ("1", "true", "yes") and _IS_PROD:
+    logger.critical("DEV_MODE is set but ignored — refusing to bypass auth on a production (https) deployment")
 
 
 async def require_admin_or_dev(request: Request) -> dict:

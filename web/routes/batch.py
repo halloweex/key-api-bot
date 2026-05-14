@@ -9,9 +9,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
+from web.ratelimit import limiter  # single app-wide limiter instance
 from web.services import dashboard_service
 from core.duckdb_store import get_store
 from core.validators import (
@@ -24,7 +23,6 @@ from core.validators import (
 from core.exceptions import ValidationError
 
 router = APIRouter(tags=["batch"])
-limiter = Limiter(key_func=get_remote_address)
 logger = logging.getLogger(__name__)
 
 
@@ -266,4 +264,5 @@ async def _safe_fetch(section: str, fetcher, params: Dict[str, Any]) -> Dict[str
         return {"error": f"Timeout fetching {section}"}
     except Exception as e:
         logger.error(f"Error fetching {section}: {e}")
-        return {"error": str(e)}
+        # Don't leak internal exception text to the client.
+        return {"error": f"Failed to fetch {section}"}

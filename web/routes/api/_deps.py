@@ -2,8 +2,7 @@
 import logging
 import time
 
-from slowapi import Limiter
-from slowapi.util import get_remote_address
+from web.ratelimit import limiter  # single app-wide limiter instance
 
 from core.duckdb_store import get_store
 from core.validators import (
@@ -16,9 +15,6 @@ from core.validators import (
     validate_promocode,
 )
 from core.exceptions import ValidationError
-
-# Shared limiter instance
-limiter = Limiter(key_func=get_remote_address)
 
 # Shared logger factory
 def get_logger(name: str) -> logging.Logger:
