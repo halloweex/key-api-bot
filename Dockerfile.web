@@ -41,7 +41,9 @@ COPY core/ ./core/
 COPY scripts/ ./scripts/
 
 # Copy web application (excluding frontend source)
-COPY web/__init__.py web/config.py web/main.py web/schemas.py web/middleware.py ./web/
+# Glob all top-level web/*.py so new modules (e.g. web/ratelimit.py) are
+# included automatically — listing files by name silently drops new ones.
+COPY web/*.py ./web/
 COPY web/routes/ ./web/routes/
 COPY web/services/ ./web/services/
 COPY web/static/ ./web/static/
