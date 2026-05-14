@@ -15,6 +15,7 @@ import { FeatureRow } from './FeatureRow'
 import type { Action } from './PermissionCell'
 import { SkeletonTable } from './Skeleton'
 import { ApiErrorState } from './ApiErrorState'
+import { PageHeaderLink } from './PageHeaderLink'
 
 const roleConfig: Record<UserRole, { label: string; color: string }> = {
   admin: { label: 'Admin', color: 'bg-purple-100 text-purple-700 border-purple-200' },
@@ -138,20 +139,12 @@ export function AdminPermissionsPage() {
           </p>
         </div>
         <div className="flex gap-3">
-          <a
-            href="/admin/users"
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
-          >
-            <Users className="w-4 h-4" />
+          <PageHeaderLink href="/admin/users" icon={<Users className="w-4 h-4" />}>
             Users
-          </a>
-          <a
-            href="/"
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4" />
+          </PageHeaderLink>
+          <PageHeaderLink href="/" icon={<ArrowLeft className="w-4 h-4" />}>
             Dashboard
-          </a>
+          </PageHeaderLink>
         </div>
       </div>
 

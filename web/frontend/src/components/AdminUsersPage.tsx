@@ -13,6 +13,7 @@ import { Select } from './Select'
 import { SkeletonTable } from './Skeleton'
 import { ApiErrorState } from './ApiErrorState'
 import { EmptyState } from './EmptyState'
+import { PageHeaderLink } from './PageHeaderLink'
 import { Wrapper } from './Wrapper'
 import { UserRow, roleOptions, statusOptions } from './UserRow'
 
@@ -87,20 +88,12 @@ export function AdminUsersPage() {
           </p>
         </div>
         <div className="flex gap-3">
-          <a
-            href="/admin/permissions"
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
-          >
-            <ShieldCheck className="w-4 h-4" />
+          <PageHeaderLink href="/admin/permissions" icon={<ShieldCheck className="w-4 h-4" />}>
             Permissions
-          </a>
-          <a
-            href="/"
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4" />
+          </PageHeaderLink>
+          <PageHeaderLink href="/" icon={<ArrowLeft className="w-4 h-4" />}>
             Dashboard
-          </a>
+          </PageHeaderLink>
         </div>
       </div>
 
