@@ -143,8 +143,13 @@ async def _serve_spa_route(request: Request, path: str) -> HTMLResponse:
     if any(path.endswith(ext) for ext in static_extensions):
         # Let the static file handler deal with this
         # This shouldn't normally be reached as static files are mounted separately
-        asset_path = STATIC_V2_DIR / path
-        if asset_path.exists():
+        # Resolve and confirm the path stays inside STATIC_V2_DIR — blocks
+        # traversal like "../../etc/passwd" smuggled through the catch-all route.
+        base = STATIC_V2_DIR.resolve()
+        asset_path = (base / path).resolve()
+        if not asset_path.is_relative_to(base):
+            return HTMLResponse(content="Not found", status_code=404)
+        if asset_path.is_file():
             return HTMLResponse(
                 content=asset_path.read_bytes(),
                 media_type=_get_media_type(path)

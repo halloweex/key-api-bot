@@ -84,8 +84,8 @@ def verify_webapp_auth(init_data: str) -> Dict[str, Any] | None:
             hashlib.sha256
         ).hexdigest()
 
-        # Compare hashes
-        if calculated_hash != received_hash:
+        # Compare hashes (constant-time to avoid timing side-channels)
+        if not hmac.compare_digest(calculated_hash, received_hash):
             logger.warning("WebApp hash mismatch - invalid initData")
             return None
 
@@ -156,8 +156,8 @@ def verify_telegram_auth(auth_data: Dict[str, Any]) -> bool:
         hashlib.sha256
     ).hexdigest()
 
-    # Compare hashes
-    if calculated_hash != received_hash:
+    # Compare hashes (constant-time to avoid timing side-channels)
+    if not hmac.compare_digest(calculated_hash, received_hash):
         logger.warning("Hash mismatch - invalid auth data")
         return False
 

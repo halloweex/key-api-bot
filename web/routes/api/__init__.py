@@ -11,7 +11,7 @@ sensitive endpoints inside the health router gate themselves.
 """
 from fastapi import APIRouter, Depends
 
-from web.routes.auth import require_user
+from web.routes.auth import require_user, require_admin
 
 from .health import router as health_router
 from .admin import router as admin_router
@@ -31,9 +31,13 @@ router = APIRouter(tags=["api"])
 # Public: health check (no session) — sensitive sub-paths gate themselves.
 router.include_router(health_router)
 
+# Operational/internal endpoints (jobs, sync stats, warehouse, bronze, cache,
+# DuckDB maintenance) are admin-only — they leak internal state and trigger
+# heavy jobs. Individual endpoints inside also keep their own require_admin.
+router.include_router(admin_router, dependencies=[Depends(require_admin)])
+
 # Everything else requires an authenticated, approved dashboard user.
 _auth = [Depends(require_user)]
-router.include_router(admin_router, dependencies=_auth)
 router.include_router(analytics_router, dependencies=_auth)
 router.include_router(customers_router, dependencies=_auth)
 router.include_router(goals_router, dependencies=_auth)

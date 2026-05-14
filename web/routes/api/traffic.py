@@ -320,7 +320,7 @@ async def _run_backfill(days: int):
     except Exception as e:
         logger.error(f"UTM backfill failed: {e}", exc_info=True)
         _backfill_status.update(running=False, result={
-            "status": "error", "error": str(e),
+            "status": "error", "error": "UTM backfill failed — see server logs",
         })
 
 
