@@ -5,14 +5,17 @@ on:
     branches:
       - main
 
+# Third-party actions are pinned to commit SHAs (not movable tags) so a
+# compromised/retagged action cannot silently enter the prod pipeline.
+
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -21,19 +24,19 @@ jobs:
         run: echo "VERSION=$(cat VERSION | tr -d '[:space:]')" >> $GITHUB_ENV
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push bot Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
         with:
           context: .
           file: ./Dockerfile
@@ -46,7 +49,7 @@ jobs:
           cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-bot:buildcache-arm64,mode=max
 
       - name: Build and push web Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
         with:
           context: .
           file: ./Dockerfile.web
@@ -58,8 +61,26 @@ jobs:
           cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-web:buildcache-arm64
           cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-web:buildcache-arm64,mode=max
 
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    # Manual-approval gate: this job pauses until a required reviewer of the
+    # `production` environment approves it. Configure once in repo Settings →
+    # Environments → production → Required reviewers. Prevents an unreviewed
+    # push to main from auto-deploying to prod. Until a reviewer is configured
+    # the environment exists with no rules and the job runs as before.
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Deploy to Hetzner
-        uses: appleboy/ssh-action@v1.0.0
+        uses: appleboy/ssh-action@55dabf81b49d4120609345970c91507e2d734799  # v1.0.0
         with:
           host: ${{ secrets.HETZNER_HOST }}
           username: ${{ secrets.HETZNER_USER }}
