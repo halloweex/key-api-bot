@@ -301,15 +301,10 @@ try:
             from web.main import app
             return TestClient(app)
 
-        def test_ws_stats_endpoint(self, client):
-            """Test the /ws/stats endpoint returns statistics."""
+        def test_ws_stats_endpoint_requires_auth(self, client):
+            """/ws/stats now requires an authenticated session (401 without one)."""
             response = client.get("/ws/stats")
-            assert response.status_code == 200
-
-            data = response.json()
-            assert "active_connections" in data
-            assert "total_connections_ever" in data
-            assert "rooms" in data
+            assert response.status_code == 401
 
 except ImportError:
     pass

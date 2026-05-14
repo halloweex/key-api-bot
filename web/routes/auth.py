@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 SECRET_KEY = config.web.secret_key or config.bot.token
 if not SECRET_KEY:
     raise RuntimeError("DASHBOARD_SECRET_KEY or BOT_TOKEN must be set")
+if not config.web.secret_key:
+    # Falling back to BOT_TOKEN: the bot token is used in many places (bot code,
+    # logs, Telegram HMAC) — a leak would let an attacker forge dashboard sessions.
+    logger.critical(
+        "DASHBOARD_SECRET_KEY is not set — using BOT_TOKEN as the session signing "
+        "key. Set a dedicated, random DASHBOARD_SECRET_KEY in production."
+    )
 session_serializer = URLSafeTimedSerializer(SECRET_KEY)
 
 router = APIRouter(tags=["auth"])
@@ -206,14 +213,14 @@ async def logout(response: Response):
     return response
 
 
-async def get_current_user(request: Request) -> dict | None:
+async def _resolve_session(session: str | None) -> dict | None:
     """
-    Get current user from session cookie.
+    Validate a signed session string and return fresh user data, or None.
 
-    Returns user data dict or None if not authenticated.
-    Re-reads role from DuckDB on every request so admin changes take effect immediately.
+    Re-reads role/status from DuckDB so admin changes (role updates, freezes,
+    denials) take effect immediately on the next request. Shared by the HTTP
+    and WebSocket entry points.
     """
-    session = request.cookies.get(SESSION_COOKIE)
     if not session:
         return None
 
@@ -254,6 +261,16 @@ async def get_current_user(request: Request) -> dict | None:
         return None
 
 
+async def get_current_user(request: Request) -> dict | None:
+    """Get current user from the HTTP session cookie (None if not authenticated)."""
+    return await _resolve_session(request.cookies.get(SESSION_COOKIE))
+
+
+async def get_current_user_ws(websocket) -> dict | None:
+    """Get current user from the session cookie sent on the WebSocket handshake."""
+    return await _resolve_session(websocket.cookies.get(SESSION_COOKIE))
+
+
 async def require_auth(request: Request) -> RedirectResponse | None:
     """
     Check if user is authenticated.
@@ -264,6 +281,19 @@ async def require_auth(request: Request) -> RedirectResponse | None:
     if not user:
         return RedirectResponse(url="/login", status_code=302)
     return None
+
+
+async def require_user(request: Request) -> dict:
+    """
+    FastAPI dependency for any authenticated, approved dashboard user.
+
+    Returns user data if authenticated, raises 401 otherwise. Applied at the
+    /api router level so the whole API surface requires a valid session.
+    """
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
 
 
 async def require_admin(request: Request) -> dict:
