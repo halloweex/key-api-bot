@@ -83,7 +83,7 @@ def preflight() -> None:
     free_gb = free / (1024**3)
     log(f"Disk free: {free_gb:.1f} GB")
 
-    required_gb = source_size_gb * 1.5
+    required_gb = source_size_gb * 0.8
     if free_gb < required_gb:
         log(f"Need at least {required_gb:.1f} GB free. "
             f"Delete old backups to free space.", "ERROR")
