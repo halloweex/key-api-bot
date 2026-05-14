@@ -21,6 +21,7 @@ import { PageHeading } from './PageHeading'
 import { InfoBanner } from './InfoBanner'
 import { RoleLegendChip } from './RoleLegendChip'
 import { Badge } from './Badge'
+import { DataTable, Tr, Th } from './DataTable'
 import { Wrapper } from './Wrapper'
 
 type RoleTone = 'purple' | 'blue' | 'slate'
@@ -183,36 +184,34 @@ export function AdminPermissionsPage() {
               title="Failed to load permissions"
             />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-slate-200 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                    <th className="py-3 px-4 w-64">Feature</th>
-                    {roles.map((role) => (
-                      <th key={role} className="py-3 px-4">
-                        <Badge tone={roleConfig[role].tone} shape="square">
-                          {roleConfig[role].label}
-                        </Badge>
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {features.map((feature) => (
-                    <FeatureRow
-                      key={feature.key}
-                      featureKey={feature.key}
-                      featureName={feature.name}
-                      featureDescription={feature.description}
-                      permissions={featurePermissions[feature.key]}
-                      roles={roles}
-                      onUpdate={handleUpdate}
-                      updatingCells={updatingCells}
-                    />
+            <DataTable variant="admin">
+              <thead>
+                <Tr header variant="admin">
+                  <Th variant="admin">Feature</Th>
+                  {roles.map((role) => (
+                    <Th key={role} variant="admin">
+                      <Badge tone={roleConfig[role].tone} shape="square">
+                        {roleConfig[role].label}
+                      </Badge>
+                    </Th>
                   ))}
-                </tbody>
-              </table>
-            </div>
+                </Tr>
+              </thead>
+              <tbody>
+                {features.map((feature) => (
+                  <FeatureRow
+                    key={feature.key}
+                    featureKey={feature.key}
+                    featureName={feature.name}
+                    featureDescription={feature.description}
+                    permissions={featurePermissions[feature.key]}
+                    roles={roles}
+                    onUpdate={handleUpdate}
+                    updatingCells={updatingCells}
+                  />
+                ))}
+              </tbody>
+            </DataTable>
           )}
         </CardContent>
       </Card>

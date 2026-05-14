@@ -13,6 +13,7 @@ import { Select } from './Select'
 import { SkeletonTable } from './Skeleton'
 import { ApiErrorState } from './ApiErrorState'
 import { EmptyState } from './EmptyState'
+import { DataTable, Tr, Th } from './DataTable'
 import { PageHeaderLink } from './PageHeaderLink'
 import { PageShell } from './PageShell'
 import { PageHeading } from './PageHeading'
@@ -133,29 +134,27 @@ export function AdminUsersPage() {
           ) : users.length === 0 ? (
             <EmptyState message="No users found" />
           ) : (
-            <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
-              <table className="w-full">
-                <thead className="sticky top-0 z-10 bg-white">
-                  <tr className="border-b border-slate-200 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                    <th className="py-3 px-4 bg-white">User</th>
-                    <th className="py-3 px-4 bg-white">Role</th>
-                    <th className="py-3 px-4 bg-white">Status</th>
-                    <th className="py-3 px-4 bg-white">Last Activity</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {users.map((user) => (
-                    <UserRow
-                      key={user.user_id}
-                      user={user}
-                      onRoleChange={handleRoleChange}
-                      onStatusChange={handleStatusChange}
-                      isUpdating={updatingUsers.has(user.user_id)}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable variant="admin" stickyHeader>
+              <thead className="sticky top-0 z-10 bg-white">
+                <Tr header variant="admin" sticky>
+                  <Th variant="admin" sticky>User</Th>
+                  <Th variant="admin" sticky>Role</Th>
+                  <Th variant="admin" sticky>Status</Th>
+                  <Th variant="admin" sticky>Last Activity</Th>
+                </Tr>
+              </thead>
+              <tbody>
+                {users.map((user) => (
+                  <UserRow
+                    key={user.user_id}
+                    user={user}
+                    onRoleChange={handleRoleChange}
+                    onStatusChange={handleStatusChange}
+                    isUpdating={updatingUsers.has(user.user_id)}
+                  />
+                ))}
+              </tbody>
+            </DataTable>
           )}
         </CardContent>
       </Card>

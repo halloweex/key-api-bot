@@ -1,6 +1,7 @@
 import { memo } from 'react'
 import type { AdminUser, UserRole, UserStatus } from '../types/api'
 import { BadgeSelect } from './BadgeSelect'
+import { Tr, Td } from './DataTable'
 
 type Tone = 'purple' | 'blue' | 'slate' | 'green' | 'yellow' | 'red'
 
@@ -60,8 +61,8 @@ export const UserRow = memo(function UserRow({
     : 'Never'
 
   return (
-    <tr className={`border-b border-slate-100 hover:bg-slate-50/50 transition-colors ${isUpdating ? 'opacity-50' : ''}`}>
-      <td className="py-3 px-4">
+    <Tr variant="admin" faded={isUpdating}>
+      <Td variant="admin">
         <div className="flex items-center gap-3">
           {user.photo_url ? (
             <img
@@ -79,9 +80,9 @@ export const UserRow = memo(function UserRow({
             <p className="text-xs text-slate-500">ID: {user.user_id}</p>
           </div>
         </div>
-      </td>
+      </Td>
 
-      <td className="py-3 px-4">
+      <Td variant="admin">
         <BadgeSelect
           tone={roleTone[user.role]}
           options={roleOptions}
@@ -89,9 +90,9 @@ export const UserRow = memo(function UserRow({
           onChange={(v) => onRoleChange(user.user_id, v as UserRole)}
           disabled={isUpdating}
         />
-      </td>
+      </Td>
 
-      <td className="py-3 px-4">
+      <Td variant="admin">
         <BadgeSelect
           tone={statusTone[user.status]}
           options={statusOptions}
@@ -99,11 +100,11 @@ export const UserRow = memo(function UserRow({
           onChange={(v) => onStatusChange(user.user_id, v as UserStatus)}
           disabled={isUpdating}
         />
-      </td>
+      </Td>
 
-      <td className="py-3 px-4 text-sm text-slate-600">
-        {lastActivity}
-      </td>
-    </tr>
+      <Td variant="admin">
+        <span className="text-sm text-slate-600">{lastActivity}</span>
+      </Td>
+    </Tr>
   )
 })

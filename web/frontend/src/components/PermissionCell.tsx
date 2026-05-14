@@ -1,6 +1,8 @@
 import { memo, useCallback } from 'react'
 import type { UserRole, FeaturePermissions } from '../types/api'
 import { PermissionCheckbox } from './PermissionCheckbox'
+import { Td } from './DataTable'
+import { Wrapper } from './Wrapper'
 
 export const actions = ['view', 'edit', 'delete'] as const
 export type Action = typeof actions[number]
@@ -35,8 +37,8 @@ export const PermissionCell = memo(function PermissionCell({
   )
 
   return (
-    <td className="py-3 px-4 border-b border-slate-100">
-      <div className={`flex flex-wrap gap-3 ${isUpdating ? 'opacity-50 pointer-events-none' : ''}`}>
+    <Td variant="admin" faded={isUpdating}>
+      <Wrapper dir="row" gap="md" wrap>
         {actions.map((action) => (
           <PermissionCheckbox
             key={action}
@@ -46,7 +48,7 @@ export const PermissionCell = memo(function PermissionCell({
             label={actionLabels[action]}
           />
         ))}
-      </div>
-    </td>
+      </Wrapper>
+    </Td>
   )
 })

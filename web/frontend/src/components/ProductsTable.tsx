@@ -2,7 +2,9 @@ import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ReportTopProduct } from '../types/api'
 import { formatCurrency, formatNumber } from '../utils/formatters'
+import { DataTable, Tr, Th, Td } from './DataTable'
 
+// Top-3 rank medal styles (gold / silver / bronze). Single-use inline visual.
 const MEDAL_STYLES: Record<number, string> = {
   1: 'bg-amber-50 text-amber-700 border-amber-200',
   2: 'bg-slate-50 text-slate-600 border-slate-300',
@@ -21,54 +23,53 @@ export const ProductsTable = memo(function ProductsTable({
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-slate-200 text-left">
-            <th className="py-2.5 px-3 font-semibold text-slate-600 w-10">{t('reports.rank')}</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600">{t('reports.product')}</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">{t('reports.qty')}</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right">{t('reports.pct')}</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden sm:table-cell">{t('reports.revenue')}</th>
-            <th className="py-2.5 px-3 font-semibold text-slate-600 text-right hidden md:table-cell">{t('reports.orders')}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {products.map((p) => {
-            const medal = MEDAL_STYLES[p.rank]
-            return (
-              <tr
-                key={`${p.rank}-${p.sku}`}
-                className={`border-b border-slate-100 hover:bg-slate-50/50 ${medal ? 'font-medium' : ''}`}
-              >
-                <td className="py-2.5 px-3">
-                  {medal ? (
-                    <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full border text-xs font-bold ${medal}`}>
-                      {p.rank}
-                    </span>
-                  ) : (
-                    <span className="text-slate-400 text-xs">{p.rank}</span>
+    <DataTable variant="feature">
+      <thead>
+        <Tr header>
+          <Th>{t('reports.rank')}</Th>
+          <Th>{t('reports.product')}</Th>
+          <Th align="right">{t('reports.qty')}</Th>
+          <Th align="right">{t('reports.pct')}</Th>
+          <Th align="right" hideBelow="sm">{t('reports.revenue')}</Th>
+          <Th align="right" hideBelow="md">{t('reports.orders')}</Th>
+        </Tr>
+      </thead>
+      <tbody>
+        {products.map((p) => {
+          const medal = MEDAL_STYLES[p.rank]
+          return (
+            <Tr key={`${p.rank}-${p.sku}`}>
+              <Td>
+                {medal ? (
+                  <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full border text-xs font-bold ${medal}`}>
+                    {p.rank}
+                  </span>
+                ) : (
+                  <span className="text-slate-400 text-xs">{p.rank}</span>
+                )}
+              </Td>
+              <Td>
+                <div className="min-w-0">
+                  <p className={`truncate max-w-[300px] ${medal ? 'text-slate-900 font-medium' : 'text-slate-800'}`}>
+                    {p.product_name}
+                  </p>
+                  {p.sku && (
+                    <p className="text-[11px] text-slate-400 truncate">{p.sku}</p>
                   )}
-                </td>
-                <td className="py-2.5 px-3">
-                  <div className="min-w-0">
-                    <p className={`truncate max-w-[300px] ${medal ? 'text-slate-900' : 'text-slate-800'}`}>
-                      {p.product_name}
-                    </p>
-                    {p.sku && (
-                      <p className="text-[11px] text-slate-400 truncate">{p.sku}</p>
-                    )}
-                  </div>
-                </td>
-                <td className="py-2.5 px-3 text-right tabular-nums font-semibold">{formatNumber(p.quantity)}</td>
-                <td className="py-2.5 px-3 text-right tabular-nums text-slate-500">{p.percentage}%</td>
-                <td className="py-2.5 px-3 text-right tabular-nums hidden sm:table-cell">{formatCurrency(p.revenue)}</td>
-                <td className="py-2.5 px-3 text-right tabular-nums hidden md:table-cell">{formatNumber(p.orders_count)}</td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
+                </div>
+              </Td>
+              <Td align="right" tabular>
+                <span className="font-semibold">{formatNumber(p.quantity)}</span>
+              </Td>
+              <Td align="right" tabular>
+                <span className="text-slate-500">{p.percentage}%</span>
+              </Td>
+              <Td align="right" tabular hideBelow="sm">{formatCurrency(p.revenue)}</Td>
+              <Td align="right" tabular hideBelow="md">{formatNumber(p.orders_count)}</Td>
+            </Tr>
+          )
+        })}
+      </tbody>
+    </DataTable>
   )
 })

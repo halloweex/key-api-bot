@@ -1,6 +1,7 @@
 import { memo } from 'react'
 import type { UserRole, FeaturePermissions } from '../types/api'
 import { PermissionCell, type Action } from './PermissionCell'
+import { Tr, Td } from './DataTable'
 
 interface FeatureRowProps {
   featureKey: string
@@ -22,13 +23,11 @@ export const FeatureRow = memo(function FeatureRow({
   updatingCells,
 }: FeatureRowProps) {
   return (
-    <tr className="hover:bg-slate-50/50 transition-colors">
-      <td className="py-3 px-4 border-b border-slate-100">
-        <div>
-          <p className="font-medium text-slate-900">{featureName}</p>
-          <p className="text-xs text-slate-500 mt-0.5">{featureDescription}</p>
-        </div>
-      </td>
+    <Tr variant="admin">
+      <Td variant="admin">
+        <p className="font-medium text-slate-900">{featureName}</p>
+        <p className="text-xs text-slate-500 mt-0.5">{featureDescription}</p>
+      </Td>
       {roles.map((role) => (
         <PermissionCell
           key={role}
@@ -39,6 +38,6 @@ export const FeatureRow = memo(function FeatureRow({
           isUpdating={updatingCells.has(`${role}:${featureKey}`)}
         />
       ))}
-    </tr>
+    </Tr>
   )
 })
