@@ -1,4 +1,5 @@
 import { memo, type ReactNode } from 'react'
+import { Wrapper } from './Wrapper'
 
 // ─── PageHeading ─────────────────────────────────────────────────────────────
 //
@@ -20,12 +21,16 @@ export const PageHeading = memo(function PageHeading({
   actions,
 }: PageHeadingProps) {
   return (
-    <div className="flex items-center justify-between mb-6">
+    <Wrapper dir="row" align="center" justify="between" marginBottom="lg">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">{title}</h1>
         {subtitle && <p className="text-sm text-slate-500 mt-1">{subtitle}</p>}
       </div>
-      {actions && <div className="flex gap-3">{actions}</div>}
-    </div>
+      {actions && (
+        <Wrapper dir="row" gap="md">
+          {actions}
+        </Wrapper>
+      )}
+    </Wrapper>
   )
 })

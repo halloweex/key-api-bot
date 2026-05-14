@@ -22,6 +22,8 @@ import {
   Y_AXIS_PROPS,
 } from './chartConfig'
 import { MetricCard } from './MetricCard'
+import { InfoBanner } from './InfoBanner'
+import { Wrapper } from './Wrapper'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -141,11 +143,11 @@ export const PurchaseTimingChart = memo(function PurchaseTimingChart({
       </div>
 
       {/* Insights */}
-      <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-        <p className="text-sm text-blue-800">
+      <Wrapper marginTop="lg">
+        <InfoBanner>
           <strong>{t('retention.insight')}</strong> {insightText}
-        </p>
-      </div>
+        </InfoBanner>
+      </Wrapper>
     </div>
   )
 })

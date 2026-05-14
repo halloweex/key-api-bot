@@ -4,6 +4,7 @@ import { AlertTriangle, Users, Clock, TrendingUp } from 'lucide-react'
 import type { AtRiskResponse } from '../types/api'
 import { formatNumber, formatCurrency, formatPercent } from '../utils/formatters'
 import { MetricCard } from './MetricCard'
+import { InfoBanner } from './InfoBanner'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -133,11 +134,9 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
             </p>
           </div>
         )}
-        <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
-          <p className="text-sm text-blue-800">
-            <strong>{t('retention.tip')}</strong> {t('retention.tipDesc')}
-          </p>
-        </div>
+        <InfoBanner>
+          <strong>{t('retention.tip')}</strong> {t('retention.tipDesc')}
+        </InfoBanner>
       </div>
     </div>
   )

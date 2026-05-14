@@ -18,11 +18,17 @@ import { ApiErrorState } from './ApiErrorState'
 import { PageHeaderLink } from './PageHeaderLink'
 import { PageShell } from './PageShell'
 import { PageHeading } from './PageHeading'
+import { InfoBanner } from './InfoBanner'
+import { RoleLegendChip } from './RoleLegendChip'
+import { Badge } from './Badge'
+import { Wrapper } from './Wrapper'
 
-const roleConfig: Record<UserRole, { label: string; color: string }> = {
-  admin: { label: 'Admin', color: 'bg-purple-100 text-purple-700 border-purple-200' },
-  editor: { label: 'Editor', color: 'bg-blue-100 text-blue-700 border-blue-200' },
-  viewer: { label: 'Viewer', color: 'bg-slate-100 text-slate-600 border-slate-200' },
+type RoleTone = 'purple' | 'blue' | 'slate'
+
+const roleConfig: Record<UserRole, { label: string; tone: RoleTone }> = {
+  admin: { label: 'Admin', tone: 'purple' },
+  editor: { label: 'Editor', tone: 'blue' },
+  viewer: { label: 'Viewer', tone: 'slate' },
 }
 
 export function AdminPermissionsPage() {
@@ -148,23 +154,20 @@ export function AdminPermissionsPage() {
         }
       />
 
-      <div className="flex gap-4 mb-6">
+      <Wrapper dir="row" gap="lg" marginBottom="lg">
         {roles.map((role) => {
           const config = roleConfig[role]
           const roleInfo = data?.roles.find((r) => r.key === role)
           return (
-            <div
+            <RoleLegendChip
               key={role}
-              className={`px-3 py-1.5 rounded-lg border ${config.color}`}
-            >
-              <span className="font-medium">{config.label}</span>
-              {roleInfo && (
-                <span className="ml-2 text-xs opacity-75">{roleInfo.description}</span>
-              )}
-            </div>
+              tone={config.tone}
+              label={config.label}
+              description={roleInfo?.description}
+            />
           )
         })}
-      </div>
+      </Wrapper>
 
       <Card>
         <CardHeader>
@@ -187,9 +190,9 @@ export function AdminPermissionsPage() {
                     <th className="py-3 px-4 w-64">Feature</th>
                     {roles.map((role) => (
                       <th key={role} className="py-3 px-4">
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${roleConfig[role].color}`}>
+                        <Badge tone={roleConfig[role].tone} shape="square">
                           {roleConfig[role].label}
-                        </span>
+                        </Badge>
                       </th>
                     ))}
                   </tr>
@@ -214,19 +217,15 @@ export function AdminPermissionsPage() {
         </CardContent>
       </Card>
 
-      <div className="mt-6 p-4 bg-blue-50 border border-blue-100 rounded-lg">
-        <div className="flex gap-3">
-          <Info className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" />
-          <div className="text-sm text-blue-800">
-            <p className="font-medium">How permissions work</p>
-            <ul className="mt-1 space-y-1 text-blue-700">
-              <li><strong>View</strong> - User can see this feature in the dashboard</li>
-              <li><strong>Edit</strong> - User can create and modify data (requires View)</li>
-              <li><strong>Delete</strong> - User can remove data (requires View)</li>
-            </ul>
-          </div>
-        </div>
-      </div>
+      <Wrapper marginTop="lg">
+        <InfoBanner icon={<Info className="w-5 h-5" />} title="How permissions work">
+          <ul className="space-y-1">
+            <li><strong>View</strong> - User can see this feature in the dashboard</li>
+            <li><strong>Edit</strong> - User can create and modify data (requires View)</li>
+            <li><strong>Delete</strong> - User can remove data (requires View)</li>
+          </ul>
+        </InfoBanner>
+      </Wrapper>
     </PageShell>
   )
 }

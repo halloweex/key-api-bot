@@ -13,6 +13,7 @@ import { CohortLTVChart } from './CohortLTVChart'
 import { AtRiskTable } from './AtRiskTable'
 import { RetentionInsights } from './RetentionInsights'
 import { TabBar, TabButton } from './TabBar'
+import { InfoBanner } from './InfoBanner'
 import { CompactSelect } from './CompactSelect'
 import { CohortTabSkeleton } from './CohortTabSkeleton'
 import { CohortSummaryCards } from './CohortSummaryCards'
@@ -219,11 +220,9 @@ export const CohortRetentionChart = memo(function CohortRetentionChart() {
         )}
       </div>
 
-      <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-        <p className="text-sm text-blue-800">
-          <strong>{t('retention.howToRead')}</strong> {getInfoText()}
-        </p>
-      </div>
+      <InfoBanner>
+        <strong>{t('retention.howToRead')}</strong> {getInfoText()}
+      </InfoBanner>
 
       {renderContent()}
     </ChartContainer>

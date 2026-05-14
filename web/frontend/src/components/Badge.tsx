@@ -13,6 +13,7 @@ import { memo, type ReactNode } from 'react'
 
 type BadgeTone =
   | 'neutral'
+  | 'slate'
   | 'green'
   | 'red'
   | 'blue'
@@ -36,6 +37,7 @@ interface BadgeProps {
 
 const toneClass: Record<BadgeTone, string> = {
   neutral: 'bg-slate-100 text-slate-600',
+  slate: 'bg-slate-100 text-slate-600',
   green: 'bg-green-100 text-green-700',
   red: 'bg-red-100 text-red-700',
   blue: 'bg-blue-100 text-blue-700',
