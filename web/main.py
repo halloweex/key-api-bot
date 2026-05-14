@@ -3,17 +3,20 @@ FastAPI web application for KeyCRM Dashboard.
 """
 import asyncio
 import os
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import ORJSONResponse, JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from web.config import STATIC_DIR, STATIC_V2_DIR, VERSION
+from web.ratelimit import limiter
 from web.routes import api, pages, auth, chat, batch, websocket
+from web.routes.auth import require_user
 from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
 from bot.database import init_database
 from core.duckdb_store import get_store, close_store
@@ -31,8 +34,7 @@ log_level = os.getenv("LOG_LEVEL", "INFO")
 setup_logging(level=log_level, json_format=(log_format == "json"))
 logger = get_logger(__name__)
 
-# Rate limiter configuration
-limiter = Limiter(key_func=get_remote_address)
+# Rate limiter is the shared instance from web.ratelimit (proxy-aware key func)
 
 # Create FastAPI app
 app = FastAPI(
@@ -99,6 +101,21 @@ app.add_middleware(RequestTimeoutMiddleware)
 # Add Gzip compression (min 500 bytes to compress)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
+# Restrictive CORS — the SPA is served same-origin so cross-origin access is
+# never needed in production. Only the dashboard origin is allowed; the Vite
+# dev server is added only for local (non-https) development.
+_dashboard_url = os.getenv("DASHBOARD_URL", "").rstrip("/")
+_cors_origins = [_dashboard_url] if _dashboard_url else []
+if not _dashboard_url.startswith("https://"):
+    _cors_origins += ["http://localhost:5173", "http://localhost:8080"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 # Apple touch icon at root for iOS home screen
 @app.get("/apple-touch-icon.png", include_in_schema=False)
 @app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
@@ -114,10 +131,11 @@ app.mount("/static-v2", StaticFiles(directory=str(STATIC_V2_DIR)), name="static-
 
 # Include routers (pages router LAST — it has a catch-all /{path:path})
 app.include_router(auth.router)  # Auth routes first (login, logout, callback)
-app.include_router(api.router, prefix="/api")
-app.include_router(batch.router, prefix="/api")
-app.include_router(websocket.router)  # WebSocket routes (no /api prefix)
-app.include_router(chat.router, prefix="/api")
+app.include_router(api.router, prefix="/api")  # sub-routers gate themselves (see api/__init__.py)
+# Batch endpoint exposes the same business data as the API — require a session.
+app.include_router(batch.router, prefix="/api", dependencies=[Depends(require_user)])
+app.include_router(websocket.router)  # WebSocket routes (no /api prefix) — self-gated
+app.include_router(chat.router, prefix="/api")  # chat/search endpoints gate themselves (require_admin)
 app.include_router(pages.router)  # SPA catch-all must be last
 
 

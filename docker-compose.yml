@@ -2,8 +2,12 @@ services:
   meilisearch:
     image: getmeili/meilisearch:v1.6
     container_name: keycrm-meili
+    # Bind to loopback only — the web container reaches Meilisearch over the
+    # internal Docker network (meilisearch:7700), so the host port never needs
+    # to be internet-facing. Previously "7700:7700" exposed the search index
+    # to the world (protected only by MEILI_MASTER_KEY).
     ports:
-      - "7700:7700"
+      - "127.0.0.1:7700:7700"
     volumes:
       - meili_data:/meili_data
     environment:

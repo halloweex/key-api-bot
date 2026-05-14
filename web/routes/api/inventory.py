@@ -1,8 +1,9 @@
 """Stock summary, average, trend, analysis, actions, alerts endpoints."""
 import logging
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Depends
 
+from web.routes.auth import require_admin
 from ._deps import limiter, get_store
 
 router = APIRouter()
@@ -96,8 +97,8 @@ async def get_inventory_analysis(
 
 @router.post("/stocks/snapshot/refresh")
 @limiter.limit("5/minute")
-async def refresh_inventory_snapshot(request: Request):
-    """Force refresh today's inventory snapshot."""
+async def refresh_inventory_snapshot(request: Request, admin: dict = Depends(require_admin)):
+    """Force refresh today's inventory snapshot. Requires admin."""
     store = await get_store()
     result = await store.record_inventory_snapshot(force=True)
     return {
