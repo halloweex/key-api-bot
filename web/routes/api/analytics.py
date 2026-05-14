@@ -5,9 +5,10 @@ from zoneinfo import ZoneInfo
 
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-from fastapi import APIRouter, Query, Request, HTTPException
+from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional, List
 
+from web.routes.auth import require_admin
 from web.services import dashboard_service
 from web.schemas import (
     SummaryStatsResponse,
@@ -190,8 +191,9 @@ async def get_revenue_forecast(
 async def train_revenue_forecast(
     request: Request,
     sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
+    admin: dict = Depends(require_admin),
 ):
-    """Manually trigger revenue prediction model training."""
+    """Manually trigger revenue prediction model training. Requires admin."""
     try:
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
@@ -207,8 +209,9 @@ async def train_revenue_forecast(
 async def tune_revenue_forecast(
     request: Request,
     sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
+    admin: dict = Depends(require_admin),
 ):
-    """Run hyperparameter grid search for LightGBM parameters."""
+    """Run hyperparameter grid search for LightGBM parameters. Requires admin."""
     try:
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:

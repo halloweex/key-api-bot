@@ -9,9 +9,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
+from web.ratelimit import limiter  # single app-wide limiter instance
 from web.services import dashboard_service
 from core.duckdb_store import get_store
 from core.validators import (
@@ -24,7 +23,6 @@ from core.validators import (
 from core.exceptions import ValidationError
 
 router = APIRouter(tags=["batch"])
-limiter = Limiter(key_func=get_remote_address)
 logger = logging.getLogger(__name__)
 
 

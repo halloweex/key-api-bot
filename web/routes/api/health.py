@@ -1,12 +1,18 @@
-"""Health check, metrics, and DuckDB stats endpoints."""
+"""Health check, metrics, and DuckDB stats endpoints.
+
+Only the basic ``/api/health`` probe is public (Docker / nginx / uptime
+monitors hit it without a session). The detailed / stats / metrics endpoints
+leak internal state and require an authenticated session.
+"""
 import asyncio
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
 
 from core.observability import get_correlation_id, metrics, Timer
 from web.config import VERSION
 from web.schemas import HealthResponse, MetricsResponse
+from web.routes.auth import require_user
 from ._deps import limiter, get_store, get_logger, START_TIME
 
 router = APIRouter()
@@ -92,7 +98,7 @@ async def health_check(request: Request):
     }
 
 
-@router.get("/health/detailed")
+@router.get("/health/detailed", dependencies=[Depends(require_user)])
 @limiter.limit("30/minute")
 async def detailed_health_check(request: Request):
     """Detailed health check with component-level status."""
@@ -194,7 +200,7 @@ async def detailed_health_check(request: Request):
     }
 
 
-@router.get("/duckdb/stats")
+@router.get("/duckdb/stats", dependencies=[Depends(require_user)])
 @limiter.limit("60/minute")
 async def get_duckdb_stats(request: Request):
     """Get DuckDB analytics store statistics."""
@@ -206,7 +212,7 @@ async def get_duckdb_stats(request: Request):
         return {"status": "error", "error": str(e)}
 
 
-@router.get("/metrics", response_model=MetricsResponse)
+@router.get("/metrics", response_model=MetricsResponse, dependencies=[Depends(require_user)])
 @limiter.limit("60/minute")
 async def get_metrics_endpoint(request: Request):
     """Get application metrics."""

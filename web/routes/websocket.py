@@ -4,25 +4,29 @@ WebSocket routes for real-time dashboard updates.
 Provides endpoints for:
 - /ws/dashboard - Real-time dashboard updates (orders synced, goal progress)
 - /ws/admin - Admin-only notifications (sync status, errors)
+
+Both endpoints authenticate using the signed ``dashboard_session`` cookie sent
+on the WebSocket handshake (same-origin requests include it automatically).
+This prevents Cross-Site WebSocket Hijacking and anonymous access to live
+business data / admin event streams.
 """
 import logging
-from datetime import datetime
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 
 from core.websocket_manager import manager, WebSocketEvent
+from web.routes.auth import get_current_user_ws, require_user
 
 router = APIRouter(tags=["websocket"])
 logger = logging.getLogger(__name__)
 
 
 @router.websocket("/ws/dashboard")
-async def dashboard_websocket(
-    websocket: WebSocket,
-    token: str = Query(default=None, description="Optional auth token"),
-):
+async def dashboard_websocket(websocket: WebSocket):
     """
     WebSocket endpoint for real-time dashboard updates.
+
+    Requires a valid dashboard session (cookie sent on the handshake).
 
     Receives events:
     - orders_synced: New orders have been synced
@@ -34,24 +38,22 @@ async def dashboard_websocket(
     Client can send:
     - "ping" for keep-alive (responds with "pong")
     - JSON: {"action": "subscribe", "room": "dashboard"}
-
-    Connection will be closed after 5 minutes of inactivity.
     """
-    # Optional: Validate token for authenticated connections
-    # For now, allow anonymous connections to dashboard room
+    user = await get_current_user_ws(websocket)
+    if not user:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
 
     conn_info = await manager.connect(websocket, room="dashboard")
 
     try:
         while True:
-            # Wait for messages from client
             try:
                 message = await websocket.receive_text()
                 await manager.handle_message(conn_info, message)
             except WebSocketDisconnect:
                 logger.debug("Client disconnected normally")
                 break
-
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
@@ -59,32 +61,20 @@ async def dashboard_websocket(
 
 
 @router.websocket("/ws/admin")
-async def admin_websocket(
-    websocket: WebSocket,
-    token: str = Query(..., description="Admin auth token required"),
-):
+async def admin_websocket(websocket: WebSocket):
     """
     WebSocket endpoint for admin-only notifications.
 
-    Receives all dashboard events plus:
-    - Detailed sync status
-    - Error notifications
-    - System health updates
-
-    Requires authentication token.
+    Requires a valid dashboard session with the ``admin`` role. Receives all
+    dashboard events plus detailed sync status, error and health notifications.
     """
-    # TODO: Validate admin token
-    # For now, reject connections without token
-    if not token:
+    user = await get_current_user_ws(websocket)
+    if not user:
         await websocket.close(code=4001, reason="Authentication required")
         return
-
-    # Simple token validation (placeholder - should use proper auth)
-    # In production, validate against session or JWT
-    import os
-    admin_ids = os.getenv("ADMIN_USER_IDS", "").split(",")
-    # For WebSocket, we'd need a different auth mechanism
-    # This is a placeholder - implement proper JWT/session validation
+    if user.get("role") != "admin":
+        await websocket.close(code=4003, reason="Admin access required")
+        return
 
     conn_info = await manager.connect(websocket, room="admin")
 
@@ -95,17 +85,16 @@ async def admin_websocket(
                 await manager.handle_message(conn_info, message)
             except WebSocketDisconnect:
                 break
-
     except Exception as e:
         logger.error(f"Admin WebSocket error: {e}")
     finally:
         await manager.disconnect(conn_info)
 
 
-@router.get("/ws/stats")
+@router.get("/ws/stats", dependencies=[Depends(require_user)])
 async def get_websocket_stats():
     """
-    Get WebSocket connection statistics.
+    Get WebSocket connection statistics. Requires an authenticated session.
 
     Returns active connections, room counts, and message stats.
     """

@@ -286,8 +286,9 @@ async def purge_orders(
 async def sync_buyers(
     request: Request,
     limit: int = Query(100, ge=1, le=500, description="Maximum buyers to sync"),
+    admin: dict = Depends(require_admin),
 ):
-    """Manually sync missing buyers from KeyCRM."""
+    """Manually sync missing buyers from KeyCRM. Requires admin."""
     from core.sync_service import get_sync_service
 
     try:
@@ -499,8 +500,12 @@ async def get_bronze_stats(request: Request):
 
 @router.post("/bronze/promote")
 @limiter.limit("10/minute")
-async def promote_bronze(request: Request, batch_size: int = Query(2000, ge=1, le=10000)):
-    """Run one promotion cycle: bronze_order_events → orders_v2 (shadow)."""
+async def promote_bronze(
+    request: Request,
+    batch_size: int = Query(2000, ge=1, le=10000),
+    admin: dict = Depends(require_admin),
+):
+    """Run one promotion cycle: bronze_order_events → orders_v2 (shadow). Requires admin."""
     try:
         store = await get_store()
         result = await store.promote_bronze_to_shadow(batch_size=batch_size)

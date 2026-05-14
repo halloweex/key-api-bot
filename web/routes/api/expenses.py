@@ -1,10 +1,11 @@
 """Expense types, expense summary, profit analysis, manual expenses endpoints."""
 from datetime import date as date_type
-from fastapi import APIRouter, Query, Request, HTTPException
+from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional
 
 from web.services import dashboard_service
+from web.routes.auth import require_permission
 from ._deps import (
     limiter, get_store,
     validate_period, validate_source_id, validate_sales_type,
@@ -129,8 +130,12 @@ async def get_expenses(
 
 @router.post("/expenses")
 @limiter.limit("30/minute")
-async def create_expense(request: Request, body: CreateExpenseRequest):
-    """Create a manual expense."""
+async def create_expense(
+    request: Request,
+    body: CreateExpenseRequest,
+    _=Depends(require_permission("expenses", "edit")),
+):
+    """Create a manual expense. Requires expenses:edit permission."""
     from datetime import datetime
 
     store = await get_store()
@@ -155,8 +160,12 @@ async def create_expense(request: Request, body: CreateExpenseRequest):
 
 @router.delete("/expenses/{expense_id}")
 @limiter.limit("30/minute")
-async def delete_expense(request: Request, expense_id: int):
-    """Delete a manual expense."""
+async def delete_expense(
+    request: Request,
+    expense_id: int,
+    _=Depends(require_permission("expenses", "delete")),
+):
+    """Delete a manual expense. Requires expenses:delete permission."""
     store = await get_store()
     deleted = await store.delete_expense(expense_id)
     if not deleted:
