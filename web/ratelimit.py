@@ -1,28 +1,23 @@
-"""Shared SlowAPI rate limiter — single instance for the whole app.
+"""Shared SlowAPI limiter — one instance app-wide.
 
-Previously each route module created its own ``Limiter()``. SlowAPI enforces
-``@limiter.limit`` decorators against ``app.state.limiter``; with mismatched
-instances the per-route limits were never actually applied. This module is the
-single source of truth — import ``limiter`` from here everywhere.
+SlowAPI enforces ``@limiter.limit`` against ``app.state.limiter``; if each
+route module instantiates its own ``Limiter()`` the decorators silently
+no-op. Import ``limiter`` from this module everywhere.
 """
 from slowapi import Limiter
 from starlette.requests import Request
 
 
 def client_key(request: Request) -> str:
-    """Rate-limit key that is correct behind the nginx reverse proxy.
-
-    nginx sets ``X-Real-IP`` to ``$remote_addr`` (it overwrites, not appends),
-    so it reflects the true client IP and cannot be spoofed by external clients.
-    Without this, ``get_remote_address`` returns the nginx container IP and every
-    user shares a single bucket. Falls back to the socket peer for direct hits.
+    """Rate-limit key. Trusts ``X-Real-IP`` because this app's nginx
+    overwrites it with the true client IP — safe ONLY as long as the web
+    container is unreachable except via that nginx (docker-compose uses
+    ``expose:`` not ``ports:``). If that ever changes, this becomes
+    spoofable: bind web to loopback or validate the upstream first.
     """
     real_ip = request.headers.get("X-Real-IP")
     if real_ip:
         return real_ip.strip()
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
 
