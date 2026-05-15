@@ -265,7 +265,11 @@ class ConfigurationError(Exception):
     pass
 
 
-def validate_config(require_bot: bool = False, require_api: bool = True) -> None:
+def validate_config(
+    require_bot: bool = False,
+    require_api: bool = True,
+    require_secret_key: bool = False,
+) -> None:
     """
     Validate that all required configuration is present.
 
@@ -275,6 +279,10 @@ def validate_config(require_bot: bool = False, require_api: bool = True) -> None
     Args:
         require_bot: If True, validate bot token (for bot service)
         require_api: If True, validate API key (for web service)
+        require_secret_key: If True AND DASHBOARD_URL is https (production),
+            require a dedicated DASHBOARD_SECRET_KEY. Refuses to fall back to
+            BOT_TOKEN as the session signing key — a BOT_TOKEN leak would
+            otherwise enable session forgery for every user.
 
     Raises:
         ConfigurationError: If required configuration is missing
@@ -299,6 +307,19 @@ def validate_config(require_bot: bool = False, require_api: bool = True) -> None
     # Validate admin IDs if bot is required
     if require_bot and not config.bot.admin_user_ids:
         errors.append("ADMIN_USER_IDS is required but not set (comma-separated Telegram user IDs)")
+
+    # In production (DASHBOARD_URL is https) refuse to fall back to BOT_TOKEN as
+    # the session signing key — non-prod deploys may still fall back with only a
+    # CRITICAL log (handled in web/routes/auth.py).
+    if (
+        require_secret_key
+        and config.web.dashboard_url.startswith("https://")
+        and not config.web.secret_key
+    ):
+        errors.append(
+            "DASHBOARD_SECRET_KEY is required in production (DASHBOARD_URL is "
+            "https) but not set — refusing to sign sessions with BOT_TOKEN"
+        )
 
     if errors:
         error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors)

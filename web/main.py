@@ -6,7 +6,6 @@ import os
 from fastapi import FastAPI, Request, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import ORJSONResponse, JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from slowapi import _rate_limit_exceeded_handler
@@ -101,20 +100,10 @@ app.add_middleware(RequestTimeoutMiddleware)
 # Add Gzip compression (min 500 bytes to compress)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
-# Restrictive CORS — the SPA is served same-origin so cross-origin access is
-# never needed in production. Only the dashboard origin is allowed; the Vite
-# dev server is added only for local (non-https) development.
-_dashboard_url = os.getenv("DASHBOARD_URL", "").rstrip("/")
-_cors_origins = [_dashboard_url] if _dashboard_url else []
-if not _dashboard_url.startswith("https://"):
-    _cors_origins += ["http://localhost:5173", "http://localhost:8080"]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-)
+# No CORSMiddleware: the SPA is served same-origin in every deployment (prod via
+# nginx, dev via Vite's `/api`/`/ws` proxy → same-origin with localhost:5173),
+# so cross-origin requests do not happen. The browser's same-origin policy is
+# fail-closed by default; adding CORS would only *widen* the surface.
 
 # Apple touch icon at root for iOS home screen
 @app.get("/apple-touch-icon.png", include_in_schema=False)
@@ -149,7 +138,7 @@ async def startup_event():
 
     # Validate configuration early - fail fast with clear errors
     try:
-        validate_config(require_bot=False, require_api=True)
+        validate_config(require_bot=False, require_api=True, require_secret_key=True)
         logger.info("Configuration validated")
     except ConfigurationError as e:
         logger.critical(f"Configuration error: {e}")

@@ -47,8 +47,11 @@ async def health_check(request: Request):
                 _stats_cache["data"] = duckdb_stats
                 _stats_cache["expires_at"] = now + _STATS_CACHE_TTL
             except Exception as e:
+                # /api/health is public — don't leak DuckDB exception text
+                # (paths, PIDs, schema fragments) to anonymous probes.
+                logger.warning(f"Health check DuckDB error: {e}")
                 duckdb_stats = None
-                duckdb_status = f"error: {e}"
+                duckdb_status = "error"
 
     sync_status = None
     try:
