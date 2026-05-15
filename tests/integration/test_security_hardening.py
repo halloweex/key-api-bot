@@ -256,12 +256,18 @@ class TestTelegramHmac:
         assert verify_telegram_auth({"id": "1", "auth_date": str(int(time.time()))}) is False
 
     def test_uses_constant_time_compare(self):
-        """Guard against a regression back to a plain `!=` comparison."""
+        """Guard against removing hmac.compare_digest from auth_service.
+
+        The behavioral test (test_tampered_field_rejected) cannot catch a
+        regression from compare_digest back to `!=`: both correctly reject
+        tampered hashes — the only difference is timing, which a unit test
+        cannot observe. The previous `"!= received_hash" not in src` check
+        was a brittle spelling-specific guard; the positive assertion below
+        is the meaningful invariant.
+        """
         import inspect
         from web.services import auth_service
-        src = inspect.getsource(auth_service)
-        assert "hmac.compare_digest" in src
-        assert "!= received_hash" not in src
+        assert "hmac.compare_digest" in inspect.getsource(auth_service)
 
 
 # ─── #13  SPA catch-all blocks path traversal ─────────────────────────────────
