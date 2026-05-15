@@ -68,7 +68,6 @@ class ChatResponse(BaseModel):
 async def chat(
     request: Request,
     body: ChatRequest,
-    _admin=Depends(require_admin_or_dev)
 ):
     """
     Send a message to the AI assistant.
@@ -106,7 +105,6 @@ async def chat_stream(
     request: Request,
     message: str = Query(..., min_length=1, max_length=2000),
     conversation_id: Optional[str] = Query(None),
-    _admin=Depends(require_admin_or_dev)
 ):
     """
     Stream chat response using Server-Sent Events (SSE).
@@ -184,7 +182,7 @@ async def chat_stream(
 
 
 @router.get("/chat/status")
-async def chat_status(_admin=Depends(require_admin_or_dev)):
+async def chat_status():
     """Get chat service status."""
     service = get_chat_service()
     return {
@@ -202,7 +200,6 @@ async def search(
     q: str = Query(..., min_length=2, description="Search query"),
     type: str = Query("all", description="Search type: buyers, orders, products, or all"),
     limit: int = Query(10, ge=1, le=50, description="Max results per type"),
-    _admin=Depends(require_admin_or_dev)
 ):
     """
     Quick inline search across buyers, orders, and products.
@@ -220,7 +217,6 @@ async def search_buyers(
     q: str = Query(..., min_length=2, description="Search query"),
     limit: int = Query(10, ge=1, le=50),
     city: Optional[str] = Query(None),
-    _admin=Depends(require_admin_or_dev)
 ):
     """Search buyers by name, phone, or email."""
     service = get_search_service()
@@ -231,7 +227,6 @@ async def search_buyers(
 async def search_orders(
     q: str = Query(..., min_length=1, description="Search query (order ID or buyer name)"),
     limit: int = Query(10, ge=1, le=50),
-    _admin=Depends(require_admin_or_dev)
 ):
     """Search orders by ID or buyer name."""
     service = get_search_service()
@@ -243,7 +238,6 @@ async def search_products(
     q: str = Query(..., min_length=2, description="Search query"),
     limit: int = Query(10, ge=1, le=50),
     brand: Optional[str] = Query(None),
-    _admin=Depends(require_admin_or_dev)
 ):
     """Search products by name, SKU, or brand."""
     service = get_search_service()
@@ -253,7 +247,6 @@ async def search_products(
 @router.get("/buyers/{buyer_id}")
 async def get_buyer_details(
     buyer_id: int,
-    _admin=Depends(require_admin_or_dev)
 ):
     """Get full buyer profile with order history."""
     service = get_search_service()
@@ -266,7 +259,6 @@ async def get_buyer_details(
 @router.get("/orders/{order_id}")
 async def get_order_details(
     order_id: int,
-    _admin=Depends(require_admin_or_dev)
 ):
     """Get full order details with products."""
     service = get_search_service()
@@ -279,7 +271,6 @@ async def get_order_details(
 @router.get("/products/{product_id}")
 async def get_product_details(
     product_id: int,
-    _admin=Depends(require_admin_or_dev)
 ):
     """Get product details with sales stats."""
     service = get_search_service()
