@@ -81,13 +81,22 @@ jobs:
 
       - name: Deploy to Hetzner
         uses: appleboy/ssh-action@55dabf81b49d4120609345970c91507e2d734799  # v1.0.0
+        env:
+          # Pin the server's checkout to the exact commit that was built and
+          # approved, not whatever `main` HEAD happens to be at SSH time.
+          # `git pull origin main` is racy: a push between approval and SSH
+          # would silently deploy unreviewed code.
+          GH_SHA: ${{ github.sha }}
         with:
           host: ${{ secrets.HETZNER_HOST }}
           username: ${{ secrets.HETZNER_USER }}
           key: ${{ secrets.HETZNER_SSH_KEY }}
+          envs: GH_SHA
           script: |
+            set -e
             cd /opt/key-api-bot
-            git pull origin main
+            git fetch origin
+            git reset --hard "$GH_SHA"
             # Stop monitor container if running (disabled in docker-compose.yml)
             docker stop keycrm-monitor 2>/dev/null || true
             docker rm keycrm-monitor 2>/dev/null || true
