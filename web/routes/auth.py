@@ -290,13 +290,35 @@ async def require_user(request: Request) -> dict:
     """
     FastAPI dependency for any authenticated, approved dashboard user.
 
-    Returns user data if authenticated, raises 401 otherwise. Applied at the
-    /api router level so the whole API surface requires a valid session.
+    Returns user data if authenticated, raises 401 otherwise.
     """
     user = await get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
     return user
+
+
+# Paths under /api that are intentionally reachable without a session.
+# Keep this set tiny — every entry here is a deliberate, audited exception.
+# /api/health is polled by Docker, nginx and external uptime monitors.
+PUBLIC_API_PATHS: set[str] = {"/api/health"}
+
+
+async def api_gate(request: Request) -> None:
+    """
+    Single authentication gate for the entire ``/api`` surface.
+
+    Applied at the router-include level in ``web/main.py`` so every API
+    endpoint inherits it without per-router or per-endpoint repetition. The
+    only way to expose an endpoint without a session is to add its path to
+    ``PUBLIC_API_PATHS`` — one place to audit.
+
+    Admin-only routers stack their own ``Depends(require_admin)`` on top of
+    this (both run; require_admin is stricter).
+    """
+    if request.url.path in PUBLIC_API_PATHS:
+        return
+    await require_user(request)
 
 
 async def require_admin(request: Request) -> dict:
