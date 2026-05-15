@@ -27,9 +27,11 @@ from web.main import app
 from web.routes.auth import (
     session_serializer,
     create_session_data,
+    api_gate,
     require_user,
     require_admin,
     get_current_user_ws,
+    PUBLIC_API_PATHS,
     SESSION_COOKIE,
 )
 from core.permissions import ADMIN_USER_IDS
@@ -134,24 +136,27 @@ class TestApiRequiresAuth:
 class TestAuthorizationStructure:
     """Structural checks on the resolved dependency tree (DB-free, deterministic)."""
 
-    def test_health_endpoint_is_public(self):
-        route = _route("/api/health")
-        assert route is not None
-        calls = _all_dep_calls(route.dependant)
-        assert require_user not in calls
-        assert require_admin not in calls
+    def test_health_is_listed_public(self):
+        # The single source of truth for what's reachable without a session.
+        assert PUBLIC_API_PATHS == {"/api/health"}, \
+            "PUBLIC_API_PATHS drifted — every entry must be a deliberate, audited exception"
 
-    @pytest.mark.parametrize("path", ["/api/summary", "/api/expenses/summary", "/api/margin/overview"])
-    def test_data_endpoints_require_user(self, path):
-        route = _route(path)
-        assert route is not None
-        assert require_user in _all_dep_calls(route.dependant)
+    @pytest.mark.parametrize("path", [
+        "/api/health", "/api/summary", "/api/expenses/summary", "/api/margin/overview",
+        "/api/jobs", "/api/dashboard/batch",
+    ])
+    def test_every_api_route_is_under_api_gate(self, path):
+        route = _route(path) or _route(path, method="POST")
+        assert route is not None, f"route {path} not found"
+        assert api_gate in _all_dep_calls(route.dependant), \
+            f"{path} is not under api_gate — auth surface drifted"
 
     @pytest.mark.parametrize("path", ["/api/jobs", "/api/sync/stats", "/api/warehouse/status", "/api/bronze/stats"])
     def test_admin_ops_endpoints_require_admin(self, path):
         route = _route(path)
         assert route is not None
-        assert require_admin in _all_dep_calls(route.dependant)
+        assert require_admin in _all_dep_calls(route.dependant), \
+            f"{path} dropped require_admin — admin→user downgrade regression"
 
     def test_admin_endpoint_403_for_non_admin(self, client, monkeypatch):
         """A logged-in viewer (not a hardcoded admin) is forbidden from /api/jobs."""

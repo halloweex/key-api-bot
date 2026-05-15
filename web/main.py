@@ -15,7 +15,7 @@ from slowapi.errors import RateLimitExceeded
 from web.config import STATIC_DIR, STATIC_V2_DIR, VERSION
 from web.ratelimit import limiter
 from web.routes import api, pages, auth, chat, batch, websocket
-from web.routes.auth import require_user
+from web.routes.auth import api_gate
 from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
 from bot.database import init_database
 from core.duckdb_store import get_store, close_store
@@ -119,10 +119,13 @@ STATIC_V2_DIR.mkdir(exist_ok=True)
 app.mount("/static-v2", StaticFiles(directory=str(STATIC_V2_DIR)), name="static-v2")
 
 # Include routers (pages router LAST — it has a catch-all /{path:path})
-app.include_router(auth.router)  # Auth routes first (login, logout, callback)
-app.include_router(api.router, prefix="/api")  # sub-routers gate themselves (see api/__init__.py)
-# Batch endpoint exposes the same business data as the API — require a session.
-app.include_router(batch.router, prefix="/api", dependencies=[Depends(require_user)])
+# api_gate is the SINGLE authentication point for /api/*: any new endpoint
+# under /api inherits it automatically. The only public paths are listed in
+# PUBLIC_API_PATHS in web/routes/auth.py — one set to audit.
+_api_gate = [Depends(api_gate)]
+app.include_router(auth.router)  # /login, /logout, /auth/* — explicitly public
+app.include_router(api.router, prefix="/api", dependencies=_api_gate)
+app.include_router(batch.router, prefix="/api", dependencies=_api_gate)
 app.include_router(websocket.router)  # WebSocket routes (no /api prefix) — self-gated
 app.include_router(chat.router, prefix="/api")  # chat/search endpoints gate themselves (require_admin)
 app.include_router(pages.router)  # SPA catch-all must be last
