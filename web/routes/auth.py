@@ -250,11 +250,14 @@ async def _resolve_session(session: str | None) -> dict | None:
         except Exception as e:
             logger.warning(f"DuckDB user check failed, falling back to SQLite: {e}")
 
-        # Fallback to SQLite during migration
+        # Fallback to SQLite during migration. DuckDB is unreachable here, so
+        # we cannot refresh the role — downgrade to 'viewer' as a fail-safe
+        # rather than trusting the (possibly stale) role baked into the cookie.
+        # A demoted admin should not retain admin during a DuckDB outage.
         access = check_user_access(user_id)
         if not access['authorized']:
             return None
-
+        session_data['role'] = 'viewer'
         return session_data
     except (BadSignature, SignatureExpired):
         logger.warning("Invalid or expired session signature")
