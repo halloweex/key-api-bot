@@ -270,6 +270,42 @@ class TestTelegramHmac:
         assert "hmac.compare_digest" in inspect.getsource(auth_service)
 
 
+# ─── WebApp auth: HttpOnly cookie set server-side, no token leaks in body ────
+
+class TestWebappAuthHardening:
+    def test_login_page_has_no_inline_scripts(self, client):
+        """CSP drops 'unsafe-inline' from script-src — login.html must be clean.
+
+        Regression guard: a previous commit broke /login by leaving an inline
+        <script> block that the new CSP refuses to execute. Telegram WebApp
+        auto-auth ended up hung. Externalising the script fixed it; this test
+        pins the invariant so it doesn't drift back.
+        """
+        import re
+        r = client.get("/login")
+        assert r.status_code == 200
+        tags = re.findall(r"<script\b[^>]*>", r.text)
+        inline = [t for t in tags if "src=" not in t]
+        assert not inline, f"inline <script> in /login breaks CSP: {inline}"
+
+    def test_webapp_auth_error_body_does_not_leak_session(self, client):
+        """/auth/webapp must NEVER include a session-token field in its body.
+
+        Previously the success path returned {"success": True, "session": "<token>"}
+        and the client set it via document.cookie — defeating HttpOnly. The
+        endpoint now sets the cookie server-side and returns only {success}.
+        Error paths must also not leak any tokenish field.
+        """
+        # Missing initData
+        r = client.post("/auth/webapp", json={})
+        assert r.status_code == 400
+        assert "session" not in r.json()
+        # Garbage initData (fails HMAC verify)
+        r = client.post("/auth/webapp", json={"initData": "garbage"})
+        assert r.status_code == 401
+        assert "session" not in r.json()
+
+
 # ─── #13  SPA catch-all blocks path traversal ─────────────────────────────────
 
 class TestPathTraversal:
