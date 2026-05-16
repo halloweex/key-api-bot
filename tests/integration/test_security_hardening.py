@@ -141,15 +141,28 @@ class TestAuthorizationStructure:
         assert PUBLIC_API_PATHS == {"/api/health"}, \
             "PUBLIC_API_PATHS drifted — every entry must be a deliberate, audited exception"
 
-    @pytest.mark.parametrize("path", [
-        "/api/health", "/api/summary", "/api/expenses/summary", "/api/margin/overview",
-        "/api/jobs", "/api/dashboard/batch",
-    ])
-    def test_every_api_route_is_under_api_gate(self, path):
-        route = _route(path) or _route(path, method="POST")
-        assert route is not None, f"route {path} not found"
-        assert api_gate in _all_dep_calls(route.dependant), \
-            f"{path} is not under api_gate — auth surface drifted"
+    def test_every_api_route_is_under_api_gate(self):
+        """Iterate ALL registered /api/* routes and assert each carries api_gate.
+
+        Previously this was a hand-curated path list of 6 spot-checks; a new
+        endpoint added on a router that escapes the include-level gate (the
+        chat router was such a case) would not be caught. Now we walk the
+        live route table — every /api/* route must have api_gate in its
+        resolved dependency tree, period.
+        """
+        from starlette.routing import Route as _Route
+        leaked = []
+        for r in app.routes:
+            if not isinstance(r, _Route):
+                continue
+            path = getattr(r, "path", "")
+            if not path.startswith("/api/"):
+                continue
+            if api_gate not in _all_dep_calls(r.dependant):
+                methods = ",".join(sorted(getattr(r, "methods", set()) or {"?"}))
+                leaked.append(f"{methods} {path}")
+        assert not leaked, \
+            "audit-invariant drift — /api/* routes outside api_gate:\n  " + "\n  ".join(leaked)
 
     @pytest.mark.parametrize("path", ["/api/jobs", "/api/sync/stats", "/api/warehouse/status", "/api/bronze/stats"])
     def test_admin_ops_endpoints_require_admin(self, path):

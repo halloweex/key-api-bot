@@ -6,17 +6,15 @@ Provides:
 - Chat endpoint (LLM-powered)
 - SSE streaming for chat responses
 """
-import os
 import json
 from typing import Optional
-from fastapi import APIRouter, Query, Depends, HTTPException, Request
+from fastapi import APIRouter, Query, HTTPException, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from web.ratelimit import limiter  # single app-wide limiter instance
 from web.services.search_service import get_search_service
 from web.services.chat_service import get_chat_service
-from web.routes.auth import require_admin
 from core.observability import get_logger
 from core.config import config
 
@@ -24,20 +22,12 @@ logger = get_logger(__name__)
 
 router = APIRouter(tags=["chat"])
 
-# Dev mode - skip auth for LOCAL development only. Hard-disabled in production
-# (DASHBOARD_URL is https) so a stray DEV_MODE=1 in a prod .env cannot open up
-# the LLM/search endpoints to the world.
-_IS_PROD = os.getenv("DASHBOARD_URL", "").startswith("https://")
-DEV_MODE = os.getenv("DEV_MODE", "").lower() in ("1", "true", "yes") and not _IS_PROD
-if os.getenv("DEV_MODE", "").lower() in ("1", "true", "yes") and _IS_PROD:
-    logger.critical("DEV_MODE is set but ignored — refusing to bypass auth on a production (https) deployment")
-
-
-async def require_admin_or_dev(request: Request) -> dict:
-    """Allow access in dev mode, otherwise require admin."""
-    if DEV_MODE:
-        return {"user_id": 0, "username": "dev"}
-    return await require_admin(request)
+# Auth is enforced at the router include level in web/main.py:
+#   Depends(api_gate)      — valid session for every /api/* endpoint
+#   Depends(require_admin) — chat/search expose LLM cost + PII; admin-only
+# The previous DEV_MODE bypass was removed: it was dead code under api_gate
+# (which already requires a session) and was a footgun if accidentally
+# enabled in prod with DASHBOARD_URL set incorrectly.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
