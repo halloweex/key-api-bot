@@ -149,20 +149,26 @@ async def webapp_auth(request: Request):
 
     Receives initData from Telegram.WebApp.initData and verifies it.
     Used when dashboard is opened via MenuButtonWebApp.
+
+    The session cookie is set server-side with HttpOnly so JS can never read
+    or exfiltrate it (was previously returned in the JSON body and set via
+    `document.cookie`, defeating HttpOnly).
     """
+    from fastapi.responses import JSONResponse
+
     try:
         body = await request.json()
         init_data = body.get('initData', '')
     except Exception:
-        return {"success": False, "error": "Invalid request body"}
+        return JSONResponse({"success": False, "error": "Invalid request body"}, status_code=400)
 
     if not init_data:
-        return {"success": False, "error": "No initData provided"}
+        return JSONResponse({"success": False, "error": "No initData provided"}, status_code=400)
 
     # Verify the WebApp initData
     user_data = verify_webapp_auth(init_data)
     if not user_data:
-        return {"success": False, "error": "Invalid WebApp data"}
+        return JSONResponse({"success": False, "error": "Invalid WebApp data"}, status_code=401)
 
     # Check if user has access (pass user_data to create/update user record)
     user_id = int(user_data['id'])
@@ -179,7 +185,10 @@ async def webapp_auth(request: Request):
     if not access['authorized']:
         status = access['status']
         logger.info(f"WebApp user {user_id} denied - status: {status}")
-        return {"success": False, "error": "Not authorized", "status": status}
+        return JSONResponse(
+            {"success": False, "error": "Not authorized", "status": status},
+            status_code=403,
+        )
 
     # Get user role
     role = access.get('role', 'viewer')
@@ -194,14 +203,21 @@ async def webapp_auth(request: Request):
         'auth_date': str(user_data['auth_date'])
     }
     session_data = create_session_data(auth_data, role=role)
-
-    # Sign session data
     signed_session = session_serializer.dumps(session_data)
 
     logger.info(f"WebApp user {user_id} (@{user_data.get('username', 'unknown')}) authenticated")
 
-    # Return success with session cookie value (client will set it)
-    response = {"success": True, "session": signed_session}
+    # Set the cookie server-side with HttpOnly — the JSON body returns
+    # nothing sensitive, just a success flag, so client can simply redirect.
+    response = JSONResponse({"success": True})
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=signed_session,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=COOKIE_SECURE,
+    )
     return response
 
 
