@@ -5,36 +5,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 
-from web.config import TEMPLATES_DIR, STATIC_V2_DIR, VERSION
-from web.routes.auth import get_current_user, require_auth
+from web.config import STATIC_V2_DIR
+from web.routes.auth import require_auth
 
 router = APIRouter(tags=["pages"])
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-
-
-# ─── V1 Dashboard (Jinja2 Templates) - Legacy ─────────────────────────────────
-
-@router.get("/v1", response_class=HTMLResponse)
-async def dashboard_v1(request: Request):
-    """Serve the legacy v1 dashboard page (protected)."""
-    # Check authentication
-    redirect = await require_auth(request)
-    if redirect:
-        return redirect
-
-    # Get current user for display
-    user = await get_current_user(request)
-
-    return templates.TemplateResponse(
-        request,
-        "dashboard.html",
-        {
-            "version": VERSION,
-            "user": user,
-        },
-    )
 
 
 # ─── React SPA ────────────────────────────────────────────────────────────────
