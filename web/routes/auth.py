@@ -8,7 +8,7 @@ from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
-from core.config import config
+from core.config import config, is_production_url
 from core.permissions import is_hardcoded_admin
 from web.services.auth_service import (
     verify_telegram_auth,
@@ -48,9 +48,9 @@ SESSION_COOKIE = "dashboard_session"
 # Session duration (7 days)
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 
-# Use secure cookies in production (HTTPS) - auto-detect from DASHBOARD_URL
+# Use secure cookies in production (HTTPS) — case-insensitive auto-detect.
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")
-COOKIE_SECURE = DASHBOARD_URL.startswith("https://") or os.getenv("COOKIE_SECURE", "false").lower() == "true"
+COOKIE_SECURE = is_production_url(DASHBOARD_URL) or os.getenv("COOKIE_SECURE", "false").lower() == "true"
 
 
 @router.get("/login")
@@ -266,10 +266,11 @@ async def _resolve_session(session: str | None) -> dict | None:
         except Exception as e:
             logger.warning(f"DuckDB user check failed, falling back to SQLite: {e}")
 
-        # Fallback to SQLite during migration. DuckDB is unreachable here, so
-        # we cannot refresh the role — downgrade to 'viewer' as a fail-safe
-        # rather than trusting the (possibly stale) role baked into the cookie.
-        # A demoted admin should not retain admin during a DuckDB outage.
+        # Fallback to SQLite. Reached either when DuckDB raised above OR when
+        # the user is not in the DuckDB `users` table (migration period).
+        # In either case we can't trust a fresh role from DuckDB, so downgrade
+        # to 'viewer' rather than honouring the role baked into the cookie
+        # — a demoted admin must not retain admin via stale cookie data.
         access = check_user_access(user_id)
         if not access['authorized']:
             return None

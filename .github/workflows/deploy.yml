@@ -106,6 +106,13 @@ jobs:
             set -e
             cd /opt/key-api-bot
             git fetch origin
+            # Surface any uncommitted/untracked state about to be clobbered —
+            # this once silently overwrote a host-side tweak to weekly_compact.sh.
+            DIRTY="$(git status --porcelain)"
+            if [ -n "$DIRTY" ]; then
+              echo "::warning::server tree dirty before reset --hard:"
+              echo "$DIRTY"
+            fi
             git reset --hard "$GH_SHA"
             # Stop monitor container if running (disabled in docker-compose.yml)
             docker stop keycrm-monitor 2>/dev/null || true
