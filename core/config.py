@@ -73,8 +73,11 @@ class BotConfig:
 class WebConfig:
     """Web dashboard configuration."""
 
+    # Default empty rather than the stale AWS IP — production must set
+    # DASHBOARD_URL explicitly. An empty default makes is_production_url()
+    # return False (fail-closed for any production-gated check).
     dashboard_url: str = field(
-        default_factory=lambda: os.getenv("DASHBOARD_URL", "http://108.130.86.30")
+        default_factory=lambda: os.getenv("DASHBOARD_URL", "")
     )
     secret_key: str = field(
         default_factory=lambda: os.getenv("DASHBOARD_SECRET_KEY", "")
@@ -265,6 +268,18 @@ class ConfigurationError(Exception):
     pass
 
 
+def is_production_url(url: str | None) -> bool:
+    """Whether `url` looks like a production https URL.
+
+    Case-insensitive, whitespace-tolerant — so a typo like ``HTTPS://...``
+    or trailing whitespace cannot bypass production-gated security checks.
+    Empty / None / non-https schemes return False.
+    """
+    if not url:
+        return False
+    return url.strip().lower().startswith("https://")
+
+
 def validate_config(
     require_bot: bool = False,
     require_api: bool = True,
@@ -313,7 +328,7 @@ def validate_config(
     # CRITICAL log (handled in web/routes/auth.py).
     if (
         require_secret_key
-        and config.web.dashboard_url.startswith("https://")
+        and is_production_url(config.web.dashboard_url)
         and not config.web.secret_key
     ):
         errors.append(
