@@ -2,6 +2,7 @@ import { memo } from 'react'
 import type { AdminUser, UserRole, UserStatus } from '../types/api'
 import { BadgeSelect } from './BadgeSelect'
 import { Tr, Td } from './DataTable'
+import { UserAvatar } from './UserAvatar'
 
 type Tone = 'purple' | 'blue' | 'slate' | 'green' | 'yellow' | 'red'
 
@@ -50,12 +51,6 @@ export const UserRow = memo(function UserRow({
       ? `@${user.username}`
       : `User ${user.user_id}`
 
-  const initials = user.first_name
-    ? user.first_name.charAt(0).toUpperCase()
-    : user.username
-      ? user.username.charAt(0).toUpperCase()
-      : '?'
-
   const lastActivity = user.last_activity
     ? new Date(user.last_activity).toLocaleDateString()
     : 'Never'
@@ -64,17 +59,10 @@ export const UserRow = memo(function UserRow({
     <Tr variant="admin" faded={isUpdating}>
       <Td variant="admin">
         <div className="flex items-center gap-3">
-          {user.photo_url ? (
-            <img
-              src={user.photo_url}
-              alt={displayName}
-              className="w-9 h-9 rounded-full object-cover"
-            />
-          ) : (
-            <div className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center text-white font-semibold text-sm">
-              {initials}
-            </div>
-          )}
+          {/* UserAvatar has onError → falls back to a generated boring-avatar
+              when Telegram's userpic URL 404s (avatars change when the user
+              updates their profile photo). */}
+          <UserAvatar name={displayName} photoUrl={user.photo_url} size={36} />
           <div>
             <p className="font-medium text-slate-900">{displayName}</p>
             <p className="text-xs text-slate-500">ID: {user.user_id}</p>
