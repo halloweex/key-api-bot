@@ -64,6 +64,41 @@ def section(title: str):
 
 # ─── Phase 1: Pre-flight ────────────────────────────────────────────────────
 
+# Empirical compaction ratio: post-compact DB / source DB.
+# Observed Apr 23, 2026: 13 GB → 4.5 GB = 0.35. When a DB is bloated by MVCC
+# tombstones the ratio tends to be MORE aggressive (most bytes are dead), so
+# 0.50 is a safe upper bound that still allows compact on a 75 GB disk when
+# DB has grown to ~50 GB.
+NEW_DB_RATIO = 0.50
+
+# Fixed overhead, regardless of source size: parquet export (~50-200 MB),
+# duckdb_tmp spill files during ZSTD compression, the secondary 3 GB check
+# in phase2_import() before INSERT, and rounding slack.
+SAFETY_BUFFER_GB = 1.0
+
+
+def compute_disk_requirements(source_size_gb: float) -> float:
+    """Minimum additional free disk space required to compact safely.
+
+    Source DB already occupies its bytes on disk — those bytes are NOT counted
+    in the requirement. We only need space for new artifacts created during
+    compaction:
+
+      1. Parquet export of bronze/essential tables  → ~50-200 MB
+      2. Newly built compact DB                     → NEW_DB_RATIO × source
+
+    The source stays read-only on disk until weekly_compact.sh performs the
+    atomic swap AFTER validation passes. Worst-case peak disk usage is
+    therefore: source + parquet + new_db ≤ source × (1 + NEW_DB_RATIO) + buffer.
+
+    Returns required free space in GB (always ≥ SAFETY_BUFFER_GB so we don't
+    try to compact onto a near-full disk even when source is tiny).
+    """
+    if source_size_gb < 0:
+        raise ValueError(f"source_size_gb must be non-negative, got {source_size_gb}")
+    return source_size_gb * NEW_DB_RATIO + SAFETY_BUFFER_GB
+
+
 def preflight() -> None:
     section("PHASE 0: PRE-FLIGHT CHECKS")
 
@@ -83,13 +118,31 @@ def preflight() -> None:
     free_gb = free / (1024**3)
     log(f"Disk free: {free_gb:.1f} GB")
 
-    required_gb = source_size_gb * 0.8
-    if free_gb < required_gb:
-        log(f"Need at least {required_gb:.1f} GB free. "
-            f"Delete old backups to free space.", "ERROR")
-        sys.exit(1)
+    required_gb = compute_disk_requirements(source_size_gb)
 
-    log(f"Disk OK (need ~{required_gb:.1f} GB, have {free_gb:.1f} GB)", "OK")
+    # Operator override: set FORCE_COMPACT=1 to bypass the preflight disk check.
+    # Safe because source DB is read-only throughout phase 1 (export) and is
+    # NOT touched again until weekly_compact.sh performs the atomic swap AFTER
+    # phase 3 validation passes. If we run out of disk mid-import, the new DB
+    # is incomplete, the script exits non-zero, and weekly_compact.sh restarts
+    # services on the unchanged source DB. No data loss path.
+    force = os.getenv("FORCE_COMPACT", "").strip().lower() in {"1", "true", "yes"}
+
+    if free_gb < required_gb:
+        if force:
+            log(f"FORCE_COMPACT=1 set — bypassing preflight "
+                f"(need {required_gb:.1f} GB, have {free_gb:.1f} GB). "
+                f"Source DB stays intact; abort-mid-import is a recoverable "
+                f"no-op.", "WARN")
+        else:
+            log(f"Need at least {required_gb:.1f} GB free "
+                f"(parquet + new DB at ratio {NEW_DB_RATIO:.0%}). "
+                f"Set FORCE_COMPACT=1 to override if you accept the risk "
+                f"of abort-mid-import (no data loss; just wasted run).",
+                "ERROR")
+            sys.exit(1)
+    else:
+        log(f"Disk OK (need ~{required_gb:.1f} GB, have {free_gb:.1f} GB)", "OK")
 
 
 # ─── Phase 1: Export ─────────────────────────────────────────────────────────
