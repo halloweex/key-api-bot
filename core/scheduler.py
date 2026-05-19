@@ -641,7 +641,25 @@ class BackgroundScheduler:
             return result
 
     async def _send_bronze_alert(self, stats: Dict[str, Any]) -> None:
-        """Send Telegram alert when bronze backlog is concerning."""
+        """Send Telegram alert when bronze backlog is concerning.
+
+        Mode-gated by design: 'unprocessed' is only a meaningful signal in
+        staging mode, where the promotion job is what flips processed_at.
+        In legacy mode processed_at stays NULL by construction, so a high
+        unprocessed count is a config artifact rather than an incident.
+
+        The caller (_run_bronze_promotion) already returns early in legacy
+        mode, so this guard is defence-in-depth: it makes the function safe
+        to call from any future code path without re-introducing alert spam.
+        """
+        from core.config import config
+        if not config.sync.is_staging:
+            logger.debug(
+                f"Bronze alert suppressed in {config.sync.mode} mode "
+                f"(unprocessed={stats.get('unprocessed')})"
+            )
+            return
+
         try:
             from bot.main import send_admin_message
             unprocessed = stats["unprocessed"]
