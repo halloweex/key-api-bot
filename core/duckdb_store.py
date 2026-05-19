@@ -2939,22 +2939,55 @@ class DuckDBStore(
                 "batch_event_ids": len(all_event_ids),
             }
 
-    async def prune_bronze_events(self, retention_days: int = 7) -> int:
-        """Delete processed bronze events older than retention window.
+    async def prune_bronze_events(
+        self,
+        retention_days: int = 7,
+        mode: Optional[str] = None,
+    ) -> int:
+        """Delete old bronze events. Mode-aware retention policy.
 
-        Only deletes events that have been successfully promoted
-        (processed_at IS NOT NULL) and are older than retention_days.
+        Behaviour depends on the active sync mode:
+
+        - **staging** mode: deletes only PROCESSED events older than the
+          retention window. Unprocessed events are preserved because the
+          promotion job still needs them. This is the original H3 design.
+
+        - **legacy** mode: deletes events older than the retention window
+          regardless of processed_at. In legacy mode the promotion job is
+          inactive, so processed_at is permanently NULL — gating on it
+          would prevent the table from ever shrinking. We learned this
+          the expensive way on 2026-05-18 when bronze hit 4.4M rows and
+          blocked weekly compaction.
+
+        Args:
+            retention_days: Events older than this many days are eligible
+                for deletion.
+            mode: 'legacy' or 'staging'. If None, read from
+                core.config.config.sync.mode at call time. Passing
+                explicitly is preferred for tests and ops scripts so the
+                behaviour is reproducible regardless of env state.
 
         Returns:
             Number of rows deleted.
         """
+        if mode is None:
+            from core.config import config
+            mode = config.sync.mode
+
+        days = int(retention_days)
+        if mode == "staging":
+            where = "processed_at IS NOT NULL AND event_ts < now() - INTERVAL '{} days'".format(days)
+        elif mode == "legacy":
+            where = "event_ts < now() - INTERVAL '{} days'".format(days)
+        else:
+            raise ValueError(
+                f"prune_bronze_events: unknown mode {mode!r}; expected 'legacy' or 'staging'"
+            )
+
         async with self.connection() as conn:
-            result = conn.execute(f"""
-                DELETE FROM bronze_order_events
-                WHERE processed_at IS NOT NULL
-                  AND event_ts < now() - INTERVAL '{int(retention_days)} days'
-                RETURNING id
-            """).fetchall()
+            result = conn.execute(
+                f"DELETE FROM bronze_order_events WHERE {where} RETURNING id"
+            ).fetchall()
             return len(result)
 
     async def replay_bronze_events(self, since: Optional[datetime] = None,

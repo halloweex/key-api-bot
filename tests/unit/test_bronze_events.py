@@ -265,10 +265,10 @@ class TestPromoteBronzeToOrders:
 
 
 class TestPruneBronzeEvents:
-    """H3 Phase 5: prune old processed events."""
+    """H3 Phase 5: prune old bronze events. Behaviour is mode-aware."""
 
     @pytest.mark.asyncio
-    async def test_prune_deletes_old_processed(self, tmp_path):
+    async def test_prune_staging_deletes_old_processed(self, tmp_path):
         store = await _make_store(tmp_path)
         try:
             await store.append_bronze_events(
@@ -283,7 +283,9 @@ class TestPruneBronzeEvents:
                     "    event_ts = CURRENT_TIMESTAMP - INTERVAL '10 days'"
                 )
 
-            deleted = await store.prune_bronze_events(retention_days=7)
+            deleted = await store.prune_bronze_events(
+                retention_days=7, mode="staging"
+            )
             assert deleted == 5
 
             stats = await store.get_bronze_stats()
@@ -292,7 +294,9 @@ class TestPruneBronzeEvents:
             await store.close()
 
     @pytest.mark.asyncio
-    async def test_prune_keeps_unprocessed(self, tmp_path):
+    async def test_prune_staging_keeps_unprocessed(self, tmp_path):
+        """In staging mode, unprocessed events are protected even if old —
+        the promotion job still needs them."""
         store = await _make_store(tmp_path)
         try:
             await store.append_bronze_events(
@@ -306,7 +310,9 @@ class TestPruneBronzeEvents:
                     "SET event_ts = CURRENT_TIMESTAMP - INTERVAL '10 days'"
                 )
 
-            deleted = await store.prune_bronze_events(retention_days=7)
+            deleted = await store.prune_bronze_events(
+                retention_days=7, mode="staging"
+            )
             assert deleted == 0
 
             stats = await store.get_bronze_stats()
@@ -315,7 +321,7 @@ class TestPruneBronzeEvents:
             await store.close()
 
     @pytest.mark.asyncio
-    async def test_prune_keeps_recent_processed(self, tmp_path):
+    async def test_prune_staging_keeps_recent_processed(self, tmp_path):
         store = await _make_store(tmp_path)
         try:
             await store.append_bronze_events(
@@ -328,8 +334,103 @@ class TestPruneBronzeEvents:
                     "UPDATE bronze_order_events SET processed_at = CURRENT_TIMESTAMP"
                 )
 
-            deleted = await store.prune_bronze_events(retention_days=7)
+            deleted = await store.prune_bronze_events(
+                retention_days=7, mode="staging"
+            )
             assert deleted == 0
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_prune_legacy_deletes_old_regardless_of_processed_at(self, tmp_path):
+        """Legacy mode regression test for the 2026-05-18 incident.
+
+        In legacy mode the promotion job is inactive so processed_at stays
+        NULL forever. The staging-mode prune logic (`WHERE processed_at IS
+        NOT NULL`) would keep ALL rows and let bronze grow to 4M+ — which
+        is exactly what happened on production and blocked weekly compact.
+
+        The fix: in legacy mode prune by event_ts only.
+        """
+        store = await _make_store(tmp_path)
+        try:
+            await store.append_bronze_events(
+                [_sample_order(i) for i in range(5)], source="sync_delta"
+            )
+
+            # Backdate event_ts but leave processed_at = NULL (legacy state).
+            async with store.connection() as conn:
+                conn.execute(
+                    "UPDATE bronze_order_events "
+                    "SET event_ts = CURRENT_TIMESTAMP - INTERVAL '10 days'"
+                )
+
+            deleted = await store.prune_bronze_events(
+                retention_days=7, mode="legacy"
+            )
+            assert deleted == 5, (
+                "legacy mode must prune by age regardless of processed_at, "
+                "otherwise the table grows forever"
+            )
+
+            stats = await store.get_bronze_stats()
+            assert stats["total"] == 0
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_prune_legacy_keeps_recent(self, tmp_path):
+        """Even in legacy mode, recent events stay (replay window)."""
+        store = await _make_store(tmp_path)
+        try:
+            await store.append_bronze_events(
+                [_sample_order(i) for i in range(3)], source="sync_delta"
+            )
+            # All events are fresh (event_ts = now), none are processed.
+
+            deleted = await store.prune_bronze_events(
+                retention_days=7, mode="legacy"
+            )
+            assert deleted == 0
+
+            stats = await store.get_bronze_stats()
+            assert stats["total"] == 3
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_prune_rejects_unknown_mode(self, tmp_path):
+        store = await _make_store(tmp_path)
+        try:
+            with pytest.raises(ValueError, match="unknown mode"):
+                await store.prune_bronze_events(retention_days=7, mode="unknown")
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_prune_mode_default_reads_config(self, tmp_path):
+        """When mode is not passed explicitly, default reads from config.
+        SyncConfig is a frozen dataclass; patch the *module-level* `config`
+        with a stand-in object exposing the same `.sync.mode` attribute."""
+        from unittest.mock import patch
+        from types import SimpleNamespace
+
+        store = await _make_store(tmp_path)
+        try:
+            await store.append_bronze_events(
+                [_sample_order(i) for i in range(3)], source="sync_delta"
+            )
+            # Backdate but no processed_at — would NOT be pruned in staging.
+            async with store.connection() as conn:
+                conn.execute(
+                    "UPDATE bronze_order_events "
+                    "SET event_ts = CURRENT_TIMESTAMP - INTERVAL '10 days'"
+                )
+
+            fake = SimpleNamespace(sync=SimpleNamespace(mode="legacy"))
+            with patch("core.config.config", fake):
+                deleted = await store.prune_bronze_events(retention_days=7)
+            assert deleted == 3, "legacy default from config should prune by age"
         finally:
             await store.close()
 

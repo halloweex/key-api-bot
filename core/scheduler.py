@@ -621,18 +621,23 @@ class BackgroundScheduler:
                 return result
 
     async def _run_bronze_prune(self) -> Dict[str, Any]:
-        """Delete processed bronze events older than 7 days."""
+        """Delete old bronze events. Retention rule is mode-aware:
+        staging keeps unprocessed; legacy prunes by age only."""
         with correlation_context() as corr_id:
-            logger.info("Starting bronze prune job")
-
+            from core.config import config
             from core.duckdb_store import get_store
+
+            logger.info(f"Starting bronze prune job (mode={config.sync.mode})")
             store = await get_store()
 
-            deleted = await store.prune_bronze_events(retention_days=7)
+            deleted = await store.prune_bronze_events(
+                retention_days=7,
+                mode=config.sync.mode,
+            )
 
-            result = {"deleted": deleted}
+            result = {"deleted": deleted, "mode": config.sync.mode}
             if deleted > 0:
-                logger.info(f"Bronze prune: deleted {deleted} old events")
+                logger.info(f"Bronze prune: deleted {deleted} old events ({config.sync.mode} mode)")
             return result
 
     async def _send_bronze_alert(self, stats: Dict[str, Any]) -> None:
