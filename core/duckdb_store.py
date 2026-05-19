@@ -3379,6 +3379,69 @@ class DuckDBStore(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# BRONZE INVARIANT EVALUATOR
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Maximum bronze row count tolerated per (mode, shadow_enabled) combination.
+# Upper bounds — exceeding them is a config-drift signal, not capacity.
+# The actual normal state in legacy-no-shadow is 0 rows; the threshold gives
+# one day of slop in case a prune cycle was missed.
+BRONZE_INVARIANT_THRESHOLDS = {
+    # (mode, shadow_enabled) : (max_total, max_unprocessed)
+    ("legacy",  False): (10_000,     10_000),       # writes disabled; expect ~0
+    ("legacy",  True):  (1_000_000,  1_000_000),    # opt-in shadow log; prune keeps bounded
+    ("staging", False): (1_000_000,  100_000),      # promotion drains unprocessed
+    ("staging", True):  (1_000_000,  100_000),      # shadow flag has no effect in staging
+}
+
+
+def evaluate_bronze_invariant(
+    stats: Dict[str, Any],
+    mode: str,
+    shadow_enabled: bool,
+) -> Tuple[bool, Optional[str]]:
+    """Pure function. Return (healthy, reason).
+
+    Invariants the system must hold:
+
+    - **legacy + no shadow**: writes disabled (SyncConfig.should_write_bronze).
+      bronze.total should be ~0. Millions → prune broken OR sync writing
+      despite the flag OR mode/shadow drifted in env.
+
+    - **legacy + shadow opt-in**: writes enabled, prune is mode-aware.
+      Grows daily but 7-day retention keeps it bounded.
+
+    - **staging**: writes always; promotion drains unprocessed. Growing
+      unprocessed → promotion falling behind.
+
+    Thresholds are deliberately generous (≈one day of slop) so the alert
+    is a "something is wrong" signal rather than a noisy capacity gauge.
+    """
+    key = (mode, bool(shadow_enabled))
+    if key not in BRONZE_INVARIANT_THRESHOLDS:
+        return False, (
+            f"unknown mode/shadow combination: "
+            f"mode={mode!r}, shadow={shadow_enabled!r}"
+        )
+
+    max_total, max_unprocessed = BRONZE_INVARIANT_THRESHOLDS[key]
+    total = stats.get("total", 0)
+    unprocessed = stats.get("unprocessed", 0)
+
+    if total > max_total:
+        return False, (
+            f"bronze.total={total:,} exceeds threshold {max_total:,} "
+            f"for mode={mode}, shadow={shadow_enabled}"
+        )
+    if unprocessed > max_unprocessed:
+        return False, (
+            f"bronze.unprocessed={unprocessed:,} exceeds threshold "
+            f"{max_unprocessed:,} for mode={mode}, shadow={shadow_enabled}"
+        )
+    return True, None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SINGLETON INSTANCE
 # ═══════════════════════════════════════════════════════════════════════════════
 
