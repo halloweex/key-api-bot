@@ -237,20 +237,27 @@ class SyncService:
         """
         from core.config import config
 
-        # Bronze write — always happens regardless of mode
-        try:
-            bronze_count = await self.store.append_bronze_events(orders, bronze_source)
-            if bronze_count:
-                logger.debug(
-                    f"Bronze: appended {bronze_count} events (source={bronze_source})"
+        # Bronze write is the ingestion path in staging mode, and an opt-in
+        # audit log in legacy mode (LEGACY_BRONZE_SHADOW). Default-off in
+        # legacy avoids unbounded growth of an audit log no code reads.
+        bronze_count = 0
+        if config.sync.should_write_bronze:
+            try:
+                bronze_count = await self.store.append_bronze_events(
+                    orders, bronze_source,
                 )
-        except Exception as e:
-            if config.sync.is_staging:
-                # In staging mode bronze is the ONLY ingest path — failure is critical
-                logger.error(f"Bronze append FAILED in staging mode: {e}")
-                raise
-            else:
-                logger.warning(f"Bronze append failed (non-blocking): {e}")
+                if bronze_count:
+                    logger.debug(
+                        f"Bronze: appended {bronze_count} events "
+                        f"(source={bronze_source}, mode={config.sync.mode})"
+                    )
+            except Exception as e:
+                if config.sync.is_staging:
+                    # Staging: bronze is the ONLY ingest path — failure is critical
+                    logger.error(f"Bronze append FAILED in staging mode: {e}")
+                    raise
+                else:
+                    logger.warning(f"Bronze append failed (non-blocking): {e}")
 
         if config.sync.is_staging:
             # Staging mode: bronze is the only write path.
