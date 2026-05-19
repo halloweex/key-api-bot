@@ -217,6 +217,10 @@ class SyncConfig:
     def is_staging(self) -> bool:
         return self.mode == "staging"
 
+    @property
+    def is_legacy(self) -> bool:
+        return self.mode == "legacy"
+
 
 @dataclass(frozen=True)
 class AppConfig:
