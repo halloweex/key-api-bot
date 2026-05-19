@@ -15,6 +15,7 @@ Features:
 """
 import asyncio
 import threading
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass, field
@@ -285,6 +286,20 @@ class BackgroundScheduler:
             description="Delete old processed bronze events (7-day retention)",
             func=self._run_bronze_prune,
             trigger=CronTrigger(hour=4, minute=0),
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Job: Bronze invariant check (every 6 hours)
+        # Catches config drift before it accumulates into a compaction blocker.
+        # The 2026-05-18 incident (4.4M rows) would have fired this within 6h
+        # instead of going undetected for 30 days.
+        self._add_job(
+            job_id="bronze_invariant_check",
+            name="Bronze Invariant Check",
+            description="Verify bronze row count matches mode invariant",
+            func=self._run_bronze_invariant_check,
+            trigger=IntervalTrigger(hours=6),
             max_instances=1,
             coalesce=True,
         )
@@ -619,6 +634,65 @@ class BackgroundScheduler:
                     await self._send_bronze_alert(stats)
 
                 return result
+
+    _bronze_invariant_last_alert: float = 0.0
+    _BRONZE_INVARIANT_ALERT_COOLDOWN_S = 21600  # 6 hours — match check interval
+
+    async def _run_bronze_invariant_check(self) -> Dict[str, Any]:
+        """Assert bronze table size matches the (mode, shadow_enabled) invariant.
+
+        Catches: prune disabled/broken, sync writing despite the opt-out,
+        env-var drift between deploys, accidental staging→legacy mode flip
+        without backlog cleanup. Alert sent at most once per cooldown
+        window to avoid spam if the breach persists across cycles.
+        """
+        with correlation_context() as corr_id:
+            from core.config import config
+            from core.duckdb_store import get_store, evaluate_bronze_invariant
+
+            store = await get_store()
+            stats = await store.get_bronze_stats()
+            mode = config.sync.mode
+            shadow = bool(config.sync.legacy_bronze_shadow)
+
+            healthy, reason = evaluate_bronze_invariant(stats, mode, shadow)
+
+            result = {
+                "healthy": healthy,
+                "reason": reason,
+                "mode": mode,
+                "shadow_enabled": shadow,
+                "total": stats["total"],
+                "unprocessed": stats["unprocessed"],
+            }
+
+            if healthy:
+                logger.debug(
+                    f"Bronze invariant OK: mode={mode}, shadow={shadow}, "
+                    f"total={stats['total']:,}"
+                )
+                return result
+
+            logger.warning(f"Bronze invariant VIOLATED: {reason}")
+
+            # Throttle Telegram alerts so a persistent breach doesn't spam.
+            now = time.time()
+            since_last = now - BackgroundScheduler._bronze_invariant_last_alert
+            if since_last >= self._BRONZE_INVARIANT_ALERT_COOLDOWN_S:
+                BackgroundScheduler._bronze_invariant_last_alert = now
+                try:
+                    from bot.main import send_admin_message
+                    await send_admin_message(
+                        "⚠️ *Bronze invariant violated*\n"
+                        f"`mode={mode}`, `shadow={shadow}`\n"
+                        f"total: {stats['total']:,} | unprocessed: {stats['unprocessed']:,}\n\n"
+                        f"{reason}\n\n"
+                        "Likely cause: prune misconfigured, or sync writing despite opt-out."
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send bronze invariant alert: {e}")
+
+            return result
 
     async def _run_bronze_prune(self) -> Dict[str, Any]:
         """Delete old bronze events. Retention rule is mode-aware:
