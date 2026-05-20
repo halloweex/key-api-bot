@@ -1291,6 +1291,76 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (reconciliation_log): {e}")
 
+        # Migration: Data Quality framework (Layer 1+2) — run+diff schema.
+        # Replaces single-row-per-check pattern with proper run/diff
+        # parent-child for trend and audit. Old reconciliation_log stays.
+        try:
+            self._connection.execute(
+                "CREATE SEQUENCE IF NOT EXISTS data_quality_run_seq START 1"
+            )
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS data_quality_runs (
+                    run_id BIGINT PRIMARY KEY DEFAULT(nextval('data_quality_run_seq')),
+                    started_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    ended_at TIMESTAMP WITH TIME ZONE,
+                    as_of TIMESTAMP WITH TIME ZONE NOT NULL,
+                    window_start DATE NOT NULL,
+                    window_end DATE NOT NULL,
+                    layer VARCHAR NOT NULL,          -- 'integrity' | 'reconciliation' | 'combined'
+                    status VARCHAR NOT NULL,          -- 'PASS' | 'WARN' | 'CRITICAL' | 'FAILED'
+                    integrity_issues_count INTEGER DEFAULT 0,
+                    discrepancies_count INTEGER DEFAULT 0,
+                    critical_count INTEGER DEFAULT 0,
+                    warn_count INTEGER DEFAULT 0,
+                    api_calls_used INTEGER DEFAULT 0,
+                    duration_ms INTEGER,
+                    error_message VARCHAR
+                )
+            """)
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dqr_started_at ON data_quality_runs(started_at DESC)"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dqr_layer ON data_quality_runs(layer)"
+            )
+
+            # Child table: layer-1 issues
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS data_quality_issues (
+                    run_id BIGINT NOT NULL,
+                    check_name VARCHAR NOT NULL,
+                    table_name VARCHAR NOT NULL,
+                    severity VARCHAR NOT NULL,
+                    count INTEGER NOT NULL,
+                    sample_ids VARCHAR,    -- JSON array
+                    description VARCHAR
+                )
+            """)
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dqi_run ON data_quality_issues(run_id)"
+            )
+
+            # Child table: layer-2 discrepancies
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS data_quality_diffs (
+                    run_id BIGINT NOT NULL,
+                    month VARCHAR NOT NULL,        -- 'YYYY-MM'
+                    source_id INTEGER NOT NULL,
+                    diff_class VARCHAR NOT NULL,
+                    field VARCHAR NOT NULL,
+                    dk_value DOUBLE NOT NULL,
+                    kc_value DOUBLE NOT NULL,
+                    severity VARCHAR NOT NULL,
+                    order_ids VARCHAR              -- JSON array, may be NULL
+                )
+            """)
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dqd_run ON data_quality_diffs(run_id)"
+            )
+            logger.debug("Migration: data_quality_* tables added/verified")
+        except Exception as e:
+            logger.debug(f"Migration note (data_quality_*): {e}")
+
         # Migration: Fix sequences after EXPORT/IMPORT compaction.
         # DuckDB doesn't support ALTER SEQUENCE, and IMPORT resets sequences to
         # START value (1) even though tables already have rows. Fix by DROP+CREATE
@@ -1298,6 +1368,7 @@ class DuckDBStore(
         _seq_table_map = [
             ("warehouse_refresh_seq", "warehouse_refreshes", "id"),
             ("reconciliation_seq", "reconciliation_log", "id"),
+            ("data_quality_run_seq", "data_quality_runs", "run_id"),
             ("seq_stock_movements_id", "stock_movements", "id"),
             ("seq_buyer_contacts_id", "buyer_contacts", "id"),
             ("seq_manual_expenses_id", "manual_expenses", "id"),

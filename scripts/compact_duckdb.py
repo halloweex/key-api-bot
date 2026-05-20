@@ -387,6 +387,8 @@ def phase2_import(manifest: dict) -> float:
         "seq_report_history_id": ("report_history", "id"),
         "warehouse_refresh_seq": ("warehouse_refreshes", "id"),
         "reconciliation_seq": ("reconciliation_log", "id"),
+        "data_quality_run_seq": ("data_quality_runs", "run_id"),
+        "seq_bronze_order_events_id": ("bronze_order_events", "id"),
     }
     for seq_name, saved_val in seq_values.items():
         try:
