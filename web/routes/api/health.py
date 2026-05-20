@@ -215,6 +215,52 @@ async def get_duckdb_stats(request: Request):
         return {"status": "error", "error": str(e)}
 
 
+@router.get("/health/data-quality")
+@limiter.limit("60/minute")
+async def get_data_quality_health(request: Request):
+    """Latest Data Quality run summaries (integrity + reconciliation).
+
+    Returns the most recent row from data_quality_runs for each layer, so
+    on-call can see at a glance:
+      - status: PASS / WARN / CRITICAL / FAILED
+      - last_run: when the watchdog last produced a verdict
+      - counts: how many issues / discrepancies were found
+    """
+    from core.data_quality import fetch_latest_run, fetch_run_diffs, fetch_run_issues
+
+    try:
+        store = await get_store()
+        async with store.connection() as conn:
+            integrity = fetch_latest_run(conn, layer="integrity")
+            reconciliation = fetch_latest_run(conn, layer="reconciliation")
+
+            # Include top-N drilldown for the recon run so admins can see
+            # WHICH (month, source) drifted without making a second call.
+            reconciliation_diffs = []
+            if reconciliation:
+                reconciliation_diffs = fetch_run_diffs(
+                    conn, reconciliation["run_id"], limit=20,
+                )
+            integrity_issues = []
+            if integrity:
+                integrity_issues = fetch_run_issues(
+                    conn, integrity["run_id"], limit=20,
+                )
+
+        return {
+            "integrity": {
+                "last_run": integrity,
+                "issues": integrity_issues,
+            },
+            "reconciliation": {
+                "last_run": reconciliation,
+                "diffs": reconciliation_diffs,
+            },
+        }
+    except Exception as e:
+        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+
+
 @router.get("/metrics", response_model=MetricsResponse)
 @limiter.limit("60/minute")
 async def get_metrics_endpoint(request: Request):
