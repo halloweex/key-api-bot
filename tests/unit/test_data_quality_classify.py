@@ -286,3 +286,72 @@ class TestMaterialThresholdsCoverage:
         explicit thresholds rather than silent inheritance."""
         expected = {"orders", "qty", "revenue", "returns_count", "returns_revenue"}
         assert set(MATERIAL_THRESHOLDS.keys()) == expected
+
+
+# ─── format_alert_message ─────────────────────────────────────────────────────
+
+
+from datetime import date
+
+from core.data_quality import IntegrityIssue, format_alert_message
+
+
+class TestFormatAlertMessage:
+    def test_empty_run_produces_clean_message(self):
+        msg = format_alert_message("combined", Severity.INFO, [], [])
+        assert "Data Quality INFO" in msg
+        assert "combined" in msg
+        # No issue/discrepancy sections
+        assert "Issues" not in msg
+        assert "Discrepancies" not in msg
+
+    def test_critical_icon_used(self):
+        d = Discrepancy(
+            month="2026-04", source_id=1,
+            diff_class=DiscrepancyClass.MISSING_IN_DK,
+            field="orders", dk_value=0, kc_value=5,
+            severity=Severity.CRITICAL,
+        )
+        msg = format_alert_message("reconciliation", Severity.CRITICAL, [], [d])
+        assert msg.startswith("🚨")
+        assert "MISSING_IN_DK" in msg
+        assert "2026-04" in msg
+        assert "src=1" in msg
+
+    def test_window_included_when_provided(self):
+        msg = format_alert_message(
+            "reconciliation", Severity.INFO, [], [],
+            window=(date(2026, 2, 1), date(2026, 5, 1)),
+        )
+        assert "2026-02-01" in msg
+        assert "2026-05-01" in msg
+
+    def test_issue_sample_ids_in_message(self):
+        i = IntegrityIssue(
+            check_name="fk_orphan_order_products_order_id",
+            table_name="order_products",
+            severity=Severity.CRITICAL,
+            count=3, sample_ids=(88888, 99999),
+            description="3 orphans",
+        )
+        msg = format_alert_message("integrity", Severity.CRITICAL, [i], [])
+        assert "88888" in msg
+        assert "fk_orphan" in msg
+
+    def test_truncation_when_many_discrepancies(self):
+        diffs = [
+            Discrepancy(
+                month=f"2026-0{m}", source_id=1,
+                diff_class=DiscrepancyClass.TOTAL_DRIFT,
+                field="orders", dk_value=100, kc_value=99,
+                severity=Severity.CRITICAL,
+            )
+            for m in range(1, 6)
+        ] * 5  # 25 diffs
+        msg = format_alert_message(
+            "reconciliation", Severity.CRITICAL, [], diffs, max_lines=5,
+        )
+        assert "…and" in msg
+        # Only ~5 diff lines shown
+        diff_lines = [line for line in msg.split("\n") if line.startswith("• ")]
+        assert 5 <= len(diff_lines) <= 7  # +/- 2 slack for issue lines

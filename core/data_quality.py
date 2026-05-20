@@ -561,6 +561,96 @@ def persist_run(
     return run_id
 
 
+def fetch_run_diffs(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+    """Read all discrepancies for a run. For health/UI surface and digest."""
+    rows = conn.execute("""
+        SELECT month, source_id, diff_class, field,
+               dk_value, kc_value, severity, order_ids
+        FROM data_quality_diffs
+        WHERE run_id = ?
+        ORDER BY severity DESC, month, source_id
+        LIMIT ?
+    """, [run_id, limit]).fetchall()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append({
+            "month": r[0], "source_id": int(r[1]),
+            "diff_class": r[2], "field": r[3],
+            "dk_value": float(r[4]), "kc_value": float(r[5]),
+            "severity": r[6],
+            "order_ids": json.loads(r[7]) if r[7] else [],
+        })
+    return out
+
+
+def fetch_run_issues(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+    rows = conn.execute("""
+        SELECT check_name, table_name, severity, count, sample_ids, description
+        FROM data_quality_issues
+        WHERE run_id = ?
+        ORDER BY severity DESC, check_name
+        LIMIT ?
+    """, [run_id, limit]).fetchall()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append({
+            "check_name": r[0], "table_name": r[1],
+            "severity": r[2], "count": int(r[3] or 0),
+            "sample_ids": json.loads(r[4]) if r[4] else [],
+            "description": r[5],
+        })
+    return out
+
+
+def format_alert_message(
+    layer: str,
+    severity: Severity,
+    issues: List[IntegrityIssue],
+    discrepancies: List[Discrepancy],
+    *,
+    window: Optional[Tuple[date, date]] = None,
+    max_lines: int = 12,
+) -> str:
+    """Build a Telegram-friendly summary. Pure function — no I/O.
+
+    Shape:
+        🚨 Data Quality CRITICAL (reconciliation)
+        Window: 2026-02 .. 2026-05
+        ── Issues (1) ──
+        • fk_orphan_order_products_order_id: 3 orphans (sample: 88888)
+        ── Discrepancies (2) ──
+        • 2026-04 / src=1: orders DK=565 KC=566 (MISSING_IN_DK)
+        ...
+    """
+    icon = {"CRITICAL": "🚨", "WARN": "⚠️", "INFO": "ℹ️"}[severity.value]
+    lines: List[str] = [f"{icon} *Data Quality {severity.value}* ({layer})"]
+    if window:
+        lines.append(f"Window: {window[0].isoformat()} .. {window[1].isoformat()}")
+
+    if issues:
+        lines.append(f"── Issues ({len(issues)}) ──")
+        for i in issues[:max_lines // 2]:
+            samples = (
+                f" (sample: {', '.join(str(s) for s in i.sample_ids[:3])})"
+                if i.sample_ids else ""
+            )
+            lines.append(f"• {i.check_name}: {i.count}{samples}")
+        if len(issues) > max_lines // 2:
+            lines.append(f"  …and {len(issues) - max_lines // 2} more")
+
+    if discrepancies:
+        lines.append(f"── Discrepancies ({len(discrepancies)}) ──")
+        for d in discrepancies[:max_lines]:
+            lines.append(
+                f"• {d.month} / src={d.source_id}: {d.field} "
+                f"DK={d.dk_value:.0f} KC={d.kc_value:.0f} ({d.diff_class.value})"
+            )
+        if len(discrepancies) > max_lines:
+            lines.append(f"  …and {len(discrepancies) - max_lines} more")
+
+    return "\n".join(lines)
+
+
 def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Read the most recent run row. Used by health endpoint."""
     where = ""

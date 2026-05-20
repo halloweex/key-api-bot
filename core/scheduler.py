@@ -304,8 +304,36 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Data Quality — Layer 1 integrity (every 6h)
+        # Cheap DB-only scans (PK uniqueness, FK orphans, value domains).
+        # Catches schema drift and corruption before it propagates.
+        self._add_job(
+            job_id="dq_integrity_check",
+            name="DQ: Integrity",
+            description="Layer 1 internal integrity scan (PK/FK/NULL/domain)",
+            func=self._run_dq_integrity,
+            trigger=IntervalTrigger(hours=6),
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Job: Data Quality — Layer 2 reconciliation (daily at 5 AM)
+        # Aggregate (month, source) comparison vs KeyCRM with 2h watermark.
+        # Classifies discrepancies, persists to data_quality_runs, alerts
+        # admin on CRITICAL severity.
+        self._add_job(
+            job_id="dq_reconciliation",
+            name="DQ: Reconciliation",
+            description="Layer 2 source-of-truth reconciliation vs KeyCRM (90d window)",
+            func=self._run_dq_reconciliation,
+            trigger=CronTrigger(hour=5, minute=0),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Reconciliation check (daily at 6 AM)
-        # Compares order counts between DuckDB and KeyCRM API for last 14 days
+        # Legacy job — preserved for backward compatibility; the new
+        # dq_reconciliation job above is the source of truth for alerts.
         self._add_job(
             job_id="reconciliation_check",
             name="Reconciliation Check",
@@ -594,6 +622,199 @@ class BackgroundScheduler:
 
             result = {"checked_days": len(results), "ok": ok, "drift": drift}
             logger.info("Reconciliation check job complete", extra=result)
+            return result
+
+    # ─── Data Quality framework (Layer 1 + 2) ─────────────────────────────────
+
+    # Alert throttling — independent timers per layer so an integrity issue
+    # doesn't suppress a reconciliation alert in the same cooldown window.
+    _dq_last_alert: Dict[str, float] = {}
+    _DQ_ALERT_COOLDOWN_S = 86400  # 24 h
+
+    async def _send_dq_alert_throttled(
+        self, layer: str, message: str,
+    ) -> bool:
+        """Send a Data Quality alert with 24h per-layer cooldown.
+        Returns True if alert was sent, False if throttled or failed."""
+        now = time.time()
+        last = BackgroundScheduler._dq_last_alert.get(layer, 0.0)
+        if now - last < self._DQ_ALERT_COOLDOWN_S:
+            logger.info(
+                f"DQ alert ({layer}) throttled: "
+                f"last sent {int(now - last)}s ago"
+            )
+            return False
+        try:
+            from bot.main import send_admin_message
+            await send_admin_message(message)
+            BackgroundScheduler._dq_last_alert[layer] = now
+            return True
+        except Exception as e:
+            logger.warning(f"DQ alert send failed ({layer}): {e}")
+            return False
+
+    async def _run_dq_integrity(self) -> Dict[str, Any]:
+        """Layer-1 integrity scan. Pure DB reads, no external I/O."""
+        from datetime import datetime, timezone
+        from core.data_quality import (
+            Severity,
+            check_internal_integrity,
+            format_alert_message,
+            overall_severity,
+            persist_run,
+        )
+        from core.duckdb_store import get_store
+
+        with correlation_context() as corr_id:
+            started_at = datetime.now(timezone.utc)
+            logger.info("DQ Layer-1 integrity scan starting")
+
+            store = await get_store()
+            error_message = None
+            issues = []
+            try:
+                async with store.connection() as conn:
+                    issues = check_internal_integrity(conn)
+            except Exception as e:
+                error_message = f"{type(e).__name__}: {e}"
+                logger.exception("DQ integrity scan raised")
+
+            ended_at = datetime.now(timezone.utc)
+            window_day = ended_at.date()
+
+            # Persist in a separate transaction (uses store wrapper).
+            run_id = None
+            try:
+                async with store.connection() as conn:
+                    run_id = persist_run(
+                        conn,
+                        started_at=started_at, ended_at=ended_at,
+                        as_of=ended_at,
+                        window_start=window_day, window_end=window_day,
+                        layer="integrity",
+                        issues=issues, discrepancies=[],
+                        error_message=error_message,
+                    )
+            except Exception as e:
+                logger.exception(f"DQ integrity persist failed: {e}")
+
+            sev = overall_severity(issues, [])
+            if sev == Severity.CRITICAL and not error_message:
+                msg = format_alert_message("integrity", sev, issues, [])
+                await self._send_dq_alert_throttled("integrity", msg)
+
+            result = {
+                "run_id": run_id,
+                "issues_count": len(issues),
+                "severity": sev.value,
+                "duration_ms": int((ended_at - started_at).total_seconds() * 1000),
+                "error": error_message,
+            }
+            logger.info("DQ Layer-1 integrity scan complete", extra=result)
+            return result
+
+    async def _run_dq_reconciliation(self) -> Dict[str, Any]:
+        """Layer-2 source-of-truth reconciliation vs KeyCRM.
+
+        Pulls (month, source) rollup for the last 90 days from both DuckDB
+        and KeyCRM with a 2-hour watermark, classifies discrepancies,
+        persists, and alerts on CRITICAL.
+        """
+        from datetime import datetime, timedelta, timezone
+        from zoneinfo import ZoneInfo
+        from core.data_quality import (
+            Severity,
+            classify_discrepancies,
+            format_alert_message,
+            overall_severity,
+            persist_run,
+        )
+        from core.duckdb_store import get_store
+        from core.reconciliation_io import (
+            duckdb_monthly_source_rollup,
+            keycrm_monthly_source_rollup,
+        )
+
+        WATERMARK_HOURS = 2
+        WINDOW_DAYS = 90
+
+        with correlation_context() as corr_id:
+            started_at = datetime.now(timezone.utc)
+            kyiv_now = started_at.astimezone(ZoneInfo("Europe/Kyiv"))
+            as_of = started_at - timedelta(hours=WATERMARK_HOURS)
+            window_end = kyiv_now.date()
+            window_start = window_end - timedelta(days=WINDOW_DAYS)
+
+            logger.info(
+                f"DQ Layer-2 reconciliation starting "
+                f"window={window_start}..{window_end} as_of={as_of.isoformat()}"
+            )
+
+            store = await get_store()
+            error_message = None
+            issues: list = []
+            discrepancies: list = []
+            api_calls = 0
+
+            try:
+                # 1. DuckDB rollup
+                async with store.connection() as conn:
+                    dk_rollup = duckdb_monthly_source_rollup(
+                        conn, window_start, window_end, watermark=as_of,
+                    )
+
+                # 2. KeyCRM rollup (counts API calls)
+                kc_rollup, api_calls = await keycrm_monthly_source_rollup(
+                    window_start, window_end, watermark=as_of,
+                )
+
+                # 3. Classify (pure)
+                discrepancies = classify_discrepancies(dk_rollup, kc_rollup)
+                logger.info(
+                    f"DQ reconciliation: dk_cells={len(dk_rollup)} "
+                    f"kc_cells={len(kc_rollup)} discrepancies={len(discrepancies)}"
+                )
+            except Exception as e:
+                error_message = f"{type(e).__name__}: {e}"
+                logger.exception("DQ reconciliation raised")
+
+            ended_at = datetime.now(timezone.utc)
+
+            # 4. Persist
+            run_id = None
+            try:
+                async with store.connection() as conn:
+                    run_id = persist_run(
+                        conn,
+                        started_at=started_at, ended_at=ended_at,
+                        as_of=as_of,
+                        window_start=window_start, window_end=window_end,
+                        layer="reconciliation",
+                        issues=issues, discrepancies=discrepancies,
+                        api_calls_used=api_calls,
+                        error_message=error_message,
+                    )
+            except Exception as e:
+                logger.exception(f"DQ reconciliation persist failed: {e}")
+
+            # 5. Alert on CRITICAL severity
+            sev = overall_severity(issues, discrepancies)
+            if sev == Severity.CRITICAL and not error_message:
+                msg = format_alert_message(
+                    "reconciliation", sev, issues, discrepancies,
+                    window=(window_start, window_end),
+                )
+                await self._send_dq_alert_throttled("reconciliation", msg)
+
+            result = {
+                "run_id": run_id,
+                "discrepancies_count": len(discrepancies),
+                "severity": sev.value,
+                "duration_ms": int((ended_at - started_at).total_seconds() * 1000),
+                "api_calls_used": api_calls,
+                "error": error_message,
+            }
+            logger.info("DQ Layer-2 reconciliation complete", extra=result)
             return result
 
     # ─── Bronze Promotion & Prune ────────────────────────────────────────────
