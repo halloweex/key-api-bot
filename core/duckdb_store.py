@@ -1361,6 +1361,26 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (data_quality_*): {e}")
 
+        # Migration: disk samples for the growth watchdog.
+        # Tiny table — one row per 6h sample, retained ~14 days = ~56 rows.
+        # No sequence: composite of sampled_at is enough; nobody queries by id.
+        try:
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS disk_samples (
+                    sampled_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    db_size_mb DOUBLE NOT NULL,
+                    disk_pct_used DOUBLE NOT NULL,
+                    disk_free_gb DOUBLE NOT NULL
+                )
+            """)
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_disk_samples_at "
+                "ON disk_samples(sampled_at DESC)"
+            )
+            logger.debug("Migration: disk_samples table added/verified")
+        except Exception as e:
+            logger.debug(f"Migration note (disk_samples): {e}")
+
         # Migration: Fix sequences after EXPORT/IMPORT compaction.
         # DuckDB doesn't support ALTER SEQUENCE, and IMPORT resets sequences to
         # START value (1) even though tables already have rows. Fix by DROP+CREATE

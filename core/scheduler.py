@@ -317,6 +317,20 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Disk growth watchdog (every 6h)
+        # Captures a (db_size, disk_pct) sample and compares against the
+        # closest sample from ~24h ago. Alerts on capacity threshold
+        # (75% / 90%) and growth rate (10% / 25% per 24h).
+        self._add_job(
+            job_id="disk_growth_check",
+            name="Disk Growth Watchdog",
+            description="Sample disk + DB size, alert on capacity or growth-rate breach",
+            func=self._run_disk_growth_check,
+            trigger=IntervalTrigger(hours=6),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Data Quality — Layer 2 reconciliation (daily at 5 AM)
         # Aggregate (month, source) comparison vs KeyCRM with 2h watermark.
         # Classifies discrepancies, persists to data_quality_runs, alerts
@@ -711,6 +725,93 @@ class BackgroundScheduler:
                 "error": error_message,
             }
             logger.info("DQ Layer-1 integrity scan complete", extra=result)
+            return result
+
+    # ─── Disk growth watchdog ─────────────────────────────────────────────────
+
+    _disk_alert_last_sent: float = 0.0
+    _DISK_ALERT_COOLDOWN_S = 86400  # 24h
+
+    async def _run_disk_growth_check(self) -> Dict[str, Any]:
+        """Sample disk + DB state, alert on capacity or growth rate breach.
+
+        Independent of dq_* jobs: this is about RESOURCES (disk filling,
+        DB ballooning), not data quality. Co-located in scheduler only
+        because the cadence is the same (6h).
+        """
+        from core.disk_monitor import (
+            evaluate_disk_growth,
+            fetch_sample_at_age,
+            insert_sample,
+            prune_old_samples,
+            sample_disk_state,
+        )
+        from core.duckdb_store import get_store
+
+        with correlation_context() as corr_id:
+            store = await get_store()
+            sample = sample_disk_state(str(store.db_path))
+
+            # Compare against ~24h-ago sample. None → bootstrap, skip growth check.
+            async with store.connection() as conn:
+                history = fetch_sample_at_age(conn, hours=24, slack_hours=2)
+                insert_sample(conn, sample)
+                # Keep the table tiny: ~56 rows max (14 days x 4 samples/day).
+                deleted = prune_old_samples(conn, retention_days=14)
+
+            db_24h_ago = history["db_size_mb"] if history else None
+
+            alert = evaluate_disk_growth(
+                disk_pct_used=sample["disk_pct_used"],
+                disk_free_gb=sample["disk_free_gb"],
+                db_size_mb=sample["db_size_mb"],
+                db_size_24h_ago_mb=db_24h_ago,
+            )
+
+            result = {
+                "db_size_mb": sample["db_size_mb"],
+                "disk_pct_used": sample["disk_pct_used"],
+                "disk_free_gb": sample["disk_free_gb"],
+                "db_24h_ago_mb": db_24h_ago,
+                "pruned_old_samples": deleted,
+                "alert_fired": False,
+            }
+
+            if alert is None:
+                logger.debug(
+                    f"Disk OK: {sample['disk_pct_used']:.1f}% used, "
+                    f"DB={sample['db_size_mb']:.0f} MB"
+                )
+                return result
+
+            logger.warning(f"Disk watchdog: {alert.severity.value} — {alert.reason}")
+
+            # Throttle: avoid paging admins every 6h while the breach persists.
+            now = time.time()
+            since = now - BackgroundScheduler._disk_alert_last_sent
+            if since < self._DISK_ALERT_COOLDOWN_S:
+                logger.info(
+                    f"Disk alert throttled — last sent {int(since)}s ago "
+                    f"(cooldown {self._DISK_ALERT_COOLDOWN_S}s)"
+                )
+                return result
+
+            BackgroundScheduler._disk_alert_last_sent = now
+            try:
+                from bot.main import send_admin_message
+                icon = "🚨" if alert.severity.value == "CRITICAL" else "⚠️"
+                msg = (
+                    f"{icon} *Disk watchdog: {alert.severity.value}*\n"
+                    f"{alert.reason}\n\n"
+                    f"DB: {alert.db_size_mb:,.0f} MB\n"
+                    f"Disk: {alert.disk_pct_used:.1f}% used, "
+                    f"{alert.disk_free_gb:.1f} GB free"
+                )
+                await send_admin_message(msg)
+                result["alert_fired"] = True
+            except Exception as e:
+                logger.warning(f"Disk alert send failed: {e}")
+
             return result
 
     async def _run_dq_reconciliation(self) -> Dict[str, Any]:
