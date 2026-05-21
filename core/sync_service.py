@@ -1124,14 +1124,20 @@ class SyncService:
                 )
 
         # ── 4. Auto-resync stale orders from already-fetched data ──
+        # CRITICAL: force_update=True here. We arrived at this branch
+        # specifically because reconciliation detected drift (status or
+        # grand_total mismatch). KeyCRM does not bump updated_at on status
+        # changes, so the skip-if-unchanged guard in upsert_orders would
+        # otherwise refuse to write — defeating the whole point of
+        # reconciliation.
         resync_count = 0
         if stale_order_ids and auto_resync:
             stale_orders = [api_full[oid] for oid in set(stale_order_ids) if oid in api_full]
             if stale_orders:
                 resync_count, _ = await self._upsert_orders_with_expenses(
-                    stale_orders, bronze_source="reconciliation",
+                    stale_orders, force_update=True, bronze_source="reconciliation",
                 )
-                logger.info(f"Resynced {resync_count} stale orders")
+                logger.info(f"Resynced {resync_count} stale orders (force_update=True)")
                 await self.store.mark_warehouse_dirty(None)
 
         ok_count = sum(1 for r in results if r["status"] == "ok")
