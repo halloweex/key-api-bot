@@ -2544,28 +2544,49 @@ class DuckDBStore(
                 WHERE id = ?
             """
 
-            # Batch-check which IDs already exist (one query, no ON CONFLICT)
+            # Batch-fetch (id, updated_at) for every existing target row so the
+            # skip-decider can compare timestamps without per-row SELECTs.
+            # See core.upsert_decider.should_update_order for the contract.
+            from core.upsert_decider import should_update_order
+
             all_ids = [int(p[0]) for p in insert_rows]
             placeholders = ",".join("?" * len(all_ids))
-            existing = set(
-                row[0] for row in conn.execute(
-                    f"SELECT id FROM orders WHERE id IN ({placeholders})", all_ids
-                ).fetchall()
-            )
+            existing_rows = conn.execute(
+                f"SELECT id, updated_at FROM orders WHERE id IN ({placeholders})",
+                all_ids,
+            ).fetchall()
+            existing: Dict[int, Any] = {int(r[0]): r[1] for r in existing_rows}
 
             success_ids: List[int] = []
+            updated_ids: List[int] = []
+            skipped_count = 0
             failed: List[tuple] = []  # (order_id, error_str)
             for params in insert_rows:
                 order_id = int(params[0])
+                incoming_updated_at = params[6]  # tuple index matches insert_sql
+                existing_updated_at = existing.get(order_id) if order_id in existing else None
+
                 try:
                     if order_id in existing:
+                        if not should_update_order(
+                            existing_updated_at, incoming_updated_at,
+                            force=force_update,
+                        ):
+                            # Identity write — same updated_at, nothing to do.
+                            # Counts toward success because the row IS in the
+                            # desired state (just not freshly written).
+                            success_ids.append(order_id)
+                            skipped_count += 1
+                            continue
                         conn.execute(update_sql, [
                             params[1], params[2], params[3], params[4], params[5],
                             params[6], params[7], params[8], params[9], params[10],
                             order_id,
                         ])
+                        updated_ids.append(order_id)
                     else:
                         conn.execute(insert_sql, list(params))
+                        updated_ids.append(order_id)
                     success_ids.append(order_id)
                 except (duckdb.TransactionException, duckdb.ConstraintException) as e:
                     failed.append((order_id, str(e)))
@@ -2574,20 +2595,22 @@ class DuckDBStore(
                     except Exception:
                         pass
 
-            # 2. Delete stale products only for orders we actually updated.
-            # Failed orders keep their existing products — the orders row wasn't
-            # updated either, so consistency is preserved.
-            if not skip_products and success_ids:
-                placeholders = ",".join("?" * len(success_ids))
+            # 2. Delete stale products ONLY for rows we actually wrote.
+            # Skipped rows (skip-if-unchanged) keep their existing products
+            # untouched — their order_products are already correct because the
+            # order itself didn't change. This was the bulk of the 1440x churn.
+            # Failed rows likewise keep their existing products for consistency.
+            if not skip_products and updated_ids:
+                placeholders = ",".join("?" * len(updated_ids))
                 conn.execute(
                     f"DELETE FROM order_products WHERE order_id IN ({placeholders})",
-                    success_ids,
+                    updated_ids,
                 )
 
-            # 3. Insert products for successful orders only
-            if not skip_products and product_rows and success_ids:
-                success_set = set(success_ids)
-                products_to_insert = [p for p in product_rows if p["order_id"] in success_set]
+            # 3. Insert products for actually-updated orders only
+            if not skip_products and product_rows and updated_ids:
+                updated_set = set(updated_ids)
+                products_to_insert = [p for p in product_rows if p["order_id"] in updated_set]
                 if products_to_insert:
                     conn.execute("BEGIN TRANSACTION")
                     try:
@@ -2614,7 +2637,11 @@ class DuckDBStore(
                 )
 
             count = len(success_ids)
-            logger.info(f"Upserted {count}/{len(insert_rows)} orders to DuckDB")
+            n_written = len(updated_ids)
+            logger.info(
+                f"Upserted {count}/{len(insert_rows)} orders to DuckDB "
+                f"(written={n_written}, skipped_unchanged={skipped_count})"
+            )
             return count
 
     # ─── H3: bronze order events (append-only audit log) ───────────────────────
