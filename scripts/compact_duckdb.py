@@ -546,6 +546,83 @@ def phase3_validate(manifest: dict) -> None:
     log("\nALL VALIDATIONS PASSED", "OK")
 
 
+# ─── Phase 4: Atomic swap (opt-in) ───────────────────────────────────────────
+
+
+def atomic_swap(data_dir: Path) -> None:
+    """Move the freshly-built clean DB into the canonical position.
+
+    Sequence (all on a single mounted filesystem — rename is atomic):
+        1. analytics.duckdb       → analytics.duckdb.old   (preserve rollback)
+        2. rm analytics.duckdb.wal                          (stale, was for old DB)
+        3. analytics_clean.duckdb → analytics.duckdb        (canonical)
+
+    Refuses to clobber an existing .old backup — that file is the only
+    rollback path if the new DB later turns out to be bad. The caller
+    (operator or weekly_compact.sh) must clean up the previous .old
+    before invoking compact again.
+
+    This function is unit-tested with a tmpdir and stub files — see
+    tests/unit/test_compact_atomic_swap.py.
+    """
+    source = data_dir / "analytics.duckdb"
+    backup = data_dir / "analytics.duckdb.old"
+    wal = data_dir / "analytics.duckdb.wal"
+    clean = data_dir / "analytics_clean.duckdb"
+
+    if not clean.exists():
+        raise RuntimeError(
+            f"atomic_swap precondition: {clean.name} missing — "
+            f"phase 2 did not produce a clean DB."
+        )
+    if backup.exists():
+        raise RuntimeError(
+            f"atomic_swap precondition: {backup.name} already exists. "
+            f"Previous compact's rollback file is still on disk. "
+            f"Remove it explicitly before swapping again."
+        )
+
+    if source.exists():
+        source.rename(backup)
+    if wal.exists():
+        wal.unlink()
+    clean.rename(source)
+
+
+def phase4_swap_if_enabled() -> None:
+    """Perform the file swap when COMPACT_AUTO_SWAP=1 is set.
+
+    Without the env var, prints the manual instructions (legacy behaviour).
+    With it, completes the swap atomically inside the script so an
+    operator's SSH disconnect after phase 3 cannot leave services pointed
+    at the old DB. Service restart is still the wrapper's job (sidecar
+    has no Docker access).
+    """
+    auto_swap = os.getenv("COMPACT_AUTO_SWAP", "").strip().lower() in {"1", "true", "yes"}
+
+    if not auto_swap:
+        section("COMPACTION COMPLETE — READY FOR SWAP")
+        log("Set COMPACT_AUTO_SWAP=1 to perform the swap automatically.\n")
+        log("Manual commands to run on the host:")
+        log("  mv /opt/key-api-bot/data/analytics.duckdb /opt/key-api-bot/data/analytics.duckdb.old")
+        log("  rm -f /opt/key-api-bot/data/analytics.duckdb.wal")
+        log("  mv /opt/key-api-bot/data/analytics_clean.duckdb /opt/key-api-bot/data/analytics.duckdb")
+        log("  cd /opt/key-api-bot && docker compose up -d")
+        return
+
+    section("PHASE 4: ATOMIC SWAP (COMPACT_AUTO_SWAP=1)")
+    try:
+        atomic_swap(DATA_DIR)
+    except RuntimeError as e:
+        log(f"Swap aborted: {e}", "ERROR")
+        sys.exit(1)
+
+    log("Swap complete:", "OK")
+    log(f"  • analytics.duckdb    = {NEW_DB.name} (new, canonical)")
+    log(f"  • analytics.duckdb.old = previous DB, kept as rollback")
+    log("Service restart is the wrapper's job — sidecar has no docker access.")
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -559,22 +636,7 @@ def main():
     manifest = phase1_export()
     phase2_import(manifest)
     phase3_validate(manifest)
-
-    section("COMPACTION COMPLETE — READY FOR SWAP")
-    log("Run these commands on the host:\n")
-    log("  # 1. Atomic file swap")
-    log("  mv /opt/key-api-bot/data/analytics.duckdb /opt/key-api-bot/data/analytics.duckdb.old")
-    log("  rm -f /opt/key-api-bot/data/analytics.duckdb.wal")
-    log("  mv /opt/key-api-bot/data/analytics_clean.duckdb /opt/key-api-bot/data/analytics.duckdb")
-    log("")
-    log("  # 2. Start web (rebuilds Silver/Gold on first sync)")
-    log("  cd /opt/key-api-bot && docker compose up -d web")
-    log("")
-    log("  # 3. Verify dashboard at https://ksanalytics.duckdns.org")
-    log("")
-    log("  # 4. Cleanup (after dashboard confirmed working)")
-    log("  rm -rf /opt/key-api-bot/data/analytics.duckdb.old")
-    log("  rm -rf /opt/key-api-bot/data/export_parquet")
+    phase4_swap_if_enabled()
 
 
 if __name__ == "__main__":

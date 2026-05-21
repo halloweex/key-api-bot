@@ -71,10 +71,15 @@ if ! docker compose stop --timeout 30 web bot meilisearch; then
 fi
 sleep 3
 
-log "Running compact in sidecar..."
+log "Running compact in sidecar (auto-swap enabled)..."
+# COMPACT_AUTO_SWAP=1: sidecar performs the atomic file swap inside the
+# script after Phase 3 validation passes. Removes the May 2026 failure
+# mode where the operator's SSH died between validation and the manual
+# `mv` commands, leaving services pointed at the old DB for 12h.
 if ! docker run -d --name duckdb-compact \
     --memory=6500m \
-    -e DUCKDB_MEMORY_LIMIT=3GB \
+    -e DUCKDB_MEMORY_LIMIT=5GB \
+    -e COMPACT_AUTO_SWAP=1 \
     -v "$DATA_DIR:/app/data" \
     --env-file "$COMPOSE_DIR/.env" \
     halloweex/keycrm-web:latest \
@@ -106,17 +111,17 @@ if ! docker logs duckdb-compact 2>&1 | grep -q "ALL VALIDATIONS PASSED"; then
     abort "compact validation did not pass"
 fi
 
-if [ ! -f "$DATA_DIR/analytics_clean.duckdb" ]; then
-    abort "analytics_clean.duckdb missing after compact"
+# Phase 4 (atomic swap) ran inside the sidecar. Verify the post-condition:
+# canonical analytics.duckdb is the freshly-compacted file, .old is the backup.
+if [ -f "$DATA_DIR/analytics_clean.duckdb" ]; then
+    abort "analytics_clean.duckdb still present after auto-swap — sidecar swap failed"
+fi
+if [ ! -f "$DATA_DIR/analytics.duckdb" ]; then
+    abort "analytics.duckdb missing after swap"
 fi
 
-CLEAN_SIZE=$(du -h "$DATA_DIR/analytics_clean.duckdb" | cut -f1)
-log "Compact OK. Clean DB: $CLEAN_SIZE"
-
-log "Atomic swap..."
-mv "$DATA_DIR/analytics.duckdb" "$DATA_DIR/analytics.duckdb.old"
-rm -f "$DATA_DIR/analytics.duckdb.wal"
-mv "$DATA_DIR/analytics_clean.duckdb" "$DATA_DIR/analytics.duckdb"
+NEW_SIZE=$(du -h "$DATA_DIR/analytics.duckdb" | cut -f1)
+log "Auto-swap OK. New canonical DB: $NEW_SIZE"
 
 log "Starting services..."
 start_services
