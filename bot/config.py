@@ -45,7 +45,7 @@ DEFAULT_TIMEZONE = "Europe/Kyiv"
 TELEGRAM_MANAGER_IDS = ['19', '22', '4', '16']
 
 # ─── Status IDs ─────────────────────────────────────────────────────────────
-RETURN_STATUS_IDS = [19, 22, 21, 23]  # Returned/Canceled orders
+RETURN_STATUS_IDS = [15, 18, 19, 21, 22, 23]  # KeyCRM lost/cancel group (group_id=6) — excluded from revenue
 
 # ─── Source Mapping ─────────────────────────────────────────────────────────
 SOURCE_MAPPING = {
