@@ -8,7 +8,7 @@ Covers:
   before it overwrites the working model / feeds revenue_predictions; and
   negative/NaN predictions are never persisted.
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -17,6 +17,7 @@ import pandas as pd
 import pytest
 
 from core.duckdb_store import DuckDBStore, MAX_VALIDATION_RETRIES
+from core.data_quality import _freshness_check, Severity
 
 
 async def _make_store(tmp_path: Path) -> DuckDBStore:
@@ -107,6 +108,48 @@ class TestRefreshSelfHeal:
         is_dirty, _ = await store.consume_warehouse_dirty()
         assert is_dirty is False, "must STOP retrying past the bound"
         assert any("CRITICAL" in a for a in alerts)
+
+
+# ─────────────────────── A12-2 / A7-1 freshness ───────────────────────
+
+class TestFreshnessCheck:
+    @pytest.mark.asyncio
+    async def test_stale_catalog_fires_fresh_orders_pass(self, tmp_path):
+        store = await _make_store(tmp_path)
+        now = datetime(2026, 5, 20, 22, 0, 0).astimezone()
+        async with store.connection() as conn:
+            # orders current; categories 45 days stale (the real incident).
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                ["last_sync_orders", (now - timedelta(minutes=5)).isoformat()],
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                ["last_sync_categories", (now - timedelta(days=45)).isoformat()],
+            )
+            issues = _freshness_check(conn, now=now)
+        names = {i.check_name for i in issues}
+        assert "freshness_categories" in names
+        assert "freshness_orders" not in names
+
+    @pytest.mark.asyncio
+    async def test_dead_orders_sync_is_critical(self, tmp_path):
+        store = await _make_store(tmp_path)
+        now = datetime(2026, 5, 20, 22, 0, 0).astimezone()
+        async with store.connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                ["last_sync_orders", (now - timedelta(hours=12)).isoformat()],
+            )
+            issues = _freshness_check(conn, now=now)
+        orders = [i for i in issues if i.check_name == "freshness_orders"]
+        assert orders and orders[0].severity == Severity.CRITICAL
+
+    @pytest.mark.asyncio
+    async def test_no_sync_history_is_bootstrap_no_issues(self, tmp_path):
+        store = await _make_store(tmp_path)
+        async with store.connection() as conn:
+            assert _freshness_check(conn) == []
 
 
 # ─────────────────────────── A11-6 ───────────────────────────
