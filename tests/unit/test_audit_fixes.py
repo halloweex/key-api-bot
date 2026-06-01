@@ -110,6 +110,38 @@ class TestRefreshSelfHeal:
         assert any("CRITICAL" in a for a in alerts)
 
 
+# ─────────────────────── A2-RETURNS-3 lost/cancel group ───────────────────────
+
+class TestReturnStatusGroup:
+    def test_return_set_includes_lost_group(self):
+        from core.models import OrderStatus
+        s = OrderStatus.return_statuses()
+        assert {15, 18, 19, 21, 22, 23} == {int(x) for x in s}
+
+    @pytest.mark.asyncio
+    async def test_status15_excluded_from_gold_revenue(self, tmp_path):
+        store = await _make_store(tmp_path)
+        async with store.connection() as conn:
+            _insert_order(conn, oid=1)              # status 1 → counts
+            # status 15 (not_available) — must be treated as is_return now.
+            conn.execute(
+                """INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at,
+                   created_at, updated_at, buyer_id, manager_id, manager_comment, promocode)
+                   VALUES (2, 4, 15, '999.00', '2026-01-15T10:00:00+03:00',
+                           '2026-01-15T10:00:00+03:00', '2026-01-15T10:00:00+03:00', 11, NULL, NULL, NULL)""",
+            )
+        await store.refresh_warehouse_layers(trigger="manual", changed_order_ids=None)
+        async with store.connection() as conn:
+            is_ret = conn.execute(
+                "SELECT is_return FROM silver_orders WHERE id = 2"
+            ).fetchone()[0]
+            rev = conn.execute(
+                "SELECT COALESCE(SUM(revenue),0) FROM gold_daily_revenue"
+            ).fetchone()[0]
+        assert is_ret is True
+        assert float(rev) == 100.0, "status-15 ₴999 order must be excluded from revenue"
+
+
 # ─────────────────────── A12-2 / A7-1 freshness ───────────────────────
 
 class TestFreshnessCheck:
