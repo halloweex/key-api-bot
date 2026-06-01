@@ -39,6 +39,13 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ml-train")
 # How far ahead to predict (days)
 FORECAST_HORIZON_DAYS = 60
 
+# A11-6 model-validation gate: reject a freshly trained model whose holdout
+# WAPE is implausibly bad rather than let it overwrite a working model and feed
+# the forecast. Known-good WAPE is ~27.66%; the worst naive baseline is ~low
+# 30s%. 60% is ~2x known-good and worse than every baseline, so anything above
+# is broken (a 252% MAPE model historically reached revenue_predictions).
+MODEL_WAPE_REJECT_THRESHOLD = 60.0
+
 
 def _get_holiday_features(dates: pd.Series) -> pd.DataFrame:
     """Compute holiday/event features for a series of dates.
@@ -1317,6 +1324,33 @@ class PredictionService:
                 _executor, _train_model, df
             )
 
+            # ── A11-6: model-validation gate ──
+            # Reject an implausible model BEFORE it overwrites the working model,
+            # disk artifact, or revenue_predictions. On reject we keep the
+            # previous in-memory/disk model (or stay unready on cold start) and
+            # alert — better no/old forecast than a garbage one.
+            wape = metrics.get("wape")
+            reject_reason = None
+            if wape is None or not np.isfinite(wape):
+                reject_reason = f"WAPE is not finite ({wape})"
+            elif wape > MODEL_WAPE_REJECT_THRESHOLD:
+                reject_reason = (
+                    f"WAPE {wape:.1f}% exceeds reject threshold "
+                    f"{MODEL_WAPE_REJECT_THRESHOLD}%"
+                )
+            if reject_reason:
+                logger.error(
+                    f"Model REJECTED ({sales_type}): {reject_reason}. "
+                    f"Keeping previous model (was_ready={self.is_ready}). metrics={metrics}"
+                )
+                await self._alert_model_rejected(sales_type, reject_reason, metrics)
+                return {
+                    "status": "rejected",
+                    "reason": reject_reason,
+                    "metrics": metrics,
+                    "training_rows": len(df),
+                }
+
             self._model = model
             self._metrics = metrics
             self._dow_corrections = dow_corrections
@@ -1339,6 +1373,21 @@ class PredictionService:
         except Exception as e:
             logger.error(f"Model training failed: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
+
+    async def _alert_model_rejected(
+        self, sales_type: str, reason: str, metrics: Dict[str, Any]
+    ) -> None:
+        """Notify admins that a freshly trained model was rejected (best-effort)."""
+        try:
+            from bot.main import send_admin_message
+            await send_admin_message(
+                f"⚠️ Revenue model retrain REJECTED ({sales_type}).\n"
+                f"Reason: {reason}\n"
+                f"Holdout metrics: {metrics}\n"
+                "Previous model kept; forecast unchanged."
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send model-rejected alert: {e}")
 
     async def predict_month(
         self,
@@ -1375,6 +1424,28 @@ class PredictionService:
         predictions = await loop.run_in_executor(
             _executor, _predict_future, self._model, historical_df, future_dates, dow_corrections, clip_ratio
         )
+
+        # ── A11-6: prediction-sanity gate ──
+        # Even a model that passed the WAPE gate can emit pathological future
+        # values (negative, NaN, or absurdly large vs history). Don't persist
+        # those to revenue_predictions where the dashboard would show them.
+        sane = True
+        vals = [p.get("predicted_revenue") for p in predictions]
+        if not vals or any(v is None or not np.isfinite(v) or v < 0 for v in vals):
+            sane = False
+            reason = "predictions contain None/NaN/negative values"
+        else:
+            hist_max = float(historical_df["revenue"].max()) if not historical_df.empty else 0.0
+            if hist_max > 0 and max(vals) > 3 * hist_max:
+                sane = False
+                reason = f"max prediction {max(vals):.0f} > 3x historical max {hist_max:.0f}"
+
+        if not sane:
+            logger.error(
+                f"Predictions REJECTED ({sales_type}): {reason}. Not storing."
+            )
+            await self._alert_model_rejected(sales_type, reason, self._metrics or {})
+            return predictions
 
         # Store predictions in DuckDB
         try:
