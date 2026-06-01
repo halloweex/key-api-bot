@@ -110,6 +110,47 @@ class TestRefreshSelfHeal:
         assert any("CRITICAL" in a for a in alerts)
 
 
+# ─────────────────────────── A9-1 backup ───────────────────────────
+
+class TestBackup:
+    @pytest.mark.asyncio
+    async def test_backup_produces_valid_copy(self, tmp_path):
+        store = await _make_store(tmp_path)
+        async with store.connection() as conn:
+            _insert_order(conn, oid=1)
+            _insert_order(conn, oid=2)
+        dest = tmp_path / "backups"
+        res = await store.backup_database(dest_dir=dest, keep=7)
+        assert res["status"] == "success"
+        assert res["orders"] == 2
+        backups = list(dest.glob("*.duckdb"))
+        assert len(backups) == 1
+        # backup opens read-only and has the rows
+        import duckdb
+        con = duckdb.connect(str(backups[0]), read_only=True)
+        try:
+            assert con.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 2
+        finally:
+            con.close()
+
+    @pytest.mark.asyncio
+    async def test_backup_retention_prunes_old(self, tmp_path):
+        store = await _make_store(tmp_path)
+        async with store.connection() as conn:
+            _insert_order(conn, oid=1)
+        dest = tmp_path / "backups"
+        dest.mkdir(parents=True)
+        # Pre-seed 3 fake older backups (same stem as the store db = "test");
+        # keep=2 → after a real backup, only the 2 newest remain.
+        for name in ("test-20260101-000000.duckdb",
+                     "test-20260102-000000.duckdb",
+                     "test-20260103-000000.duckdb"):
+            (dest / name).write_bytes(b"old")
+        res = await store.backup_database(dest_dir=dest, keep=2)
+        assert res["status"] == "success"
+        assert len(list(dest.glob("test-*.duckdb"))) == 2
+
+
 # ─────────────────────── A2-RETURNS-3 lost/cancel group ───────────────────────
 
 class TestReturnStatusGroup:
