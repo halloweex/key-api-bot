@@ -2474,6 +2474,104 @@ class DuckDBStore(
         except Exception as e:
             logger.warning(f"Failed to send warehouse alert: {e}")
 
+    async def backup_database(
+        self, dest_dir: "Path | str | None" = None, keep: int = 7,
+    ) -> Dict[str, Any]:
+        """Create a consistent on-disk backup of the DuckDB file (A9-1).
+
+        DuckDB has no online/hot backup. We hold the store lock (serializing
+        with every refresh/sync write), CHECKPOINT to fold the WAL into the main
+        file, then copy the file while the lock is STILL held so no writer can
+        run mid-copy — yielding a byte-consistent snapshot. The copy is offloaded
+        to the executor so the event loop is not blocked. The copy is then
+        validated read-only before older backups are pruned.
+
+        Holds the global lock for the copy duration (tens of seconds on a multi-GB
+        DB) → schedule at a low-traffic hour. For real DR the backup dir must be
+        replicated OFF-HOST (rclone/S3) — see docs/backup_runbook.md.
+
+        Protects data that is NOT recoverable from KeyCRM: revenue_goals,
+        manual_expenses, users/roles, user_preferences, celebrated_milestones.
+        """
+        import os
+        import shutil
+        import time
+
+        src = Path(self.db_path)
+        dest = Path(dest_dir) if dest_dir else src.parent / "backups"
+        dest.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(DEFAULT_TZ).strftime("%Y%m%d-%H%M%S")
+        final_path = dest / f"{src.stem}-{stamp}.duckdb"
+        tmp_path = dest / f".{src.stem}-{stamp}.duckdb.tmp"
+
+        # Disk-space guard: need room for a full second copy (+10% margin).
+        src_size = src.stat().st_size
+        free = shutil.disk_usage(dest).free
+        if free < src_size * 1.1:
+            msg = (f"Backup aborted: only {free/1e9:.1f}GB free, need "
+                   f"~{src_size*1.1/1e9:.1f}GB for {src.name}")
+            logger.error(msg)
+            await self._send_warehouse_alert(f"🚨 DB backup FAILED — {msg}")
+            return {"status": "error", "error": msg}
+
+        t0 = time.perf_counter()
+        try:
+            async with self.connection() as conn:
+                conn.execute("CHECKPOINT")
+                loop = asyncio.get_running_loop()
+                # Copy with the lock held → no concurrent writer → consistent.
+                await loop.run_in_executor(
+                    self._executor, shutil.copy2, str(src), str(tmp_path)
+                )
+
+            # Validate the copy read-only (outside the lock).
+            def _validate() -> int:
+                con = duckdb.connect(str(tmp_path), read_only=True)
+                try:
+                    return con.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+                finally:
+                    con.close()
+
+            loop = asyncio.get_running_loop()
+            orders_in_backup = await loop.run_in_executor(self._executor, _validate)
+            if not orders_in_backup or orders_in_backup <= 0:
+                raise ValueError(f"backup validation failed: orders={orders_in_backup}")
+
+            os.replace(tmp_path, final_path)
+            duration = time.perf_counter() - t0
+
+            # Retain only the newest `keep` backups.
+            backups = sorted(dest.glob(f"{src.stem}-*.duckdb"))
+            removed = 0
+            for old in backups[:-keep] if keep > 0 else []:
+                try:
+                    old.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+
+            logger.info(
+                f"DB backup OK: {final_path.name} ({src_size/1e9:.2f}GB, "
+                f"orders={orders_in_backup}, {duration:.1f}s, pruned {removed})"
+            )
+            return {
+                "status": "success",
+                "path": str(final_path),
+                "size_bytes": src_size,
+                "orders": orders_in_backup,
+                "duration_s": round(duration, 1),
+                "pruned": removed,
+            }
+        except Exception as e:
+            logger.error(f"DB backup failed: {e}", exc_info=True)
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            await self._send_warehouse_alert(f"🚨 DB backup FAILED: {e}")
+            return {"status": "error", "error": str(e)}
+
     async def get_order_count_for_date(self, date_str: str) -> int:
         """Get count of orders in DuckDB for a specific date (in Kyiv timezone)."""
         async with self.connection() as conn:
