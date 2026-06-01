@@ -1,0 +1,189 @@
+"""Tests for data-platform-fixes branch (ultra-audit STEP 5).
+
+Covers:
+- A5-1 / F3: refresh self-heal — a thrown pipeline error marks the warehouse
+  dirty (so the next scheduler tick rebuilds) and alerts, instead of leaving
+  durable cross-layer inconsistency silently; consecutive-failure bound.
+- A11-6: model-validation gate — an implausible model (high WAPE) is rejected
+  before it overwrites the working model / feeds revenue_predictions; and
+  negative/NaN predictions are never persisted.
+"""
+from datetime import date, timedelta
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from core.duckdb_store import DuckDBStore, MAX_VALIDATION_RETRIES
+
+
+async def _make_store(tmp_path: Path) -> DuckDBStore:
+    store = DuckDBStore(db_path=tmp_path / "test.duckdb")
+    await store.connect()
+    return store
+
+
+def _insert_order(conn, oid: int, buyer_id: int = 10):
+    conn.execute(
+        """INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at,
+           created_at, updated_at, buyer_id, manager_id, manager_comment, promocode)
+           VALUES (?, 4, 1, '100.00', '2026-01-15T10:00:00+03:00',
+                   '2026-01-15T10:00:00+03:00', '2026-01-15T10:00:00+03:00', ?, NULL, NULL, NULL)""",
+        [oid, buyer_id],
+    )
+
+
+# ─────────────────────────── A5-1 / F3 ───────────────────────────
+
+class TestRefreshSelfHeal:
+    @pytest.mark.asyncio
+    async def test_consecutive_failure_counter(self, tmp_path):
+        store = await _make_store(tmp_path)
+        async with store.connection() as conn:
+            # oldest → newest. Most recent two are failures.
+            for ts, vp in [
+                ("2026-01-01", True),
+                ("2026-01-02", False),
+                ("2026-01-03", True),
+                ("2026-01-04", False),
+                ("2026-01-05", False),
+            ]:
+                conn.execute(
+                    "INSERT INTO warehouse_refreshes (refreshed_at, trigger, validation_passed) "
+                    "VALUES (?, 'test', ?)",
+                    [ts + "T00:00:00+03:00", vp],
+                )
+        assert await store._count_consecutive_refresh_failures() == 2
+
+    @pytest.mark.asyncio
+    async def test_pipeline_exception_marks_dirty_and_alerts(self, tmp_path, monkeypatch):
+        store = await _make_store(tmp_path)
+        async with store.connection() as conn:
+            _insert_order(conn, oid=1)
+
+        alerts: list[str] = []
+
+        async def fake_alert(msg):
+            alerts.append(msg)
+
+        monkeypatch.setattr(store, "_send_warehouse_alert", fake_alert)
+        # Poison the date helper so the Silver INSERT SELECT throws inside the
+        # pipeline → exercises the outer except (self-heal) path.
+        monkeypatch.setattr("core.duckdb_store._date_in_kyiv", lambda col: "not valid sql (")
+
+        res = await store.refresh_warehouse_layers(trigger="manual", changed_order_ids=None)
+
+        assert res["status"] == "error"
+        is_dirty, _ = await store.consume_warehouse_dirty()
+        assert is_dirty is True, "partial-failure must mark warehouse dirty to self-heal"
+        assert alerts, "must alert on refresh error"
+        assert "error" in alerts[0].lower()
+
+    @pytest.mark.asyncio
+    async def test_exception_stops_retry_after_max(self, tmp_path, monkeypatch):
+        store = await _make_store(tmp_path)
+        async with store.connection() as conn:
+            _insert_order(conn, oid=1)
+            # Seed MAX_VALIDATION_RETRIES+1 prior consecutive failures so the
+            # bound trips → no further dirty mark, CRITICAL alert instead.
+            for i in range(MAX_VALIDATION_RETRIES + 1):
+                conn.execute(
+                    "INSERT INTO warehouse_refreshes (refreshed_at, trigger, validation_passed) "
+                    "VALUES (?, 'test', FALSE)",
+                    [f"2026-01-0{i+1}T00:00:00+03:00"],
+                )
+        alerts: list[str] = []
+
+        async def fake_alert(msg):
+            alerts.append(msg)
+
+        monkeypatch.setattr(store, "_send_warehouse_alert", fake_alert)
+        monkeypatch.setattr("core.duckdb_store._date_in_kyiv", lambda col: "not valid sql (")
+
+        await store.refresh_warehouse_layers(trigger="manual", changed_order_ids=None)
+
+        is_dirty, _ = await store.consume_warehouse_dirty()
+        assert is_dirty is False, "must STOP retrying past the bound"
+        assert any("CRITICAL" in a for a in alerts)
+
+
+# ─────────────────────────── A11-6 ───────────────────────────
+
+def _valid_training_df(n: int = 120) -> pd.DataFrame:
+    start = date(2025, 1, 1)
+    dates = [start + timedelta(days=i) for i in range(n)]
+    return pd.DataFrame({
+        "date": dates,
+        "revenue": np.linspace(10000, 20000, n),
+    })
+
+
+class TestModelValidationGate:
+    @pytest.mark.asyncio
+    async def test_high_wape_model_rejected(self, monkeypatch):
+        from core import prediction_service as ps
+        svc = ps.PredictionService()
+
+        async def fake_get_store():
+            return object()
+
+        monkeypatch.setattr("core.duckdb_store.get_store", fake_get_store)
+        monkeypatch.setattr(svc, "_query_daily_revenue",
+                            AsyncMock(return_value=_valid_training_df()))
+        # Garbage model: WAPE far above the reject threshold.
+        monkeypatch.setattr(ps, "_train_model",
+                            lambda df: (object(), {"wape": 252.88, "mape": 252.0, "mae": 1.0}, {}, 1.0))
+        monkeypatch.setattr(svc, "_alert_model_rejected", AsyncMock())
+
+        res = await svc._train_impl("retail")
+
+        assert res["status"] == "rejected"
+        assert svc._model is None, "rejected model must NOT be committed"
+        svc._alert_model_rejected.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_good_model_accepted(self, monkeypatch):
+        from core import prediction_service as ps
+        svc = ps.PredictionService()
+
+        async def fake_get_store():
+            return object()
+
+        monkeypatch.setattr("core.duckdb_store.get_store", fake_get_store)
+        monkeypatch.setattr(svc, "_query_daily_revenue",
+                            AsyncMock(return_value=_valid_training_df()))
+        sentinel_model = object()
+        monkeypatch.setattr(ps, "_train_model",
+                            lambda df: (sentinel_model, {"wape": 27.66, "mape": 30.0, "mae": 1.0}, {}, 1.0))
+        monkeypatch.setattr(svc, "_save_model", lambda: None)
+        monkeypatch.setattr(svc, "predict_month", AsyncMock(return_value=[]))
+
+        res = await svc._train_impl("retail")
+
+        assert res["status"] == "success"
+        assert svc._model is sentinel_model
+
+    @pytest.mark.asyncio
+    async def test_negative_predictions_not_stored(self, monkeypatch):
+        from core import prediction_service as ps
+        svc = ps.PredictionService()
+        svc._model = object()  # is_ready
+        svc._metrics = {"wape": 27.66}
+
+        fake_store = AsyncMock()
+        async def fake_get_store():
+            return fake_store
+        monkeypatch.setattr("core.duckdb_store.get_store", fake_get_store)
+
+        hist = _valid_training_df()
+        # predictions contain a negative value → must be rejected.
+        monkeypatch.setattr(ps, "_predict_future",
+                            lambda *a, **k: [{"date": date(2026, 2, 1), "predicted_revenue": -500.0}])
+        monkeypatch.setattr(svc, "_alert_model_rejected", AsyncMock())
+
+        await svc.predict_month(historical_df=hist, sales_type="retail")
+
+        fake_store.store_predictions.assert_not_called()
+        svc._alert_model_rejected.assert_awaited_once()
