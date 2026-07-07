@@ -6,6 +6,7 @@ import { ROASSection } from './ROASSection'
 import { PlatformBreakdownChart } from './PlatformBreakdownChart'
 import { TrafficTrendChart } from './TrafficTrendChart'
 import { TrafficTransactionsTable } from './TrafficTransactionsTable'
+import { UtmCampaignsTable } from './UtmCampaignsTable'
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,9 @@ export const TrafficPage = memo(function TrafficPage() {
       </section>
       <section aria-label={t('traffic.platformBreakdown')}>
         <PlatformBreakdownChart />
+      </section>
+      <section aria-label={t('traffic.utmCampaigns')}>
+        <UtmCampaignsTable />
       </section>
       <section aria-label={t('traffic.transactions')}>
         <TrafficTransactionsTable />

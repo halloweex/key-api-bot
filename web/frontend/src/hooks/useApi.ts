@@ -40,6 +40,7 @@ import type {
   StockAction,
   RestockAlert,
   TrafficAnalyticsResponse,
+  UtmCampaignsResponse,
   TrafficTrendResponse,
   TrafficTransactionsResponse,
   TrafficROASResponse,
@@ -120,6 +121,7 @@ export const queryKeys = {
   trafficTrend: (params: string) => ['trafficTrend', params] as const,
   trafficTransactions: (params: string) => ['trafficTransactions', params] as const,
   trafficROAS: (params: string) => ['trafficROAS', params] as const,
+  trafficUtmCampaigns: (params: string) => ['trafficUtmCampaigns', params] as const,
   // Reports
   reportSummary: (params: string) => ['reportSummary', params] as const,
   reportTopProducts: (params: string) => ['reportTopProducts', params] as const,
@@ -651,6 +653,21 @@ export function useTrafficROAS() {
   return useQuery<TrafficROASResponse>({
     queryKey: queryKeys.trafficROAS(queryParams),
     queryFn: () => api.getTrafficROAS(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useTrafficUtmCampaigns(limit: number, offset: number) {
+  const queryParams = useQueryParams()
+
+  const fullParams = new URLSearchParams(queryParams)
+  fullParams.set('limit', String(limit))
+  fullParams.set('offset', String(offset))
+  const paramsStr = fullParams.toString()
+
+  return useQuery<UtmCampaignsResponse>({
+    queryKey: [...queryKeys.trafficUtmCampaigns(queryParams), limit, offset],
+    queryFn: () => api.getTrafficUtmCampaigns(paramsStr),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

@@ -1013,6 +1013,22 @@ export interface TrafficTransactionsResponse {
   offset: number
 }
 
+export interface UtmCampaignRow {
+  campaign: string
+  utm_source: string | null
+  platform: string
+  traffic_type: string
+  orders: number
+  revenue: number
+}
+
+export interface UtmCampaignsResponse {
+  campaigns: UtmCampaignRow[]
+  total: number
+  limit: number
+  offset: number
+}
+
 // ─── ROAS / Ad Spend Types ──────────────────────────────────────────────────
 
 export interface PlatformROAS {
