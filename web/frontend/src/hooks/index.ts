@@ -58,6 +58,7 @@ export {
   useTrafficTrend,
   useTrafficTransactions,
   useTrafficROAS,
+  useTrafficUtmCampaigns,
   useCreateExpense,
   useDeleteExpense,
   // Margin Analysis

@@ -51,6 +51,7 @@ import type {
   TrafficTrendResponse,
   TrafficTransactionsResponse,
   TrafficROASResponse,
+  UtmCampaignsResponse,
   CreateExpenseRequest,
   CreateExpenseResponse,
   DeleteExpenseResponse,
@@ -667,6 +668,9 @@ export const api = {
 
   getTrafficROAS: (params: string, options?: FetchOptions) =>
     fetchApi<TrafficROASResponse>('/traffic/roas', params, options),
+
+  getTrafficUtmCampaigns: (params: string, options?: FetchOptions) =>
+    fetchApi<UtmCampaignsResponse>('/traffic/utm-campaigns', params, options),
 
   createExpense: (data: CreateExpenseRequest, options?: FetchOptions) =>
     fetchApiMutationWithBody<CreateExpenseResponse>('/expenses', 'POST', data, options),

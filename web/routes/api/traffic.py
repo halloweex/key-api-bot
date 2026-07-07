@@ -119,6 +119,37 @@ async def get_traffic_transactions(
     )
 
 
+@router.get("/traffic/utm-campaigns")
+@limiter.limit("30/minute")
+async def get_traffic_utm_campaigns(
+    request: Request,
+    period: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    source_id: Optional[int] = Query(None),
+    sales_type: Optional[str] = Query("retail"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """Get orders and revenue aggregated per UTM campaign."""
+    try:
+        validate_period(period)
+        validate_source_id(source_id)
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    start_dt = _dt.strptime(start, "%Y-%m-%d").date()
+    end_dt = _dt.strptime(end, "%Y-%m-%d").date()
+
+    store = await get_store()
+    return await store.get_traffic_utm_campaigns(
+        start_date=start_dt, end_date=end_dt, sales_type=sales_type,
+        source_id=source_id, limit=limit, offset=offset,
+    )
+
+
 @router.get("/traffic/roas")
 @limiter.limit("30/minute")
 async def get_traffic_roas(

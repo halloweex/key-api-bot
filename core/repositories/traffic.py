@@ -91,12 +91,16 @@ class TrafficMixin:
         if source in ('facebook', 'fb') and medium in ('paid', 'cpc', 'paid_social', 'sales'):
             return 'paid_confirmed', 'facebook'
 
-        # 5. TikTok Ads - campaign patterns (TOF/MOF/BOF = funnel stages)
+        # 5. Funnel-stage campaign patterns (TOF/MOF/BOF). Historically these
+        # were TikTok-only, but Facebook campaigns use the same naming —
+        # trust the source when it says facebook.
         if campaign and re.search(
             r'(?:^|[\s_|])(?:tof|mof|bof)(?:[\s_|]|$)|'
             r'\| ss \||\| retarget|\| dynamic',
             campaign
         ):
+            if source.startswith('fb') or 'facebook' in source:
+                return 'paid_confirmed', 'facebook'
             return 'paid_confirmed', 'tiktok'
 
         # 6. TikTok Ads - source + medium
@@ -374,6 +378,15 @@ class TrafficMixin:
 
         for row in rows:
             platform, traffic_type, orders, revenue = row
+
+            # Split Google into ads vs organic (numeric-campaign CPC traffic
+            # vs product_sync/free listings) — they mean different things
+            # and must not be summed under one "google" slice.
+            if platform == 'google':
+                if traffic_type in ('paid_confirmed', 'paid_likely'):
+                    platform = 'google_ads'
+                else:
+                    platform = 'google_organic'
 
             if platform not in platforms:
                 platforms[platform] = {'orders': 0, 'revenue': 0.0}
@@ -655,6 +668,96 @@ class TrafficMixin:
             evidence.append({'field': 'ttp', 'value': ttp, 'reason': 'TikTok pixel'})
 
         return evidence
+
+    async def get_traffic_utm_campaigns(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "all",
+        source_id: Optional[int] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """Aggregate orders and revenue per UTM campaign.
+
+        Groups by (utm_campaign, platform, traffic_type) so the same
+        campaign name split across platforms (or paid vs organic, e.g.
+        Google Ads numeric IDs vs product_sync) stays in separate rows.
+        Orders without a UTM campaign fall into a single '' campaign row
+        per platform/traffic_type (rendered as "no UTM" by the frontend).
+        """
+        filters = [
+            "NOT s.is_return",
+            "s.is_active_source",
+            "s.order_date >= ?",
+            "s.order_date <= ?",
+        ]
+        params: list = [start_date, end_date]
+
+        if source_id:
+            filters.append("s.source_id = ?")
+            params.append(source_id)
+
+        if sales_type != "all":
+            filters.append("s.sales_type = ?")
+            params.append(sales_type)
+
+        where_clause = " AND ".join(filters)
+
+        # GROUP BY must repeat the COALESCE expressions (see refresh_traffic_gold_layer)
+        campaign_expr = "COALESCE(u.utm_campaign, '')"
+        platform_expr = """COALESCE(u.platform,
+            CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END)"""
+        traffic_type_expr = """COALESCE(u.traffic_type,
+            CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END)"""
+
+        count_query = f"""
+            SELECT COUNT(*) FROM (
+                SELECT 1
+                FROM silver_orders s
+                LEFT JOIN silver_order_utm u ON s.id = u.order_id
+                WHERE {where_clause}
+                GROUP BY {campaign_expr}, {platform_expr}, {traffic_type_expr}
+            )
+        """
+        count_row = await self._fetch_one(count_query, params)
+        total = count_row[0] if count_row else 0
+
+        data_query = f"""
+            SELECT
+                {campaign_expr} AS campaign,
+                any_value(u.utm_source) AS utm_source,
+                {platform_expr} AS platform,
+                {traffic_type_expr} AS traffic_type,
+                COUNT(DISTINCT s.id) AS orders,
+                COALESCE(SUM(s.grand_total), 0) AS revenue
+            FROM silver_orders s
+            LEFT JOIN silver_order_utm u ON s.id = u.order_id
+            WHERE {where_clause}
+            GROUP BY {campaign_expr}, {platform_expr}, {traffic_type_expr}
+            ORDER BY revenue DESC
+            LIMIT ? OFFSET ?
+        """
+        rows = await self._fetch_all(data_query, params + [limit, offset])
+
+        campaigns = [
+            {
+                'campaign': campaign,
+                'utm_source': utm_source,
+                'platform': platform,
+                'traffic_type': traffic_type,
+                'orders': orders,
+                'revenue': round(float(revenue), 2),
+            }
+            for campaign, utm_source, platform, traffic_type, orders, revenue in rows
+        ]
+
+        return {
+            'campaigns': campaigns,
+            'total': total,
+            'limit': limit,
+            'offset': offset,
+        }
 
     # ─── ROAS Calculation ──────────────────────────────────────────────────────
 

@@ -517,6 +517,10 @@
   "traffic.evidence": "Evidence",
   "traffic.showing": "Showing",
   "traffic.loadMore": "Load more",
+  "traffic.utmCampaigns": "UTM Campaigns",
+  "traffic.utmCampaignsDesc": "Orders and revenue aggregated per UTM campaign",
+  "traffic.noUtm": "(no UTM)",
+  "traffic.noUtmData": "No campaign data for this period",
 
   "traffic.blendedRoas": "Blended ROAS",
   "traffic.totalAdSpend": "Total Ad Spend",

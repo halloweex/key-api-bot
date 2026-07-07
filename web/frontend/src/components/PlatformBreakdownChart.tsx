@@ -23,6 +23,8 @@ const PLATFORM_COLORS: Record<string, string> = {
   facebook: '#7C3AED',  // purple
   tiktok: '#06B6D4',    // cyan
   google: '#2563EB',    // blue
+  google_ads: '#2563EB',     // blue
+  google_organic: '#93C5FD', // light blue
   instagram: '#EC4899', // pink
   email: '#10B981',     // green
   telegram: '#0EA5E9',  // sky blue
@@ -40,6 +42,8 @@ const formatPlatformName = (platform: string): string => {
     facebook: 'Facebook',
     tiktok: 'TikTok',
     google: 'Google',
+    google_ads: 'Google Ads',
+    google_organic: 'Google Organic',
     instagram: 'Instagram',
     email: 'Email',
     telegram: 'Telegram',
