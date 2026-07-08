@@ -657,16 +657,27 @@ export function useTrafficROAS() {
   })
 }
 
-export function useTrafficUtmCampaigns(limit: number, offset: number) {
+export function useTrafficUtmCampaigns(
+  trafficType: string | null,
+  platform: string | null,
+  sortBy: string,
+  sortDir: 'asc' | 'desc',
+  limit: number,
+  offset: number,
+) {
   const queryParams = useQueryParams()
 
   const fullParams = new URLSearchParams(queryParams)
+  if (trafficType) fullParams.set('traffic_type', trafficType)
+  if (platform) fullParams.set('platform', platform)
+  fullParams.set('sort_by', sortBy)
+  fullParams.set('sort_dir', sortDir)
   fullParams.set('limit', String(limit))
   fullParams.set('offset', String(offset))
   const paramsStr = fullParams.toString()
 
   return useQuery<UtmCampaignsResponse>({
-    queryKey: [...queryKeys.trafficUtmCampaigns(queryParams), limit, offset],
+    queryKey: [...queryKeys.trafficUtmCampaigns(queryParams), trafficType, platform, sortBy, sortDir, limit, offset],
     queryFn: () => api.getTrafficUtmCampaigns(paramsStr),
     staleTime: CACHE_TTL.STANDARD,
   })
