@@ -2,10 +2,36 @@ import { memo, useState, useCallback, useRef, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
 import { Badge } from './Badge'
+import { Select } from './Select'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import { useTrafficUtmCampaigns } from '../hooks'
 import { useQueryParams } from '../store/filterStore'
 import type { UtmCampaignRow } from '../types/api'
+
+// ─── Filter Options ──────────────────────────────────────────────────────────
+
+const TRAFFIC_TYPES = [
+  { value: '', labelKey: 'traffic.allTypes' },
+  { value: 'paid_confirmed', labelKey: 'traffic.paid' },
+  { value: 'paid_likely', labelKey: 'traffic.paidLikely' },
+  { value: 'manager', labelKey: 'traffic.salesManager' },
+  { value: 'organic', labelKey: 'traffic.organic' },
+  { value: 'pixel_only', labelKey: 'traffic.pixelOnly' },
+  { value: 'unknown', labelKey: 'traffic.unknown' },
+] as const
+
+const PLATFORMS = [
+  { value: '', labelKey: 'traffic.allPlatforms' },
+  { value: 'facebook', labelKey: 'traffic.facebook' },
+  { value: 'instagram', labelKey: 'traffic.instagram' },
+  { value: 'google', labelKey: 'traffic.google' },
+  { value: 'tiktok', labelKey: 'traffic.tiktok' },
+  { value: 'email', labelKey: 'traffic.email' },
+  { value: 'telegram', labelKey: 'traffic.telegram' },
+  { value: 'ai', labelKey: 'traffic.ai' },
+  { value: 'manager', labelKey: 'traffic.manager' },
+  { value: 'other', labelKey: 'traffic.otherPlatform' },
+] as const
 
 // ─── Traffic Type Badges ─────────────────────────────────────────────────────
 
@@ -44,12 +70,81 @@ const formatPlatformName = (platform: string, trafficType: string): string => {
   return names[platform] || platform.charAt(0).toUpperCase() + platform.slice(1)
 }
 
+const FilterSelect = memo(function FilterSelect({
+  value,
+  onChange,
+  options,
+}: {
+  value: string
+  onChange: (v: string) => void
+  options: readonly { value: string; labelKey: string }[]
+}) {
+  const { t } = useTranslation()
+  const resolved = options.map((opt) => ({ value: opt.value, label: t(opt.labelKey) }))
+  return (
+    <Select
+      options={resolved}
+      value={value}
+      onChange={(v) => onChange(v ?? options[0].value)}
+      allowEmpty={false}
+    />
+  )
+})
+
+// ─── Sortable Header ─────────────────────────────────────────────────────────
+
+type SortDir = 'asc' | 'desc'
+
+// Columns where the first click should sort descending (biggest first)
+const NUMERIC_COLUMNS = new Set(['orders', 'revenue'])
+
+const SortableTh = memo(function SortableTh({
+  column,
+  label,
+  sortBy,
+  sortDir,
+  onSort,
+  align = 'left',
+  className = '',
+}: {
+  column: string
+  label: string
+  sortBy: string
+  sortDir: SortDir
+  onSort: (column: string) => void
+  align?: 'left' | 'right'
+  className?: string
+}) {
+  const isActive = sortBy === column
+  const arrow = isActive ? (sortDir === 'asc' ? '▲' : '▼') : ''
+
+  return (
+    <th
+      className={`py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide
+                  cursor-pointer select-none hover:text-slate-900 hover:bg-slate-100 transition-colors
+                  ${align === 'right' ? 'text-right' : 'text-left'} ${className}`}
+      onClick={() => onSort(column)}
+      aria-sort={isActive ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+    >
+      <span className="inline-flex items-center gap-1">
+        {align === 'right' && isActive && <span className="text-[9px] text-blue-600">{arrow}</span>}
+        {label}
+        {align === 'left' && isActive && <span className="text-[9px] text-blue-600">{arrow}</span>}
+      </span>
+    </th>
+  )
+})
+
 const PAGE_SIZE = 50
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
   const { t } = useTranslation()
+  const [trafficFilter, setTrafficFilter] = useState('')
+  const [platformFilter, setPlatformFilter] = useState('')
+  const [sortBy, setSortBy] = useState('revenue')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [offset, setOffset] = useState(0)
   // Accumulate loaded pages; keyed by the filter context to reset on change
   const pagesRef = useRef<UtmCampaignRow[]>([])
@@ -57,16 +152,19 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
 
   const queryParams = useQueryParams()
 
-  // Reset accumulated pages when global filters change
-  if (queryParams !== prevKeyRef.current) {
-    prevKeyRef.current = queryParams
+  // Reset accumulated pages when global filters, local filters or sort change
+  const resetKey = `${queryParams}|${trafficFilter}|${platformFilter}|${sortBy}|${sortDir}`
+  if (resetKey !== prevKeyRef.current) {
+    prevKeyRef.current = resetKey
     pagesRef.current = []
     if (offset !== 0) {
       setOffset(0)
     }
   }
 
-  const { data, isLoading, error, refetch } = useTrafficUtmCampaigns(PAGE_SIZE, offset)
+  const { data, isLoading, error, refetch } = useTrafficUtmCampaigns(
+    trafficFilter || null, platformFilter || null, sortBy, sortDir, PAGE_SIZE, offset,
+  )
 
   const allCampaigns = useMemo(() => {
     if (!data?.campaigns) return pagesRef.current
@@ -80,6 +178,28 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
     return pagesRef.current
   }, [data, offset])
 
+  const handleTrafficChange = useCallback((value: string) => {
+    setTrafficFilter(value)
+    setOffset(0)
+  }, [])
+
+  const handlePlatformChange = useCallback((value: string) => {
+    setPlatformFilter(value)
+    setOffset(0)
+  }, [])
+
+  const handleSort = useCallback((column: string) => {
+    setOffset(0)
+    setSortBy(prev => {
+      if (prev === column) {
+        setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))
+        return prev
+      }
+      setSortDir(NUMERIC_COLUMNS.has(column) ? 'desc' : 'asc')
+      return column
+    })
+  }, [])
+
   const handleLoadMore = useCallback(() => {
     setOffset(prev => prev + PAGE_SIZE)
   }, [])
@@ -91,6 +211,12 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
   return (
     <ChartContainer
       title={t('traffic.utmCampaigns')}
+      titleExtra={
+        <div className="flex items-center gap-2">
+          <FilterSelect value={trafficFilter} onChange={handleTrafficChange} options={TRAFFIC_TYPES} />
+          <FilterSelect value={platformFilter} onChange={handlePlatformChange} options={PLATFORMS} />
+        </div>
+      }
       isLoading={isLoading && offset === 0}
       error={error as Error | null}
       onRetry={refetch}
@@ -103,24 +229,18 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
         <table className="w-full text-sm">
           <thead className="sticky top-0 z-10">
             <tr className="bg-slate-50 border-b border-slate-200">
-              <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
-                {t('traffic.campaign')}
-              </th>
-              <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide hidden md:table-cell">
-                {t('traffic.source')}
-              </th>
-              <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide hidden md:table-cell">
-                {t('traffic.platform')}
-              </th>
-              <th className="text-left py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
-                {t('chart.type')}
-              </th>
-              <th className="text-right py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
-                {t('common.orders')}
-              </th>
-              <th className="text-right py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide">
-                {t('common.revenue')}
-              </th>
+              <SortableTh column="campaign" label={t('traffic.campaign')}
+                sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
+              <SortableTh column="utm_source" label={t('traffic.source')}
+                sortBy={sortBy} sortDir={sortDir} onSort={handleSort} className="hidden md:table-cell" />
+              <SortableTh column="platform" label={t('traffic.platform')}
+                sortBy={sortBy} sortDir={sortDir} onSort={handleSort} className="hidden md:table-cell" />
+              <SortableTh column="traffic_type" label={t('chart.type')}
+                sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
+              <SortableTh column="orders" label={t('common.orders')} align="right"
+                sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
+              <SortableTh column="revenue" label={t('common.revenue')} align="right"
+                sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">

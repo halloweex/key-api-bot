@@ -128,6 +128,10 @@ async def get_traffic_utm_campaigns(
     end_date: Optional[str] = Query(None),
     source_id: Optional[int] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    traffic_type: Optional[str] = Query(None),
+    platform: Optional[str] = Query(None),
+    sort_by: str = Query("revenue"),
+    sort_dir: str = Query("desc"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -139,6 +143,20 @@ async def get_traffic_utm_campaigns(
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    if traffic_type and traffic_type not in (
+        "paid_confirmed", "paid_likely", "manager", "organic", "pixel_only", "unknown",
+    ):
+        raise HTTPException(status_code=400, detail=f"Invalid traffic_type: {traffic_type}")
+
+    valid_platforms = ("facebook", "instagram", "google", "tiktok", "email", "telegram", "ai", "manager", "other")
+    if platform and platform not in valid_platforms:
+        raise HTTPException(status_code=400, detail=f"Invalid platform: {platform}")
+
+    if sort_by not in ("campaign", "utm_source", "platform", "traffic_type", "orders", "revenue"):
+        raise HTTPException(status_code=400, detail=f"Invalid sort_by: {sort_by}")
+    if sort_dir not in ("asc", "desc"):
+        raise HTTPException(status_code=400, detail=f"Invalid sort_dir: {sort_dir}")
+
     start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
@@ -146,7 +164,8 @@ async def get_traffic_utm_campaigns(
     store = await get_store()
     return await store.get_traffic_utm_campaigns(
         start_date=start_dt, end_date=end_dt, sales_type=sales_type,
-        source_id=source_id, limit=limit, offset=offset,
+        source_id=source_id, traffic_type=traffic_type, platform=platform,
+        sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=offset,
     )
 
 

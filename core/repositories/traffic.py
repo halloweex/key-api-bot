@@ -669,12 +669,21 @@ class TrafficMixin:
 
         return evidence
 
+    # Whitelist of sortable columns → SELECT aliases in the campaigns query
+    _UTM_CAMPAIGN_SORT_COLUMNS = {
+        'campaign', 'utm_source', 'platform', 'traffic_type', 'orders', 'revenue',
+    }
+
     async def get_traffic_utm_campaigns(
         self,
         start_date: date,
         end_date: date,
         sales_type: str = "all",
         source_id: Optional[int] = None,
+        traffic_type: Optional[str] = None,
+        platform: Optional[str] = None,
+        sort_by: str = "revenue",
+        sort_dir: str = "desc",
         limit: int = 50,
         offset: int = 0,
     ) -> Dict[str, Any]:
@@ -686,6 +695,10 @@ class TrafficMixin:
         Orders without a UTM campaign fall into a single '' campaign row
         per platform/traffic_type (rendered as "no UTM" by the frontend).
         """
+        if sort_by not in self._UTM_CAMPAIGN_SORT_COLUMNS:
+            sort_by = 'revenue'
+        sort_dir = 'ASC' if sort_dir.lower() == 'asc' else 'DESC'
+
         filters = [
             "NOT s.is_return",
             "s.is_active_source",
@@ -701,6 +714,20 @@ class TrafficMixin:
         if sales_type != "all":
             filters.append("s.sales_type = ?")
             params.append(sales_type)
+
+        if traffic_type:
+            filters.append("""
+                COALESCE(u.traffic_type,
+                    CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
+                ) = ?""")
+            params.append(traffic_type)
+
+        if platform:
+            filters.append("""
+                COALESCE(u.platform,
+                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END
+                ) = ?""")
+            params.append(platform)
 
         where_clause = " AND ".join(filters)
 
@@ -735,7 +762,7 @@ class TrafficMixin:
             LEFT JOIN silver_order_utm u ON s.id = u.order_id
             WHERE {where_clause}
             GROUP BY {campaign_expr}, {platform_expr}, {traffic_type_expr}
-            ORDER BY revenue DESC
+            ORDER BY {sort_by} {sort_dir}, revenue DESC
             LIMIT ? OFFSET ?
         """
         rows = await self._fetch_all(data_query, params + [limit, offset])
