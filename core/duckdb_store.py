@@ -2555,11 +2555,17 @@ class DuckDBStore(
                                    buyer_id, manager_id, manager_comment, promocode, synced_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
             """
+            # manager_comment carries UTM attribution data. COALESCE keeps the
+            # stored value when the API payload has it as null — otherwise a
+            # re-sync of an order whose payload omits the field would destroy
+            # attribution that backfill restored (loss is unrecoverable: the
+            # UTM silver layer parses from this column).
             update_sql = """
                 UPDATE orders SET
                     source_id = ?, status_id = ?, grand_total = ?,
                     ordered_at = ?, created_at = ?, updated_at = ?,
-                    buyer_id = ?, manager_id = ?, manager_comment = ?,
+                    buyer_id = ?, manager_id = ?,
+                    manager_comment = COALESCE(?, manager_comment),
                     promocode = ?, synced_at = now()
                 WHERE id = ?
             """
