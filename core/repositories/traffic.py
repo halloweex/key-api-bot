@@ -11,31 +11,59 @@ logger = logging.getLogger(__name__)
 
 class TrafficMixin:
 
+    # A pair value runs until a semicolon, newline, or the next ", key:" pair
+    # (comma-separated lists), so one malformed separator can't swallow the
+    # remaining pairs into a single corrupted value.
+    _UTM_PAIR_RE = re.compile(r'(\w+):\s*((?:(?!,\s*\w+:)[^;\n\r])+)')
+    # Query-string style (utm_source=fbads&fbclid=... — raw or inside a URL)
+    _UTM_QS_RE = re.compile(r'\b(utm_\w+|fbclid|ttp|_fbp|_fbc)=([^&\s;]+)')
+    # "key: value" pairs without any "UTM:" prefix (tracking keys only)
+    _UTM_BARE_RE = re.compile(r'\b(utm_\w+|fbclid|ttp|_fbp|_fbc):\s*((?:(?!,\s*\w+:)[^;\n\r])+)')
+
     @staticmethod
     def _parse_utm_from_comment(comment: str) -> Dict[str, Any]:
         """Parse UTM data from manager_comment field.
 
-        The comment format is:
+        The canonical format is:
         UTM: utm_source: value; utm_medium: value; ...
 
-        Also extracts pixel IDs like _fbp, _fbc, ttp, fbclid.
+        Also tolerates real-world deviations: lowercase "utm:", pairs
+        separated by newlines/commas, query-string form (utm_source=x&...)
+        including UTM parameters inside URLs, and pairs without the
+        "UTM:" prefix. Extracts pixel IDs like _fbp, _fbc, ttp, fbclid.
         """
         if not comment:
             return {}
 
-        utm_data = {}
+        utm_data: Dict[str, Any] = {}
 
-        # Find UTM block: "UTM: key: value; key: value; ..."
-        utm_match = re.search(r'UTM:\s*(.+?)(?:\n\n|\n[A-Z]|$)', comment, re.DOTALL)
-        if not utm_match:
-            return {}
+        def take(key: str, value: str) -> None:
+            key = key.strip().lower()
+            value = value.strip().rstrip('.,')
+            if value and key not in utm_data:
+                utm_data[key] = value
 
-        utm_line = utm_match.group(1).strip()
+        # 1) Explicit "UTM:" block (prefix case-insensitive via scoped (?i:),
+        #    NOT a global IGNORECASE — that would make the [A-Z] terminator
+        #    class match lowercase and cut the block at any newline. The block
+        #    ends at a blank line or a line starting with a capital letter
+        #    (next comment section), unless that line is itself a UTM key.
+        utm_match = re.search(
+            r'(?i:UTM):\s*(.+?)(?:\n\s*\n|\n(?!(?i:utm_|_fb|ttp|fbclid))[A-ZА-ЯІЇЄ]|$)',
+            comment, re.DOTALL,
+        )
+        if utm_match:
+            for key, value in TrafficMixin._UTM_PAIR_RE.findall(utm_match.group(1).strip()):
+                take(key, value)
 
-        # Parse key: value pairs separated by semicolons
-        pairs = re.findall(r'(\w+):\s*([^;]+)', utm_line)
-        for key, value in pairs:
-            utm_data[key.strip().lower()] = value.strip()
+        # 2) Query-string pairs anywhere in the comment (raw or inside URLs)
+        for key, value in TrafficMixin._UTM_QS_RE.findall(comment):
+            take(key, value)
+
+        # 3) Fallback: bare "utm_x: value" pairs without the "UTM:" prefix
+        if not utm_data:
+            for key, value in TrafficMixin._UTM_BARE_RE.findall(comment):
+                take(key, value)
 
         return utm_data
 
