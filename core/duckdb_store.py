@@ -572,6 +572,48 @@ class DuckDBStore(
             PRIMARY KEY (prediction_date, sales_type)
         );
 
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- SMS campaigns: the frozen roster of a send.
+        --
+        -- The eligible population moves every day (people buy, recency slides), so
+        -- re-running the segmentation later returns a DIFFERENT set of people. Once
+        -- a file has gone to the SMS provider, the only way to measure the campaign
+        -- is to have recorded who was in it — target and holdout alike — at the
+        -- moment of export. Without this table there is no control group to compare
+        -- against and no measurable result.
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS sms_campaigns (
+            campaign VARCHAR PRIMARY KEY,
+            ltv_basis VARCHAR NOT NULL,
+            sales_type VARCHAR NOT NULL,
+            holdout_pct INTEGER NOT NULL,
+            criteria VARCHAR NOT NULL,            -- JSON snapshot of the thresholds
+            promocode VARCHAR,                    -- optional, for direct attribution
+            exported_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            sent_at TIMESTAMP WITH TIME ZONE,     -- set once the file actually goes out
+            notes VARCHAR
+        );
+
+        CREATE TABLE IF NOT EXISTS sms_campaign_members (
+            campaign VARCHAR NOT NULL,
+            buyer_id INTEGER NOT NULL,
+            phone VARCHAR NOT NULL,
+            tier VARCHAR NOT NULL,
+            assignment VARCHAR NOT NULL,          -- 'target' or 'holdout'
+            -- State at export time: the campaign is measured against what these
+            -- customers looked like when they were chosen, not what they became.
+            orders_at_export INTEGER NOT NULL,
+            revenue_ltv_at_export DECIMAL(14, 2),
+            margin_ltv_at_export DECIMAL(14, 2),
+            recency_at_export INTEGER,
+            PRIMARY KEY (campaign, buyer_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sms_members_campaign
+            ON sms_campaign_members(campaign, assignment);
+        CREATE INDEX IF NOT EXISTS idx_sms_members_buyer
+            ON sms_campaign_members(buyer_id);
+
         -- Managers/Users table (synced from KeyCRM)
         CREATE TABLE IF NOT EXISTS managers (
             id INTEGER PRIMARY KEY,
