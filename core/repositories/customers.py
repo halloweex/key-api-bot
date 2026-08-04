@@ -1,8 +1,9 @@
 """DuckDBStore customer insights methods."""
 from __future__ import annotations
 
-from datetime import date, timedelta
-from typing import Optional, Dict, Any
+import json
+from datetime import date, datetime, timedelta
+from typing import Optional, Dict, Any, List
 
 from core.duckdb_constants import B2B_MANAGER_ID, RETAIL_MANAGER_IDS
 
@@ -1009,6 +1010,198 @@ class CustomersMixin:
                 }
             }
 
+    async def freeze_sms_campaign(
+        self,
+        campaign: str,
+        customers: List[Dict[str, Any]],
+        criteria: Dict[str, Any],
+        ltv_basis: str,
+        sales_type: str,
+        holdout_pct: int,
+        promocode: Optional[str] = None,
+        notes: Optional[str] = None,
+        overwrite: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Record who was in a campaign — target and holdout alike — at export time.
+
+        The eligible population shifts daily, so the same segmentation query run
+        after the send returns a different set of people. Freezing the roster is
+        what makes the campaign measurable at all: the holdout recorded here is
+        the only control group that will exist.
+
+        Re-freezing an existing campaign is refused unless ``overwrite`` is set,
+        so a roster cannot be silently rewritten after the file has gone out.
+
+        Args:
+            campaign: Campaign slug; the primary key.
+            customers: Rows from get_sms_segments (needs include_customers).
+            criteria: Threshold snapshot, stored as JSON for the record.
+            ltv_basis: Which LTV drove the tiering.
+            sales_type: retail / b2b / all.
+            holdout_pct: Percent withheld, for the record.
+            promocode: Optional code, if the campaign uses direct attribution.
+            notes: Free-text note.
+            overwrite: Replace an existing roster instead of refusing.
+
+        Returns:
+            Dict with the campaign and its per-tier target/holdout counts.
+
+        Raises:
+            ValueError: If the campaign exists and overwrite is False, or if
+                customers is empty (an empty roster measures nothing).
+        """
+        if not customers:
+            raise ValueError(
+                "refusing to freeze an empty roster — nothing could be measured"
+            )
+
+        async with self.connection() as conn:
+            exists = conn.execute(
+                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign]
+            ).fetchone()
+
+            if exists is not None:
+                if not overwrite:
+                    raise ValueError(
+                        f"campaign {campaign!r} is already frozen — pass overwrite "
+                        f"to replace it, or use a new campaign name"
+                    )
+                if exists[0] is not None:
+                    raise ValueError(
+                        f"campaign {campaign!r} was already sent on {exists[0]} — "
+                        f"its roster is the control group and cannot be rewritten"
+                    )
+                conn.execute("DELETE FROM sms_campaign_members WHERE campaign = ?", [campaign])
+                conn.execute("DELETE FROM sms_campaigns WHERE campaign = ?", [campaign])
+
+            conn.execute(
+                """
+                INSERT INTO sms_campaigns
+                    (campaign, ltv_basis, sales_type, holdout_pct, criteria,
+                     promocode, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [campaign, ltv_basis, sales_type, holdout_pct,
+                 json.dumps(criteria, ensure_ascii=False), promocode, notes],
+            )
+
+            conn.executemany(
+                """
+                INSERT INTO sms_campaign_members
+                    (campaign, buyer_id, phone, tier, assignment, orders_at_export,
+                     revenue_ltv_at_export, margin_ltv_at_export, recency_at_export)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    [campaign, c["buyerId"], c["phone"], c["tier"], c["assignment"],
+                     c["orders"], c["revenueLtv"], c["marginLtv"], c["recencyDays"]]
+                    for c in customers
+                ],
+            )
+
+            rows = conn.execute(
+                """
+                SELECT tier,
+                       COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE assignment = 'target') AS target,
+                       COUNT(*) FILTER (WHERE assignment = 'holdout') AS holdout
+                FROM sms_campaign_members
+                WHERE campaign = ?
+                GROUP BY tier
+                """,
+                [campaign],
+            ).fetchall()
+
+        tier_order = {"VIP": 0, "CORE": 1, "REACTIVATION": 2}
+        segments = [
+            {"tier": t, "total": total, "target": target, "holdout": holdout}
+            for t, total, target, holdout in
+            sorted(rows, key=lambda r: tier_order.get(r[0], 9))
+        ]
+        return {
+            "campaign": campaign,
+            "ltvBasis": ltv_basis,
+            "promocode": promocode,
+            "frozen": True,
+            "segments": segments,
+            "totals": {
+                "customers": sum(s["total"] for s in segments),
+                "target": sum(s["target"] for s in segments),
+                "holdout": sum(s["holdout"] for s in segments),
+            },
+        }
+
+    async def mark_sms_campaign_sent(
+        self,
+        campaign: str,
+        sent_at: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """
+        Record when the file actually went to the SMS provider.
+
+        Results are measured from this date, not from the export date — the two
+        can differ by days, and attributing purchases to the wrong window is the
+        easiest way to manufacture a result that is not there.
+
+        Raises:
+            ValueError: If the campaign does not exist.
+        """
+        async with self.connection() as conn:
+            row = conn.execute(
+                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign]
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"campaign {campaign!r} is not frozen")
+
+            conn.execute(
+                "UPDATE sms_campaigns SET sent_at = ? WHERE campaign = ?",
+                [sent_at or datetime.now(), campaign],
+            )
+            sent = conn.execute(
+                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign]
+            ).fetchone()[0]
+
+        return {
+            "campaign": campaign,
+            "sentAt": sent.isoformat() if sent else None,
+            "previouslySentAt": row[0].isoformat() if row[0] else None,
+        }
+
+    async def list_sms_campaigns(self) -> List[Dict[str, Any]]:
+        """List frozen campaigns, newest export first."""
+        async with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.campaign, c.ltv_basis, c.sales_type, c.holdout_pct,
+                       c.promocode, c.exported_at, c.sent_at, c.notes,
+                       COUNT(m.buyer_id) AS members,
+                       COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'target') AS target,
+                       COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'holdout') AS holdout
+                FROM sms_campaigns c
+                LEFT JOIN sms_campaign_members m ON m.campaign = c.campaign
+                GROUP BY ALL
+                ORDER BY c.exported_at DESC
+                """
+            ).fetchall()
+
+        return [
+            {
+                "campaign": r[0],
+                "ltvBasis": r[1],
+                "salesType": r[2],
+                "holdoutPct": r[3],
+                "promocode": r[4],
+                "exportedAt": r[5].isoformat() if r[5] else None,
+                "sentAt": r[6].isoformat() if r[6] else None,
+                "notes": r[7],
+                "members": r[8],
+                "target": r[9],
+                "holdout": r[10],
+            }
+            for r in rows
+        ]
+
     async def get_sms_segments(
         self,
         max_recency_days: int = 270,
@@ -1140,6 +1333,40 @@ class CustomersMixin:
                     ) AS revenue
                 FROM line_items
             ),
+            order_totals AS (
+                SELECT buyer_id, order_id, order_date, SUM(revenue) AS order_total
+                FROM allocated
+                GROUP BY buyer_id, order_id, order_date
+            ),
+            last_order AS (
+                -- What the customer bought last: the hook an SMS is written around.
+                SELECT buyer_id, order_id, order_total
+                FROM order_totals
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY buyer_id ORDER BY order_date DESC, order_id DESC
+                ) = 1
+            ),
+            last_order_items AS (
+                -- Names run long (up to ~4k chars per order), so keep the three
+                -- biggest lines, truncate each, and note how many were left out.
+                SELECT
+                    lo.buyer_id,
+                    lo.order_id AS last_order_id,
+                    lo.order_total AS last_order_total,
+                    COUNT(*) AS last_order_item_count,
+                    array_to_string(
+                        list_transform(
+                            list_slice(
+                                array_agg(op.name ORDER BY op.quantity DESC, op.name), 1, 3
+                            ),
+                            x -> CASE WHEN length(x) > 60
+                                      THEN left(x, 57) || chr(8230) ELSE x END
+                        ), ' | '
+                    ) AS last_order_items
+                FROM last_order lo
+                JOIN order_products op ON op.order_id = lo.order_id
+                GROUP BY lo.buyer_id, lo.order_id, lo.order_total
+            ),
             cust AS (
                 SELECT
                     buyer_id,
@@ -1160,6 +1387,10 @@ class CustomersMixin:
             scored AS (
                 SELECT
                     c.*,
+                    lo.last_order_id,
+                    lo.last_order_total,
+                    lo.last_order_item_count,
+                    lo.last_order_items,
                     b.full_name,
                     b.city,
                     regexp_replace(COALESCE(b.phone, ''), '[^0-9]', '', 'g') AS phone,
@@ -1170,6 +1401,7 @@ class CustomersMixin:
                     END AS tier
                 FROM cust c
                 JOIN buyers b ON b.id = c.buyer_id
+                LEFT JOIN last_order_items lo ON lo.buyer_id = c.buyer_id
                 WHERE c.recency <= ?
             ),
             eligible AS (
@@ -1193,6 +1425,12 @@ class CustomersMixin:
                 ROUND(100.0 * margin_ltv / NULLIF(revenue_ltv, 0), 1) AS margin_pct,
                 ROUND(100.0 * COALESCE(cost_coverage, 0), 1) AS cost_coverage,
                 recency, last_order_date, first_order_date,
+                last_order_id,
+                ROUND(last_order_total, 2) AS last_order_total,
+                last_order_item_count,
+                CASE WHEN last_order_item_count > 3
+                     THEN last_order_items || ' +' || (last_order_item_count - 3) || ' ещё'
+                     ELSE last_order_items END AS last_order_items,
                 CASE WHEN hash(buyer_id::VARCHAR || '|' || ?) % 100 < ?
                      THEN 'holdout' ELSE 'target' END AS assignment
             FROM eligible
@@ -1217,7 +1455,9 @@ class CustomersMixin:
         customers = []
         for (buyer_id, full_name, phone, city, row_tier, orders, ltv, aov,
              revenue_ltv, margin_ltv, margin_pct, cost_coverage,
-             recency, last_order, first_order, assignment) in rows:
+             recency, last_order, first_order,
+             last_order_id, last_order_total, last_order_item_count, last_order_items,
+             assignment) in rows:
             stats = tiers.setdefault(row_tier, {
                 "tier": row_tier, "total": 0, "target": 0, "holdout": 0,
                 "ltv": 0.0, "revenue": 0.0, "margin": 0.0,
@@ -1248,6 +1488,10 @@ class CustomersMixin:
                     "recencyDays": recency,
                     "lastOrderDate": last_order.isoformat() if last_order else None,
                     "firstOrderDate": first_order.isoformat() if first_order else None,
+                    "lastOrderId": last_order_id,
+                    "lastOrderTotal": float(last_order_total or 0),
+                    "lastOrderItemCount": last_order_item_count or 0,
+                    "lastOrderItems": last_order_items,
                     "assignment": assignment,
                 })
 
