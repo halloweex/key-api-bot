@@ -2,8 +2,62 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any, List
+
+
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF, via erf — avoids pulling scipy in for one number."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _compare_groups(
+    target: Dict[str, Any], holdout: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Compare a messaged group against its control.
+
+    Returns the difference in conversion rate with a 95% interval and a
+    two-sided p-value, plus incremental revenue and margin per contact. The
+    interval is the point of the exercise: with a 10% holdout the control is
+    small, so a difference that looks large can still be indistinguishable
+    from noise, and the interval says so where a bare percentage would not.
+
+    Returns None when either group is empty — there is nothing to compare.
+    """
+    t_n, h_n = target["contacts"], holdout["contacts"]
+    if not t_n or not h_n:
+        return None
+
+    p_t = target["converted"] / t_n
+    p_h = holdout["converted"] / h_n
+    diff = p_t - p_h
+
+    se = math.sqrt(p_t * (1 - p_t) / t_n + p_h * (1 - p_h) / h_n)
+    margin_of_error = 1.96 * se
+    z = diff / se if se > 0 else 0.0
+    p_value = 2 * (1 - _norm_cdf(abs(z)))
+
+    lo, hi = diff - margin_of_error, diff + margin_of_error
+    rev_per_contact = target["revenue"] / t_n - holdout["revenue"] / h_n
+    margin_per_contact = target["margin"] / t_n - holdout["margin"] / h_n
+
+    return {
+        "conversionTarget": round(100 * p_t, 2),
+        "conversionHoldout": round(100 * p_h, 2),
+        "liftPp": round(100 * diff, 2),
+        "liftRelativePct": round(100 * diff / p_h, 1) if p_h > 0 else None,
+        "ci95Pp": [round(100 * lo, 2), round(100 * hi, 2)],
+        "pValue": round(p_value, 4),
+        # The honest headline: if the interval spans zero, the campaign has
+        # not been shown to have done anything, whatever the raw rates say.
+        "significant": lo > 0 or hi < 0,
+        "incrementalRevenuePerContact": round(rev_per_contact, 2),
+        "incrementalMarginPerContact": round(margin_per_contact, 2),
+        "incrementalRevenueTotal": round(rev_per_contact * t_n, 2),
+        "incrementalMarginTotal": round(margin_per_contact * t_n, 2),
+    }
 
 from core.duckdb_constants import B2B_MANAGER_ID, RETAIL_MANAGER_IDS
 
@@ -1166,6 +1220,143 @@ class CustomersMixin:
             "campaign": campaign,
             "sentAt": sent.isoformat() if sent else None,
             "previouslySentAt": row[0].isoformat() if row[0] else None,
+        }
+
+    async def get_sms_campaign_results(
+        self,
+        campaign: str,
+        window_days: int = 30,
+    ) -> Dict[str, Any]:
+        """
+        Measure a campaign: what the messaged group did versus the control.
+
+        Counts purchases in the ``window_days`` after the send, for the frozen
+        roster only, and compares target against holdout per tier. The raw
+        conversion of the target group on its own is not a result — most of it
+        would have happened anyway. The difference is the result.
+
+        Args:
+            campaign: Campaign slug.
+            window_days: Days after the send to attribute purchases to.
+
+        Returns:
+            Per-tier and overall comparison, plus promo-code counts when the
+            campaign carried one.
+
+        Raises:
+            ValueError: If the campaign is unknown or has no send date — an
+                unsent campaign has no window to measure over.
+        """
+        async with self.connection() as conn:
+            camp = conn.execute(
+                "SELECT sent_at, promocode, ltv_basis, holdout_pct"
+                " FROM sms_campaigns WHERE campaign = ?", [campaign],
+            ).fetchone()
+            if camp is None:
+                raise ValueError(f"campaign {campaign!r} is not frozen")
+            sent_at, promocode, ltv_basis, holdout_pct = camp
+            if sent_at is None:
+                raise ValueError(
+                    f"campaign {campaign!r} has no send date — mark it sent before "
+                    f"measuring, or results would cover an arbitrary window"
+                )
+
+            rows = conn.execute(
+                f"""
+                WITH window_orders AS (
+                    SELECT o.buyer_id, o.id AS order_id, o.grand_total, o.promocode,
+                           op.price_sold * op.quantity AS line_revenue,
+                           CASE WHEN os.purchased_price > 0
+                                THEN os.purchased_price * op.quantity END AS line_cogs
+                    FROM silver_orders o
+                    JOIN order_products op ON op.order_id = o.id
+                    LEFT JOIN products p ON p.id = op.product_id
+                    LEFT JOIN offer_stocks os ON os.sku = p.sku
+                    WHERE NOT o.is_return
+                      AND o.is_active_source
+                      AND o.order_date >= CAST(? AS DATE)
+                      AND o.order_date <= CAST(? AS DATE) + {int(window_days)}
+                ),
+                alloc AS (
+                    SELECT buyer_id, order_id, promocode, line_cogs,
+                           COALESCE(grand_total * line_revenue
+                               / NULLIF(SUM(line_revenue) OVER (PARTITION BY order_id), 0),
+                             0) AS revenue
+                    FROM window_orders
+                ),
+                per_buyer AS (
+                    SELECT buyer_id,
+                           COUNT(DISTINCT order_id) AS orders,
+                           SUM(revenue) AS revenue,
+                           COALESCE(SUM(revenue - line_cogs)
+                               FILTER (WHERE line_cogs IS NOT NULL), 0) AS margin,
+                           COUNT(DISTINCT CASE WHEN promocode = ? THEN order_id END)
+                               AS promo_orders
+                    FROM alloc
+                    GROUP BY buyer_id
+                )
+                SELECT m.tier, m.assignment,
+                       COUNT(*) AS contacts,
+                       COUNT(pb.buyer_id) AS converted,
+                       COALESCE(SUM(pb.orders), 0) AS orders,
+                       COALESCE(SUM(pb.revenue), 0) AS revenue,
+                       COALESCE(SUM(pb.margin), 0) AS margin,
+                       COALESCE(SUM(pb.promo_orders), 0) AS promo_orders
+                FROM sms_campaign_members m
+                LEFT JOIN per_buyer pb ON pb.buyer_id = m.buyer_id
+                WHERE m.campaign = ?
+                GROUP BY m.tier, m.assignment
+                """,
+                [sent_at, sent_at, promocode, campaign],
+            ).fetchall()
+
+        by_tier: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for tier, assignment, contacts, converted, orders, revenue, margin, promo in rows:
+            by_tier.setdefault(tier, {})[assignment] = {
+                "contacts": contacts,
+                "converted": converted,
+                "orders": orders,
+                "revenue": float(revenue or 0),
+                "margin": float(margin or 0),
+                "promoOrders": promo,
+            }
+
+        empty = {"contacts": 0, "converted": 0, "orders": 0,
+                 "revenue": 0.0, "margin": 0.0, "promoOrders": 0}
+
+        def _blank() -> Dict[str, Any]:
+            return dict(empty)
+
+        tier_order = {"VIP": 0, "CORE": 1, "REACTIVATION": 2}
+        segments = []
+        overall_t, overall_h = _blank(), _blank()
+
+        for tier in sorted(by_tier, key=lambda t: tier_order.get(t, 9)):
+            t = by_tier[tier].get("target", _blank())
+            h = by_tier[tier].get("holdout", _blank())
+            for acc, src in ((overall_t, t), (overall_h, h)):
+                for k in empty:
+                    acc[k] += src[k]
+            segments.append({
+                "tier": tier,
+                "target": t,
+                "holdout": h,
+                "comparison": _compare_groups(t, h),
+            })
+
+        return {
+            "campaign": campaign,
+            "sentAt": sent_at.isoformat(),
+            "windowDays": window_days,
+            "ltvBasis": ltv_basis,
+            "holdoutPct": holdout_pct,
+            "promocode": promocode,
+            "segments": segments,
+            "overall": {
+                "target": overall_t,
+                "holdout": overall_h,
+                "comparison": _compare_groups(overall_t, overall_h),
+            },
         }
 
     async def list_sms_campaigns(self) -> List[Dict[str, Any]]:

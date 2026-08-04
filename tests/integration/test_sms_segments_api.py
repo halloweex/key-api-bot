@@ -25,6 +25,7 @@ ADMIN_ID = sorted(ADMIN_USER_IDS)[0]
 
 SEGMENTS_PATH = "/api/customers/sms-segments"
 CSV_PATH = "/api/customers/sms-segments/export/csv"
+RESULTS_PATH = "/api/customers/sms-campaigns/aug/results"
 
 
 def _make_cookie(user_id: int, role: str = "admin") -> str:
@@ -94,6 +95,14 @@ class _FakeStore:
         self.freezes = []
         self.freeze_error = None
         self.truncated = False
+        self.result_calls = []
+        self.results_error = None
+
+    async def get_sms_campaign_results(self, campaign, window_days=30):
+        if self.results_error:
+            raise ValueError(self.results_error)
+        self.result_calls.append({"campaign": campaign, "window_days": window_days})
+        return {"campaign": campaign, "windowDays": window_days, "segments": []}
 
     async def freeze_sms_campaign(self, **kwargs):
         if self.freeze_error:
@@ -169,7 +178,7 @@ def store(monkeypatch):
 class TestSmsSegmentsAuth:
     """PII endpoints must be admin-only, not merely session-gated."""
 
-    @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH])
+    @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH, RESULTS_PATH])
     def test_requires_session(self, client, path):
         assert client.get(path).status_code == 401
 
@@ -427,6 +436,31 @@ class TestSmsSegmentsCsv:
         )
         assert r.status_code == 409
         assert "already frozen" in r.json()["detail"]
+
+    def test_results_defaults_and_window(self, client, store):
+        r = client.get(RESULTS_PATH, headers=_admin_headers())
+        assert r.status_code == 200
+        assert store.result_calls[0] == {"campaign": "aug", "window_days": 30}
+
+        client.get(RESULTS_PATH, params={"window_days": 60}, headers=_admin_headers())
+        assert store.result_calls[1]["window_days"] == 60
+
+    def test_results_window_bounds(self, client, store):
+        assert client.get(
+            RESULTS_PATH, params={"window_days": 400}, headers=_admin_headers(),
+        ).status_code == 422
+
+    def test_unknown_campaign_is_404(self, client, store):
+        store.results_error = "campaign 'aug' is not frozen"
+        r = client.get(RESULTS_PATH, headers=_admin_headers())
+        assert r.status_code == 404
+
+    def test_unsent_campaign_is_409(self, client, store):
+        """Frozen but unsent is a state problem, not a missing resource."""
+        store.results_error = "campaign 'aug' has no send date — mark it sent"
+        r = client.get(RESULTS_PATH, headers=_admin_headers())
+        assert r.status_code == 409
+        assert "send date" in r.json()["detail"]
 
     def test_export_is_rate_limited(self, client, store):
         """Bulk PII export is capped — a leaked session can't drain the base."""

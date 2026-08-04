@@ -412,6 +412,36 @@ async def mark_sms_campaign_sent(
     return result
 
 
+@router.get("/customers/sms-campaigns/{campaign}/results")
+@limiter.limit("30/minute")
+async def get_sms_campaign_results(
+    request: Request,
+    campaign: str,
+    window_days: int = Query(30, ge=1, le=180),
+    admin: dict = Depends(require_admin),
+):
+    """
+    Measure a campaign: the messaged group against the control.
+
+    The target group's own conversion is not a result — most of it would have
+    happened anyway. What this returns is the *difference*, with a 95% interval
+    and a p-value, per tier and overall. When the interval spans zero the
+    campaign has not been shown to have done anything, whatever the raw rates
+    look like.
+
+    Requires the campaign to be marked sent; without a send date there is no
+    window to measure over.
+    """
+    store = await get_store()
+    try:
+        return await store.get_sms_campaign_results(campaign, window_days=window_days)
+    except ValueError as e:
+        # Unknown campaign is 404; frozen-but-unsent is a state problem, not a
+        # missing resource, so it answers 409.
+        status = 404 if "not frozen" in str(e) else 409
+        raise HTTPException(status_code=status, detail=str(e))
+
+
 @router.get("/customers/sms-campaigns")
 @limiter.limit("30/minute")
 async def list_sms_campaigns(
