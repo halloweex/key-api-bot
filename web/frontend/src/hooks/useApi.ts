@@ -59,6 +59,9 @@ import type {
   MarginTrendItem,
   MarginBrandCategoryItem,
   MarginAlertItem,
+  SmsSegmentsResponse,
+  SmsCampaignsResponse,
+  SmsCampaignResultsResponse,
   MarketingReportResponse,
 } from '../types/api'
 
@@ -887,5 +890,49 @@ export function useMarginAlerts() {
     queryKey: queryKeys.marginAlerts(queryParams),
     queryFn: () => api.getMarginAlerts(queryParams),
     staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+// ─── SMS Campaigns ──────────────────────────────────────────────────────────
+
+export function useSmsSegments(params: string, enabled = true) {
+  return useQuery<SmsSegmentsResponse>({
+    queryKey: ['smsSegments', params] as const,
+    queryFn: () => api.getSmsSegments(params),
+    staleTime: CACHE_TTL.STANDARD,
+    enabled,
+  })
+}
+
+export function useSmsCampaigns(enabled = true) {
+  return useQuery<SmsCampaignsResponse>({
+    queryKey: ['smsCampaigns'] as const,
+    queryFn: () => api.getSmsCampaigns(),
+    staleTime: CACHE_TTL.REALTIME,
+    enabled,
+  })
+}
+
+export function useSmsCampaignResults(campaign: string | null, windowDays: number) {
+  return useQuery<SmsCampaignResultsResponse>({
+    queryKey: ['smsCampaignResults', campaign, windowDays] as const,
+    queryFn: () => api.getSmsCampaignResults(campaign as string, windowDays),
+    staleTime: CACHE_TTL.REALTIME,
+    enabled: Boolean(campaign),
+    // A frozen-but-unsent campaign answers 409; retrying cannot change that.
+    retry: false,
+  })
+}
+
+export function useMarkSmsCampaignSent() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ campaign, sentAt }: { campaign: string; sentAt?: string }) =>
+      api.markSmsCampaignSent(campaign, sentAt),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['smsCampaigns'] })
+      queryClient.invalidateQueries({ queryKey: ['smsCampaignResults'] })
+    },
   })
 }

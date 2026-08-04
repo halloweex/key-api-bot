@@ -1284,3 +1284,105 @@ export interface MarketingReportResponse {
   brands: MarketingBrandRow[]
   sources: MarketingSourceRow[]
 }
+
+// ─── SMS Campaigns ───────────────────────────────────────────────────────────
+
+export type SmsLtvBasis = 'revenue' | 'margin'
+export type SmsTier = 'VIP' | 'CORE' | 'REACTIVATION'
+
+export interface SmsSegment {
+  tier: SmsTier
+  total: number
+  target: number
+  holdout: number
+  totalLtv: number
+  avgLtv: number
+  totalRevenue: number
+  totalMargin: number
+  marginPct: number | null
+  avgOrders: number
+  avgRecencyDays: number
+}
+
+export interface SmsSegmentsResponse {
+  campaign: string
+  salesType: string
+  ltvBasis: SmsLtvBasis
+  criteria: {
+    maxRecencyDays: number
+    ltvBasis: SmsLtvBasis
+    vipLtv: number
+    coreLtv: number
+    coreMinOrders: number
+    reactivationMaxRecency: number
+    holdoutPct: number
+  }
+  segments: SmsSegment[]
+  totals: { customers: number; target: number; holdout: number }
+  truncated: boolean
+}
+
+export interface SmsCampaignSummary {
+  campaign: string
+  ltvBasis: SmsLtvBasis
+  salesType: string
+  holdoutPct: number
+  promocode: string | null
+  exportedAt: string | null
+  sentAt: string | null
+  notes: string | null
+  members: number
+  target: number
+  holdout: number
+}
+
+export interface SmsCampaignsResponse {
+  campaigns: SmsCampaignSummary[]
+}
+
+export interface SmsGroupStats {
+  contacts: number
+  converted: number
+  orders: number
+  revenue: number
+  margin: number
+  promoOrders: number
+}
+
+export interface SmsComparison {
+  conversionTarget: number
+  conversionHoldout: number
+  liftPp: number
+  liftRelativePct: number | null
+  /** [low, high] of the 95% interval, in percentage points. */
+  ci95Pp: [number, number]
+  pValue: number
+  /** False whenever the interval spans zero — no effect has been shown. */
+  significant: boolean
+  incrementalRevenuePerContact: number
+  incrementalMarginPerContact: number
+  incrementalRevenueTotal: number
+  incrementalMarginTotal: number
+}
+
+export interface SmsResultSegment {
+  tier: SmsTier
+  target: SmsGroupStats
+  holdout: SmsGroupStats
+  comparison: SmsComparison | null
+}
+
+export interface SmsCampaignResultsResponse {
+  campaign: string
+  sentAt: string
+  windowDays: number
+  ltvBasis: SmsLtvBasis
+  holdoutPct: number
+  promocode: string | null
+  segments: SmsResultSegment[]
+  overall: {
+    target: SmsGroupStats
+    holdout: SmsGroupStats
+    comparison: SmsComparison | null
+  }
+}
