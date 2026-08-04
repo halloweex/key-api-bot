@@ -17,6 +17,7 @@ const InventoryPage = lazy(() => import('./components/InventoryPage'))
 const ReportsPage = lazy(() => import('./components/ReportsPage'))
 const MarketingPage = lazy(() => import('./components/MarketingPage'))
 const MarginPage = lazy(() => import('./components/MarginPage'))
+const SmsCampaignsPage = lazy(() => import('./components/SmsCampaignsPage'))
 
 // ─── Welcome Toast Hook ──────────────────────────────────────────────────────
 
@@ -216,6 +217,19 @@ function App() {
         <AdminGuard>
           <Suspense fallback={<PageSpinner />}>
             <MarginPage />
+          </Suspense>
+        </AdminGuard>
+      </AppShell>
+    )
+  }
+
+  // SMS campaigns (admin only — the roster carries names and phone numbers)
+  if (path === '/v2/sms' || path === '/sms') {
+    return (
+      <AppShell>
+        <AdminGuard>
+          <Suspense fallback={<PageSpinner />}>
+            <SmsCampaignsPage />
           </Suspense>
         </AdminGuard>
       </AppShell>

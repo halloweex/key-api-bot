@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import {
   BarChart3, Lightbulb, Activity, Box, ClipboardList, Rocket, Percent,
-  CircleDollarSign, Users, ShieldCheck, PanelLeft, User,
+  CircleDollarSign, Users, ShieldCheck, PanelLeft, User, MessageSquare,
 } from 'lucide-react'
 import { useNavStore } from '../store/navStore'
 import { useAuth, useUserDisplayName } from '../hooks/useAuth'
@@ -198,6 +198,9 @@ export const SidebarRail = memo(function SidebarRail() {
         <CollapsedNavIcon href="/inventory" icon={<Box className="w-5 h-5" />} label={t('nav.inventory')} />
         <CollapsedNavIcon href="/reports" icon={<ClipboardList className="w-5 h-5" />} label={t('nav.reports')} />
         <CollapsedNavIcon href="/marketing" icon={<Rocket className="w-5 h-5" />} label={t('nav.marketing')} />
+        {isAdmin && (
+          <CollapsedNavIcon href="/sms" icon={<MessageSquare className="w-5 h-5" />} label={t('nav.smsCampaigns')} />
+        )}
       </div>
 
       {/* Expanded content */}
@@ -225,6 +228,11 @@ export const SidebarRail = memo(function SidebarRail() {
           <NavLink href="/marketing" icon={<Rocket className="w-5 h-5" />}>
             {t('nav.marketing')}
           </NavLink>
+          {isAdmin && (
+            <NavLink href="/sms" icon={<MessageSquare className="w-5 h-5" />}>
+              {t('nav.smsCampaigns')}
+            </NavLink>
+          )}
           <NavLink href="/financial" icon={<CircleDollarSign className="w-5 h-5" />} disabled>
             {t('nav.financial')}
           </NavLink>
