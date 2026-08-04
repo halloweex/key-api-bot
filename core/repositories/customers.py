@@ -6,6 +6,20 @@ from typing import Optional, Dict, Any
 
 from core.duckdb_constants import B2B_MANAGER_ID, RETAIL_MANAGER_IDS
 
+# Tier cut-offs per LTV basis for get_sms_segments.
+#
+# The margin figures are calibrated so each tier selects roughly the same
+# share of the base as its revenue counterpart (blended margin runs ~54%):
+# on current data revenue >=10000/5000 picks 1325/3108 customers, margin
+# >=5500/2750 picks 1346/3149. Switching basis therefore re-ranks who lands
+# in a tier without silently resizing it.
+SMS_LTV_BASES = ("revenue", "margin")
+
+SMS_TIER_DEFAULTS = {
+    "revenue": {"vip": 10000.0, "core": 5000.0},
+    "margin": {"vip": 5500.0, "core": 2750.0},
+}
+
 
 class CustomersMixin:
 
@@ -994,3 +1008,288 @@ class CustomersMixin:
                     "churnPct": round(100.0 * total_churned / total_customers, 1) if total_customers > 0 else 0
                 }
             }
+
+    async def get_sms_segments(
+        self,
+        max_recency_days: int = 270,
+        vip_ltv: Optional[float] = None,
+        core_ltv: Optional[float] = None,
+        core_min_orders: int = 2,
+        reactivation_max_recency: int = 120,
+        sales_type: str = "retail",
+        ltv_basis: str = "revenue",
+        holdout_pct: int = 10,
+        campaign: str = "default",
+        tier: Optional[str] = None,
+        include_customers: bool = False,
+        limit: int = 20000,
+    ) -> Dict[str, Any]:
+        """
+        Build RFM-based SMS campaign segments with a deterministic holdout group.
+
+        Customers are scored on recency / frequency / lifetime value and assigned
+        to exactly one tier (most valuable wins):
+
+        * ``VIP``          - ltv >= vip_ltv. High baseline repeat rate; discounting
+          them mostly cannibalises purchases that would have happened anyway.
+        * ``CORE``         - orders >= core_min_orders OR ltv >= core_ltv.
+        * ``REACTIVATION`` - single-order buyers still inside
+          ``reactivation_max_recency`` days. Lowest baseline, highest headroom.
+
+        Everyone outside ``max_recency_days``, without a usable phone number, or
+        a single-order buyer past ``reactivation_max_recency`` is dropped.
+
+        ``ltv_basis`` picks which lifetime value drives the tiering:
+
+        * ``revenue`` - lifetime revenue.
+        * ``margin``  - lifetime contribution margin (revenue minus COGS from
+          ``offer_stocks.purchased_price``). Preferred when margin varies by
+          brand, since revenue ranking otherwise steers budget towards
+          low-margin customers.
+
+        Both figures are always returned, so the two bases can be compared on
+        the same people. Margin can be negative (goods sold below cost) and is
+        deliberately not clipped. Where a SKU has no cost, that line is left out
+        of the margin but still counted in revenue — ``costCoverage`` reports
+        the costed share so under-scored customers are visible.
+
+        ``holdout_pct`` of each tier is marked ``holdout`` instead of ``target``
+        so campaign uplift can be measured. The split is a hash of
+        (buyer_id, campaign): stable across reruns of the same campaign, and
+        re-drawn when ``campaign`` changes so the same people are not always
+        withheld.
+
+        Args:
+            max_recency_days: Drop customers whose last order is older than this.
+            vip_ltv: VIP cut-off; defaults per basis (see SMS_TIER_DEFAULTS).
+            core_ltv: CORE cut-off without repeat orders; defaults per basis.
+            core_min_orders: Order count that qualifies for CORE.
+            reactivation_max_recency: Recency cap for single-order buyers.
+            sales_type: retail / b2b / all.
+            ltv_basis: revenue or margin — which LTV drives tier assignment.
+            holdout_pct: Percent of each tier withheld as control (0 disables).
+            campaign: Campaign label; also seeds the holdout split.
+            tier: Return only this tier (VIP / CORE / REACTIVATION).
+            include_customers: Include the customer rows, not just the summary.
+            limit: Max customer rows returned when include_customers is set.
+
+        Returns:
+            Dict with per-tier summary, totals and (optionally) customer rows.
+
+        Raises:
+            ValueError: If ltv_basis is not one of SMS_LTV_BASES.
+        """
+        if ltv_basis not in SMS_LTV_BASES:
+            raise ValueError(
+                f"ltv_basis must be one of {', '.join(SMS_LTV_BASES)}, got {ltv_basis!r}"
+            )
+
+        defaults = SMS_TIER_DEFAULTS[ltv_basis]
+        if vip_ltv is None:
+            vip_ltv = defaults["vip"]
+        if core_ltv is None:
+            core_ltv = defaults["core"]
+
+        if tier is not None:
+            tier = tier.upper()
+
+        async with self.connection() as conn:
+            # Silver already classifies each order, so filter on the column
+            # rather than re-deriving retail/b2b from manager_id here.
+            sales_type_filter = "" if sales_type == "all" else "AND o.sales_type = ?"
+
+            # Phones are stored as free text; normalise to digits and keep only
+            # full Ukrainian MSISDNs (380 + 9 digits). Everything shorter is a
+            # partial record that no SMS gateway will accept.
+            # Which lifetime value drives tiering. Both are always computed.
+            ltv_column = "revenue_ltv" if ltv_basis == "revenue" else "margin_ltv"
+
+            query = f"""
+            WITH line_items AS (
+                SELECT
+                    o.id AS order_id,
+                    o.buyer_id,
+                    o.order_date,
+                    o.grand_total,
+                    op.price_sold * op.quantity AS line_revenue,
+                    CASE WHEN os.purchased_price > 0
+                         THEN os.purchased_price * op.quantity END AS line_cogs
+                FROM silver_orders o
+                JOIN order_products op ON op.order_id = o.id
+                LEFT JOIN products p ON p.id = op.product_id
+                LEFT JOIN offer_stocks os ON os.sku = p.sku
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  -- Same revenue definition the Gold layer uses: deprecated
+                  -- sources (Opencart et al.) must not inflate LTV or recency.
+                  AND o.is_active_source
+                  {sales_type_filter}
+            ),
+            allocated AS (
+                -- Order-level discounts live in grand_total, not in the line
+                -- prices (line totals run ~1.5% above grand_total), so spread
+                -- each order's grand_total across its lines pro rata. That
+                -- charges the discount to margin, which is where it belongs:
+                -- a customer who only ever buys on discount is worth less.
+                SELECT
+                    buyer_id, order_id, order_date, line_cogs,
+                    COALESCE(
+                        grand_total * line_revenue
+                            / NULLIF(SUM(line_revenue) OVER (PARTITION BY order_id), 0),
+                        0
+                    ) AS revenue
+                FROM line_items
+            ),
+            cust AS (
+                SELECT
+                    buyer_id,
+                    COUNT(DISTINCT order_id) AS orders,
+                    SUM(revenue) AS revenue_ltv,
+                    -- Uncosted lines drop out of margin but stay in revenue;
+                    -- cost_coverage exposes how much of the customer is costed.
+                    COALESCE(SUM(revenue - line_cogs) FILTER (WHERE line_cogs IS NOT NULL), 0)
+                        AS margin_ltv,
+                    COALESCE(SUM(revenue) FILTER (WHERE line_cogs IS NOT NULL), 0)
+                        / NULLIF(SUM(revenue), 0) AS cost_coverage,
+                    MAX(order_date) AS last_order_date,
+                    MIN(order_date) AS first_order_date,
+                    DATEDIFF('day', MAX(order_date), CURRENT_DATE) AS recency
+                FROM allocated
+                GROUP BY buyer_id
+            ),
+            scored AS (
+                SELECT
+                    c.*,
+                    b.full_name,
+                    b.city,
+                    regexp_replace(COALESCE(b.phone, ''), '[^0-9]', '', 'g') AS phone,
+                    CASE
+                        WHEN c.{ltv_column} >= ? THEN 'VIP'
+                        WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
+                        WHEN c.recency <= ? THEN 'REACTIVATION'
+                    END AS tier
+                FROM cust c
+                JOIN buyers b ON b.id = c.buyer_id
+                WHERE c.recency <= ?
+            ),
+            eligible AS (
+                SELECT *
+                FROM scored
+                WHERE tier IS NOT NULL
+                  AND length(phone) = 12
+                  AND phone LIKE '380%'
+                -- One SMS per phone number: shared numbers across buyer records
+                -- would otherwise be messaged twice.
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY phone ORDER BY {ltv_column} DESC, buyer_id
+                ) = 1
+            )
+            SELECT
+                buyer_id, full_name, phone, city, tier, orders,
+                ROUND({ltv_column}, 2) AS ltv,
+                ROUND({ltv_column} / orders, 2) AS aov,
+                ROUND(revenue_ltv, 2) AS revenue_ltv,
+                ROUND(margin_ltv, 2) AS margin_ltv,
+                ROUND(100.0 * margin_ltv / NULLIF(revenue_ltv, 0), 1) AS margin_pct,
+                ROUND(100.0 * COALESCE(cost_coverage, 0), 1) AS cost_coverage,
+                recency, last_order_date, first_order_date,
+                CASE WHEN hash(buyer_id::VARCHAR || '|' || ?) % 100 < ?
+                     THEN 'holdout' ELSE 'target' END AS assignment
+            FROM eligible
+            {"WHERE tier = ?" if tier else ""}
+            ORDER BY tier, ltv DESC, buyer_id
+            """
+
+            # Bound in textual order of the `?` placeholders above.
+            params: list = []
+            if sales_type != "all":
+                params.append(sales_type)
+            params += [
+                vip_ltv, core_min_orders, core_ltv, reactivation_max_recency,
+                max_recency_days, campaign, holdout_pct,
+            ]
+            if tier:
+                params.append(tier)
+
+            rows = conn.execute(query, params).fetchall()
+
+        tiers: Dict[str, Dict[str, Any]] = {}
+        customers = []
+        for (buyer_id, full_name, phone, city, row_tier, orders, ltv, aov,
+             revenue_ltv, margin_ltv, margin_pct, cost_coverage,
+             recency, last_order, first_order, assignment) in rows:
+            stats = tiers.setdefault(row_tier, {
+                "tier": row_tier, "total": 0, "target": 0, "holdout": 0,
+                "ltv": 0.0, "revenue": 0.0, "margin": 0.0,
+                "_recency_sum": 0, "_orders_sum": 0,
+            })
+            stats["total"] += 1
+            stats[assignment] += 1
+            stats["ltv"] += float(ltv or 0)
+            stats["revenue"] += float(revenue_ltv or 0)
+            stats["margin"] += float(margin_ltv or 0)
+            stats["_recency_sum"] += recency
+            stats["_orders_sum"] += orders
+
+            if include_customers and len(customers) < limit:
+                customers.append({
+                    "buyerId": buyer_id,
+                    "fullName": full_name,
+                    "phone": phone,
+                    "city": city,
+                    "tier": row_tier,
+                    "orders": orders,
+                    "ltv": float(ltv or 0),
+                    "avgOrderValue": float(aov or 0),
+                    "revenueLtv": float(revenue_ltv or 0),
+                    "marginLtv": float(margin_ltv or 0),
+                    "marginPct": float(margin_pct) if margin_pct is not None else None,
+                    "costCoverage": float(cost_coverage or 0),
+                    "recencyDays": recency,
+                    "lastOrderDate": last_order.isoformat() if last_order else None,
+                    "firstOrderDate": first_order.isoformat() if first_order else None,
+                    "assignment": assignment,
+                })
+
+        tier_order = {"VIP": 0, "CORE": 1, "REACTIVATION": 2}
+        summary = []
+        for stats in sorted(tiers.values(), key=lambda s: tier_order.get(s["tier"], 9)):
+            total = stats["total"]
+            summary.append({
+                "tier": stats["tier"],
+                "total": total,
+                "target": stats["target"],
+                "holdout": stats["holdout"],
+                "totalLtv": round(stats["ltv"], 2),
+                "avgLtv": round(stats["ltv"] / total, 2) if total else 0,
+                "totalRevenue": round(stats["revenue"], 2),
+                "totalMargin": round(stats["margin"], 2),
+                "marginPct": round(100.0 * stats["margin"] / stats["revenue"], 1)
+                             if stats["revenue"] else None,
+                "avgOrders": round(stats["_orders_sum"] / total, 2) if total else 0,
+                "avgRecencyDays": round(stats["_recency_sum"] / total) if total else 0,
+            })
+
+        total_customers = sum(s["total"] for s in summary)
+        return {
+            "campaign": campaign,
+            "salesType": sales_type,
+            "ltvBasis": ltv_basis,
+            "criteria": {
+                "maxRecencyDays": max_recency_days,
+                "ltvBasis": ltv_basis,
+                "vipLtv": vip_ltv,
+                "coreLtv": core_ltv,
+                "coreMinOrders": core_min_orders,
+                "reactivationMaxRecency": reactivation_max_recency,
+                "holdoutPct": holdout_pct,
+            },
+            "segments": summary,
+            "totals": {
+                "customers": total_customers,
+                "target": sum(s["target"] for s in summary),
+                "holdout": sum(s["holdout"] for s in summary),
+            },
+            "customers": customers if include_customers else [],
+            "truncated": include_customers and total_customers > limit,
+        }
