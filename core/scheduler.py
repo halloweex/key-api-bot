@@ -265,6 +265,19 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Daily DuckDB backup (A9-1) at a low-traffic hour.
+        # Holds the store lock briefly for a consistent CHECKPOINT+copy; protects
+        # data NOT recoverable from KeyCRM (goals, manual expenses, roles).
+        self._add_job(
+            job_id="db_backup",
+            name="DB Backup",
+            description="Consistent on-disk backup of analytics.duckdb (retains 7)",
+            func=self._run_backup,
+            trigger=CronTrigger(hour=4, minute=30),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Bronze promotion (every 2 min, staging mode only)
         # Promotes unprocessed bronze events → orders table.
         # Only active when SYNC_MODE=staging; no-ops in legacy mode.
@@ -620,6 +633,17 @@ class BackgroundScheduler:
                     changed_order_ids=changed_ids,
                 )
                 logger.info("Warehouse refresh complete")
+                return result
+
+    async def _run_backup(self) -> Dict[str, Any]:
+        """Daily consistent backup of the DuckDB warehouse (A9-1)."""
+        async with self._heavy_job_lock:
+            from core.duckdb_store import get_store
+            store = await get_store()
+            with correlation_context() as corr_id:
+                logger.info("Starting daily DB backup")
+                result = await store.backup_database(keep=7)
+                logger.info(f"DB backup job complete: {result.get('status')}")
                 return result
 
     async def _run_reconciliation(self) -> Dict[str, Any]:

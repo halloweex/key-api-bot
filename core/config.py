@@ -171,8 +171,10 @@ class SourceConfig:
 class OrderConfig:
     """Order processing configuration."""
 
-    # Status IDs for returned/canceled orders
-    return_status_ids: List[int] = field(default_factory=lambda: [19, 22, 21, 23])
+    # Status IDs excluded from revenue = KeyCRM lost/cancel group (group_id=6):
+    # 15 not_available, 18 did_not_arrange_price, 19 returned, 21 canceled,
+    # 22 refunded, 23 rejected.
+    return_status_ids: List[int] = field(default_factory=lambda: [15, 18, 19, 21, 22, 23])
 
     # Telegram manager IDs to include
     telegram_manager_ids: List[str] = field(default_factory=lambda: ["19", "22", "4", "16"])

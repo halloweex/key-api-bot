@@ -63,7 +63,9 @@ class SourceId(IntEnum):
 
 class OrderStatus(IntEnum):
     """Order status IDs from KeyCRM."""
-    # Return/Cancel statuses
+    # Lost / cancel group (KeyCRM status_group_id = 6) — excluded from revenue.
+    NOT_AVAILABLE = 15          # товару немає в наявності
+    DID_NOT_ARRANGE_PRICE = 18  # не узгодили ціну
     RETURNED = 19
     CANCELED = 21
     REFUNDED = 22
@@ -71,8 +73,18 @@ class OrderStatus(IntEnum):
 
     @classmethod
     def return_statuses(cls) -> set:
-        """Get set of return/cancel status IDs."""
-        return {cls.RETURNED, cls.CANCELED, cls.REFUNDED, cls.REJECTED}
+        """Status IDs excluded from revenue = KeyCRM lost/cancel group (group_id=6).
+
+        Canonical "not a booked sale" set used by the Silver is_return flag, gold
+        revenue, goals, and reconciliation. Covers returns AND cancels AND lost
+        orders (not_available / did_not_arrange_price), which KeyCRM groups as
+        group_id=6. Previously this list was {19,21,22,23} only, so 15 & 18 were
+        wrongly counted as revenue.
+        """
+        return {
+            cls.NOT_AVAILABLE, cls.DID_NOT_ARRANGE_PRICE,
+            cls.RETURNED, cls.CANCELED, cls.REFUNDED, cls.REJECTED,
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
