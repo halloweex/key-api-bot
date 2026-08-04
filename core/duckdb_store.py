@@ -42,6 +42,13 @@ from core.repositories import (
 
 logger = logging.getLogger(__name__)
 
+# Warehouse self-heal bound: how many consecutive failed/errored refreshes we
+# keep auto-retrying (mark dirty → next scheduler tick) before we STOP the loop
+# and escalate loudly. Prevents both the old silent-idle dead-end (wrong data
+# served until the weekly full_sync) and an unbounded retry spin on a
+# deterministic data bug.
+MAX_VALIDATION_RETRIES = 3
+
 
 class DuckDBStore(
     UsersMixin, TrafficMixin, CustomersMixin, GoalsMixin,
@@ -2142,6 +2149,7 @@ class DuckDBStore(
 
             # ── Step 4: Validation + audit log ──
             needs_full_retry = False
+            validation_alert: str | None = None
             async with self.connection() as conn:
                 checksums = conn.execute("""
                     SELECT
@@ -2170,26 +2178,50 @@ class DuckDBStore(
                 validation_passed = checksum_match and row_count_match and product_checksum_match
 
                 if not validation_passed:
-                    # Check if last refresh also failed (consecutive failure = don't retry again)
-                    last_status = conn.execute(
-                        "SELECT validation_passed FROM warehouse_refreshes ORDER BY refreshed_at DESC LIMIT 1"
-                    ).fetchone()
-                    is_consecutive_failure = last_status and last_status[0] is False
+                    # Count consecutive PRIOR failures (this run's row not yet
+                    # written). Keep self-healing (mark dirty → full retry on the
+                    # next scheduler tick) up to MAX_VALIDATION_RETRIES, then STOP
+                    # the loop and escalate LOUDLY. The old code went silently idle
+                    # on the 2nd consecutive failure, leaving the Gold layer serving
+                    # wrong revenue until the weekly full_sync, with no alert.
+                    prior_failures = conn.execute(
+                        "SELECT validation_passed FROM warehouse_refreshes "
+                        "ORDER BY refreshed_at DESC LIMIT ?",
+                        [MAX_VALIDATION_RETRIES + 1],
+                    ).fetchall()
+                    consecutive = 0
+                    for (vp,) in prior_failures:
+                        if vp is False:
+                            consecutive += 1
+                        else:
+                            break
 
-                    if not is_consecutive_failure:
+                    detail = (
+                        f"rows={bronze_orders}→{silver_rows} (match={row_count_match}), "
+                        f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match}), "
+                        f"product_revenue={bronze_product_revenue:.2f}→{gold_product_revenue:.2f} "
+                        f"(match={product_checksum_match})"
+                    )
+
+                    if consecutive < MAX_VALIDATION_RETRIES:
                         logger.warning(
-                            f"Warehouse validation failed — scheduling full retry: "
-                            f"rows={bronze_orders}→{silver_rows} (match={row_count_match}), "
-                            f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match}), "
-                            f"product_revenue={bronze_product_revenue:.2f}→{gold_product_revenue:.2f} (match={product_checksum_match})"
+                            f"Warehouse validation failed — scheduling full retry "
+                            f"(consecutive={consecutive}): {detail}"
                         )
                         needs_full_retry = True
+                        validation_alert = (
+                            "⚠️ Warehouse validation failed — full retry scheduled "
+                            f"(attempt {consecutive + 1}/{MAX_VALIDATION_RETRIES}).\n{detail}"
+                        )
                     else:
                         logger.error(
-                            f"Warehouse validation failed AGAIN (consecutive): "
-                            f"rows={bronze_orders}→{silver_rows}, "
-                            f"revenue={silver_revenue:.2f}→{gold_revenue:.2f}, "
-                            f"product_revenue={bronze_product_revenue:.2f}→{gold_product_revenue:.2f}"
+                            f"Warehouse validation failed {consecutive}x consecutively — "
+                            f"STOPPING auto-retry, manual intervention required: {detail}"
+                        )
+                        validation_alert = (
+                            f"🚨 CRITICAL: Warehouse validation failed {consecutive}x in a "
+                            "row. Auto-retry stopped — the Gold layer may be serving WRONG "
+                            f"revenue. Manual fix needed.\n{detail}"
                         )
 
                 duration_ms = (time.perf_counter() - start_time) * 1000
@@ -2211,6 +2243,8 @@ class DuckDBStore(
             # (mark_warehouse_dirty also acquires self._lock via self.connection())
             if needs_full_retry:
                 await self.mark_warehouse_dirty(None)
+            if validation_alert:
+                await self._send_warehouse_alert(validation_alert)
 
             incremental_info = ""
             if affected_dates:
@@ -2266,6 +2300,34 @@ class DuckDBStore(
                     """, [trigger, round(duration_ms, 2), error_msg])
             except Exception:
                 pass
+
+            # A5-1 self-heal: an exception here can mean a DURABLE cross-layer
+            # inconsistency on disk — e.g. the Gold-revenue transaction committed
+            # (Step 2) but the Gold-products transaction (Step 3) threw, or the
+            # process was OOM-killed between them. Each step is its own
+            # BEGIN/COMMIT, so the layers are left from different points in time
+            # and validation never ran. Mark dirty so the next scheduler tick does
+            # a full rebuild and reconciles, bounded by the same consecutive-failure
+            # escalation as validation failures (the audit row above is already
+            # counted). Previously this path returned without marking dirty, so the
+            # inconsistency persisted silently until the weekly full_sync.
+            try:
+                consecutive = await self._count_consecutive_refresh_failures()
+                if consecutive <= MAX_VALIDATION_RETRIES:
+                    await self.mark_warehouse_dirty(None)
+                    await self._send_warehouse_alert(
+                        f"⚠️ Warehouse refresh errored — full rebuild scheduled to "
+                        f"self-heal (attempt {consecutive}/{MAX_VALIDATION_RETRIES}). "
+                        f"Gold layers may be cross-inconsistent until then.\n{error_msg}"
+                    )
+                else:
+                    await self._send_warehouse_alert(
+                        f"🚨 CRITICAL: Warehouse refresh errored {consecutive}x in a row. "
+                        f"Auto-retry stopped — Gold layers may be cross-inconsistent. "
+                        f"Manual fix needed.\n{error_msg}"
+                    )
+            except Exception as heal_err:
+                logger.error(f"Failed to schedule warehouse self-heal: {heal_err}")
 
             return {
                 "status": "error",
@@ -2377,6 +2439,138 @@ class DuckDBStore(
             if value == "full":
                 return True, None
             return True, json.loads(value)
+
+    async def _count_consecutive_refresh_failures(self) -> int:
+        """How many of the most-recent warehouse_refreshes rows failed in a row.
+
+        A row "failed" when validation_passed IS FALSE (covers both validation
+        failures and thrown-error rows, which are logged with FALSE). Used to
+        bound the self-heal retry loop so a deterministic data bug doesn't spin
+        a full rebuild every scheduler tick forever.
+        """
+        async with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT validation_passed FROM warehouse_refreshes "
+                "ORDER BY refreshed_at DESC LIMIT ?",
+                [MAX_VALIDATION_RETRIES + 2],
+            ).fetchall()
+        consecutive = 0
+        for (vp,) in rows:
+            if vp is False:
+                consecutive += 1
+            else:
+                break
+        return consecutive
+
+    async def _send_warehouse_alert(self, message: str) -> None:
+        """Push a warehouse-health alert to admins (best-effort, never raises).
+
+        Mirrors scheduler._send_bronze_alert: lazy import to avoid a circular
+        dependency on bot.main at module load.
+        """
+        try:
+            from bot.main import send_admin_message
+            await send_admin_message(message)
+        except Exception as e:
+            logger.warning(f"Failed to send warehouse alert: {e}")
+
+    async def backup_database(
+        self, dest_dir: "Path | str | None" = None, keep: int = 7,
+    ) -> Dict[str, Any]:
+        """Create a consistent on-disk backup of the DuckDB file (A9-1).
+
+        DuckDB has no online/hot backup. We hold the store lock (serializing
+        with every refresh/sync write), CHECKPOINT to fold the WAL into the main
+        file, then copy the file while the lock is STILL held so no writer can
+        run mid-copy — yielding a byte-consistent snapshot. The copy is offloaded
+        to the executor so the event loop is not blocked. The copy is then
+        validated read-only before older backups are pruned.
+
+        Holds the global lock for the copy duration (tens of seconds on a multi-GB
+        DB) → schedule at a low-traffic hour. For real DR the backup dir must be
+        replicated OFF-HOST (rclone/S3) — see docs/backup_runbook.md.
+
+        Protects data that is NOT recoverable from KeyCRM: revenue_goals,
+        manual_expenses, users/roles, user_preferences, celebrated_milestones.
+        """
+        import os
+        import shutil
+        import time
+
+        src = Path(self.db_path)
+        dest = Path(dest_dir) if dest_dir else src.parent / "backups"
+        dest.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(DEFAULT_TZ).strftime("%Y%m%d-%H%M%S")
+        final_path = dest / f"{src.stem}-{stamp}.duckdb"
+        tmp_path = dest / f".{src.stem}-{stamp}.duckdb.tmp"
+
+        # Disk-space guard: need room for a full second copy (+10% margin).
+        src_size = src.stat().st_size
+        free = shutil.disk_usage(dest).free
+        if free < src_size * 1.1:
+            msg = (f"Backup aborted: only {free/1e9:.1f}GB free, need "
+                   f"~{src_size*1.1/1e9:.1f}GB for {src.name}")
+            logger.error(msg)
+            await self._send_warehouse_alert(f"🚨 DB backup FAILED — {msg}")
+            return {"status": "error", "error": msg}
+
+        t0 = time.perf_counter()
+        try:
+            async with self.connection() as conn:
+                conn.execute("CHECKPOINT")
+                loop = asyncio.get_running_loop()
+                # Copy with the lock held → no concurrent writer → consistent.
+                await loop.run_in_executor(
+                    self._executor, shutil.copy2, str(src), str(tmp_path)
+                )
+
+            # Validate the copy read-only (outside the lock).
+            def _validate() -> int:
+                con = duckdb.connect(str(tmp_path), read_only=True)
+                try:
+                    return con.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+                finally:
+                    con.close()
+
+            loop = asyncio.get_running_loop()
+            orders_in_backup = await loop.run_in_executor(self._executor, _validate)
+            if not orders_in_backup or orders_in_backup <= 0:
+                raise ValueError(f"backup validation failed: orders={orders_in_backup}")
+
+            os.replace(tmp_path, final_path)
+            duration = time.perf_counter() - t0
+
+            # Retain only the newest `keep` backups.
+            backups = sorted(dest.glob(f"{src.stem}-*.duckdb"))
+            removed = 0
+            for old in backups[:-keep] if keep > 0 else []:
+                try:
+                    old.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+
+            logger.info(
+                f"DB backup OK: {final_path.name} ({src_size/1e9:.2f}GB, "
+                f"orders={orders_in_backup}, {duration:.1f}s, pruned {removed})"
+            )
+            return {
+                "status": "success",
+                "path": str(final_path),
+                "size_bytes": src_size,
+                "orders": orders_in_backup,
+                "duration_s": round(duration, 1),
+                "pruned": removed,
+            }
+        except Exception as e:
+            logger.error(f"DB backup failed: {e}", exc_info=True)
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            await self._send_warehouse_alert(f"🚨 DB backup FAILED: {e}")
+            return {"status": "error", "error": str(e)}
 
     async def get_order_count_for_date(self, date_str: str) -> int:
         """Get count of orders in DuckDB for a specific date (in Kyiv timezone)."""

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -423,6 +423,82 @@ def _value_domain_check(
     )]
 
 
+# Per-entity freshness thresholds (hours) and the severity when breached.
+# orders syncs every ~60s so a multi-hour gap means the pipeline is dead →
+# no new revenue lands → CRITICAL. catalog (categories/expense_types) syncs only
+# in the weekly full_sync, so its threshold tolerates a healthy week but fires on
+# a stall (the confirmed 45-day-stale incident that NOTHING alerted on).
+FRESHNESS_THRESHOLDS: Dict[str, Tuple[float, "Severity"]] = {
+    "orders":        (6,   Severity.CRITICAL),
+    "products":      (48,  Severity.WARN),
+    "buyers":        (48,  Severity.WARN),
+    "offers":        (48,  Severity.WARN),
+    "stocks":        (48,  Severity.WARN),
+    "managers":      (192, Severity.WARN),
+    "categories":    (192, Severity.WARN),
+    "expense_types": (192, Severity.WARN),
+}
+
+
+def _freshness_check(conn, now: Optional[datetime] = None) -> List[IntegrityIssue]:
+    """Flag sync_metadata entities whose last_sync_* is older than its threshold.
+
+    Catches silent sync-pipeline stalls — e.g. categories/expense_types going
+    45 days stale while orders kept current — which neither the warehouse
+    validation nor the reconciliation checks cover.
+    """
+    issues: List[IntegrityIssue] = []
+    if now is None:
+        now = datetime.now().astimezone()
+
+    rows = conn.execute(
+        "SELECT key, value FROM sync_metadata WHERE key LIKE 'last_sync_%'"
+    ).fetchall()
+    seen = {k[len("last_sync_"):]: v for k, v in rows}
+    # No sync history at all → fresh/bootstrap install, not a stall. Skip to
+    # avoid spurious "never synced" issues before the first sync completes.
+    if not seen:
+        return []
+
+    for entity, (max_hours, sev) in FRESHNESS_THRESHOLDS.items():
+        raw = seen.get(entity)
+        if not raw:
+            issues.append(IntegrityIssue(
+                check_name=f"freshness_{entity}",
+                table_name=entity,
+                severity=sev,
+                count=1,
+                description=f"sync_metadata has no last_sync_{entity} — entity never synced",
+            ))
+            continue
+        try:
+            ts = datetime.fromisoformat(raw)
+        except (ValueError, TypeError):
+            issues.append(IntegrityIssue(
+                check_name=f"freshness_{entity}",
+                table_name=entity,
+                severity=Severity.WARN,
+                count=1,
+                description=f"unparseable last_sync_{entity}={raw!r}",
+            ))
+            continue
+        if ts.tzinfo is None:
+            ts = ts.astimezone()
+        age_h = (now - ts).total_seconds() / 3600
+        if age_h > max_hours:
+            issues.append(IntegrityIssue(
+                check_name=f"freshness_{entity}",
+                table_name=entity,
+                severity=sev,
+                count=int(age_h),
+                description=(
+                    f"{entity} last synced {age_h:.1f}h ago "
+                    f"(threshold {max_hours}h) — sync may be stalled"
+                ),
+            ))
+    return issues
+
+
 def check_internal_integrity(conn) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
 
@@ -456,6 +532,9 @@ def check_internal_integrity(conn) -> List[IntegrityIssue]:
     issues += _value_domain_check(
         conn, "orders", "source_id", KNOWN_SOURCE_IDS, Severity.WARN,
     )
+
+    # Freshness — catch silent sync-pipeline stalls (e.g. categories 45d stale).
+    issues += _freshness_check(conn)
 
     return issues
 
