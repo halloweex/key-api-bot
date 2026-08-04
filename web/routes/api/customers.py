@@ -2,7 +2,7 @@
 import csv
 import io
 import logging
-from datetime import date as _date
+from datetime import date as _date, datetime as _datetime
 
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
@@ -254,6 +254,16 @@ async def export_sms_segments_csv(
     criteria: dict = Depends(_sms_segment_params),
     include_holdout: bool = Query(False),
     limit: int = Query(50000, ge=1, le=100000),
+    freeze: bool = Query(
+        False,
+        description="Record this roster as the campaign's control group. Set it on "
+                    "the export you actually send.",
+    ),
+    overwrite: bool = Query(False, description="Replace an existing frozen roster"),
+    promocode: Optional[str] = Query(
+        None, max_length=40,
+        description="Code carried by this campaign, for direct attribution",
+    ),
     admin: dict = Depends(require_admin),
 ):
     """
@@ -262,9 +272,37 @@ async def export_sms_segments_csv(
     By default only the `target` group is exported — the holdout must stay
     unmessaged for the campaign uplift to be measurable. Pass
     `include_holdout=true` to get both groups (e.g. to archive the split).
+
+    Pass `freeze=true` on the export you actually send. The eligible population
+    shifts daily, so a roster that is not recorded now cannot be reconstructed
+    later — and without it there is no control group to measure against.
     """
     store = await get_store()
     data = await store.get_sms_segments(include_customers=True, limit=limit, **criteria)
+
+    # Freezing must happen before the file leaves — the roster recorded here is
+    # the only control group that will exist when results are measured.
+    frozen = None
+    if freeze:
+        if data["truncated"]:
+            raise HTTPException(
+                status_code=400,
+                detail="refusing to freeze a truncated roster — raise `limit` so the "
+                       "whole segment is recorded",
+            )
+        try:
+            frozen = await store.freeze_sms_campaign(
+                campaign=criteria["campaign"],
+                customers=data["customers"],
+                criteria=data["criteria"],
+                ltv_basis=criteria["ltv_basis"],
+                sales_type=criteria["sales_type"],
+                holdout_pct=criteria["holdout_pct"],
+                promocode=promocode,
+                overwrite=overwrite,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
 
     rows = data["customers"]
     if not include_holdout:
@@ -286,6 +324,8 @@ async def export_sms_segments_csv(
         # spreadsheet without another export.
         "revenue_ltv", "margin_ltv", "margin_pct", "cost_coverage_pct",
         "recency_days", "last_order_date", "first_order_date",
+        # What they bought last — the hook the message is written around.
+        "last_order_id", "last_order_total", "last_order_item_count", "last_order_items",
     ])
     for c in rows:
         writer.writerow([
@@ -308,6 +348,10 @@ async def export_sms_segments_csv(
             c["recencyDays"],
             c["lastOrderDate"] or "",
             c["firstOrderDate"] or "",
+            c["lastOrderId"] or "",
+            c["lastOrderTotal"],
+            c["lastOrderItemCount"],
+            c["lastOrderItems"] or "",
         ])
 
     tier_part = (criteria["tier"] or "all").lower()
@@ -324,5 +368,56 @@ async def export_sms_segments_csv(
             "Content-Disposition": f"attachment; filename={filename}",
             "X-Segment-Rows": str(len(rows)),
             "X-Segment-Truncated": str(data["truncated"]).lower(),
+            "X-Campaign-Frozen": str(bool(frozen)).lower(),
+            "X-Campaign-Holdout": str(frozen["totals"]["holdout"]) if frozen else "0",
         },
     )
+
+
+@router.post("/customers/sms-campaigns/{campaign}/sent")
+@limiter.limit("20/minute")
+async def mark_sms_campaign_sent(
+    request: Request,
+    campaign: str,
+    sent_at: Optional[str] = Query(
+        None, description="ISO timestamp; defaults to now",
+    ),
+    admin: dict = Depends(require_admin),
+):
+    """
+    Record when the campaign file actually went to the SMS provider.
+
+    Results are measured from this moment, not from the export — the two can be
+    days apart, and measuring from the wrong one invents an effect that isn't there.
+    """
+    parsed = None
+    if sent_at:
+        try:
+            parsed = _datetime.fromisoformat(sent_at)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="sent_at must be an ISO timestamp",
+            )
+
+    store = await get_store()
+    try:
+        result = await store.mark_sms_campaign_sent(campaign, parsed)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    logger.info(
+        "SMS campaign marked sent: user=%s campaign=%s at=%s",
+        admin.get("user_id"), campaign, result["sentAt"],
+    )
+    return result
+
+
+@router.get("/customers/sms-campaigns")
+@limiter.limit("30/minute")
+async def list_sms_campaigns(
+    request: Request,
+    admin: dict = Depends(require_admin),
+):
+    """List frozen campaigns with their roster sizes and send dates."""
+    store = await get_store()
+    return {"campaigns": await store.list_sms_campaigns()}
