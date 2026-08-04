@@ -329,6 +329,115 @@ async def test_limit_truncates_rows_but_not_summary(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_last_order_is_the_most_recent_one(tmp_path):
+    """The message is written around what they bought last, not first."""
+    store = await _make_store(tmp_path)
+    async with store.connection() as conn:
+        _seed_catalogue(conn)
+        _add_buyer(conn, 1, "380961111111")
+        _add_order(conn, oid=10, buyer_id=1, days_ago=90, total="1000.00",
+                   product_id=PRODUCT_LOW_MARGIN)
+        _add_order(conn, oid=11, buyer_id=1, days_ago=15, total="4000.00",
+                   product_id=PRODUCT_HIGH_MARGIN, quantity=4, line_price="1000.00")
+
+    customer = _by_id(await store.get_sms_segments(
+        include_customers=True, holdout_pct=0,
+    ))[1]
+
+    assert customer["lastOrderId"] == 11
+    assert customer["lastOrderTotal"] == 4000.0
+    assert customer["lastOrderItemCount"] == 1
+    assert customer["lastOrderItems"] == f"Product {PRODUCT_HIGH_MARGIN}"
+    assert customer["lastOrderDate"] is not None
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_last_order_lists_items_and_counts_the_rest(tmp_path):
+    """Three names at most; anything beyond is summarised, not dropped silently."""
+    store = await _make_store(tmp_path)
+    async with store.connection() as conn:
+        _seed_catalogue(conn)
+        # Five extra catalogue lines so the last order has 5 items
+        for pid in range(201, 206):
+            conn.execute(
+                "INSERT INTO products (id, name, sku, price) VALUES (?, ?, ?, 1000)",
+                [pid, f"Item {pid}", f"SKU-{pid}"],
+            )
+        _add_buyer(conn, 1, "380961111111")
+        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="5000.00",
+                   product_id=201, quantity=5, line_price="1000.00")
+        for i, pid in enumerate(range(202, 206), start=1):
+            conn.execute(
+                "INSERT INTO order_products (id, order_id, product_id, name, quantity,"
+                " price_sold) VALUES (?, 1, ?, ?, ?, 0)",
+                [100 + i, pid, f"Item {pid}", 5 - i],
+            )
+
+    customer = _by_id(await store.get_sms_segments(
+        include_customers=True, holdout_pct=0,
+    ))[1]
+
+    assert customer["lastOrderItemCount"] == 5
+    items = customer["lastOrderItems"]
+    assert items.count(" | ") == 2, "three names, two separators"
+    assert items.startswith("Product 201"), "ordered by quantity, biggest line first"
+    assert items.endswith("+2 ещё"), "the omitted lines are accounted for"
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_long_product_names_are_truncated(tmp_path):
+    """Real names run to hundreds of characters and would wreck the spreadsheet."""
+    store = await _make_store(tmp_path)
+    long_name = "GROWUS Damage Therapy Perfume Hand Cream, Sea Salt - " + "х" * 120
+    async with store.connection() as conn:
+        _seed_catalogue(conn)
+        conn.execute(
+            "INSERT INTO products (id, name, sku, price) VALUES (301, ?, 'SKU-LONG', 1000)",
+            [long_name],
+        )
+        _add_buyer(conn, 1, "380961111111")
+        _add_order(conn, oid=1, buyer_id=1, days_ago=10, total="1000.00", product_id=301)
+        conn.execute("UPDATE order_products SET name = ? WHERE order_id = 1", [long_name])
+
+    items = _by_id(await store.get_sms_segments(
+        include_customers=True, holdout_pct=0,
+    ))[1]["lastOrderItems"]
+
+    assert len(items) == 58, "57 characters plus an ellipsis"
+    assert items.endswith("…")
+    assert items.startswith("GROWUS Damage Therapy")
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_last_order_ignores_returns_and_dead_sources(tmp_path):
+    """A returned order is not what they last bought."""
+    store = await _make_store(tmp_path)
+    async with store.connection() as conn:
+        _seed_catalogue(conn)
+        _add_buyer(conn, 1, "380961111111")
+        _add_order(conn, oid=1, buyer_id=1, days_ago=30, total="6000.00",
+                   product_id=PRODUCT_HIGH_MARGIN)
+        _add_order(conn, oid=2, buyer_id=1, days_ago=5, total="900.00", is_return=True)
+        _add_order(conn, oid=3, buyer_id=1, days_ago=2, total="800.00",
+                   is_active_source=False)
+
+    customer = _by_id(await store.get_sms_segments(
+        include_customers=True, holdout_pct=0,
+    ))[1]
+
+    assert customer["lastOrderId"] == 1
+    assert customer["lastOrderTotal"] == 6000.0
+
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_margin_basis_reranks_customers(tmp_path):
     """The point of ltv_basis=margin: equal revenue, unequal contribution.
 

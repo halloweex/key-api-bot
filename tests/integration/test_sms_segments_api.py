@@ -78,6 +78,10 @@ def _customer(buyer_id: int, tier: str, assignment: str) -> dict:
         "recencyDays": 20,
         "lastOrderDate": "2026-07-16",
         "firstOrderDate": "2025-11-02",
+        "lastOrderId": 90000 + buyer_id,
+        "lastOrderTotal": 2450.0,
+        "lastOrderItemCount": 5,
+        "lastOrderItems": "Abib COLLAGEN GEL MASK | LALARECIPE Cica 3in1 | NARD Treatment +2 ещё",
         "assignment": assignment,
     }
 
@@ -87,6 +91,25 @@ class _FakeStore:
 
     def __init__(self):
         self.calls = []
+        self.freezes = []
+        self.freeze_error = None
+        self.truncated = False
+
+    async def freeze_sms_campaign(self, **kwargs):
+        if self.freeze_error:
+            raise ValueError(self.freeze_error)
+        self.freezes.append(kwargs)
+        roster = kwargs["customers"]
+        return {
+            "campaign": kwargs["campaign"],
+            "frozen": True,
+            "segments": [],
+            "totals": {
+                "customers": len(roster),
+                "target": sum(1 for c in roster if c["assignment"] == "target"),
+                "holdout": sum(1 for c in roster if c["assignment"] == "holdout"),
+            },
+        }
 
     async def get_sms_segments(self, **kwargs):
         self.calls.append(kwargs)
@@ -106,7 +129,7 @@ class _FakeStore:
             "segments": [{"tier": "VIP", "total": 1, "target": 1, "holdout": 0}],
             "totals": {"customers": 3, "target": 2, "holdout": 1},
             "customers": customers,
-            "truncated": False,
+            "truncated": self.truncated,
         }
 
 
@@ -320,7 +343,20 @@ class TestSmsSegmentsCsv:
             "orders", "ltv", "ltv_basis", "avg_order_value",
             "revenue_ltv", "margin_ltv", "margin_pct", "cost_coverage_pct",
             "recency_days", "last_order_date", "first_order_date",
+            "last_order_id", "last_order_total", "last_order_item_count",
+            "last_order_items",
         ]
+
+    def test_last_order_columns_carry_the_personalisation_hook(self, client, store):
+        rows = self._rows(client.get(CSV_PATH, headers=_admin_headers()))
+        row = rows[0]
+
+        assert row["last_order_date"] == "2026-07-16"
+        assert row["last_order_id"] == "90001"
+        assert row["last_order_total"] == "2450.0"
+        assert row["last_order_item_count"] == "5"
+        assert "Abib COLLAGEN GEL MASK" in row["last_order_items"]
+        assert row["last_order_items"].endswith("+2 ещё")
 
     def test_both_bases_travel_with_the_file(self, client, store):
         """The export must be re-rankable in a spreadsheet without a second pull."""
@@ -343,6 +379,54 @@ class TestSmsSegmentsCsv:
     def test_export_always_requests_customer_rows(self, client, store):
         client.get(CSV_PATH, headers=_admin_headers())
         assert store.calls[0]["include_customers"] is True
+
+    def test_no_freeze_by_default(self, client, store):
+        """Exploratory pulls must not litter the campaign table."""
+        r = client.get(CSV_PATH, headers=_admin_headers())
+        assert r.status_code == 200
+        assert store.freezes == []
+        assert r.headers["X-Campaign-Frozen"] == "false"
+
+    def test_freeze_records_the_whole_roster(self, client, store):
+        """The holdout is excluded from the CSV but must still be recorded."""
+        r = client.get(
+            CSV_PATH,
+            params={"freeze": "true", "campaign": "aug-promo", "promocode": "KS-AUG"},
+            headers=_admin_headers(),
+        )
+        assert r.status_code == 200
+
+        assert len(store.freezes) == 1
+        frozen = store.freezes[0]
+        assert frozen["campaign"] == "aug-promo"
+        assert frozen["promocode"] == "KS-AUG"
+        assert len(frozen["customers"]) == 3, "target AND holdout are frozen"
+        assert {c["assignment"] for c in frozen["customers"]} == {"target", "holdout"}
+
+        # ...while the file itself still carries only the target group
+        assert len(self._rows(r)) == 2
+        assert r.headers["X-Campaign-Frozen"] == "true"
+        assert r.headers["X-Campaign-Holdout"] == "1"
+
+    def test_truncated_roster_refuses_to_freeze(self, client, store):
+        """A partial roster would silently shrink the control group."""
+        store.truncated = True
+        r = client.get(
+            CSV_PATH, params={"freeze": "true", "campaign": "aug-promo"},
+            headers=_admin_headers(),
+        )
+        assert r.status_code == 400
+        assert "limit" in r.json()["detail"]
+        assert store.freezes == []
+
+    def test_refreezing_conflicts(self, client, store):
+        store.freeze_error = "campaign 'aug-promo' is already frozen"
+        r = client.get(
+            CSV_PATH, params={"freeze": "true", "campaign": "aug-promo"},
+            headers=_admin_headers(),
+        )
+        assert r.status_code == 409
+        assert "already frozen" in r.json()["detail"]
 
     def test_export_is_rate_limited(self, client, store):
         """Bulk PII export is capped — a leaked session can't drain the base."""
