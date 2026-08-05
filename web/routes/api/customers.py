@@ -9,7 +9,9 @@ from fastapi.responses import StreamingResponse
 from typing import Optional
 
 from core.repositories.customers import SMS_LTV_BASES, SMS_TIER_DEFAULTS
-from core.turbosms import TurboSmsClient, TurboSmsError, count_segments
+from core.turbosms import (
+    TurboSmsClient, TurboSmsConfig, TurboSmsError, ViberMessage, count_segments,
+)
 from web.routes.auth import require_admin
 from web.services import dashboard_service
 from ._deps import (
@@ -419,6 +421,10 @@ async def send_sms_campaign(
     request: Request,
     campaign: str,
     text: str = Query(..., min_length=1, max_length=600),
+    channel: str = Query("sms", pattern="^(sms|viber_sms)$"),
+    viber_text: Optional[str] = Query(None, max_length=1000),
+    button_caption: Optional[str] = Query(None, max_length=30),
+    button_url: Optional[str] = Query(None, max_length=300),
     admin: dict = Depends(require_admin),
 ):
     """
@@ -428,6 +434,12 @@ async def send_sms_campaign(
     result to mean anything. The gateway's per-recipient answer is recorded:
     message ids for tracking delivery, and stoplist refusals as opt-outs, so
     those people are never selected again.
+
+    `channel=viber_sms` sends over Viber first and falls back to SMS only for
+    recipients Viber could not reach. The measurement is unaffected — one
+    message id per recipient either way — but the copy is not: the Viber arm
+    can carry a button, and `text` is what the SMS fallback shows, so it has
+    to stand on its own with the link spelled out.
 
     Sending twice is refused: the campaign is stamped sent on the first pass.
     """
@@ -442,10 +454,11 @@ async def send_sms_campaign(
         raise HTTPException(status_code=409, detail="campaign has no target recipients")
 
     by_phone = {t["phone"]: t["buyerId"] for t in targets}
+    viber = _build_viber(channel, text, viber_text, button_caption, button_url)
 
     try:
         async with TurboSmsClient() as client:
-            results = await client.send(list(by_phone), text)
+            results = await client.send(list(by_phone), text, viber=viber)
     except TurboSmsError as e:
         # Nothing is stamped sent — the campaign can be retried once fixed.
         logger.error("TurboSMS send failed: campaign=%s error=%s", campaign, e)
@@ -466,11 +479,58 @@ async def send_sms_campaign(
     summary = await store.record_sms_send(campaign, accepted, stoplisted, failed)
 
     logger.info(
-        "SMS campaign sent: user=%s campaign=%s accepted=%d stoplisted=%d failed=%d",
-        admin.get("user_id"), campaign,
+        "SMS campaign sent: user=%s campaign=%s channel=%s accepted=%d "
+        "stoplisted=%d failed=%d",
+        admin.get("user_id"), campaign, channel,
         summary["accepted"], summary["stoplisted"], summary["failed"],
     )
-    return summary
+    return {**summary, "channel": channel}
+
+
+def _build_viber(
+    channel: str,
+    text: str,
+    viber_text: Optional[str],
+    button_caption: Optional[str],
+    button_url: Optional[str],
+) -> Optional[ViberMessage]:
+    """
+    Assemble the Viber half of a send, or None for SMS only.
+
+    Viber is not a nicer SMS: it carries a button, which is the only way a
+    campaign link ever gets readable anchor text. That is also why the two
+    texts are separate — the SMS fallback has no button, so it has to spell
+    the URL out, while the Viber copy stays clean.
+    """
+    if channel != "viber_sms":
+        return None
+    try:
+        return ViberMessage(
+            text=(viber_text or text).strip(),
+            caption=(button_caption or None),
+            action=(button_url or None),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/customers/sms/channels")
+@limiter.limit("30/minute")
+async def get_sms_channels(request: Request, admin: dict = Depends(require_admin)):
+    """
+    Which channels this deployment can actually send on.
+
+    Viber sender names are registered separately from SMS alpha names, so a
+    working SMS setup says nothing about Viber. The dashboard needs to know
+    before it offers the choice, rather than finding out from a 502.
+    """
+    config = TurboSmsConfig()
+    return {
+        "sms": config.configured,
+        "viber": config.viber_configured,
+        "smsSender": config.sender or None,
+        "viberSender": config.viber_sender or None,
+    }
 
 
 @router.post("/customers/sms/test-send")
@@ -479,6 +539,10 @@ async def send_test_sms(
     request: Request,
     phone: str = Query(..., min_length=10, max_length=20),
     text: str = Query(..., min_length=1, max_length=600),
+    channel: str = Query("sms", pattern="^(sms|viber_sms)$"),
+    viber_text: Optional[str] = Query(None, max_length=1000),
+    button_caption: Optional[str] = Query(None, max_length=30),
+    button_url: Optional[str] = Query(None, max_length=300),
     admin: dict = Depends(require_admin),
 ):
     """
@@ -492,6 +556,10 @@ async def send_test_sms(
     path is a rehearsal and must not move the data a campaign is measured on.
     The billed cost comes back too — Cyrillic drops the limit from 160
     characters to 70, which is invisible while writing the text.
+
+    `channel=viber_sms` rehearses the hybrid send: Viber first, SMS only for
+    what Viber could not deliver. Both arms are worth testing, because they do
+    not look alike — the Viber one carries a button, the SMS one cannot.
     """
     digits = "".join(c for c in phone if c.isdigit())
     # Same rule the segmentation applies, so a number that passes here is one
@@ -503,10 +571,11 @@ async def send_test_sms(
         )
 
     cost = count_segments(text)
+    viber = _build_viber(channel, text, viber_text, button_caption, button_url)
 
     try:
         async with TurboSmsClient() as client:
-            results = await client.send([digits], text)
+            results = await client.send([digits], text, viber=viber)
     except TurboSmsError as e:
         logger.error("Test SMS failed: user=%s error=%s", admin.get("user_id"), e)
         raise HTTPException(status_code=502, detail=str(e))
@@ -516,11 +585,13 @@ async def send_test_sms(
 
     result = results[0]
     logger.info(
-        "Test SMS: user=%s phone=%s accepted=%s code=%s parts=%d",
-        admin.get("user_id"), digits, result.accepted, result.code, cost.parts,
+        "Test SMS: user=%s phone=%s channel=%s accepted=%s code=%s parts=%d",
+        admin.get("user_id"), digits, channel, result.accepted, result.code,
+        cost.parts,
     )
     return {
         "phone": digits,
+        "channel": channel,
         "accepted": result.accepted,
         "stoplisted": result.stoplisted,
         "messageId": result.message_id,

@@ -24,6 +24,7 @@ const addToast = vi.fn()
 
 vi.mock('../../hooks/useApi', () => ({
   useSendTestSms: () => ({ mutate, isPending: false }),
+  useSmsChannels: () => ({ data: { sms: true, viber: true } }),
 }))
 
 vi.mock('../Toast', () => ({ useToast: () => ({ addToast }) }))
@@ -81,9 +82,47 @@ describe('SmsTestSendDialog', () => {
     await userEvent.click(sendButton())
 
     expect(mutate).toHaveBeenCalledWith(
-      { phone: '380934555554', text: 'Знижка 20%' },
+      {
+        phone: '380934555554', text: 'Знижка 20%',
+        channel: 'sms', viber: undefined,
+      },
       expect.anything(),
     )
+  })
+
+  it('rehearses the hybrid arms separately — only one of them has a button', async () => {
+    render(<SmsTestSendDialog onClose={() => {}} />)
+
+    await userEvent.click(screen.getByRole('radio', { name: 'sms.channelViberSms' }))
+    const [phone, message, caption, url] = screen.getAllByRole('textbox')
+    await userEvent.type(phone, '380934555554')
+    await userEvent.type(message, 'День народження')
+    await userEvent.type(caption, 'Korean Story')
+    await userEvent.type(url, 'https://example.com')
+    await userEvent.click(sendButton())
+
+    expect(mutate.mock.calls[0][0]).toEqual({
+      phone: '380934555554',
+      text: 'День народження\nhttps://example.com',
+      channel: 'viber_sms',
+      viber: {
+        viberText: 'День народження',
+        buttonCaption: 'Korean Story',
+        buttonUrl: 'https://example.com',
+      },
+    })
+  })
+
+  it('counts the cost on the SMS arm, which is the longer one', async () => {
+    render(<SmsTestSendDialog onClose={() => {}} />)
+
+    await userEvent.click(screen.getByRole('radio', { name: 'sms.channelViberSms' }))
+    const [, message, , url] = screen.getAllByRole('textbox')
+    await userEvent.type(message, 'Знижка')
+    await userEvent.type(url, 'https://example.com')
+
+    // 6 + newline + 19 = 26, not the 6 of the Viber copy.
+    expect(screen.getByText('26 / 600')).toBeTruthy()
   })
 
   it('carries a text handed to it, so the campaign wording can be rehearsed', () => {
