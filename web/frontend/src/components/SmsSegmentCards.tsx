@@ -120,6 +120,10 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
   const [promocode, setPromocode] = useState('')
   const [freeze, setFreeze] = useState(false)
   const [testing, setTesting] = useState(false)
+  // Which tiers this campaign is for. A discount suits Core and Reactivation
+  // and cannibalises VIP, so the roster has to be selectable — and empty means
+  // all three, matching what the cards above show.
+  const [pickedTiers, setPickedTiers] = useState<SmsTier[]>([])
 
   const params = useMemo(
     () => `ltv_basis=${ltvBasis}&include_customers=false`,
@@ -141,11 +145,20 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
     [data],
   )
 
+  function toggleTier(tier: SmsTier) {
+    setPickedTiers((prev) =>
+      prev.includes(tier) ? prev.filter((t) => t !== tier) : [...prev, tier],
+    )
+  }
+
   function handleExport() {
     const p = new URLSearchParams({ ltv_basis: ltvBasis })
     if (campaignValid) p.set('campaign', campaign)
     if (freeze) p.set('freeze', 'true')
     if (promocode.trim()) p.set('promocode', promocode.trim())
+    // Nothing picked means every tier, so the parameter is left off entirely
+    // rather than sent empty.
+    if (pickedTiers.length > 0) p.set('tier', pickedTiers.join(','))
     window.open(`/api/customers/sms-segments/export/csv?${p.toString()}`, '_blank')
   }
 
@@ -211,6 +224,49 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
               <p className="text-xs text-slate-500 mt-0.5 mb-3">{t('sms.exportDesc')}</p>
 
               <div className="space-y-3">
+                {/* ── Who the campaign is for ──────────────────────── */}
+                <div>
+                  <span className="text-xs text-slate-600">{t('sms.exportTiers')}</span>
+                  <div
+                    className="mt-1 flex flex-wrap gap-2"
+                    role="group"
+                    aria-label={t('sms.exportTiers')}
+                  >
+                    {segments.map((s) => {
+                      const on = pickedTiers.includes(s.tier)
+                      return (
+                        <button
+                          key={s.tier}
+                          type="button"
+                          aria-pressed={on}
+                          onClick={() => toggleTier(s.tier)}
+                          className={`px-3 py-1.5 text-xs rounded-md border transition-colors
+                                      tabular-nums ${
+                            on
+                              ? 'border-purple-400 bg-purple-50 text-purple-800 font-medium'
+                              : 'border-slate-200 text-slate-600 hover:border-slate-300'
+                          }`}
+                        >
+                          {t(`sms.tier.${s.tier}`)} · {formatNumber(s.target)}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    {pickedTiers.length === 0
+                      ? t('sms.exportAllTiers', {
+                          total: formatNumber(data?.totals.target ?? 0),
+                        })
+                      : t('sms.exportPickedTiers', {
+                          total: formatNumber(
+                            segments
+                              .filter((s) => pickedTiers.includes(s.tier))
+                              .reduce((n, s) => n + s.target, 0),
+                          ),
+                        })}
+                  </p>
+                </div>
+
                 <div className="flex flex-wrap items-end gap-3">
                   <label className="text-xs text-slate-600">
                     <span className="block mb-1">{t('sms.campaignName')}</span>

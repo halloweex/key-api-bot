@@ -286,7 +286,7 @@ class TestSmsSegmentsJson:
     def test_tier_is_normalised(self, client, store):
         r = client.get(SEGMENTS_PATH, params={"tier": "vip"}, headers=_admin_headers())
         assert r.status_code == 200
-        assert store.calls[0]["tier"] == "VIP"
+        assert store.calls[0]["tier"] == ["VIP"]
 
 
 # ─── Parameter validation ─────────────────────────────────────────────────
@@ -666,3 +666,57 @@ class TestChannelSelection:
 
         assert r.status_code == 422
         assert gateway.sent == []
+
+
+class TestMultiTierSelection:
+    """A discount suits Core and Reactivation and cannibalises VIP.
+
+    That is one campaign with one text, so the filter has to take a set —
+    splitting it into two rosters would mean two sends to reconcile later.
+    """
+
+    def test_several_tiers_reach_the_store_as_a_list(self, client, store):
+        client.get(
+            SEGMENTS_PATH, params={"tier": "CORE,REACTIVATION"},
+            headers=_admin_headers(),
+        )
+
+        assert store.calls[0]["tier"] == ["CORE", "REACTIVATION"]
+
+    def test_whitespace_and_case_are_forgiven(self, client, store):
+        client.get(
+            SEGMENTS_PATH, params={"tier": " core , Reactivation "},
+            headers=_admin_headers(),
+        )
+
+        assert store.calls[0]["tier"] == ["CORE", "REACTIVATION"]
+
+    def test_duplicates_collapse(self, client, store):
+        client.get(
+            SEGMENTS_PATH, params={"tier": "CORE,CORE"}, headers=_admin_headers(),
+        )
+
+        assert store.calls[0]["tier"] == ["CORE"]
+
+    def test_one_bad_name_rejects_the_whole_request(self, client, store):
+        """Silently dropping it would send to fewer people than were asked for."""
+        r = client.get(
+            SEGMENTS_PATH, params={"tier": "CORE,GOLD"}, headers=_admin_headers(),
+        )
+
+        assert r.status_code == 400
+        assert "GOLD" in r.json()["detail"]
+        assert store.calls == []
+
+    def test_empty_tier_means_every_tier(self, client, store):
+        client.get(SEGMENTS_PATH, params={"tier": ""}, headers=_admin_headers())
+
+        assert store.calls[0]["tier"] is None
+
+    def test_export_filename_names_the_tiers_it_holds(self, client, store):
+        r = client.get(
+            CSV_PATH, params={"tier": "CORE,REACTIVATION", "campaign": "aug"},
+            headers=_admin_headers(),
+        )
+
+        assert "sms_aug_core-reactivation" in r.headers["content-disposition"]

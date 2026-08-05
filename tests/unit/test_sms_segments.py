@@ -697,3 +697,57 @@ async def test_thresholds_are_configurable(tmp_path):
     assert set(_by_id(result)) == {1, 2, 3}
 
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_several_tiers_come_back_in_one_roster(tmp_path):
+    """Core + Reactivation is one campaign, not two to reconcile afterwards."""
+    store = await _make_store(tmp_path)
+    await _seed(store)
+
+    result = await store.get_sms_segments(
+        tier=["CORE", "REACTIVATION"], include_customers=True, holdout_pct=0,
+    )
+
+    assert set(_by_id(result)) == {2, 3, 4}
+    assert [s["tier"] for s in result["segments"]] == ["CORE", "REACTIVATION"]
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_single_tier_name_still_works_as_a_string(tmp_path):
+    store = await _make_store(tmp_path)
+    await _seed(store)
+
+    result = await store.get_sms_segments(tier="VIP", holdout_pct=0)
+
+    assert [s["tier"] for s in result["segments"]] == ["VIP"]
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_tier_subset_does_not_change_who_wins_a_shared_phone(tmp_path):
+    """De-duplication runs before the filter, so asking for one tier cannot
+    promote a buyer the full roster would have dropped."""
+    store = await _make_store(tmp_path)
+    async with store.connection() as conn:
+        _seed_catalogue(conn)
+        # Same number on two buyers: a VIP and a single-order Reactivation.
+        _add_buyer(conn, 1, "380961111111")
+        for i in range(3):
+            _add_order(conn, oid=10 + i, buyer_id=1, days_ago=10, total="10000.00")
+        _add_buyer(conn, 2, "380961111111")
+        _add_order(conn, oid=20, buyer_id=2, days_ago=30, total="1000.00")
+
+    everyone = await store.get_sms_segments(include_customers=True, holdout_pct=0)
+    assert set(_by_id(everyone)) == {1}, "the VIP wins the number"
+
+    # Asking only for Reactivation must not resurrect buyer 2 on that number.
+    only_react = await store.get_sms_segments(
+        tier=["REACTIVATION"], include_customers=True, holdout_pct=0,
+    )
+    assert only_react["customers"] == []
+
+    await store.close()

@@ -857,5 +857,8 @@
   "sms.buttonCaption": "Подпись кнопки",
   "sms.buttonUrl": "Ссылка кнопки",
   "sms.buttonNeedsBoth": "Кнопке нужны и подпись, и ссылка — иначе шлюз её не примет.",
-  "sms.smsFallbackPreview": "Что придёт в SMS, если Viber не доставит:"
+  "sms.smsFallbackPreview": "Что придёт в SMS, если Viber не доставит:",
+  "sms.exportTiers": "Кому отправляем",
+  "sms.exportAllTiers": "Ничего не выбрано — в файл пойдут все группы, {{total}} контактов.",
+  "sms.exportPickedTiers": "В файл пойдут {{total}} контактов из выбранных групп."
 }
