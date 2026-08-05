@@ -118,7 +118,21 @@ jobs:
             docker stop keycrm-monitor 2>/dev/null || true
             docker rm keycrm-monitor 2>/dev/null || true
             docker compose pull
-            docker compose up -d --force-recreate
+            # Recreate only what actually changed. --force-recreate replaced
+            # every service, healthy dependencies included, and a dependent
+            # waiting on `condition: service_healthy` then found its target
+            # container gone mid-swap:
+            #   dependency failed to start: No such container: <id>
+            # That killed the deploys for a6801bd and 3f62bb1 on 2026-08-05,
+            # on meilisearch and on web respectively. Compose already
+            # recreates a service whose image or config changed, which is the
+            # only recreation a deploy needs.
+            docker compose up -d
+            # A container that starts and then falls over must fail the run,
+            # not pass it quietly. web is not published on the host, so the
+            # gate goes through nginx — which also proves the proxy is up.
+            timeout 180 sh -c \
+              'until curl -fsS http://127.0.0.1/api/health >/dev/null 2>&1; do sleep 5; done'
             docker image prune -f
 
       - name: Bump version
