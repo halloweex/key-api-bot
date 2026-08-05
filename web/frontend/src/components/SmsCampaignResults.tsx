@@ -5,13 +5,14 @@ import { Select } from './Select'
 import { Badge } from './Badge'
 import { Checkbox } from './Checkbox'
 import { EmptyState } from './EmptyState'
+import { InfoBanner } from './InfoBanner'
 import { SkeletonCard } from './Skeleton'
-import { SmsLiftInterval } from './SmsLiftInterval'
+import { DataTable, Th, Td, Tr } from './DataTable'
 import { SmsResultsGuide } from './SmsResultsGuide'
 import { SmsLiftForest, type ForestRow } from './SmsLiftForest'
 import { useSmsCampaigns, useSmsCampaignResults } from '../hooks/useApi'
 import { formatCurrency, formatNumber } from '../utils/formatters'
-import type { SmsComparison, SmsGroupStats, SmsTier } from '../types/api'
+import type { SmsComparison, SmsGroupStats } from '../types/api'
 import { ApiError } from '../api/client'
 
 // ─── SmsCampaignResults ──────────────────────────────────────────────────────
@@ -22,6 +23,14 @@ import { ApiError } from '../api/client'
 // every level. The target's own conversion is the number people want to quote,
 // and on its own it is meaningless — Tier 1 buys at ~46% without any message.
 // Showing the pair side by side makes the comparison the obvious reading.
+//
+// This used to be four blocks — an "all tiers" panel and a card per tier —
+// each printing the same six figures with its own miniature interval plot.
+// Twenty-four numbers, no two of them on a scale that let you compare them,
+// and four grey bars that said "not proven" without ever saying it. Now the
+// same six figures are columns: one row per arm, totals row first, so reading
+// down a column is the comparison. The forest plot is the only chart, because
+// interval width is the one thing a table cannot show.
 
 // The window should match how long the offer lives. Days after it expires add
 // ordinary trading to both arms equally — no effect, more variance — so a long
@@ -30,25 +39,15 @@ import { ApiError } from '../api/client'
 // its own terms; the API has always accepted 1.
 const WINDOWS = [1, 2, 3, 7, 14, 30, 90]
 
-function GroupColumn({ label, stats, muted }: {
+/** One arm of the campaign, as the table sees it. */
+interface ResultRow {
+  key: string
   label: string
-  stats: SmsGroupStats
-  muted?: boolean
-}) {
-  const { t } = useTranslation()
-  const rate = stats.contacts ? (100 * stats.converted) / stats.contacts : 0
-
-  return (
-    <div className={muted ? 'opacity-80' : undefined}>
-      <div className="text-[11px] uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="text-xl font-semibold text-slate-800 tabular-nums">
-        {rate.toFixed(1)}%
-      </div>
-      <div className="text-[11px] text-slate-500 tabular-nums">
-        {formatNumber(stats.converted)} / {formatNumber(stats.contacts)} {t('sms.bought')}
-      </div>
-    </div>
-  )
+  target: SmsGroupStats
+  holdout: SmsGroupStats
+  comparison: SmsComparison | null
+  /** The totals row, which leads the table and carries the verdict. */
+  emphasis?: boolean
 }
 
 function Verdict({ comparison }: { comparison: SmsComparison }) {
@@ -63,42 +62,40 @@ function Verdict({ comparison }: { comparison: SmsComparison }) {
   )
 }
 
-function ComparisonBlock({ comparison }: { comparison: SmsComparison }) {
+/** Rate over the arm, with the counts it was computed from underneath. */
+function RateCell({ stats }: { stats: SmsGroupStats }) {
+  const rate = stats.contacts ? (100 * stats.converted) / stats.contacts : 0
+
+  return (
+    <>
+      <div className="font-medium text-slate-800">{rate.toFixed(1)}%</div>
+      <div className="text-[11px] text-slate-500">
+        {formatNumber(stats.converted)} / {formatNumber(stats.contacts)}
+      </div>
+    </>
+  )
+}
+
+/** A total, over the per-contact figure it was scaled from.
+ *
+ *  The total is what you weigh against what the send cost; the per-contact
+ *  number is what you weigh against the ~₴1.3 a message costs to deliver.
+ *  Both are wanted and neither is a column of its own. */
+function MoneyCell({ total, perContact }: { total: number; perContact: number }) {
   const { t } = useTranslation()
 
   return (
-    <div className="space-y-2">
-      <SmsLiftInterval comparison={comparison} />
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
-        <dt className="text-slate-500">{t('sms.lift')}</dt>
-        <dd className="text-right text-slate-800 font-medium tabular-nums">
-          {comparison.liftPp > 0 ? '+' : ''}{comparison.liftPp.toFixed(1)} {t('sms.pp')}
-        </dd>
-        <dt className="text-slate-500">{t('sms.pValue')}</dt>
-        <dd className="text-right text-slate-800 tabular-nums">
-          {comparison.pValue < 0.001 ? '<0.001' : comparison.pValue.toFixed(3)}
-        </dd>
-        {/* Revenue beside margin: revenue is the figure people recognise,
-            margin is the one that decides whether the campaign paid. */}
-        <dt className="text-slate-500">{t('sms.incrementalRevenuePerContact')}</dt>
-        <dd className="text-right text-slate-800 tabular-nums">
-          {formatCurrency(comparison.incrementalRevenuePerContact)}
-        </dd>
-        <dt className="text-slate-500">{t('sms.incrementalRevenueTotal')}</dt>
-        <dd className="text-right text-slate-800 font-medium tabular-nums">
-          {formatCurrency(comparison.incrementalRevenueTotal)}
-        </dd>
-        <dt className="text-slate-500">{t('sms.incrementalPerContact')}</dt>
-        <dd className="text-right text-slate-800 tabular-nums">
-          {formatCurrency(comparison.incrementalMarginPerContact)}
-        </dd>
-        <dt className="text-slate-500">{t('sms.incrementalTotal')}</dt>
-        <dd className="text-right text-slate-800 font-medium tabular-nums">
-          {formatCurrency(comparison.incrementalMarginTotal)}
-        </dd>
-      </dl>
-    </div>
+    <>
+      <div className="text-slate-800">{formatCurrency(total)}</div>
+      <div className="text-[11px] text-slate-500">
+        {perContact.toFixed(2)} {t('sms.perContact')}
+      </div>
+    </>
   )
+}
+
+function formatP(p: number): string {
+  return p < 0.001 ? '<0.001' : p.toFixed(3)
 }
 
 export const SmsCampaignResults = memo(function SmsCampaignResults() {
@@ -122,30 +119,49 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
   // more use than quietly dropping them.
   const notSent = data?.overall.target.notSent ?? 0
 
-  // Overall first, then the tiers — one shared scale is the whole point, so
-  // the chart is built from every arm that produced a comparison at all.
-  const forestRows = useMemo<ForestRow[]>(() => {
+  // Totals first, then the tiers. Both the table and the chart read from this,
+  // so the two can never fall out of step.
+  const rows = useMemo<ResultRow[]>(() => {
     if (!data) return []
-    const rows: ForestRow[] = []
-    if (data.overall.comparison) {
-      rows.push({
+    return [
+      {
+        key: 'overall',
         label: t('sms.overall'),
+        target: data.overall.target,
+        holdout: data.overall.holdout,
         comparison: data.overall.comparison,
-        contacts: data.overall.target.contacts,
         emphasis: true,
-      })
-    }
-    for (const s of data.segments) {
-      if (s.comparison) {
-        rows.push({
-          label: t(`sms.tier.${s.tier}`),
-          comparison: s.comparison,
-          contacts: s.target.contacts,
-        })
-      }
-    }
-    return rows
+      },
+      ...data.segments.map((s) => ({
+        key: s.tier,
+        label: t(`sms.tier.${s.tier}`),
+        target: s.target,
+        holdout: s.holdout,
+        comparison: s.comparison,
+      })),
+    ]
   }, [data, t])
+
+  // One shared scale is the whole point, so the chart takes every arm that
+  // produced a comparison at all.
+  const forestRows = useMemo<ForestRow[]>(
+    () =>
+      rows
+        .filter((r): r is ResultRow & { comparison: SmsComparison } => !!r.comparison)
+        .map((r) => ({
+          label: r.label,
+          comparison: r.comparison,
+          contacts: r.target.contacts,
+          emphasis: r.emphasis,
+        })),
+    [rows],
+  )
+
+  // Every interval crossing zero is a state in its own right, not four grey
+  // bars to squint at. It means the campaign has not been measured yet — which
+  // is emphatically not the same as it having done nothing.
+  const nothingProven =
+    forestRows.length > 0 && forestRows.every((r) => !r.comparison.significant)
 
   if (sent.length === 0) {
     return (
@@ -162,8 +178,6 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
       </Card>
     )
   }
-
-  const tiers: SmsTier[] = (data?.segments ?? []).map((s) => s.tier)
 
   return (
     <Card>
@@ -234,7 +248,16 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
               </span>
             </label>
 
-            {/* ── Every arm on one axis ───────────────────────────────── */}
+            {/* ── Nothing clears zero: say so once, plainly ───────────── */}
+            {nothingProven && (
+              <div className="mb-4">
+                <InfoBanner title={t('sms.insufficientTitle')}>
+                  {t('sms.insufficientBody')}
+                </InfoBanner>
+              </div>
+            )}
+
+            {/* ── Every arm on one axis — the only chart here ─────────── */}
             {forestRows.length > 0 && (
               <div className="rounded-lg border border-slate-200 p-3 sm:p-4 mb-4">
                 <h3 className="text-sm font-medium text-slate-700 mb-1">
@@ -245,47 +268,79 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
               </div>
             )}
 
-            {/* ── Overall ─────────────────────────────────────────────── */}
-            {data.overall.comparison && (
-              <div className="rounded-lg border border-slate-200 p-3 sm:p-4 mb-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                  <span className="text-sm font-medium text-slate-700">
-                    {t('sms.overall')}
-                  </span>
-                  <Verdict comparison={data.overall.comparison} />
-                </div>
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="flex gap-6">
-                    <GroupColumn label={t('sms.messaged')} stats={data.overall.target} />
-                    <GroupColumn label={t('sms.control')} stats={data.overall.holdout} muted />
-                  </div>
-                  <ComparisonBlock comparison={data.overall.comparison} />
-                </div>
+            {/* ── The figures, one row per arm ────────────────────────── */}
+            {rows.length > 0 && (
+              <div className="rounded-lg border border-slate-200">
+                <DataTable>
+                  <thead>
+                    <Tr header>
+                      <Th>{t('sms.colGroup')}</Th>
+                      <Th align="right">{t('sms.colMessaged')}</Th>
+                      <Th align="right">{t('sms.colControl')}</Th>
+                      <Th align="right">{`${t('sms.lift')}, ${t('sms.pp')}`}</Th>
+                      <Th align="right">{t('sms.pValue')}</Th>
+                      <Th align="right">{t('sms.guideRevenueTerm')}</Th>
+                      <Th align="right">{t('sms.guideMarginTerm')}</Th>
+                    </Tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r) => {
+                      const c = r.comparison
+                      // Colour is state, and it is named in the forest key
+                      // above — an unproven lift must not read as a win.
+                      const liftInk = c?.significant
+                        ? 'text-emerald-700 font-medium'
+                        : 'text-slate-600'
+
+                      return (
+                        <Tr key={r.key} hover={false}>
+                          <Td bold={r.emphasis}>
+                            <span className="flex flex-wrap items-center gap-2">
+                              {r.label}
+                              {r.emphasis && c && <Verdict comparison={c} />}
+                            </span>
+                          </Td>
+                          <Td align="right" tabular>
+                            <RateCell stats={r.target} />
+                          </Td>
+                          <Td align="right" tabular>
+                            <RateCell stats={r.holdout} />
+                          </Td>
+                          {c ? (
+                            <>
+                              <Td align="right" tabular>
+                                <span className={liftInk}>
+                                  {c.liftPp > 0 ? '+' : ''}{c.liftPp.toFixed(1)}
+                                </span>
+                              </Td>
+                              <Td align="right" tabular>{formatP(c.pValue)}</Td>
+                              <Td align="right" tabular>
+                                <MoneyCell
+                                  total={c.incrementalRevenueTotal}
+                                  perContact={c.incrementalRevenuePerContact}
+                                />
+                              </Td>
+                              <Td align="right" tabular>
+                                <MoneyCell
+                                  total={c.incrementalMarginTotal}
+                                  perContact={c.incrementalMarginPerContact}
+                                />
+                              </Td>
+                            </>
+                          ) : (
+                            <Td align="right" colSpan={4}>
+                              <span className="text-[11px] text-slate-500">
+                                {t('sms.noControlInTier')}
+                              </span>
+                            </Td>
+                          )}
+                        </Tr>
+                      )
+                    })}
+                  </tbody>
+                </DataTable>
               </div>
             )}
-
-            {/* ── Per tier ────────────────────────────────────────────── */}
-            <div className="grid gap-3 sm:grid-cols-3">
-              {data.segments.map((s) => (
-                <div key={s.tier} className="rounded-lg border border-slate-200 p-3">
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <span className="text-xs font-medium text-slate-700">
-                      {t(`sms.tier.${s.tier}`)}
-                    </span>
-                    {s.comparison && <Verdict comparison={s.comparison} />}
-                  </div>
-                  <div className="flex gap-4 mb-3">
-                    <GroupColumn label={t('sms.messaged')} stats={s.target} />
-                    <GroupColumn label={t('sms.control')} stats={s.holdout} muted />
-                  </div>
-                  {s.comparison ? (
-                    <ComparisonBlock comparison={s.comparison} />
-                  ) : (
-                    <p className="text-[11px] text-slate-500">{t('sms.noControlInTier')}</p>
-                  )}
-                </div>
-              ))}
-            </div>
 
             {data.promocode && (
               <p className="mt-3 text-xs text-slate-500">
@@ -300,7 +355,7 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
               {t('sms.deliveryCaveat')}
             </p>
 
-            {tiers.length === 0 && <EmptyState message={t('sms.noRosterData')} />}
+            {data.segments.length === 0 && <EmptyState message={t('sms.noRosterData')} />}
           </>
         )}
       </CardContent>
