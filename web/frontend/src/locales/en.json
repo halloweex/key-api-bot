@@ -831,5 +831,22 @@
   "sms.funnel.uniquePhone": "Unique numbers",
   "sms.funnelNote": "The right column is how many that rule removed. Numbers shared across customer records collapse into one — the SMS goes out once.",
   "sms.exportTitle": "Export the list",
-  "sms.exportDesc": "A campaign name is what lets the roster be frozen — without it the campaign never reaches step 2 and there is nothing to measure."
+  "sms.exportDesc": "A campaign name is what lets the roster be frozen — without it the campaign never reaches step 2 and there is nothing to measure.",
+  "sms.testSend": "Test send",
+  "sms.testTitle": "Test send to one number",
+  "sms.testDesc": "Check the text before a campaign. Nothing is recorded: no campaign, no roster, no opt-outs.",
+  "sms.testPhone": "Recipient number",
+  "sms.testPhoneInvalid": "Needs a full Ukrainian number: 380 followed by 9 digits.",
+  "sms.testNoLinks": "An SMS cannot hide a link behind text — paste the full address; the customer sees it as is.",
+  "sms.testSendNow": "Send test",
+  "sms.testAccepted": "The gateway accepted the message. ID: {{id}}",
+  "sms.testNotAccepted": "The gateway did not accept it: code {{code}}, {{status}}",
+  "sms.testStoplisted": "Number is on the provider's stoplist",
+  "sms.testRefused": "The gateway refused the message",
+  "sms.testFailed": "Test send failed",
+  "sms.close": "Close",
+  "sms.costParts": "{{parts}} SMS · {{encoding}}",
+  "sms.costTotal": "≈{{total}} SMS for the campaign",
+  "sms.encoding.gsm7": "Latin, 160 chars",
+  "sms.encoding.ucs2": "Cyrillic, 70 chars"
 }

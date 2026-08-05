@@ -26,6 +26,7 @@ ADMIN_ID = sorted(ADMIN_USER_IDS)[0]
 SEGMENTS_PATH = "/api/customers/sms-segments"
 CSV_PATH = "/api/customers/sms-segments/export/csv"
 RESULTS_PATH = "/api/customers/sms-campaigns/aug/results"
+TEST_SEND_PATH = "/api/customers/sms/test-send"
 
 
 def _make_cookie(user_id: int, role: str = "admin") -> str:
@@ -471,3 +472,113 @@ class TestSmsSegmentsCsv:
         codes = [client.get(CSV_PATH, headers=_admin_headers()).status_code for _ in range(7)]
         assert codes[:5] == [200] * 5
         assert 429 in codes[5:]
+
+
+# ─── Test send ────────────────────────────────────────────────────────────
+
+class _FakeTurboClient:
+    """Stands in for the gateway; records what it was asked to send."""
+
+    sent: list = []
+    error: Exception | None = None
+    results: list = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def send(self, phones, text):
+        if type(self).error:
+            raise type(self).error
+        type(self).sent.append({"phones": phones, "text": text})
+        return type(self).results
+
+
+@pytest.fixture
+def gateway(monkeypatch):
+    from core.turbosms import SendResult
+
+    _FakeTurboClient.sent = []
+    _FakeTurboClient.error = None
+    _FakeTurboClient.results = [
+        SendResult(phone="380934555554", message_id="msg-1", code=0, status="OK"),
+    ]
+    monkeypatch.setattr(
+        "web.routes.api.customers.TurboSmsClient", lambda *a, **kw: _FakeTurboClient()
+    )
+    return _FakeTurboClient
+
+
+class TestTestSend:
+    """A rehearsal must reach the gateway and touch nothing else."""
+
+    def test_requires_admin_dependency(self):
+        route = _route(TEST_SEND_PATH, "POST")
+        assert route is not None, "test-send is not registered"
+        assert require_admin in _all_dep_calls(route.dependant)
+
+    def test_requires_session(self, client):
+        assert client.post(
+            TEST_SEND_PATH, params={"phone": "380934555554", "text": "hi"},
+        ).status_code == 401
+
+    def test_sends_the_normalised_number(self, client, gateway):
+        r = client.post(
+            TEST_SEND_PATH,
+            params={"phone": "+38 (093) 455-55-54", "text": "hi"},
+            headers=_admin_headers(),
+        )
+
+        assert r.status_code == 200
+        assert gateway.sent == [{"phones": ["380934555554"], "text": "hi"}]
+        assert r.json()["accepted"] is True
+
+    @pytest.mark.parametrize("phone", ["0934555554", "380934555", "123456789012"])
+    def test_rejects_anything_a_campaign_could_not_contain(self, client, gateway, phone):
+        r = client.post(
+            TEST_SEND_PATH, params={"phone": phone, "text": "hi"},
+            headers=_admin_headers(),
+        )
+
+        # 400 from the 380-prefix rule, 422 when it is too short to reach it.
+        assert r.status_code in (400, 422)
+        assert gateway.sent == [], "a bad number must not reach the gateway"
+
+    def test_reports_the_billed_cost(self, client, gateway):
+        """The cost cliff is the point: Cyrillic drops the limit to 70."""
+        r = client.post(
+            TEST_SEND_PATH, params={"phone": "380934555554", "text": "я" * 71},
+            headers=_admin_headers(),
+        )
+
+        assert r.json()["cost"] == {"encoding": "ucs2", "characters": 71, "parts": 2}
+
+    def test_stoplist_refusal_is_reported_not_recorded(self, client, gateway, store):
+        from core.turbosms import SendResult
+
+        gateway.results = [
+            SendResult(phone="380934555554", message_id=None, code=404,
+                       status="NOT_ALLOWED_NUMBER_STOPLIST"),
+        ]
+
+        body = client.post(
+            TEST_SEND_PATH, params={"phone": "380934555554", "text": "hi"},
+            headers=_admin_headers(),
+        ).json()
+
+        assert (body["accepted"], body["stoplisted"]) == (False, True)
+        assert store.freezes == [], "a rehearsal must not create a campaign"
+
+    def test_gateway_failure_is_a_502(self, client, gateway):
+        from core.turbosms import TurboSmsError
+
+        gateway.error = TurboSmsError("TurboSMS is not configured")
+        r = client.post(
+            TEST_SEND_PATH, params={"phone": "380934555554", "text": "hi"},
+            headers=_admin_headers(),
+        )
+
+        assert r.status_code == 502
+        assert "not configured" in r.json()["detail"]
