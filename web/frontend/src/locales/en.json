@@ -864,5 +864,22 @@
   "sms.sendPartial": "Partly sent: {{unsent}} recipients were not messaged. The campaign is stamped sent — it cannot be retried without messaging the others twice.",
   "sms.notSentWarning": "The gateway never took {{n}} of the target arm — they were never messaged. They are left out of the figures so the lift is not understated.",
   "sms.deliveredOnlyLabel": "Confirmed deliveries only",
-  "sms.deliveredOnlyHint": "drops undelivered recipients from the target arm, leaving the control intact. An optimistic bound rather than a clean comparison: delivery tracks how live a number is."
+  "sms.deliveredOnlyHint": "drops undelivered recipients from the target arm, leaving the control intact. An optimistic bound rather than a clean comparison: delivery tracks how live a number is.",
+  "sms.incrementalRevenuePerContact": "Added revenue / contact",
+  "sms.incrementalRevenueTotal": "Added revenue, total",
+  "sms.guideTitle": "How to read these figures",
+  "sms.guideDiffTerm": "Everything here is a difference, not a total",
+  "sms.guideDiffBody": "The campaign's result is the gap between the messaged group and the control. The messaged group's own purchase rate means nothing alone: they would have bought anyway.",
+  "sms.guideLiftBody": "How many percentage points higher the purchase rate is than the control's. +1.0 pp means one extra buyer per 100 recipients.",
+  "sms.guidePValueBody": "The chance of seeing a gap this size if the campaign does nothing at all. Below 0.05 the effect counts as shown. Above it, there is not enough data yet — which is not the same as there being no effect.",
+  "sms.guideRevenueTerm": "Added revenue",
+  "sms.guideRevenueBody": "Average revenue per recipient minus average revenue per control member, times the number of recipients. What the campaign brought in beyond ordinary trading.",
+  "sms.guideMarginTerm": "Added margin",
+  "sms.guideMarginBody": "The same, less the cost of goods. This is the figure that says whether the campaign paid for itself. A product with no cost on file drops out of margin but stays in revenue, so margin reads low.",
+  "sms.guideWindowTerm": "Window",
+  "sms.guideWindowBody": "Purchases count from the moment of sending, for the chosen number of days. A short window (7 days) shows the campaign more sharply; over 30 days it blurs into ordinary trading.",
+  "sms.guideChangingTerm": "Why the numbers move",
+  "sms.guideChangingBody": "While purchases are few, a per-contact difference multiplied by thousands of recipients swings the totals wildly, negative included. That is noise, not a loss. Read it after 7–14 days, and always next to the p-value.",
+  "sms.guideControlTerm": "How the control group is drawn",
+  "sms.guideControlBody": "When the roster is frozen, each customer lands in the control or in the send by a hash of (customer ID, campaign name). The hash gives a number 0–99, and anything below the chosen percentage goes to the control. The draw runs inside each tier separately, so the control share is the same in VIP, Core and Reactivation. The point of a hash rather than a coin toss is that it repeats: re-exporting the same campaign gives the same split, while a new campaign name reshuffles it — so the same people are not withheld from every campaign in a row. The control is never messaged, including on a repeat send."
 }
