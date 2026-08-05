@@ -142,6 +142,7 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
             <div className="flex items-center gap-2">
               <Badge tone="slate" shape="tag">{t('sms.step', { n: 3 })}</Badge>
               <CardTitle>{t('sms.resultsTitle')}</CardTitle>
+              <SmsResultsGuide />
             </div>
             <p className="text-xs text-slate-500 mt-0.5">{t('sms.resultsDesc')}</p>
           </div>
@@ -184,8 +185,6 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
 
         {data && !isLoading && (
           <>
-            <SmsResultsGuide />
-
             {/* ── How much of the arm was actually treated ────────────── */}
             {notSent > 0 && (
               <div className="mb-4 text-xs text-amber-800 bg-amber-50 rounded-md px-3 py-2 leading-snug">
