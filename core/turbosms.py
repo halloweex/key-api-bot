@@ -100,7 +100,11 @@ def count_segments(text: str) -> MessageCost:
     )
 
     if unicode_needed:
-        chars = len(text)
+        # UCS-2 is billed in 16-bit units, not characters. Anything outside the
+        # Basic Multilingual Plane — every pictographic emoji — takes two of
+        # them, so len() understates a message that carries one and can hide a
+        # whole extra segment.
+        chars = len(text.encode("utf-16-le")) // 2
         single, concatenated = 70, 67
         encoding = "ucs2"
     else:
