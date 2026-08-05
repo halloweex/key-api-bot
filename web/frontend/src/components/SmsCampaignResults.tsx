@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { Select } from './Select'
 import { Badge } from './Badge'
+import { Checkbox } from './Checkbox'
 import { EmptyState } from './EmptyState'
 import { SkeletonCard } from './Skeleton'
 import { SmsLiftInterval } from './SmsLiftInterval'
@@ -87,6 +88,7 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
   const { t } = useTranslation()
   const [campaign, setCampaign] = useState<string | null>(null)
   const [windowDays, setWindowDays] = useState(30)
+  const [deliveredOnly, setDeliveredOnly] = useState(false)
 
   const { data: list } = useSmsCampaigns()
   const sent = useMemo(
@@ -95,7 +97,13 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
   )
 
   const selected = campaign ?? sent[0]?.campaign ?? null
-  const { data, isLoading, error } = useSmsCampaignResults(selected, windowDays)
+  const { data, isLoading, error } = useSmsCampaignResults(
+    selected, windowDays, deliveredOnly,
+  )
+  // Anyone the gateway never took is in the target arm without ever having
+  // been messaged, which pulls the measured lift toward nothing. Saying so is
+  // more use than quietly dropping them.
+  const notSent = data?.overall.target.notSent ?? 0
 
   if (sent.length === 0) {
     return (
@@ -165,6 +173,24 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
 
         {data && !isLoading && (
           <>
+            {/* ── How much of the arm was actually treated ────────────── */}
+            {notSent > 0 && (
+              <div className="mb-4 text-xs text-amber-800 bg-amber-50 rounded-md px-3 py-2 leading-snug">
+                {t('sms.notSentWarning', { n: formatNumber(notSent) })}
+              </div>
+            )}
+
+            <label className="mb-4 flex items-start gap-2 cursor-pointer">
+              <Checkbox checked={deliveredOnly} onChange={setDeliveredOnly} size="sm" />
+              <span className="text-xs text-slate-600 leading-snug">
+                <span className="font-medium text-slate-700">
+                  {t('sms.deliveredOnlyLabel')}
+                </span>
+                {' — '}
+                {t('sms.deliveredOnlyHint')}
+              </span>
+            </label>
+
             {/* ── Overall ─────────────────────────────────────────────── */}
             {data.overall.comparison && (
               <div className="rounded-lg border border-slate-200 p-3 sm:p-4 mb-4">

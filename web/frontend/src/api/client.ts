@@ -767,10 +767,13 @@ export const api = {
   getSmsCampaigns: (options?: FetchOptions) =>
     fetchApi<SmsCampaignsResponse>('/customers/sms-campaigns', undefined, options),
 
-  getSmsCampaignResults: (campaign: string, windowDays: number, options?: FetchOptions) =>
+  getSmsCampaignResults: (
+    campaign: string, windowDays: number, deliveredOnly = false,
+    options?: FetchOptions,
+  ) =>
     fetchApi<SmsCampaignResultsResponse>(
       `/customers/sms-campaigns/${encodeURIComponent(campaign)}/results`,
-      `window_days=${windowDays}`,
+      `window_days=${windowDays}&delivered_only=${deliveredOnly}`,
       options,
     ),
 
