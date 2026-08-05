@@ -318,7 +318,11 @@ async def require_user(request: Request) -> dict:
 # Paths under /api that are intentionally reachable without a session.
 # Keep this set tiny — every entry here is a deliberate, audited exception.
 # /api/health is polled by Docker, nginx and external uptime monitors.
-PUBLIC_API_PATHS: set[str] = {"/api/health"}
+# /api/health is polled by Docker, nginx and external uptime monitors.
+# /api/webhooks/turbosms is called by the SMS gateway, which cannot hold a
+# session; it authenticates itself with a SHA1 signature over a shared secret
+# and rejects anything unsigned. See web/routes/api/webhooks.py.
+PUBLIC_API_PATHS: set[str] = {"/api/health", "/api/webhooks/turbosms"}
 
 
 async def api_gate(request: Request) -> None:

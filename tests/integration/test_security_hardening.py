@@ -138,7 +138,13 @@ class TestAuthorizationStructure:
 
     def test_health_is_listed_public(self):
         # The single source of truth for what's reachable without a session.
-        assert PUBLIC_API_PATHS == {"/api/health"}, \
+        #
+        # /api/health          — polled by Docker, nginx and uptime monitors.
+        # /api/webhooks/turbosms — called by the SMS gateway, which cannot hold
+        #   a session; it authenticates with a SHA1 signature over a shared
+        #   secret and fails closed when the secret is unset. Signature
+        #   behaviour is pinned in tests/integration/test_turbosms_webhook.py.
+        assert PUBLIC_API_PATHS == {"/api/health", "/api/webhooks/turbosms"}, \
             "PUBLIC_API_PATHS drifted — every entry must be a deliberate, audited exception"
 
     def test_every_api_route_is_under_api_gate(self):
