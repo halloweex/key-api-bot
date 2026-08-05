@@ -857,5 +857,8 @@
   "sms.buttonCaption": "Button label",
   "sms.buttonUrl": "Button link",
   "sms.buttonNeedsBoth": "A button needs both a label and a link, or the gateway will refuse it.",
-  "sms.smsFallbackPreview": "What arrives by SMS if Viber cannot deliver:"
+  "sms.smsFallbackPreview": "What arrives by SMS if Viber cannot deliver:",
+  "sms.exportTiers": "Who this campaign is for",
+  "sms.exportAllTiers": "Nothing picked — the file takes every tier, {{total}} contacts.",
+  "sms.exportPickedTiers": "The file takes {{total}} contacts from the picked tiers."
 }

@@ -185,12 +185,25 @@ def _sms_segment_params(
             detail=f"ltv_basis must be one of {', '.join(SMS_LTV_BASES)}",
         )
 
-    if tier is not None:
-        tier = tier.upper()
-        if tier not in _SMS_TIERS:
-            raise HTTPException(
-                status_code=400, detail=f"tier must be one of {', '.join(_SMS_TIERS)}",
-            )
+    # A comma-separated list, because the tiers are not always addressed one at
+    # a time: a discount suits Core and Reactivation and cannibalises VIP, and
+    # that is one campaign with one text, not two campaigns to reconcile later.
+    tiers: Optional[list] = None
+    if tier:
+        tiers = []
+        for raw in tier.split(","):
+            name = raw.strip().upper()
+            if not name:
+                continue
+            if name not in _SMS_TIERS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"tier must be one of {', '.join(_SMS_TIERS)}, got {name!r}",
+                )
+            if name not in tiers:
+                tiers.append(name)
+        if not tiers:
+            tiers = None
 
     # Thresholds are basis-specific, so resolve defaults before comparing them.
     defaults = SMS_TIER_DEFAULTS[ltv_basis]
@@ -219,7 +232,7 @@ def _sms_segment_params(
         "sales_type": sales_type,
         "holdout_pct": holdout_pct,
         "campaign": campaign,
-        "tier": tier,
+        "tier": tiers,
     }
 
 
@@ -357,7 +370,9 @@ async def export_sms_segments_csv(
             c["lastOrderItems"] or "",
         ])
 
-    tier_part = (criteria["tier"] or "all").lower()
+    # Name the file after what is in it: several tiers join with a dash, so a
+    # Core+Reactivation export is not mistaken for the whole base on disk.
+    tier_part = "-".join(t.lower() for t in criteria["tier"]) if criteria["tier"] else "all"
     filename = (
         f"sms_{criteria['campaign']}_{tier_part}"
         f"_{criteria['ltv_basis']}_{_date.today()}.csv"
