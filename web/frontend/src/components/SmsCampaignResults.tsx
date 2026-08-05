@@ -8,6 +8,7 @@ import { EmptyState } from './EmptyState'
 import { SkeletonCard } from './Skeleton'
 import { SmsLiftInterval } from './SmsLiftInterval'
 import { SmsResultsGuide } from './SmsResultsGuide'
+import { SmsLiftForest, type ForestRow } from './SmsLiftForest'
 import { useSmsCampaigns, useSmsCampaignResults } from '../hooks/useApi'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import type { SmsComparison, SmsGroupStats, SmsTier } from '../types/api'
@@ -116,6 +117,31 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
   // more use than quietly dropping them.
   const notSent = data?.overall.target.notSent ?? 0
 
+  // Overall first, then the tiers — one shared scale is the whole point, so
+  // the chart is built from every arm that produced a comparison at all.
+  const forestRows = useMemo<ForestRow[]>(() => {
+    if (!data) return []
+    const rows: ForestRow[] = []
+    if (data.overall.comparison) {
+      rows.push({
+        label: t('sms.overall'),
+        comparison: data.overall.comparison,
+        contacts: data.overall.target.contacts,
+        emphasis: true,
+      })
+    }
+    for (const s of data.segments) {
+      if (s.comparison) {
+        rows.push({
+          label: t(`sms.tier.${s.tier}`),
+          comparison: s.comparison,
+          contacts: s.target.contacts,
+        })
+      }
+    }
+    return rows
+  }, [data, t])
+
   if (sent.length === 0) {
     return (
       <Card>
@@ -202,6 +228,17 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
                 {t('sms.deliveredOnlyHint')}
               </span>
             </label>
+
+            {/* ── Every arm on one axis ───────────────────────────────── */}
+            {forestRows.length > 0 && (
+              <div className="rounded-lg border border-slate-200 p-3 sm:p-4 mb-4">
+                <h3 className="text-sm font-medium text-slate-700 mb-1">
+                  {t('sms.forestTitle')}
+                </h3>
+                <p className="text-xs text-slate-500 mb-3">{t('sms.forestDesc')}</p>
+                <SmsLiftForest rows={forestRows} />
+              </div>
+            )}
 
             {/* ── Overall ─────────────────────────────────────────────── */}
             {data.overall.comparison && (
