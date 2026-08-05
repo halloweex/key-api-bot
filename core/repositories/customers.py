@@ -1346,6 +1346,26 @@ class CustomersMixin:
                     [buyer_id, campaign, buyer_id],
                 )
 
+            # Whoever the gateway never answered for was never messaged. A send
+            # that dies partway leaves them behind, and they must not sit in the
+            # target arm unable to respond to a message they never got.
+            #
+            # The results already exclude this status — but nothing wrote it.
+            # It existed only because a roster was repaired by hand after the
+            # fact, which meant the exclusion was dead code resting on a manual
+            # step. A member with neither a message id nor a status is exactly
+            # the one nobody heard about.
+            not_sent = conn.execute(
+                """
+                UPDATE sms_campaign_members
+                SET delivery_status = 'NotSent', delivered = FALSE
+                WHERE campaign = ? AND assignment = 'target'
+                  AND message_id IS NULL AND delivery_status IS NULL
+                RETURNING buyer_id
+                """,
+                [campaign],
+            ).fetchall()
+
             conn.execute(
                 "UPDATE sms_campaigns SET sent_at = ? WHERE campaign = ?",
                 [sent_at or datetime.now(), campaign],
@@ -1356,6 +1376,7 @@ class CustomersMixin:
             "accepted": len(accepted),
             "stoplisted": len(stoplisted),
             "failed": len(failed),
+            "notSent": len(not_sent),
         }
 
     async def record_sms_delivery(

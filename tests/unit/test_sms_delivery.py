@@ -90,7 +90,8 @@ async def test_send_records_ids_stoplist_and_failures(tmp_path):
         failed={3: "INVALID_NUMBER"}, sent_at=SENT,
     )
 
-    assert summary == {"campaign": "aug", "accepted": 1, "stoplisted": 1, "failed": 1}
+    assert summary == {"campaign": "aug", "accepted": 1, "stoplisted": 1,
+                       "failed": 1, "notSent": 0}
 
     async with store.connection() as conn:
         rows = dict(conn.execute(
@@ -351,5 +352,51 @@ async def test_a_released_campaign_can_be_sent_again(tmp_path):
     await store.release_sms_campaign("aug")
 
     assert [t["buyerId"] for t in await store.get_sms_campaign_targets("aug")] == [1]
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_members_the_gateway_never_answered_for_are_marked(tmp_path):
+    """A send that dies partway leaves people behind, and they must not sit in
+    the target arm unable to respond to a message they never got.
+
+    The results already excluded this status; nothing wrote it. It existed only
+    because a roster was repaired by hand, so the exclusion was dead code.
+    """
+    store = await _make_store(tmp_path)
+    await _freeze(store, [
+        _member(1, "target"), _member(2, "target"), _member(3, "target"),
+        _member(4, "holdout"),
+    ])
+
+    # Only buyer 1 came back from the gateway before the send failed.
+    summary = await store.record_sms_send("aug", {1: "m-1"}, [], {})
+
+    assert summary["notSent"] == 2
+    async with store.connection() as conn:
+        rows = dict(conn.execute(
+            "SELECT buyer_id, delivery_status FROM sms_campaign_members"
+            " WHERE campaign = 'aug' ORDER BY buyer_id"
+        ).fetchall())
+    assert rows[1] == "Accepted"
+    assert rows[2] == rows[3] == "NotSent"
+    assert rows[4] is None, "the control was never sent to, so it is not NotSent"
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_complete_send_marks_nobody_as_unsent(tmp_path):
+    store = await _make_store(tmp_path)
+    await _freeze(store, [
+        _member(1, "target"), _member(2, "target"), _member(3, "holdout"),
+    ])
+
+    summary = await store.record_sms_send(
+        "aug", {1: "m-1"}, [], {2: "NOT_ALLOWED_NUMBER"},
+    )
+
+    assert summary["notSent"] == 0, "a refusal is an answer, not a silence"
 
     await store.close()
