@@ -877,7 +877,7 @@
   "sms.guideMarginTerm": "Added margin",
   "sms.guideMarginBody": "The same, less the cost of goods. This is the figure that says whether the campaign paid for itself. A product with no cost on file drops out of margin but stays in revenue, so margin reads low.",
   "sms.guideWindowTerm": "Window",
-  "sms.guideWindowBody": "Purchases count from the moment of sending, for the chosen number of days. A short window (7 days) shows the campaign more sharply; over 30 days it blurs into ordinary trading.",
+  "sms.guideWindowBody": "Purchases count from the moment of sending, for the chosen number of days. Match the window to how long the offer lives: a two-day sale wants 2. Days after it expires add ordinary trading to both arms equally — no effect, more variance — so the result gets harder to see, not easier.",
   "sms.guideChangingTerm": "Why the numbers move",
   "sms.guideChangingBody": "While purchases are few, a per-contact difference multiplied by thousands of recipients swings the totals wildly, negative included. That is noise, not a loss. Read it after 7–14 days, and always next to the p-value.",
   "sms.guideControlTerm": "How the control group is drawn",

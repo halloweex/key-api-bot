@@ -23,7 +23,12 @@ import { ApiError } from '../api/client'
 // and on its own it is meaningless — Tier 1 buys at ~46% without any message.
 // Showing the pair side by side makes the comparison the obvious reading.
 
-const WINDOWS = [7, 14, 30, 60, 90]
+// The window should match how long the offer lives. Days after it expires add
+// ordinary trading to both arms equally — no effect, more variance — so a long
+// window on a short promo weakens the reading rather than strengthening it.
+// The shortest option used to be 7, which left a two-day sale unmeasurable on
+// its own terms; the API has always accepted 1.
+const WINDOWS = [1, 2, 3, 7, 14, 30, 90]
 
 function GroupColumn({ label, stats, muted }: {
   label: string
