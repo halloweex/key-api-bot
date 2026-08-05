@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import date, datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Sequence, Union
 
 
 def _norm_cdf(x: float) -> float:
@@ -1598,7 +1598,7 @@ class CustomersMixin:
         ltv_basis: str = "revenue",
         holdout_pct: int = 10,
         campaign: str = "default",
-        tier: Optional[str] = None,
+        tier: Optional[Union[str, Sequence[str]]] = None,
         include_customers: bool = False,
         limit: int = 20000,
     ) -> Dict[str, Any]:
@@ -1647,7 +1647,8 @@ class CustomersMixin:
             ltv_basis: revenue or margin — which LTV drives tier assignment.
             holdout_pct: Percent of each tier withheld as control (0 disables).
             campaign: Campaign label; also seeds the holdout split.
-            tier: Return only this tier (VIP / CORE / REACTIVATION).
+            tier: Restrict to these tiers (VIP / CORE / REACTIVATION). A
+                single name or a sequence; None keeps all three.
             include_customers: Include the customer rows, not just the summary.
             limit: Max customer rows returned when include_customers is set.
 
@@ -1669,8 +1670,12 @@ class CustomersMixin:
         if core_ltv is None:
             core_ltv = defaults["core"]
 
-        if tier is not None:
-            tier = tier.upper()
+        # One tier or several: a discount aimed at Core and Reactivation but
+        # not VIP is a single campaign with a single text, so the filter has to
+        # take a set rather than forcing two rosters that must be reconciled.
+        if isinstance(tier, str):
+            tier = [tier]
+        tiers = [t.upper() for t in tier] if tier else None
 
         async with self.connection() as conn:
             # Silver already classifies each order, so filter on the column
@@ -1818,10 +1823,10 @@ class CustomersMixin:
                 ) = 1
             ),
             selected AS (
-                -- Tier filter applies after de-duplication so asking for one
-                -- tier cannot change which buyer wins a shared phone number.
+                -- Tier filter applies after de-duplication so asking for a
+                -- subset cannot change which buyer wins a shared phone number.
                 SELECT * FROM eligible
-                {"WHERE tier = ?" if tier else ""}
+                {f"WHERE tier IN ({', '.join('?' * len(tiers))})" if tiers else ""}
             ),
             funnel AS (
                 -- The selection, stage by stage. Counted in the order the rules
@@ -1868,8 +1873,8 @@ class CustomersMixin:
                 vip_ltv, core_min_orders, core_ltv, reactivation_max_recency,
                 max_recency_days,
             ]
-            if tier:
-                params.append(tier)
+            if tiers:
+                params += tiers
             params += [campaign, holdout_pct]
 
             rows = conn.execute(query, params).fetchall()
