@@ -1,9 +1,11 @@
-import { memo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from './Button'
+import { SmsCostLine } from './SmsCostLine'
 import { useSendSmsCampaign } from '../hooks/useApi'
 import { useToast } from './Toast'
 import { formatNumber } from '../utils/formatters'
+import { smsCost } from '../utils/smsCost'
 import type { SmsCampaignSummary } from '../types/api'
 
 // ─── SmsSendDialog ───────────────────────────────────────────────────────────
@@ -35,6 +37,7 @@ export const SmsSendDialog = memo(function SmsSendDialog({
   const { addToast } = useToast()
 
   const trimmed = text.trim()
+  const cost = useMemo(() => smsCost(trimmed), [trimmed])
   const nameMatches = confirmName.trim() === campaign.campaign
   const canSend = trimmed.length > 0 && trimmed.length <= SMS_LIMIT && nameMatches
     && !send.isPending
@@ -101,13 +104,7 @@ export const SmsSendDialog = memo(function SmsSendDialog({
                          focus:ring-purple-500/30 focus:border-purple-400 resize-y"
               placeholder={t('sms.messagePlaceholder')}
             />
-            <span
-              className={`text-[11px] tabular-nums ${
-                trimmed.length > SMS_LIMIT ? 'text-red-600' : 'text-slate-400'
-              }`}
-            >
-              {trimmed.length} / {SMS_LIMIT}
-            </span>
+            <SmsCostLine cost={cost} limit={SMS_LIMIT} recipients={campaign.target} />
           </label>
 
           {campaign.promocode && (

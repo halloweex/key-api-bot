@@ -51,8 +51,65 @@ FAILED_STATUSES = frozenset({
 })
 
 
+# GSM 03.38, the 7-bit alphabet operators bill at 160 characters. Anything
+# outside it forces the whole message to UCS-2 at 70 — so a single Cyrillic
+# character in an otherwise Latin text more than halves what fits.
+_GSM7_BASIC = set(
+    "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?"
+    "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà"
+)
+# These cost two GSM-7 characters each: they are sent as an escape plus a code.
+_GSM7_EXTENDED = set("^{}\\[~]|€")
+
+
 class TurboSmsError(Exception):
     """A TurboSMS call failed outright (transport, auth, or malformed reply)."""
+
+
+@dataclass(frozen=True)
+class MessageCost:
+    """What one text will actually be billed as."""
+
+    encoding: str      # "gsm7" or "ucs2"
+    characters: int    # billable units, not len(text) — GSM-7 escapes count twice
+    parts: int
+
+    @property
+    def unicode(self) -> bool:
+        return self.encoding == "ucs2"
+
+
+def count_segments(text: str) -> MessageCost:
+    """
+    Work out the encoding and part count an operator will charge for.
+
+    Worth surfacing because the cost cliff is invisible while writing: a
+    Ukrainian message is UCS-2, so it fits 70 characters rather than 160, and
+    a two-part send doubles the bill for every recipient in the campaign.
+    """
+    unicode_needed = any(
+        ch not in _GSM7_BASIC and ch not in _GSM7_EXTENDED for ch in text
+    )
+
+    if unicode_needed:
+        chars = len(text)
+        single, concatenated = 70, 67
+        encoding = "ucs2"
+    else:
+        # Escaped characters occupy two septets each.
+        chars = sum(2 if ch in _GSM7_EXTENDED else 1 for ch in text)
+        single, concatenated = 160, 153
+        encoding = "gsm7"
+
+    if chars == 0:
+        parts = 0
+    elif chars <= single:
+        parts = 1
+    else:
+        # Concatenation spends part of every segment on the joining header.
+        parts = -(-chars // concatenated)
+
+    return MessageCost(encoding=encoding, characters=chars, parts=parts)
 
 
 @dataclass(frozen=True)

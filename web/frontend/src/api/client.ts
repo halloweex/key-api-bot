@@ -74,6 +74,7 @@ import type {
   SmsCampaignsResponse,
   SmsCampaignResultsResponse,
   SmsSendResult,
+  SmsTestSendResult,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -762,6 +763,13 @@ export const api = {
     fetchApiMutation<SmsSendResult>(
       `/customers/sms-campaigns/${encodeURIComponent(campaign)}/send`
         + `?text=${encodeURIComponent(text)}`,
+      'POST',
+    ),
+
+  sendTestSms: (phone: string, text: string) =>
+    fetchApiMutation<SmsTestSendResult>(
+      '/customers/sms/test-send'
+        + `?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(text)}`,
       'POST',
     ),
 }

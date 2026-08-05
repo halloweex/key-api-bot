@@ -15,6 +15,7 @@ from core.turbosms import (
     TurboSmsConfig,
     TurboSmsError,
     classify_dlr,
+    count_segments,
     verify_webhook_signature,
 )
 
@@ -247,3 +248,45 @@ class TestTokenEnvNames:
         monkeypatch.setenv("TURBOSMS_API_TOKEN", "tok")
         monkeypatch.delenv("TURBOSMS_SENDER", raising=False)
         assert TurboSmsConfig().configured is False
+
+
+# ─── billing ─────────────────────────────────────────────────────────────
+
+class TestCountSegments:
+    """What a message costs is invisible while writing it, and it is not len()."""
+
+    def test_latin_text_fits_a_full_gsm7_segment(self):
+        cost = count_segments("A" * 160)
+        assert (cost.encoding, cost.parts) == ("gsm7", 1)
+
+    def test_one_character_past_the_limit_splits_in_two(self):
+        assert count_segments("A" * 161).parts == 2
+
+    def test_a_single_cyrillic_character_halves_the_whole_message(self):
+        """Encoding is a property of the text, not of the offending character."""
+        latin = count_segments("A" * 100)
+        mixed = count_segments("A" * 99 + "я")
+
+        assert latin.parts == 1
+        assert (mixed.encoding, mixed.parts) == ("ucs2", 2)
+
+    def test_ukrainian_text_fits_seventy_characters(self):
+        assert count_segments("я" * 70).parts == 1
+        assert count_segments("я" * 71).parts == 2
+
+    def test_extended_characters_cost_two_septets(self):
+        # 159 plain + one escaped character = 161 septets, so it splits.
+        cost = count_segments("A" * 159 + "€")
+        assert (cost.encoding, cost.characters, cost.parts) == ("gsm7", 161, 2)
+
+    def test_concatenation_overhead_shrinks_later_parts(self):
+        """Two parts hold 153 septets each, not 160."""
+        assert count_segments("A" * 306).parts == 2
+        assert count_segments("A" * 307).parts == 3
+
+    def test_empty_text_costs_nothing(self):
+        assert count_segments("").parts == 0
+
+    def test_newlines_stay_within_gsm7(self):
+        """A line break is in the basic alphabet — it must not force UCS-2."""
+        assert count_segments("Line one\nLine two").encoding == "gsm7"
