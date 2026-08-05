@@ -881,5 +881,11 @@
   "sms.guideChangingTerm": "Why the numbers move",
   "sms.guideChangingBody": "While purchases are few, a per-contact difference multiplied by thousands of recipients swings the totals wildly, negative included. That is noise, not a loss. Read it after 7–14 days, and always next to the p-value.",
   "sms.guideControlTerm": "How the control group is drawn",
-  "sms.guideControlBody": "When the roster is frozen, each customer lands in the control or in the send by a hash of (customer ID, campaign name). The hash gives a number 0–99, and anything below the chosen percentage goes to the control. The draw runs inside each tier separately, so the control share is the same in VIP, Core and Reactivation. The point of a hash rather than a coin toss is that it repeats: re-exporting the same campaign gives the same split, while a new campaign name reshuffles it — so the same people are not withheld from every campaign in a row. The control is never messaged, including on a repeat send."
+  "sms.guideControlBody": "When the roster is frozen, each customer lands in the control or in the send by a hash of (customer ID, campaign name). The hash gives a number 0–99, and anything below the chosen percentage goes to the control. The draw runs inside each tier separately, so the control share is the same in VIP, Core and Reactivation. The point of a hash rather than a coin toss is that it repeats: re-exporting the same campaign gives the same split, while a new campaign name reshuffles it — so the same people are not withheld from every campaign in a row. The control is never messaged, including on a repeat send.",
+  "sms.forestTitle": "Lift by tier",
+  "sms.forestDesc": "Every tier on one scale. The dot is the measured lift, the bar is the interval the true value sits in. A bar that does not touch zero means the effect is shown.",
+  "sms.forestKeyProven": "interval clear of zero — effect shown",
+  "sms.forestKeyUnproven": "interval crosses zero — not shown",
+  "sms.forestDetail": "messaged {{target}}% against {{control}}% in the control, interval {{lo}} to {{hi}} pp, p={{p}}, {{contacts}} recipients",
+  "sms.forestHint": "Hover a row for the figures"
 }
