@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { Button } from './Button'
@@ -7,7 +7,9 @@ import { EmptyState } from './EmptyState'
 import { SkeletonTable } from './Skeleton'
 import { useSmsCampaigns, useMarkSmsCampaignSent } from '../hooks/useApi'
 import { useToast } from './Toast'
+import { SmsSendDialog } from './SmsSendDialog'
 import { formatNumber } from '../utils/formatters'
+import type { SmsCampaignSummary } from '../types/api'
 
 // ─── SmsCampaignList ─────────────────────────────────────────────────────────
 //
@@ -32,6 +34,7 @@ export const SmsCampaignList = memo(function SmsCampaignList() {
   const { data, isLoading } = useSmsCampaigns()
   const markSent = useMarkSmsCampaignSent()
   const { addToast } = useToast()
+  const [sending, setSending] = useState<SmsCampaignSummary | null>(null)
 
   const campaigns = data?.campaigns ?? []
 
@@ -103,14 +106,22 @@ export const SmsCampaignList = memo(function SmsCampaignList() {
                     </td>
                     <td className="py-2.5 pl-3 text-right">
                       {!c.sentAt && (
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => handleMarkSent(c.campaign)}
-                          disabled={markSent.isPending}
-                        >
-                          {t('sms.markSent')}
-                        </Button>
+                        <div className="flex justify-end gap-2">
+                          <Button size="sm" onClick={() => setSending(c)}>
+                            {t('sms.send')}
+                          </Button>
+                          {/* Kept for the manual path: a file handed to the
+                              provider outside this app still needs a send date,
+                              or its results cannot be measured. */}
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => handleMarkSent(c.campaign)}
+                            disabled={markSent.isPending}
+                          >
+                            {t('sms.markSent')}
+                          </Button>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -120,6 +131,10 @@ export const SmsCampaignList = memo(function SmsCampaignList() {
           </div>
         )}
       </CardContent>
+
+      {sending && (
+        <SmsSendDialog campaign={sending} onClose={() => setSending(null)} />
+      )}
     </Card>
   )
 })

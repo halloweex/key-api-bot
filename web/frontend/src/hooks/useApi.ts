@@ -62,6 +62,7 @@ import type {
   SmsSegmentsResponse,
   SmsCampaignsResponse,
   SmsCampaignResultsResponse,
+  SmsSendResult,
   MarketingReportResponse,
 } from '../types/api'
 
@@ -933,6 +934,20 @@ export function useMarkSmsCampaignSent() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['smsCampaigns'] })
       queryClient.invalidateQueries({ queryKey: ['smsCampaignResults'] })
+    },
+  })
+}
+
+export function useSendSmsCampaign() {
+  const queryClient = useQueryClient()
+
+  return useMutation<SmsSendResult, Error, { campaign: string; text: string }>({
+    mutationFn: ({ campaign, text }) => api.sendSmsCampaign(campaign, text),
+    onSuccess: () => {
+      // The send stamps sent_at and creates opt-outs, so both the campaign list
+      // and the next segmentation are stale.
+      queryClient.invalidateQueries({ queryKey: ['smsCampaigns'] })
+      queryClient.invalidateQueries({ queryKey: ['smsSegments'] })
     },
   })
 }
