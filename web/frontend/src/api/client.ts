@@ -104,6 +104,25 @@ export class ApiError extends Error {
     this.code = code
   }
 
+  /**
+   * Build an error that prefers what the server actually said.
+   *
+   * The canned per-status text below is a fallback for responses with no
+   * usable body. On its own it actively misleads: a TurboSMS refusal comes
+   * back as 502 with the gateway's reason in `detail`, and reporting that as
+   * "Server is restarting" sends the reader to check the wrong thing.
+   */
+  static async from(response: Response): Promise<ApiError> {
+    const fallback = ApiError.fromResponse(response)
+    try {
+      const body = await response.json()
+      const detail = typeof body?.detail === 'string' ? body.detail : null
+      return detail ? new ApiError(response.status, detail, fallback.code) : fallback
+    } catch {
+      return fallback
+    }
+  }
+
   static fromResponse(response: Response): ApiError {
     const status = response.status
 
@@ -242,7 +261,7 @@ async function fetchApi<T>(
     const response = await fetchWithTimeout(url, options)
 
     if (!response.ok) {
-      throw ApiError.fromResponse(response)
+      throw await ApiError.from(response)
     }
 
     try {
@@ -280,7 +299,7 @@ async function fetchApiMutation<T>(
     clearTimeout(timeoutId)
 
     if (!response.ok) {
-      throw ApiError.fromResponse(response)
+      throw await ApiError.from(response)
     }
 
     return await response.json()
@@ -334,7 +353,7 @@ async function fetchApiMutationWithBody<T>(
     clearTimeout(timeoutId)
 
     if (!response.ok) {
-      throw ApiError.fromResponse(response)
+      throw await ApiError.from(response)
     }
 
     return await response.json()
