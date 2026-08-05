@@ -32,7 +32,10 @@ export function smsCost(text: string): SmsCost {
   let concatenated: number
 
   if (unicodeNeeded) {
-    characters = chars.length
+    // UCS-2 is billed in 16-bit units, not characters. A JS string is already
+    // UTF-16, so its length is the billed figure — while Array.from would
+    // collapse an emoji surrogate pair into one and understate the message.
+    characters = text.length
     single = 70
     concatenated = 67
   } else {
