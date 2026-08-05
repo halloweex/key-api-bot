@@ -1224,10 +1224,24 @@ class CustomersMixin:
 
     async def get_sms_campaign_targets(self, campaign: str) -> List[Dict[str, Any]]:
         """
-        Phones to actually message: the target arm only, never the control.
+        Claim the campaign and hand back the phones to message.
+
+        Stamping ``sent_at`` here, before a single message leaves, is the whole
+        point. It used to be written only after the gateway had taken the last
+        batch, which left the campaign unclaimed for the entire length of the
+        send — and a send of thousands takes minutes. Two requests could both
+        read "not sent yet" and both go, which is exactly what happened: a
+        roster of 5,550 went out twice because a client-side timeout made the
+        operator press send again while the first call was still running.
+
+        The check and the claim share one connection block, and the store
+        serialises those, so the second caller now finds the campaign taken.
+
+        Callers that end up sending nothing must hand it back with
+        :meth:`release_sms_campaign`, or the campaign is stuck.
 
         Raises:
-            ValueError: If the campaign is unknown or already sent.
+            ValueError: If the campaign is unknown or already claimed.
         """
         async with self.connection() as conn:
             camp = conn.execute(
@@ -1241,6 +1255,11 @@ class CustomersMixin:
                     f"sending twice would double-message the roster"
                 )
 
+            conn.execute(
+                "UPDATE sms_campaigns SET sent_at = ? WHERE campaign = ?",
+                [datetime.now(), campaign],
+            )
+
             rows = conn.execute(
                 """
                 SELECT buyer_id, phone, tier
@@ -1252,6 +1271,19 @@ class CustomersMixin:
             ).fetchall()
 
         return [{"buyerId": r[0], "phone": r[1], "tier": r[2]} for r in rows]
+
+    async def release_sms_campaign(self, campaign: str) -> None:
+        """
+        Hand a claimed campaign back, for when nothing was actually sent.
+
+        Only safe when no message left: clearing the stamp makes the campaign
+        sendable again, which is a double-send if anything did go out.
+        """
+        async with self.connection() as conn:
+            conn.execute(
+                "UPDATE sms_campaigns SET sent_at = NULL WHERE campaign = ?",
+                [campaign],
+            )
 
     async def record_sms_send(
         self,

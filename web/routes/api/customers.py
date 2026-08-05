@@ -488,8 +488,10 @@ async def send_sms_campaign(
         )
         results, partial = e.results, e
     except TurboSmsError as e:
-        # Nothing went out, so nothing is stamped — the campaign can be
-        # retried once whatever the gateway objected to is fixed.
+        # Nothing went out, so hand the campaign back — it can be retried once
+        # whatever the gateway objected to is fixed. Safe only on this branch:
+        # PartialSendError above keeps the claim, because messages did leave.
+        await store.release_sms_campaign(campaign)
         logger.error("TurboSMS send failed: campaign=%s error=%s", campaign, e)
         raise HTTPException(status_code=502, detail=str(e))
 
