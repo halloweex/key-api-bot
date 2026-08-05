@@ -1408,3 +1408,18 @@ export interface SmsSendResult {
   stoplisted: number
   failed: number
 }
+
+/** One rehearsal send: the gateway's answer for a single number. */
+export interface SmsTestSendResult {
+  phone: string
+  accepted: boolean
+  stoplisted: boolean
+  messageId: string | null
+  code: number
+  status: string
+  cost: {
+    encoding: 'gsm7' | 'ucs2'
+    characters: number
+    parts: number
+  }
+}

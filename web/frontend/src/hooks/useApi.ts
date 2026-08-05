@@ -63,6 +63,7 @@ import type {
   SmsCampaignsResponse,
   SmsCampaignResultsResponse,
   SmsSendResult,
+  SmsTestSendResult,
   MarketingReportResponse,
 } from '../types/api'
 
@@ -949,5 +950,12 @@ export function useSendSmsCampaign() {
       queryClient.invalidateQueries({ queryKey: ['smsCampaigns'] })
       queryClient.invalidateQueries({ queryKey: ['smsSegments'] })
     },
+  })
+}
+
+/** A rehearsal send. Nothing is invalidated because nothing is written. */
+export function useSendTestSms() {
+  return useMutation<SmsTestSendResult, Error, { phone: string; text: string }>({
+    mutationFn: ({ phone, text }) => api.sendTestSms(phone, text),
   })
 }

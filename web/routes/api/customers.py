@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from typing import Optional
 
 from core.repositories.customers import SMS_LTV_BASES, SMS_TIER_DEFAULTS
-from core.turbosms import TurboSmsClient, TurboSmsError
+from core.turbosms import TurboSmsClient, TurboSmsError, count_segments
 from web.routes.auth import require_admin
 from web.services import dashboard_service
 from ._deps import (
@@ -471,6 +471,67 @@ async def send_sms_campaign(
         summary["accepted"], summary["stoplisted"], summary["failed"],
     )
     return summary
+
+
+@router.post("/customers/sms/test-send")
+@limiter.limit("10/minute")
+async def send_test_sms(
+    request: Request,
+    phone: str = Query(..., min_length=10, max_length=20),
+    text: str = Query(..., min_length=1, max_length=600),
+    admin: dict = Depends(require_admin),
+):
+    """
+    Send one message to one number, to check the creative before a campaign.
+
+    Until this existed the only way to see a message as a customer sees it was
+    to send a real campaign, which stamps the roster sent and cannot be undone.
+
+    Deliberately writes nothing: no campaign, no roster, no opt-out. A stoplist
+    refusal is reported in the response instead of being recorded, because this
+    path is a rehearsal and must not move the data a campaign is measured on.
+    The billed cost comes back too — Cyrillic drops the limit from 160
+    characters to 70, which is invisible while writing the text.
+    """
+    digits = "".join(c for c in phone if c.isdigit())
+    # Same rule the segmentation applies, so a number that passes here is one
+    # that could actually appear in a campaign.
+    if len(digits) != 12 or not digits.startswith("380"):
+        raise HTTPException(
+            status_code=400,
+            detail="phone must be a full Ukrainian number: 380 followed by 9 digits",
+        )
+
+    cost = count_segments(text)
+
+    try:
+        async with TurboSmsClient() as client:
+            results = await client.send([digits], text)
+    except TurboSmsError as e:
+        logger.error("Test SMS failed: user=%s error=%s", admin.get("user_id"), e)
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if not results:
+        raise HTTPException(status_code=502, detail="gateway returned no result")
+
+    result = results[0]
+    logger.info(
+        "Test SMS: user=%s phone=%s accepted=%s code=%s parts=%d",
+        admin.get("user_id"), digits, result.accepted, result.code, cost.parts,
+    )
+    return {
+        "phone": digits,
+        "accepted": result.accepted,
+        "stoplisted": result.stoplisted,
+        "messageId": result.message_id,
+        "code": result.code,
+        "status": result.status,
+        "cost": {
+            "encoding": cost.encoding,
+            "characters": cost.characters,
+            "parts": cost.parts,
+        },
+    }
 
 
 @router.post("/customers/sms-campaigns/optout")

@@ -8,6 +8,7 @@ import { Badge } from './Badge'
 import { ApiErrorState } from './ApiErrorState'
 import { SkeletonCard } from './Skeleton'
 import { SmsSelectionCriteria } from './SmsSelectionCriteria'
+import { SmsTestSendDialog } from './SmsTestSendDialog'
 import { useSmsSegments } from '../hooks/useApi'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import type { SmsLtvBasis, SmsSegment, SmsSegmentsResponse, SmsTier } from '../types/api'
@@ -118,6 +119,7 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
   const [campaign, setCampaign] = useState('')
   const [promocode, setPromocode] = useState('')
   const [freeze, setFreeze] = useState(false)
+  const [testing, setTesting] = useState(false)
 
   const params = useMemo(
     () => `ltv_basis=${ltvBasis}&include_customers=false`,
@@ -238,6 +240,11 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
                   <Button onClick={handleExport} disabled={!canExport} size="sm">
                     {t('sms.downloadCsv')}
                   </Button>
+                  {/* Rehearsing the text belongs before the roster is frozen —
+                      once a campaign is sent the wording cannot be taken back. */}
+                  <Button variant="secondary" size="sm" onClick={() => setTesting(true)}>
+                    {t('sms.testSend')}
+                  </Button>
                 </div>
 
                 <label className="flex items-start gap-2 cursor-pointer">
@@ -262,6 +269,8 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
           </>
         )}
       </CardContent>
+
+      {testing && <SmsTestSendDialog onClose={() => setTesting(false)} />}
     </Card>
   )
 })
