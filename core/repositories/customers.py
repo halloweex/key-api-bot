@@ -1490,8 +1490,15 @@ class CustomersMixin:
                     LEFT JOIN offer_stocks os ON os.sku = p.sku
                     WHERE NOT o.is_return
                       AND o.is_active_source
-                      AND o.order_date >= CAST(? AS DATE)
-                      AND o.order_date <= CAST(? AS DATE) + {int(window_days)}
+                      -- From the moment the message went out, not from midnight
+                      -- that day. Rounding the start down to a date credited
+                      -- the campaign with every purchase made earlier the same
+                      -- day — hours of ordinary trading, split at random
+                      -- between the two arms, which on day one is the whole
+                      -- reading. Both columns carry a timezone, so this
+                      -- compares instants.
+                      AND o.ordered_at >= ?
+                      AND o.ordered_at < ? + INTERVAL '{int(window_days)} days'
                 ),
                 alloc AS (
                     SELECT buyer_id, order_id, promocode, line_cogs,
@@ -1519,7 +1526,13 @@ class CustomersMixin:
                        COALESCE(SUM(pb.margin), 0) AS margin,
                        COALESCE(SUM(pb.promo_orders), 0) AS promo_orders,
                        COUNT(*) FILTER (WHERE m.delivered) AS delivered,
-                       COUNT(*) FILTER (WHERE m.delivered = FALSE) AS undelivered
+                       COUNT(*) FILTER (WHERE m.delivered = FALSE) AS undelivered,
+                       -- Never handed to the gateway at all. Counted apart from
+                       -- undelivered because it is a different failure: these
+                       -- people were never treated, so leaving them in the
+                       -- target arm dilutes whatever the message did.
+                       COUNT(*) FILTER (WHERE m.delivery_status = 'NotSent')
+                           AS not_sent
                 FROM sms_campaign_members m
                 LEFT JOIN per_buyer pb ON pb.buyer_id = m.buyer_id
                 WHERE m.campaign = ?
@@ -1533,7 +1546,7 @@ class CustomersMixin:
 
         by_tier: Dict[str, Dict[str, Dict[str, Any]]] = {}
         for (tier, assignment, contacts, converted, orders, revenue, margin,
-             promo, delivered, undelivered) in rows:
+             promo, delivered, undelivered, not_sent) in rows:
             by_tier.setdefault(tier, {})[assignment] = {
                 "contacts": contacts,
                 "converted": converted,
@@ -1543,11 +1556,12 @@ class CustomersMixin:
                 "promoOrders": promo,
                 "delivered": delivered,
                 "undelivered": undelivered,
+                "notSent": not_sent,
             }
 
         empty = {"contacts": 0, "converted": 0, "orders": 0,
                  "revenue": 0.0, "margin": 0.0, "promoOrders": 0,
-                 "delivered": 0, "undelivered": 0}
+                 "delivered": 0, "undelivered": 0, "notSent": 0}
 
         def _blank() -> Dict[str, Any]:
             return dict(empty)

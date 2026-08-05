@@ -1362,6 +1362,10 @@ export interface SmsGroupStats {
   revenue: number
   margin: number
   promoOrders: number
+  delivered: number
+  undelivered: number
+  /** Never handed to the gateway — counted in the arm but never treated. */
+  notSent: number
 }
 
 export interface SmsComparison {

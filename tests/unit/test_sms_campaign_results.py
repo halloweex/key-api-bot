@@ -357,3 +357,90 @@ async def test_unknown_campaign(tmp_path):
     with pytest.raises(ValueError, match="not frozen"):
         await store.get_sms_campaign_results("nope")
     await store.close()
+
+
+# ─── the window starts at the send, not at midnight ──────────────────────
+
+async def _buy_at(store, buyer_id: int, when: datetime, oid: int,
+                  total: str = "1000.00"):
+    """A purchase at a precise moment, for testing the window's edges."""
+    async with store.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO silver_orders (
+                id, source_id, status_id, grand_total, ordered_at, buyer_id,
+                manager_id, order_date, is_return, sales_type, is_active_source,
+                source_name, is_new_customer, promocode
+            ) VALUES (?, 4, 1, ?, ?, ?, NULL, ?, FALSE, 'retail', TRUE,
+                      'Shopify', FALSE, NULL)
+            """,
+            [oid, total, when, buyer_id, when.date()],
+        )
+        conn.execute(
+            "INSERT INTO order_products (id, order_id, product_id, name, quantity,"
+            " price_sold) VALUES (?, ?, 1, 'Cream', 1, ?)",
+            [oid, oid, total],
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_purchase_before_the_send_is_not_the_campaign(tmp_path):
+    """Rounding the start down to a date credited the campaign with a whole
+    day of ordinary trading that happened before anyone was messaged."""
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=10, holdouts=10)
+
+    # SENT is 10:00. This one bought at 09:00, an hour earlier.
+    await _buy_at(store, 1, SENT - timedelta(hours=1), oid=900)
+
+    overall = (await store.get_sms_campaign_results("aug"))["overall"]
+    assert overall["target"]["converted"] == 0
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_purchase_after_the_send_counts_the_same_day(tmp_path):
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=10, holdouts=10)
+
+    await _buy_at(store, 1, SENT + timedelta(minutes=30), oid=901)
+
+    overall = (await store.get_sms_campaign_results("aug"))["overall"]
+    assert overall["target"]["converted"] == 1
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_window_closes_exactly_n_days_after_the_send(tmp_path):
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=10, holdouts=10)
+
+    await _buy_at(store, 1, SENT + timedelta(days=7) - timedelta(minutes=1), oid=902)
+    await _buy_at(store, 2, SENT + timedelta(days=7) + timedelta(minutes=1), oid=903)
+
+    overall = (await store.get_sms_campaign_results("aug", window_days=7))["overall"]
+    assert overall["target"]["converted"] == 1, "only the one inside the window"
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_members_never_handed_to_the_gateway_are_counted_apart(tmp_path):
+    """They were never treated, so they dilute whatever the message did."""
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=10, holdouts=10)
+    async with store.connection() as conn:
+        conn.execute(
+            "UPDATE sms_campaign_members SET delivery_status = 'NotSent',"
+            " delivered = FALSE WHERE campaign = 'aug' AND buyer_id IN (1, 2)"
+        )
+
+    overall = (await store.get_sms_campaign_results("aug"))["overall"]
+
+    assert overall["target"]["notSent"] == 2
+    assert overall["target"]["contacts"] == 10, "still in the arm, but visible"
+    assert overall["holdout"]["notSent"] == 0
+
+    await store.close()
