@@ -43,9 +43,19 @@ describe('smsCost', () => {
     expect(smsCost('Line one\nLine two').encoding).toBe('gsm7')
   })
 
-  it('counts an emoji as the unit the operator bills, not as two', () => {
-    // Surrogate pairs are one code point; splitting on UTF-16 units would
-    // double-count and overstate the price.
-    expect(smsCost('🎉').characters).toBe(1)
+  it('counts an emoji as the two units the operator bills', () => {
+    // UCS-2 is billed in 16-bit units. A pictographic emoji is a surrogate
+    // pair, so it takes two of the 70 — counting it as one code point
+    // understates the message and can hide an extra segment.
+    expect(smsCost('🎉').characters).toBe(2)
+  })
+
+  it('does not let an emoji sneak a message into another segment', () => {
+    expect(smsCost('я'.repeat(69) + '🎉').characters).toBe(71)
+    expect(smsCost('я'.repeat(69) + '🎉').parts).toBe(2)
+  })
+
+  it('still counts a BMP symbol as one unit', () => {
+    expect(smsCost('❤').characters).toBe(1)
   })
 })

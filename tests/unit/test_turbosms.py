@@ -475,3 +475,18 @@ class TestSuccessCodes:
 
         assert results[0].accepted is False
         assert results[0].stoplisted is True
+
+    def test_emoji_costs_two_ucs2_units(self):
+        """UCS-2 is billed in 16-bit units, and an emoji is a surrogate pair.
+
+        Counting it as one code point understates the message and can hide a
+        whole extra segment from whoever is writing it.
+        """
+        assert count_segments("\U0001F389").characters == 2
+
+    def test_emoji_can_push_a_message_over_the_edge(self):
+        cost = count_segments("я" * 69 + "\U0001F389")
+        assert (cost.characters, cost.parts) == (71, 2)
+
+    def test_bmp_symbol_is_still_one_unit(self):
+        assert count_segments("❤").characters == 1
