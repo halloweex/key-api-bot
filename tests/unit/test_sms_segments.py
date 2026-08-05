@@ -300,6 +300,86 @@ async def test_tier_filter_and_summary_shape(tmp_path):
     await store.close()
 
 
+def _funnel(result: dict) -> dict:
+    return {s["stage"]: s["remaining"] for s in result["funnel"]}
+
+
+@pytest.mark.asyncio
+async def test_funnel_accounts_for_every_dropped_customer(tmp_path):
+    """The funnel is the page's answer to "why is the list this size?".
+
+    Each stage has to name the rule that removed people, so the seed is read
+    back rule by rule rather than only at the end.
+    """
+    store = await _make_store(tmp_path)
+    await _seed(store)
+
+    funnel = _funnel(await store.get_sms_segments())
+
+    # 9 buyers seeded; the b2b one never enters a retail segmentation at all.
+    assert funnel["customers"] == 8
+    # Buyer 6 last ordered 400 days ago.
+    assert funnel["inWindow"] == 7
+    # Buyer 5 is a lone order past the reactivation window — no tier fits.
+    assert funnel["tiered"] == 6
+    # Buyers 7 (no phone) and 8 (fragment) cannot be messaged.
+    assert funnel["phone"] == 4
+    assert funnel["subscribed"] == 4
+    assert funnel["uniquePhone"] == 4
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_funnel_survives_an_empty_segmentation(tmp_path):
+    """Nothing eligible is exactly when the funnel has to explain itself."""
+    store = await _make_store(tmp_path)
+    async with store.connection() as conn:
+        _seed_catalogue(conn)
+        _add_buyer(conn, 1, "380961111111")
+        _add_order(conn, oid=1, buyer_id=1, days_ago=500, total="1000.00")
+
+    result = await store.get_sms_segments()
+
+    assert result["segments"] == []
+    assert result["totals"]["customers"] == 0
+    assert _funnel(result) == {
+        "customers": 1, "inWindow": 0, "tiered": 0,
+        "phone": 0, "subscribed": 0, "uniquePhone": 0,
+    }
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_funnel_counts_opt_outs_separately_from_bad_phones(tmp_path):
+    store = await _make_store(tmp_path)
+    await _seed(store)
+    await store.add_marketing_optout(buyer_id=1, phone="380961111111")
+
+    funnel = _funnel(await store.get_sms_segments())
+
+    assert funnel["phone"] == 4, "opting out is not a phone problem"
+    assert funnel["subscribed"] == 3
+    assert funnel["uniquePhone"] == 3
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_funnel_describes_the_base_not_the_tier_filter(tmp_path):
+    """Asking for one tier narrows the roster, not the account of the base."""
+    store = await _make_store(tmp_path)
+    await _seed(store)
+
+    result = await store.get_sms_segments(tier="CORE")
+
+    assert result["totals"]["customers"] == 2
+    assert _funnel(result)["uniquePhone"] == 4
+
+    await store.close()
+
+
 @pytest.mark.asyncio
 async def test_customers_omitted_unless_requested(tmp_path):
     store = await _make_store(tmp_path)

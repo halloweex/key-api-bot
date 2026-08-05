@@ -1304,6 +1304,20 @@ export interface SmsSegment {
   avgRecencyDays: number
 }
 
+/** One rule in the selection, and how many customers were still in after it. */
+export type SmsFunnelStage =
+  | 'customers'
+  | 'inWindow'
+  | 'tiered'
+  | 'phone'
+  | 'subscribed'
+  | 'uniquePhone'
+
+export interface SmsFunnelStep {
+  stage: SmsFunnelStage
+  remaining: number
+}
+
 export interface SmsSegmentsResponse {
   campaign: string
   salesType: string
@@ -1317,6 +1331,7 @@ export interface SmsSegmentsResponse {
     reactivationMaxRecency: number
     holdoutPct: number
   }
+  funnel: SmsFunnelStep[]
   segments: SmsSegment[]
   totals: { customers: number; target: number; holdout: number }
   truncated: boolean

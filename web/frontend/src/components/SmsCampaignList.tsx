@@ -53,7 +53,10 @@ export const SmsCampaignList = memo(function SmsCampaignList() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{t('sms.campaignsTitle')}</CardTitle>
+        <div className="flex items-center gap-2">
+          <Badge tone="slate" shape="tag">{t('sms.step', { n: 2 })}</Badge>
+          <CardTitle>{t('sms.campaignsTitle')}</CardTitle>
+        </div>
         <p className="text-xs text-slate-500 mt-0.5">{t('sms.campaignsDesc')}</p>
       </CardHeader>
 
