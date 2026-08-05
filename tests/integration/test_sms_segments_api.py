@@ -98,11 +98,14 @@ class _FakeStore:
         self.result_calls = []
         self.results_error = None
 
-    async def get_sms_campaign_results(self, campaign, window_days=30):
+    async def get_sms_campaign_results(self, campaign, window_days=30,
+                                       delivered_only=False):
         if self.results_error:
             raise ValueError(self.results_error)
-        self.result_calls.append({"campaign": campaign, "window_days": window_days})
-        return {"campaign": campaign, "windowDays": window_days, "segments": []}
+        self.result_calls.append({"campaign": campaign, "window_days": window_days,
+                                  "delivered_only": delivered_only})
+        return {"campaign": campaign, "windowDays": window_days,
+                "deliveredOnly": delivered_only, "segments": []}
 
     async def freeze_sms_campaign(self, **kwargs):
         if self.freeze_error:
@@ -440,7 +443,8 @@ class TestSmsSegmentsCsv:
     def test_results_defaults_and_window(self, client, store):
         r = client.get(RESULTS_PATH, headers=_admin_headers())
         assert r.status_code == 200
-        assert store.result_calls[0] == {"campaign": "aug", "window_days": 30}
+        assert store.result_calls[0] == {"campaign": "aug", "window_days": 30,
+                                         "delivered_only": False}
 
         client.get(RESULTS_PATH, params={"window_days": 60}, headers=_admin_headers())
         assert store.result_calls[1]["window_days"] == 60

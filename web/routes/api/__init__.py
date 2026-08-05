@@ -29,6 +29,7 @@ from .reports import router as reports_router
 from .products_intel import router as products_intel_router
 from .margin import router as margin_router
 from .me import router as me_router
+from .webhooks import router as webhooks_router
 
 router = APIRouter(tags=["api"])
 
@@ -47,3 +48,5 @@ router.include_router(reports_router)
 router.include_router(products_intel_router)
 router.include_router(margin_router)
 router.include_router(me_router)
+# Inbound machine callers: no session, each endpoint authenticates itself.
+router.include_router(webhooks_router)

@@ -606,8 +606,35 @@ class DuckDBStore(
             revenue_ltv_at_export DECIMAL(14, 2),
             margin_ltv_at_export DECIMAL(14, 2),
             recency_at_export INTEGER,
+            -- Delivery, filled in when the campaign is sent through the gateway.
+            -- An undelivered number that stays counted as "messaged" drags the
+            -- measured lift down, so results exclude anyone not delivered to.
+            message_id VARCHAR,
+            delivery_status VARCHAR,              -- gateway status, verbatim
+            delivered BOOLEAN,                    -- NULL = operator hasn't reported
+            delivered_at TIMESTAMP WITH TIME ZONE,
             PRIMARY KEY (campaign, buyer_id)
         );
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- Marketing opt-outs.
+        --
+        -- Segmentation looks only at purchases, so without this table someone
+        -- who opted out is re-selected by every future export. The provider's
+        -- own stoplist prevents delivery but not re-selection, and it leaves
+        -- them in the roster as a silent non-responder.
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS marketing_optouts (
+            buyer_id INTEGER NOT NULL,
+            channel VARCHAR NOT NULL DEFAULT 'sms',
+            phone VARCHAR,
+            reason VARCHAR,                       -- 'stoplist', 'manual', 'complaint'
+            source VARCHAR,                       -- who/what recorded it
+            opted_out_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (buyer_id, channel)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_optouts_phone ON marketing_optouts(phone);
 
         CREATE INDEX IF NOT EXISTS idx_sms_members_campaign
             ON sms_campaign_members(campaign, assignment);
