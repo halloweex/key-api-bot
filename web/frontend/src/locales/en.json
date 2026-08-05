@@ -861,5 +861,8 @@
   "sms.exportTiers": "Who this campaign is for",
   "sms.exportAllTiers": "Nothing picked — the file takes every tier, {{total}} contacts.",
   "sms.exportPickedTiers": "The file takes {{total}} contacts from the picked tiers.",
-  "sms.sendPartial": "Partly sent: {{unsent}} recipients were not messaged. The campaign is stamped sent — it cannot be retried without messaging the others twice."
+  "sms.sendPartial": "Partly sent: {{unsent}} recipients were not messaged. The campaign is stamped sent — it cannot be retried without messaging the others twice.",
+  "sms.notSentWarning": "{{n}} of the target arm were never sent — the gateway did not take them. They stay in the arm but were never messaged, so the lift reads low.",
+  "sms.deliveredOnlyLabel": "Confirmed deliveries only",
+  "sms.deliveredOnlyHint": "drops undelivered recipients from the target arm, leaving the control intact. An optimistic bound rather than a clean comparison: delivery tracks how live a number is."
 }

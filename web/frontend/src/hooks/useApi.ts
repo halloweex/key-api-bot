@@ -918,10 +918,13 @@ export function useSmsCampaigns(enabled = true) {
   })
 }
 
-export function useSmsCampaignResults(campaign: string | null, windowDays: number) {
+export function useSmsCampaignResults(
+  campaign: string | null, windowDays: number, deliveredOnly = false,
+) {
   return useQuery<SmsCampaignResultsResponse>({
-    queryKey: ['smsCampaignResults', campaign, windowDays] as const,
-    queryFn: () => api.getSmsCampaignResults(campaign as string, windowDays),
+    queryKey: ['smsCampaignResults', campaign, windowDays, deliveredOnly] as const,
+    queryFn: () =>
+      api.getSmsCampaignResults(campaign as string, windowDays, deliveredOnly),
     staleTime: CACHE_TTL.REALTIME,
     enabled: Boolean(campaign),
     // A frozen-but-unsent campaign answers 409; retrying cannot change that.
