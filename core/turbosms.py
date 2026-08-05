@@ -38,9 +38,17 @@ BASE_URL = "https://api.turbosms.ua"
 CODE_OK = 0
 CODE_STOPLIST = 404          # NOT_ALLOWED_NUMBER_STOPLIST
 CODE_ACCEPTED = 800          # SUCCESS_MESSAGE_ACCEPTED (queued)
+CODE_SENT = 801              # SUCCESS_MESSAGE_SENT (already away)
 CODE_PARTIAL = 802           # SUCCESS_MESSAGE_PARTIAL_ACCEPTED
+CODE_PARTIAL_SENT = 803      # SUCCESS_MESSAGE_PARTIAL_SENT
 
-_ACCEPTED_CODES = frozenset({CODE_OK, CODE_ACCEPTED, CODE_PARTIAL})
+# The gateway reports success as any of 800-803: queued or already sent,
+# whole or partial. Treating one of them as a failure is the worst mistake
+# available here — the messages have gone out, but the campaign is left
+# unstamped, so the obvious next move is to send the whole roster again.
+_ACCEPTED_CODES = frozenset({
+    CODE_OK, CODE_ACCEPTED, CODE_SENT, CODE_PARTIAL, CODE_PARTIAL_SENT,
+})
 
 # DLR statuses from the webhook, mapped to the three outcomes we act on.
 # Anything unknown stays as-is rather than being forced into a bucket.

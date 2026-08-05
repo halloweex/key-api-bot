@@ -409,3 +409,69 @@ class TestViberConfig:
         monkeypatch.setenv("TURBOSMS_API_TOKEN", "tok")
         monkeypatch.setenv("TURBOSMS_VIBER_SENDER", "KoreanStoryViber")
         assert TurboSmsConfig().viber_configured is True
+
+
+# ─── success codes ───────────────────────────────────────────────────────
+
+class TestSuccessCodes:
+    """800-803 all mean success. Reading one as a failure re-sends the roster.
+
+    The campaign is only stamped sent when the call returns cleanly, so a
+    success mistaken for an error leaves messages delivered and the campaign
+    looking unsent — and the obvious next move is to send it all again.
+    """
+
+    @pytest.mark.parametrize("code,status", [
+        (0, "OK"),
+        (800, "SUCCESS_MESSAGE_ACCEPTED"),
+        (801, "SUCCESS_MESSAGE_SENT"),
+        (802, "SUCCESS_MESSAGE_PARTIAL_ACCEPTED"),
+        (803, "SUCCESS_MESSAGE_PARTIAL_SENT"),
+    ])
+    @pytest.mark.asyncio
+    async def test_request_level_success_is_not_an_error(self, code, status):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "response_code": code, "response_status": status,
+                "response_result": [
+                    {"phone": "380961111111", "response_code": code,
+                     "message_id": "aaa-111", "response_status": status},
+                ],
+            })
+
+        async with _client_with(handler) as c:
+            results = await c.send(["380961111111"], "Sale")
+
+        assert results[0].accepted is True, f"{code} {status} must count as sent"
+
+    @pytest.mark.parametrize("code", [302, 400])
+    @pytest.mark.asyncio
+    async def test_sender_rejections_still_raise(self, code):
+        """A refused alpha name must not look like a delivery."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "response_code": code, "response_status": "NOT_ALLOWED_MESSAGE_SENDER",
+                "response_result": [],
+            })
+
+        async with _client_with(handler) as c:
+            with pytest.raises(TurboSmsError):
+                await c.send(["380961111111"], "Sale")
+
+    @pytest.mark.asyncio
+    async def test_per_recipient_stoplist_is_still_not_accepted(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "response_code": 801, "response_status": "SUCCESS_MESSAGE_SENT",
+                "response_result": [
+                    {"phone": "380961111111", "response_code": 404,
+                     "message_id": None,
+                     "response_status": "NOT_ALLOWED_NUMBER_STOPLIST"},
+                ],
+            })
+
+        async with _client_with(handler) as c:
+            results = await c.send(["380961111111"], "Sale")
+
+        assert results[0].accepted is False
+        assert results[0].stoplisted is True
