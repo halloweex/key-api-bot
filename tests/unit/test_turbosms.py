@@ -221,3 +221,29 @@ class TestWebhookSignature:
     ])
     def test_rejects_missing_pieces(self, event_id, sig, secret):
         assert verify_webhook_signature(event_id, sig, secret) is False
+
+
+# ─── configuration ───────────────────────────────────────────────────────
+
+class TestTokenEnvNames:
+    """The project's .env already uses TURBOSMS_API_TOKEN; both spellings work."""
+
+    def test_reads_api_token(self, monkeypatch):
+        monkeypatch.setenv("TURBOSMS_API_TOKEN", "from-api-token")
+        monkeypatch.delenv("TURBOSMS_TOKEN", raising=False)
+        assert TurboSmsConfig().token == "from-api-token"
+
+    def test_falls_back_to_plain_token(self, monkeypatch):
+        monkeypatch.delenv("TURBOSMS_API_TOKEN", raising=False)
+        monkeypatch.setenv("TURBOSMS_TOKEN", "from-plain")
+        assert TurboSmsConfig().token == "from-plain"
+
+    def test_api_token_wins(self, monkeypatch):
+        monkeypatch.setenv("TURBOSMS_API_TOKEN", "primary")
+        monkeypatch.setenv("TURBOSMS_TOKEN", "alias")
+        assert TurboSmsConfig().token == "primary"
+
+    def test_configured_needs_a_sender_too(self, monkeypatch):
+        monkeypatch.setenv("TURBOSMS_API_TOKEN", "tok")
+        monkeypatch.delenv("TURBOSMS_SENDER", raising=False)
+        assert TurboSmsConfig().configured is False

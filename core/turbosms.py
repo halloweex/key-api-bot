@@ -79,7 +79,12 @@ class SendResult:
 class TurboSmsConfig:
     """Credentials and defaults, read from the environment."""
 
-    token: str = field(default_factory=lambda: os.getenv("TURBOSMS_TOKEN", ""))
+    # TURBOSMS_API_TOKEN is the name already in use in this project's .env;
+    # TURBOSMS_TOKEN is accepted as an alias so either spelling works.
+    token: str = field(
+        default_factory=lambda: os.getenv("TURBOSMS_API_TOKEN")
+        or os.getenv("TURBOSMS_TOKEN", "")
+    )
     sender: str = field(default_factory=lambda: os.getenv("TURBOSMS_SENDER", ""))
     # Shared secret configured alongside the callback URL in the TurboSMS
     # panel; the webhook signature is SHA1(secret + event id).
