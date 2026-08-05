@@ -70,6 +70,9 @@ import type {
   MarginTrendItem,
   MarginBrandCategoryItem,
   MarginAlertItem,
+  SmsSegmentsResponse,
+  SmsCampaignsResponse,
+  SmsCampaignResultsResponse,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -732,6 +735,27 @@ export const api = {
 
   getMarginAlerts: (params: string, options?: FetchOptions) =>
     fetchApi<MarginAlertItem[]>('/margin/alerts', params, options),
+
+  // SMS campaigns
+  getSmsSegments: (params: string, options?: FetchOptions) =>
+    fetchApi<SmsSegmentsResponse>('/customers/sms-segments', params, options),
+
+  getSmsCampaigns: (options?: FetchOptions) =>
+    fetchApi<SmsCampaignsResponse>('/customers/sms-campaigns', undefined, options),
+
+  getSmsCampaignResults: (campaign: string, windowDays: number, options?: FetchOptions) =>
+    fetchApi<SmsCampaignResultsResponse>(
+      `/customers/sms-campaigns/${encodeURIComponent(campaign)}/results`,
+      `window_days=${windowDays}`,
+      options,
+    ),
+
+  markSmsCampaignSent: (campaign: string, sentAt?: string) =>
+    fetchApiMutation<{ campaign: string; sentAt: string | null }>(
+      `/customers/sms-campaigns/${encodeURIComponent(campaign)}/sent`
+        + (sentAt ? `?sent_at=${encodeURIComponent(sentAt)}` : ''),
+      'POST',
+    ),
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────
