@@ -1311,6 +1311,31 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (revenue_predictions model_wape): {e}")
 
+        # Migration: delivery columns on sms_campaign_members.
+        #
+        # The table ships from CREATE TABLE IF NOT EXISTS, which does nothing to
+        # a table that already exists — so a database created before the
+        # TurboSMS work has the roster but none of the delivery columns, and
+        # every delivery report 500s. No DEFAULT on these: ALTER TABLE ... ADD
+        # COLUMN ... DEFAULT rewrites the whole table and OOMs on a large DB.
+        for column, ddl_type in (
+            ("message_id", "VARCHAR"),
+            ("delivery_status", "VARCHAR"),
+            ("delivered", "BOOLEAN"),
+            ("delivered_at", "TIMESTAMP WITH TIME ZONE"),
+        ):
+            try:
+                self._connection.execute(
+                    f"ALTER TABLE sms_campaign_members "
+                    f"ADD COLUMN IF NOT EXISTS {column} {ddl_type}"
+                )
+                logger.debug(
+                    "Migration: %s column added/verified on sms_campaign_members",
+                    column,
+                )
+            except Exception as e:
+                logger.debug(f"Migration note (sms_campaign_members {column}): {e}")
+
         # Migration: Add language column to user_preferences
         try:
             self._connection.execute(
