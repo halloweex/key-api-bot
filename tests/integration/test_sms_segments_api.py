@@ -749,6 +749,9 @@ class TestPartialSend:
                 return {"campaign": campaign, "accepted": len(accepted),
                         "stoplisted": len(stoplisted), "failed": len(failed)}
 
+            async def release_sms_campaign(self, campaign):
+                recorded["released"] = campaign
+
         async def _fake_get_store():
             return _Store()
 
@@ -809,4 +812,33 @@ class TestPartialSend:
         )
 
         assert r.status_code == 502
-        assert sending_store == {}, "nothing recorded, so the send can be retried"
+        assert "accepted" not in sending_store, "nothing went out, nothing recorded"
+        # The claim is taken before the gateway call, so a total failure has to
+        # hand it back or the campaign is stuck unsendable.
+        assert sending_store["released"] == "aug"
+
+    def test_a_partial_failure_keeps_the_claim(self, client, sending_store, monkeypatch):
+        """Messages left, so the campaign must never become sendable again."""
+        from core.turbosms import PartialSendError, SendResult, TurboSmsError
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def send(self, phones, text, viber=None):
+                raise PartialSendError(
+                    [SendResult(phone="380961111111", message_id="m-1",
+                                code=0, status="OK")],
+                    sent=1, unsent=1, cause=TurboSmsError("gateway said no"),
+                )
+
+        monkeypatch.setattr(
+            "web.routes.api.customers.TurboSmsClient", lambda *a, **kw: _Client()
+        )
+
+        client.post(self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers())
+
+        assert "released" not in sending_store

@@ -37,6 +37,11 @@ export const SmsSendDialog = memo(function SmsSendDialog({
   const [buttonCaption, setButtonCaption] = useState('')
   const [buttonUrl, setButtonUrl] = useState('')
   const [confirmName, setConfirmName] = useState('')
+  // One press per dialog, whatever the outcome. A send that appears to fail
+  // may still be running at the gateway, and pressing again is how a roster
+  // gets messaged twice — the server refuses the second attempt now, but the
+  // control that produced the mistake belongs here too.
+  const [attempted, setAttempted] = useState(false)
   const send = useSendSmsCampaign()
   const { addToast } = useToast()
 
@@ -52,9 +57,10 @@ export const SmsSendDialog = memo(function SmsSendDialog({
   const buttonComplete = Boolean(buttonCaption.trim()) === Boolean(buttonUrl.trim())
   const nameMatches = confirmName.trim() === campaign.campaign
   const canSend = trimmed.length > 0 && smsText.length <= SMS_LIMIT && nameMatches
-    && (!hybrid || buttonComplete) && !send.isPending
+    && (!hybrid || buttonComplete) && !send.isPending && !attempted
 
   function handleSend() {
+    setAttempted(true)
     send.mutate(
       {
         campaign: campaign.campaign,

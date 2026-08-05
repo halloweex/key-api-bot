@@ -789,6 +789,11 @@ export const api = {
       `/customers/sms-campaigns/${encodeURIComponent(campaign)}/send`
         + `?text=${encodeURIComponent(text)}&${channelParams(channel, viber)}`,
       'POST',
+      // Thousands of recipients take minutes at the gateway. On the default
+      // 10s the request aborted while the send carried on server-side, and
+      // the failure on screen invited a second press — which sent the roster
+      // twice.
+      { timeout: 10 * 60 * 1000 },
     ),
 
   sendTestSms: (
