@@ -10,7 +10,8 @@ from typing import Optional
 
 from core.repositories.customers import SMS_LTV_BASES, SMS_TIER_DEFAULTS
 from core.turbosms import (
-    TurboSmsClient, TurboSmsConfig, TurboSmsError, ViberMessage, count_segments,
+    PartialSendError, TurboSmsClient, TurboSmsConfig, TurboSmsError,
+    ViberMessage, count_segments,
 )
 from web.routes.auth import require_admin
 from web.services import dashboard_service
@@ -471,11 +472,24 @@ async def send_sms_campaign(
     by_phone = {t["phone"]: t["buyerId"] for t in targets}
     viber = _build_viber(channel, text, viber_text, button_caption, button_url)
 
+    # A roster past the gateway's per-request limit is split, so a later batch
+    # can fail with earlier ones already delivered. Those have to be recorded
+    # anyway: a retry that did not know about them would message those people
+    # twice, spend the budget twice, and destroy the comparison the campaign
+    # exists to produce.
+    partial: Optional[PartialSendError] = None
     try:
         async with TurboSmsClient() as client:
             results = await client.send(list(by_phone), text, viber=viber)
+    except PartialSendError as e:
+        logger.error(
+            "TurboSMS send partially failed: campaign=%s sent=%d unsent=%d error=%s",
+            campaign, e.sent, e.unsent, e,
+        )
+        results, partial = e.results, e
     except TurboSmsError as e:
-        # Nothing is stamped sent — the campaign can be retried once fixed.
+        # Nothing went out, so nothing is stamped — the campaign can be
+        # retried once whatever the gateway objected to is fixed.
         logger.error("TurboSMS send failed: campaign=%s error=%s", campaign, e)
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -495,11 +509,20 @@ async def send_sms_campaign(
 
     logger.info(
         "SMS campaign sent: user=%s campaign=%s channel=%s accepted=%d "
-        "stoplisted=%d failed=%d",
+        "stoplisted=%d failed=%d unsent=%d",
         admin.get("user_id"), campaign, channel,
         summary["accepted"], summary["stoplisted"], summary["failed"],
+        partial.unsent if partial else 0,
     )
-    return {**summary, "channel": channel}
+    return {
+        **summary,
+        "channel": channel,
+        # Non-zero means the roster is only partly messaged and cannot be
+        # resent — the campaign is stamped, so say so rather than reporting a
+        # clean success.
+        "unsent": partial.unsent if partial else 0,
+        "partialError": str(partial) if partial else None,
+    }
 
 
 def _build_viber(

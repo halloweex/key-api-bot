@@ -16,6 +16,7 @@ from core.turbosms import (
     TurboSmsError,
     classify_dlr,
     count_segments,
+    PartialSendError,
     ViberMessage,
     verify_webhook_signature,
 )
@@ -490,3 +491,119 @@ class TestSuccessCodes:
 
     def test_bmp_symbol_is_still_one_unit(self):
         assert count_segments("❤").characters == 1
+
+
+# ─── batching ────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_roster_over_the_limit_is_split():
+    """The gateway refuses more than 5000 in one call with 405."""
+    batches = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        batches.append(len(json.loads(request.content)["recipients"]))
+        return httpx.Response(200, json={
+            "response_code": 801, "response_status": "SUCCESS_MESSAGE_SENT",
+            "response_result": [],
+        })
+
+    phones = [f"38096{i:07d}" for i in range(5550)]
+    async with _client_with(handler) as c:
+        await c.send(phones, "Sale")
+
+    assert batches == [5000, 550]
+
+
+@pytest.mark.asyncio
+async def test_one_request_is_still_one_request():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(200, json={
+            "response_code": 0, "response_status": "OK", "response_result": [],
+        })
+
+    async with _client_with(handler) as c:
+        await c.send(["380961111111"], "Sale")
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_batch_does_not_discard_what_already_went():
+    """Losing the earlier results is the one unrecoverable mistake here.
+
+    Those people have the message; a retry that did not know would send it
+    twice, spend the budget twice, and destroy the campaign's measurement.
+    """
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        seen.append(1)
+        if len(seen) == 1:
+            return httpx.Response(200, json={
+                "response_code": 801, "response_status": "SUCCESS_MESSAGE_SENT",
+                "response_result": [
+                    {"phone": "380960000000", "response_code": 0,
+                     "message_id": "aaa-111", "response_status": "OK"},
+                ],
+            })
+        return httpx.Response(200, json={
+            "response_code": 405,
+            "response_status": "NOT_ALLOWED_RECIPIENTS_LIMIT",
+            "response_result": [],
+        })
+
+    phones = [f"38096{i:07d}" for i in range(5550)]
+    async with _client_with(handler) as c:
+        with pytest.raises(PartialSendError) as excinfo:
+            await c.send(phones, "Sale")
+
+    error = excinfo.value
+    assert error.sent == 5000
+    assert error.unsent == 550
+    assert [r.message_id for r in error.results] == ["aaa-111"]
+
+
+@pytest.mark.asyncio
+async def test_a_first_batch_failure_is_a_plain_error():
+    """Nothing went out, so the campaign must stay retryable."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "response_code": 405,
+            "response_status": "NOT_ALLOWED_RECIPIENTS_LIMIT",
+            "response_result": [],
+        })
+
+    async with _client_with(handler) as c:
+        with pytest.raises(TurboSmsError) as excinfo:
+            await c.send(["380961111111"], "Sale")
+
+    assert not isinstance(excinfo.value, PartialSendError)
+
+
+@pytest.mark.asyncio
+async def test_every_batch_carries_the_same_viber_block():
+    payloads = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "response_code": 801, "response_status": "SUCCESS_MESSAGE_SENT",
+            "response_result": [],
+        })
+
+    phones = [f"38096{i:07d}" for i in range(5001)]
+    client = TurboSmsClient(
+        _config(viber_sender="KoreanStoryViber"),
+        transport=httpx.MockTransport(handler),
+    )
+    async with client as c:
+        await c.send(phones, "Sale", viber=ViberMessage(text="Sale"))
+
+    assert len(payloads) == 2
+    assert payloads[0]["viber"] == payloads[1]["viber"]

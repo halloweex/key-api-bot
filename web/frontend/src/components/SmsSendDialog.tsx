@@ -70,14 +70,19 @@ export const SmsSendDialog = memo(function SmsSendDialog({
       },
       {
         onSuccess: (result) => {
+          // A partly-sent roster is not a success: the campaign is stamped, so
+          // the rest can never be messaged without sending to the others twice.
           addToast({
-            type: 'success',
-            title: t('sms.sendDone', {
-              accepted: result.accepted,
-              stoplisted: result.stoplisted,
-              failed: result.failed,
-            }),
-            duration: 8000,
+            type: result.unsent > 0 ? 'error' : 'success',
+            title: result.unsent > 0
+              ? t('sms.sendPartial', { unsent: result.unsent })
+              : t('sms.sendDone', {
+                  accepted: result.accepted,
+                  stoplisted: result.stoplisted,
+                  failed: result.failed,
+                }),
+            message: result.partialError ?? undefined,
+            duration: result.unsent > 0 ? 20000 : 8000,
           })
           onClose()
         },
