@@ -295,3 +295,61 @@ async def test_delivery_columns_are_added_to_a_pre_existing_table(tmp_path):
         ).fetchone()[0] == 1
 
     await store.close()
+
+
+# ─── claiming ────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_asking_for_targets_claims_the_campaign(tmp_path):
+    """The stamp has to land before the gateway call, not after it.
+
+    It used to be written once the last batch had gone, leaving the campaign
+    unclaimed for the whole length of a send — minutes, on a real roster. Two
+    requests both read "not sent yet" and both went, which is how 5,550 people
+    were messaged twice.
+    """
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target"), _member(2, "holdout")])
+
+    first = await store.get_sms_campaign_targets("aug")
+    assert [t["buyerId"] for t in first] == [1]
+
+    with pytest.raises(ValueError, match="already sent"):
+        await store.get_sms_campaign_targets("aug")
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sends_cannot_both_take_the_roster(tmp_path):
+    import asyncio
+
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target"), _member(2, "target")])
+
+    results = await asyncio.gather(
+        store.get_sms_campaign_targets("aug"),
+        store.get_sms_campaign_targets("aug"),
+        return_exceptions=True,
+    )
+
+    ok = [r for r in results if not isinstance(r, Exception)]
+    refused = [r for r in results if isinstance(r, ValueError)]
+    assert len(ok) == 1, "exactly one caller may send"
+    assert len(refused) == 1
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_released_campaign_can_be_sent_again(tmp_path):
+    """Nothing went out, so the claim must come back."""
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target")])
+
+    await store.get_sms_campaign_targets("aug")
+    await store.release_sms_campaign("aug")
+
+    assert [t["buyerId"] for t in await store.get_sms_campaign_targets("aug")] == [1]
+
+    await store.close()
