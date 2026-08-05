@@ -786,5 +786,18 @@
   "sms.noControlInTier": "No control group in this tier — nothing to compare against.",
   "sms.noRosterData": "No roster data for this campaign",
   "sms.promoOrders": "Orders with code {{code}}: {{count}}",
-  "sms.deliveryCaveat": "Delivery status is not recorded: undelivered numbers count as non-responders, so every figure here understates the real effect."
+  "sms.deliveryCaveat": "Delivery status is not recorded: undelivered numbers count as non-responders, so every figure here understates the real effect.",
+  "sms.send": "Send",
+  "sms.sendTitle": "Send campaign {{campaign}}",
+  "sms.sendRecipients": "{{target}} will be messaged. {{holdout}} are held back as the control group and will not receive anything.",
+  "sms.messageText": "Message",
+  "sms.messagePlaceholder": "Text as the customer will see it",
+  "sms.promoReminder": "This campaign carries code {{code}} — include it in the text.",
+  "sms.sendIrreversible": "Sending cannot be undone. The roster is stamped sent and a second send is refused, so the measurement stays honest.",
+  "sms.typeNameToConfirm": "Type {{campaign}} to confirm",
+  "sms.cancel": "Cancel",
+  "sms.sending": "Sending…",
+  "sms.sendNow": "Send to {{total}}",
+  "sms.sendDone": "Sent: {{accepted}} accepted, {{stoplisted}} opted out, {{failed}} failed",
+  "sms.sendFailed": "The gateway refused the send — nothing was marked as sent"
 }

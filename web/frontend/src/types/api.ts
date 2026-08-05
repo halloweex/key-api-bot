@@ -1386,3 +1386,10 @@ export interface SmsCampaignResultsResponse {
     comparison: SmsComparison | null
   }
 }
+
+export interface SmsSendResult {
+  campaign: string
+  accepted: number
+  stoplisted: number
+  failed: number
+}
