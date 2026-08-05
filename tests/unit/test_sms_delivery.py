@@ -239,3 +239,59 @@ async def test_optout_is_idempotent(tmp_path):
 
     assert result["totalOptouts"] == 1, "the same person is not recorded twice"
     await store.close()
+
+
+# ─── schema migration ────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_delivery_columns_are_added_to_a_pre_existing_table(tmp_path):
+    """CREATE TABLE IF NOT EXISTS is a no-op on an existing table.
+
+    A database created before the TurboSMS work has the roster but none of the
+    delivery columns, so every delivery report fails. The migration has to add
+    them; this reproduces that database and checks it recovers.
+    """
+    db = tmp_path / "legacy.duckdb"
+
+    # A roster table in its pre-TurboSMS shape
+    import duckdb
+    con = duckdb.connect(str(db))
+    con.execute(
+        """
+        CREATE TABLE sms_campaign_members (
+            campaign VARCHAR NOT NULL,
+            buyer_id INTEGER NOT NULL,
+            phone VARCHAR NOT NULL,
+            tier VARCHAR NOT NULL,
+            assignment VARCHAR NOT NULL,
+            orders_at_export INTEGER NOT NULL,
+            revenue_ltv_at_export DECIMAL(14, 2),
+            margin_ltv_at_export DECIMAL(14, 2),
+            recency_at_export INTEGER,
+            PRIMARY KEY (campaign, buyer_id)
+        )
+        """
+    )
+    con.execute(
+        "INSERT INTO sms_campaign_members VALUES"
+        " ('old', 1, '380961111111', 'CORE', 'target', 2, 100, 50, 30)"
+    )
+    con.close()
+
+    store = DuckDBStore(db_path=db)
+    await store.connect()
+
+    async with store.connection() as conn:
+        columns = {r[0] for r in conn.execute(
+            "DESCRIBE sms_campaign_members"
+        ).fetchall()}
+
+    assert {"message_id", "delivery_status", "delivered", "delivered_at"} <= columns
+
+    # And the existing row survived, so the migration did not rebuild the table
+    async with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sms_campaign_members WHERE campaign='old'"
+        ).fetchone()[0] == 1
+
+    await store.close()
