@@ -1222,13 +1222,197 @@ class CustomersMixin:
             "previouslySentAt": row[0].isoformat() if row[0] else None,
         }
 
+    async def get_sms_campaign_targets(self, campaign: str) -> List[Dict[str, Any]]:
+        """
+        Phones to actually message: the target arm only, never the control.
+
+        Raises:
+            ValueError: If the campaign is unknown or already sent.
+        """
+        async with self.connection() as conn:
+            camp = conn.execute(
+                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign],
+            ).fetchone()
+            if camp is None:
+                raise ValueError(f"campaign {campaign!r} is not frozen")
+            if camp[0] is not None:
+                raise ValueError(
+                    f"campaign {campaign!r} was already sent on {camp[0]} — "
+                    f"sending twice would double-message the roster"
+                )
+
+            rows = conn.execute(
+                """
+                SELECT buyer_id, phone, tier
+                FROM sms_campaign_members
+                WHERE campaign = ? AND assignment = 'target'
+                ORDER BY buyer_id
+                """,
+                [campaign],
+            ).fetchall()
+
+        return [{"buyerId": r[0], "phone": r[1], "tier": r[2]} for r in rows]
+
+    async def record_sms_send(
+        self,
+        campaign: str,
+        accepted: Dict[int, str],
+        stoplisted: List[int],
+        failed: Dict[int, str],
+        sent_at: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """
+        Store the gateway's answer and stamp the campaign as sent.
+
+        ``accepted`` maps buyer_id to the gateway's message id, ``stoplisted``
+        lists buyers the gateway refused because they opted out, and ``failed``
+        maps buyer_id to a status string for everything else.
+
+        Stoplisted buyers are also written to marketing_optouts: the provider
+        already refuses to deliver to them, and without a record of our own they
+        would be re-selected by every future export.
+        """
+        async with self.connection() as conn:
+            for buyer_id, message_id in accepted.items():
+                conn.execute(
+                    """
+                    UPDATE sms_campaign_members
+                    SET message_id = ?, delivery_status = 'Accepted'
+                    WHERE campaign = ? AND buyer_id = ?
+                    """,
+                    [message_id, campaign, buyer_id],
+                )
+
+            for buyer_id, status in failed.items():
+                conn.execute(
+                    """
+                    UPDATE sms_campaign_members
+                    SET delivery_status = ?, delivered = FALSE
+                    WHERE campaign = ? AND buyer_id = ?
+                    """,
+                    [status, campaign, buyer_id],
+                )
+
+            for buyer_id in stoplisted:
+                conn.execute(
+                    """
+                    UPDATE sms_campaign_members
+                    SET delivery_status = 'Stoplist', delivered = FALSE
+                    WHERE campaign = ? AND buyer_id = ?
+                    """,
+                    [campaign, buyer_id],
+                )
+                conn.execute(
+                    """
+                    INSERT INTO marketing_optouts
+                        (buyer_id, channel, phone, reason, source)
+                    SELECT ?, 'sms', phone, 'stoplist', 'turbosms'
+                    FROM sms_campaign_members
+                    WHERE campaign = ? AND buyer_id = ?
+                    ON CONFLICT (buyer_id, channel) DO NOTHING
+                    """,
+                    [buyer_id, campaign, buyer_id],
+                )
+
+            conn.execute(
+                "UPDATE sms_campaigns SET sent_at = ? WHERE campaign = ?",
+                [sent_at or datetime.now(), campaign],
+            )
+
+        return {
+            "campaign": campaign,
+            "accepted": len(accepted),
+            "stoplisted": len(stoplisted),
+            "failed": len(failed),
+        }
+
+    async def record_sms_delivery(
+        self,
+        message_id: str,
+        status: str,
+        delivered: Optional[bool],
+        delivered_at: Optional[datetime] = None,
+    ) -> bool:
+        """
+        Apply one delivery report. Returns False if the message id is unknown.
+
+        ``delivered=None`` means the operator has not reported a final state
+        yet, so the flag is left untouched rather than guessed at.
+        """
+        async with self.connection() as conn:
+            if delivered is None:
+                cur = conn.execute(
+                    """
+                    UPDATE sms_campaign_members SET delivery_status = ?
+                    WHERE message_id = ?
+                    """,
+                    [status, message_id],
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE sms_campaign_members
+                    SET delivery_status = ?, delivered = ?, delivered_at = ?
+                    WHERE message_id = ?
+                    """,
+                    [status, delivered, delivered_at or datetime.now(), message_id],
+                )
+            changed = cur.fetchall()
+
+            found = conn.execute(
+                "SELECT COUNT(*) FROM sms_campaign_members WHERE message_id = ?",
+                [message_id],
+            ).fetchone()[0]
+
+        return bool(found)
+
+    async def add_marketing_optout(
+        self,
+        buyer_id: int,
+        phone: Optional[str] = None,
+        reason: str = "manual",
+        source: str = "dashboard",
+        channel: str = "sms",
+    ) -> Dict[str, Any]:
+        """Record that a customer asked not to receive marketing on this channel."""
+        async with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO marketing_optouts (buyer_id, channel, phone, reason, source)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (buyer_id, channel) DO NOTHING
+                """,
+                [buyer_id, channel, phone, reason, source],
+            )
+            total = conn.execute(
+                "SELECT COUNT(*) FROM marketing_optouts WHERE channel = ?", [channel],
+            ).fetchone()[0]
+
+        return {"buyerId": buyer_id, "channel": channel, "totalOptouts": total}
+
     async def get_sms_campaign_results(
         self,
         campaign: str,
         window_days: int = 30,
+        delivered_only: bool = False,
     ) -> Dict[str, Any]:
         """
         Measure a campaign: what the messaged group did versus the control.
+
+        By default every roster member counts, delivered or not. That is the
+        intention-to-treat reading, and it is the one that is actually a clean
+        randomised comparison: it answers "what did running this campaign do".
+
+        ``delivered_only`` restricts the target arm to recipients the gateway
+        confirmed delivery for. It is tempting — undelivered people cannot have
+        responded, so including them drags the lift down — but it is NOT an
+        equivalent comparison. Undeliverable customers are removed from the
+        target arm while their counterparts stay in the control arm, and if
+        unreachable people buy at a different rate the difference is biased.
+        Read it as an optimistic bound, not as the result.
+
+        Either way the target group's delivery counts come back, so the size of
+        the problem is visible instead of implied.
 
         Counts purchases in the ``window_days`` after the send, for the frozen
         roster only, and compares target against holdout per tier. The raw
@@ -1301,17 +1485,23 @@ class CustomersMixin:
                        COALESCE(SUM(pb.orders), 0) AS orders,
                        COALESCE(SUM(pb.revenue), 0) AS revenue,
                        COALESCE(SUM(pb.margin), 0) AS margin,
-                       COALESCE(SUM(pb.promo_orders), 0) AS promo_orders
+                       COALESCE(SUM(pb.promo_orders), 0) AS promo_orders,
+                       COUNT(*) FILTER (WHERE m.delivered) AS delivered,
+                       COUNT(*) FILTER (WHERE m.delivered = FALSE) AS undelivered
                 FROM sms_campaign_members m
                 LEFT JOIN per_buyer pb ON pb.buyer_id = m.buyer_id
                 WHERE m.campaign = ?
+                  -- The control arm was never sent to, so a delivery filter
+                  -- must not touch it, or the comparison loses its baseline.
+                  {"AND (m.assignment = 'holdout' OR m.delivered)" if delivered_only else ""}
                 GROUP BY m.tier, m.assignment
                 """,
                 [sent_at, sent_at, promocode, campaign],
             ).fetchall()
 
         by_tier: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        for tier, assignment, contacts, converted, orders, revenue, margin, promo in rows:
+        for (tier, assignment, contacts, converted, orders, revenue, margin,
+             promo, delivered, undelivered) in rows:
             by_tier.setdefault(tier, {})[assignment] = {
                 "contacts": contacts,
                 "converted": converted,
@@ -1319,10 +1509,13 @@ class CustomersMixin:
                 "revenue": float(revenue or 0),
                 "margin": float(margin or 0),
                 "promoOrders": promo,
+                "delivered": delivered,
+                "undelivered": undelivered,
             }
 
         empty = {"contacts": 0, "converted": 0, "orders": 0,
-                 "revenue": 0.0, "margin": 0.0, "promoOrders": 0}
+                 "revenue": 0.0, "margin": 0.0, "promoOrders": 0,
+                 "delivered": 0, "undelivered": 0}
 
         def _blank() -> Dict[str, Any]:
             return dict(empty)
@@ -1348,6 +1541,7 @@ class CustomersMixin:
             "campaign": campaign,
             "sentAt": sent_at.isoformat(),
             "windowDays": window_days,
+            "deliveredOnly": delivered_only,
             "ltvBasis": ltv_basis,
             "holdoutPct": holdout_pct,
             "promocode": promocode,
@@ -1601,6 +1795,13 @@ class CustomersMixin:
                 WHERE tier IS NOT NULL
                   AND length(phone) = 12
                   AND phone LIKE '380%'
+                  -- Opted out stays out. Matched on buyer AND on phone, because
+                  -- the same number can reach us under a second buyer record.
+                  AND NOT EXISTS (
+                      SELECT 1 FROM marketing_optouts o
+                      WHERE o.channel = 'sms'
+                        AND (o.buyer_id = scored.buyer_id OR o.phone = scored.phone)
+                  )
                 -- One SMS per phone number: shared numbers across buyer records
                 -- would otherwise be messaged twice.
                 QUALIFY ROW_NUMBER() OVER (

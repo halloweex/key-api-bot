@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from typing import Optional
 
 from core.repositories.customers import SMS_LTV_BASES, SMS_TIER_DEFAULTS
+from core.turbosms import TurboSmsClient, TurboSmsError
 from web.routes.auth import require_admin
 from web.services import dashboard_service
 from ._deps import (
@@ -412,12 +413,97 @@ async def mark_sms_campaign_sent(
     return result
 
 
+@router.post("/customers/sms-campaigns/{campaign}/send")
+@limiter.limit("3/minute")
+async def send_sms_campaign(
+    request: Request,
+    campaign: str,
+    text: str = Query(..., min_length=1, max_length=600),
+    admin: dict = Depends(require_admin),
+):
+    """
+    Send the campaign's target group through TurboSMS.
+
+    Only the target arm is sent — the control must stay unmessaged for the
+    result to mean anything. The gateway's per-recipient answer is recorded:
+    message ids for tracking delivery, and stoplist refusals as opt-outs, so
+    those people are never selected again.
+
+    Sending twice is refused: the campaign is stamped sent on the first pass.
+    """
+    store = await get_store()
+    try:
+        targets = await store.get_sms_campaign_targets(campaign)
+    except ValueError as e:
+        status = 404 if "not frozen" in str(e) else 409
+        raise HTTPException(status_code=status, detail=str(e))
+
+    if not targets:
+        raise HTTPException(status_code=409, detail="campaign has no target recipients")
+
+    by_phone = {t["phone"]: t["buyerId"] for t in targets}
+
+    try:
+        async with TurboSmsClient() as client:
+            results = await client.send(list(by_phone), text)
+    except TurboSmsError as e:
+        # Nothing is stamped sent — the campaign can be retried once fixed.
+        logger.error("TurboSMS send failed: campaign=%s error=%s", campaign, e)
+        raise HTTPException(status_code=502, detail=str(e))
+
+    accepted, failed, stoplisted = {}, {}, []
+    for r in results:
+        buyer_id = by_phone.get(r.phone)
+        if buyer_id is None:
+            continue
+        if r.accepted:
+            accepted[buyer_id] = r.message_id
+        elif r.stoplisted:
+            stoplisted.append(buyer_id)
+        else:
+            failed[buyer_id] = r.status or f"code {r.code}"
+
+    summary = await store.record_sms_send(campaign, accepted, stoplisted, failed)
+
+    logger.info(
+        "SMS campaign sent: user=%s campaign=%s accepted=%d stoplisted=%d failed=%d",
+        admin.get("user_id"), campaign,
+        summary["accepted"], summary["stoplisted"], summary["failed"],
+    )
+    return summary
+
+
+@router.post("/customers/sms-campaigns/optout")
+@limiter.limit("30/minute")
+async def add_marketing_optout(
+    request: Request,
+    buyer_id: int = Query(..., ge=1),
+    phone: Optional[str] = Query(None, max_length=20),
+    reason: str = Query("manual", max_length=40),
+    admin: dict = Depends(require_admin),
+):
+    """Record that a customer asked not to receive marketing SMS."""
+    store = await get_store()
+    result = await store.add_marketing_optout(
+        buyer_id=buyer_id, phone=phone, reason=reason,
+        source=str(admin.get("user_id") or "dashboard"),
+    )
+    logger.info("Marketing opt-out: user=%s buyer=%s reason=%s",
+                admin.get("user_id"), buyer_id, reason)
+    return result
+
+
 @router.get("/customers/sms-campaigns/{campaign}/results")
 @limiter.limit("30/minute")
 async def get_sms_campaign_results(
     request: Request,
     campaign: str,
     window_days: int = Query(30, ge=1, le=180),
+    delivered_only: bool = Query(
+        False,
+        description="Restrict the target arm to confirmed deliveries. Optimistic "
+                    "bound, not a clean randomised comparison — see the docs.",
+    ),
     admin: dict = Depends(require_admin),
 ):
     """
@@ -434,7 +520,9 @@ async def get_sms_campaign_results(
     """
     store = await get_store()
     try:
-        return await store.get_sms_campaign_results(campaign, window_days=window_days)
+        return await store.get_sms_campaign_results(
+            campaign, window_days=window_days, delivered_only=delivered_only,
+        )
     except ValueError as e:
         # Unknown campaign is 404; frozen-but-unsent is a state problem, not a
         # missing resource, so it answers 409.
