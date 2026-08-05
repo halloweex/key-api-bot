@@ -1518,13 +1518,18 @@ class CustomersMixin:
                     FROM alloc
                     GROUP BY buyer_id
                 )
+                -- Members the gateway never took are excluded from the arm
+                -- itself. They could not respond to a message they never
+                -- received, so counting them as contacts understates the rate
+                -- on every reading. They stay visible as not_sent below.
                 SELECT m.tier, m.assignment,
-                       COUNT(*) AS contacts,
-                       COUNT(pb.buyer_id) AS converted,
-                       COALESCE(SUM(pb.orders), 0) AS orders,
-                       COALESCE(SUM(pb.revenue), 0) AS revenue,
-                       COALESCE(SUM(pb.margin), 0) AS margin,
-                       COALESCE(SUM(pb.promo_orders), 0) AS promo_orders,
+                       COUNT(*) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS contacts,
+                       COUNT(pb.buyer_id) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS converted,
+                       COALESCE(SUM(pb.orders) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS orders,
+                       COALESCE(SUM(pb.revenue) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS revenue,
+                       COALESCE(SUM(pb.margin) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS margin,
+                       COALESCE(SUM(pb.promo_orders) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0)
+                           AS promo_orders,
                        COUNT(*) FILTER (WHERE m.delivered) AS delivered,
                        COUNT(*) FILTER (WHERE m.delivered = FALSE) AS undelivered,
                        -- Never handed to the gateway at all. Counted apart from

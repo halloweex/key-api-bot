@@ -427,8 +427,9 @@ async def test_the_window_closes_exactly_n_days_after_the_send(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_members_never_handed_to_the_gateway_are_counted_apart(tmp_path):
-    """They were never treated, so they dilute whatever the message did."""
+async def test_members_never_handed_to_the_gateway_leave_the_arm(tmp_path):
+    """They cannot respond to a message they never got, so counting them as
+    contacts understates the rate on every reading."""
     store = await _make_store(tmp_path)
     await _seed_campaign(store, targets=10, holdouts=10)
     async with store.connection() as conn:
@@ -439,8 +440,30 @@ async def test_members_never_handed_to_the_gateway_are_counted_apart(tmp_path):
 
     overall = (await store.get_sms_campaign_results("aug"))["overall"]
 
-    assert overall["target"]["notSent"] == 2
-    assert overall["target"]["contacts"] == 10, "still in the arm, but visible"
+    assert overall["target"]["contacts"] == 8, "only the ones actually messaged"
+    assert overall["target"]["notSent"] == 2, "but the loss stays visible"
+    assert overall["holdout"]["contacts"] == 10, "the control is untouched"
     assert overall["holdout"]["notSent"] == 0
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_purchase_by_someone_never_messaged_is_not_a_response(tmp_path):
+    """They bought without ever seeing the message, so it is not the campaign's."""
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=10, holdouts=10)
+    async with store.connection() as conn:
+        conn.execute(
+            "UPDATE sms_campaign_members SET delivery_status = 'NotSent',"
+            " delivered = FALSE WHERE campaign = 'aug' AND buyer_id = 1"
+        )
+    await _buy(store, 1, days_after=2)
+    await _buy(store, 2, days_after=2)
+
+    overall = (await store.get_sms_campaign_results("aug"))["overall"]
+
+    assert overall["target"]["converted"] == 1, "buyer 2 only"
+    assert overall["target"]["contacts"] == 9
 
     await store.close()
