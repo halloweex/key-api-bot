@@ -7,8 +7,10 @@ import { CircleHelp } from 'lucide-react'
  * Matches the existing InfoButton + InfoTooltipContent pattern
  * used in RevenueTrendChart and CustomerInsightsChart.
  */
-export function InfoPopover({ title, children }: {
+export function InfoPopover({ title, size = 'default', children }: {
   title?: string
+  /** `wide` for panels that explain several metrics rather than one. */
+  size?: 'default' | 'wide'
   children: ReactNode
 }) {
   const { t } = useTranslation()
@@ -36,7 +38,16 @@ export function InfoPopover({ title, children }: {
         <CircleHelp className="w-4 h-4" />
       </button>
       {open && (
-        <div className="absolute top-8 left-0 z-50 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-4 min-w-[220px] max-w-[300px]">
+        <div
+          className={`absolute top-8 left-0 z-50 bg-slate-800 border border-slate-700
+                      rounded-lg shadow-xl p-4 min-w-[220px] ${
+            size === 'wide'
+              // Several metrics need room to stay readable, and height without
+              // width just turns the panel into a column of two-word lines.
+              ? 'w-[min(30rem,calc(100vw-2rem))] max-h-[70vh] overflow-y-auto'
+              : 'max-w-[300px]'
+          }`}
+        >
           <button
             onClick={() => setOpen(false)}
             className="absolute top-2 right-2 text-slate-400 hover:text-slate-200 text-lg leading-none"

@@ -7,6 +7,7 @@ import { Checkbox } from './Checkbox'
 import { EmptyState } from './EmptyState'
 import { SkeletonCard } from './Skeleton'
 import { SmsLiftInterval } from './SmsLiftInterval'
+import { SmsResultsGuide } from './SmsResultsGuide'
 import { useSmsCampaigns, useSmsCampaignResults } from '../hooks/useApi'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import type { SmsComparison, SmsGroupStats, SmsTier } from '../types/api'
@@ -71,6 +72,16 @@ function ComparisonBlock({ comparison }: { comparison: SmsComparison }) {
         <dd className="text-right text-slate-800 tabular-nums">
           {comparison.pValue < 0.001 ? '<0.001' : comparison.pValue.toFixed(3)}
         </dd>
+        {/* Revenue beside margin: revenue is the figure people recognise,
+            margin is the one that decides whether the campaign paid. */}
+        <dt className="text-slate-500">{t('sms.incrementalRevenuePerContact')}</dt>
+        <dd className="text-right text-slate-800 tabular-nums">
+          {formatCurrency(comparison.incrementalRevenuePerContact)}
+        </dd>
+        <dt className="text-slate-500">{t('sms.incrementalRevenueTotal')}</dt>
+        <dd className="text-right text-slate-800 font-medium tabular-nums">
+          {formatCurrency(comparison.incrementalRevenueTotal)}
+        </dd>
         <dt className="text-slate-500">{t('sms.incrementalPerContact')}</dt>
         <dd className="text-right text-slate-800 tabular-nums">
           {formatCurrency(comparison.incrementalMarginPerContact)}
@@ -131,6 +142,7 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
             <div className="flex items-center gap-2">
               <Badge tone="slate" shape="tag">{t('sms.step', { n: 3 })}</Badge>
               <CardTitle>{t('sms.resultsTitle')}</CardTitle>
+              <SmsResultsGuide />
             </div>
             <p className="text-xs text-slate-500 mt-0.5">{t('sms.resultsDesc')}</p>
           </div>
