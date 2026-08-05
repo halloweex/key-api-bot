@@ -75,6 +75,9 @@ import type {
   SmsCampaignResultsResponse,
   SmsSendResult,
   SmsTestSendResult,
+  SmsChannel,
+  SmsChannelsResponse,
+  SmsViberOptions,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -778,19 +781,46 @@ export const api = {
       'POST',
     ),
 
-  sendSmsCampaign: (campaign: string, text: string) =>
+  sendSmsCampaign: (
+    campaign: string, text: string,
+    channel: SmsChannel = 'sms', viber?: SmsViberOptions,
+  ) =>
     fetchApiMutation<SmsSendResult>(
       `/customers/sms-campaigns/${encodeURIComponent(campaign)}/send`
-        + `?text=${encodeURIComponent(text)}`,
+        + `?text=${encodeURIComponent(text)}&${channelParams(channel, viber)}`,
       'POST',
     ),
 
-  sendTestSms: (phone: string, text: string) =>
+  sendTestSms: (
+    phone: string, text: string,
+    channel: SmsChannel = 'sms', viber?: SmsViberOptions,
+  ) =>
     fetchApiMutation<SmsTestSendResult>(
       '/customers/sms/test-send'
-        + `?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(text)}`,
+        + `?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(text)}`
+        + `&${channelParams(channel, viber)}`,
       'POST',
     ),
+
+  getSmsChannels: (options?: FetchOptions) =>
+    fetchApi<SmsChannelsResponse>('/customers/sms/channels', undefined, options),
+}
+
+/**
+ * Serialise the channel choice and its Viber extras.
+ *
+ * The button fields are dropped unless the send is actually hybrid — sending
+ * them on an SMS-only call would have the server reject a button that was
+ * never going to be rendered.
+ */
+function channelParams(channel: SmsChannel, viber?: SmsViberOptions): string {
+  const p = new URLSearchParams({ channel })
+  if (channel === 'viber_sms' && viber) {
+    if (viber.viberText) p.set('viber_text', viber.viberText)
+    if (viber.buttonCaption) p.set('button_caption', viber.buttonCaption)
+    if (viber.buttonUrl) p.set('button_url', viber.buttonUrl)
+  }
+  return p.toString()
 }
 
 // ─── Type Exports ────────────────────────────────────────────────────────────

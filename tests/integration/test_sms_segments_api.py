@@ -27,6 +27,7 @@ SEGMENTS_PATH = "/api/customers/sms-segments"
 CSV_PATH = "/api/customers/sms-segments/export/csv"
 RESULTS_PATH = "/api/customers/sms-campaigns/aug/results"
 TEST_SEND_PATH = "/api/customers/sms/test-send"
+CHANNELS_PATH = "/api/customers/sms/channels"
 
 
 def _make_cookie(user_id: int, role: str = "admin") -> str:
@@ -489,10 +490,10 @@ class _FakeTurboClient:
     async def __aexit__(self, *exc):
         return False
 
-    async def send(self, phones, text):
+    async def send(self, phones, text, viber=None):
         if type(self).error:
             raise type(self).error
-        type(self).sent.append({"phones": phones, "text": text})
+        type(self).sent.append({"phones": phones, "text": text, "viber": viber})
         return type(self).results
 
 
@@ -532,7 +533,9 @@ class TestTestSend:
         )
 
         assert r.status_code == 200
-        assert gateway.sent == [{"phones": ["380961111111"], "text": "hi"}]
+        assert gateway.sent == [
+            {"phones": ["380961111111"], "text": "hi", "viber": None},
+        ]
         assert r.json()["accepted"] is True
 
     @pytest.mark.parametrize("phone", ["0961111111", "380961111", "123456789012"])
@@ -582,3 +585,84 @@ class TestTestSend:
 
         assert r.status_code == 502
         assert "not configured" in r.json()["detail"]
+
+
+class TestChannelSelection:
+    """Viber is a different message, not a nicer SMS — the route has to say so."""
+
+    def test_channels_endpoint_reports_what_is_configured(self, client, monkeypatch):
+        monkeypatch.setenv("TURBOSMS_API_TOKEN", "tok")
+        monkeypatch.setenv("TURBOSMS_SENDER", "KoreanStory")
+        monkeypatch.delenv("TURBOSMS_VIBER_SENDER", raising=False)
+
+        body = client.get(CHANNELS_PATH, headers=_admin_headers()).json()
+
+        assert body["sms"] is True
+        assert body["viber"] is False
+
+    def test_channels_endpoint_is_admin_only(self):
+        route = _route(CHANNELS_PATH)
+        assert route is not None
+        assert require_admin in _all_dep_calls(route.dependant)
+
+    def test_hybrid_send_passes_a_viber_message(self, client, gateway):
+        client.post(
+            TEST_SEND_PATH,
+            params={
+                "phone": "380961111111",
+                "text": "Знижка https://example.com",
+                "channel": "viber_sms",
+                "viber_text": "Знижка",
+                "button_caption": "Korean Story",
+                "button_url": "https://example.com",
+            },
+            headers=_admin_headers(),
+        )
+
+        viber = gateway.sent[0]["viber"]
+        assert viber is not None
+        assert (viber.text, viber.caption) == ("Знижка", "Korean Story")
+        # The fallback has no button, so its own text must carry the link.
+        assert gateway.sent[0]["text"] == "Знижка https://example.com"
+
+    def test_sms_channel_sends_no_viber_message(self, client, gateway):
+        client.post(
+            TEST_SEND_PATH,
+            params={"phone": "380961111111", "text": "Знижка", "channel": "sms"},
+            headers=_admin_headers(),
+        )
+
+        assert gateway.sent[0]["viber"] is None
+
+    def test_viber_text_defaults_to_the_sms_text(self, client, gateway):
+        client.post(
+            TEST_SEND_PATH,
+            params={"phone": "380961111111", "text": "Знижка", "channel": "viber_sms"},
+            headers=_admin_headers(),
+        )
+
+        assert gateway.sent[0]["viber"].text == "Знижка"
+
+    def test_a_button_without_a_url_is_rejected_before_sending(self, client, gateway):
+        r = client.post(
+            TEST_SEND_PATH,
+            params={
+                "phone": "380961111111", "text": "Знижка",
+                "channel": "viber_sms", "button_caption": "Korean Story",
+            },
+            headers=_admin_headers(),
+        )
+
+        assert r.status_code == 400
+        assert "action URL" in r.json()["detail"]
+        assert gateway.sent == []
+
+    def test_unknown_channel_is_refused(self, client, gateway):
+        r = client.post(
+            TEST_SEND_PATH,
+            params={"phone": "380961111111", "text": "hi", "channel": "telegram"},
+            headers=_admin_headers(),
+        )
+
+        assert r.status_code == 422
+        assert gateway.sent == []

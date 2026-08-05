@@ -16,6 +16,7 @@ from core.turbosms import (
     TurboSmsError,
     classify_dlr,
     count_segments,
+    ViberMessage,
     verify_webhook_signature,
 )
 
@@ -290,3 +291,121 @@ class TestCountSegments:
     def test_newlines_stay_within_gsm7(self):
         """A line break is in the basic alphabet — it must not force UCS-2."""
         assert count_segments("Line one\nLine two").encoding == "gsm7"
+
+
+# ─── viber ───────────────────────────────────────────────────────────────
+
+class TestViberMessage:
+    """The button is the whole point — an SMS can only ever show a bare URL."""
+
+    def test_button_needs_a_destination(self):
+        with pytest.raises(ValueError, match="caption and an action"):
+            ViberMessage(text="hi", caption="Korean Story")
+
+    def test_destination_needs_a_label(self):
+        with pytest.raises(ValueError, match="caption and an action"):
+            ViberMessage(text="hi", action="https://example.com")
+
+    def test_caption_is_capped_at_thirty(self):
+        with pytest.raises(ValueError, match="caption exceeds"):
+            ViberMessage(text="hi", caption="x" * 31, action="https://example.com")
+
+    def test_text_is_capped_at_a_thousand(self):
+        with pytest.raises(ValueError, match="text exceeds"):
+            ViberMessage(text="x" * 1001)
+
+    def test_empty_text_is_refused(self):
+        with pytest.raises(ValueError, match="empty"):
+            ViberMessage(text="   ")
+
+    def test_ttl_stays_inside_the_gateway_range(self):
+        with pytest.raises(ValueError, match="ttl"):
+            ViberMessage(text="hi", ttl=30)
+
+    def test_payload_omits_absent_fields(self):
+        assert ViberMessage(text="hi").payload("KS") == {"sender": "KS", "text": "hi"}
+
+    def test_payload_carries_the_button(self):
+        payload = ViberMessage(
+            text="hi", caption="Korean Story", action="https://example.com",
+        ).payload("KS")
+
+        assert payload["caption"] == "Korean Story"
+        assert payload["action"] == "https://example.com"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_send_asks_for_viber_and_sms_together():
+    """Both blocks present is what makes the gateway fall back rather than choose."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={
+            "response_code": 0, "response_status": "OK",
+            "response_result": [
+                {"phone": "380961111111", "response_code": 0,
+                 "message_id": "aaa-111", "response_status": "OK"},
+            ],
+        })
+
+    client = TurboSmsClient(
+        _config(viber_sender="KoreanStoryViber"),
+        transport=httpx.MockTransport(handler),
+    )
+    async with client as c:
+        results = await c.send(
+            ["380961111111"], "Sale, https://example.com",
+            viber=ViberMessage(text="Sale", caption="Korean Story",
+                               action="https://example.com"),
+        )
+
+    assert seen["sms"] == {"sender": "KoreanStory", "text": "Sale, https://example.com"}
+    assert seen["viber"]["sender"] == "KoreanStoryViber"
+    assert seen["viber"]["caption"] == "Korean Story"
+    assert results[0].accepted is True
+
+
+@pytest.mark.asyncio
+async def test_sms_only_send_carries_no_viber_block():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={
+            "response_code": 0, "response_status": "OK", "response_result": [],
+        })
+
+    async with _client_with(handler) as c:
+        await c.send(["380961111111"], "Sale")
+
+    assert "viber" not in seen
+
+
+@pytest.mark.asyncio
+async def test_hybrid_send_refuses_without_a_registered_viber_sender():
+    """Viber names are registered separately; a working SMS setup proves nothing."""
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("must not reach the gateway")
+
+    async with _client_with(handler) as c:
+        with pytest.raises(TurboSmsError, match="TURBOSMS_VIBER_SENDER"):
+            await c.send(["380961111111"], "Sale", viber=ViberMessage(text="Sale"))
+
+
+class TestViberConfig:
+    def test_viber_needs_its_own_sender(self, monkeypatch):
+        monkeypatch.setenv("TURBOSMS_API_TOKEN", "tok")
+        monkeypatch.setenv("TURBOSMS_SENDER", "KoreanStory")
+        monkeypatch.delenv("TURBOSMS_VIBER_SENDER", raising=False)
+
+        config = TurboSmsConfig()
+        assert config.configured is True
+        assert config.viber_configured is False
+
+    def test_viber_sender_is_read_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv("TURBOSMS_API_TOKEN", "tok")
+        monkeypatch.setenv("TURBOSMS_VIBER_SENDER", "KoreanStoryViber")
+        assert TurboSmsConfig().viber_configured is True

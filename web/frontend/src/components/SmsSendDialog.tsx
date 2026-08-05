@@ -2,11 +2,12 @@ import { memo, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from './Button'
 import { SmsCostLine } from './SmsCostLine'
+import { SmsChannelFields, composeSmsText } from './SmsChannelFields'
 import { useSendSmsCampaign } from '../hooks/useApi'
 import { useToast } from './Toast'
 import { formatNumber } from '../utils/formatters'
 import { smsCost } from '../utils/smsCost'
-import type { SmsCampaignSummary } from '../types/api'
+import type { SmsCampaignSummary, SmsChannel } from '../types/api'
 
 // ─── SmsSendDialog ───────────────────────────────────────────────────────────
 //
@@ -32,19 +33,41 @@ export const SmsSendDialog = memo(function SmsSendDialog({
 }: SmsSendDialogProps) {
   const { t } = useTranslation()
   const [text, setText] = useState('')
+  const [channel, setChannel] = useState<SmsChannel>('sms')
+  const [buttonCaption, setButtonCaption] = useState('')
+  const [buttonUrl, setButtonUrl] = useState('')
   const [confirmName, setConfirmName] = useState('')
   const send = useSendSmsCampaign()
   const { addToast } = useToast()
 
   const trimmed = text.trim()
-  const cost = useMemo(() => smsCost(trimmed), [trimmed])
+  const hybrid = channel === 'viber_sms'
+  // The SMS arm has no button, so it carries the link inline — and it is the
+  // arm the cost is charged on.
+  const smsText = useMemo(
+    () => (hybrid ? composeSmsText(trimmed, buttonUrl) : trimmed),
+    [hybrid, trimmed, buttonUrl],
+  )
+  const cost = useMemo(() => smsCost(smsText), [smsText])
+  const buttonComplete = Boolean(buttonCaption.trim()) === Boolean(buttonUrl.trim())
   const nameMatches = confirmName.trim() === campaign.campaign
-  const canSend = trimmed.length > 0 && trimmed.length <= SMS_LIMIT && nameMatches
-    && !send.isPending
+  const canSend = trimmed.length > 0 && smsText.length <= SMS_LIMIT && nameMatches
+    && (!hybrid || buttonComplete) && !send.isPending
 
   function handleSend() {
     send.mutate(
-      { campaign: campaign.campaign, text: trimmed },
+      {
+        campaign: campaign.campaign,
+        text: smsText,
+        channel,
+        viber: hybrid
+          ? {
+              viberText: trimmed,
+              buttonCaption: buttonCaption.trim() || undefined,
+              buttonUrl: buttonUrl.trim() || undefined,
+            }
+          : undefined,
+      },
       {
         onSuccess: (result) => {
           addToast({
@@ -106,6 +129,22 @@ export const SmsSendDialog = memo(function SmsSendDialog({
             />
             <SmsCostLine cost={cost} limit={SMS_LIMIT} recipients={campaign.target} />
           </label>
+
+          <SmsChannelFields
+            channel={channel}
+            onChannelChange={setChannel}
+            buttonCaption={buttonCaption}
+            onButtonCaptionChange={setButtonCaption}
+            buttonUrl={buttonUrl}
+            onButtonUrlChange={setButtonUrl}
+          />
+
+          {hybrid && smsText !== trimmed && (
+            <div className="text-xs text-slate-600 bg-slate-50 rounded-md px-3 py-2">
+              <p className="font-medium text-slate-700">{t('sms.smsFallbackPreview')}</p>
+              <p className="mt-1 whitespace-pre-wrap break-words">{smsText}</p>
+            </div>
+          )}
 
           {campaign.promocode && (
             <p className="text-xs text-slate-600 bg-slate-50 rounded-md px-3 py-2">

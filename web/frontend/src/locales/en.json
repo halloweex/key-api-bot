@@ -848,5 +848,14 @@
   "sms.costParts": "{{parts}} SMS · {{encoding}}",
   "sms.costTotal": "≈{{total}} SMS for the campaign",
   "sms.encoding.gsm7": "Latin, 160 chars",
-  "sms.encoding.ucs2": "Cyrillic, 70 chars"
+  "sms.encoding.ucs2": "Cyrillic, 70 chars",
+  "sms.channel": "Channel",
+  "sms.channelSms": "SMS only",
+  "sms.channelViberSms": "Viber + SMS",
+  "sms.viberUnavailable": "Viber is unavailable: no Viber sender name configured (TURBOSMS_VIBER_SENDER). It is registered separately from the SMS alpha name.",
+  "sms.viberButtonHint": "On Viber the link becomes a labelled button. SMS has no buttons — there the address is appended on its own line, and the cost is counted on that version.",
+  "sms.buttonCaption": "Button label",
+  "sms.buttonUrl": "Button link",
+  "sms.buttonNeedsBoth": "A button needs both a label and a link, or the gateway will refuse it.",
+  "sms.smsFallbackPreview": "What arrives by SMS if Viber cannot deliver:"
 }

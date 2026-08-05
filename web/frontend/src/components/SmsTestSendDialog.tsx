@@ -2,10 +2,11 @@ import { memo, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from './Button'
 import { SmsCostLine } from './SmsCostLine'
+import { SmsChannelFields, composeSmsText } from './SmsChannelFields'
 import { useSendTestSms } from '../hooks/useApi'
 import { useToast } from './Toast'
 import { smsCost } from '../utils/smsCost'
-import type { SmsTestSendResult } from '../types/api'
+import type { SmsChannel, SmsTestSendResult } from '../types/api'
 
 // ─── SmsTestSendDialog ───────────────────────────────────────────────────────
 //
@@ -32,6 +33,9 @@ export const SmsTestSendDialog = memo(function SmsTestSendDialog({
   const { t } = useTranslation()
   const [phone, setPhone] = useState('')
   const [text, setText] = useState(initialText)
+  const [channel, setChannel] = useState<SmsChannel>('sms')
+  const [buttonCaption, setButtonCaption] = useState('')
+  const [buttonUrl, setButtonUrl] = useState('')
   const [result, setResult] = useState<SmsTestSendResult | null>(null)
   const send = useSendTestSms()
   const { addToast } = useToast()
@@ -39,15 +43,36 @@ export const SmsTestSendDialog = memo(function SmsTestSendDialog({
   const trimmed = text.trim()
   const digits = useMemo(() => phone.replace(/\D/g, ''), [phone])
   const phoneValid = PHONE_HINT.test(digits)
-  const cost = useMemo(() => smsCost(trimmed), [trimmed])
 
+  const hybrid = channel === 'viber_sms'
+  // What the SMS arm actually shows. With a button there is no anchor text to
+  // fall back to, so the URL is appended — and the cost is counted on that,
+  // not on the shorter Viber copy.
+  const smsText = useMemo(
+    () => (hybrid ? composeSmsText(trimmed, buttonUrl) : trimmed),
+    [hybrid, trimmed, buttonUrl],
+  )
+  const cost = useMemo(() => smsCost(smsText), [smsText])
+
+  const buttonComplete = Boolean(buttonCaption.trim()) === Boolean(buttonUrl.trim())
   const canSend = phoneValid && trimmed.length > 0
-    && trimmed.length <= SMS_LIMIT && !send.isPending
+    && smsText.length <= SMS_LIMIT && (!hybrid || buttonComplete) && !send.isPending
 
   function handleSend() {
     setResult(null)
     send.mutate(
-      { phone: digits, text: trimmed },
+      {
+        phone: digits,
+        text: smsText,
+        channel,
+        viber: hybrid
+          ? {
+              viberText: trimmed,
+              buttonCaption: buttonCaption.trim() || undefined,
+              buttonUrl: buttonUrl.trim() || undefined,
+            }
+          : undefined,
+      },
       {
         onSuccess: (r) => {
           setResult(r)
@@ -116,9 +141,27 @@ export const SmsTestSendDialog = memo(function SmsTestSendDialog({
             <SmsCostLine cost={cost} limit={SMS_LIMIT} />
           </label>
 
-          <p className="text-xs text-slate-600 bg-slate-50 rounded-md px-3 py-2 leading-snug">
-            {t('sms.testNoLinks')}
-          </p>
+          <SmsChannelFields
+            channel={channel}
+            onChannelChange={setChannel}
+            buttonCaption={buttonCaption}
+            onButtonCaptionChange={setButtonCaption}
+            buttonUrl={buttonUrl}
+            onButtonUrlChange={setButtonUrl}
+          />
+
+          {hybrid && smsText !== trimmed ? (
+            // The fallback is a different message from the one just typed;
+            // showing it is cheaper than explaining it.
+            <div className="text-xs text-slate-600 bg-slate-50 rounded-md px-3 py-2">
+              <p className="font-medium text-slate-700">{t('sms.smsFallbackPreview')}</p>
+              <p className="mt-1 whitespace-pre-wrap break-words">{smsText}</p>
+            </div>
+          ) : (
+            <p className="text-xs text-slate-600 bg-slate-50 rounded-md px-3 py-2 leading-snug">
+              {t('sms.testNoLinks')}
+            </p>
+          )}
 
           {result && (
             <div
