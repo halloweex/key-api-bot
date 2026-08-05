@@ -64,6 +64,9 @@ import type {
   SmsCampaignResultsResponse,
   SmsSendResult,
   SmsTestSendResult,
+  SmsChannel,
+  SmsChannelsResponse,
+  SmsViberOptions,
   MarketingReportResponse,
 } from '../types/api'
 
@@ -942,8 +945,12 @@ export function useMarkSmsCampaignSent() {
 export function useSendSmsCampaign() {
   const queryClient = useQueryClient()
 
-  return useMutation<SmsSendResult, Error, { campaign: string; text: string }>({
-    mutationFn: ({ campaign, text }) => api.sendSmsCampaign(campaign, text),
+  return useMutation<
+    SmsSendResult, Error,
+    { campaign: string; text: string; channel: SmsChannel; viber?: SmsViberOptions }
+  >({
+    mutationFn: ({ campaign, text, channel, viber }) =>
+      api.sendSmsCampaign(campaign, text, channel, viber),
     onSuccess: () => {
       // The send stamps sent_at and creates opt-outs, so both the campaign list
       // and the next segmentation are stale.
@@ -955,7 +962,20 @@ export function useSendSmsCampaign() {
 
 /** A rehearsal send. Nothing is invalidated because nothing is written. */
 export function useSendTestSms() {
-  return useMutation<SmsTestSendResult, Error, { phone: string; text: string }>({
-    mutationFn: ({ phone, text }) => api.sendTestSms(phone, text),
+  return useMutation<
+    SmsTestSendResult, Error,
+    { phone: string; text: string; channel: SmsChannel; viber?: SmsViberOptions }
+  >({
+    mutationFn: ({ phone, text, channel, viber }) =>
+      api.sendTestSms(phone, text, channel, viber),
+  })
+}
+
+/** Which channels this deployment can send on. Configuration, so rarely stale. */
+export function useSmsChannels() {
+  return useQuery<SmsChannelsResponse>({
+    queryKey: ['smsChannels'] as const,
+    queryFn: () => api.getSmsChannels(),
+    staleTime: CACHE_TTL.STATIC,
   })
 }

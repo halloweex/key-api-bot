@@ -25,6 +25,7 @@ const addToast = vi.fn()
 
 vi.mock('../../hooks/useApi', () => ({
   useSendSmsCampaign: () => ({ mutate, isPending: false }),
+  useSmsChannels: () => ({ data: { sms: true, viber: true } }),
 }))
 
 vi.mock('../Toast', () => ({ useToast: () => ({ addToast }) }))
@@ -94,7 +95,52 @@ describe('SmsSendDialog', () => {
     expect(mutate.mock.calls[0][0]).toEqual({
       campaign: 'aug-promo',
       text: 'Знижка 20%',
+      channel: 'sms',
+      viber: undefined,
     })
+  })
+
+  it('defaults to SMS only, so a channel change is always deliberate', () => {
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+
+    expect(
+      screen.getByRole('radio', { name: 'sms.channelSms' }),
+    ).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('spells the link out in the SMS arm, which has no button', async () => {
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+
+    await userEvent.click(screen.getByRole('radio', { name: 'sms.channelViberSms' }))
+    const [message, caption, url, confirm] = screen.getAllByRole('textbox')
+    await userEvent.type(message, 'День народження')
+    await userEvent.type(caption, 'Korean Story')
+    await userEvent.type(url, 'https://example.com')
+    await userEvent.type(confirm, 'aug-promo')
+    await userEvent.click(sendButton())
+
+    expect(mutate.mock.calls[0][0]).toEqual({
+      campaign: 'aug-promo',
+      text: 'День народження\nhttps://example.com',
+      channel: 'viber_sms',
+      viber: {
+        viberText: 'День народження',
+        buttonCaption: 'Korean Story',
+        buttonUrl: 'https://example.com',
+      },
+    })
+  })
+
+  it('will not send a half-built button', async () => {
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+
+    await userEvent.click(screen.getByRole('radio', { name: 'sms.channelViberSms' }))
+    const [message, caption, , confirm] = screen.getAllByRole('textbox')
+    await userEvent.type(message, 'День народження')
+    await userEvent.type(caption, 'Korean Story')
+    await userEvent.type(confirm, 'aug-promo')
+
+    expect(sendButton()).toBeDisabled()
   })
 
   it('names the control group so its absence is not a surprise', () => {

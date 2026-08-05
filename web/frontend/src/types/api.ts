@@ -1404,14 +1404,33 @@ export interface SmsCampaignResultsResponse {
 
 export interface SmsSendResult {
   campaign: string
+  channel: SmsChannel
   accepted: number
   stoplisted: number
   failed: number
 }
 
+/** Viber is registered separately from SMS, so availability differs. */
+export interface SmsChannelsResponse {
+  sms: boolean
+  viber: boolean
+  smsSender: string | null
+  viberSender: string | null
+}
+
+export type SmsChannel = 'sms' | 'viber_sms'
+
+/** The Viber half of a send: same words, plus a button an SMS cannot have. */
+export interface SmsViberOptions {
+  viberText?: string
+  buttonCaption?: string
+  buttonUrl?: string
+}
+
 /** One rehearsal send: the gateway's answer for a single number. */
 export interface SmsTestSendResult {
   phone: string
+  channel: SmsChannel
   accepted: boolean
   stoplisted: boolean
   messageId: string | null

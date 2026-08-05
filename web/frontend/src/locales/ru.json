@@ -848,5 +848,14 @@
   "sms.costParts": "{{parts}} SMS · {{encoding}}",
   "sms.costTotal": "≈{{total}} SMS на кампанию",
   "sms.encoding.gsm7": "латиница, 160 симв.",
-  "sms.encoding.ucs2": "кириллица, 70 симв."
+  "sms.encoding.ucs2": "кириллица, 70 симв.",
+  "sms.channel": "Канал",
+  "sms.channelSms": "Только SMS",
+  "sms.channelViberSms": "Viber + SMS",
+  "sms.viberUnavailable": "Viber недоступен: имя отправителя для Viber не настроено (TURBOSMS_VIBER_SENDER). Регистрируется отдельно от SMS-альфы.",
+  "sms.viberButtonHint": "В Viber ссылка станет кнопкой с подписью. В SMS кнопок нет — туда адрес добавится отдельной строкой, и цена считается по этому варианту.",
+  "sms.buttonCaption": "Подпись кнопки",
+  "sms.buttonUrl": "Ссылка кнопки",
+  "sms.buttonNeedsBoth": "Кнопке нужны и подпись, и ссылка — иначе шлюз её не примет.",
+  "sms.smsFallbackPreview": "Что придёт в SMS, если Viber не доставит:"
 }

@@ -132,6 +132,57 @@ class SendResult:
         return self.code == CODE_STOPLIST
 
 
+#: Viber caps the button label; the gateway rejects anything longer.
+VIBER_CAPTION_LIMIT = 30
+VIBER_TEXT_LIMIT = 1000
+
+
+@dataclass(frozen=True)
+class ViberMessage:
+    """
+    The Viber half of a hybrid send.
+
+    Worth having as its own type because Viber is not "SMS but nicer": it
+    carries a real button, which is the only way a campaign link ever gets
+    readable anchor text. An SMS can only ever show the bare URL.
+    """
+
+    text: str
+    #: Button label. Requires `action` — a button with no destination is a
+    #: dead control, and the gateway will not render one without a URL.
+    caption: Optional[str] = None
+    #: Where the button goes.
+    action: Optional[str] = None
+    image_url: Optional[str] = None
+    #: Seconds the message stays deliverable before falling back to SMS.
+    ttl: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if not self.text.strip():
+            raise ValueError("viber text is empty")
+        if len(self.text) > VIBER_TEXT_LIMIT:
+            raise ValueError(f"viber text exceeds {VIBER_TEXT_LIMIT} characters")
+        if bool(self.caption) != bool(self.action):
+            raise ValueError("viber button needs both a caption and an action URL")
+        if self.caption and len(self.caption) > VIBER_CAPTION_LIMIT:
+            raise ValueError(
+                f"viber button caption exceeds {VIBER_CAPTION_LIMIT} characters"
+            )
+        if self.ttl is not None and not 60 <= self.ttl <= 86400:
+            raise ValueError("viber ttl must be between 60 and 86400 seconds")
+
+    def payload(self, sender: str) -> Dict[str, Any]:
+        body: Dict[str, Any] = {"sender": sender, "text": self.text}
+        if self.caption and self.action:
+            body["caption"] = self.caption
+            body["action"] = self.action
+        if self.image_url:
+            body["image_url"] = self.image_url
+        if self.ttl is not None:
+            body["ttl"] = self.ttl
+        return body
+
+
 @dataclass
 class TurboSmsConfig:
     """Credentials and defaults, read from the environment."""
@@ -143,6 +194,11 @@ class TurboSmsConfig:
         or os.getenv("TURBOSMS_TOKEN", "")
     )
     sender: str = field(default_factory=lambda: os.getenv("TURBOSMS_SENDER", ""))
+    # Viber sender names are registered separately from SMS alpha names, so a
+    # working SMS setup says nothing about whether Viber can be used.
+    viber_sender: str = field(
+        default_factory=lambda: os.getenv("TURBOSMS_VIBER_SENDER", "")
+    )
     # Shared secret configured alongside the callback URL in the TurboSMS
     # panel; the webhook signature is SHA1(secret + event id).
     webhook_secret: str = field(
@@ -153,6 +209,10 @@ class TurboSmsConfig:
     @property
     def configured(self) -> bool:
         return bool(self.token and self.sender)
+
+    @property
+    def viber_configured(self) -> bool:
+        return bool(self.token and self.viber_sender)
 
 
 def verify_webhook_signature(event_id: str, signature: str, secret: str) -> bool:
@@ -247,21 +307,41 @@ class TurboSmsClient:
             )
         return body
 
-    async def send(self, phones: List[str], text: str) -> List[SendResult]:
+    async def send(
+        self,
+        phones: List[str],
+        text: str,
+        viber: Optional[ViberMessage] = None,
+    ) -> List[SendResult]:
         """
-        Send one text to many recipients.
+        Send one message to many recipients, over Viber then SMS if asked.
 
-        Returns a result per recipient, including the ones the gateway refused.
+        Passing `viber` makes it a hybrid send: the gateway tries Viber first
+        and falls back to SMS only for recipients it could not reach. That is
+        cheaper per delivery and carries a real button, so the SMS text should
+        be written to stand on its own — the fallback has no button to press.
+
+        Returns one result per recipient either way; the gateway does not say
+        which channel it used at send time, only later via `statuses`.
+
         A stoplisted recipient comes back with message_id=None and code 404 —
         that is a signal to record, not an error to swallow.
         """
         if not phones:
             return []
 
-        body = await self._post("/message/send.json", {
+        payload: Dict[str, Any] = {
             "recipients": phones,
             "sms": {"sender": self.config.sender, "text": text},
-        })
+        }
+        if viber is not None:
+            if not self.config.viber_configured:
+                raise TurboSmsError(
+                    "Viber is not configured — set TURBOSMS_VIBER_SENDER"
+                )
+            payload["viber"] = viber.payload(self.config.viber_sender)
+
+        body = await self._post("/message/send.json", payload)
 
         results = [
             SendResult(
@@ -275,8 +355,9 @@ class TurboSmsClient:
 
         stoplisted = sum(1 for r in results if r.stoplisted)
         logger.info(
-            "TurboSMS send: %d requested, %d accepted, %d stoplisted",
+            "TurboSMS send: %d requested, %d accepted, %d stoplisted, channel=%s",
             len(phones), sum(1 for r in results if r.accepted), stoplisted,
+            "viber+sms" if viber is not None else "sms",
         )
         return results
 
