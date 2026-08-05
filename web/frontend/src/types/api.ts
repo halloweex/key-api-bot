@@ -1408,6 +1408,10 @@ export interface SmsSendResult {
   accepted: number
   stoplisted: number
   failed: number
+  /** Recipients a failed batch never reached. The campaign is stamped sent
+   *  regardless, so these cannot be retried without messaging others twice. */
+  unsent: number
+  partialError: string | null
 }
 
 /** Viber is registered separately from SMS, so availability differs. */
