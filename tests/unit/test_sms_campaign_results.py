@@ -274,6 +274,67 @@ async def test_returns_and_dead_sources_excluded(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_delivery_counts_are_reported(tmp_path):
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=4, holdouts=2)
+
+    async with store.connection() as conn:
+        conn.execute("UPDATE sms_campaign_members SET message_id='m1',"
+                     " delivered=TRUE WHERE campaign='aug' AND buyer_id=1")
+        conn.execute("UPDATE sms_campaign_members SET delivered=FALSE"
+                     " WHERE campaign='aug' AND buyer_id IN (2,3)")
+
+    target = (await store.get_sms_campaign_results("aug"))["overall"]["target"]
+
+    assert target["contacts"] == 4
+    assert target["delivered"] == 1
+    assert target["undelivered"] == 2
+    # buyer 4 has no report yet — neither delivered nor failed
+    assert target["delivered"] + target["undelivered"] < target["contacts"]
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_delivered_only_never_filters_the_control(tmp_path):
+    """The control was never sent to, so a delivery filter must not touch it.
+
+    Filtering it would strip the baseline and turn any campaign into a success.
+    """
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=10, holdouts=10)
+
+    async with store.connection() as conn:
+        # Only half the target arm was delivered to; the control has no reports
+        conn.execute("UPDATE sms_campaign_members SET delivered=TRUE"
+                     " WHERE campaign='aug' AND buyer_id <= 5")
+        conn.execute("UPDATE sms_campaign_members SET delivered=FALSE"
+                     " WHERE campaign='aug' AND buyer_id BETWEEN 6 AND 10")
+
+    for i in (1, 2, 3):
+        await _buy(store, i, days_after=3)
+    for i in (11, 12):
+        await _buy(store, i, days_after=3)
+
+    itt = (await store.get_sms_campaign_results("aug"))["overall"]
+    assert itt["target"]["contacts"] == 10
+    assert itt["holdout"]["contacts"] == 10
+
+    restricted = await store.get_sms_campaign_results("aug", delivered_only=True)
+    assert restricted["deliveredOnly"] is True
+    assert restricted["overall"]["target"]["contacts"] == 5, "target is restricted"
+    assert restricted["overall"]["holdout"]["contacts"] == 10, \
+        "the control arm keeps every member"
+
+    # Same three buyers either way, but the target rate rises because the
+    # denominator shrank — exactly why this reading is a bound, not the result.
+    assert itt["comparison"]["conversionTarget"] == 30.0
+    assert restricted["overall"]["comparison"]["conversionTarget"] == 60.0
+
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_unsent_campaign_refuses_to_report(tmp_path):
     store = await _make_store(tmp_path)
     await store.freeze_sms_campaign(
