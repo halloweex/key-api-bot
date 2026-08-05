@@ -7,13 +7,19 @@ import { Select } from './Select'
 import { Badge } from './Badge'
 import { ApiErrorState } from './ApiErrorState'
 import { SkeletonCard } from './Skeleton'
+import { SmsSelectionCriteria } from './SmsSelectionCriteria'
 import { useSmsSegments } from '../hooks/useApi'
 import { formatCurrency, formatNumber } from '../utils/formatters'
-import type { SmsLtvBasis, SmsSegment, SmsTier } from '../types/api'
+import type { SmsLtvBasis, SmsSegment, SmsSegmentsResponse, SmsTier } from '../types/api'
 
 // ─── SmsSegmentCards ─────────────────────────────────────────────────────────
 //
 // Pick the criteria, see the three tiers, take the file.
+//
+// Every tier states the rule that built it, in the numbers currently in force
+// rather than in prose: a tier whose membership cannot be explained is a tier
+// nobody trusts enough to spend budget against. The fuller account — what the
+// rules removed, and in what order — sits under <SmsSelectionCriteria>.
 //
 // The export is the moment a campaign becomes real, so "freeze" lives right
 // next to the download button rather than buried in settings: the roster has
@@ -27,7 +33,32 @@ const TIER_STYLE: Record<SmsTier, { tone: 'purple' | 'blue' | 'orange'; order: n
 
 const CAMPAIGN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/
 
-function TierCard({ segment }: { segment: SmsSegment }) {
+/** The membership rule for a tier, in the thresholds actually applied. */
+function tierRule(
+  tier: SmsTier,
+  criteria: SmsSegmentsResponse['criteria'],
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): string {
+  switch (tier) {
+    case 'VIP':
+      return t('sms.ruleLtvAtLeast', { value: formatCurrency(criteria.vipLtv) })
+    case 'CORE':
+      return t('sms.ruleCoreValue', {
+        orders: criteria.coreMinOrders,
+        value: formatCurrency(criteria.coreLtv),
+      })
+    default:
+      return t('sms.ruleReactivationValue', { days: criteria.reactivationMaxRecency })
+  }
+}
+
+function TierCard({
+  segment,
+  criteria,
+}: {
+  segment: SmsSegment
+  criteria: SmsSegmentsResponse['criteria']
+}) {
   const { t } = useTranslation()
   const style = TIER_STYLE[segment.tier] ?? TIER_STYLE.CORE
 
@@ -53,6 +84,10 @@ function TierCard({ segment }: { segment: SmsSegment }) {
             </div>
           </div>
         </div>
+
+        <p className="mt-2 text-[11px] text-slate-500 leading-snug">
+          {tierRule(segment.tier, criteria, t)}
+        </p>
 
         <dl className="mt-3 pt-3 border-t border-slate-100 grid grid-cols-3 gap-2 text-xs">
           <div>
@@ -91,7 +126,10 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
   const { data, isLoading, error, refetch } = useSmsSegments(params)
 
   const campaignValid = CAMPAIGN_PATTERN.test(campaign)
-  const canExport = !freeze || campaignValid
+  // An unnamed export is legitimate (a look at the list); a badly named one is
+  // a typo that would otherwise download an anonymous file and look like it
+  // worked. Freezing needs the name either way.
+  const canExport = campaign.length === 0 ? !freeze : campaignValid
 
   const segments = useMemo(
     () =>
@@ -118,7 +156,10 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <CardTitle>{t('sms.segmentsTitle')}</CardTitle>
+            <div className="flex items-center gap-2">
+              <Badge tone="slate" shape="tag">{t('sms.step', { n: 1 })}</Badge>
+              <CardTitle>{t('sms.segmentsTitle')}</CardTitle>
+            </div>
             <p className="text-xs text-slate-500 mt-0.5">{t('sms.segmentsDesc')}</p>
           </div>
           <Select
@@ -144,11 +185,13 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
           </div>
         ) : (
           <>
-            <div className="grid gap-3 sm:grid-cols-3">
-              {segments.map((s) => (
-                <TierCard key={s.tier} segment={s} />
-              ))}
-            </div>
+            {data && (
+              <div className="grid gap-3 sm:grid-cols-3">
+                {segments.map((s) => (
+                  <TierCard key={s.tier} segment={s} criteria={data.criteria} />
+                ))}
+              </div>
+            )}
 
             <div className="mt-3 text-xs text-slate-500 tabular-nums">
               {t('sms.totals', {
@@ -158,53 +201,63 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
               })}
             </div>
 
+            {data && <SmsSelectionCriteria data={data} />}
+
             {/* ── Export ─────────────────────────────────────────────── */}
-            <div className="mt-4 pt-4 border-t border-slate-100 space-y-3">
-              <div className="flex flex-wrap items-end gap-3">
-                <label className="text-xs text-slate-600">
-                  <span className="block mb-1">{t('sms.campaignName')}</span>
-                  <input
-                    type="text"
-                    value={campaign}
-                    onChange={(e) => setCampaign(e.target.value)}
-                    placeholder="aug-promo"
-                    className="px-2 py-1.5 text-sm bg-white border border-slate-200 rounded-md
-                               text-slate-700 focus:outline-none focus:ring-2
-                               focus:ring-purple-500/30 focus:border-purple-400"
-                  />
+            <div className="mt-4 pt-4 border-t border-slate-100">
+              <h3 className="text-sm font-medium text-slate-700">{t('sms.exportTitle')}</h3>
+              <p className="text-xs text-slate-500 mt-0.5 mb-3">{t('sms.exportDesc')}</p>
+
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="text-xs text-slate-600">
+                    <span className="block mb-1">{t('sms.campaignName')}</span>
+                    <input
+                      type="text"
+                      value={campaign}
+                      onChange={(e) => setCampaign(e.target.value)}
+                      placeholder="aug-promo"
+                      className="px-2 py-1.5 text-sm bg-white border border-slate-200 rounded-md
+                                 text-slate-700 focus:outline-none focus:ring-2
+                                 focus:ring-purple-500/30 focus:border-purple-400"
+                    />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    <span className="block mb-1">{t('sms.promocodeOptional')}</span>
+                    <input
+                      type="text"
+                      value={promocode}
+                      onChange={(e) => setPromocode(e.target.value)}
+                      placeholder="KS-AUG"
+                      maxLength={40}
+                      className="px-2 py-1.5 text-sm bg-white border border-slate-200 rounded-md
+                                 text-slate-700 focus:outline-none focus:ring-2
+                                 focus:ring-purple-500/30 focus:border-purple-400"
+                    />
+                  </label>
+                  <Button onClick={handleExport} disabled={!canExport} size="sm">
+                    {t('sms.downloadCsv')}
+                  </Button>
+                </div>
+
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <Checkbox checked={freeze} onChange={setFreeze} size="sm" />
+                  <span className="text-xs text-slate-600 leading-snug">
+                    <span className="font-medium text-slate-700">{t('sms.freezeLabel')}</span>
+                    {' — '}
+                    {t('sms.freezeHint')}
+                  </span>
                 </label>
-                <label className="text-xs text-slate-600">
-                  <span className="block mb-1">{t('sms.promocodeOptional')}</span>
-                  <input
-                    type="text"
-                    value={promocode}
-                    onChange={(e) => setPromocode(e.target.value)}
-                    placeholder="KS-AUG"
-                    maxLength={40}
-                    className="px-2 py-1.5 text-sm bg-white border border-slate-200 rounded-md
-                               text-slate-700 focus:outline-none focus:ring-2
-                               focus:ring-purple-500/30 focus:border-purple-400"
-                  />
-                </label>
-                <Button onClick={handleExport} disabled={!canExport} size="sm">
-                  {t('sms.downloadCsv')}
-                </Button>
+
+                {/* A name that fails the pattern is dropped from the request
+                    rather than rejected, so say so before the file lands
+                    unnamed — not only when freeze forces the issue. */}
+                {campaign.length > 0 && !campaignValid && (
+                  <p className="text-xs text-amber-700 bg-amber-50 rounded-md px-2 py-1.5">
+                    {t('sms.campaignRequired')}
+                  </p>
+                )}
               </div>
-
-              <label className="flex items-start gap-2 cursor-pointer">
-                <Checkbox checked={freeze} onChange={setFreeze} size="sm" />
-                <span className="text-xs text-slate-600 leading-snug">
-                  <span className="font-medium text-slate-700">{t('sms.freezeLabel')}</span>
-                  {' — '}
-                  {t('sms.freezeHint')}
-                </span>
-              </label>
-
-              {freeze && !campaignValid && (
-                <p className="text-xs text-amber-700 bg-amber-50 rounded-md px-2 py-1.5">
-                  {t('sms.campaignRequired')}
-                </p>
-              )}
             </div>
           </>
         )}

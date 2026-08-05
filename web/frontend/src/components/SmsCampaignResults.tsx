@@ -120,7 +120,10 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <CardTitle>{t('sms.resultsTitle')}</CardTitle>
+            <div className="flex items-center gap-2">
+              <Badge tone="slate" shape="tag">{t('sms.step', { n: 3 })}</Badge>
+              <CardTitle>{t('sms.resultsTitle')}</CardTitle>
+            </div>
             <p className="text-xs text-slate-500 mt-0.5">{t('sms.resultsDesc')}</p>
           </div>
           <div className="flex items-center gap-2">

@@ -1652,7 +1652,8 @@ class CustomersMixin:
             limit: Max customer rows returned when include_customers is set.
 
         Returns:
-            Dict with per-tier summary, totals and (optionally) customer rows.
+            Dict with per-tier summary, totals, the selection funnel (how many
+            customers each rule left standing) and (optionally) customer rows.
 
         Raises:
             ValueError: If ltv_basis is not one of SMS_LTV_BASES.
@@ -1789,24 +1790,50 @@ class CustomersMixin:
                 LEFT JOIN last_order_items lo ON lo.buyer_id = c.buyer_id
                 WHERE c.recency <= ?
             ),
+            flagged AS (
+                -- Each eligibility rule as its own column rather than a WHERE
+                -- clause, so the same pass can both filter and report how many
+                -- customers each rule removed.
+                SELECT
+                    *,
+                    tier IS NOT NULL AS ok_tier,
+                    length(phone) = 12 AND phone LIKE '380%' AS ok_phone,
+                    -- Opted out stays out. Matched on buyer AND on phone, because
+                    -- the same number can reach us under a second buyer record.
+                    NOT EXISTS (
+                        SELECT 1 FROM marketing_optouts o
+                        WHERE o.channel = 'sms'
+                          AND (o.buyer_id = scored.buyer_id OR o.phone = scored.phone)
+                    ) AS ok_subscribed
+                FROM scored
+            ),
             eligible AS (
                 SELECT *
-                FROM scored
-                WHERE tier IS NOT NULL
-                  AND length(phone) = 12
-                  AND phone LIKE '380%'
-                  -- Opted out stays out. Matched on buyer AND on phone, because
-                  -- the same number can reach us under a second buyer record.
-                  AND NOT EXISTS (
-                      SELECT 1 FROM marketing_optouts o
-                      WHERE o.channel = 'sms'
-                        AND (o.buyer_id = scored.buyer_id OR o.phone = scored.phone)
-                  )
+                FROM flagged
+                WHERE ok_tier AND ok_phone AND ok_subscribed
                 -- One SMS per phone number: shared numbers across buyer records
                 -- would otherwise be messaged twice.
                 QUALIFY ROW_NUMBER() OVER (
                     PARTITION BY phone ORDER BY {ltv_column} DESC, buyer_id
                 ) = 1
+            ),
+            selected AS (
+                -- Tier filter applies after de-duplication so asking for one
+                -- tier cannot change which buyer wins a shared phone number.
+                SELECT * FROM eligible
+                {"WHERE tier = ?" if tier else ""}
+            ),
+            funnel AS (
+                -- The selection, stage by stage. Counted in the order the rules
+                -- are applied above, so each figure is "still in after this rule".
+                SELECT
+                    (SELECT COUNT(*) FROM cust) AS f_customers,
+                    COUNT(*) AS f_in_window,
+                    COUNT(*) FILTER (ok_tier) AS f_tiered,
+                    COUNT(*) FILTER (ok_tier AND ok_phone) AS f_phone,
+                    COUNT(*) FILTER (ok_tier AND ok_phone AND ok_subscribed) AS f_subscribed,
+                    (SELECT COUNT(*) FROM eligible) AS f_eligible
+                FROM flagged
             )
             SELECT
                 buyer_id, full_name, phone, city, tier, orders,
@@ -1824,9 +1851,12 @@ class CustomersMixin:
                      THEN last_order_items || ' +' || (last_order_item_count - 3) || ' ещё'
                      ELSE last_order_items END AS last_order_items,
                 CASE WHEN hash(buyer_id::VARCHAR || '|' || ?) % 100 < ?
-                     THEN 'holdout' ELSE 'target' END AS assignment
-            FROM eligible
-            {"WHERE tier = ?" if tier else ""}
+                     THEN 'holdout' ELSE 'target' END AS assignment,
+                f_customers, f_in_window, f_tiered, f_phone, f_subscribed, f_eligible
+            -- RIGHT JOIN, not CROSS: when nothing survives the filters the
+            -- funnel is the only thing left to explain why, so its single row
+            -- has to come back regardless.
+            FROM selected RIGHT JOIN funnel ON TRUE
             ORDER BY tier, ltv DESC, buyer_id
             """
 
@@ -1836,20 +1866,30 @@ class CustomersMixin:
                 params.append(sales_type)
             params += [
                 vip_ltv, core_min_orders, core_ltv, reactivation_max_recency,
-                max_recency_days, campaign, holdout_pct,
+                max_recency_days,
             ]
             if tier:
                 params.append(tier)
+            params += [campaign, holdout_pct]
 
             rows = conn.execute(query, params).fetchall()
 
         tiers: Dict[str, Dict[str, Any]] = {}
         customers = []
+        funnel_counts = (0, 0, 0, 0, 0, 0)
         for (buyer_id, full_name, phone, city, row_tier, orders, ltv, aov,
              revenue_ltv, margin_ltv, margin_pct, cost_coverage,
              recency, last_order, first_order,
              last_order_id, last_order_total, last_order_item_count, last_order_items,
-             assignment) in rows:
+             assignment,
+             f_customers, f_in_window, f_tiered, f_phone, f_subscribed,
+             f_eligible) in rows:
+            funnel_counts = (f_customers, f_in_window, f_tiered, f_phone,
+                             f_subscribed, f_eligible)
+            # The funnel row survives the RIGHT JOIN even when no customer does.
+            if buyer_id is None:
+                continue
+
             stats = tiers.setdefault(row_tier, {
                 "tier": row_tier, "total": 0, "target": 0, "holdout": 0,
                 "ltv": 0.0, "revenue": 0.0, "margin": 0.0,
@@ -1907,6 +1947,7 @@ class CustomersMixin:
             })
 
         total_customers = sum(s["total"] for s in summary)
+        f_customers, f_in_window, f_tiered, f_phone, f_subscribed, f_eligible = funnel_counts
         return {
             "campaign": campaign,
             "salesType": sales_type,
@@ -1920,6 +1961,18 @@ class CustomersMixin:
                 "reactivationMaxRecency": reactivation_max_recency,
                 "holdoutPct": holdout_pct,
             },
+            # How the base narrowed, rule by rule, in the order the query
+            # applies them. Published because the tier sizes on their own look
+            # arbitrary: the drop from every customer to a sendable list is
+            # most of the story, and it is invisible in the segment totals.
+            "funnel": [
+                {"stage": "customers", "remaining": int(f_customers or 0)},
+                {"stage": "inWindow", "remaining": int(f_in_window or 0)},
+                {"stage": "tiered", "remaining": int(f_tiered or 0)},
+                {"stage": "phone", "remaining": int(f_phone or 0)},
+                {"stage": "subscribed", "remaining": int(f_subscribed or 0)},
+                {"stage": "uniquePhone", "remaining": int(f_eligible or 0)},
+            ],
             "segments": summary,
             "totals": {
                 "customers": total_customers,
