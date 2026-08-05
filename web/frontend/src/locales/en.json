@@ -860,5 +860,6 @@
   "sms.smsFallbackPreview": "What arrives by SMS if Viber cannot deliver:",
   "sms.exportTiers": "Who this campaign is for",
   "sms.exportAllTiers": "Nothing picked — the file takes every tier, {{total}} contacts.",
-  "sms.exportPickedTiers": "The file takes {{total}} contacts from the picked tiers."
+  "sms.exportPickedTiers": "The file takes {{total}} contacts from the picked tiers.",
+  "sms.sendPartial": "Partly sent: {{unsent}} recipients were not messaged. The campaign is stamped sent — it cannot be retried without messaging the others twice."
 }

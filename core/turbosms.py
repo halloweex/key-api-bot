@@ -70,8 +70,32 @@ _GSM7_BASIC = set(
 _GSM7_EXTENDED = set("^{}\\[~]|€")
 
 
+# The gateway refuses more than this in one call with 405
+# NOT_ALLOWED_RECIPIENTS_LIMIT, so a campaign larger than it has to be split.
+RECIPIENTS_PER_REQUEST = 5000
+
+
 class TurboSmsError(Exception):
     """A TurboSMS call failed outright (transport, auth, or malformed reply)."""
+
+
+class PartialSendError(TurboSmsError):
+    """A batch failed after earlier ones had already gone out.
+
+    Carries the results of the batches that succeeded, because discarding
+    them is the one unrecoverable mistake here: those people have the message
+    on their phones, and a retry that does not know it would send it twice —
+    spending the budget again and destroying the campaign's measurement.
+    """
+
+    def __init__(self, results: List["SendResult"], sent: int, unsent: int, cause: Exception):
+        super().__init__(
+            f"sent to {sent} recipients, then the gateway refused: {cause}. "
+            f"{unsent} were not messaged."
+        )
+        self.results = results
+        self.sent = sent
+        self.unsent = unsent
 
 
 @dataclass(frozen=True)
@@ -342,33 +366,51 @@ class TurboSmsClient:
         if not phones:
             return []
 
-        payload: Dict[str, Any] = {
-            "recipients": phones,
-            "sms": {"sender": self.config.sender, "text": text},
-        }
+        viber_payload = None
         if viber is not None:
             if not self.config.viber_configured:
                 raise TurboSmsError(
                     "Viber is not configured — set TURBOSMS_VIBER_SENDER"
                 )
-            payload["viber"] = viber.payload(self.config.viber_sender)
+            viber_payload = viber.payload(self.config.viber_sender)
 
-        body = await self._post("/message/send.json", payload)
+        results: List[SendResult] = []
+        for start in range(0, len(phones), RECIPIENTS_PER_REQUEST):
+            batch = phones[start:start + RECIPIENTS_PER_REQUEST]
+            payload: Dict[str, Any] = {
+                "recipients": batch,
+                "sms": {"sender": self.config.sender, "text": text},
+            }
+            if viber_payload is not None:
+                payload["viber"] = viber_payload
 
-        results = [
-            SendResult(
-                phone=str(item.get("phone", "")),
-                message_id=item.get("message_id"),
-                code=int(item.get("response_code", -1)),
-                status=str(item.get("response_status", "")),
+            try:
+                body = await self._post("/message/send.json", payload)
+            except TurboSmsError as e:
+                # Anything already away must survive the failure, or the retry
+                # messages those people a second time.
+                if results:
+                    raise PartialSendError(
+                        results, sent=start, unsent=len(phones) - start, cause=e,
+                    ) from e
+                raise
+
+            results.extend(
+                SendResult(
+                    phone=str(item.get("phone", "")),
+                    message_id=item.get("message_id"),
+                    code=int(item.get("response_code", -1)),
+                    status=str(item.get("response_status", "")),
+                )
+                for item in body.get("response_result") or []
             )
-            for item in body.get("response_result") or []
-        ]
 
         stoplisted = sum(1 for r in results if r.stoplisted)
         logger.info(
-            "TurboSMS send: %d requested, %d accepted, %d stoplisted, channel=%s",
-            len(phones), sum(1 for r in results if r.accepted), stoplisted,
+            "TurboSMS send: %d requested in %d batch(es), %d accepted, "
+            "%d stoplisted, channel=%s",
+            len(phones), -(-len(phones) // RECIPIENTS_PER_REQUEST),
+            sum(1 for r in results if r.accepted), stoplisted,
             "viber+sms" if viber is not None else "sms",
         )
         return results

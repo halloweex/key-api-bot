@@ -720,3 +720,93 @@ class TestMultiTierSelection:
         )
 
         assert "sms_aug_core-reactivation" in r.headers["content-disposition"]
+
+
+class TestPartialSend:
+    """A batch failing mid-roster must not look like a clean failure.
+
+    Earlier batches are already on people's phones. Discarding them would let
+    a retry message those people twice — twice the spend, and the control
+    comparison ruined.
+    """
+
+    SEND_PATH = "/api/customers/sms-campaigns/aug/send"
+
+    @pytest.fixture
+    def sending_store(self, monkeypatch):
+        recorded = {}
+
+        class _Store:
+            async def get_sms_campaign_targets(self, campaign):
+                return [
+                    {"buyerId": 1, "phone": "380961111111", "tier": "CORE"},
+                    {"buyerId": 2, "phone": "380962222222", "tier": "CORE"},
+                ]
+
+            async def record_sms_send(self, campaign, accepted, stoplisted, failed):
+                recorded.update({"accepted": accepted, "stoplisted": stoplisted,
+                                 "failed": failed})
+                return {"campaign": campaign, "accepted": len(accepted),
+                        "stoplisted": len(stoplisted), "failed": len(failed)}
+
+        async def _fake_get_store():
+            return _Store()
+
+        monkeypatch.setattr("web.routes.api.customers.get_store", _fake_get_store)
+        return recorded
+
+    def test_what_already_went_is_recorded(self, client, sending_store, monkeypatch):
+        from core.turbosms import PartialSendError, SendResult, TurboSmsError
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def send(self, phones, text, viber=None):
+                raise PartialSendError(
+                    [SendResult(phone="380961111111", message_id="m-1",
+                                code=0, status="OK")],
+                    sent=1, unsent=1,
+                    cause=TurboSmsError("405 NOT_ALLOWED_RECIPIENTS_LIMIT"),
+                )
+
+        monkeypatch.setattr(
+            "web.routes.api.customers.TurboSmsClient", lambda *a, **kw: _Client()
+        )
+
+        body = client.post(
+            self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers(),
+        ).json()
+
+        assert sending_store["accepted"] == {1: "m-1"}, "the delivered one is kept"
+        assert body["unsent"] == 1
+        assert "NOT_ALLOWED_RECIPIENTS_LIMIT" in body["partialError"]
+
+    def test_a_total_failure_records_nothing_and_stays_retryable(
+        self, client, sending_store, monkeypatch,
+    ):
+        from core.turbosms import TurboSmsError
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def send(self, phones, text, viber=None):
+                raise TurboSmsError("405 NOT_ALLOWED_RECIPIENTS_LIMIT")
+
+        monkeypatch.setattr(
+            "web.routes.api.customers.TurboSmsClient", lambda *a, **kw: _Client()
+        )
+
+        r = client.post(
+            self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers(),
+        )
+
+        assert r.status_code == 502
+        assert sending_store == {}, "nothing recorded, so the send can be retried"
