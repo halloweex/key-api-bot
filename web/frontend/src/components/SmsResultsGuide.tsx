@@ -34,6 +34,7 @@ export const SmsResultsGuide = memo(function SmsResultsGuide() {
         <Entry term={t('sms.guideDiffTerm')}>{t('sms.guideDiffBody')}</Entry>
         <Entry term={t('sms.lift')}>{t('sms.guideLiftBody')}</Entry>
         <Entry term={t('sms.pValue')}>{t('sms.guidePValueBody')}</Entry>
+        <Entry term={t('sms.guideVerdictTerm')}>{t('sms.guideVerdictBody')}</Entry>
         <Entry term={t('sms.guideRevenueTerm')}>{t('sms.guideRevenueBody')}</Entry>
         <Entry term={t('sms.guideMarginTerm')}>{t('sms.guideMarginBody')}</Entry>
         <Entry term={t('sms.guideWindowTerm')}>{t('sms.guideWindowBody')}</Entry>
