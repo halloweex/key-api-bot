@@ -194,6 +194,30 @@ describe('SmsCampaignResults', () => {
     expect(container.querySelectorAll('td .text-emerald-700')).toHaveLength(0)
   })
 
+  it('marks the money as an estimate while the verdict is withheld', () => {
+    renderWith(response({
+      overall: {
+        target: stats(),
+        holdout: stats({ contacts: 120, converted: 1 }),
+        comparison: comparison({ verdictReady: false, eventsHoldout: 1 }),
+      },
+    }))
+
+    const overall = screen.getAllByRole('row')[1]
+    // Still printed — watching it move is the point — but not as a result.
+    expect(within(overall).getByText('₴12,000').className).toContain('slate-400')
+    expect(within(overall).getAllByText('sms.moneyEstimate')).toHaveLength(2)
+    expect(within(overall).queryByText('12.00 sms.perContact')).toBeNull()
+  })
+
+  it('gives the money its full weight once a verdict is offered', () => {
+    renderWith(response())
+
+    const overall = screen.getAllByRole('row')[1]
+    expect(within(overall).getByText('₴12,000').className).toContain('slate-800')
+    expect(within(overall).getByText('12.00 sms.perContact')).toBeTruthy()
+  })
+
   it('draws no table at all until the results have loaded', () => {
     results.current = null
     render(<SmsCampaignResults />)
