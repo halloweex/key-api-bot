@@ -12,6 +12,17 @@ def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
+# Purchases an arm needs before any verdict is worth printing.
+#
+# The interval arithmetic below stays defined at zero purchases, but "defined"
+# is not "informative": a control that has not bought yet carries almost no
+# information about the rate it will settle at, and the first day of a campaign
+# always looks like that. Five is the usual floor for a normal approximation to
+# a count, and it is the point below which the interval is driven by the prior
+# baked into the correction rather than by anything observed.
+MIN_EVENTS_FOR_VERDICT = 5
+
+
 def _compare_groups(
     target: Dict[str, Any], holdout: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
@@ -24,22 +35,53 @@ def _compare_groups(
     small, so a difference that looks large can still be indistinguishable
     from noise, and the interval says so where a bare percentage would not.
 
+    The interval is Agresti-Caffo, not Wald. Wald's standard error is
+    ``sqrt(p_t(1-p_t)/n_t + p_h(1-p_h)/n_h)``, which contributes exactly zero
+    variance from an arm where nobody has bought — it asserts that arm's rate
+    is known to be precisely 0%. On the first real campaign that turned two
+    tiers with empty control groups into "effect proven" within a day of
+    sending, one of them at p = 0.0. With 162 people and no purchases the true
+    rate can still be anything up to about 1.85% (the rule of three), which
+    was the entire measured lift. Adding one success and one failure to each
+    arm before forming the interval removes the collapse and has better
+    coverage than Wald at every sample size worth caring about.
+
+    The p-value is the pooled (score) test rather than Wald's, for the same
+    reason: pooling the two arms keeps the standard error away from zero when
+    one of them has no events.
+
+    ``significant`` additionally requires ``MIN_EVENTS_FOR_VERDICT`` purchases
+    in *both* arms. Widening the interval alone is not enough — at one purchase
+    in a control of 646 the interval still clears zero, and the honest reading
+    of that is "too early", not "proven".
+
     Returns None when either group is empty — there is nothing to compare.
     """
     t_n, h_n = target["contacts"], holdout["contacts"]
     if not t_n or not h_n:
         return None
 
-    p_t = target["converted"] / t_n
-    p_h = holdout["converted"] / h_n
+    t_x, h_x = target["converted"], holdout["converted"]
+    p_t, p_h = t_x / t_n, h_x / h_n
     diff = p_t - p_h
 
-    se = math.sqrt(p_t * (1 - p_t) / t_n + p_h * (1 - p_h) / h_n)
-    margin_of_error = 1.96 * se
-    z = diff / se if se > 0 else 0.0
+    # Agresti-Caffo: +1 success and +1 failure per arm, then an ordinary Wald
+    # interval on the adjusted proportions. The point estimate stays the raw
+    # difference — only the interval is adjusted.
+    a_t, a_h = (t_x + 1) / (t_n + 2), (h_x + 1) / (h_n + 2)
+    se_ac = math.sqrt(
+        a_t * (1 - a_t) / (t_n + 2) + a_h * (1 - a_h) / (h_n + 2)
+    )
+    centre = a_t - a_h
+    lo, hi = centre - 1.96 * se_ac, centre + 1.96 * se_ac
+
+    p_pooled = (t_x + h_x) / (t_n + h_n)
+    se_pooled = math.sqrt(p_pooled * (1 - p_pooled) * (1 / t_n + 1 / h_n))
+    z = diff / se_pooled if se_pooled > 0 else 0.0
     p_value = 2 * (1 - _norm_cdf(abs(z)))
 
-    lo, hi = diff - margin_of_error, diff + margin_of_error
+    enough_events = min(t_x, h_x) >= MIN_EVENTS_FOR_VERDICT
+
     rev_per_contact = target["revenue"] / t_n - holdout["revenue"] / h_n
     margin_per_contact = target["margin"] / t_n - holdout["margin"] / h_n
 
@@ -51,8 +93,15 @@ def _compare_groups(
         "ci95Pp": [round(100 * lo, 2), round(100 * hi, 2)],
         "pValue": round(p_value, 4),
         # The honest headline: if the interval spans zero, the campaign has
-        # not been shown to have done anything, whatever the raw rates say.
-        "significant": lo > 0 or hi < 0,
+        # not been shown to have done anything, whatever the raw rates say —
+        # and below the event floor there is nothing to say either way.
+        "significant": enough_events and (lo > 0 or hi < 0),
+        # Why a verdict is or is not being offered, so the page can say
+        # "too early" instead of the much stronger "no effect".
+        "verdictReady": enough_events,
+        "eventsTarget": t_x,
+        "eventsHoldout": h_x,
+        "minEvents": MIN_EVENTS_FOR_VERDICT,
         "incrementalRevenuePerContact": round(rev_per_contact, 2),
         "incrementalMarginPerContact": round(margin_per_contact, 2),
         "incrementalRevenueTotal": round(rev_per_contact * t_n, 2),
@@ -1456,13 +1505,17 @@ class CustomersMixin:
         intention-to-treat reading, and it is the one that is actually a clean
         randomised comparison: it answers "what did running this campaign do".
 
-        ``delivered_only`` restricts the target arm to recipients the gateway
-        confirmed delivery for. It is tempting — undelivered people cannot have
+        ``delivered_only`` drops from the target arm the recipients the gateway
+        actively refused. It is tempting — a refused number cannot have
         responded, so including them drags the lift down — but it is NOT an
-        equivalent comparison. Undeliverable customers are removed from the
+        equivalent comparison. Unreachable customers are removed from the
         target arm while their counterparts stay in the control arm, and if
         unreachable people buy at a different rate the difference is biased.
         Read it as an optimistic bound, not as the result.
+
+        It deliberately keeps recipients with no delivery report at all. A
+        receipt that never arrived is not a failed delivery, and since the
+        provider's webhook does not reach us most receipts never arrive.
 
         Either way the target group's delivery counts come back, so the size of
         the problem is visible instead of implied.
@@ -1500,7 +1553,34 @@ class CustomersMixin:
 
             rows = conn.execute(
                 f"""
-                WITH window_orders AS (
+                WITH linked AS (
+                    -- Every customer record that is the same person as a roster
+                    -- member, matched on the phone the message went to.
+                    --
+                    -- Responding to the campaign is itself a way to acquire a
+                    -- second customer record: the recipient follows the link,
+                    -- checks out on the storefront, and a fresh buyer row is
+                    -- created because the name is spelled differently
+                    -- ("Наталія Дяків" against "Дяків Наталія"). Matching the
+                    -- purchase back by buyer_id then misses it. On the first
+                    -- real campaign that hid 6 of 55 responses, ~27 700 UAH,
+                    -- every one of them in the target arm — the arm is the only
+                    -- one holding a link to click, so the loss is one-sided and
+                    -- always understates the campaign.
+                    --
+                    -- Last nine digits, because the roster stores 380XXXXXXXXX
+                    -- and buyers may carry a +, spaces or brackets.
+                    SELECT m.buyer_id AS member_id, b.id AS buyer_id
+                    FROM sms_campaign_members m
+                    JOIN buyers b
+                      ON right(regexp_replace(b.phone, '[^0-9]', '', 'g'), 9)
+                       = right(m.phone, 9)
+                    WHERE m.campaign = ?
+                    UNION  -- the member's own row, even with no usable phone
+                    SELECT buyer_id, buyer_id
+                    FROM sms_campaign_members WHERE campaign = ?
+                ),
+                window_orders AS (
                     SELECT o.buyer_id, o.id AS order_id, o.grand_total, o.promocode,
                            op.price_sold * op.quantity AS line_revenue,
                            CASE WHEN os.purchased_price > 0
@@ -1538,6 +1618,20 @@ class CustomersMixin:
                                AS promo_orders
                     FROM alloc
                     GROUP BY buyer_id
+                ),
+                per_member AS (
+                    -- Roll every linked record up onto the roster member, so a
+                    -- person counts once however many customer rows they have.
+                    -- Orders belong to exactly one buyer row and roster phones
+                    -- are unique, so nothing is double counted here.
+                    SELECT l.member_id,
+                           SUM(pb.orders) AS orders,
+                           SUM(pb.revenue) AS revenue,
+                           SUM(pb.margin) AS margin,
+                           SUM(pb.promo_orders) AS promo_orders
+                    FROM linked l
+                    JOIN per_buyer pb ON pb.buyer_id = l.buyer_id
+                    GROUP BY l.member_id
                 )
                 -- Members the gateway never took are excluded from the arm
                 -- itself. They could not respond to a message they never
@@ -1545,7 +1639,7 @@ class CustomersMixin:
                 -- on every reading. They stay visible as not_sent below.
                 SELECT m.tier, m.assignment,
                        COUNT(*) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS contacts,
-                       COUNT(pb.buyer_id) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS converted,
+                       COUNT(pb.member_id) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS converted,
                        COALESCE(SUM(pb.orders) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS orders,
                        COALESCE(SUM(pb.revenue) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS revenue,
                        COALESCE(SUM(pb.margin) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS margin,
@@ -1560,14 +1654,22 @@ class CustomersMixin:
                        COUNT(*) FILTER (WHERE m.delivery_status = 'NotSent')
                            AS not_sent
                 FROM sms_campaign_members m
-                LEFT JOIN per_buyer pb ON pb.buyer_id = m.buyer_id
+                LEFT JOIN per_member pb ON pb.member_id = m.buyer_id
                 WHERE m.campaign = ?
                   -- The control arm was never sent to, so a delivery filter
                   -- must not touch it, or the comparison loses its baseline.
-                  {"AND (m.assignment = 'holdout' OR m.delivered)" if delivered_only else ""}
+                  --
+                  -- IS NOT FALSE, not a bare truth test: delivered is NULL for
+                  -- everyone the gateway accepted but never reported on, and
+                  -- with the delivery webhook not reaching us those receipts
+                  -- never arrive. On the first campaign that was 246 people
+                  -- against 25 actual rejections — treating "in transit" as
+                  -- "undelivered" drops nine responders for every one refusal.
+                  {"AND (m.assignment = 'holdout' OR m.delivered IS NOT FALSE)"
+                   if delivered_only else ""}
                 GROUP BY m.tier, m.assignment
                 """,
-                [sent_at, sent_at, promocode, campaign],
+                [campaign, campaign, sent_at, sent_at, promocode, campaign],
             ).fetchall()
 
         by_tier: Dict[str, Dict[str, Dict[str, Any]]] = {}
