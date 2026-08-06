@@ -776,6 +776,7 @@
   "sms.colMessaged": "Messaged",
   "sms.colControl": "Control",
   "sms.perContact": "/ contact",
+  "sms.moneyEstimate": "estimate, not a result yet",
   "sms.insufficientTitle": "Not enough data to call it yet",
   "sms.insufficientBody": "Every interval crosses zero: no arm has shown an effect. That is not the same as the campaign having done nothing — with this few purchases, a real gain of a couple of percentage points would look exactly like this. Read the figures again after 7–14 days.",
   "sms.tooEarlyTitle": "Nothing to measure yet",
