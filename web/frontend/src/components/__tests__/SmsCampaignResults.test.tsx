@@ -49,6 +49,7 @@ function comparison(over: Partial<SmsComparison> = {}): SmsComparison {
   return {
     conversionTarget: 4, conversionHoldout: 3, liftPp: 1,
     liftRelativePct: 33, ci95Pp: [-0.6, 2.6], pValue: 0.21, significant: false,
+    verdictReady: true, eventsTarget: 40, eventsHoldout: 4, minEvents: 5,
     incrementalRevenuePerContact: 12, incrementalMarginPerContact: 4,
     incrementalRevenueTotal: 12000, incrementalMarginTotal: 4000, ...over,
   }
@@ -139,6 +140,58 @@ describe('SmsCampaignResults', () => {
     expect(within(overall).getByText('₴12,000')).toBeTruthy()
     expect(within(overall).getByText('12.00 sms.perContact')).toBeTruthy()
     expect(within(overall).getByText('₴4,000')).toBeTruthy()
+  })
+
+  it('says "too early" rather than "no effect" while the control is thin', () => {
+    renderWith(response({
+      overall: {
+        target: stats(),
+        holdout: stats({ contacts: 120, converted: 1 }),
+        comparison: comparison({ verdictReady: false, eventsHoldout: 1 }),
+      },
+    }))
+
+    // The weaker sentence, and the count that explains it.
+    expect(screen.getByText(/sms\.verdictTooEarly.*"n":1/)).toBeTruthy()
+    expect(screen.queryByText('sms.verdictInconclusive')).toBeNull()
+  })
+
+  it('picks the banner that matches why nothing is proven', () => {
+    const thin = { verdictReady: false, eventsHoldout: 1 }
+    renderWith(response({
+      overall: {
+        target: stats(), holdout: stats({ contacts: 120, converted: 1 }),
+        comparison: comparison(thin),
+      },
+      segments: [{
+        tier: 'VIP', target: stats(), holdout: stats({ contacts: 40, converted: 0 }),
+        comparison: comparison({ verdictReady: false, eventsHoldout: 0 }),
+      }],
+    }))
+    expect(screen.getByText('sms.tooEarlyTitle')).toBeTruthy()
+    expect(screen.queryByText('sms.insufficientTitle')).toBeNull()
+  })
+
+  it('falls back to the wider-interval wording once the arms have bought', () => {
+    renderWith(response())   // verdictReady, nothing significant
+    expect(screen.getByText('sms.insufficientTitle')).toBeTruthy()
+    expect(screen.queryByText('sms.tooEarlyTitle')).toBeNull()
+  })
+
+  it('never paints a lift green while the verdict is withheld', () => {
+    const { container } = renderWith(response({
+      overall: {
+        target: stats(),
+        holdout: stats({ contacts: 120, converted: 0 }),
+        // An interval clear of zero, but on an arm that has not bought.
+        comparison: comparison({
+          ci95Pp: [0.4, 3.1], significant: false,
+          verdictReady: false, eventsHoldout: 0,
+        }),
+      },
+    }))
+
+    expect(container.querySelectorAll('td .text-emerald-700')).toHaveLength(0)
   })
 
   it('draws no table at all until the results have loaded', () => {
