@@ -90,10 +90,30 @@ function RateCell({ stats }: { stats: SmsGroupStats }) {
  *
  *  The total is what you weigh against what the send cost; the per-contact
  *  number is what you weigh against the ~₴1.3 a message costs to deliver.
- *  Both are wanted and neither is a column of its own. */
-function MoneyCell({ total, perContact }: { total: number; perContact: number }) {
+ *  Both are wanted and neither is a column of its own.
+ *
+ *  `estimate` marks the figure as not yet a result. Money is far less stable
+ *  than the conversion rate it sits beside — revenue per contact runs a
+ *  standard deviation thirteen times its own mean, so one large order moves a
+ *  total by six figures — and the p-value in the same row belongs to the rate,
+ *  not to this. Printed plain, a column reading "₴12 179" gave no hint that a
+ *  third of its plausible range was a loss. It stays visible, because watching
+ *  it move is the point, but it must not read as the result. */
+function MoneyCell({ total, perContact, estimate }: {
+  total: number
+  perContact: number
+  estimate?: boolean
+}) {
   const { t } = useTranslation()
 
+  if (estimate) {
+    return (
+      <>
+        <div className="text-slate-400">{formatCurrency(total)}</div>
+        <div className="text-[11px] text-slate-400 italic">{t('sms.moneyEstimate')}</div>
+      </>
+    )
+  }
   return (
     <>
       <div className="text-slate-800">{formatCurrency(total)}</div>
@@ -340,12 +360,14 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
                                 <MoneyCell
                                   total={c.incrementalRevenueTotal}
                                   perContact={c.incrementalRevenuePerContact}
+                                  estimate={!c.verdictReady}
                                 />
                               </Td>
                               <Td align="right" tabular>
                                 <MoneyCell
                                   total={c.incrementalMarginTotal}
                                   perContact={c.incrementalMarginPerContact}
+                                  estimate={!c.verdictReady}
                                 />
                               </Td>
                             </>
