@@ -32,6 +32,7 @@ function comparison(over: Partial<SmsComparison> = {}): SmsComparison {
     ci95Pp: [-0.5, 2.5], pValue: 0.2, significant: false,
     incrementalRevenuePerContact: 10, incrementalMarginPerContact: 5,
     incrementalRevenueTotal: 1000, incrementalMarginTotal: 500,
+    verdictReady: true, eventsTarget: 30, eventsHoldout: 20, minEvents: 5,
     ...over,
   }
 }

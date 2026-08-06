@@ -467,3 +467,199 @@ async def test_a_purchase_by_someone_never_messaged_is_not_a_response(tmp_path):
     assert overall["target"]["contacts"] == 9
 
     await store.close()
+
+
+async def _second_record(store, *, buyer_id: int, phone: str, name: str):
+    """A duplicate customer row for the same person, reached on the same phone.
+
+    Responding to a campaign creates these: the recipient follows the link,
+    checks out on the storefront, and the name is spelled differently enough
+    that a fresh buyer row is written.
+    """
+    async with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO buyers (id, full_name, phone) VALUES (?, ?, ?)",
+            [buyer_id, name, phone],
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_empty_control_does_not_certify_an_effect(tmp_path):
+    """The bug this guard exists for.
+
+    With Wald, a control arm where nobody has bought contributes exactly zero
+    variance, so the interval clears zero and the campaign reads as proven on
+    its first day. Nothing has been shown: 0 purchases out of 160 is consistent
+    with a true rate of nearly 2%, which is the whole of the measured lift.
+    """
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=1350, holdouts=160)
+
+    for i in range(1, 26):            # 25/1350 target, 0/160 control
+        await _buy(store, i, days_after=1)
+
+    cmp = (await store.get_sms_campaign_results("aug"))["overall"]["comparison"]
+
+    assert cmp["conversionHoldout"] == 0.0
+    assert cmp["liftPp"] > 1.8, "the raw gap is real enough to be tempting"
+    assert cmp["significant"] is False, "but an empty control shows nothing"
+    assert cmp["verdictReady"] is False
+    assert cmp["ci95Pp"][0] < 0, "the interval must reach below zero"
+    assert cmp["pValue"] > 0.05
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_needs_purchases_in_both_arms(tmp_path):
+    """Widening the interval is not enough on its own.
+
+    At one purchase in a large control the interval still clears zero, and the
+    honest reading of that is "too early", not "proven".
+    """
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=2000, holdouts=600)
+
+    for i in range(1, 41):
+        await _buy(store, i, days_after=1)
+    await _buy(store, 2001, days_after=1)      # a single control purchase
+
+    cmp = (await store.get_sms_campaign_results("aug"))["overall"]["comparison"]
+
+    assert cmp["eventsHoldout"] == 1
+    assert cmp["minEvents"] == 5
+    assert cmp["verdictReady"] is False
+    assert cmp["significant"] is False
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_is_offered_once_both_arms_have_bought(tmp_path):
+    """The guard must not swallow a result that has genuinely arrived."""
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=1000, holdouts=1000)
+
+    for i in range(1, 121):                    # 12% target
+        await _buy(store, i, days_after=2)
+    for i in range(1001, 1041):                # 4% control
+        await _buy(store, i, days_after=2)
+
+    cmp = (await store.get_sms_campaign_results("aug"))["overall"]["comparison"]
+
+    assert cmp["verdictReady"] is True
+    assert cmp["significant"] is True
+    assert cmp["ci95Pp"][0] > 0
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_interval_holds_the_lift_it_is_drawn_around(tmp_path):
+    """The chart draws the point and the interval from these two fields."""
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=500, holdouts=200)
+
+    for i in range(1, 51):
+        await _buy(store, i, days_after=2)
+    for i in range(501, 511):
+        await _buy(store, i, days_after=2)
+
+    cmp = (await store.get_sms_campaign_results("aug"))["overall"]["comparison"]
+
+    lo, hi = cmp["ci95Pp"]
+    assert lo <= cmp["liftPp"] <= hi
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_response_under_a_second_customer_record_still_counts(tmp_path):
+    """The campaign's own doing: the click creates the duplicate record.
+
+    Matching the purchase back by buyer_id misses it, and only the messaged arm
+    holds a link to click — so the loss is one-sided and always understates the
+    campaign.
+    """
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=10, holdouts=10)
+
+    # Member 3's phone is 380900000003 (see _seed_campaign); she checks out as
+    # a new customer, and the storefront writes buyer 9003 with a '+' prefix.
+    await _second_record(store, buyer_id=9003, phone="+380900000003",
+                         name="Anastasiia Y.")
+    await _buy(store, 9003, days_after=1, total="2000.00")
+
+    overall = (await store.get_sms_campaign_results("aug"))["overall"]
+
+    assert overall["target"]["converted"] == 1, "she is one responder, not none"
+    assert overall["target"]["revenue"] == 2000.0
+    assert overall["target"]["contacts"] == 10, "and still one contact"
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_one_person_on_two_records_is_still_one_response(tmp_path):
+    """Rolling records up must not turn one buyer into two."""
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=10, holdouts=10)
+
+    await _second_record(store, buyer_id=9003, phone="380900000003",
+                         name="Duplicate")
+    await _buy(store, 3, days_after=1, total="1000.00")
+    await _buy(store, 9003, days_after=2, total="1000.00")
+
+    overall = (await store.get_sms_campaign_results("aug"))["overall"]
+
+    assert overall["target"]["converted"] == 1, "one person"
+    assert overall["target"]["orders"] == 2, "who placed two orders"
+    assert overall["target"]["revenue"] == 2000.0
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stranger_on_a_different_number_is_not_a_member(tmp_path):
+    """The phone match must not sweep in whoever happens to be nearby."""
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=10, holdouts=10)
+
+    await _second_record(store, buyer_id=9999, phone="380671234567",
+                         name="Someone Else")
+    await _buy(store, 9999, days_after=1)
+
+    overall = (await store.get_sms_campaign_results("aug"))["overall"]
+
+    assert overall["target"]["converted"] == 0
+    assert overall["holdout"]["converted"] == 0
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_delivery_filter_keeps_recipients_with_no_report(tmp_path):
+    """A receipt that never arrived is not a failed delivery.
+
+    The provider's webhook does not reach us, so most recipients keep a NULL
+    delivery flag for ever. Reading NULL as undelivered dropped 246 people from
+    the first real campaign against 25 actual refusals.
+    """
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=10, holdouts=10)
+    async with store.connection() as conn:
+        conn.execute("UPDATE sms_campaign_members SET delivered = TRUE,"
+                     " delivery_status = 'Delivered'"
+                     " WHERE campaign = 'aug' AND buyer_id <= 3")
+        conn.execute("UPDATE sms_campaign_members SET delivered = FALSE,"
+                     " delivery_status = 'Rejected'"
+                     " WHERE campaign = 'aug' AND buyer_id = 4")
+        # 5..10 keep delivery_status 'Sent' and a NULL flag — in transit.
+
+    restricted = (await store.get_sms_campaign_results(
+        "aug", delivered_only=True))["overall"]
+
+    assert restricted["target"]["contacts"] == 9, "only the refusal is dropped"
+    assert restricted["holdout"]["contacts"] == 10
+
+    await store.close()

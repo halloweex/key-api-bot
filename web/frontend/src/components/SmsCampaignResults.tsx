@@ -50,9 +50,19 @@ interface ResultRow {
   emphasis?: boolean
 }
 
+// Three states, not two. "No effect shown" is a claim about the campaign;
+// before either arm has bought enough, the only true statement is that nobody
+// has measured anything yet, and saying the stronger thing reads as a failure.
 function Verdict({ comparison }: { comparison: SmsComparison }) {
   const { t } = useTranslation()
 
+  if (!comparison.verdictReady) {
+    return (
+      <Badge tone="orange">
+        {t('sms.verdictTooEarly', { n: comparison.eventsHoldout })}
+      </Badge>
+    )
+  }
   return comparison.significant ? (
     <Badge tone="green">
       {t('sms.verdictProven', { lift: comparison.liftPp.toFixed(1) })}
@@ -162,6 +172,13 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
   // is emphatically not the same as it having done nothing.
   const nothingProven =
     forestRows.length > 0 && forestRows.every((r) => !r.comparison.significant)
+  // And there are two ways to arrive there. Too few purchases to judge is the
+  // ordinary state of a campaign in its first days; intervals that span zero on
+  // arms that have bought plenty is a much later, much weaker result. They
+  // deserve different sentences.
+  const nothingMeasurable =
+    nothingProven && forestRows.every((r) => !r.comparison.verdictReady)
+  const minEvents = forestRows[0]?.comparison.minEvents ?? 5
 
   if (sent.length === 0) {
     return (
@@ -251,8 +268,13 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
             {/* ── Nothing clears zero: say so once, plainly ───────────── */}
             {nothingProven && (
               <div className="mb-4">
-                <InfoBanner title={t('sms.insufficientTitle')}>
-                  {t('sms.insufficientBody')}
+                <InfoBanner
+                  title={t(nothingMeasurable
+                    ? 'sms.tooEarlyTitle' : 'sms.insufficientTitle')}
+                >
+                  {nothingMeasurable
+                    ? t('sms.tooEarlyBody', { n: minEvents })
+                    : t('sms.insufficientBody')}
                 </InfoBanner>
               </div>
             )}
