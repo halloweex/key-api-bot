@@ -1376,8 +1376,14 @@ export interface SmsComparison {
   /** [low, high] of the 95% interval, in percentage points. */
   ci95Pp: [number, number]
   pValue: number
-  /** False whenever the interval spans zero — no effect has been shown. */
+  /** False whenever the interval spans zero, or an arm is below `minEvents`. */
   significant: boolean
+  /** Both arms have enough purchases for a verdict to mean anything.
+   *  False separates "too early to say" from the far stronger "no effect". */
+  verdictReady: boolean
+  eventsTarget: number
+  eventsHoldout: number
+  minEvents: number
   incrementalRevenuePerContact: number
   incrementalMarginPerContact: number
   incrementalRevenueTotal: number
