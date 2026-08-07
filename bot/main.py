@@ -39,11 +39,15 @@ _application: Application | None = None
 async def send_admin_message(text: str, parse_mode: str = "HTML") -> None:
     """Broadcast `text` to every admin in ADMIN_USER_IDS.
 
-    Imported by core/scheduler.py for memory/bronze alerts. Silently logs and
-    skips if the bot hasn't initialized yet or no admins are configured.
+    Imported by core/scheduler.py, core/duckdb_store.py and
+    core/prediction_service.py — all of which run inside the *web* container,
+    where no Application exists. Dropping the message there meant warehouse
+    validation could fail for days without anyone hearing about it, so with no
+    Application we fall back to the HTTP Bot API, which needs only the token.
     """
     if _application is None:
-        logger.warning("send_admin_message called before bot init; dropping: %s", text[:80])
+        from core.telegram_alerts import send_admin_message_http
+        await send_admin_message_http(text, parse_mode)
         return
     if not ADMIN_USER_IDS:
         return

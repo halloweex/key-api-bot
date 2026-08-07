@@ -51,6 +51,10 @@ services:
       - .env
     environment:
       - TZ=Europe/Kyiv
+      # DuckDB's own ceiling, well under mem_limit so Python/pandas/Meili keep
+      # room. Raise before a full warehouse rebuild; 3GB is what OOM'd on
+      # 2026-08-02 and truncated the Gold layer.
+      - DUCKDB_MEMORY_LIMIT=4GB
     volumes:
       - ./data:/app/data
     expose:
