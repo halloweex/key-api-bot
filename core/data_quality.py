@@ -499,6 +499,53 @@ def _freshness_check(conn, now: Optional[datetime] = None) -> List[IntegrityIssu
     return issues
 
 
+def _headline_vs_line_items_check(
+    conn, severity: "Severity" = None,
+) -> List[IntegrityIssue]:
+    """Flag completed orders billed at zero that still carry line items.
+
+    KeyCRM lets an order be saved with grand_total = 0 while its products are
+    invoiced separately. Revenue reads grand_total; the product, brand and
+    category pages read line items. The two therefore disagree by exactly these
+    orders — ₴4.16M across 1 177 of them as of 2026-08 — and nothing said so.
+    The gap is created upstream and cannot be fixed here, but it can stop being
+    invisible.
+    """
+    severity = severity or Severity.WARN
+    row = conn.execute("""
+        SELECT COUNT(*), COALESCE(SUM(li.amount), 0)
+        FROM silver_orders s
+        JOIN (SELECT order_id, SUM(price_sold * quantity) AS amount
+              FROM order_products GROUP BY order_id) li ON li.order_id = s.id
+        WHERE NOT s.is_return AND s.is_active_source
+          AND s.grand_total = 0 AND li.amount > 0
+    """).fetchone()
+    count = int(row[0] or 0)
+    if count == 0:
+        return []
+    amount = float(row[1] or 0)
+    sample = tuple(r[0] for r in conn.execute("""
+        SELECT s.id FROM silver_orders s
+        JOIN (SELECT order_id, SUM(price_sold * quantity) AS amount
+              FROM order_products GROUP BY order_id) li ON li.order_id = s.id
+        WHERE NOT s.is_return AND s.is_active_source
+          AND s.grand_total = 0 AND li.amount > 0
+        ORDER BY li.amount DESC LIMIT 10
+    """).fetchall())
+    return [IntegrityIssue(
+        check_name="headline_vs_line_items",
+        table_name="silver_orders",
+        severity=severity,
+        count=count,
+        sample_ids=sample,
+        description=(
+            f"{count} order(s) have grand_total = 0 but {amount:,.2f} in line "
+            "items. Revenue figures read grand_total and product/brand/category "
+            "figures read line items, so the two disagree by this amount."
+        ),
+    )]
+
+
 def check_internal_integrity(conn) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
 
@@ -535,6 +582,13 @@ def check_internal_integrity(conn) -> List[IntegrityIssue]:
 
     # Freshness — catch silent sync-pipeline stalls (e.g. categories 45d stale).
     issues += _freshness_check(conn)
+
+    # Cross-metric consistency — revenue and product pages read different
+    # columns, so orders billed at zero make them disagree without saying so.
+    try:
+        issues += _headline_vs_line_items_check(conn)
+    except Exception as exc:  # silver_orders may not exist yet on a fresh DB
+        logger.debug("headline_vs_line_items check skipped: %s", exc)
 
     return issues
 
