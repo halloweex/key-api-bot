@@ -44,7 +44,18 @@ async def send_admin_message(text: str, parse_mode: str = "HTML") -> None:
     where no Application exists. Dropping the message there meant warehouse
     validation could fail for days without anyone hearing about it, so with no
     Application we fall back to the HTTP Bot API, which needs only the token.
+
+    Identical alerts are throttled. Several callers re-raise the same message on
+    every scheduler tick for as long as a condition holds — the warehouse
+    validator does it every two minutes — and a channel that repeats itself 30
+    times an hour is one people learn to swipe away.
     """
+    from core.telegram_alerts import throttle_check
+
+    should_send, text = throttle_check(text)
+    if not should_send:
+        return
+
     if _application is None:
         from core.telegram_alerts import send_admin_message_http
         await send_admin_message_http(text, parse_mode)
