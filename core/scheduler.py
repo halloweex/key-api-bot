@@ -850,14 +850,16 @@ class BackgroundScheduler:
         from core.data_quality import (
             Severity,
             classify_discrepancies,
+            classify_order_discrepancies,
             format_alert_message,
             overall_severity,
             persist_run,
         )
         from core.duckdb_store import get_store
         from core.reconciliation_io import (
-            duckdb_monthly_source_rollup,
-            keycrm_monthly_source_rollup,
+            duckdb_orders_in_window,
+            keycrm_orders_in_window,
+            rollup_from_orders,
         )
 
         WATERMARK_HOURS = 2
@@ -882,23 +884,29 @@ class BackgroundScheduler:
             api_calls = 0
 
             try:
-                # 1. KeyCRM rollup (counts API calls). Runs first because it
+                # 1. KeyCRM orders (counts API calls). Runs first because it
                 #    decides which orders are in-flight — DuckDB's updated_at is
                 #    a synced copy and can only be older, so KeyCRM's cut is the
                 #    wider one and both sides must honour it.
-                kc_rollup, api_calls, inflight_ids = await keycrm_monthly_source_rollup(
+                kc_orders, api_calls, inflight_ids = await keycrm_orders_in_window(
                     window_start, window_end, watermark=as_of,
                 )
 
-                # 2. DuckDB rollup, excluding the same in-flight orders
+                # 2. The same facts from the warehouse, minus the same orders
                 async with store.connection() as conn:
-                    dk_rollup = duckdb_monthly_source_rollup(
+                    dk_orders = duckdb_orders_in_window(
                         conn, window_start, window_end, watermark=as_of,
                         exclude_ids=inflight_ids,
                     )
 
-                # 3. Classify (pure)
+                # 3. Classify (pure). Both rollups come from one function, so
+                #    the two sides cannot aggregate differently. The per-order
+                #    pass costs no extra API calls and catches what totals hide:
+                #    offsetting errors net to zero in a monthly sum.
+                dk_rollup = rollup_from_orders(dk_orders)
+                kc_rollup = rollup_from_orders(kc_orders)
                 discrepancies = classify_discrepancies(dk_rollup, kc_rollup)
+                discrepancies += classify_order_discrepancies(dk_orders, kc_orders)
                 logger.info(
                     f"DQ reconciliation: dk_cells={len(dk_rollup)} "
                     f"kc_cells={len(kc_rollup)} discrepancies={len(discrepancies)}"
