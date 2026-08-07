@@ -41,22 +41,42 @@ def _insert_order(conn, oid: int, buyer_id: int = 10):
 class TestRefreshSelfHeal:
     @pytest.mark.asyncio
     async def test_consecutive_failure_counter(self, tmp_path):
+        """Counts consecutive *errored* refreshes.
+
+        Validation failures have their own budget. They used to share this one,
+        which is how an OOM storm on 2026-08-02 spent the allowance meant for
+        repairing the damage the storm caused.
+        """
         store = await _make_store(tmp_path)
         async with store.connection() as conn:
-            # oldest → newest. Most recent two are failures.
-            for ts, vp in [
-                ("2026-01-01", True),
-                ("2026-01-02", False),
-                ("2026-01-03", True),
-                ("2026-01-04", False),
-                ("2026-01-05", False),
+            # oldest → newest. Most recent two threw.
+            for ts, err in [
+                ("2026-01-01", None),
+                ("2026-01-02", "boom"),
+                ("2026-01-03", None),
+                ("2026-01-04", "boom"),
+                ("2026-01-05", "boom"),
             ]:
                 conn.execute(
-                    "INSERT INTO warehouse_refreshes (refreshed_at, trigger, validation_passed) "
-                    "VALUES (?, 'test', ?)",
-                    [ts + "T00:00:00+03:00", vp],
+                    "INSERT INTO warehouse_refreshes "
+                    "(refreshed_at, trigger, validation_passed, error) "
+                    "VALUES (?, 'test', ?, ?)",
+                    [ts + "T00:00:00+03:00", err is None, err],
                 )
         assert await store._count_consecutive_refresh_failures() == 2
+
+    @pytest.mark.asyncio
+    async def test_validation_failures_do_not_spend_the_error_budget(self, tmp_path):
+        store = await _make_store(tmp_path)
+        async with store.connection() as conn:
+            for i in range(MAX_VALIDATION_RETRIES + 2):
+                conn.execute(
+                    "INSERT INTO warehouse_refreshes "
+                    "(refreshed_at, trigger, validation_passed, error) "
+                    "VALUES (?, 'test', FALSE, NULL)",
+                    [f"2026-01-0{i + 1}T00:00:00+03:00"],
+                )
+        assert await store._count_consecutive_refresh_failures() == 0
 
     @pytest.mark.asyncio
     async def test_pipeline_exception_marks_dirty_and_alerts(self, tmp_path, monkeypatch):
@@ -87,12 +107,13 @@ class TestRefreshSelfHeal:
         store = await _make_store(tmp_path)
         async with store.connection() as conn:
             _insert_order(conn, oid=1)
-            # Seed MAX_VALIDATION_RETRIES+1 prior consecutive failures so the
+            # Seed MAX_VALIDATION_RETRIES+1 prior consecutive *errors* so the
             # bound trips → no further dirty mark, CRITICAL alert instead.
             for i in range(MAX_VALIDATION_RETRIES + 1):
                 conn.execute(
-                    "INSERT INTO warehouse_refreshes (refreshed_at, trigger, validation_passed) "
-                    "VALUES (?, 'test', FALSE)",
+                    "INSERT INTO warehouse_refreshes "
+                    "(refreshed_at, trigger, validation_passed, error) "
+                    "VALUES (?, 'test', FALSE, 'boom')",
                     [f"2026-01-0{i+1}T00:00:00+03:00"],
                 )
         alerts: list[str] = []
