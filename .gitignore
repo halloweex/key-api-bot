@@ -131,6 +131,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv-spike/
 env/
 venv/
 ENV/
@@ -180,3 +181,8 @@ data/
 
 # Frontend build output (built in Docker)
 web/static-v2/
+
+# Provider reports and exports: these carry customer phone numbers.
+*.xlsx
+*.csv
+!tests/**/*.csv
