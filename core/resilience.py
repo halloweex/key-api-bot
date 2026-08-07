@@ -226,6 +226,15 @@ async def retry_with_backoff(
             jitter = delay * config.jitter * random.random()
             delay += jitter
 
+            # A server that told us how long to wait knows better than our
+            # curve — rate limiters in particular reset on their own schedule.
+            retry_after = getattr(e, "retry_after", None)
+            if retry_after:
+                try:
+                    delay = max(delay, float(retry_after))
+                except (TypeError, ValueError):
+                    pass
+
             logger.warning(
                 f"Attempt {attempt} failed, retrying in {delay:.2f}s",
                 extra={"attempt": attempt, "delay": delay, "error": str(e)}

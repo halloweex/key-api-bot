@@ -44,6 +44,32 @@ RETRY_CONFIG = RetryConfig(
     exponential_base=2.0
 )
 
+# Upper bound on how long we will honour a server's Retry-After. Long enough to
+# ride out a rate-limit window, short enough that a hostile value cannot park a
+# scheduler job for an hour.
+MAX_RETRY_AFTER_SECONDS = 60.0
+
+
+def _retry_after_seconds(response) -> float:
+    """Parse a Retry-After header into seconds, clamped and defaulted.
+
+    Only the delta-seconds form is handled; the HTTP-date form is rare in
+    practice and not worth the parsing surface. Anything unusable falls back to
+    a small delay so the caller still backs off.
+    """
+    raw = None
+    try:
+        raw = response.headers.get("Retry-After")
+    except Exception:
+        pass
+    try:
+        if raw is not None:
+            return max(0.0, min(float(raw), MAX_RETRY_AFTER_SECONDS))
+    except (TypeError, ValueError):
+        pass
+    return 5.0
+
+
 CIRCUIT_BREAKER_CONFIG = CircuitBreakerConfig(
     failure_threshold=5,
     recovery_timeout=60.0,
@@ -208,6 +234,16 @@ class KeyCRMClient:
                     f"API error {response.status_code}: {error_text}",
                     extra={"endpoint": endpoint, "status_code": response.status_code}
                 )
+                # 429 and 5xx are transient. Raised as KeyCRMAPIError they were
+                # not in retryable_exceptions, so a single rate-limit reply
+                # anywhere in a long pagination aborted the whole job — this is
+                # what killed most reconciliation runs. Raise the retryable type
+                # instead and let the caller's backoff handle it.
+                if response.status_code == 429 or response.status_code >= 500:
+                    raise KeyCRMConnectionError(
+                        f"API returned {response.status_code}",
+                        retry_after=_retry_after_seconds(response),
+                    )
                 raise KeyCRMAPIError(
                     f"API returned {response.status_code}",
                     status_code=response.status_code,
