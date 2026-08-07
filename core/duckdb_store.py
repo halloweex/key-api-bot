@@ -408,17 +408,11 @@ class DuckDBStore(
         CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);
 
         -- Pre-aggregated daily statistics (materialized for speed)
-        CREATE TABLE IF NOT EXISTS daily_stats (
-            date DATE NOT NULL,
-            source_id INTEGER NOT NULL,
-            orders_count INTEGER DEFAULT 0,
-            revenue DECIMAL(12, 2) DEFAULT 0,
-            returns_count INTEGER DEFAULT 0,
-            returns_revenue DECIMAL(12, 2) DEFAULT 0,
-            unique_customers INTEGER DEFAULT 0,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (date, source_id)
-        );
+        -- daily_stats was declared here and never written to. It sat empty
+        -- while presenting itself as pre-aggregated revenue by source, so any
+        -- query that trusted it would have got zeros for every day the
+        -- warehouse actually has data. gold_daily_revenue is the real table.
+        DROP TABLE IF EXISTS daily_stats;
 
         -- Expense types (delivery, taxes, advertising, etc.)
         CREATE TABLE IF NOT EXISTS expense_types (
@@ -855,7 +849,6 @@ class DuckDBStore(
         -- Additional indexes (non-duplicate, supplementing per-table indexes above)
         CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id);
         CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);
-        CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(date);
         CREATE INDEX IF NOT EXISTS idx_expenses_expense_type_id ON expenses(expense_type_id);
         CREATE INDEX IF NOT EXISTS idx_expenses_payment_date ON expenses(payment_date);
         CREATE INDEX IF NOT EXISTS idx_managers_is_retail ON managers(is_retail);
@@ -2046,10 +2039,19 @@ class DuckDBStore(
                         THEN TRUE ELSE FALSE
                     END
                 FROM (
+                    -- The baseline deliberately does NOT filter is_active_source.
+                    -- A purchase on a retired channel is still a purchase: with
+                    -- Opencart excluded here, 419 buyers whose first order was
+                    -- placed there counted as brand new the next time they bought
+                    -- on Instagram — 422 orders and ₴1,081,979.59 of repeat
+                    -- business booked as acquisition, overstating new customers
+                    -- by 3.9% across 2025.
+                    -- Returns stay excluded: a cancelled first order is not a
+                    -- purchase, so the next one genuinely is their first.
                     SELECT buyer_id, MIN(order_date) AS first_order_date
                     FROM silver_orders
                     WHERE {inner_filter}
-                      AND NOT is_return AND is_active_source
+                      AND NOT is_return
                     GROUP BY buyer_id
                 ) fo
                 WHERE silver_orders.buyer_id = fo.buyer_id
