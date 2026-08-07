@@ -12,6 +12,7 @@ falls back to it when no Application is available.
 """
 import asyncio
 import logging
+import time
 from typing import Iterable
 
 import httpx
@@ -23,6 +24,71 @@ TELEGRAM_API = "https://api.telegram.org"
 # Alerts are diagnostics, not user traffic — a slow Telegram must never stall a
 # warehouse refresh or a scheduler job.
 _TIMEOUT_SECONDS = 10.0
+
+# How long an identical alert stays silent after being sent. The warehouse
+# validator runs every two minutes and re-raises the same CRITICAL for as long
+# as the condition holds, so an unthrottled channel delivers 30 copies an hour
+# of a message whose whole point is "a human needs to act". Repetition does not
+# make it more actionable; it makes the channel ignorable.
+DEFAULT_COOLDOWN_SECONDS = 1800.0
+
+
+class AlertThrottle:
+    """Suppresses identical alerts within a cooldown, counting what it swallowed.
+
+    Keyed on exact message text, so distinct alerts never mask one another and
+    a changing metric in the body still gets through. State is per-process and
+    resets on restart — deliberately: after a restart the first alert of each
+    kind should always land.
+    """
+
+    def __init__(self, cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS):
+        self.cooldown_seconds = cooldown_seconds
+        self._last_sent: dict[str, float] = {}
+        self._suppressed: dict[str, int] = {}
+
+    def check(self, text: str, *, now: float | None = None) -> "tuple[bool, int]":
+        """Return (should_send, suppressed_since_last_send).
+
+        Calling this records the decision, so call it exactly once per attempt.
+        """
+        now = time.monotonic() if now is None else now
+        last = self._last_sent.get(text)
+        if last is not None and (now - last) < self.cooldown_seconds:
+            self._suppressed[text] = self._suppressed.get(text, 0) + 1
+            return False, self._suppressed[text]
+        swallowed = self._suppressed.pop(text, 0)
+        self._last_sent[text] = now
+        return True, swallowed
+
+
+_throttle = AlertThrottle()
+
+
+def throttle_check(text: str) -> "tuple[bool, str]":
+    """Decide whether `text` should go out, and what exactly to send.
+
+    Returns (should_send, text_to_send). When an alert has been muted, the copy
+    that finally lands says how many it stood in for — silence about the
+    suppression would understate how long the condition has been shouting.
+    """
+    allow, swallowed = _throttle.check(text)
+    if not allow:
+        logger.debug("Admin alert suppressed (repeat #%d within cooldown)", swallowed)
+        return False, text
+    if swallowed:
+        minutes = int(_throttle.cooldown_seconds // 60)
+        return True, (
+            f"{text}\n\n(unchanged, and repeated {swallowed}× "
+            f"in the last {minutes} min)"
+        )
+    return True, text
+
+
+def reset_throttle() -> None:
+    """Drop all throttle state. For tests and for a deliberate re-arm."""
+    _throttle._last_sent.clear()
+    _throttle._suppressed.clear()
 
 
 async def send_admin_message_http(
