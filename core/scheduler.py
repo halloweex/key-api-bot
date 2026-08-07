@@ -167,6 +167,19 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Order gap backfill (hourly). Detection is free — holes in our own
+        # id sequence — so this costs one API call per missing order and nothing
+        # at all once the holes are closed.
+        self._add_job(
+            job_id="order_gap_backfill",
+            name="Order Gap Backfill",
+            description="Re-fetch orders missing from our id sequence",
+            func=self._run_order_gap_backfill,
+            trigger=IntervalTrigger(hours=1),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Inventory snapshot (daily at 1 AM)
         self._add_job(
             job_id="inventory_snapshot",
@@ -991,6 +1004,44 @@ class BackgroundScheduler:
             }
             logger.info("DQ Layer-2 reconciliation complete", extra=result)
             return result
+
+    async def _run_order_gap_backfill(self) -> Dict[str, Any]:
+        """Fill holes in our order-id sequence by fetching them from KeyCRM.
+
+        The daily reconciliation only looks at the last 90 days, so the 1 616
+        orders missing from 2023–2025 would never have come up. Holes in the id
+        sequence find them without spending a single API call, and the repair
+        drains them a batch at a time until there is nothing left to ask for.
+        """
+        from core.duckdb_store import get_store
+        from core.sync_service import get_sync_service
+
+        with correlation_context():
+            store = await get_store()
+            gaps = await store.find_order_id_gaps(limit=200)
+            if not gaps:
+                logger.debug("Order gap backfill: no holes left")
+                return {"gaps_found": 0, "repaired": 0}
+
+            sync_service = await get_sync_service()
+            result = await sync_service.repair_orders(gaps)
+
+            # An id KeyCRM does not have is a hole that will never close.
+            # Recording it is what lets the job finish rather than loop.
+            permanent = {
+                oid: reason for oid, reason in result.get("failures", {}).items()
+                if "not found" in str(reason).lower()
+            }
+            recorded = await store.record_backfill_misses(permanent)
+
+            out = {
+                "gaps_found": len(gaps),
+                "repaired": result.get("repaired", 0),
+                "absent_upstream": recorded,
+                "failed": result.get("failed", 0),
+            }
+            logger.info(f"Order gap backfill: {out}")
+            return out
 
     # ─── Bronze Promotion & Prune ────────────────────────────────────────────
 
