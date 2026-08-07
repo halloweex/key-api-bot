@@ -16,6 +16,7 @@ Domain-specific query methods are organized into repository mixins:
 import asyncio
 import json
 import logging
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -48,6 +49,31 @@ logger = logging.getLogger(__name__)
 # served until the weekly full_sync) and an unbounded retry spin on a
 # deterministic data bug.
 MAX_VALIDATION_RETRIES = 3
+
+# DuckDB's own memory ceiling, independent of the container's mem_limit. Keep it
+# below what the container allows: Python, pandas frames and the Meili sync all
+# draw from the same budget, and a container OOM-kill is worse than a DuckDB
+# spill to temp_directory.
+DEFAULT_DUCKDB_MEMORY_LIMIT = "4GB"
+
+
+def _memory_limit() -> str:
+    """Resolve the DuckDB memory limit from DUCKDB_MEMORY_LIMIT.
+
+    Only DuckDB's own size syntax is accepted ("4GB", "512MB", …). Anything else
+    falls back to the default rather than reaching the SET statement, so a typo
+    in the environment cannot stop the store from connecting at all.
+    """
+    raw = (os.getenv("DUCKDB_MEMORY_LIMIT") or "").strip()
+    if not raw:
+        return DEFAULT_DUCKDB_MEMORY_LIMIT
+    if re.fullmatch(r"\d+(\.\d+)?\s*(K|M|G|T)?i?B", raw, re.IGNORECASE):
+        return raw
+    logger.warning(
+        "Ignoring malformed DUCKDB_MEMORY_LIMIT=%r; using %s",
+        raw, DEFAULT_DUCKDB_MEMORY_LIMIT,
+    )
+    return DEFAULT_DUCKDB_MEMORY_LIMIT
 
 
 class DuckDBStore(
@@ -87,9 +113,12 @@ class DuckDBStore(
                 # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM).
                 # 3GB verified safe for checkpoint on 19GB DB via compact_duckdb.py spike runs
                 # (also exercises full export). 2GB OOMs WAL flush — keep 3GB as floor.
-                # Lowered from 4GB → 3GB to free headroom for Python/Meili sync DataFrames
-                # on a 7g container; combined with temp_directory spill, query slowdown is bounded.
-                self._connection.execute("SET memory_limit='3GB'")
+                #
+                # 3GB was too tight: on 2026-08-02 seven consecutive warehouse refreshes died
+                # at 2.7/2.7 GiB while the container sat at ~950 MiB of its 7g budget, and the
+                # first refresh to complete afterwards left Gold truncated by 763 revenue rows.
+                # The ceiling is now configurable so it can be raised without a code deploy.
+                self._connection.execute(f"SET memory_limit='{_memory_limit()}'")
                 # Reduce memory usage for bulk operations
                 self._connection.execute("SET preserve_insertion_order=false")
                 # Large WAL threshold; rely on the explicit 6h CHECKPOINT job.
