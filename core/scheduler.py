@@ -882,16 +882,20 @@ class BackgroundScheduler:
             api_calls = 0
 
             try:
-                # 1. DuckDB rollup
+                # 1. KeyCRM rollup (counts API calls). Runs first because it
+                #    decides which orders are in-flight — DuckDB's updated_at is
+                #    a synced copy and can only be older, so KeyCRM's cut is the
+                #    wider one and both sides must honour it.
+                kc_rollup, api_calls, inflight_ids = await keycrm_monthly_source_rollup(
+                    window_start, window_end, watermark=as_of,
+                )
+
+                # 2. DuckDB rollup, excluding the same in-flight orders
                 async with store.connection() as conn:
                     dk_rollup = duckdb_monthly_source_rollup(
                         conn, window_start, window_end, watermark=as_of,
+                        exclude_ids=inflight_ids,
                     )
-
-                # 2. KeyCRM rollup (counts API calls)
-                kc_rollup, api_calls = await keycrm_monthly_source_rollup(
-                    window_start, window_end, watermark=as_of,
-                )
 
                 # 3. Classify (pure)
                 discrepancies = classify_discrepancies(dk_rollup, kc_rollup)
