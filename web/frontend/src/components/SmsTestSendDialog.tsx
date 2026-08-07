@@ -117,7 +117,7 @@ export const SmsTestSendDialog = memo(function SmsTestSendDialog({
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
               autoFocus
-              placeholder="+380 93 455 55 54"
+              placeholder="+380 96 111 11 11"
               className="mt-1 w-full px-3 py-2 text-sm border border-slate-200 rounded-lg
                          text-slate-700 focus:outline-none focus:ring-2
                          focus:ring-purple-500/30 focus:border-purple-400"

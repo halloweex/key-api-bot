@@ -504,7 +504,7 @@ def gateway(monkeypatch):
     _FakeTurboClient.sent = []
     _FakeTurboClient.error = None
     _FakeTurboClient.results = [
-        SendResult(phone="380934555554", message_id="msg-1", code=0, status="OK"),
+        SendResult(phone="380961111111", message_id="msg-1", code=0, status="OK"),
     ]
     monkeypatch.setattr(
         "web.routes.api.customers.TurboSmsClient", lambda *a, **kw: _FakeTurboClient()
@@ -522,23 +522,23 @@ class TestTestSend:
 
     def test_requires_session(self, client):
         assert client.post(
-            TEST_SEND_PATH, params={"phone": "380934555554", "text": "hi"},
+            TEST_SEND_PATH, params={"phone": "380961111111", "text": "hi"},
         ).status_code == 401
 
     def test_sends_the_normalised_number(self, client, gateway):
         r = client.post(
             TEST_SEND_PATH,
-            params={"phone": "+38 (093) 455-55-54", "text": "hi"},
+            params={"phone": "+38 (096) 111-11-11", "text": "hi"},
             headers=_admin_headers(),
         )
 
         assert r.status_code == 200
         assert gateway.sent == [
-            {"phones": ["380934555554"], "text": "hi", "viber": None},
+            {"phones": ["380961111111"], "text": "hi", "viber": None},
         ]
         assert r.json()["accepted"] is True
 
-    @pytest.mark.parametrize("phone", ["0934555554", "380934555", "123456789012"])
+    @pytest.mark.parametrize("phone", ["0961111111", "380961111", "123456789012"])
     def test_rejects_anything_a_campaign_could_not_contain(self, client, gateway, phone):
         r = client.post(
             TEST_SEND_PATH, params={"phone": phone, "text": "hi"},
@@ -552,7 +552,7 @@ class TestTestSend:
     def test_reports_the_billed_cost(self, client, gateway):
         """The cost cliff is the point: Cyrillic drops the limit to 70."""
         r = client.post(
-            TEST_SEND_PATH, params={"phone": "380934555554", "text": "я" * 71},
+            TEST_SEND_PATH, params={"phone": "380961111111", "text": "я" * 71},
             headers=_admin_headers(),
         )
 
@@ -562,12 +562,12 @@ class TestTestSend:
         from core.turbosms import SendResult
 
         gateway.results = [
-            SendResult(phone="380934555554", message_id=None, code=404,
+            SendResult(phone="380961111111", message_id=None, code=404,
                        status="NOT_ALLOWED_NUMBER_STOPLIST"),
         ]
 
         body = client.post(
-            TEST_SEND_PATH, params={"phone": "380934555554", "text": "hi"},
+            TEST_SEND_PATH, params={"phone": "380961111111", "text": "hi"},
             headers=_admin_headers(),
         ).json()
 
@@ -579,7 +579,7 @@ class TestTestSend:
 
         gateway.error = TurboSmsError("TurboSMS is not configured")
         r = client.post(
-            TEST_SEND_PATH, params={"phone": "380934555554", "text": "hi"},
+            TEST_SEND_PATH, params={"phone": "380961111111", "text": "hi"},
             headers=_admin_headers(),
         )
 
@@ -609,7 +609,7 @@ class TestChannelSelection:
         client.post(
             TEST_SEND_PATH,
             params={
-                "phone": "380934555554",
+                "phone": "380961111111",
                 "text": "Знижка https://example.com",
                 "channel": "viber_sms",
                 "viber_text": "Знижка",
@@ -628,7 +628,7 @@ class TestChannelSelection:
     def test_sms_channel_sends_no_viber_message(self, client, gateway):
         client.post(
             TEST_SEND_PATH,
-            params={"phone": "380934555554", "text": "Знижка", "channel": "sms"},
+            params={"phone": "380961111111", "text": "Знижка", "channel": "sms"},
             headers=_admin_headers(),
         )
 
@@ -637,7 +637,7 @@ class TestChannelSelection:
     def test_viber_text_defaults_to_the_sms_text(self, client, gateway):
         client.post(
             TEST_SEND_PATH,
-            params={"phone": "380934555554", "text": "Знижка", "channel": "viber_sms"},
+            params={"phone": "380961111111", "text": "Знижка", "channel": "viber_sms"},
             headers=_admin_headers(),
         )
 
@@ -647,7 +647,7 @@ class TestChannelSelection:
         r = client.post(
             TEST_SEND_PATH,
             params={
-                "phone": "380934555554", "text": "Знижка",
+                "phone": "380961111111", "text": "Знижка",
                 "channel": "viber_sms", "button_caption": "Korean Story",
             },
             headers=_admin_headers(),
@@ -660,7 +660,7 @@ class TestChannelSelection:
     def test_unknown_channel_is_refused(self, client, gateway):
         r = client.post(
             TEST_SEND_PATH,
-            params={"phone": "380934555554", "text": "hi", "channel": "telegram"},
+            params={"phone": "380961111111", "text": "hi", "channel": "telegram"},
             headers=_admin_headers(),
         )
 

@@ -58,7 +58,7 @@ describe('SmsTestSendDialog', () => {
     render(<SmsTestSendDialog onClose={() => {}} />)
     const [phone, message] = fields()
 
-    await userEvent.type(phone, '0934555554')
+    await userEvent.type(phone, '0961111111')
     await userEvent.type(message, 'Знижка 20%')
 
     expect(sendButton()).toBeDisabled()
@@ -68,7 +68,7 @@ describe('SmsTestSendDialog', () => {
     render(<SmsTestSendDialog onClose={() => {}} />)
     const [phone] = fields()
 
-    await userEvent.type(phone, '380934555554')
+    await userEvent.type(phone, '380961111111')
 
     expect(sendButton()).toBeDisabled()
   })
@@ -77,13 +77,13 @@ describe('SmsTestSendDialog', () => {
     render(<SmsTestSendDialog onClose={() => {}} />)
     const [phone, message] = fields()
 
-    await userEvent.type(phone, '+38 (093) 455-55-54')
+    await userEvent.type(phone, '+38 (096) 111-11-11')
     await userEvent.type(message, '  Знижка 20%  ')
     await userEvent.click(sendButton())
 
     expect(mutate).toHaveBeenCalledWith(
       {
-        phone: '380934555554', text: 'Знижка 20%',
+        phone: '380961111111', text: 'Знижка 20%',
         channel: 'sms', viber: undefined,
       },
       expect.anything(),
@@ -95,14 +95,14 @@ describe('SmsTestSendDialog', () => {
 
     await userEvent.click(screen.getByRole('radio', { name: 'sms.channelViberSms' }))
     const [phone, message, caption, url] = screen.getAllByRole('textbox')
-    await userEvent.type(phone, '380934555554')
+    await userEvent.type(phone, '380961111111')
     await userEvent.type(message, 'День народження')
     await userEvent.type(caption, 'Korean Story')
     await userEvent.type(url, 'https://example.com')
     await userEvent.click(sendButton())
 
     expect(mutate.mock.calls[0][0]).toEqual({
-      phone: '380934555554',
+      phone: '380961111111',
       text: 'День народження\nhttps://example.com',
       channel: 'viber_sms',
       viber: {
@@ -146,7 +146,7 @@ describe('SmsTestSendDialog', () => {
   it('surfaces a stoplist refusal instead of reporting success', async () => {
     mutate.mockImplementation((_vars, opts) =>
       opts.onSuccess({
-        phone: '380934555554', accepted: false, stoplisted: true,
+        phone: '380961111111', accepted: false, stoplisted: true,
         messageId: null, code: 404, status: 'NOT_ALLOWED_NUMBER_STOPLIST',
         cost: { encoding: 'ucs2', characters: 10, parts: 1 },
       }),
@@ -154,7 +154,7 @@ describe('SmsTestSendDialog', () => {
     render(<SmsTestSendDialog onClose={() => {}} />)
     const [phone, message] = fields()
 
-    await userEvent.type(phone, '380934555554')
+    await userEvent.type(phone, '380961111111')
     await userEvent.type(message, 'Знижка')
     await userEvent.click(sendButton())
 
@@ -167,7 +167,7 @@ describe('SmsTestSendDialog', () => {
     const onClose = vi.fn()
     mutate.mockImplementation((_vars, opts) =>
       opts.onSuccess({
-        phone: '380934555554', accepted: true, stoplisted: false,
+        phone: '380961111111', accepted: true, stoplisted: false,
         messageId: 'msg-1', code: 0, status: 'OK',
         cost: { encoding: 'ucs2', characters: 6, parts: 1 },
       }),
@@ -175,7 +175,7 @@ describe('SmsTestSendDialog', () => {
     render(<SmsTestSendDialog onClose={onClose} />)
     const [phone, message] = fields()
 
-    await userEvent.type(phone, '380934555554')
+    await userEvent.type(phone, '380961111111')
     await userEvent.type(message, 'Знижка')
     await userEvent.click(sendButton())
 
