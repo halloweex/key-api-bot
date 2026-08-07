@@ -177,9 +177,13 @@ async def rebuild_silver_from_scratch(
                     THEN TRUE ELSE FALSE
                 END
             FROM (
+                -- Must stay identical to _silver_pass2_sql in core/duckdb_store.py.
+                -- No is_active_source filter: a purchase on a retired channel is
+                -- still a purchase, and filtering it here made returning buyers
+                -- look new. See the comment there for the numbers.
                 SELECT buyer_id, MIN(order_date) AS first_order_date
                 FROM silver_orders
-                WHERE buyer_id IS NOT NULL AND NOT is_return AND is_active_source
+                WHERE buyer_id IS NOT NULL AND NOT is_return
                 GROUP BY buyer_id
             ) fo
             WHERE silver_orders.buyer_id = fo.buyer_id
