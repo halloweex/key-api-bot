@@ -40,9 +40,9 @@ def run(batches, months):
     from collections import defaultdict
     rollup = defaultdict(lambda: {"orders": 0, "qty": 0, "revenue": 0.0,
                                   "returns_count": 0, "returns_revenue": 0.0})
-    for month in months:
+    for _month in months:
         for batch in batches:
-            _process_batch(batch, month, rollup, seen, WATERMARK,
+            _process_batch(batch, rollup, seen, WATERMARK,
                            WINDOW_START, WINDOW_END, inflight)
     return dict(rollup), inflight
 
@@ -74,17 +74,29 @@ class TestWindowClipping:
 
 
 class TestMonthBoundaryDedup:
-    def test_next_month_order_survives_the_widening(self):
+    def test_next_month_order_counts_from_whichever_pass_finds_it(self):
         """June 1st is pulled into May's fetch by the +2 day widening."""
         mays_page = [order(1, "2026-06-01T10:00:00+00:00")]
-        junes_page = [order(1, "2026-06-01T10:00:00+00:00")]
         rollup, _ = run([mays_page], ["2026-05"])
-        assert rollup.get(("2026-06", 1), {"orders": 0})["orders"] == 0
 
-        rollup, _ = run([mays_page, junes_page], ["2026-05", "2026-06"])
         assert rollup[("2026-06", 1)]["orders"] == 1, (
-            "order was consumed by May's pass and never counted in June"
+            "the month being iterated decides what we ask for, not what counts"
         )
+
+    def test_backdated_order_reachable_only_through_a_later_month(self):
+        """Order 40028: created May, ordered June, updated July.
+
+        June's windows miss it on both created_at and updated_at; only July's
+        updated_between surfaces it, and by then June has been processed.
+        """
+        julys_page = [order(40028, "2026-06-04T13:36:29+00:00", source_id=2,
+                            grand_total=11689.0, quantity=17,
+                            updated_at="2026-07-03T15:32:42+00:00")]
+        rollup, _ = run([[], julys_page], ["2026-06", "2026-07"])
+
+        assert rollup[("2026-06", 2)]["orders"] == 1
+        assert rollup[("2026-06", 2)]["revenue"] == 11689.0
+        assert rollup[("2026-06", 2)]["qty"] == 17
 
     def test_no_double_count_when_both_passes_return_it(self):
         page = [order(1, "2026-06-10T10:00:00+00:00")]
@@ -92,7 +104,7 @@ class TestMonthBoundaryDedup:
 
         assert rollup[("2026-06", 1)]["orders"] == 1
 
-    def test_previous_month_order_is_left_for_nobody_but_still_not_counted(self):
+    def test_order_outside_the_window_is_never_counted(self):
         """April 30 appears in May's -2 day widening; it is outside the run."""
         batch = [order(1, "2026-04-30T10:00:00+00:00")]
         rollup, _ = run([batch], ["2026-05"])

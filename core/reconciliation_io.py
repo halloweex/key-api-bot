@@ -216,7 +216,7 @@ async def keycrm_monthly_source_rollup(
             }
             async for batch in client.paginate("order", params=params, page_size=50):
                 page_count += 1
-                _process_batch(batch, m_str, rollup, seen, watermark_utc,
+                _process_batch(batch, rollup, seen, watermark_utc,
                                window_start, window_end, inflight)
             # Pass 2: updated_between (status changes on backdated orders)
             params_upd = {
@@ -225,7 +225,7 @@ async def keycrm_monthly_source_rollup(
             }
             async for batch in client.paginate("order", params=params_upd, page_size=50):
                 page_count += 1
-                _process_batch(batch, m_str, rollup, seen, watermark_utc,
+                _process_batch(batch, rollup, seen, watermark_utc,
                                window_start, window_end, inflight)
 
             api_calls += page_count
@@ -239,7 +239,6 @@ async def keycrm_monthly_source_rollup(
 
 def _process_batch(
     batch: list,
-    target_month: str,
     rollup: Dict[Tuple[str, int], Dict[str, float]],
     seen: set,
     watermark_utc: datetime,
@@ -250,13 +249,19 @@ def _process_batch(
     """Update rollup in-place with one KeyCRM page of orders, deduplicating
     by order id.
 
-    `seen` is only stamped once an order has been *resolved* — counted, or
-    knowingly held back as in-flight. Stamping on sight looked equivalent but
-    was not: each month is fetched with a ±2 day widening, so an order belonging
-    to the following month was marked seen while iterating this one, discarded
-    for the month mismatch, and then skipped for good when its own month came
-    round. The 1st and 2nd of every month quietly went missing from the KeyCRM
-    side, and the warehouse got blamed for the difference.
+    Every order is credited to the month it was *ordered* in, no matter which
+    month's fetch surfaced it. The month loop only decides what we ask KeyCRM
+    for; it has no business deciding what counts. It used to: orders whose month
+    did not match the pass being iterated were thrown away, which silently lost
+    anything whose ordered_at, created_at and updated_at fall in different
+    months. Order 40028 — created 2026-05-01, ordered 2026-06-04, updated
+    2026-07-03 — is reachable only through July's updated_between window, by
+    which point June had already been processed.
+
+    Correctness rests on `seen` instead, which is stamped once an order has been
+    *resolved* — counted, or knowingly held back as in-flight. Stamping on sight
+    looked equivalent but was not: an order pulled in by a neighbouring month's
+    ±2 day widening was marked seen there and then skipped for good.
     """
     for o in batch:
         oid = o.get("id")
@@ -275,12 +280,7 @@ def _process_batch(
         except (ValueError, TypeError):
             continue
         m = dt.strftime("%Y-%m")
-        if m != target_month:
-            # Belongs to an adjacent month pulled in by the widening. Leave it
-            # unseen so its own iteration can claim it.
-            continue
         if not (window_start <= dt.date() <= window_end):
-            # Inside the calendar month, outside the reconciliation window.
             continue
 
         # Watermark check
