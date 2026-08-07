@@ -14,7 +14,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from core.reconciliation_io import _process_batch
+from core.reconciliation_io import _process_batch, rollup_from_orders
 
 WATERMARK = datetime(2026, 8, 4, 0, 0, tzinfo=timezone.utc)
 WINDOW_START = date(2026, 5, 6)
@@ -36,15 +36,12 @@ def order(oid, ordered_at, *, source_id=1, status_id=12, grand_total=100.0,
 
 def run(batches, months):
     """Feed batches through the month loop the way the real fetcher does."""
-    rollup, seen, inflight = {}, set(), set()
-    from collections import defaultdict
-    rollup = defaultdict(lambda: {"orders": 0, "qty": 0, "revenue": 0.0,
-                                  "returns_count": 0, "returns_revenue": 0.0})
+    orders, inflight = {}, set()
     for _month in months:
         for batch in batches:
-            _process_batch(batch, rollup, seen, WATERMARK,
+            _process_batch(batch, orders, WATERMARK,
                            WINDOW_START, WINDOW_END, inflight)
-    return dict(rollup), inflight
+    return rollup_from_orders(orders), inflight
 
 
 class TestWindowClipping:

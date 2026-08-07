@@ -541,6 +541,83 @@ def _orders_without_line_items_check(
         ),
     )]
 
+def classify_order_discrepancies(
+    dk: Dict[int, Dict[str, Any]],
+    kc: Dict[int, Dict[str, Any]],
+    *,
+    fields: Tuple[str, ...] = (
+        "status_id", "source_id", "manager_id", "buyer_id",
+        "grand_total", "order_date", "n_lines", "qty", "line_amount",
+    ),
+    money_fields: frozenset = frozenset({"grand_total", "line_amount"}),
+    money_tolerance: float = 0.01,
+    max_ids: int = 50,
+) -> List[Discrepancy]:
+    """Compare two order-id → facts maps, order by order.
+
+    Rollups net out anything that offsets — a status wrong on one order and
+    right on another, a line item lost here and gained there, a manager
+    reassigned — so the monthly comparison can be perfectly green while
+    individual orders disagree. This sees those.
+
+    Results are grouped into one Discrepancy per (month, source, field) so they
+    fit the existing diffs table, with `dk_value` carrying the number of orders
+    that differ and `order_ids` carrying handles for triage.
+    """
+    grouped: Dict[Tuple[str, int, str, DiscrepancyClass], List[int]] = {}
+
+    def _add(order_id: int, facts: Dict[str, Any], field_name: str,
+             klass: DiscrepancyClass) -> None:
+        order_date = facts.get("order_date")
+        month = order_date.strftime("%Y-%m") if order_date is not None else "unknown"
+        source_id = int(facts.get("source_id") or 0)
+        grouped.setdefault((month, source_id, field_name, klass), []).append(order_id)
+
+    for order_id in sorted(set(kc) - set(dk)):
+        _add(order_id, kc[order_id], "order", DiscrepancyClass.MISSING_IN_DK)
+    for order_id in sorted(set(dk) - set(kc)):
+        _add(order_id, dk[order_id], "order", DiscrepancyClass.MISSING_IN_KC)
+
+    for order_id in sorted(set(dk) & set(kc)):
+        dk_facts, kc_facts = dk[order_id], kc[order_id]
+        for field_name in fields:
+            dk_value, kc_value = dk_facts.get(field_name), kc_facts.get(field_name)
+            if field_name in money_fields:
+                differs = abs(float(dk_value or 0) - float(kc_value or 0)) > money_tolerance
+            else:
+                differs = dk_value != kc_value
+            if not differs:
+                continue
+            klass = (DiscrepancyClass.STATUS_DRIFT if field_name == "status_id"
+                     else DiscrepancyClass.VALUE_MISMATCH)
+            _add(order_id, kc_facts, field_name, klass)
+
+    out: List[Discrepancy] = []
+    for (month, source_id, field_name, klass), ids in sorted(
+        grouped.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2])
+    ):
+        # A per-order difference is material by construction: there is no
+        # rounding noise in "this order exists on one side only" or "its status
+        # is 12 here and 19 there".
+        severity = (
+            Severity.CRITICAL
+            if klass in (DiscrepancyClass.MISSING_IN_DK,
+                         DiscrepancyClass.MISSING_IN_KC,
+                         DiscrepancyClass.STATUS_DRIFT)
+            else Severity.WARN
+        )
+        out.append(Discrepancy(
+            month=month,
+            source_id=source_id,
+            diff_class=klass,
+            field=field_name,
+            dk_value=float(len(ids)),
+            kc_value=0.0,
+            severity=severity,
+            order_ids=tuple(ids[:max_ids]),
+        ))
+    return out
+
 
 def _headline_vs_line_items_check(
     conn, severity: "Severity" = None,
