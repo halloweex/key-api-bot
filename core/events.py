@@ -60,7 +60,6 @@ class SyncEvent(Enum):
     INVENTORY_UPDATED = "inventory.updated"
 
     # Analytics events
-    DAILY_STATS_UPDATED = "analytics.daily_stats_updated"
     SEASONALITY_CALCULATED = "analytics.seasonality_calculated"
     GOALS_UPDATED = "analytics.goals_updated"
 
