@@ -846,6 +846,16 @@ class DuckDBStore(
             error VARCHAR
         );
 
+        -- Order ids KeyCRM does not have. The gap-backfill walks the holes in
+        -- our own id sequence, and a hole KeyCRM cannot fill is permanent —
+        -- a deleted order, or one that never existed. Remembering them is what
+        -- stops the job re-requesting the same 404s every run, forever.
+        CREATE TABLE IF NOT EXISTS order_backfill_misses (
+            order_id BIGINT PRIMARY KEY,
+            checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            reason VARCHAR
+        );
+
         -- Additional indexes (non-duplicate, supplementing per-table indexes above)
         CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id);
         CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);
@@ -2597,6 +2607,41 @@ class DuckDBStore(
             if value == "full":
                 return True, None
             return True, json.loads(value)
+
+    async def find_order_id_gaps(self, limit: int = 200) -> List[int]:
+        """Order ids missing from our copy, found without asking KeyCRM.
+
+        KeyCRM issues order ids as a dense sequence, so every hole between our
+        lowest and highest id is an order we never stored. That makes finding
+        them free: 1 660 holes existed as of 2026-08, and a full-history
+        comparison against the API confirmed 1 616 of them were real orders.
+
+        Ids already known to be absent upstream are skipped, so the list drains
+        to empty instead of cycling forever.
+        """
+        async with self.connection() as conn:
+            rows = conn.execute("""
+                WITH bounds AS (SELECT MIN(id) lo, MAX(id) hi FROM orders)
+                SELECT g.id FROM bounds, generate_series(bounds.lo, bounds.hi) AS g(id)
+                WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.id = g.id)
+                  AND NOT EXISTS (SELECT 1 FROM order_backfill_misses m
+                                  WHERE m.order_id = g.id)
+                ORDER BY g.id
+                LIMIT ?
+            """, [int(limit)]).fetchall()
+        return [int(r[0]) for r in rows]
+
+    async def record_backfill_misses(self, misses: "Dict[int, str]") -> int:
+        """Remember ids KeyCRM could not supply, so they are not retried."""
+        if not misses:
+            return 0
+        async with self.connection() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO order_backfill_misses "
+                "(order_id, checked_at, reason) VALUES (?, CURRENT_TIMESTAMP, ?)",
+                [(int(oid), str(reason)[:200]) for oid, reason in misses.items()],
+            )
+        return len(misses)
 
     def _claim_stuck_rebuild_slot(self) -> bool:
         """Take the one full-rebuild attempt allowed per cooldown, if it is free.

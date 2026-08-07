@@ -167,6 +167,19 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Order gap backfill (hourly). Detection is free — holes in our own
+        # id sequence — so this costs one API call per missing order and nothing
+        # at all once the holes are closed.
+        self._add_job(
+            job_id="order_gap_backfill",
+            name="Order Gap Backfill",
+            description="Re-fetch orders missing from our id sequence",
+            func=self._run_order_gap_backfill,
+            trigger=IntervalTrigger(hours=1),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Inventory snapshot (daily at 1 AM)
         self._add_job(
             job_id="inventory_snapshot",
@@ -934,13 +947,58 @@ class BackgroundScheduler:
             except Exception as e:
                 logger.exception(f"DQ reconciliation persist failed: {e}")
 
-            # 5. Alert on CRITICAL severity
+            # 5. Repair what can only be repaired by id. A delta sync keyed on
+            #    updated_at can never reach an order we do not hold, so finding
+            #    them and doing nothing would mean finding them again tomorrow.
+            #    Additive only — MISSING_IN_KC is deliberately not touched,
+            #    because deleting on the strength of one API reading is how you
+            #    turn a fetch glitch into data loss.
+            repair = None
+            if not error_message:
+                repairable = sorted({
+                    oid
+                    for d in discrepancies
+                    if d.diff_class == DiscrepancyClass.MISSING_IN_DK
+                    for oid in d.order_ids
+                })
+                # Half-written orders are found by scanning our own tables, not
+                # by the comparison, so they are not bounded by the 90-day
+                # window — which matters, because most of them are older than it.
+                try:
+                    async with store.connection() as conn:
+                        repairable += [
+                            int(r[0]) for r in conn.execute("""
+                                SELECT o.id FROM orders o
+                                LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
+                                       ON li.order_id = o.id
+                                WHERE li.order_id IS NULL AND o.grand_total > 0
+                                ORDER BY o.grand_total DESC LIMIT ?
+                            """, [SyncService.REPAIR_BATCH_LIMIT]).fetchall()
+                        ]
+                except Exception as e:
+                    logger.warning(f"Could not list half-written orders: {e}")
+
+                if repairable:
+                    try:
+                        sync_service = await get_sync_service()
+                        repair = await sync_service.repair_orders(repairable)
+                    except Exception as e:
+                        logger.exception(f"DQ repair failed: {e}")
+
+            # 6. Alert on CRITICAL severity
             sev = overall_severity(issues, discrepancies)
             if sev == Severity.CRITICAL and not error_message:
                 msg = format_alert_message(
                     "reconciliation", sev, issues, discrepancies,
                     window=(window_start, window_end),
                 )
+                if repair and repair.get("repaired"):
+                    msg += (
+                        f"\n\nRe-fetched {repair['repaired']} order(s) by id"
+                        + (f", {repair['remaining']} queued for the next run"
+                           if repair.get("remaining") else "")
+                        + "."
+                    )
                 await self._send_dq_alert_throttled("reconciliation", msg)
 
             result = {
@@ -949,10 +1007,49 @@ class BackgroundScheduler:
                 "severity": sev.value,
                 "duration_ms": int((ended_at - started_at).total_seconds() * 1000),
                 "api_calls_used": api_calls,
+                "repair": repair,
                 "error": error_message,
             }
             logger.info("DQ Layer-2 reconciliation complete", extra=result)
             return result
+
+    async def _run_order_gap_backfill(self) -> Dict[str, Any]:
+        """Fill holes in our order-id sequence by fetching them from KeyCRM.
+
+        The daily reconciliation only looks at the last 90 days, so the 1 616
+        orders missing from 2023–2025 would never have come up. Holes in the id
+        sequence find them without spending a single API call, and the repair
+        drains them a batch at a time until there is nothing left to ask for.
+        """
+        from core.duckdb_store import get_store
+        from core.sync_service import get_sync_service
+
+        with correlation_context():
+            store = await get_store()
+            gaps = await store.find_order_id_gaps(limit=200)
+            if not gaps:
+                logger.debug("Order gap backfill: no holes left")
+                return {"gaps_found": 0, "repaired": 0}
+
+            sync_service = await get_sync_service()
+            result = await sync_service.repair_orders(gaps)
+
+            # An id KeyCRM does not have is a hole that will never close.
+            # Recording it is what lets the job finish rather than loop.
+            permanent = {
+                oid: reason for oid, reason in result.get("failures", {}).items()
+                if "not found" in str(reason).lower()
+            }
+            recorded = await store.record_backfill_misses(permanent)
+
+            out = {
+                "gaps_found": len(gaps),
+                "repaired": result.get("repaired", 0),
+                "absent_upstream": recorded,
+                "failed": result.get("failed", 0),
+            }
+            logger.info(f"Order gap backfill: {out}")
+            return out
 
     # ─── Bronze Promotion & Prune ────────────────────────────────────────────
 

@@ -499,6 +499,48 @@ def _freshness_check(conn, now: Optional[datetime] = None) -> List[IntegrityIssu
     return issues
 
 
+def _orders_without_line_items_check(
+    conn, severity: "Severity" = None, min_total: float = 0.01,
+) -> List[IntegrityIssue]:
+    """Flag orders that carry revenue but hold no line items at all.
+
+    An order billed for money must have sold something. When the header lands
+    and the products do not, every revenue figure is right and every product,
+    brand and category figure is short — and the order looks complete, so no
+    delta sync ever goes back for it. 552 orders were in this state as of
+    2026-08, worth ₴1,422,610.30, 437 of them from a single month.
+    """
+    severity = severity or Severity.WARN
+    row = conn.execute("""
+        SELECT COUNT(*), COALESCE(SUM(o.grand_total), 0)
+        FROM orders o
+        LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
+               ON li.order_id = o.id
+        WHERE li.order_id IS NULL AND o.grand_total >= ?
+    """, [min_total]).fetchone()
+    count = int(row[0] or 0)
+    if count == 0:
+        return []
+    sample = tuple(r[0] for r in conn.execute("""
+        SELECT o.id FROM orders o
+        LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
+               ON li.order_id = o.id
+        WHERE li.order_id IS NULL AND o.grand_total >= ?
+        ORDER BY o.grand_total DESC LIMIT 10
+    """, [min_total]).fetchall())
+    return [IntegrityIssue(
+        check_name="orders_without_line_items",
+        table_name="order_products",
+        severity=severity,
+        count=count,
+        sample_ids=sample,
+        description=(
+            f"{count} order(s) worth {float(row[1] or 0):,.2f} have no line "
+            "items. Revenue counts them, product/brand/category breakdowns "
+            "cannot. Repairable by re-fetching those ids from KeyCRM."
+        ),
+    )]
+
 def classify_order_discrepancies(
     dk: Dict[int, Dict[str, Any]],
     kc: Dict[int, Dict[str, Any]],
@@ -667,6 +709,10 @@ def check_internal_integrity(conn) -> List[IntegrityIssue]:
         issues += _headline_vs_line_items_check(conn)
     except Exception as exc:  # silver_orders may not exist yet on a fresh DB
         logger.debug("headline_vs_line_items check skipped: %s", exc)
+
+    # An order with revenue and no products is a half-written order. The header
+    # makes it look complete, so nothing goes back for it on its own.
+    issues += _orders_without_line_items_check(conn)
 
     return issues
 

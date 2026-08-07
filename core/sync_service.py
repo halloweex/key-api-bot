@@ -1024,6 +1024,68 @@ class SyncService:
 
         return stats
 
+    # An order-by-order repair is one API call each, so a run is bounded and the
+    # remainder is picked up on the next one rather than fired off in a burst
+    # that trips the rate limiter.
+    REPAIR_BATCH_LIMIT = 200
+
+    async def repair_orders(
+        self, order_ids, *, limit: int | None = None,
+    ) -> Dict[str, Any]:
+        """Re-fetch specific orders from KeyCRM and upsert them whole.
+
+        The date-window syncs cannot reach these: an order absent from our copy
+        is invisible to a delta sync keyed on updated_at, and one whose line
+        items failed to write looks complete because the header is there. Both
+        need the order pulled again by id.
+
+        Only ever adds or corrects — nothing is deleted, so this is safe to run
+        automatically against ids that a comparison against the source flagged.
+        """
+        ids = list(dict.fromkeys(int(i) for i in order_ids))
+        cap = self.REPAIR_BATCH_LIMIT if limit is None else limit
+        attempted, fetched = ids[:cap], []
+        failures: Dict[int, str] = {}
+
+        if not attempted:
+            return {"requested": 0, "attempted": 0, "repaired": 0,
+                    "failed": 0, "remaining": 0, "failures": {}}
+
+        client = await get_async_client()
+        for order_id in attempted:
+            try:
+                order = await client.get_order(
+                    order_id, include="products.offer,manager,buyer,expenses",
+                )
+                if order and order.get("id"):
+                    fetched.append(order)
+                else:
+                    failures[order_id] = "not found in KeyCRM"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failures[order_id] = f"{type(exc).__name__}: {exc}"
+
+        repaired = 0
+        if fetched:
+            # force_update: the whole point is to overwrite what we hold, and
+            # KeyCRM's updated_at may well be older than our last touch.
+            repaired, _ = await self._upsert_orders_with_expenses(
+                fetched, force_update=True, bronze_source="repair",
+            )
+            await self.store.mark_warehouse_dirty([o["id"] for o in fetched])
+
+        result = {
+            "requested": len(ids),
+            "attempted": len(attempted),
+            "repaired": int(repaired),
+            "failed": len(failures),
+            "remaining": max(0, len(ids) - len(attempted)),
+            "failures": dict(list(failures.items())[:10]),
+        }
+        logger.info(f"Order repair: {result}")
+        return result
+
     async def reconcile_with_api(self, days_back: int = 14, auto_resync: bool = True) -> list[dict]:
         """Compare orders between DuckDB and KeyCRM API per day.
 
