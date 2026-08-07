@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
@@ -49,6 +50,13 @@ logger = logging.getLogger(__name__)
 # served until the weekly full_sync) and an unbounded retry spin on a
 # deterministic data bug.
 MAX_VALIDATION_RETRIES = 3
+
+# Once the retry budget is spent we stop rebuilding on every scheduler tick, but
+# "stop" used to mean forever — the Gold layer stayed wrong until a human acted
+# or the weekly full_sync came round. On 2026-08-02 that was five days. A full
+# rebuild every six hours is cheap enough to be worth the chance that the damage
+# was transient, and rare enough not to spin on a deterministic data bug.
+STUCK_REBUILD_COOLDOWN_SECONDS = 6 * 60 * 60
 
 # DuckDB's own memory ceiling, independent of the container's mem_limit. Keep it
 # below what the container allows: Python, pandas frames and the Meili sync all
@@ -91,6 +99,11 @@ class DuckDBStore(
     - Fast analytical queries
     - Thread offloading to avoid blocking asyncio event loop
     """
+
+    # Monotonic timestamp of the last full rebuild attempted after the per-tick
+    # retry budget ran out. Class-level default so instances built without
+    # __init__ still read cleanly.
+    _last_stuck_rebuild: "float | None" = None
 
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
@@ -2307,8 +2320,15 @@ class DuckDBStore(
                     # the loop and escalate LOUDLY. The old code went silently idle
                     # on the 2nd consecutive failure, leaving the Gold layer serving
                     # wrong revenue until the weekly full_sync, with no alert.
+                    #
+                    # Errored rows are skipped rather than counted: an OOM says
+                    # nothing about whether Gold reconciles, and on 2026-08-02 a
+                    # storm of seven of them spent the entire budget before the
+                    # truncated Gold it caused was ever seen — the self-heal was
+                    # disarmed by the very event it exists to recover from.
                     prior_failures = conn.execute(
                         "SELECT validation_passed FROM warehouse_refreshes "
+                        "WHERE error IS NULL "
                         "ORDER BY refreshed_at DESC LIMIT ?",
                         [MAX_VALIDATION_RETRIES + 1],
                     ).fetchall()
@@ -2336,15 +2356,28 @@ class DuckDBStore(
                             "⚠️ Warehouse validation failed — full retry scheduled "
                             f"(attempt {consecutive + 1}/{MAX_VALIDATION_RETRIES}).\n{detail}"
                         )
+                    elif self._claim_stuck_rebuild_slot():
+                        hours = STUCK_REBUILD_COOLDOWN_SECONDS // 3600
+                        logger.error(
+                            f"Warehouse validation failed {consecutive}x consecutively — "
+                            f"per-tick retry stopped; attempting one full rebuild: {detail}"
+                        )
+                        needs_full_retry = True
+                        validation_alert = (
+                            f"🚨 CRITICAL: Warehouse validation failed {consecutive}x in a "
+                            "row. The Gold layer may be serving WRONG revenue. Attempting a "
+                            f"full rebuild; if this alert returns in {hours}h the cause is "
+                            f"not transient and needs a human.\n{detail}"
+                        )
                     else:
                         logger.error(
                             f"Warehouse validation failed {consecutive}x consecutively — "
-                            f"STOPPING auto-retry, manual intervention required: {detail}"
+                            f"full rebuild already attempted this period: {detail}"
                         )
                         validation_alert = (
                             f"🚨 CRITICAL: Warehouse validation failed {consecutive}x in a "
-                            "row. Auto-retry stopped — the Gold layer may be serving WRONG "
-                            f"revenue. Manual fix needed.\n{detail}"
+                            "row and a full rebuild did not fix it — the Gold layer may be "
+                            f"serving WRONG revenue. Manual fix needed.\n{detail}"
                         )
 
                 duration_ms = (time.perf_counter() - start_time) * 1000
@@ -2563,23 +2596,39 @@ class DuckDBStore(
                 return True, None
             return True, json.loads(value)
 
-    async def _count_consecutive_refresh_failures(self) -> int:
-        """How many of the most-recent warehouse_refreshes rows failed in a row.
+    def _claim_stuck_rebuild_slot(self) -> bool:
+        """Take the one full-rebuild attempt allowed per cooldown, if it is free.
 
-        A row "failed" when validation_passed IS FALSE (covers both validation
-        failures and thrown-error rows, which are logged with FALSE). Used to
-        bound the self-heal retry loop so a deterministic data bug doesn't spin
-        a full rebuild every scheduler tick forever.
+        Kept in process memory rather than in the database, so that a restart
+        re-arms it. A deploy or a container restart is the moment someone is
+        most likely to have just changed something that makes the rebuild work —
+        raising the memory ceiling, for instance — and making them wait out the
+        cooldown to find out would be perverse.
+        """
+        now = time.monotonic()
+        last = self._last_stuck_rebuild
+        if last is not None and (now - last) < STUCK_REBUILD_COOLDOWN_SECONDS:
+            return False
+        self._last_stuck_rebuild = now
+        return True
+
+    async def _count_consecutive_refresh_failures(self) -> int:
+        """How many of the most-recent refreshes threw, in a row.
+
+        Counts *errored* rows only. Validation failures are a separate budget
+        with its own counter — conflating them let a burst of one exhaust the
+        allowance meant for the other. Used to bound the self-heal retry loop so
+        a deterministic failure doesn't spin a full rebuild every tick forever.
         """
         async with self.connection() as conn:
             rows = conn.execute(
-                "SELECT validation_passed FROM warehouse_refreshes "
+                "SELECT error FROM warehouse_refreshes "
                 "ORDER BY refreshed_at DESC LIMIT ?",
                 [MAX_VALIDATION_RETRIES + 2],
             ).fetchall()
         consecutive = 0
-        for (vp,) in rows:
-            if vp is False:
+        for (err,) in rows:
+            if err is not None:
                 consecutive += 1
             else:
                 break
