@@ -39,6 +39,23 @@ logger = get_logger(__name__)
 # Timezone for scheduling
 SCHEDULER_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
+# APScheduler drops a job as MISSED when it cannot be dispatched within this many
+# seconds of its scheduled instant. The default is ONE SECOND, and it was never
+# overridden: production logged 108 missed bronze_promotion runs in five hours,
+# and the 05:00 reconciliation vanished every Sunday because the weekly full sync
+# was still holding the heavy-job lock at the moment it was due. Nothing here is
+# time-critical to the second — an invariant check running forty minutes late is
+# worth infinitely more than one that never runs.
+DEFAULT_MISFIRE_GRACE_SECONDS = 3600
+
+# Six-hourly jobs used IntervalTrigger, whose next fire is computed from
+# registration. _add_job re-registers on every scheduler start with
+# replace_existing=True, so each deploy pushed the next run another six hours
+# out — the integrity scan ran 6 times in 79 days. CronTrigger computes from the
+# wall clock and is immune. Hours avoid the 03:00-04:00 DST window; do not move
+# these to hour 3 or 4.
+INVARIANT_CHECK_HOURS = "1,7,13,19"
+
 
 class JobStatus(Enum):
     """Job execution status."""
@@ -325,7 +342,7 @@ class BackgroundScheduler:
             name="Bronze Invariant Check",
             description="Verify bronze row count matches mode invariant",
             func=self._run_bronze_invariant_check,
-            trigger=IntervalTrigger(hours=6),
+            trigger=CronTrigger(hour=INVARIANT_CHECK_HOURS),
             max_instances=1,
             coalesce=True,
         )
@@ -338,7 +355,7 @@ class BackgroundScheduler:
             name="DQ: Integrity",
             description="Layer 1 internal integrity scan (PK/FK/NULL/domain)",
             func=self._run_dq_integrity,
-            trigger=IntervalTrigger(hours=6),
+            trigger=CronTrigger(hour=INVARIANT_CHECK_HOURS),
             max_instances=1,
             coalesce=True,
         )
@@ -352,7 +369,7 @@ class BackgroundScheduler:
             name="Disk Growth Watchdog",
             description="Sample disk + DB size, alert on capacity or growth-rate breach",
             func=self._run_disk_growth_check,
-            trigger=IntervalTrigger(hours=6),
+            trigger=CronTrigger(hour=INVARIANT_CHECK_HOURS),
             max_instances=1,
             coalesce=True,
         )
@@ -408,6 +425,7 @@ class BackgroundScheduler:
         trigger,
         max_instances: int = 1,
         coalesce: bool = True,
+        misfire_grace_time: int = DEFAULT_MISFIRE_GRACE_SECONDS,
     ) -> None:
         """Add a job to the scheduler."""
         self._scheduler.add_job(
@@ -415,6 +433,7 @@ class BackgroundScheduler:
             trigger=trigger,
             id=job_id,
             name=name,
+            misfire_grace_time=misfire_grace_time,
             max_instances=max_instances,
             coalesce=coalesce,
             replace_existing=True,
