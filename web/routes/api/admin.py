@@ -485,6 +485,70 @@ async def get_sync_stats(request: Request):
         return {"status": "error", "error": str(e)}
 
 
+# ─── Managers: who counts as retail ───────────────────────────────────────────
+
+@router.get("/managers")
+@limiter.limit("60/minute")
+async def list_managers(request: Request, admin: dict = Depends(require_admin)):
+    """Managers with their retail classification and how much they sell.
+
+    The classification decides `sales_type`, and every dashboard endpoint
+    defaults to `retail` — so a manager left unclassified sells into
+    `other` and appears on no page. This is the list you answer that from.
+    """
+    store = await get_store()
+    managers = await store.get_all_managers()
+
+    async with store.connection() as conn:
+        revenue = dict(conn.execute("""
+            SELECT manager_id, COALESCE(SUM(grand_total), 0)
+            FROM silver_orders
+            WHERE NOT is_return AND is_active_source
+              AND order_date >= CURRENT_DATE - INTERVAL '365 days'
+            GROUP BY manager_id
+        """).fetchall())
+
+    for m in managers:
+        m["revenue_365d"] = float(revenue.get(m["id"], 0.0))
+        m["sales_type"] = "retail" if m["is_retail"] else "other"
+    managers.sort(key=lambda m: m["revenue_365d"], reverse=True)
+    return {"status": "ok", "managers": managers}
+
+
+@router.post("/managers/{manager_id}/retail-status")
+@limiter.limit("30/minute")
+async def set_manager_retail_status(
+    request: Request,
+    manager_id: int,
+    is_retail: bool = Query(..., description="TRUE counts this manager's orders as retail"),
+    admin: dict = Depends(require_admin),
+):
+    """Classify a manager as retail or not, durably.
+
+    `upsert_managers` seeds this from a constant for managers it has never
+    seen and never touches it again, so what is set here survives the next
+    sync. `sales_type` is materialised into Silver, so the warehouse is
+    marked dirty: the classification only reaches the pages after a rebuild.
+    """
+    store = await get_store()
+    managers = {m["id"] for m in await store.get_all_managers()}
+    if manager_id not in managers:
+        raise HTTPException(status_code=404, detail=f"Manager {manager_id} not found")
+
+    await store.set_manager_retail_status(manager_id, is_retail)
+    await store.mark_warehouse_dirty(None)
+    logger.info(
+        "Manager %s retail status set to %s by admin %s",
+        manager_id, is_retail, admin.get("user_id"),
+    )
+    return {
+        "status": "ok",
+        "manager_id": manager_id,
+        "is_retail": is_retail,
+        "note": "warehouse marked dirty; sales_type updates on the next refresh",
+    }
+
+
 @router.get("/bronze/stats")
 @limiter.limit("60/minute")
 async def get_bronze_stats(request: Request):

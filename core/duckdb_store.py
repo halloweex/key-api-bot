@@ -34,7 +34,7 @@ from bot.config import DEFAULT_TIMEZONE, TELEGRAM_MANAGER_IDS
 from core.exceptions import QueryTimeoutError
 from core.duckdb_constants import (
     DB_DIR, DB_PATH, DEFAULT_TZ, DEFAULT_QUERY_TIMEOUT, LONG_QUERY_TIMEOUT,
-    B2B_MANAGER_ID, RETAIL_MANAGER_IDS, DISPLAY_TIMEZONE, _date_in_kyiv,
+    B2B_MANAGER_ID, RETAIL_MANAGER_IDS, KNOWN_SALES_TYPES, DISPLAY_TIMEZONE, _date_in_kyiv,
 )
 from core.repositories import (
     UsersMixin, TrafficMixin, CustomersMixin, GoalsMixin,
@@ -2302,14 +2302,21 @@ class DuckDBStore(
             # it carries the checksums and the attempt number, so it differs
             # on every one of the 30 ticks an hour a standing failure produces.
             validation_alert_key: str | None = None
+            partition_alert: str | None = None
             async with self.connection() as conn:
-                checksums = conn.execute("""
+                # The known-types sum is written with a literal tuple because
+                # DuckDB will not parameterise an IN list; the values come from
+                # a module constant, never from a request.
+                known_types_sql = ", ".join(f"'{t}'" for t in KNOWN_SALES_TYPES)
+                checksums = conn.execute(f"""
                     SELECT
                         (SELECT COUNT(*) FROM orders) AS bronze_orders,
                         (SELECT COUNT(*) FROM silver_orders) AS silver_rows,
                         (SELECT COALESCE(SUM(grand_total), 0) FROM silver_orders
                          WHERE NOT is_return AND is_active_source) AS silver_revenue,
                         (SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue) AS gold_revenue,
+                        (SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue
+                         WHERE sales_type IN ({known_types_sql})) AS gold_revenue_known,
                         (SELECT COALESCE(SUM(product_revenue), 0) FROM gold_daily_products) AS gold_product_revenue,
                         (SELECT COALESCE(SUM(op.price_sold * op.quantity), 0)
                          FROM order_products op
@@ -2321,13 +2328,54 @@ class DuckDBStore(
                 silver_rows = checksums[1]
                 silver_revenue = float(checksums[2])
                 gold_revenue = float(checksums[3])
-                gold_product_revenue = float(checksums[4])
-                bronze_product_revenue = float(checksums[5])
+                gold_revenue_known = float(checksums[4])
+                gold_product_revenue = float(checksums[5])
+                bronze_product_revenue = float(checksums[6])
 
                 checksum_match = abs(silver_revenue - gold_revenue) < 0.01
                 product_checksum_match = abs(gold_product_revenue - bronze_product_revenue) < 0.01
                 row_count_match = bronze_orders == silver_rows
                 validation_passed = checksum_match and row_count_match and product_checksum_match
+
+                # ── Partition assertion (P2-2) ──
+                # The three checksums above sum every sales_type, while every
+                # dashboard endpoint defaults to Query("retail"). A fourth
+                # value — or a NULL — would therefore balance the checksums
+                # perfectly and show up nowhere. Comparing the KNOWN types
+                # against the Silver total is what notices; the subtraction
+                # also catches NULL, which `NOT IN (...)` silently would not.
+                #
+                # Deliberately NOT part of validation_passed: that flag drives
+                # mark_warehouse_dirty → a full rebuild every two minutes, and
+                # a rebuild cannot fix a sales_type the code does not know
+                # about. This reports; a human classifies.
+                partition_exhaustive = abs(silver_revenue - gold_revenue_known) < 0.01
+                if not partition_exhaustive:
+                    unknown = conn.execute(f"""
+                        SELECT sales_type, COALESCE(SUM(revenue), 0) AS revenue
+                        FROM gold_daily_revenue
+                        WHERE sales_type IS NULL
+                           OR sales_type NOT IN ({known_types_sql})
+                        GROUP BY sales_type
+                        ORDER BY revenue DESC
+                    """).fetchall()
+                    detail = ", ".join(
+                        f"{row[0] if row[0] is not None else 'NULL'}=₴{float(row[1]):,.2f}"
+                        for row in unknown
+                    ) or "no rows — Gold is short of Silver"
+                    logger.error(
+                        f"sales_type partition not exhaustive: silver={silver_revenue:.2f} "
+                        f"known-types gold={gold_revenue_known:.2f}; {detail}"
+                    )
+                    partition_alert = (
+                        "🚨 *Unknown `sales_type` in Gold*\n"
+                        f"Silver revenue {silver_revenue:,.2f} vs "
+                        f"{gold_revenue_known:,.2f} across "
+                        f"{', '.join(KNOWN_SALES_TYPES)}.\n"
+                        f"Outside the partition: {detail}\n\n"
+                        "Revenue in an unknown sales_type reaches no page — "
+                        "every endpoint defaults to retail."
+                    )
 
                 if not validation_passed:
                     # Count consecutive PRIOR failures (this run's row not yet
@@ -2420,6 +2468,10 @@ class DuckDBStore(
                 await self.mark_warehouse_dirty(None)
             if validation_alert:
                 await self._send_warehouse_alert(validation_alert, validation_alert_key)
+            if partition_alert:
+                await self._send_warehouse_alert(
+                    partition_alert, "warehouse:sales_type_partition",
+                )
 
             incremental_info = ""
             if affected_dates:
@@ -3652,6 +3704,16 @@ class DuckDBStore(
     async def upsert_managers(self, managers: List[Dict[str, Any]]) -> int:
         """Insert or update managers from KeyCRM API response.
 
+        `is_retail` is seeded from RETAIL_MANAGER_IDS for managers we have
+        never seen, and **left alone** for managers we already hold. It used
+        to be recomputed from that constant on every sync, which made the
+        column unfixable: KeyCRM does not know whether a manager is retail,
+        wholesale, internal or a blogger, so the only source for that is a
+        human — and whatever a human set was overwritten within the minute.
+        The list has not grown since it was written; managers 3, 5, 6, 7, 10,
+        28, 34 and 40 have been selling into `sales_type='other'` ever since,
+        ₴3.1M of it, invisible on every page.
+
         Args:
             managers: List of manager/user dicts from KeyCRM API
 
@@ -3667,15 +3729,22 @@ class DuckDBStore(
                 count = 0
                 for mgr in managers:
                     conn.execute("""
-                        INSERT OR REPLACE INTO managers
+                        INSERT INTO managers
                         (id, name, email, status, is_retail, synced_at)
                         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT (id) DO UPDATE SET
+                            name = EXCLUDED.name,
+                            email = EXCLUDED.email,
+                            status = EXCLUDED.status,
+                            -- EXCLUDED, not CURRENT_TIMESTAMP: DuckDB binds a
+                            -- bare name on this side as a column reference.
+                            synced_at = EXCLUDED.synced_at
                     """, [
                         mgr.get("id"),
                         mgr.get("name") or mgr.get("full_name", "Unknown"),
                         mgr.get("email"),
                         mgr.get("status"),  # 'active', 'blocked', 'pending'
-                        mgr.get("id") in RETAIL_MANAGER_IDS  # Set is_retail based on known IDs
+                        mgr.get("id") in RETAIL_MANAGER_IDS,  # seed for new rows only
                     ])
                     count += 1
 
