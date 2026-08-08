@@ -194,7 +194,18 @@ class KeyCRMClient:
             await _circuit_breaker.record_success()
             return result
 
-        except (KeyCRMAPIError, KeyCRMConnectionError) as e:
+        except KeyCRMAPIError as e:
+            # A 4xx is the server answering clearly, not the server being down.
+            # Counting it as a breaker failure meant a handful of 404s — a gap
+            # backfill walking ids KeyCRM no longer has — could open the circuit
+            # and reject everything else for a minute, the incremental sync
+            # included. Transient statuses (429, 5xx) are raised as
+            # KeyCRMConnectionError and still count.
+            if e.status_code is None or e.status_code >= 500:
+                await _circuit_breaker.record_failure()
+            raise
+
+        except KeyCRMConnectionError as e:
             await _circuit_breaker.record_failure()
             raise
 

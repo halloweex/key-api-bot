@@ -1081,9 +1081,15 @@ class SyncService:
             "repaired": int(repaired),
             "failed": len(failures),
             "remaining": max(0, len(ids) - len(attempted)),
-            "failures": dict(list(failures.items())[:10]),
+            # Every failure, not a sample. The caller decides which ids are
+            # permanently absent and must never be asked for again; handing it
+            # ten of thirty-seven meant the rest came round every hour forever.
+            "failures": failures,
         }
-        logger.info(f"Order repair: {result}")
+        logger.info(
+            "Order repair: %s",
+            {**result, "failures": dict(list(failures.items())[:10])},
+        )
         return result
 
     async def reconcile_with_api(self, days_back: int = 14, auto_resync: bool = True) -> list[dict]:
