@@ -129,3 +129,54 @@ class TestInvariantJobsUseCron:
         cron = CronTrigger(hour=INVARIANT_CHECK_HOURS, timezone=kyiv)
         assert (cron.get_next_fire_time(None, redeploy)
                 == cron.get_next_fire_time(None, redeploy)), "cron is immune"
+
+
+class TestNextRunReporting:
+    """`next_run: null` on a healthy daily job is a lie the dashboard tells.
+
+    `_add_job` samples `next_run_time` while registering — before
+    `scheduler.start()`, when APScheduler has not computed one yet — and only
+    the post-execution listener refreshes it. Every cron job therefore read
+    "null" until its first run in the process, which is indistinguishable from
+    "this job will never fire".
+    """
+
+    def _scheduler_with_job(self, next_run_time):
+        from core.scheduler import JobInfo
+
+        class FakeJob:
+            trigger = "cron[hour='9', minute='0']"
+
+            def __init__(self, nrt):
+                self.next_run_time = nrt
+
+        class FakeScheduler:
+            def __init__(self, job):
+                self._job = job
+
+            def get_job(self, job_id):
+                return self._job
+
+        scheduler = BackgroundScheduler()
+        scheduler._scheduler = FakeScheduler(FakeJob(next_run_time))
+        scheduler._job_info["dq_digest"] = JobInfo(
+            id="dq_digest", name="DQ: Daily Digest", description="d",
+        )
+        return scheduler
+
+    def test_next_run_comes_from_the_live_scheduler(self):
+        from datetime import datetime, timezone
+
+        when = datetime(2026, 8, 9, 9, 0, tzinfo=timezone.utc)
+        jobs = self._scheduler_with_job(when).get_jobs()
+
+        assert jobs[0]["next_run"] == when.isoformat()
+
+    def test_falls_back_to_the_cached_value(self):
+        from datetime import datetime, timezone
+
+        scheduler = self._scheduler_with_job(None)
+        cached = datetime(2026, 8, 9, 5, 0, tzinfo=timezone.utc)
+        scheduler._job_info["dq_digest"].next_run = cached
+
+        assert scheduler.get_jobs()[0]["next_run"] == cached.isoformat()

@@ -1638,12 +1638,21 @@ class BackgroundScheduler:
             if job and job.trigger:
                 trigger_desc = str(job.trigger)
 
+            # Ask APScheduler, don't trust the cached copy. `_add_job` reads
+            # next_run_time during registration — before `scheduler.start()`,
+            # when it is always None — and only the post-execution listener
+            # ever refreshes it. So every job that had not yet run in this
+            # process reported "next_run: null", which reads as "this will
+            # never fire" for exactly the daily jobs whose silence we have
+            # twice mistaken for absence.
+            next_run = getattr(job, "next_run_time", None) or info.next_run
+
             jobs.append({
                 "id": info.id,
                 "name": info.name,
                 "description": info.description,
                 "trigger": trigger_desc,
-                "next_run": info.next_run.isoformat() if info.next_run else None,
+                "next_run": next_run.isoformat() if next_run else None,
                 "last_run": info.last_run.isoformat() if info.last_run else None,
                 "last_status": info.last_status.value if info.last_status else None,
                 "run_count": info.run_count,
