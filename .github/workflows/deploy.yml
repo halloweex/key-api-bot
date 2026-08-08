@@ -8,6 +8,20 @@ on:
 # Third-party actions are pinned to commit SHAs (not movable tags) so a
 # compromised/retagged action cannot silently enter the prod pipeline.
 
+# One deploy at a time. Two merges 12 seconds apart on 2026-08-08 put two SSH
+# sessions on the same host running `docker compose up -d` simultaneously: one
+# was removing keycrm-web while the other tried to recreate it, and the run died
+# on "removal of container ... is already in progress". Docker then could not
+# free the name, so the surviving container came up as 370b903dcd15_keycrm-web
+# and every `docker exec keycrm-web` broke until the next clean recreate.
+#
+# cancel-in-progress stays false deliberately. Cancelling a deploy midway
+# through recreating a container is the failure we are preventing, not a
+# cheaper version of it — the queued run waits, it does not fight.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
