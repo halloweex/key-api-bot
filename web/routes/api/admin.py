@@ -499,18 +499,35 @@ async def list_managers(request: Request, admin: dict = Depends(require_admin)):
     store = await get_store()
     managers = await store.get_all_managers()
 
+    # Read the sales_type the warehouse actually assigned rather than deriving
+    # it from is_retail here. Deriving it got the B2B manager wrong — is_retail
+    # is FALSE for them, which is not the same as unclassified — and labelled
+    # ₴15.5M of wholesale as `other` on the very screen meant to tell the two
+    # apart. There is one CASE for this, it lives in Silver, and this reports
+    # its output.
     async with store.connection() as conn:
-        revenue = dict(conn.execute("""
-            SELECT manager_id, COALESCE(SUM(grand_total), 0)
+        rows = conn.execute("""
+            SELECT manager_id, sales_type, COALESCE(SUM(grand_total), 0) AS revenue
             FROM silver_orders
             WHERE NOT is_return AND is_active_source
               AND order_date >= CURRENT_DATE - INTERVAL '365 days'
-            GROUP BY manager_id
-        """).fetchall())
+            GROUP BY manager_id, sales_type
+        """).fetchall()
+
+    revenue: dict = {}
+    by_type: dict = {}
+    for manager_id, sales_type, amount in rows:
+        revenue[manager_id] = revenue.get(manager_id, 0.0) + float(amount)
+        by_type.setdefault(manager_id, {})[sales_type] = float(amount)
 
     for m in managers:
+        types = by_type.get(m["id"], {})
         m["revenue_365d"] = float(revenue.get(m["id"], 0.0))
-        m["sales_type"] = "retail" if m["is_retail"] else "other"
+        # A manager maps to exactly one sales_type today; join them rather than
+        # pick one if that ever stops being true.
+        m["sales_type"] = (
+            "+".join(sorted(types, key=lambda t: -types[t])) if types else None
+        )
     managers.sort(key=lambda m: m["revenue_365d"], reverse=True)
     return {"status": "ok", "managers": managers}
 

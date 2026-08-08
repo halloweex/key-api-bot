@@ -61,12 +61,19 @@ def _route(path: str, method: str = "GET"):
 
 
 class _FakeConn:
+    """Silver grouped by (manager_id, sales_type), as the endpoint reads it."""
+
     def execute(self, sql, params=None):
         self.sql = sql
         return self
 
     def fetchall(self):
-        return [(34, 230_300.0), (None, 1_000_000.0)]
+        return [
+            (34, "other", 230_300.0),
+            (22, "retail", 8_215_717.77),
+            (15, "b2b", 15_549_070.0),
+            (None, "retail", 1_000_000.0),
+        ]
 
 
 class _FakeStore:
@@ -78,6 +85,8 @@ class _FakeStore:
         return [
             {"id": 22, "name": "Retail One", "is_retail": True, "order_count": 900},
             {"id": 34, "name": "Unclassified", "is_retail": False, "order_count": 120},
+            {"id": 15, "name": "Wholesale", "is_retail": False, "order_count": 1160},
+            {"id": 99, "name": "Never Sold", "is_retail": False, "order_count": 0},
         ]
 
     async def set_manager_retail_status(self, manager_id, is_retail):
@@ -163,6 +172,21 @@ class TestBehaviour:
         assert by_id[34]["sales_type"] == "other"
         assert by_id[34]["revenue_365d"] == 230_300.0
         assert by_id[22]["sales_type"] == "retail"
+
+    def test_the_b2b_manager_is_not_reported_as_unclassified(self, client, store):
+        """is_retail is FALSE for wholesale too — which is not the same thing.
+        Deriving the label from it called ₴15.5M of B2B `other`."""
+        by_id = {m["id"]: m for m in client.get(LIST_PATH).json()["managers"]}
+
+        assert by_id[15]["sales_type"] == "b2b"
+        assert by_id[15]["revenue_365d"] == 15_549_070.0
+
+    def test_a_manager_who_has_sold_nothing_has_no_sales_type(self, client, store):
+        """Silver says nothing about them, so neither does this."""
+        by_id = {m["id"]: m for m in client.get(LIST_PATH).json()["managers"]}
+
+        assert by_id[99]["sales_type"] is None
+        assert by_id[99]["revenue_365d"] == 0.0
 
     def test_setting_marks_the_warehouse_dirty(self, client, store):
         """sales_type lives in Silver; without a rebuild nothing changes on screen."""
