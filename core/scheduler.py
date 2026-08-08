@@ -388,6 +388,20 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Half-written order repair (every 2 h)
+        # Orders with revenue and no line items. Detection is a table scan of
+        # our own data, so an idle run costs nothing; a working one costs one
+        # API call per order, capped at REPAIR_BATCH_LIMIT.
+        self._add_job(
+            job_id="halfwritten_repair",
+            name="Half-written Order Repair",
+            description="Re-fetch orders that have revenue but no line items",
+            func=self._run_halfwritten_repair,
+            trigger=IntervalTrigger(hours=2),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Data Quality — daily digest (09:00 Kyiv)
         # After the 05:00 reconciliation and the 07:00 integrity scan, so it
         # reports the day's verdicts rather than yesterday's. WARN findings
@@ -999,6 +1013,12 @@ class BackgroundScheduler:
             #    Additive only — MISSING_IN_KC is deliberately not touched,
             #    because deleting on the strength of one API reading is how you
             #    turn a fetch glitch into data loss.
+            #    Half-written orders used to be repaired here too. They are
+            #    found by scanning our own tables, owe nothing to the comparison
+            #    or its 90-day window, and cost one API call each — so they hung
+            #    their fate on a job that failed 57 runs out of 68 and died at
+            #    120 s before ever reaching this line. They have their own job
+            #    now: `halfwritten_repair`.
             repair = None
             if not error_message:
                 repairable = sorted({
@@ -1007,22 +1027,6 @@ class BackgroundScheduler:
                     if d.diff_class == DiscrepancyClass.MISSING_IN_DK
                     for oid in d.order_ids
                 })
-                # Half-written orders are found by scanning our own tables, not
-                # by the comparison, so they are not bounded by the 90-day
-                # window — which matters, because most of them are older than it.
-                try:
-                    async with store.connection() as conn:
-                        repairable += [
-                            int(r[0]) for r in conn.execute("""
-                                SELECT o.id FROM orders o
-                                LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
-                                       ON li.order_id = o.id
-                                WHERE li.order_id IS NULL AND o.grand_total > 0
-                                ORDER BY o.grand_total DESC LIMIT ?
-                            """, [SyncService.REPAIR_BATCH_LIMIT]).fetchall()
-                        ]
-                except Exception as e:
-                    logger.warning(f"Could not list half-written orders: {e}")
 
                 if repairable:
                     try:
@@ -1061,6 +1065,72 @@ class BackgroundScheduler:
             }
             logger.info("DQ Layer-2 reconciliation complete", extra=result)
             return result
+
+    async def _run_halfwritten_repair(self) -> Dict[str, Any]:
+        """Re-fetch orders that carry revenue but no line items.
+
+        523 of them, ₴1,422,610.30: revenue counts them because it reads
+        `grand_total`, while every product, brand and category figure cannot,
+        because those read line items. Only a fetch by id can fill them — a
+        delta sync keyed on `updated_at` sees a complete-looking header and
+        moves on.
+
+        An order KeyCRM re-serves still empty is recorded, so the next run asks
+        about something else. Recorded ids come back up for another try after
+        30 days: the alternative is being permanently blind to an order whose
+        line items someone eventually fixes upstream.
+        """
+        from core.duckdb_store import get_store
+        from core.sync_service import SyncService, get_sync_service
+
+        _EMPTY_LINE_ITEMS = """
+            SELECT o.id FROM orders o
+            LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
+                   ON li.order_id = o.id
+            WHERE li.order_id IS NULL AND o.grand_total > 0
+        """
+
+        with correlation_context():
+            store = await get_store()
+
+            async with store.connection() as conn:
+                candidates = [int(r[0]) for r in conn.execute(f"""
+                    {_EMPTY_LINE_ITEMS}
+                      AND NOT EXISTS (
+                          SELECT 1 FROM order_backfill_misses m
+                          WHERE m.order_id = o.id
+                            AND m.checked_at > CURRENT_TIMESTAMP - INTERVAL '30 days'
+                      )
+                    ORDER BY o.grand_total DESC
+                    LIMIT ?
+                """, [SyncService.REPAIR_BATCH_LIMIT]).fetchall()]
+
+            if not candidates:
+                logger.debug("Half-written repair: nothing to fetch")
+                return {"candidates": 0, "repaired": 0, "still_empty": 0}
+
+            sync_service = await get_sync_service()
+            result = await sync_service.repair_orders(candidates)
+
+            # Which ones KeyCRM served without line items anyway.
+            ph = ",".join("?" * len(candidates))
+            async with store.connection() as conn:
+                still_empty = [int(r[0]) for r in conn.execute(
+                    f"{_EMPTY_LINE_ITEMS} AND o.id IN ({ph})", candidates,
+                ).fetchall()]
+            recorded = await store.record_backfill_misses({
+                oid: "re-fetched by id; KeyCRM served no line items"
+                for oid in still_empty
+            })
+
+            out = {
+                "candidates": len(candidates),
+                "repaired": result.get("repaired", 0),
+                "failed": result.get("failed", 0),
+                "still_empty": recorded,
+            }
+            logger.info(f"Half-written repair: {out}")
+            return out
 
     async def _run_dq_digest(self) -> Dict[str, Any]:
         """Say out loud, once a day, what the checks have been writing down.

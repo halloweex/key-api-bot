@@ -2129,6 +2129,25 @@ class DuckDBStore(
                     elif silver_scope_ids:
                         silver_mode = f"incremental_{len(silver_scope_ids)}"
 
+                # Dates these rows occupy BEFORE they are rewritten. Gold is
+                # rebuilt per date, and the dates a row leaves are not the dates
+                # it arrives at: move an order from the 1st to the 5th and only
+                # the 5th gets recomputed, so the 1st keeps the revenue too and
+                # the money is counted twice. An order deleted upstream is worse
+                # — after the DELETE its date is nowhere to be found, so Gold
+                # keeps it until the next full rebuild.
+                silver_old_dates: set = set()
+                if silver_mode != "full" and silver_scope_ids:
+                    sph = ",".join("?" * len(silver_scope_ids))
+                    silver_old_dates = {
+                        r[0] for r in conn.execute(
+                            f"SELECT DISTINCT order_date FROM silver_orders "
+                            f"WHERE id IN ({sph})",
+                            silver_scope_ids,
+                        ).fetchall()
+                        if r[0] is not None
+                    }
+
                 conn.execute("BEGIN TRANSACTION")
                 try:
                     if silver_mode != "full":
@@ -2166,22 +2185,26 @@ class DuckDBStore(
                     raise
 
             # ── Determine affected dates for incremental Gold rebuild ──
+            # Gold follows Silver's decision. A full Silver rebuild with a
+            # partial Gold one is how Gold ends up holding rows no Silver row
+            # supports: the guardrail branch above and the post-compact
+            # recovery path both rewrite every Silver row, and a Gold rebuild
+            # scoped to the changed ids would leave every other date as it was.
             affected_dates: set[date] | None = None
-            if changed_order_ids:
+            if silver_mode != "full" and silver_scope_ids:
                 async with self.connection() as conn:
-                    # Get dates for changed orders + all dates for affected buyers
-                    # (is_new_customer can cascade to other dates for the same buyer)
-                    placeholders = ",".join("?" * len(changed_order_ids))
-                    id_params = list(changed_order_ids)
+                    # Dates these rows occupy now. silver_scope_ids already
+                    # carries the buyer cascade, so one scope drives Silver and
+                    # Gold and the two cannot disagree about what changed.
+                    sph = ",".join("?" * len(silver_scope_ids))
                     rows = conn.execute(f"""
                         SELECT DISTINCT order_date FROM silver_orders
-                        WHERE id IN ({placeholders})
-                           OR buyer_id IN (
-                               SELECT DISTINCT buyer_id FROM silver_orders
-                               WHERE id IN ({placeholders}) AND buyer_id IS NOT NULL
-                           )
-                    """, id_params + id_params).fetchall()
-                    affected_dates = {r[0] for r in rows if r[0] is not None}
+                        WHERE id IN ({sph})
+                    """, silver_scope_ids).fetchall()
+                    new_dates = {r[0] for r in rows if r[0] is not None}
+
+                # Where they were ∪ where they are.
+                affected_dates = silver_old_dates | new_dates
 
                 if not affected_dates:
                     affected_dates = None  # Fall back to full rebuild
