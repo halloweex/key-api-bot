@@ -267,7 +267,10 @@ class TestFetchLastSuccessAges:
             recon = ages["reconciliation"]
             # Must reflect the 3-day-old success, not the 5-minute-old failure.
             assert recon["age_seconds"] > 2 * 86400
-            assert recon["last_success_at"].startswith(old.date().isoformat())
+            # Compare instants, not rendered dates: DuckDB returns TIMESTAMPTZ
+            # in the session timezone, whose calendar day can differ from UTC's.
+            returned = datetime.fromisoformat(recon["last_success_at"])
+            assert abs((returned - old).total_seconds()) < 1
         finally:
             await store.close()
 

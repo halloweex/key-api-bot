@@ -84,10 +84,10 @@ class TestRefreshSelfHeal:
         async with store.connection() as conn:
             _insert_order(conn, oid=1)
 
-        alerts: list[str] = []
+        alerts: list[tuple[str, str | None]] = []
 
-        async def fake_alert(msg):
-            alerts.append(msg)
+        async def fake_alert(msg, key=None):
+            alerts.append((msg, key))
 
         monkeypatch.setattr(store, "_send_warehouse_alert", fake_alert)
         # Poison the date helper so the Silver INSERT SELECT throws inside the
@@ -100,7 +100,10 @@ class TestRefreshSelfHeal:
         is_dirty, _ = await store.consume_warehouse_dirty()
         assert is_dirty is True, "partial-failure must mark warehouse dirty to self-heal"
         assert alerts, "must alert on refresh error"
-        assert "error" in alerts[0].lower()
+        assert "error" in alerts[0][0].lower()
+        # Keyed, or the throttle cannot recognise the repeat: the body carries
+        # an attempt counter that differs on every tick.
+        assert alerts[0][1] == "warehouse:refresh_errored"
 
     @pytest.mark.asyncio
     async def test_exception_stops_retry_after_max(self, tmp_path, monkeypatch):
@@ -116,10 +119,10 @@ class TestRefreshSelfHeal:
                     "VALUES (?, 'test', FALSE, 'boom')",
                     [f"2026-01-0{i+1}T00:00:00+03:00"],
                 )
-        alerts: list[str] = []
+        alerts: list[tuple[str, str | None]] = []
 
-        async def fake_alert(msg):
-            alerts.append(msg)
+        async def fake_alert(msg, key=None):
+            alerts.append((msg, key))
 
         monkeypatch.setattr(store, "_send_warehouse_alert", fake_alert)
         monkeypatch.setattr("core.duckdb_store._date_in_kyiv", lambda col: "not valid sql (")
@@ -128,7 +131,8 @@ class TestRefreshSelfHeal:
 
         is_dirty, _ = await store.consume_warehouse_dirty()
         assert is_dirty is False, "must STOP retrying past the bound"
-        assert any("CRITICAL" in a for a in alerts)
+        assert any("CRITICAL" in msg for msg, _ in alerts)
+        assert any(key == "warehouse:refresh_errored_exhausted" for _, key in alerts)
 
 
 # ─────────────────────────── A9-1 backup ───────────────────────────

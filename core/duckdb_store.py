@@ -2298,6 +2298,10 @@ class DuckDBStore(
             # ── Step 4: Validation + audit log ──
             needs_full_retry = False
             validation_alert: str | None = None
+            # Names the condition for the throttle. The message text cannot:
+            # it carries the checksums and the attempt number, so it differs
+            # on every one of the 30 ticks an hour a standing failure produces.
+            validation_alert_key: str | None = None
             async with self.connection() as conn:
                 checksums = conn.execute("""
                     SELECT
@@ -2368,6 +2372,7 @@ class DuckDBStore(
                             "⚠️ Warehouse validation failed — full retry scheduled "
                             f"(attempt {consecutive + 1}/{MAX_VALIDATION_RETRIES}).\n{detail}"
                         )
+                        validation_alert_key = "warehouse:validation_retrying"
                     elif self._claim_stuck_rebuild_slot():
                         hours = STUCK_REBUILD_COOLDOWN_SECONDS // 3600
                         logger.error(
@@ -2381,6 +2386,7 @@ class DuckDBStore(
                             f"full rebuild; if this alert returns in {hours}h the cause is "
                             f"not transient and needs a human.\n{detail}"
                         )
+                        validation_alert_key = "warehouse:validation_rebuilding"
                     else:
                         logger.error(
                             f"Warehouse validation failed {consecutive}x consecutively — "
@@ -2391,6 +2397,7 @@ class DuckDBStore(
                             "row and a full rebuild did not fix it — the Gold layer may be "
                             f"serving WRONG revenue. Manual fix needed.\n{detail}"
                         )
+                        validation_alert_key = "warehouse:validation_unfixed"
 
                 duration_ms = (time.perf_counter() - start_time) * 1000
 
@@ -2412,7 +2419,7 @@ class DuckDBStore(
             if needs_full_retry:
                 await self.mark_warehouse_dirty(None)
             if validation_alert:
-                await self._send_warehouse_alert(validation_alert)
+                await self._send_warehouse_alert(validation_alert, validation_alert_key)
 
             incremental_info = ""
             if affected_dates:
@@ -2486,13 +2493,15 @@ class DuckDBStore(
                     await self._send_warehouse_alert(
                         f"⚠️ Warehouse refresh errored — full rebuild scheduled to "
                         f"self-heal (attempt {consecutive}/{MAX_VALIDATION_RETRIES}). "
-                        f"Gold layers may be cross-inconsistent until then.\n{error_msg}"
+                        f"Gold layers may be cross-inconsistent until then.\n{error_msg}",
+                        "warehouse:refresh_errored",
                     )
                 else:
                     await self._send_warehouse_alert(
                         f"🚨 CRITICAL: Warehouse refresh errored {consecutive}x in a row. "
                         f"Auto-retry stopped — Gold layers may be cross-inconsistent. "
-                        f"Manual fix needed.\n{error_msg}"
+                        f"Manual fix needed.\n{error_msg}",
+                        "warehouse:refresh_errored_exhausted",
                     )
             except Exception as heal_err:
                 logger.error(f"Failed to schedule warehouse self-heal: {heal_err}")
@@ -2681,15 +2690,21 @@ class DuckDBStore(
                 break
         return consecutive
 
-    async def _send_warehouse_alert(self, message: str) -> None:
+    async def _send_warehouse_alert(
+        self, message: str, key: "str | None" = None,
+    ) -> None:
         """Push a warehouse-health alert to admins (best-effort, never raises).
+
+        `key` names the condition so the throttle can recognise a repeat. Every
+        message here embeds live checksums and an attempt counter, so without
+        one no two are ever the same string and the throttle never fires.
 
         Mirrors scheduler._send_bronze_alert: lazy import to avoid a circular
         dependency on bot.main at module load.
         """
         try:
             from bot.main import send_admin_message
-            await send_admin_message(message)
+            await send_admin_message(message, key=key)
         except Exception as e:
             logger.warning(f"Failed to send warehouse alert: {e}")
 
@@ -2730,7 +2745,9 @@ class DuckDBStore(
             msg = (f"Backup aborted: only {free/1e9:.1f}GB free, need "
                    f"~{src_size*1.1/1e9:.1f}GB for {src.name}")
             logger.error(msg)
-            await self._send_warehouse_alert(f"🚨 DB backup FAILED — {msg}")
+            await self._send_warehouse_alert(
+                f"🚨 DB backup FAILED — {msg}", "warehouse:backup_failed",
+            )
             return {"status": "error", "error": msg}
 
         t0 = time.perf_counter()
@@ -2788,7 +2805,9 @@ class DuckDBStore(
                     tmp_path.unlink()
             except OSError:
                 pass
-            await self._send_warehouse_alert(f"🚨 DB backup FAILED: {e}")
+            await self._send_warehouse_alert(
+                f"🚨 DB backup FAILED: {e}", "warehouse:backup_failed",
+            )
             return {"status": "error", "error": str(e)}
 
     async def get_order_count_for_date(self, date_str: str) -> int:

@@ -36,7 +36,9 @@ logger = logging.getLogger(__name__)
 _application: Application | None = None
 
 
-async def send_admin_message(text: str, parse_mode: str = "HTML") -> None:
+async def send_admin_message(
+    text: str, parse_mode: str = "HTML", *, key: str | None = None,
+) -> None:
     """Broadcast `text` to every admin in ADMIN_USER_IDS.
 
     Imported by core/scheduler.py, core/duckdb_store.py and
@@ -45,14 +47,16 @@ async def send_admin_message(text: str, parse_mode: str = "HTML") -> None:
     validation could fail for days without anyone hearing about it, so with no
     Application we fall back to the HTTP Bot API, which needs only the token.
 
-    Identical alerts are throttled. Several callers re-raise the same message on
-    every scheduler tick for as long as a condition holds — the warehouse
-    validator does it every two minutes — and a channel that repeats itself 30
-    times an hour is one people learn to swipe away.
+    Repeats are throttled. Several callers re-raise the same condition on every
+    scheduler tick for as long as it holds — the warehouse validator does it
+    every two minutes — and a channel that repeats itself 30 times an hour is
+    one people learn to swipe away. Pass `key` to name the condition: bodies
+    that carry live checksums or attempt counters are never twice the same
+    string, so text-keyed throttling does not touch them.
     """
     from core.telegram_alerts import throttle_check
 
-    should_send, text = throttle_check(text)
+    should_send, text = throttle_check(text, key)
     if not should_send:
         return
 
@@ -266,7 +270,12 @@ def main() -> None:
         decision = canary_state.decide(result)
         if decision == "alert":
             logger.warning("Canary alerting: %s", result.failures)
-            await send_admin_message(format_alert(result, DASHBOARD_URL))
+            # Key on which problems are failing, not on the text: the body
+            # carries ages and cert days that differ on every probe.
+            await send_admin_message(
+                format_alert(result, DASHBOARD_URL),
+                key="canary:" + ",".join(sorted(result.failure_keys or ["unkeyed"])),
+            )
         elif decision == "recovery":
             logger.info("Canary recovery")
             await send_admin_message(format_recovery(result, DASHBOARD_URL))

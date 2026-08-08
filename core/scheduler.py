@@ -388,6 +388,20 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Data Quality — daily digest (09:00 Kyiv)
+        # After the 05:00 reconciliation and the 07:00 integrity scan, so it
+        # reports the day's verdicts rather than yesterday's. WARN findings
+        # reach a human here and nowhere else.
+        self._add_job(
+            job_id="dq_digest",
+            name="DQ: Daily Digest",
+            description="One daily message with WARN+ findings from both DQ layers",
+            func=self._run_dq_digest,
+            trigger=CronTrigger(hour=9, minute=0),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Reconciliation check (daily at 6 AM)
         # Legacy job — preserved for backward compatibility; the new
         # dq_reconciliation job above is the source of truth for alerts.
@@ -702,25 +716,33 @@ class BackgroundScheduler:
     _DQ_ALERT_COOLDOWN_S = 86400  # 24 h
 
     async def _send_dq_alert_throttled(
-        self, layer: str, message: str,
+        self, layer: str, message: str, key: Optional[str] = None,
     ) -> bool:
-        """Send a Data Quality alert with 24h per-layer cooldown.
-        Returns True if alert was sent, False if throttled or failed."""
+        """Send a Data Quality alert with a 24h cooldown per distinct problem.
+
+        The cooldown used to be per *layer*, which meant a second, unrelated
+        CRITICAL in the same layer was silently swallowed for a day by the
+        first one. `key` — from `alert_fingerprint`, naming the checks and
+        discrepancy classes involved — makes each problem its own bucket.
+
+        Returns True if alert was sent, False if throttled or failed.
+        """
+        bucket = key or layer
         now = time.time()
-        last = BackgroundScheduler._dq_last_alert.get(layer, 0.0)
+        last = BackgroundScheduler._dq_last_alert.get(bucket, 0.0)
         if now - last < self._DQ_ALERT_COOLDOWN_S:
             logger.info(
-                f"DQ alert ({layer}) throttled: "
+                f"DQ alert ({bucket}) throttled: "
                 f"last sent {int(now - last)}s ago"
             )
             return False
         try:
             from bot.main import send_admin_message
-            await send_admin_message(message)
-            BackgroundScheduler._dq_last_alert[layer] = now
+            await send_admin_message(message, key=bucket)
+            BackgroundScheduler._dq_last_alert[bucket] = now
             return True
         except Exception as e:
-            logger.warning(f"DQ alert send failed ({layer}): {e}")
+            logger.warning(f"DQ alert send failed ({bucket}): {e}")
             return False
 
     async def _run_dq_integrity(self) -> Dict[str, Any]:
@@ -728,6 +750,7 @@ class BackgroundScheduler:
         from datetime import datetime, timezone
         from core.data_quality import (
             Severity,
+            alert_fingerprint,
             check_internal_integrity,
             format_alert_message,
             overall_severity,
@@ -771,7 +794,10 @@ class BackgroundScheduler:
             sev = overall_severity(issues, [])
             if sev == Severity.CRITICAL and not error_message:
                 msg = format_alert_message("integrity", sev, issues, [])
-                await self._send_dq_alert_throttled("integrity", msg)
+                await self._send_dq_alert_throttled(
+                    "integrity", msg,
+                    alert_fingerprint("integrity", sev, issues, []),
+                )
 
             result = {
                 "run_id": run_id,
@@ -863,7 +889,7 @@ class BackgroundScheduler:
                     f"Disk: {alert.disk_pct_used:.1f}% used, "
                     f"{alert.disk_free_gb:.1f} GB free"
                 )
-                await send_admin_message(msg)
+                await send_admin_message(msg, key="disk:" + alert.severity.value)
                 result["alert_fired"] = True
             except Exception as e:
                 logger.warning(f"Disk alert send failed: {e}")
@@ -881,6 +907,7 @@ class BackgroundScheduler:
         from zoneinfo import ZoneInfo
         from core.data_quality import (
             Severity,
+            alert_fingerprint,
             classify_discrepancies,
             classify_order_discrepancies,
             format_alert_message,
@@ -1018,7 +1045,10 @@ class BackgroundScheduler:
                            if repair.get("remaining") else "")
                         + "."
                     )
-                await self._send_dq_alert_throttled("reconciliation", msg)
+                await self._send_dq_alert_throttled(
+                    "reconciliation", msg,
+                    alert_fingerprint("reconciliation", sev, issues, discrepancies),
+                )
 
             result = {
                 "run_id": run_id,
@@ -1030,6 +1060,80 @@ class BackgroundScheduler:
                 "error": error_message,
             }
             logger.info("DQ Layer-2 reconciliation complete", extra=result)
+            return result
+
+    async def _run_dq_digest(self) -> Dict[str, Any]:
+        """Say out loud, once a day, what the checks have been writing down.
+
+        WARN findings are persisted on every run and pushed on none — only
+        CRITICAL is alerted at the moment it happens. So two standing WARNs
+        covering ₴5.6M sat in `data_quality_issues` where nobody reads them.
+        This job is their surface: one message, both layers, with a delta
+        against the previous run so a growing problem does not read like the
+        one you already know about.
+
+        Sends nothing when every layer is fresh and clean. Silence here means
+        "nothing new to report" — proving the checks are still running is the
+        canary's job, off this host and on its own clock.
+        """
+        from datetime import datetime, timezone
+        from core.data_quality import (
+            DigestSection,
+            build_digest,
+            fetch_latest_run,
+            fetch_previous_run,
+            fetch_run_diffs,
+            fetch_run_issues,
+            WATCHED_LAYERS,
+        )
+        from core.duckdb_store import get_store
+
+        with correlation_context():
+            store = await get_store()
+            now = datetime.now(timezone.utc)
+            sections: List[DigestSection] = []
+
+            async with store.connection() as conn:
+                for layer in WATCHED_LAYERS:
+                    run = fetch_latest_run(conn, layer=layer)
+                    if run is None:
+                        sections.append(DigestSection(layer=layer, run=None))
+                        continue
+
+                    age_hours = None
+                    if run.get("started_at"):
+                        started = datetime.fromisoformat(run["started_at"])
+                        age_hours = (now - started).total_seconds() / 3600
+
+                    previous = fetch_previous_run(conn, layer, run["run_id"])
+                    sections.append(DigestSection(
+                        layer=layer,
+                        run=run,
+                        issues=fetch_run_issues(conn, run["run_id"], limit=20),
+                        diffs=fetch_run_diffs(conn, run["run_id"], limit=20),
+                        previous_issues=(
+                            fetch_run_issues(conn, previous["run_id"], limit=20)
+                            if previous else []
+                        ),
+                        age_hours=age_hours,
+                    ))
+
+            message = build_digest(sections)
+            sent = False
+            if message:
+                try:
+                    from bot.main import send_admin_message
+                    await send_admin_message(message, key="dq:digest")
+                    sent = True
+                except Exception as e:
+                    logger.warning(f"DQ digest send failed: {e}")
+
+            result = {
+                "layers": len(sections),
+                "sent": sent,
+                "quiet": message is None,
+            }
+            logger.info("DQ digest complete", extra=result)
             return result
 
     async def _run_order_gap_backfill(self) -> Dict[str, Any]:
@@ -1161,7 +1265,8 @@ class BackgroundScheduler:
                         f"`mode={mode}`, `shadow={shadow}`\n"
                         f"total: {stats['total']:,} | unprocessed: {stats['unprocessed']:,}\n\n"
                         f"{reason}\n\n"
-                        "Likely cause: prune misconfigured, or sync writing despite opt-out."
+                        "Likely cause: prune misconfigured, or sync writing despite opt-out.",
+                        key="bronze:invariant_violated",
                     )
                 except Exception as e:
                     logger.warning(f"Failed to send bronze invariant alert: {e}")
@@ -1221,7 +1326,7 @@ class BackgroundScheduler:
                 "Promotion may be falling behind. "
                 "Check `/api/bronze/stats` and scheduler jobs."
             )
-            await send_admin_message(msg)
+            await send_admin_message(msg, key="bronze:backlog")
         except Exception as e:
             logger.warning(f"Failed to send bronze alert: {e}")
 

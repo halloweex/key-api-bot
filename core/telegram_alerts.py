@@ -34,12 +34,17 @@ DEFAULT_COOLDOWN_SECONDS = 1800.0
 
 
 class AlertThrottle:
-    """Suppresses identical alerts within a cooldown, counting what it swallowed.
+    """Suppresses repeats of the same alert within a cooldown, counting them.
 
-    Keyed on exact message text, so distinct alerts never mask one another and
-    a changing metric in the body still gets through. State is per-process and
-    resets on restart — deliberately: after a restart the first alert of each
-    kind should always land.
+    Callers should pass an explicit `key` naming the *condition* — e.g.
+    `warehouse:validation_failed`. Keying on message text does not work for
+    the alerts that most need throttling: the warehouse validator puts live
+    checksums and an attempt counter in every body, so 3 119 failures produced
+    404 distinct "identical" messages and 124 deliveries on the worst day.
+    Text remains the fallback key for callers that have no stable identity.
+
+    State is per-process and resets on restart — deliberately: after a restart
+    the first alert of each kind should always land.
     """
 
     def __init__(self, cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS):
@@ -47,32 +52,39 @@ class AlertThrottle:
         self._last_sent: dict[str, float] = {}
         self._suppressed: dict[str, int] = {}
 
-    def check(self, text: str, *, now: float | None = None) -> "tuple[bool, int]":
+    def check(
+        self, text: str, *, key: str | None = None, now: float | None = None,
+    ) -> "tuple[bool, int]":
         """Return (should_send, suppressed_since_last_send).
 
         Calling this records the decision, so call it exactly once per attempt.
         """
         now = time.monotonic() if now is None else now
-        last = self._last_sent.get(text)
+        bucket = key if key is not None else text
+        last = self._last_sent.get(bucket)
         if last is not None and (now - last) < self.cooldown_seconds:
-            self._suppressed[text] = self._suppressed.get(text, 0) + 1
-            return False, self._suppressed[text]
-        swallowed = self._suppressed.pop(text, 0)
-        self._last_sent[text] = now
+            self._suppressed[bucket] = self._suppressed.get(bucket, 0) + 1
+            return False, self._suppressed[bucket]
+        swallowed = self._suppressed.pop(bucket, 0)
+        self._last_sent[bucket] = now
         return True, swallowed
 
 
 _throttle = AlertThrottle()
 
 
-def throttle_check(text: str) -> "tuple[bool, str]":
+def throttle_check(text: str, key: str | None = None) -> "tuple[bool, str]":
     """Decide whether `text` should go out, and what exactly to send.
+
+    `key` names the condition; pass one whenever the body carries live numbers.
+    Without it the text itself is the key, which only throttles alerts that
+    repeat verbatim.
 
     Returns (should_send, text_to_send). When an alert has been muted, the copy
     that finally lands says how many it stood in for — silence about the
     suppression would understate how long the condition has been shouting.
     """
-    allow, swallowed = _throttle.check(text)
+    allow, swallowed = _throttle.check(text, key=key)
     if not allow:
         logger.debug("Admin alert suppressed (repeat #%d within cooldown)", swallowed)
         return False, text

@@ -49,11 +49,45 @@ class TestAlertThrottle:
         assert throttle.check("disk nearly full", now=1.0) == (True, 0)
 
     def test_a_changed_metric_in_the_body_still_gets_through(self):
-        """Keyed on exact text, so a moving number is a new alert."""
+        """Without a key the text is the key, so a moving number is a new alert."""
         throttle = AlertThrottle(cooldown_seconds=3600)
         throttle.check("gap=1000", now=0.0)
 
         assert throttle.check("gap=2000", now=1.0)[0] is True
+
+
+class TestKeyedThrottle:
+    """The warehouse validator's body carries live checksums and an attempt
+    counter, so text-keying never fired: 3 119 failures made 404 distinct
+    'identical' messages."""
+
+    def test_moving_numbers_are_one_condition_when_keyed(self):
+        throttle = AlertThrottle(cooldown_seconds=3600)
+        first = "validation failed (attempt 1/3)\nrevenue=120076246.58→120076240.00"
+        later = "validation failed (attempt 2/3)\nrevenue=120076246.58→120076111.00"
+
+        assert throttle.check(first, key="warehouse:validation_retrying", now=0.0)[0] is True
+        assert throttle.check(later, key="warehouse:validation_retrying", now=120.0) == (False, 1)
+
+    def test_different_keys_do_not_mask_each_other(self):
+        throttle = AlertThrottle(cooldown_seconds=3600)
+        throttle.check("a", key="warehouse:validation_retrying", now=0.0)
+
+        assert throttle.check("b", key="warehouse:backup_failed", now=1.0)[0] is True
+
+    def test_identical_text_under_two_keys_is_two_conditions(self):
+        throttle = AlertThrottle(cooldown_seconds=3600)
+        throttle.check("same words", key="k1", now=0.0)
+
+        assert throttle.check("same words", key="k2", now=1.0)[0] is True
+
+    def test_keyed_alert_returns_after_cooldown_with_its_tally(self):
+        throttle = AlertThrottle(cooldown_seconds=60)
+        throttle.check("v=1", key="k", now=0.0)
+        throttle.check("v=2", key="k", now=10.0)
+        throttle.check("v=3", key="k", now=20.0)
+
+        assert throttle.check("v=4", key="k", now=61.0) == (True, 2)
 
 
 class TestThrottleCheckDecoration:
@@ -108,3 +142,32 @@ class TestSendAdminMessageIsThrottled:
             await bot_main.send_admin_message("sync stalled")
 
         assert sender.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_a_standing_condition_reaches_the_transport_once_when_keyed(
+        self, monkeypatch,
+    ):
+        """30 ticks an hour, a different checksum in each, one message."""
+        monkeypatch.setattr(bot_main, "_application", None)
+        sender = AsyncMock(return_value=2)
+
+        with patch("core.telegram_alerts.send_admin_message_http", sender):
+            for attempt in range(15):
+                await bot_main.send_admin_message(
+                    f"⚠️ Warehouse validation failed (attempt {attempt}/3)\n"
+                    f"revenue=120076246.58→{120076246.58 - attempt:.2f}",
+                    key="warehouse:validation_retrying",
+                )
+
+        assert sender.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_second_condition_is_not_swallowed_by_the_first(self, monkeypatch):
+        monkeypatch.setattr(bot_main, "_application", None)
+        sender = AsyncMock(return_value=2)
+
+        with patch("core.telegram_alerts.send_admin_message_http", sender):
+            await bot_main.send_admin_message("checksums drifted", key="warehouse:validation_retrying")
+            await bot_main.send_admin_message("backup could not run", key="warehouse:backup_failed")
+
+        assert sender.await_count == 2
