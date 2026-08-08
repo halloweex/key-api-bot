@@ -86,6 +86,13 @@ async def health_check(request: Request):
 
     from core.config import config as app_config
 
+    # Data-quality freshness rides along in the cached stats; lift it to the
+    # top level so the canary reads it without parsing the duckdb block.
+    # Its absence is meaningful (bot/canary.py treats a missing block as a
+    # failure), so never substitute an empty dict for "we could not tell".
+    stats = dict(duckdb_stats or {})
+    data_quality = stats.pop("data_quality", None)
+
     return {
         "status": "healthy" if duckdb_stats else "degraded",
         "version": VERSION,
@@ -95,9 +102,10 @@ async def health_check(request: Request):
         "duckdb": {
             "status": duckdb_status,
             "latency_ms": db_latency_ms,
-            **(duckdb_stats or {})
+            **stats
         },
         "sync": sync_status,
+        "data_quality": data_quality,
     }
 
 

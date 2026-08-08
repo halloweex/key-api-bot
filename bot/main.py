@@ -272,8 +272,9 @@ def main() -> None:
             await send_admin_message(format_recovery(result, DASHBOARD_URL))
         else:
             logger.debug(
-                "Canary OK: cert_days=%s sync_age=%s",
+                "Canary OK: cert_days=%s sync_age=%s dq_ages=%s",
                 result.cert_days_remaining, result.sync_seconds_since,
+                result.dq_ages,
             )
 
     # Set up command menu at startup
