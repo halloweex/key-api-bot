@@ -16,6 +16,7 @@ from core.data_quality import (
     DiscrepancyClass,
     IntegrityIssue,
     Severity,
+    fetch_last_success_ages,
     fetch_latest_run,
     persist_run,
 )
@@ -233,5 +234,85 @@ class TestFetchLatestRun:
 
             assert latest_integrity["run_id"] == integrity_id
             assert latest_recon["run_id"] == reconciliation_id
+        finally:
+            await store.close()
+
+
+class TestFetchLastSuccessAges:
+    """Freshness for the run-age watchdog — keyed on success, not on rows."""
+
+    @pytest.mark.asyncio
+    async def test_failed_runs_do_not_count_as_freshness(self, tmp_path):
+        """The bug this exists for: 57 failed runs in a row read as 'ran recently'."""
+        store = await _make_store(tmp_path)
+        try:
+            old = datetime.now(timezone.utc) - timedelta(days=3)
+            recent = datetime.now(timezone.utc) - timedelta(minutes=5)
+            async with store.connection() as conn:
+                # A real verdict, three days ago.
+                persist_run(
+                    conn, started_at=old, ended_at=old + timedelta(seconds=1),
+                    as_of=old, window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
+                    layer="reconciliation", issues=[], discrepancies=[],
+                )
+                # …then nothing but crashes, the most recent five minutes ago.
+                persist_run(
+                    conn, started_at=recent, ended_at=recent + timedelta(seconds=1),
+                    as_of=recent, window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
+                    layer="reconciliation", issues=[], discrepancies=[],
+                    error_message="429 Too Many Attempts",
+                )
+                ages = fetch_last_success_ages(conn)
+
+            recon = ages["reconciliation"]
+            # Must reflect the 3-day-old success, not the 5-minute-old failure.
+            assert recon["age_seconds"] > 2 * 86400
+            assert recon["last_success_at"].startswith(old.date().isoformat())
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_never_run_layer_reports_null_age(self, tmp_path):
+        """A layer with no successes gets a key with a null age, not a missing key."""
+        store = await _make_store(tmp_path)
+        try:
+            base = datetime.now(timezone.utc)
+            async with store.connection() as conn:
+                persist_run(
+                    conn, started_at=base, ended_at=base + timedelta(seconds=1),
+                    as_of=base, window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
+                    layer="integrity", issues=[], discrepancies=[],
+                )
+                ages = fetch_last_success_ages(conn)
+
+            assert set(ages) == {"integrity", "reconciliation"}
+            assert ages["integrity"]["age_seconds"] is not None
+            assert ages["integrity"]["age_seconds"] < 60
+            assert ages["reconciliation"] == {
+                "last_success_at": None, "age_seconds": None,
+            }
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_warn_and_critical_runs_still_count_as_fresh(self, tmp_path):
+        """A check that found problems still ran — only an errored run did not."""
+        store = await _make_store(tmp_path)
+        try:
+            base = datetime.now(timezone.utc)
+            issue = IntegrityIssue(
+                check_name="orphan_products", table_name="order_products",
+                severity=Severity.CRITICAL, count=3, sample_ids=[1, 2, 3],
+                description="orphans",
+            )
+            async with store.connection() as conn:
+                persist_run(
+                    conn, started_at=base, ended_at=base + timedelta(seconds=1),
+                    as_of=base, window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
+                    layer="integrity", issues=[issue], discrepancies=[],
+                )
+                ages = fetch_last_success_ages(conn)
+
+            assert ages["integrity"]["age_seconds"] is not None
         finally:
             await store.close()

@@ -43,6 +43,17 @@ class DuckDBStats(BaseModel):
     db_size_mb: Optional[float] = None
 
 
+class DataQualityFreshness(BaseModel):
+    """When a data-quality layer last produced a verdict.
+
+    "Last success" means a run that finished without an error — a failed run
+    writes a row too, so row-existence alone would have read green through
+    57 consecutive reconciliation failures.
+    """
+    last_success_at: Optional[str] = Field(None, description="ISO timestamp of the last successful run")
+    age_seconds: Optional[int] = Field(None, description="Seconds since that run; null means never succeeded")
+
+
 class SyncStatus(BaseModel):
     """Background sync service status."""
     status: str = Field(description="Sync status: active, idle, or error")
@@ -62,6 +73,9 @@ class HealthResponse(BaseModel):
     sync_mode: str = Field("legacy", description="Sync pipeline mode: legacy or staging")
     duckdb: DuckDBStats
     sync: Optional[SyncStatus] = Field(None, description="Background sync service status")
+    data_quality: Optional[Dict[str, DataQualityFreshness]] = Field(
+        None, description="Per-layer age of the last successful data-quality run"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

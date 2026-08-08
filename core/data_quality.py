@@ -946,3 +946,48 @@ def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, An
         "duration_ms": int(row[13] or 0),
         "error_message": row[14],
     }
+
+
+# Layers a run-age watchdog is expected to see. A layer that never appears
+# here would be watched by nobody.
+WATCHED_LAYERS: Tuple[str, ...] = ("integrity", "reconciliation")
+
+
+def fetch_last_success_ages(
+    conn, layers: Tuple[str, ...] = WATCHED_LAYERS,
+) -> Dict[str, Dict[str, Any]]:
+    """Age of the last **successful** run per layer, for the run-age watchdog.
+
+    Keyed on `error_message IS NULL`, not on the mere existence of a row:
+    `persist_run` writes a row on the failure path too, so a plain
+    "when did this job last run" watchdog stayed silent through all 57
+    consecutive `429 Too Many Attempts` failures of the reconciliation job.
+    A run that produced no verdict is not a run.
+
+    Returns one entry per requested layer — a layer that has never succeeded
+    reports `last_success_at=None, age_seconds=None`, so the consumer can
+    tell "never ran" apart from "ran recently" instead of seeing a missing key.
+    """
+    placeholders = ", ".join("?" for _ in layers)
+    rows = conn.execute(f"""
+        SELECT layer,
+               MAX(started_at) AS last_success_at,
+               EXTRACT(EPOCH FROM (now() - MAX(started_at))) AS age_seconds
+        FROM data_quality_runs
+        WHERE layer IN ({placeholders})
+          AND error_message IS NULL
+          AND status <> 'FAILED'
+        GROUP BY layer
+    """, list(layers)).fetchall()
+
+    found = {
+        r[0]: {
+            "last_success_at": r[1].isoformat() if r[1] else None,
+            "age_seconds": int(r[2]) if r[2] is not None else None,
+        }
+        for r in rows
+    }
+    return {
+        layer: found.get(layer, {"last_success_at": None, "age_seconds": None})
+        for layer in layers
+    }
