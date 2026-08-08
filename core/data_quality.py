@@ -23,10 +23,13 @@ Vocabulary
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Severity & classes ───────────────────────────────────────────────────────
