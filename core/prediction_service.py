@@ -1384,7 +1384,8 @@ class PredictionService:
                 f"⚠️ Revenue model retrain REJECTED ({sales_type}).\n"
                 f"Reason: {reason}\n"
                 f"Holdout metrics: {metrics}\n"
-                "Previous model kept; forecast unchanged."
+                "Previous model kept; forecast unchanged.",
+                key=f"prediction:retrain_rejected:{sales_type}",
             )
         except Exception as e:
             logger.warning(f"Failed to send model-rejected alert: {e}")

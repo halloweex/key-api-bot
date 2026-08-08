@@ -953,6 +953,169 @@ def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, An
 WATCHED_LAYERS: Tuple[str, ...] = ("integrity", "reconciliation")
 
 
+def alert_fingerprint(
+    layer: str,
+    severity: Severity,
+    issues: List[IntegrityIssue],
+    discrepancies: List[Discrepancy],
+) -> str:
+    """A stable key naming *which* problem this alert is about.
+
+    Built from the identities of the findings — check names, and the
+    (field, class) pairs of the discrepancies — never from their counts or
+    amounts, which move on every run. Two runs reporting the same broken
+    things get the same key and the second is throttled; a new kind of
+    breakage gets a new key and is delivered at once, instead of hiding
+    behind the cooldown of the one already being reported.
+    """
+    parts = sorted({i.check_name for i in issues})
+    parts += sorted({f"{d.field}/{d.diff_class.value}" for d in discrepancies})
+    body = ",".join(parts) if parts else "clean"
+    return f"dq:{layer}:{severity.value}:{body}"
+
+
+def fetch_previous_run(conn, layer: str, before_run_id: int) -> Optional[Dict[str, Any]]:
+    """The run of `layer` immediately preceding `before_run_id`, if any.
+
+    Used by the digest to say whether a standing problem is growing. Failed
+    runs are skipped: their zero counts would read as "fixed, then broke
+    again" and turn every 429 into a fake recovery.
+    """
+    row = conn.execute("""
+        SELECT run_id FROM data_quality_runs
+        WHERE layer = ? AND run_id < ?
+          AND error_message IS NULL AND status <> 'FAILED'
+        ORDER BY run_id DESC
+        LIMIT 1
+    """, [layer, before_run_id]).fetchone()
+    if not row:
+        return None
+    return fetch_latest_run_by_id(conn, int(row[0]))
+
+
+def fetch_latest_run_by_id(conn, run_id: int) -> Optional[Dict[str, Any]]:
+    """Read one run row by id, in the same shape as `fetch_latest_run`."""
+    row = conn.execute("""
+        SELECT run_id, started_at, ended_at, as_of, window_start, window_end,
+               layer, status, integrity_issues_count, discrepancies_count,
+               critical_count, warn_count, api_calls_used, duration_ms, error_message
+        FROM data_quality_runs WHERE run_id = ?
+    """, [run_id]).fetchone()
+    if not row:
+        return None
+    return {
+        "run_id": int(row[0]),
+        "started_at": row[1].isoformat() if row[1] else None,
+        "ended_at": row[2].isoformat() if row[2] else None,
+        "as_of": row[3].isoformat() if row[3] else None,
+        "window_start": row[4].isoformat() if row[4] else None,
+        "window_end": row[5].isoformat() if row[5] else None,
+        "layer": row[6],
+        "status": row[7],
+        "integrity_issues_count": int(row[8] or 0),
+        "discrepancies_count": int(row[9] or 0),
+        "critical_count": int(row[10] or 0),
+        "warn_count": int(row[11] or 0),
+        "api_calls_used": int(row[12] or 0),
+        "duration_ms": int(row[13] or 0),
+        "error_message": row[14],
+    }
+
+
+# ─── Daily digest ─────────────────────────────────────────────────────────────
+
+# How stale a layer's newest verdict may be before the digest calls it out.
+# One cycle plus grace, same reasoning as the canary's thresholds.
+DIGEST_MAX_AGE_HOURS = {"reconciliation": 30, "integrity": 12}
+
+
+@dataclass
+class DigestSection:
+    """One layer's contribution to the daily digest."""
+    layer: str
+    run: Optional[Dict[str, Any]]           # newest successful run, if any
+    issues: List[Dict[str, Any]] = field(default_factory=list)
+    diffs: List[Dict[str, Any]] = field(default_factory=list)
+    previous_issues: List[Dict[str, Any]] = field(default_factory=list)
+    age_hours: Optional[float] = None       # age of `run`, None if never ran
+
+
+def _delta_note(check_name: str, count: int, previous: List[Dict[str, Any]]) -> str:
+    """'new', 'unchanged', or '+12 since the last run'."""
+    for p in previous:
+        if p["check_name"] == check_name:
+            diff = count - int(p["count"])
+            if diff == 0:
+                return "unchanged"
+            return f"{diff:+d} since the last run"
+    return "new"
+
+
+def build_digest(
+    sections: List[DigestSection],
+    *,
+    max_issue_lines: int = 8,
+    max_diff_lines: int = 6,
+) -> Optional[str]:
+    """Render the daily digest, or None when there is nothing to say.
+
+    WARN findings are persisted on every run and alerted on none — only
+    CRITICAL is pushed at the moment it happens. Two standing WARNs worth
+    ₴5.6M had therefore never been said out loud to anyone. This is the
+    surface for them: once a day, with a delta so a growing problem reads
+    differently from a known one.
+
+    Returns None when every layer is fresh and clean, so a quiet day stays
+    quiet. Liveness is the canary's job, not the digest's.
+    """
+    body: List[str] = []
+    worth_sending = False
+
+    for s in sorted(sections, key=lambda x: x.layer):
+        if s.run is None:
+            body.append(f"*{s.layer}* — no successful run on record")
+            worth_sending = True
+            continue
+
+        limit = DIGEST_MAX_AGE_HOURS.get(s.layer)
+        stale = limit is not None and s.age_hours is not None and s.age_hours > limit
+        when = (s.run.get("started_at") or "")[:16].replace("T", " ")
+        head = f"*{s.layer}* · {s.run.get('status')} · {when}"
+        if stale:
+            head += f" · ⏳ {s.age_hours:.0f}h old (>{limit}h)"
+            worth_sending = True
+        body.append(head)
+
+        if s.issues:
+            worth_sending = True
+            for i in s.issues[:max_issue_lines]:
+                note = _delta_note(i["check_name"], int(i["count"]), s.previous_issues)
+                body.append(f"• {i['check_name']}: {i['count']:,} ({note})")
+                desc = (i.get("description") or "").strip()
+                if desc:
+                    body.append(f"  ↳ {desc[:200]}")
+            if len(s.issues) > max_issue_lines:
+                body.append(f"  …and {len(s.issues) - max_issue_lines} more")
+
+        if s.diffs:
+            worth_sending = True
+            for d in s.diffs[:max_diff_lines]:
+                body.append(
+                    f"• {d['month']} / src={d['source_id']}: {d['field']} "
+                    f"DK={d['dk_value']:,.0f} KC={d['kc_value']:,.0f} ({d['diff_class']})"
+                )
+            if len(s.diffs) > max_diff_lines:
+                body.append(f"  …and {len(s.diffs) - max_diff_lines} more")
+
+        if not s.issues and not s.diffs and not stale:
+            body.append("• clean")
+
+    if not worth_sending:
+        return None
+
+    return "\n".join(["📋 *Data quality digest*", ""] + body)
+
+
 def fetch_last_success_ages(
     conn, layers: Tuple[str, ...] = WATCHED_LAYERS,
 ) -> Dict[str, Dict[str, Any]]:
