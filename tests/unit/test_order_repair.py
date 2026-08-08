@@ -175,3 +175,41 @@ class TestOrdersWithoutLineItemsCheck:
 
         assert issues[0].count == 1
         assert issues[0].sample_ids == (2,)
+
+
+class TestIntegrityScanSurvivesAMissingTable:
+    """`/warehouse/rebuild-silver` DROPs silver_orders; the 6-hourly scan can
+    land inside that window. The handler written to tolerate it referenced a
+    logger the module never imported, so it raised NameError and took the whole
+    scan down with it — including every check that had nothing to do with
+    silver_orders."""
+
+    def test_no_silver_orders_table_is_tolerated(self):
+        import duckdb
+
+        from core.data_quality import check_internal_integrity
+
+        conn = duckdb.connect(":memory:")
+        conn.execute("""
+            CREATE TABLE orders (id BIGINT, ordered_at TIMESTAMPTZ,
+                                 source_id INTEGER, status_id INTEGER,
+                                 grand_total DOUBLE);
+            CREATE TABLE order_products (id BIGINT, order_id BIGINT,
+                                         product_id BIGINT, price_sold DOUBLE,
+                                         quantity INTEGER);
+            CREATE TABLE products (id BIGINT);
+            CREATE TABLE buyers (id BIGINT);
+            CREATE TABLE categories (id BIGINT);
+            CREATE TABLE sync_metadata (key VARCHAR, value VARCHAR);
+        """)
+
+        issues = check_internal_integrity(conn)
+
+        assert isinstance(issues, list)
+        conn.close()
+
+    def test_the_module_has_a_logger(self):
+        """The bug was a name that did not exist, so name it in a test."""
+        import core.data_quality as dq
+
+        assert hasattr(dq, "logger")
