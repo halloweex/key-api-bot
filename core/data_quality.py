@@ -805,6 +805,115 @@ def _goods_shipped_without_sale_check(
     )]
 
 
+# Every Gold column the rebuild writes, and how closely a recomputed value has
+# to match. Counts must be exact; money is DECIMAL(12,2) and avg_order_value is
+# a division, so both get a cent of slack.
+_GOLD_CELL_COLUMNS = (
+    ("revenue", 0.01),
+    ("orders_count", 0),
+    ("unique_customers", 0),
+    ("new_customers", 0),
+    ("returning_customers", 0),
+    ("instagram_revenue", 0.01),
+    ("telegram_revenue", 0.01),
+    ("shopify_revenue", 0.01),
+    ("instagram_orders", 0),
+    ("telegram_orders", 0),
+    ("shopify_orders", 0),
+    ("returns_count", 0),
+    ("returns_revenue", 0.01),
+    ("avg_order_value", 0.01),
+)
+
+
+def _gold_cell_values_check(
+    conn, severity: "Severity" = None, max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Recompute every Gold cell from Silver and compare all fourteen columns.
+
+    The warehouse validation asserts three scalars and, since the cell guard,
+    that the *set* of (date, sales_type) cells matches. It says nothing about
+    thirteen of the fourteen values inside a cell: order counts, unique and
+    new and returning customers, per-source revenue and orders, returns,
+    average order value. PR #41 was a bug in exactly one of those columns —
+    the new-customer baseline — and it was found by eye.
+
+    Deliberately **report-only**, and placed here rather than inline in the
+    refresh to make that structural. Integrity findings never touch
+    `validation_passed`, so this cannot drive `mark_warehouse_dirty` and it
+    cannot start a rebuild loop: fourteen columns across ~2 000 cells failing
+    every two minutes on a 7 GB host is the outcome the design debate vetoed.
+    It runs with the rest of the integrity scan, four times a day, and reaches
+    a human through the daily digest.
+
+    What it cannot see: a lie that arrived from Bronze. Gold is rebuilt from
+    Silver in the same tick, so a consistent wrong value is reproduced on both
+    sides of this comparison. It covers rebuild faults and the unasserted
+    columns — nothing more. Reconciliation against KeyCRM is the only check
+    that sees the rest.
+    """
+    from core.duckdb_store import GOLD_REVENUE_SELECT_SQL
+
+    severity = severity or Severity.WARN
+    expected = GOLD_REVENUE_SELECT_SQL.format(date_filter="order_date IS NOT NULL")
+
+    diffs = []
+    for column, tolerance in _GOLD_CELL_COLUMNS:
+        if tolerance:
+            diffs.append(
+                f"ABS(COALESCE(e.{column}, 0) - COALESCE(g.{column}, 0)) > {tolerance}"
+            )
+        else:
+            diffs.append(f"COALESCE(e.{column}, -1) <> COALESCE(g.{column}, -1)")
+
+    rows = conn.execute(f"""
+        WITH expected AS ({expected})
+        SELECT e.date, e.sales_type,
+               {", ".join(f"e.{c} AS e_{c}, g.{c} AS g_{c}" for c, _ in _GOLD_CELL_COLUMNS)}
+        FROM expected e
+        JOIN gold_daily_revenue g
+          ON g.date = e.date AND g.sales_type = e.sales_type
+        WHERE {" OR ".join(diffs)}
+        ORDER BY e.date DESC
+        LIMIT ?
+    """, [max_samples]).fetchall()
+
+    if not rows:
+        return []
+
+    # Name the columns that actually moved, not just the cells.
+    offenders: Dict[str, int] = {}
+    for row in rows:
+        for idx, (column, tolerance) in enumerate(_GOLD_CELL_COLUMNS):
+            e_val, g_val = row[2 + idx * 2], row[3 + idx * 2]
+            if e_val is None and g_val is None:
+                continue
+            differs = (
+                abs(float(e_val or 0) - float(g_val or 0)) > tolerance
+                if tolerance else (e_val != g_val)
+            )
+            if differs:
+                offenders[column] = offenders.get(column, 0) + 1
+
+    worst = ", ".join(
+        f"{c} ({n})" for c, n in sorted(offenders.items(), key=lambda kv: -kv[1])[:5]
+    )
+    return [IntegrityIssue(
+        check_name="gold_cell_values",
+        table_name="gold_daily_revenue",
+        severity=severity,
+        count=len(rows),
+        sample_ids=tuple(),
+        description=(
+            f"{len(rows)} Gold cell(s) disagree with a recompute from Silver "
+            f"(showing at most {max_samples}). Columns: {worst}. "
+            "Report only — Gold is rebuilt from Silver, so this catches rebuild "
+            "faults and the columns nothing else asserts, not a wrong value that "
+            "arrived from Bronze."
+        ),
+    )]
+
+
 def check_internal_integrity(conn) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
 
@@ -854,6 +963,13 @@ def check_internal_integrity(conn) -> List[IntegrityIssue]:
         issues += _headline_vs_line_items_check(conn)
     except Exception as exc:  # silver_orders may not exist yet on a fresh DB
         logger.debug("headline_vs_line_items check skipped: %s", exc)
+
+    # Fourteen Gold columns against a recompute from Silver. Report-only by
+    # construction: an integrity finding cannot reach validation_passed.
+    try:
+        issues += _gold_cell_values_check(conn)
+    except Exception as exc:  # gold_daily_revenue may not exist yet
+        logger.debug("gold_cell_values check skipped: %s", exc)
 
     # The same shape, deliberately: goods leaving with no sale is the whole
     # job of an influence manager. Counted, not warned about.

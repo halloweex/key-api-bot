@@ -84,6 +84,42 @@ def _memory_limit() -> str:
     return DEFAULT_DUCKDB_MEMORY_LIMIT
 
 
+# The one definition of what a Gold revenue cell contains. Both the rebuild and
+# the per-cell audit in core/data_quality.py read it from here: an audit with
+# its own copy of the projection checks that two hand-written queries agree,
+# which is not the same question.
+#
+# `{date_filter}` is substituted by the caller — a date list for an incremental
+# rebuild, `order_date IS NOT NULL` for everything.
+GOLD_REVENUE_SELECT_SQL = """
+SELECT
+    order_date AS date,
+    sales_type,
+    COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0) AS revenue,
+    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) AS orders_count,
+    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND buyer_id IS NOT NULL THEN buyer_id END) AS unique_customers,
+    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND is_new_customer THEN buyer_id END) AS new_customers,
+    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END) AS returning_customers,
+    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 1 THEN grand_total END), 0) AS instagram_revenue,
+    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 2 THEN grand_total END), 0) AS telegram_revenue,
+    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 4 THEN grand_total END), 0) AS shopify_revenue,
+    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 1 THEN id END) AS instagram_orders,
+    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 2 THEN id END) AS telegram_orders,
+    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 4 THEN id END) AS shopify_orders,
+    COUNT(DISTINCT CASE WHEN is_return AND is_active_source THEN id END) AS returns_count,
+    COALESCE(SUM(CASE WHEN is_return AND is_active_source THEN grand_total END), 0) AS returns_revenue,
+    CASE
+        WHEN COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) > 0
+        THEN COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0)
+             / COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END)
+        ELSE 0
+    END AS avg_order_value
+FROM silver_orders
+WHERE {date_filter}
+GROUP BY order_date, sales_type
+"""
+
+
 class DuckDBStore(
     UsersMixin, TrafficMixin, CustomersMixin, GoalsMixin,
     InventoryMixin, ExpensesMixin, RevenueMixin, ProductsIntelMixin,
@@ -2235,34 +2271,7 @@ class DuckDBStore(
 
             # ── Step 2: Gold daily revenue (lock acquired + released) ──
             # Single SQL template for both incremental and full rebuild
-            _GOLD_REVENUE_SQL = """
-                INSERT INTO gold_daily_revenue
-                SELECT
-                    order_date AS date,
-                    sales_type,
-                    COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0) AS revenue,
-                    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) AS orders_count,
-                    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND buyer_id IS NOT NULL THEN buyer_id END) AS unique_customers,
-                    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND is_new_customer THEN buyer_id END) AS new_customers,
-                    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END) AS returning_customers,
-                    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 1 THEN grand_total END), 0) AS instagram_revenue,
-                    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 2 THEN grand_total END), 0) AS telegram_revenue,
-                    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 4 THEN grand_total END), 0) AS shopify_revenue,
-                    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 1 THEN id END) AS instagram_orders,
-                    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 2 THEN id END) AS telegram_orders,
-                    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 4 THEN id END) AS shopify_orders,
-                    COUNT(DISTINCT CASE WHEN is_return AND is_active_source THEN id END) AS returns_count,
-                    COALESCE(SUM(CASE WHEN is_return AND is_active_source THEN grand_total END), 0) AS returns_revenue,
-                    CASE
-                        WHEN COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) > 0
-                        THEN COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0)
-                             / COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END)
-                        ELSE 0
-                    END AS avg_order_value
-                FROM silver_orders
-                WHERE {date_filter}
-                GROUP BY order_date, sales_type
-            """
+            _GOLD_REVENUE_SQL = "INSERT INTO gold_daily_revenue\n" + GOLD_REVENUE_SELECT_SQL
 
             gold_revenue_rows = 0
             async with self.connection() as conn:
