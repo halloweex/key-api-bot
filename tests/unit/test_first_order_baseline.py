@@ -135,9 +135,10 @@ class TestHeadlineVsLineItems:
         conn = duckdb.connect(":memory:")
         conn.execute("""
             CREATE TABLE silver_orders (id BIGINT, grand_total DOUBLE,
-                                        is_return BOOLEAN, is_active_source BOOLEAN);
+                                        is_return BOOLEAN, is_active_source BOOLEAN,
+                                        sales_type VARCHAR DEFAULT 'retail');
             CREATE TABLE order_products (order_id BIGINT, price_sold DOUBLE, quantity INTEGER);
-            INSERT INTO silver_orders VALUES (1, 0.0, FALSE, TRUE), (2, 500.0, FALSE, TRUE);
+            INSERT INTO silver_orders (id, grand_total, is_return, is_active_source) VALUES (1, 0.0, FALSE, TRUE), (2, 500.0, FALSE, TRUE);
             INSERT INTO order_products VALUES (1, 100.0, 3), (2, 250.0, 2);
         """)
         issues = _headline_vs_line_items_check(conn)
@@ -154,9 +155,10 @@ class TestHeadlineVsLineItems:
         conn = duckdb.connect(":memory:")
         conn.execute("""
             CREATE TABLE silver_orders (id BIGINT, grand_total DOUBLE,
-                                        is_return BOOLEAN, is_active_source BOOLEAN);
+                                        is_return BOOLEAN, is_active_source BOOLEAN,
+                                        sales_type VARCHAR DEFAULT 'retail');
             CREATE TABLE order_products (order_id BIGINT, price_sold DOUBLE, quantity INTEGER);
-            INSERT INTO silver_orders VALUES (1, 300.0, FALSE, TRUE);
+            INSERT INTO silver_orders (id, grand_total, is_return, is_active_source) VALUES (1, 300.0, FALSE, TRUE);
             INSERT INTO order_products VALUES (1, 100.0, 3);
         """)
         assert _headline_vs_line_items_check(conn) == []
@@ -168,9 +170,10 @@ class TestHeadlineVsLineItems:
         conn = duckdb.connect(":memory:")
         conn.execute("""
             CREATE TABLE silver_orders (id BIGINT, grand_total DOUBLE,
-                                        is_return BOOLEAN, is_active_source BOOLEAN);
+                                        is_return BOOLEAN, is_active_source BOOLEAN,
+                                        sales_type VARCHAR DEFAULT 'retail');
             CREATE TABLE order_products (order_id BIGINT, price_sold DOUBLE, quantity INTEGER);
-            INSERT INTO silver_orders VALUES (1, 0.0, TRUE, TRUE), (2, 0.0, FALSE, FALSE);
+            INSERT INTO silver_orders (id, grand_total, is_return, is_active_source) VALUES (1, 0.0, TRUE, TRUE), (2, 0.0, FALSE, FALSE);
             INSERT INTO order_products VALUES (1, 100.0, 3), (2, 100.0, 3);
         """)
         assert _headline_vs_line_items_check(conn) == []

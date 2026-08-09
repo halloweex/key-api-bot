@@ -2382,7 +2382,44 @@ class DuckDBStore(
                 checksum_match = abs(silver_revenue - gold_revenue) < 0.01
                 product_checksum_match = abs(gold_product_revenue - bronze_product_revenue) < 0.01
                 row_count_match = bronze_orders == silver_rows
-                validation_passed = checksum_match and row_count_match and product_checksum_match
+
+                # ── Cell guard ──
+                # Gold holds one row per (date, sales_type) and is built from
+                # Silver by GROUP BY, so the two sets of cells must be equal.
+                # The scalar checksums cannot see it when they are not: on the
+                # three backups taken during the August incident there were
+                # 100 → 90 → 84 mismatched cells and *zero* value mismatches —
+                # every one was a cell Gold was missing, while the sums agreed.
+                # Two anti-joins over an indexed pair of columns; ~7 ms.
+                missing_cells = conn.execute("""
+                    SELECT COUNT(*) FROM (
+                        SELECT DISTINCT order_date AS d, sales_type AS t FROM silver_orders
+                        EXCEPT
+                        SELECT date, sales_type FROM gold_daily_revenue
+                    )
+                """).fetchone()[0]
+                extra_cells = conn.execute("""
+                    SELECT COUNT(*) FROM (
+                        SELECT date AS d, sales_type AS t FROM gold_daily_revenue
+                        EXCEPT
+                        SELECT DISTINCT order_date, sales_type FROM silver_orders
+                    )
+                """).fetchone()[0]
+                cells_match = (missing_cells == 0 and extra_cells == 0)
+                if not cells_match:
+                    logger.error(
+                        f"Gold cell mismatch: {missing_cells} missing, "
+                        f"{extra_cells} orphaned (silver_rows={silver_rows})"
+                    )
+
+                # A missing cell is a rebuild fault, and a rebuild is what
+                # fixes it — so this joins the flag that drives the self-heal,
+                # unlike the partition assertion below, which reports a
+                # condition no rebuild can repair.
+                validation_passed = (
+                    checksum_match and row_count_match
+                    and product_checksum_match and cells_match
+                )
 
                 # ── Partition assertion (P2-2) ──
                 # The three checksums above sum every sales_type, while every
@@ -2452,6 +2489,7 @@ class DuckDBStore(
 
                     detail = (
                         f"rows={bronze_orders}→{silver_rows} (match={row_count_match}), "
+                        f"cells: {missing_cells} missing/{extra_cells} orphaned, "
                         f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match}), "
                         f"product_revenue={bronze_product_revenue:.2f}→{gold_product_revenue:.2f} "
                         f"(match={product_checksum_match})"

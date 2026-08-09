@@ -33,11 +33,11 @@ def _issue(check_name: str, count: int, severity=Severity.WARN, description=""):
     )
 
 
-def _row(check_name: str, count: int, description: str = ""):
+def _row(check_name: str, count: int, description: str = "", severity: str = "WARN"):
     """A persisted issue as fetch_run_issues returns it."""
     return {
         "check_name": check_name, "table_name": "silver_orders",
-        "severity": "WARN", "count": count, "sample_ids": [1],
+        "severity": severity, "count": count, "sample_ids": [1],
         "description": description,
     }
 
@@ -158,6 +158,27 @@ class TestBuildDigest:
         )]
         msg = build_digest(sections)
         assert "2026-04 / src=1: orders DK=565 KC=566 (MISSING_IN_DK)" in msg
+
+    def test_an_info_finding_alone_does_not_summon_a_digest(self):
+        """Goods shipped to bloggers is a number, not a problem. A digest that
+        arrives every day regardless stops being read on the day it matters."""
+        sections = [DigestSection(
+            layer="integrity", run=_run("PASS"), age_hours=2,
+            issues=[_row("goods_shipped_without_sale", 448, severity="INFO")],
+        )]
+        assert build_digest(sections) is None
+
+    def test_but_it_rides_along_when_there_is_something_to_say(self):
+        sections = [DigestSection(
+            layer="integrity", run=_run("WARN"), age_hours=2,
+            issues=[
+                _row("headline_vs_line_items", 12),
+                _row("goods_shipped_without_sale", 448, severity="INFO"),
+            ],
+        )]
+        msg = build_digest(sections)
+        assert msg is not None
+        assert "goods_shipped_without_sale: 448" in msg
 
     def test_long_lists_are_truncated(self):
         sections = [DigestSection(

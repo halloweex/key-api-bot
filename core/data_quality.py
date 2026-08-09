@@ -655,6 +655,11 @@ def _headline_vs_line_items_check(
     orders — ₴4.16M across 1 177 of them as of 2026-08 — and nothing said so.
     The gap is created upstream and cannot be fixed here, but it can stop being
     invisible.
+
+    `internal` is excluded and counted separately by
+    `_goods_shipped_without_sale_check`: shipping product with no money owed
+    is that role's job, not a fault, and a check that reports intended work as
+    a defect is one people stop reading.
     """
     severity = severity or Severity.WARN
     row = conn.execute("""
@@ -664,6 +669,7 @@ def _headline_vs_line_items_check(
               FROM order_products GROUP BY order_id) li ON li.order_id = s.id
         WHERE NOT s.is_return AND s.is_active_source
           AND s.grand_total = 0 AND li.amount > 0
+          AND s.sales_type <> 'internal'
     """).fetchone()
     count = int(row[0] or 0)
     if count == 0:
@@ -675,6 +681,7 @@ def _headline_vs_line_items_check(
               FROM order_products GROUP BY order_id) li ON li.order_id = s.id
         WHERE NOT s.is_return AND s.is_active_source
           AND s.grand_total = 0 AND li.amount > 0
+          AND s.sales_type <> 'internal'
         ORDER BY li.amount DESC LIMIT 10
     """).fetchall())
     return [IntegrityIssue(
@@ -745,6 +752,59 @@ def _status_group_agreement_check(
     )]
 
 
+def _goods_shipped_without_sale_check(
+    conn, severity: "Severity" = None,
+) -> List[IntegrityIssue]:
+    """Count product that left with no money attached — deliberately.
+
+    An influence manager ships cosmetics to bloggers: the order carries line
+    items and a grand_total of zero, forever. That is the job, not a fault,
+    which is why these orders are kept out of `headline_vs_line_items` — but
+    the amount is worth knowing. It is marketing spend measured at the price
+    the goods would otherwise have sold for, and until now nobody counted it.
+
+    INFO on purpose: it belongs in the daily digest as a figure, never as a
+    warning about something needing repair.
+    """
+    severity = severity or Severity.INFO
+    row = conn.execute("""
+        SELECT COUNT(*), COALESCE(SUM(li.amount), 0)
+        FROM silver_orders s
+        JOIN (SELECT order_id, SUM(price_sold * quantity) AS amount
+              FROM order_products GROUP BY order_id) li ON li.order_id = s.id
+        WHERE NOT s.is_return AND s.is_active_source
+          AND s.grand_total = 0 AND li.amount > 0
+          AND s.sales_type = 'internal'
+    """).fetchone()
+    count = int(row[0] or 0)
+    if count == 0:
+        return []
+    amount = float(row[1] or 0)
+    sample = tuple(r[0] for r in conn.execute("""
+        SELECT s.id FROM silver_orders s
+        JOIN (SELECT order_id, SUM(price_sold * quantity) AS amount
+              FROM order_products GROUP BY order_id) li ON li.order_id = s.id
+        WHERE NOT s.is_return AND s.is_active_source
+          AND s.grand_total = 0 AND li.amount > 0
+          AND s.sales_type = 'internal'
+        ORDER BY li.amount DESC
+        LIMIT 10
+    """).fetchall())
+    return [IntegrityIssue(
+        check_name="goods_shipped_without_sale",
+        table_name="silver_orders",
+        severity=severity,
+        count=count,
+        sample_ids=sample,
+        description=(
+            f"{count} internal order(s) shipped {amount:,.2f} of goods with no "
+            "sale attached — seeding and gifts, priced at what they would have "
+            "sold for. Expected, and counted here so it is a number rather "
+            "than a silence."
+        ),
+    )]
+
+
 def check_internal_integrity(conn) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
 
@@ -794,6 +854,13 @@ def check_internal_integrity(conn) -> List[IntegrityIssue]:
         issues += _headline_vs_line_items_check(conn)
     except Exception as exc:  # silver_orders may not exist yet on a fresh DB
         logger.debug("headline_vs_line_items check skipped: %s", exc)
+
+    # The same shape, deliberately: goods leaving with no sale is the whole
+    # job of an influence manager. Counted, not warned about.
+    try:
+        issues += _goods_shipped_without_sale_check(conn)
+    except Exception as exc:
+        logger.debug("goods_shipped_without_sale check skipped: %s", exc)
 
     # An order with revenue and no products is a half-written order. The header
     # makes it look complete, so nothing goes back for it on its own.
@@ -1169,7 +1236,12 @@ def build_digest(
         body.append(head)
 
         if s.issues:
-            worth_sending = True
+            # INFO findings are content, never a reason to write. Goods shipped
+            # to bloggers is a number worth reading beside a real problem and
+            # not worth a message of its own — a digest that arrives every day
+            # regardless is one that stops being read on the day it matters.
+            if any(i.get("severity") != "INFO" for i in s.issues):
+                worth_sending = True
             for i in s.issues[:max_issue_lines]:
                 note = _delta_note(i["check_name"], int(i["count"]), s.previous_issues)
                 body.append(f"• {i['check_name']}: {i['count']:,} ({note})")

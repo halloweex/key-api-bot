@@ -250,3 +250,56 @@ class TestSummarizeIssues:
         s = summarize_issues([])
         assert set(s.keys()) == {sv.value for sv in Severity}
         assert all(v == 0 for v in s.values())
+
+
+class TestIntendedShipmentsAreCountedNotWarnedAbout:
+    """An influence manager ships cosmetics to bloggers: line items, zero
+    money, forever. That is the job. A check that reports it as a defect is
+    one people stop reading — and this one had ₴1.19M of it inside a WARN."""
+
+    @pytest.mark.asyncio
+    async def test_internal_shipments_leave_the_warning_and_get_their_own_line(
+        self, tmp_path,
+    ):
+        from core.data_quality import check_internal_integrity
+
+        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
+        await store.connect()
+        try:
+            async with store.connection() as conn:
+                # A retail order billed at zero — the real disagreement.
+                conn.execute("""
+                    INSERT INTO silver_orders
+                    (id, source_id, status_id, grand_total, ordered_at, buyer_id,
+                     manager_id, order_date, is_return, sales_type,
+                     is_active_source, source_name)
+                    VALUES (1, 4, 12, 0, now(), 10, 4, CURRENT_DATE, FALSE,
+                            'retail', TRUE, 'Shopify')
+                """)
+                # An influence shipment — intended.
+                conn.execute("""
+                    INSERT INTO silver_orders
+                    (id, source_id, status_id, grand_total, ordered_at, buyer_id,
+                     manager_id, order_date, is_return, sales_type,
+                     is_active_source, source_name)
+                    VALUES (2, 4, 12, 0, now(), 20, 28, CURRENT_DATE, FALSE,
+                            'internal', TRUE, 'Shopify')
+                """)
+                for oid, amount in ((1, 300.0), (2, 5000.0)):
+                    conn.execute(
+                        "INSERT INTO order_products (id, order_id, product_id, "
+                        "name, quantity, price_sold) VALUES (?, ?, 1, 'x', 1, ?)",
+                        [oid * 1000, oid, amount],
+                    )
+                issues = {i.check_name: i for i in check_internal_integrity(conn)}
+
+            warned = issues["headline_vs_line_items"]
+            assert warned.count == 1, "only the retail order is a disagreement"
+            assert "300" in warned.description
+
+            counted = issues["goods_shipped_without_sale"]
+            assert counted.count == 1
+            assert counted.severity == Severity.INFO, "a number, not a warning"
+            assert "5,000.00" in counted.description
+        finally:
+            await store.close()
