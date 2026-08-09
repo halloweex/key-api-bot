@@ -304,9 +304,31 @@ def summarize_discrepancies(discrepancies: List[Discrepancy]) -> Dict[str, int]:
 
 # Known order statuses (KeyCRM-defined; new IDs require explicit registration
 # so we don't silently accept upstream changes).
+# Verified against KeyCRM on 2026-08-09. Statuses 3, 4, 8, 10, 11, 18 and 24
+# were missing, so a perfectly ordinary parcel «Зібрано для самовивозу» (24)
+# would have been reported as an unknown status. Status 20 was listed under
+# "return/cancel family" and is nothing of the kind — it is «Прибув у
+# відділення», KeyCRM group 4, and it belongs to revenue. That comment cost
+# two sessions a phantom ₴265,230.78 discrepancy.
 KNOWN_STATUS_IDS = frozenset({
-    1, 2, 9, 12, 15,           # active
-    19, 20, 21, 22, 23,         # return/cancel family
+    1,   # new
+    2,   # presence_confirmed
+    3,   # waiting_for_email_response
+    4,   # waiting_for_prepayment
+    8,   # delivered_to_delivery
+    9,   # delivered
+    10,  # departing
+    11,  # in_transit
+    12,  # completed
+    20,  # Прибув у відділення
+    24,  # Зібрано для самовивозу
+    # Lost / cancel group (KeyCRM status_group_id = 6) — excluded from revenue
+    15,  # not_available
+    18,  # did_not_arrange_price
+    19,  # canceled
+    21,  # Помилка доставки
+    22,  # Повернено
+    23,  # Повертається
 })
 
 # Known sources (active + deprecated). New source IDs from KeyCRM should
@@ -669,6 +691,60 @@ def _headline_vs_line_items_check(
     )]
 
 
+def _status_group_agreement_check(
+    conn, severity: "Severity" = None,
+) -> List[IntegrityIssue]:
+    """Compare KeyCRM's own status grouping against our hardcoded id list.
+
+    Revenue excludes the lost/cancel group. We learn that group from the
+    order payload now, but a hardcoded list of status ids still backs up rows
+    synced before the column existed — and a list can only describe the
+    statuses that existed when it was written. Status 20 appeared on
+    2026-07-09 and nothing noticed for a month.
+
+    This is the check that would have. It says nothing while the two agree,
+    and names the status the moment they part company.
+    """
+    from core.models import LOST_STATUS_GROUP_ID, OrderStatus
+
+    severity = severity or Severity.WARN
+    listed = tuple(int(s) for s in OrderStatus.return_statuses())
+    listed_sql = ", ".join(str(s) for s in listed)
+    rows = conn.execute(f"""
+        SELECT status_id, status_group_id, COUNT(*) AS n,
+               COALESCE(SUM(grand_total), 0) AS amount
+        FROM orders
+        WHERE status_group_id IS NOT NULL
+          AND (status_group_id = {LOST_STATUS_GROUP_ID})
+              <> (status_id IN ({listed_sql}))
+        GROUP BY status_id, status_group_id
+        ORDER BY amount DESC
+    """).fetchall()
+    if not rows:
+        return []
+
+    total = sum(int(r[2]) for r in rows)
+    amount = sum(float(r[3]) for r in rows)
+    detail = "; ".join(
+        f"status {int(r[0])} is KeyCRM group {int(r[1])} but our list says "
+        f"{'excluded' if int(r[0]) in listed else 'revenue'} "
+        f"({int(r[2])} orders, {float(r[3]):,.2f})"
+        for r in rows[:5]
+    )
+    return [IntegrityIssue(
+        check_name="status_group_vs_return_list",
+        table_name="orders",
+        severity=severity,
+        count=total,
+        sample_ids=tuple(int(r[0]) for r in rows[:10]),
+        description=(
+            f"{total} order(s) worth {amount:,.2f} are classified differently by "
+            f"KeyCRM's status group and by our status-id list. {detail}. "
+            "The group is the source's own answer; the list is our copy of it."
+        ),
+    )]
+
+
 def check_internal_integrity(conn) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
 
@@ -699,6 +775,12 @@ def check_internal_integrity(conn) -> List[IntegrityIssue]:
     issues += _value_domain_check(
         conn, "orders", "status_id", KNOWN_STATUS_IDS, Severity.WARN,
     )
+
+    # Our copy of "what counts as revenue" against KeyCRM's own grouping.
+    try:
+        issues += _status_group_agreement_check(conn)
+    except Exception as exc:  # status_group_id predates some schemas
+        logger.debug("status_group agreement check skipped: %s", exc)
     issues += _value_domain_check(
         conn, "orders", "source_id", KNOWN_SOURCE_IDS, Severity.WARN,
     )

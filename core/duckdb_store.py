@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 import pandas as pd
 
-from core.models import Order, SourceId, OrderStatus
+from core.models import LOST_STATUS_GROUP_ID, Order, SourceId, OrderStatus
 from bot.config import DEFAULT_TIMEZONE, TELEGRAM_MANAGER_IDS
 from core.exceptions import QueryTimeoutError
 from core.duckdb_constants import (
@@ -349,6 +349,7 @@ class DuckDBStore(
             id INTEGER PRIMARY KEY,
             source_id INTEGER NOT NULL,
             status_id INTEGER NOT NULL,
+            status_group_id INTEGER,       -- KeyCRM's own grouping; 6 = lost/cancel
             grand_total DECIMAL(12, 2) NOT NULL,
             ordered_at TIMESTAMP WITH TIME ZONE,
             created_at TIMESTAMP WITH TIME ZONE,
@@ -2012,6 +2013,9 @@ class DuckDBStore(
                  AND o.manager_id IN ({manager_list}) THEN 'retail'
             ELSE 'internal'
         """
+        # KeyCRM's own grouping decides when we have it; the id list covers
+        # rows synced before the column existed. Verified equal for every
+        # status the warehouse holds — see core/models.py.
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
 
         # ── Silver SELECT clause — shared by full and incremental paths ──
@@ -2019,7 +2023,11 @@ class DuckDBStore(
             o.id, o.source_id, o.status_id, o.grand_total,
             o.ordered_at, o.buyer_id, o.manager_id,
             {_date_in_kyiv('o.ordered_at')} AS order_date,
-            o.status_id IN {return_statuses} AS is_return,
+            CASE
+                WHEN o.status_group_id IS NOT NULL
+                    THEN o.status_group_id = {LOST_STATUS_GROUP_ID}
+                ELSE o.status_id IN {return_statuses}
+            END AS is_return,
             CASE {retail_filter} END AS sales_type,
             o.source_id IN (1, 2, 4) AS is_active_source,
             CASE o.source_id
@@ -2985,6 +2993,7 @@ class DuckDBStore(
                 "id": order.id,
                 "source_id": order.source_id,
                 "status_id": order.status_id,
+                "status_group_id": order.status_group_id,
                 "grand_total": float(order.grand_total),
                 "ordered_at": order.ordered_at,  # Keep as datetime
                 "created_at": order.created_at,  # Keep as datetime
@@ -3021,7 +3030,7 @@ class DuckDBStore(
 
         # Ensure nullable integer columns use Int64 so None stays pd.NA, not float NaN
         # (DuckDB 1.5+ rejects float NaN → INT32 in executemany)
-        for col in ["source_id", "status_id", "buyer_id", "manager_id"]:
+        for col in ["source_id", "status_id", "status_group_id", "buyer_id", "manager_id"]:
             orders_df[col] = orders_df[col].astype("Int64")
 
         # Ensure nullable string columns are proper type for DuckDB
@@ -3040,6 +3049,7 @@ class DuckDBStore(
             insert_rows.append((
                 int(row["id"]), _int_or_none(row["source_id"]),
                 _int_or_none(row["status_id"]),
+                _int_or_none(row["status_group_id"]),
                 float(row["grand_total"]),
                 row["ordered_at"], row["created_at"], row["updated_at"],
                 _int_or_none(row["buyer_id"]),
@@ -3058,9 +3068,10 @@ class DuckDBStore(
             # DuckDB 1.5.x has MVCC bugs in ON CONFLICT that cause write-write
             # conflicts on "poisoned" rows. Explicit check avoids that code path.
             insert_sql = """
-                INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, created_at, updated_at,
+                INSERT INTO orders (id, source_id, status_id, status_group_id,
+                                   grand_total, ordered_at, created_at, updated_at,
                                    buyer_id, manager_id, manager_comment, promocode, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
             """
             # manager_comment carries UTM attribution data. COALESCE keeps the
             # stored value when the API payload has it as null — otherwise a
@@ -3069,7 +3080,7 @@ class DuckDBStore(
             # UTM silver layer parses from this column).
             update_sql = """
                 UPDATE orders SET
-                    source_id = ?, status_id = ?, grand_total = ?,
+                    source_id = ?, status_id = ?, status_group_id = ?, grand_total = ?,
                     ordered_at = ?, created_at = ?, updated_at = ?,
                     buyer_id = ?, manager_id = ?,
                     manager_comment = COALESCE(?, manager_comment),
@@ -3096,7 +3107,7 @@ class DuckDBStore(
             failed: List[tuple] = []  # (order_id, error_str)
             for params in insert_rows:
                 order_id = int(params[0])
-                incoming_updated_at = params[6]  # tuple index matches insert_sql
+                incoming_updated_at = params[7]  # tuple index matches insert_sql
                 existing_updated_at = existing.get(order_id) if order_id in existing else None
 
                 try:
@@ -3114,6 +3125,7 @@ class DuckDBStore(
                         conn.execute(update_sql, [
                             params[1], params[2], params[3], params[4], params[5],
                             params[6], params[7], params[8], params[9], params[10],
+                            params[11],
                             order_id,
                         ])
                         updated_ids.append(order_id)

@@ -115,7 +115,7 @@ async def rebuild_silver_from_scratch(
     use when silver has corrupted rows blocking DELETE+INSERT rebuild.
     """
     from core.duckdb_constants import B2B_MANAGER_ID, RETAIL_MANAGER_IDS, _date_in_kyiv
-    from core.models import OrderStatus
+    from core.models import LOST_STATUS_GROUP_ID, OrderStatus
 
     store = await get_store()
     manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
@@ -156,7 +156,11 @@ async def rebuild_silver_from_scratch(
                 o.id, o.source_id, o.status_id, o.grand_total,
                 o.ordered_at, o.buyer_id, o.manager_id,
                 {_date_in_kyiv('o.ordered_at')} AS order_date,
-                o.status_id IN {return_statuses} AS is_return,
+                CASE
+                    WHEN o.status_group_id IS NOT NULL
+                        THEN o.status_group_id = {LOST_STATUS_GROUP_ID}
+                    ELSE o.status_id IN {return_statuses}
+                END AS is_return,
                 CASE {retail_filter} END AS sales_type,
                 o.source_id IN (1, 2, 4) AS is_active_source,
                 CASE o.source_id WHEN 1 THEN 'Instagram' WHEN 2 THEN 'Telegram'
