@@ -570,6 +570,34 @@ async def set_manager_retail_status(
     }
 
 
+@router.post("/reconcile")
+@limiter.limit("2/hour")
+async def reconcile_on_demand(
+    request: Request,
+    days: int = Query(90, ge=1, le=400, description="Window in days"),
+    admin: dict = Depends(require_admin),
+):
+    """Run the source reconciliation over an arbitrary window, now.
+
+    The scheduled job covers 90 days, so months older than that are checked by
+    nobody — and the months when this job was dying on 429s were never checked
+    at all. Same code, same rules on both sides, result persisted to
+    `data_quality_runs` like any other run.
+
+    Costs roughly one API call per 20 orders and runs for minutes, not seconds;
+    hence the rate limit.
+    """
+    from core.scheduler import get_scheduler
+
+    scheduler = get_scheduler()
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="Scheduler not running")
+
+    logger.info("On-demand reconciliation over %s days by admin %s",
+                days, admin.get("user_id"))
+    return await scheduler._run_dq_reconciliation(window_days=days)
+
+
 @router.get("/bronze/stats")
 @limiter.limit("60/minute")
 async def get_bronze_stats(request: Request):

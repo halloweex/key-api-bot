@@ -184,3 +184,34 @@ class TestReconciliationIsOffTheCompactWindow:
         asyncio.run(scheduler._register_jobs())
 
         assert set(CATCHUP_CHECKS) <= set(added)
+
+
+class TestReconciliationWindowIsAParameter:
+    """The daily job covers 90 days; months older than that are checked by
+    nobody, and the months this job spent dying on 429s were never checked at
+    all. `POST /api/reconcile?days=N` is how you go back and look."""
+
+    def test_the_default_is_still_ninety_days(self):
+        import inspect
+        from core.scheduler import BackgroundScheduler
+
+        sig = inspect.signature(BackgroundScheduler._run_dq_reconciliation)
+        assert sig.parameters["window_days"].default == 90
+
+    def test_the_endpoint_is_admin_only(self):
+        from web.main import app
+        from web.routes.auth import require_admin
+
+        route = next(
+            r for r in app.routes
+            if getattr(r, "path", None) == "/api/reconcile" and "POST" in getattr(r, "methods", set())
+        )
+        calls = set()
+        stack = [route.dependant]
+        while stack:
+            d = stack.pop()
+            for dep in d.dependencies:
+                if dep.call is not None:
+                    calls.add(dep.call)
+                stack.append(dep)
+        assert require_admin in calls

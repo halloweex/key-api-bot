@@ -999,7 +999,7 @@ class BackgroundScheduler:
 
             return result
 
-    async def _run_dq_reconciliation(self) -> Dict[str, Any]:
+    async def _run_dq_reconciliation(self, window_days: int = 90) -> Dict[str, Any]:
         """Layer-2 source-of-truth reconciliation vs KeyCRM.
 
         Pulls (month, source) rollup for the last 90 days from both DuckDB
@@ -1025,7 +1025,10 @@ class BackgroundScheduler:
         )
 
         WATERMARK_HOURS = 2
-        WINDOW_DAYS = 90
+        # The daily run covers 90 days. Older months are checked by nobody —
+        # they were inside the window once, during the months this job was
+        # dying on 429s. `POST /api/reconcile?days=N` widens it on demand.
+        WINDOW_DAYS = max(1, int(window_days))
 
         with correlation_context() as corr_id:
             started_at = datetime.now(timezone.utc)
