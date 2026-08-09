@@ -22,12 +22,19 @@ B2B_MANAGER_ID = 15
 RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]
 
 # Every value the sales_type partition may take. The Silver CASE ends in
-# ELSE 'other', so the partition is exhaustive by construction — and that is
+# ELSE 'internal', so the partition is exhaustive by construction — and that is
 # exactly what has to be asserted, because nothing else would notice if a
 # future edit added a fourth value. Such a value would land in Gold, keep the
 # revenue checksum balanced, and appear on no page: every endpoint defaults to
 # Query("retail"). It would vanish from the views and the checksums at once.
-KNOWN_SALES_TYPES = ("retail", "b2b", "other")
+#
+# `internal` was called `other` until 2026-08-09. Retail is a fixed list of
+# retail managers and b2b is the wholesale manager; nobody else may be mixed
+# into either. What was left was a junk drawer with a junk name, holding two
+# unrelated things at once — genuine sales by staff outside those two roles,
+# and goods shipped to bloggers with no sale at all. Naming it does not
+# separate them, but it stops the bucket pretending to be an error.
+KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 
 # Timezone for date extraction - KeyCRM stores timestamps in +04:00 (server time)
 # but UI displays in Kyiv timezone, so we convert for consistency

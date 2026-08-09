@@ -122,7 +122,7 @@ class TestPartitionAssertion:
             async with store.connection() as conn:
                 _insert_order(conn, 1, None, 1000.0, when)       # retail (NULL manager)
                 _insert_order(conn, 2, 15, 2000.0, when)         # b2b
-                _insert_order(conn, 3, 34, 3000.0, when)         # other
+                _insert_order(conn, 3, 34, 3000.0, when)         # internal
 
             alerts: list[tuple[str, str | None]] = []
 
@@ -159,7 +159,7 @@ class TestPartitionAssertion:
             when = datetime.now(timezone.utc) - timedelta(days=1)
             async with store.connection() as conn:
                 _insert_order(conn, 1, None, 1000.0, when)   # retail
-                _insert_order(conn, 2, 34, 500.0, when)      # 'other'
+                _insert_order(conn, 2, 34, 500.0, when)      # 'internal'
 
             alerts: list[tuple[str, str | None]] = []
 
@@ -178,6 +178,6 @@ class TestPartitionAssertion:
 
             partition = [(m, k) for m, k in alerts if k == "warehouse:sales_type_partition"]
             assert partition, "revenue outside the partition must be reported"
-            assert "other=₴500.00" in partition[0][0]
+            assert "internal=₴500.00" in partition[0][0]
         finally:
             await store.close()

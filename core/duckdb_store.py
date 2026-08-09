@@ -2010,7 +2010,7 @@ class DuckDBStore(
             WHEN o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'
             WHEN NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
                  AND o.manager_id IN ({manager_list}) THEN 'retail'
-            ELSE 'other'
+            ELSE 'internal'
         """
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
 
