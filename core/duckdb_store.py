@@ -1105,6 +1105,22 @@ class DuckDBStore(
             # Column might already exist or ALTER TABLE not supported
             logger.debug(f"Migration note: {e}")
 
+        # Migration: Add status_group_id to orders. KeyCRM's own grouping of the
+        # status — 6 is lost/cancel — read off the order payload and preferred
+        # over our hardcoded id list wherever it is known.
+        #
+        # No DEFAULT, deliberately: `ADD COLUMN ... DEFAULT x` rewrites every
+        # row to materialise the value and has OOM-killed this container on a
+        # multi-GB database before. Existing rows get NULL, which is exactly
+        # what the fallback in the Silver CASE expects.
+        try:
+            self._connection.execute(
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS status_group_id INTEGER"
+            )
+            logger.debug("Migration: status_group_id column added/verified")
+        except Exception as e:
+            logger.debug(f"Migration note: {e}")
+
         # Migration: Add manager_comment column to orders table (for UTM tracking)
         try:
             self._connection.execute(
