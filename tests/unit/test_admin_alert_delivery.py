@@ -111,3 +111,31 @@ class TestFallbackWiring:
 
         sender.assert_awaited_once()
         assert "CRITICAL" in sender.await_args.args[0]
+
+
+class TestTheSuiteCannotReachTelegram:
+    """`.env` holds a real BOT_TOKEN and `send_admin_message` falls back to the
+    HTTP Bot API whenever no Application is running — which is every test
+    process. The cell-guard tests, which must fail validation on purpose, sent
+    a real alert to real admins before the conftest guard existed."""
+
+    @pytest.mark.asyncio
+    async def test_the_transport_is_blocked_by_default(self, monkeypatch):
+        import core.telegram_alerts as alerts
+
+        monkeypatch.setattr(bot_main, "_application", None)
+        delivered = await alerts.send_admin_message_http("this must not go out")
+
+        assert delivered == 0, "the autouse guard in conftest is missing"
+
+    @pytest.mark.asyncio
+    async def test_a_failing_warehouse_alert_goes_nowhere(self, monkeypatch):
+        from core.telegram_alerts import reset_throttle
+
+        reset_throttle()
+        monkeypatch.setattr(bot_main, "_application", None)
+        # The exact path the cell guard takes on a failed validation.
+        await bot_main.send_admin_message(
+            "⚠️ Warehouse validation failed — full retry scheduled (attempt 1/3).",
+            key="warehouse:validation_retrying",
+        )
