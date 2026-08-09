@@ -12,6 +12,9 @@ from ._deps import limiter, get_store
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# Strong references to detached work, so nothing is collected mid-flight.
+_BACKGROUND_TASKS: set = set()
+
 
 # ─── DuckDB Admin ─────────────────────────────────────────────────────────────
 
@@ -575,9 +578,15 @@ async def set_manager_retail_status(
 async def reconcile_on_demand(
     request: Request,
     days: int = Query(90, ge=1, le=400, description="Window in days"),
+    background: bool = Query(True, description="Return at once and run detached"),
     admin: dict = Depends(require_admin),
 ):
     """Run the source reconciliation over an arbitrary window, now.
+
+    Detached by default. Run inline and a 365-day window returns 504 after two
+    minutes while the work carries on for another eight and persists correctly
+    — no harm done, but it reads like a failure, and the next person to see it
+    will believe the reconciliation broke.
 
     The scheduled job covers 90 days, so months older than that are checked by
     nobody — and the months when this job was dying on 429s were never checked
@@ -593,9 +602,33 @@ async def reconcile_on_demand(
     if scheduler is None:
         raise HTTPException(status_code=503, detail="Scheduler not running")
 
-    logger.info("On-demand reconciliation over %s days by admin %s",
-                days, admin.get("user_id"))
-    return await scheduler._run_dq_reconciliation(window_days=days)
+    logger.info("On-demand reconciliation over %s days by admin %s (background=%s)",
+                days, admin.get("user_id"), background)
+
+    if not background:
+        return await scheduler._run_dq_reconciliation(window_days=days)
+
+    task = asyncio.create_task(
+        scheduler._run_dq_reconciliation(window_days=days),
+        name=f"reconcile_{days}d",
+    )
+    # Hold a reference: asyncio keeps only a weak one, and a task nobody holds
+    # can be collected mid-flight.
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    task.add_done_callback(
+        lambda t: logger.error("On-demand reconciliation failed: %s", t.exception())
+        if not t.cancelled() and t.exception() else None
+    )
+    return {
+        "status": "started",
+        "window_days": days,
+        "note": (
+            "A 365-day window takes ~10 minutes and ~1000 API calls. The result "
+            "persists like any scheduled run — read it from "
+            "/api/health/data-quality when it lands."
+        ),
+    }
 
 
 @router.get("/bronze/stats")

@@ -215,3 +215,55 @@ class TestReconciliationWindowIsAParameter:
                     calls.add(dep.call)
                 stack.append(dep)
         assert require_admin in calls
+
+
+class TestReconcileEndpointDoesNotHoldTheRequestOpen:
+    """Run inline, a 365-day window 504s after two minutes while the work
+    carries on for another eight — harmless, but it reads like a failure."""
+
+    def _client(self, monkeypatch, recorder):
+        import time as _time
+        from fastapi.testclient import TestClient
+        from web.main import app
+        from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
+        from core.permissions import ADMIN_USER_IDS
+        from web.routes.api._deps import limiter
+
+        limiter.reset()
+        admin_id = sorted(ADMIN_USER_IDS)[0]
+
+        class _FakeScheduler:
+            async def _run_dq_reconciliation(self, window_days=90):
+                recorder.append(window_days)
+                return {"run_id": 1, "discrepancies_count": 0}
+
+        monkeypatch.setattr("core.scheduler.get_scheduler", lambda: _FakeScheduler())
+
+        async def _resolve(session):
+            return {"user_id": admin_id, "role": "admin"}
+
+        monkeypatch.setattr("web.routes.auth._resolve_session", _resolve)
+        client = TestClient(app)
+        client.cookies.set(SESSION_COOKIE, session_serializer.dumps(create_session_data(
+            {"id": str(admin_id), "first_name": "T", "last_name": "U",
+             "username": "t", "auth_date": str(int(_time.time()))}, role="admin",
+        )))
+        return client
+
+    def test_it_returns_at_once_and_says_where_the_result_lands(self, monkeypatch):
+        seen = []
+        res = self._client(monkeypatch, seen).post("/api/reconcile?days=365")
+
+        assert res.status_code == 200
+        body = res.json()
+        assert body["status"] == "started"
+        assert body["window_days"] == 365
+        assert "/api/health/data-quality" in body["note"]
+
+    def test_inline_is_still_available_for_a_short_window(self, monkeypatch):
+        seen = []
+        res = self._client(monkeypatch, seen).post("/api/reconcile?days=7&background=false")
+
+        assert res.status_code == 200
+        assert res.json()["discrepancies_count"] == 0
+        assert seen == [7], "the window must reach the job"
