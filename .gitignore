@@ -173,6 +173,10 @@ cython_debug/
 # Claude Code CLI
 .claude/*
 !.claude/agents/
+# Tracked deliberately: it is the first thing a new session reads about this
+# system, and a doc only one machine can see goes stale on all the others.
+# The repository is public — keep hosts, users, keys and staff names out of it.
+!.claude/CLAUDE.md
 
 # SQLite Database
 data/
