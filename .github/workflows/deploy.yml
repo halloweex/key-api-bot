@@ -4,6 +4,22 @@ on:
   push:
     branches:
       - main
+    # Changes that cannot alter what runs in a container do not deploy one.
+    # A merged README used to rebuild both images, restart the containers and
+    # hold the `deploy-production` concurrency slot while it did — three
+    # minutes of risk for a paragraph.
+    #
+    # `paths-ignore` skips the run only when EVERY changed file matches, so a
+    # commit touching code and a doc together deploys exactly as before. Tests
+    # are listed for the same reason: they never ship inside the image.
+    paths-ignore:
+      - '**/*.md'
+      - '.claude/**'
+      - '.planning/**'
+      - 'tests/**'
+      - '.idea/**'
+      - 'LICENSE'
+      - '.gitignore'
 
 # Third-party actions are pinned to commit SHAs (not movable tags) so a
 # compromised/retagged action cannot silently enter the prod pipeline.
