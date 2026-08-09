@@ -56,6 +56,24 @@ DEFAULT_MISFIRE_GRACE_SECONDS = 3600
 # these to hour 3 or 4.
 INVARIANT_CHECK_HOURS = "1,7,13,19"
 
+# Checks whose scheduled instant we may simply not have been alive for, and how
+# stale their last *successful* verdict may be at process start before we run a
+# one-off catch-up. Shape: job_id -> (data_quality layer, max age s, delay s).
+#
+# A CronTrigger computes its next fire from the moment of registration, so a
+# process that starts at 02:00:51 for a job due at 02:00:00 sets the next run a
+# full day out. The job is not late — it does not exist when it is due, and
+# misfire_grace_time has nothing to forgive. That is not a rare event: the host
+# cron `0 2 * * 0 weekly_compact.sh` stops the containers at exactly 02:00 UTC
+# every Sunday, and any deploy landing on a cron instant does the same.
+#
+# The delay keeps the catch-up out of the startup rush (initial sync, model
+# training, first warehouse refresh) and staggers the two checks.
+CATCHUP_CHECKS = {
+    "dq_reconciliation": ("reconciliation", 26 * 3600, 300),
+    "dq_integrity_check": ("integrity", 8 * 3600, 120),
+}
+
 
 class JobStatus(Enum):
     """Job execution status."""
@@ -155,6 +173,70 @@ class BackgroundScheduler:
         self._scheduler.start()
         self._started = True
         logger.info("Background scheduler started")
+
+        await self._schedule_catchup_runs()
+
+    async def _schedule_catchup_runs(self) -> None:
+        """Queue a one-off run for any check whose due instant we missed.
+
+        Only the *successful* runs count — a row written on the error path is
+        not a verdict — so this reads the same freshness the canary judges on.
+        One attempt per process start, never on a schedule of its own: if the
+        check is broken rather than skipped, this costs one extra attempt per
+        restart and no more.
+
+        Best-effort throughout. A watchdog that can stop the scheduler from
+        starting is worse than no watchdog.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from apscheduler.triggers.date import DateTrigger
+
+        try:
+            from core.data_quality import fetch_last_success_ages
+            from core.duckdb_store import get_store
+
+            store = await get_store()
+            async with store.connection() as conn:
+                ages = fetch_last_success_ages(conn)
+        except Exception as e:
+            logger.warning(f"Catch-up check skipped: {e}")
+            return
+
+        now = datetime.now(timezone.utc)
+        for job_id, (layer, max_age_s, delay_s) in CATCHUP_CHECKS.items():
+            entry = ages.get(layer) or {}
+            age = entry.get("age_seconds")
+            # A layer that has never succeeded is exactly the case worth
+            # catching up, so a null age counts as overdue, not as unknown.
+            if age is not None and age <= max_age_s:
+                continue
+
+            job = self._scheduler.get_job(job_id) if self._scheduler else None
+            if job is None:
+                continue
+
+            run_at = now + timedelta(seconds=delay_s)
+            try:
+                self._scheduler.add_job(
+                    job.func,
+                    trigger=DateTrigger(run_date=run_at),
+                    id=f"{job_id}_catchup",
+                    name=f"{job.name} (catch-up)",
+                    misfire_grace_time=DEFAULT_MISFIRE_GRACE_SECONDS,
+                    max_instances=1,
+                    coalesce=True,
+                    replace_existing=True,
+                )
+                logger.warning(
+                    "%s last succeeded %s ago (limit %dh) — catch-up run queued for %s",
+                    job_id,
+                    f"{age / 3600:.1f}h" if age is not None else "never",
+                    max_age_s // 3600,
+                    run_at.isoformat(timespec="seconds"),
+                )
+            except Exception as e:
+                logger.warning(f"Could not queue catch-up for {job_id}: {e}")
 
     async def _register_jobs(self) -> None:
         """Register all background jobs."""
@@ -374,16 +456,23 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
-        # Job: Data Quality — Layer 2 reconciliation (daily at 5 AM)
+        # Job: Data Quality — Layer 2 reconciliation (daily at 05:30 Kyiv)
         # Aggregate (month, source) comparison vs KeyCRM with 2h watermark.
         # Classifies discrepancies, persists to data_quality_runs, alerts
         # admin on CRITICAL severity.
+        #
+        # 05:00 Kyiv is FORBIDDEN — it is 02:00 UTC, and the host cron
+        # `0 2 * * 0 weekly_compact.sh` stops both containers at that exact
+        # instant every Sunday. The scheduler came back at 02:00:51, after the
+        # cron instant, so CronTrigger set the next fire a day out and the run
+        # was lost. Not late — absent, which no misfire grace can forgive.
+        # The compact takes ~85 s; half an hour of clearance is plenty.
         self._add_job(
             job_id="dq_reconciliation",
             name="DQ: Reconciliation",
             description="Layer 2 source-of-truth reconciliation vs KeyCRM (90d window)",
             func=self._run_dq_reconciliation,
-            trigger=CronTrigger(hour=5, minute=0),
+            trigger=CronTrigger(hour=5, minute=30),
             max_instances=1,
             coalesce=True,
         )
