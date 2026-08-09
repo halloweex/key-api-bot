@@ -21,6 +21,33 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')")
 
 
+@pytest.fixture(autouse=True)
+def _no_telegram_from_tests(monkeypatch):
+    """Nothing in the suite may reach Telegram. Ever.
+
+    `.env` holds a real BOT_TOKEN, and `bot.main.send_admin_message` falls back
+    to the HTTP Bot API whenever no Application is running — which is every
+    test process. So a test that deliberately fails warehouse validation, as
+    the cell-guard tests must, sent a real alert to real admins:
+
+        ⚠️ Warehouse validation failed — full retry scheduled (attempt 1/3).
+        rows=2→2 (match=True), cells: 1 missing/0 orphaned, revenue=1000.00
+
+    Two orders and a thousand hryvnia — unmistakably a fixture, delivered to a
+    phone at midday. Individual tests stubbing `_send_warehouse_alert` is not
+    protection; it only covers the paths someone remembered.
+
+    Autouse and function-scoped, so a test that wants to exercise delivery can
+    still patch the same name itself and see its own mock.
+    """
+    async def _blocked(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(
+        "core.telegram_alerts.send_admin_message_http", _blocked, raising=False,
+    )
+
+
 @pytest.fixture
 def sample_order() -> Dict[str, Any]:
     """Sample order data from KeyCRM API."""
