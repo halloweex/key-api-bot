@@ -339,7 +339,29 @@ async def api_gate(request: Request) -> None:
     """
     if request.url.path in PUBLIC_API_PATHS:
         return
-    await require_user(request)
+    user = await require_user(request)
+    require_admin_for_internal(user, request.query_params.get("sales_type"))
+
+
+def require_admin_for_internal(user: dict, sales_type: str | None) -> None:
+    """`sales_type=internal` is admin-only.
+
+    It is staff activity outside retail and wholesale — one manager's own
+    sales, another's shipments to bloggers — and who did what is not for
+    every dashboard viewer. Enforced here rather than in `validate_sales_type`
+    because that function never sees who is asking, and once per gate rather
+    than per endpoint because there are dozens of endpoints and one gate.
+
+    Note `sales_type=all` still spans every category, as it always has; it
+    reveals a total, not who is inside it.
+    """
+    if sales_type != "internal":
+        return
+    user_id = user.get("user_id")
+    if user.get("role") != "admin" and not is_hardcoded_admin(user_id):
+        raise HTTPException(
+            status_code=403, detail="sales_type=internal is admin-only",
+        )
 
 
 async def require_admin(request: Request) -> dict:

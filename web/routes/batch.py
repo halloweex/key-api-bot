@@ -21,6 +21,7 @@ from core.validators import (
     validate_sales_type,
 )
 from core.exceptions import ValidationError
+from web.routes.auth import get_current_user, require_admin_for_internal
 
 router = APIRouter(tags=["batch"])
 logger = logging.getLogger(__name__)
@@ -184,6 +185,10 @@ async def get_dashboard_batch(request: Request, batch: BatchRequest):
         validate_category_id(batch.category_id)
         brand = validate_brand_name(batch.brand)
         sales_type = validate_sales_type(batch.sales_type)
+        # The gate reads the query string; here sales_type arrives in the body,
+        # so the same rule has to be applied explicitly. Two places, both
+        # audited — better than a rule the batch endpoint quietly escapes.
+        require_admin_for_internal(await get_current_user(request) or {}, sales_type)
         compare_type = batch.compare_type or "previous_period"
         if compare_type not in ("previous_period", "year_ago", "month_ago"):
             compare_type = "previous_period"

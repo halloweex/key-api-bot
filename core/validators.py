@@ -321,7 +321,7 @@ def validate_sales_type(
     allow_none: bool = True
 ) -> Optional[str]:
     """
-    Validate a sales type filter (retail/b2b).
+    Validate a sales type filter (retail/b2b/internal/all).
 
     Args:
         value: Sales type string to validate
@@ -334,7 +334,11 @@ def validate_sales_type(
     Raises:
         ValidationError: If sales type is invalid
     """
-    valid_types = {"retail", "b2b", "all"}
+    # `internal` is everyone outside the retail list and the wholesale
+    # manager. Reachable through the API and the dashboard for admins only —
+    # enforced in `api_gate`, not here, because this function never sees who
+    # is asking.
+    valid_types = {"retail", "b2b", "internal", "all"}
 
     if value is None or value == "":
         if allow_none:

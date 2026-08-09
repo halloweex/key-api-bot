@@ -25,6 +25,7 @@
   "filter.custom": "Пользовательское",
   "filter.retail": "Розничная торговля",
   "filter.b2b": "B2B",
+  "filter.internal": "Внутренние",
   "filter.all": "Все",
   "filter.allSources": "Все источники",
   "filter.allCategories": "Все категории",
