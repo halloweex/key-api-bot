@@ -61,29 +61,72 @@ class SourceId(IntEnum):
         return colors.get(self, "#999999")
 
 
+# KeyCRM groups every order status. Group 6 is the lost/cancel group, and it
+# is the only one excluded from revenue. Verified against the API on
+# 2026-08-09 by fetching a live order for every status present in the
+# warehouse: 15, 19, 21, 22, 23 came back group 6; 1, 9, 12, 20 did not.
+LOST_STATUS_GROUP_ID = 6
+
+
+# What this codebase called these ids before 2026-08-09, kept verbatim so the
+# change can be undone without archaeology.
+#
+# The names below were adopted from KeyCRM's own labels, and a label in a CRM
+# is typed by a person: it can be as wrong as any other note. If 19 has always
+# meant a *return* in this business while KeyCRM files it as `canceled`, then
+# the old name was the truer one and this table is how it comes back.
+#
+# Nothing computes from either set of names. `return_statuses()` decides what
+# is excluded from revenue, and its membership is identical under both.
+LEGACY_STATUS_NAMES = {
+    15: "NOT_AVAILABLE",
+    18: "DID_NOT_ARRANGE_PRICE",
+    19: "RETURNED",
+    21: "CANCELED",
+    22: "REFUNDED",
+    23: "REJECTED",
+}
+
+
 class OrderStatus(IntEnum):
-    """Order status IDs from KeyCRM."""
+    """Order status IDs from KeyCRM, named as KeyCRM labels them.
+
+    Renamed 2026-08-09 after reading the labels out of the CRM; the previous
+    names are preserved in `LEGACY_STATUS_NAMES` above, because whether the
+    CRM's labels are correct is a question about the business, not about the
+    data, and it is not settled.
+
+    What *is* settled is the arithmetic: every id in `return_statuses()` sits
+    in KeyCRM's lost/cancel group (`status_group_id = 6`) and every id outside
+    it does not — verified against the API, one live order per status. That
+    holds whatever either side calls them, and it is the only part any figure
+    depends on.
+    """
     # Lost / cancel group (KeyCRM status_group_id = 6) — excluded from revenue.
-    NOT_AVAILABLE = 15          # товару немає в наявності
-    DID_NOT_ARRANGE_PRICE = 18  # не узгодили ціну
-    RETURNED = 19
-    CANCELED = 21
-    REFUNDED = 22
-    REJECTED = 23
+    NOT_AVAILABLE = 15          # not_available — товару немає в наявності
+    DID_NOT_ARRANGE_PRICE = 18  # did_not_arrange_price — не узгодили ціну
+    CANCELED = 19               # canceled            (was RETURNED)
+    DELIVERY_FAILED = 21        # Помилка доставки     (was CANCELED)
+    RETURNED = 22               # Повернено           (was REFUNDED)
+    RETURNING = 23              # Повертається        (was REJECTED)
 
     @classmethod
     def return_statuses(cls) -> set:
-        """Status IDs excluded from revenue = KeyCRM lost/cancel group (group_id=6).
+        """Status IDs excluded from revenue — the KeyCRM lost/cancel group.
 
-        Canonical "not a booked sale" set used by the Silver is_return flag, gold
-        revenue, goals, and reconciliation. Covers returns AND cancels AND lost
-        orders (not_available / did_not_arrange_price), which KeyCRM groups as
-        group_id=6. Previously this list was {19,21,22,23} only, so 15 & 18 were
-        wrongly counted as revenue.
+        A hardcoded list can only describe the statuses that existed when it
+        was written. `status_group_id` from the order payload is the source's
+        own answer and should be preferred wherever it is known; this set is
+        the fallback for rows synced before we stored it, and it reproduces
+        the group exactly for every status the warehouse holds.
+
+        Status 20 («Прибув у відділення») is group 4 and belongs to revenue.
+        It first appeared on 2026-07-09 and nothing noticed — which is the
+        whole argument for reading the group instead of maintaining this list.
         """
         return {
             cls.NOT_AVAILABLE, cls.DID_NOT_ARRANGE_PRICE,
-            cls.RETURNED, cls.CANCELED, cls.REFUNDED, cls.REJECTED,
+            cls.CANCELED, cls.DELIVERY_FAILED, cls.RETURNED, cls.RETURNING,
         }
 
 
@@ -297,6 +340,9 @@ class Order:
     source_id: int
     status_id: int
     grand_total: float
+    # KeyCRM's own classification of the status. None for orders synced before
+    # we stored it; `is_return` falls back to the id list for those.
+    status_group_id: Optional[int] = None
     ordered_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None  # For idempotent sync
@@ -341,6 +387,10 @@ class Order:
         if status_id is None and data.get("status"):
             status_id = data["status"].get("id")
 
+        status_group_id = data.get("status_group_id")
+        if status_group_id is None and data.get("status"):
+            status_group_id = data["status"].get("status_group_id")
+
         products = [
             OrderProduct.from_api(p)
             for p in data.get("products", [])
@@ -350,6 +400,7 @@ class Order:
             id=data.get("id", 0),
             source_id=data.get("source_id", 0),
             status_id=status_id or 0,
+            status_group_id=int(status_group_id) if status_group_id is not None else None,
             grand_total=float(data.get("grand_total", 0)),
             ordered_at=ordered_at,
             created_at=created_at,
@@ -371,7 +422,13 @@ class Order:
 
     @property
     def is_return(self) -> bool:
-        """Check if order is returned/canceled."""
+        """Whether this order is excluded from revenue.
+
+        Prefers KeyCRM's own grouping; falls back to the id list when the
+        payload predates us storing the group.
+        """
+        if self.status_group_id is not None:
+            return self.status_group_id == LOST_STATUS_GROUP_ID
         return self.status_id in OrderStatus.return_statuses()
 
     def is_within_period(self, start: datetime, end: datetime) -> bool:

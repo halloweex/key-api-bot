@@ -379,9 +379,10 @@ class KeyCRMClient:
     # STATUS METHODS
     # ═══════════════════════════════════════════════════════════════════════════
 
-    async def get_statuses(self) -> Dict[str, Any]:
-        """Get all order statuses."""
-        return await self._request("GET", "order-status")
+    # `get_statuses` used to live here, calling `order-status`. That route
+    # returns 404 — KeyCRM has no order-status listing on v1, and nothing
+    # called the method. The status group travels on the order itself
+    # (`status_group_id`), which is where we read it from now.
 
     # ═══════════════════════════════════════════════════════════════════════════
     # USER/MANAGER METHODS
