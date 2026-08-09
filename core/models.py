@@ -68,22 +68,47 @@ class SourceId(IntEnum):
 LOST_STATUS_GROUP_ID = 6
 
 
-class OrderStatus(IntEnum):
-    """Order status IDs from KeyCRM, named as KeyCRM names them.
+# What this codebase called these ids before 2026-08-09, kept verbatim so the
+# change can be undone without archaeology.
+#
+# The names below were adopted from KeyCRM's own labels, and a label in a CRM
+# is typed by a person: it can be as wrong as any other note. If 19 has always
+# meant a *return* in this business while KeyCRM files it as `canceled`, then
+# the old name was the truer one and this table is how it comes back.
+#
+# Nothing computes from either set of names. `return_statuses()` decides what
+# is excluded from revenue, and its membership is identical under both.
+LEGACY_STATUS_NAMES = {
+    15: "NOT_AVAILABLE",
+    18: "DID_NOT_ARRANGE_PRICE",
+    19: "RETURNED",
+    21: "CANCELED",
+    22: "REFUNDED",
+    23: "REJECTED",
+}
 
-    The names here were wrong until 2026-08-09 — 19 was called RETURNED when
-    KeyCRM calls it `canceled`, 21 was CANCELED when it is «Помилка доставки»,
-    22 and 23 were REFUNDED and REJECTED when they are «Повернено» and
-    «Повертається». The *set* was right, so no figure was ever wrong; but a
-    name that lies is a decision waiting to be made badly.
+
+class OrderStatus(IntEnum):
+    """Order status IDs from KeyCRM, named as KeyCRM labels them.
+
+    Renamed 2026-08-09 after reading the labels out of the CRM; the previous
+    names are preserved in `LEGACY_STATUS_NAMES` above, because whether the
+    CRM's labels are correct is a question about the business, not about the
+    data, and it is not settled.
+
+    What *is* settled is the arithmetic: every id in `return_statuses()` sits
+    in KeyCRM's lost/cancel group (`status_group_id = 6`) and every id outside
+    it does not — verified against the API, one live order per status. That
+    holds whatever either side calls them, and it is the only part any figure
+    depends on.
     """
     # Lost / cancel group (KeyCRM status_group_id = 6) — excluded from revenue.
     NOT_AVAILABLE = 15          # not_available — товару немає в наявності
     DID_NOT_ARRANGE_PRICE = 18  # did_not_arrange_price — не узгодили ціну
-    CANCELED = 19               # canceled
-    DELIVERY_FAILED = 21        # Помилка доставки
-    RETURNED = 22               # Повернено
-    RETURNING = 23              # Повертається
+    CANCELED = 19               # canceled            (was RETURNED)
+    DELIVERY_FAILED = 21        # Помилка доставки     (was CANCELED)
+    RETURNED = 22               # Повернено           (was REFUNDED)
+    RETURNING = 23              # Повертається        (was REJECTED)
 
     @classmethod
     def return_statuses(cls) -> set:

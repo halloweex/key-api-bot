@@ -15,6 +15,10 @@ Verified against the live API on 2026-08-09, one real order per status:
     status 12  → group 5     status 21  → group 6
     status 20  → group 4     status 22  → group 6
                              status 23  → group 6
+
+The members now carry KeyCRM's labels; the names this codebase used before
+are preserved in `LEGACY_STATUS_NAMES`, because whether the CRM's labels are
+right is a question about the business and it is not settled here.
 """
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,7 +27,12 @@ import pytest
 
 from core.data_quality import KNOWN_STATUS_IDS, check_internal_integrity
 from core.duckdb_store import DuckDBStore
-from core.models import LOST_STATUS_GROUP_ID, Order, OrderStatus
+from core.models import (
+    LEGACY_STATUS_NAMES,
+    LOST_STATUS_GROUP_ID,
+    Order,
+    OrderStatus,
+)
 
 # The mapping the API returned, as measured.
 MEASURED_GROUPS = {1: 1, 9: 4, 12: 5, 15: 6, 19: 6, 20: 4, 21: 6, 22: 6, 23: 6}
@@ -50,6 +59,40 @@ def _api_order(oid: int, status_id: int, group_id=None, total="1000.00"):
     if group_id is not None:
         payload["status_group_id"] = group_id
     return payload
+
+
+class TestTheOldNamesAreKeptOnFile:
+    """A label in a CRM is typed by a person and can be wrong.
+
+    The members now carry KeyCRM's labels, but whether those labels are right
+    is a question about the business, not about the data. If 19 has always
+    meant a *return* here while KeyCRM files it as `canceled`, the old name
+    was the truer one — so it is written down, not thrown away.
+    """
+
+    def test_every_previous_name_is_on_file(self):
+        assert LEGACY_STATUS_NAMES == {
+            15: "NOT_AVAILABLE",
+            18: "DID_NOT_ARRANGE_PRICE",
+            19: "RETURNED",
+            21: "CANCELED",
+            22: "REFUNDED",
+            23: "REJECTED",
+        }
+
+    def test_the_record_covers_every_excluded_status(self):
+        """A rename with no way back is what this guards against."""
+        assert {int(s) for s in OrderStatus.return_statuses()} == set(LEGACY_STATUS_NAMES)
+
+    def test_the_names_moved_but_the_set_did_not(self):
+        """No figure depends on the vocabulary — only on this membership."""
+        assert {int(s) for s in OrderStatus.return_statuses()} == {15, 18, 19, 21, 22, 23}
+
+    def test_the_current_names_follow_keycrm(self):
+        assert OrderStatus.CANCELED == 19
+        assert OrderStatus.DELIVERY_FAILED == 21
+        assert OrderStatus.RETURNED == 22
+        assert OrderStatus.RETURNING == 23
 
 
 class TestTheListMatchesTheSource:
