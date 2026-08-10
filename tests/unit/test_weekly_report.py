@@ -546,19 +546,19 @@ class TestSchedulerJob:
 
             calls = []
 
-            async def _animation(data, caption="", **kwargs):
+            async def _photo(data, caption="", **kwargs):
                 calls.append((data, caption))
                 return 2
 
             monkeypatch.setattr(
-                "core.telegram_alerts.send_admin_animation_http", _animation,
+                "core.telegram_alerts.send_admin_photo_http", _photo,
             )
             result = await scheduler._run_weekly_report()
 
             assert result["card"] is True
             assert len(calls) == 1
-            gif, caption = calls[0]
-            assert gif[:6] in (b"GIF87a", b"GIF89a")
+            png, caption = calls[0]
+            assert png[:8] == b"\x89PNG\r\n\x1a\n"
             assert "Weekly report" in caption
             assert text_sends == [], "the caption already carried the report"
         finally:

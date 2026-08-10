@@ -1394,14 +1394,14 @@ class BackgroundScheduler:
             # nothing else. No throttle on this path: the ledger above is the
             # dedup, and the throttle exists for conditions that re-raise every
             # two minutes.
-            from core.telegram_alerts import send_admin_animation_http
-            from core.weekly_report_image import render_weekly_gif
+            from core.telegram_alerts import send_admin_photo_http
+            from core.weekly_report_image import render_weekly_card
 
-            card = render_weekly_gif(report)
+            card = render_weekly_card(report)
             delivered = 0
             if card is not None:
-                delivered = await send_admin_animation_http(
-                    card, caption=message, filename=f"week-{week}.gif",
+                delivered = await send_admin_photo_http(
+                    card, caption=message, filename=f"week-{week}.png",
                 )
             if not delivered:
                 from bot.main import send_admin_message

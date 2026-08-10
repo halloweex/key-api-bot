@@ -43,7 +43,7 @@ def _no_telegram_from_tests(monkeypatch):
     async def _blocked(*args, **kwargs):
         return 0
 
-    for name in ("send_admin_message_http", "send_admin_animation_http"):
+    for name in ("send_admin_message_http", "send_admin_photo_http"):
         monkeypatch.setattr(
             f"core.telegram_alerts.{name}", _blocked, raising=False,
         )

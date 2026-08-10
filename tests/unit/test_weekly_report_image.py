@@ -1,9 +1,9 @@
 """The weekly report card: a picture that must never cost the report.
 
-Everything here is decoration wrapped around numbers that are not, so the
-contract is narrow and absolute — render something valid, or return None and
-let the text go out alone. There is no third outcome, including on a host with
-no fonts, a week with no history, or a value that breaks the arithmetic.
+It is decoration wrapped around numbers that are not, so the contract is narrow
+and absolute — render something valid, or return None and let the text go out
+alone. There is no third outcome, including on a host with no fonts, a week
+with no history, or a value that breaks the arithmetic.
 """
 from __future__ import annotations
 
@@ -14,13 +14,17 @@ import pytest
 
 from core.weekly_report import ProductMove, WeekTotals, WeeklyReport
 from core.weekly_report_image import (
+    BAR,
     CALM,
+    CHART_BOTTOM,
+    CHART_TOP,
     DOWN,
+    PAD,
     UP,
     H,
     W,
     _tone,
-    render_weekly_gif,
+    render_weekly_card,
 )
 
 
@@ -51,52 +55,69 @@ def _report(**overrides) -> WeeklyReport:
     return WeeklyReport(**base)
 
 
-def _frames(data: bytes):
+def _open(data: bytes):
     from PIL import Image
-    return Image.open(io.BytesIO(data))
+    return Image.open(io.BytesIO(data)).convert("RGB")
 
 
 def _uniform(region) -> bool:
-    """Is this crop a single flat colour — i.e. nothing drawn there yet?"""
+    """Is this crop a single flat colour — i.e. nothing drawn there?"""
     return all(low == high for low, high in region.getextrema())
 
 
 class TestRendering:
-    def test_it_produces_a_looping_animation_at_card_size(self):
-        data = render_weekly_gif(_report())
-        assert data is not None
-
-        img = _frames(data)
-        assert img.format == "GIF"
+    def test_it_produces_one_still_image_at_card_size(self):
+        img = _open(render_weekly_card(_report()))
         assert img.size == (W, H)
-        assert img.n_frames > 1, "a still image is not an animation"
-        assert img.info.get("loop") == 0, "the card should loop forever"
+        assert getattr(img, "n_frames", 1) == 1
+
+    def test_it_is_light(self):
+        """A dark card is a hole burnt in a chat that is mostly white."""
+        img = _open(render_weekly_card(_report()))
+        assert img.getpixel((5, 5)) == (255, 255, 255)
 
     def test_it_stays_small_enough_to_send_every_week(self):
-        """Flat colours and one shared palette, not a video of a spreadsheet."""
-        data = render_weekly_gif(_report())
-        assert len(data) < 1_500_000
+        assert len(render_weekly_card(_report())) < 400_000
 
-    def test_the_last_frame_is_the_finished_card(self):
-        """Whatever Telegram shows as a still has to be the complete report."""
-        img = _frames(render_weekly_gif(_report()))
-        img.seek(img.n_frames - 1)
-        last = img.convert("RGB")
-        img.seek(0)
-        first = img.convert("RGB")
-        assert last.tobytes() != first.tobytes()
-        # The finished card reaches into its lower third; the opening frame,
-        # before the stats block is drawn, leaves it empty.
-        assert not _uniform(last.crop((0, 540, W, H)))
-        assert _uniform(first.crop((0, 540, W, H)))
+    def test_every_band_of_the_card_is_used(self):
+        """Headline, chart and stats each occupy their own third.
+
+        A layout regression that drops a block leaves its band flat white, and
+        nothing else in the suite would notice.
+        """
+        img = _open(render_weekly_card(_report()))
+        for name, box in (
+            ("headline", (0, PAD, W, CHART_TOP - 40)),
+            ("chart", (0, CHART_TOP, W, CHART_BOTTOM)),
+            ("stats", (0, CHART_BOTTOM + 100, W, H - 20)),
+        ):
+            assert not _uniform(img.crop(box)), f"{name} band is empty"
+
+
+class TestChart:
+    def _last_bar_colour(self, report) -> tuple:
+        """The colour of the newest bar, sampled just above its baseline."""
+        img = _open(render_weekly_card(report))
+        return img.getpixel((W - PAD - 20, CHART_BOTTOM - 10))
+
+    def test_the_newest_week_is_the_one_picked_out(self):
+        """The whole point of the chart is where *this* week sits."""
+        assert self._last_bar_colour(_report()) == CALM
+        # ...and it is the only bar in the accent colour.
+        img = _open(render_weekly_card(_report()))
+        assert img.getpixel((PAD + 20, CHART_BOTTOM - 10)) == BAR
+
+    def test_an_unusually_low_week_is_flagged_on_the_chart_itself(self):
+        low = _report(current=WeekTotals(revenue=100_000, orders=40))
+        assert self._last_bar_colour(low) == DOWN
 
 
 class TestTone:
     def test_an_ordinary_week_is_painted_calm(self):
         """A 25% fall inside its own normal range is not an emergency.
 
-        Colouring every dip red is the visual form of crying wolf, and the
-        chip above the chart already carries the direction.
+        Colouring every dip red is the visual form of crying wolf, and the chip
+        under the headline already carries the direction.
         """
         assert _tone(_report()) == CALM
 
@@ -120,14 +141,14 @@ class TestDegradation:
         """
         monkeypatch.setattr("core.weekly_report_image._font_file",
                             lambda *a, **k: None)
-        assert render_weekly_gif(_report()) is None
+        assert render_weekly_card(_report()) is None
 
     def test_a_drawing_failure_costs_the_card_and_nothing_else(self, monkeypatch):
         def _explode(*args, **kwargs):
             raise RuntimeError("no pixels today")
 
-        monkeypatch.setattr("core.weekly_report_image._draw_frame", _explode)
-        assert render_weekly_gif(_report()) is None
+        monkeypatch.setattr("core.weekly_report_image._draw_chart", _explode)
+        assert render_weekly_card(_report()) is None
 
     @pytest.mark.parametrize("name,overrides", [
         ("first week ever", dict(previous=None, year_ago=None, baseline_mean=None,
@@ -142,6 +163,6 @@ class TestDegradation:
         ("a flat history", dict(baseline_sd=0.0)),
     ])
     def test_thin_data_still_renders_or_declines_cleanly(self, name, overrides):
-        data = render_weekly_gif(_report(**overrides))
+        data = render_weekly_card(_report(**overrides))
         if data is not None:
-            assert _frames(data).size == (W, H)
+            assert _open(data).size == (W, H)

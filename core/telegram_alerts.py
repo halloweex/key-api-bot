@@ -164,19 +164,16 @@ async def send_admin_message_http(
 TELEGRAM_CAPTION_LIMIT = 1024
 
 
-async def send_admin_animation_http(
-    animation: bytes,
+async def send_admin_photo_http(
+    photo: bytes,
     caption: str = "",
     *,
-    filename: str = "report.gif",
+    filename: str = "report.png",
     parse_mode: str = "HTML",
     token: str | None = None,
     admin_ids: Iterable[int] | None = None,
 ) -> int:
-    """Send an animated GIF with a caption to every admin. Never raises.
-
-    Telegram transcodes a GIF sent this way into a looping silent video, so it
-    plays inline in the chat rather than sitting there as a file to tap.
+    """Send an image with a caption to every admin. Never raises.
 
     Returns the number of admins reached, which is what lets a caller fall back
     to plain text on a partial or total failure instead of assuming a picture
@@ -188,17 +185,17 @@ async def send_admin_animation_http(
     recipients = list(admin_ids if admin_ids is not None else ADMIN_USER_IDS)
 
     if not token:
-        logger.warning("Cannot send admin animation: BOT_TOKEN is not configured")
+        logger.warning("Cannot send admin photo: BOT_TOKEN is not configured")
         return 0
     if not recipients:
-        logger.warning("Cannot send admin animation: ADMIN_USER_IDS is empty")
+        logger.warning("Cannot send admin photo: ADMIN_USER_IDS is empty")
         return 0
     if len(caption) > TELEGRAM_CAPTION_LIMIT:
         logger.warning("Caption is %d chars, over Telegram's %d limit",
                        len(caption), TELEGRAM_CAPTION_LIMIT)
         return 0
 
-    url = f"{TELEGRAM_API}/bot{token}/sendAnimation"
+    url = f"{TELEGRAM_API}/bot{token}/sendPhoto"
     delivered = 0
     try:
         # A generous timeout: this is an upload, repeated once per recipient
@@ -213,22 +210,22 @@ async def send_admin_animation_http(
                             "caption": caption,
                             "parse_mode": parse_mode,
                         },
-                        files={"animation": (filename, animation, "image/gif")},
+                        files={"photo": (filename, photo, "image/png")},
                     )
                     response.raise_for_status()
                     delivered += 1
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    logger.warning("HTTP admin animation to %s failed: %s",
+                    logger.warning("HTTP admin photo to %s failed: %s",
                                    admin_id, exc)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        logger.warning("HTTP admin animation transport failed: %s", exc)
+        logger.warning("HTTP admin photo transport failed: %s", exc)
         return delivered
 
     if delivered:
-        logger.info("Admin animation delivered over HTTP to %d/%d admins",
+        logger.info("Admin photo delivered over HTTP to %d/%d admins",
                     delivered, len(recipients))
     return delivered

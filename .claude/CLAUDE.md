@@ -403,13 +403,16 @@ return quiet, and a Monday spent down becomes a Tuesday delivery instead of a
 week nobody ever sees. It defers while `MAX(date)` in Gold is still behind the
 week end, so no report is ever rendered mid-rebuild.
 
-It sends an animated card (`core/weekly_report_image.py`) with the text report
+It sends a light PNG card (`core/weekly_report_image.py`) with the text report
 as the caption — thirteen weekly bars, the ±1σ band, and the reported week last
-in the row, which is the one thing a column of numbers cannot show. Pillow
-only, no matplotlib. The card needs `fonts-dejavu-core` in the image
-(`Dockerfile.web`): `python:3.14-slim` ships no fonts, and DejaVu is the one
-carrying both Cyrillic and ₴. No font, a caption over Telegram's 1 024, or any
-render failure costs the picture and nothing else — the text still goes out.
+in the row, which is the one thing a column of numbers cannot show. Everything
+else stays in the caption; a card that repeats its own message is one more
+thing to read, not one less. Pillow only, no matplotlib, drawn at ~2× display
+size because Telegram re-encodes photos as JPEG. The card needs
+`fonts-dejavu-core` in the image (`Dockerfile.web`): `python:3.14-slim` ships
+no fonts, and DejaVu is the one carrying both Cyrillic and ₴. No font, a
+caption over Telegram's 1 024, or any render failure costs the picture and
+nothing else — the text still goes out.
 
 ### How a failure reaches a human
 - **Alert throttle** keys on the *condition* (`warehouse:validation_retrying`,
