@@ -31,6 +31,12 @@ joblib>=1.3.0
 
 # Caching
 
+# Weekly report card (core/weekly_report_image.py). Pillow alone, on purpose:
+# matplotlib would draw that chart in a tenth of the code and add ~100 MB to an
+# image that already runs against a memory ceiling, for one picture a week.
+# Needs fonts-dejavu-core in the image — see Dockerfile.web.
+pillow>=12.0.0
+
 # NOTE: test/dev dependencies live in requirements-dev.txt — they are
 # intentionally NOT installed into the production Docker images.
 

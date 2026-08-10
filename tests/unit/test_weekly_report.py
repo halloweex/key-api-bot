@@ -534,6 +534,59 @@ class TestSchedulerJob:
             await store.close()
 
     @pytest.mark.asyncio
+    async def test_it_prefers_the_card_with_the_report_as_its_caption(
+        self, tmp_path, monkeypatch,
+    ):
+        """One message carrying both, not a picture and then a wall of text."""
+        store = await _store(tmp_path)
+        try:
+            await self._seed(store, complete=True)
+            text_sends = []
+            scheduler = self._wire(monkeypatch, store, text_sends)
+
+            calls = []
+
+            async def _animation(data, caption="", **kwargs):
+                calls.append((data, caption))
+                return 2
+
+            monkeypatch.setattr(
+                "core.telegram_alerts.send_admin_animation_http", _animation,
+            )
+            result = await scheduler._run_weekly_report()
+
+            assert result["card"] is True
+            assert len(calls) == 1
+            gif, caption = calls[0]
+            assert gif[:6] in (b"GIF87a", b"GIF89a")
+            assert "Weekly report" in caption
+            assert text_sends == [], "the caption already carried the report"
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_card_that_will_not_send_falls_back_to_text(
+        self, tmp_path, monkeypatch,
+    ):
+        """A missing font must cost the picture and never the numbers."""
+        store = await _store(tmp_path)
+        try:
+            await self._seed(store, complete=True)
+            text_sends = []
+            scheduler = self._wire(monkeypatch, store, text_sends)
+            monkeypatch.setattr("core.weekly_report_image._font_file",
+                                lambda *a, **k: None)
+
+            result = await scheduler._run_weekly_report()
+
+            assert result["sent"] is True
+            assert result["card"] is False
+            assert len(text_sends) == 1
+            assert "Weekly report" in text_sends[0]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
     async def test_a_failed_send_leaves_the_week_pending(self, tmp_path, monkeypatch):
         """Marking a week delivered that never left the host would drop it."""
         store = await _store(tmp_path)

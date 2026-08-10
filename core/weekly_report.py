@@ -130,6 +130,11 @@ class WeeklyReport:
     baseline_weeks: int
     movers: List[ProductMove]
     product_move_total: float
+    # The weeks the baseline was computed from, oldest first. The text uses
+    # only their mean and spread; the rendered card plots them, because where
+    # a week sits among the ones before it is the one thing a column of
+    # numbers cannot show.
+    baseline_series: Tuple[float, ...] = ()
 
     @property
     def z(self) -> Optional[float]:
@@ -348,6 +353,7 @@ def build_report(
         baseline_weeks=len(series),
         movers=movers[:TOP_MOVERS],
         product_move_total=product_total,
+        baseline_series=tuple(series),
     )
 
 

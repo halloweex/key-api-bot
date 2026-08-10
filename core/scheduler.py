@@ -1384,11 +1384,28 @@ class BackgroundScheduler:
 
             # Deliberately outside the connection block: store.connection()
             # holds the single-writer lock for its whole body, and Telegram is
-            # allowed ten seconds per admin. Every other DuckDB reader in this
-            # process would wait behind it.
+            # allowed ten seconds per admin — longer for the card upload. Every
+            # other DuckDB reader in this process would wait behind it.
             message = format_report(report, DASHBOARD_URL or None)
-            from bot.main import send_admin_message
-            await send_admin_message(message, key=f"weekly_report:{week}")
+
+            # The card first, with the report as its caption, so one message
+            # carries both. It is drawn from the same values, so a host with no
+            # fonts or a caption over Telegram's limit costs the picture and
+            # nothing else. No throttle on this path: the ledger above is the
+            # dedup, and the throttle exists for conditions that re-raise every
+            # two minutes.
+            from core.telegram_alerts import send_admin_animation_http
+            from core.weekly_report_image import render_weekly_gif
+
+            card = render_weekly_gif(report)
+            delivered = 0
+            if card is not None:
+                delivered = await send_admin_animation_http(
+                    card, caption=message, filename=f"week-{week}.gif",
+                )
+            if not delivered:
+                from bot.main import send_admin_message
+                await send_admin_message(message, key=f"weekly_report:{week}")
 
             async with store.connection() as conn:
                 mark_sent(
@@ -1402,6 +1419,7 @@ class BackgroundScheduler:
                 "sales_type": sales_type,
                 "revenue": round(report.current.revenue, 2),
                 "orders": report.current.orders,
+                "card": bool(delivered),
             }
             logger.info("Weekly report sent", extra=result)
             return result
