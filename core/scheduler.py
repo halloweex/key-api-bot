@@ -1387,19 +1387,36 @@ class BackgroundScheduler:
             # allowed ten seconds per admin — longer for the card upload. Every
             # other DuckDB reader in this process would wait behind it.
             #
-            # One render per language, not per admin: admins mostly share a
-            # language, so this is usually a single pass. The grouping exists
-            # so that the day they do not, nobody quietly gets the wrong one.
-            from core.bot_prefs import group_by_language
+            # Everyone the bot has approved, plus the admins — who are always
+            # on the list whether or not they ever went through approval. The
+            # report is `retail` only, which is exactly what an approved user
+            # already sees on the dashboard, so this widens the audience
+            # without widening what is disclosed.
+            #
+            # One render per language, not per reader: most people share one,
+            # so this is a pass or two however long the list. The grouping
+            # exists so that nobody quietly gets somebody else's language.
+            from core.bot_prefs import (
+                default_language_for,
+                group_by_language,
+                read_approved_user_ids,
+            )
             from core.telegram_alerts import (
                 send_admin_message_http,
                 send_admin_photo_http,
             )
             from core.weekly_report_image import render_weekly_card
 
+            audience = list(dict.fromkeys(
+                [int(a) for a in ADMIN_USER_IDS] + read_approved_user_ids()
+            ))
+            defaults = {
+                uid: default_language_for(uid, ADMIN_USER_IDS) for uid in audience
+            }
+
             delivered = 0
             with_card = 0
-            for lang, recipients in group_by_language(ADMIN_USER_IDS).items():
+            for lang, recipients in group_by_language(audience, defaults).items():
                 message = format_report(report, DASHBOARD_URL or None, lang)
 
                 # The card first, with the report as its caption, so one
@@ -1410,13 +1427,13 @@ class BackgroundScheduler:
                 sent_here = 0
                 if card is not None:
                     sent_here = await send_admin_photo_http(
-                        card, caption=message, admin_ids=recipients,
+                        card, caption=message, chat_ids=recipients,
                         filename=f"week-{week}-{lang}.png",
                     )
                     with_card += sent_here
                 if not sent_here:
                     sent_here = await send_admin_message_http(
-                        message, admin_ids=recipients,
+                        message, chat_ids=recipients,
                     )
                 delivered += sent_here
 
@@ -1438,6 +1455,7 @@ class BackgroundScheduler:
                 "sales_type": sales_type,
                 "revenue": round(report.current.revenue, 2),
                 "orders": report.current.orders,
+                "recipients": len(audience),
                 "delivered": delivered,
                 "card": bool(with_card),
             }

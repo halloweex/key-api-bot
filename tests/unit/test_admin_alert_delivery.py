@@ -36,7 +36,7 @@ class TestHttpTransport:
         client = _client_returning(_ok_response)
         with patch("httpx.AsyncClient", return_value=client):
             delivered = await send_admin_message_http(
-                "boom", token="123:ABC", admin_ids=[111, 222],
+                "boom", token="123:ABC", chat_ids=[111, 222],
             )
 
         assert delivered == 2
@@ -56,7 +56,7 @@ class TestHttpTransport:
         client = _client_returning(flaky)
         with patch("httpx.AsyncClient", return_value=client):
             delivered = await send_admin_message_http(
-                "boom", token="123:ABC", admin_ids=[111, 222],
+                "boom", token="123:ABC", chat_ids=[111, 222],
             )
 
         assert delivered == 1
@@ -64,14 +64,14 @@ class TestHttpTransport:
     @pytest.mark.asyncio
     async def test_reports_zero_without_token_or_admins(self):
         with patch("httpx.AsyncClient") as client_cls:
-            assert await send_admin_message_http("x", token="", admin_ids=[111]) == 0
-            assert await send_admin_message_http("x", token="123:ABC", admin_ids=[]) == 0
+            assert await send_admin_message_http("x", token="", chat_ids=[111]) == 0
+            assert await send_admin_message_http("x", token="123:ABC", chat_ids=[]) == 0
         client_cls.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_transport_failure_never_raises(self):
         with patch("httpx.AsyncClient", side_effect=RuntimeError("no network")):
-            assert await send_admin_message_http("x", token="123:ABC", admin_ids=[111]) == 0
+            assert await send_admin_message_http("x", token="123:ABC", chat_ids=[111]) == 0
 
 
 class TestFallbackWiring:
