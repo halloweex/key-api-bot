@@ -11,8 +11,13 @@ import sqlite3
 
 import pytest
 
-from core.bot_prefs import group_by_language, read_user_languages
-from core.i18n import DEFAULT_LANGUAGE, RU, UK
+from core.bot_prefs import (
+    default_language_for,
+    group_by_language,
+    read_approved_user_ids,
+    read_user_languages,
+)
+from core.i18n import DEFAULT_LANGUAGE, EN, RU, UK
 
 
 @pytest.fixture
@@ -82,6 +87,57 @@ class TestDegradation:
         read_user_languages([1, 2, 3], bot_db)
         assert bot_db.read_bytes() == before
         assert not (bot_db.parent / "bot.db-journal").exists()
+
+
+class TestDefaultLanguage:
+    def test_staff_get_ukrainian_and_admins_get_english(self):
+        assert default_language_for(500, admin_ids=[1, 2]) == UK
+        assert default_language_for(1, admin_ids=[1, 2]) == EN
+
+    def test_admin_ids_may_arrive_as_strings(self):
+        """`.env` parsing has produced both over the life of this project."""
+        assert default_language_for(1, admin_ids=["1", "2"]) == EN
+
+    def test_a_stored_choice_beats_the_default(self, bot_db):
+        """The whole point: choose once, and it sticks."""
+        defaults = {1: EN, 2: EN, 3: EN}
+        languages = read_user_languages([1, 2, 3], bot_db, defaults=defaults)
+        assert languages[1] == UK   # stored 'uk' wins over the English default
+        assert languages[2] == RU
+        assert languages[3] == EN   # nothing stored, so the default stands
+
+
+class TestApprovedUsers:
+    @pytest.fixture
+    def users_db(self, tmp_path):
+        path = tmp_path / "bot.db"
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE authorized_users "
+                         "(user_id INTEGER PRIMARY KEY, status TEXT)")
+            conn.executemany("INSERT INTO authorized_users VALUES (?, ?)", [
+                (1, "approved"), (2, "approved"), (3, "denied"),
+                (4, "pending"), (5, "approved"),
+            ])
+            conn.execute("CREATE TABLE user_preferences "
+                         "(user_id INTEGER PRIMARY KEY, notifications_enabled INTEGER)")
+            conn.executemany("INSERT INTO user_preferences VALUES (?, ?)",
+                             [(1, 1), (5, 0)])
+        return path
+
+    def test_only_approved_users_are_written_to(self, users_db):
+        assert sorted(read_approved_user_ids(users_db)) == [1, 2]
+
+    def test_muting_notifications_is_respected(self, users_db):
+        """A toggle some messages ignore is worse than no toggle at all."""
+        assert 5 not in read_approved_user_ids(users_db)
+
+    def test_a_user_who_never_opened_settings_is_included(self, users_db):
+        """No preferences row at all — the column defaults to on."""
+        assert 2 in read_approved_user_ids(users_db)
+
+    def test_an_unreadable_database_yields_nobody(self, tmp_path):
+        """The caller falls back to the admins rather than to silence."""
+        assert read_approved_user_ids(tmp_path / "nope.db") == []
 
 
 class TestGrouping:

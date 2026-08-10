@@ -383,7 +383,7 @@ whole reason the group is read from the source now.
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
-| `weekly_report` | daily 09:30 | last complete week's numbers — sends once, then quiet |
+| `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 
 **Never schedule anything at 05:00–05:05 Kyiv.** The host cron
 `0 2 * * 0 weekly_compact.sh` is 02:00 UTC — the same instant — and it stops
@@ -402,6 +402,12 @@ reports the last *complete* Monday–Sunday week, recording each delivery in
 return quiet, and a Monday spent down becomes a Tuesday delivery instead of a
 week nobody ever sees. It defers while `MAX(date)` in Gold is still behind the
 week end, so no report is ever rendered mid-rebuild.
+
+**Audience**: every approved bot user plus the admins, minus anyone who
+switched `notifications_enabled` off — a toggle some messages ignore is worse
+than no toggle. The report is `retail` only, which is exactly what an approved
+user already sees on the dashboard, so the wider audience does not widen what
+is disclosed. An unreadable `bot.db` falls back to the admins alone.
 
 It sends a light PNG card (`core/weekly_report_image.py`) with the text report
 as the caption: revenue against the week before, then orders, basket and the
@@ -439,13 +445,18 @@ Dates are rendered numerically (`18.05 – 24.05.2026`) on purpose. Ukrainian an
 Russian month names inflect — a date takes the genitive — so a table of
 nominative month names is a table of wrong ones.
 
+**Default: Ukrainian for everyone, English for admins** — one function,
+`core/bot_prefs.default_language_for`. A stored choice overrides it for good,
+in the interface and in the report alike. Telegram's `language_code` is
+deliberately not consulted: the default is a decision about this company, not
+about a phone's locale.
+
 The choice lives in `user_preferences.language` in the bot's SQLite, set from
 the bot's settings screen. The weekly report runs in the **web** container and
 reads it through `core/bot_prefs.py`, which opens `data/bot.db` read-only —
 both containers bind-mount `./data`. A locked, missing, or pre-migration
-database all mean the same thing there: English, and the report still goes.
-The job renders once per distinct language among the admins, not once per
-admin.
+database all mean the same thing there: fall back, and the report still goes.
+The job renders once per distinct language, not once per reader.
 
 **Translated so far**: the weekly report (text and card) and the bot's settings
 screen. The rest of the bot UI — `/start`, `/help`, report and search flows,

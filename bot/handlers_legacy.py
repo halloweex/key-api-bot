@@ -1776,9 +1776,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     user_id = update.effective_user.id
     prefs = database.get_user_preferences(user_id) or {}
-    lang = database.get_user_language(
-        user_id, fallback=getattr(update.effective_user, "language_code", None),
-    )
+    lang = database.get_user_language(user_id)
 
     await update.message.reply_text(
         f"⚙️ <b>{t('settings.title', lang)}</b>",
@@ -1798,9 +1796,7 @@ async def settings_command_from_callback(update: Update, context: ContextTypes.D
 
     user_id = update.effective_user.id
     prefs = database.get_user_preferences(user_id) or {}
-    lang = database.get_user_language(
-        user_id, fallback=getattr(update.effective_user, "language_code", None),
-    )
+    lang = database.get_user_language(user_id)
 
     await query.edit_message_text(
         f"⚙️ <b>{t('settings.title', lang)}</b>",
@@ -1819,11 +1815,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     user_id = update.effective_user.id
     action = query.data
-    # Telegram's own language_code seeds the first visit, so a user who has
-    # never opened this screen still sees it in their language.
-    lang = database.get_user_language(
-        user_id, fallback=getattr(update.effective_user, "language_code", None),
-    )
+    lang = database.get_user_language(user_id)
 
     if action == "settings_language":
         await query.edit_message_text(

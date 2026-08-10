@@ -108,7 +108,7 @@ async def send_admin_message_http(
     parse_mode: str = "HTML",
     *,
     token: str | None = None,
-    admin_ids: Iterable[int] | None = None,
+    chat_ids: Iterable[int] | None = None,
 ) -> int:
     """Send `text` to every admin over the HTTP Bot API. Never raises.
 
@@ -119,7 +119,7 @@ async def send_admin_message_http(
     from core.config import ADMIN_USER_IDS, BOT_TOKEN
 
     token = token if token is not None else BOT_TOKEN
-    recipients = list(admin_ids if admin_ids is not None else ADMIN_USER_IDS)
+    recipients = list(chat_ids if chat_ids is not None else ADMIN_USER_IDS)
 
     if not token:
         logger.warning("Cannot send admin alert: BOT_TOKEN is not configured")
@@ -171,7 +171,7 @@ async def send_admin_photo_http(
     filename: str = "report.png",
     parse_mode: str = "HTML",
     token: str | None = None,
-    admin_ids: Iterable[int] | None = None,
+    chat_ids: Iterable[int] | None = None,
 ) -> int:
     """Send an image with a caption to every admin. Never raises.
 
@@ -182,7 +182,7 @@ async def send_admin_photo_http(
     from core.config import ADMIN_USER_IDS, BOT_TOKEN
 
     token = token if token is not None else BOT_TOKEN
-    recipients = list(admin_ids if admin_ids is not None else ADMIN_USER_IDS)
+    recipients = list(chat_ids if chat_ids is not None else ADMIN_USER_IDS)
 
     if not token:
         logger.warning("Cannot send admin photo: BOT_TOKEN is not configured")

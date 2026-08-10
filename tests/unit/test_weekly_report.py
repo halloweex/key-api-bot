@@ -474,13 +474,14 @@ class TestSchedulerJob:
 
     ADMINS = [111, 222]
 
-    def _wire(self, monkeypatch, store, sent, tmp_path=None, languages=None):
+    def _wire(self, monkeypatch, store, sent, tmp_path=None, languages=None,
+              approved=None):
         """Point the job at this store, these admins, and a capturing transport.
 
-        `languages` maps admin id to a language and is written into a throwaway
-        SQLite standing in for the bot's — without it the job would read the
-        developer's real `data/bot.db` and the test would pass or fail by
-        whatever language happens to be stored there.
+        `languages` and `approved` are written into a throwaway SQLite standing
+        in for the bot's — without it the job would read the developer's real
+        `data/bot.db` and the test would pass or fail by whatever happens to be
+        stored there.
         """
         import importlib
         import sqlite3
@@ -497,14 +498,20 @@ class TestSchedulerJob:
 
         async def _send_text(text, **kwargs):
             sent.append(text)
-            return len(kwargs.get("admin_ids") or self.ADMINS)
+            return len(kwargs.get("chat_ids") or self.ADMINS)
 
         db = (tmp_path or store.db_path.parent) / "prefs.db"
         with sqlite3.connect(db) as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS user_preferences "
-                         "(user_id INTEGER PRIMARY KEY, language TEXT)")
-            conn.executemany("INSERT OR REPLACE INTO user_preferences VALUES (?, ?)",
-                             list((languages or {}).items()))
+                         "(user_id INTEGER PRIMARY KEY, language TEXT, "
+                         " notifications_enabled INTEGER DEFAULT 1)")
+            conn.executemany(
+                "INSERT OR REPLACE INTO user_preferences (user_id, language) "
+                "VALUES (?, ?)", list((languages or {}).items()))
+            conn.execute("CREATE TABLE IF NOT EXISTS authorized_users "
+                         "(user_id INTEGER PRIMARY KEY, status TEXT)")
+            conn.executemany("INSERT OR REPLACE INTO authorized_users VALUES (?, ?)",
+                             [(uid, "approved") for uid in (approved or [])])
 
         monkeypatch.setattr("core.bot_prefs.BOT_DB_PATH", db)
         monkeypatch.setattr(core_config, "ADMIN_USER_IDS", self.ADMINS)
@@ -595,9 +602,9 @@ class TestSchedulerJob:
 
             calls = []
 
-            async def _photo(data, caption="", admin_ids=None, **kwargs):
-                calls.append((caption, list(admin_ids or [])))
-                return len(admin_ids or [])
+            async def _photo(data, caption="", chat_ids=None, **kwargs):
+                calls.append((caption, list(chat_ids or [])))
+                return len(chat_ids or [])
 
             monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
             result = await scheduler._run_weekly_report()
@@ -606,6 +613,70 @@ class TestSchedulerJob:
             by_recipient = {tuple(ids): caption for caption, ids in calls}
             assert by_recipient[(111,)].startswith("📊 <b>Тижневий звіт</b>")
             assert by_recipient[(222,)].startswith("📊 <b>Weekly report</b>")
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_it_reaches_staff_in_ukrainian_and_admins_in_english(
+        self, tmp_path, monkeypatch,
+    ):
+        """The default policy, end to end, plus a stored choice overriding it."""
+        store = await _store(tmp_path)
+        try:
+            await self._seed(store, complete=True)
+            scheduler = self._wire(
+                monkeypatch, store, [], tmp_path,
+                approved=[301, 302, 303],
+                languages={303: "ru"},   # chose Russian; the default must yield
+            )
+
+            calls = []
+
+            async def _photo(data, caption="", chat_ids=None, **kwargs):
+                calls.append((caption.split("\n")[0], sorted(chat_ids or [])))
+                return len(chat_ids or [])
+
+            monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
+            result = await scheduler._run_weekly_report()
+
+            # Two admins plus three approved staff, nobody twice.
+            assert result["recipients"] == 5
+            assert result["delivered"] == 5
+
+            by_head = {head: ids for head, ids in calls}
+            assert by_head["📊 <b>Weekly report</b>"] == self.ADMINS
+            assert by_head["📊 <b>Тижневий звіт</b>"] == [301, 302]
+            assert by_head["📊 <b>Недельный отчёт</b>"] == [303]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_someone_who_muted_notifications_is_not_written_to(
+        self, tmp_path, monkeypatch,
+    ):
+        """A toggle some messages ignore is worse than no toggle at all."""
+        import sqlite3
+
+        store = await _store(tmp_path)
+        try:
+            await self._seed(store, complete=True)
+            scheduler = self._wire(monkeypatch, store, [], tmp_path,
+                                   approved=[301, 302])
+            with sqlite3.connect(tmp_path / "prefs.db") as conn:
+                conn.execute("INSERT OR REPLACE INTO user_preferences "
+                             "(user_id, notifications_enabled) VALUES (302, 0)")
+
+            reached = []
+
+            async def _photo(data, caption="", chat_ids=None, **kwargs):
+                reached.extend(chat_ids or [])
+                return len(chat_ids or [])
+
+            monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
+            await scheduler._run_weekly_report()
+
+            assert 301 in reached
+            assert 302 not in reached
         finally:
             await store.close()
 

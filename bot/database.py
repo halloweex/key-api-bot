@@ -493,19 +493,23 @@ def get_user_preferences(user_id: int) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_user_language(user_id: int, fallback: str = None) -> str:
-    """The language this user picked, normalised, or the default.
+def get_user_language(user_id: int) -> str:
+    """The language this user picked, or the default for who they are.
 
-    `fallback` lets a caller pass Telegram's `language_code` so a user who has
-    never opened settings is still met in their own language.
+    Ukrainian for everyone, English for admins — until they choose otherwise,
+    at which point the stored choice wins for good, here and in the weekly
+    report alike. Telegram's own `language_code` is deliberately not consulted:
+    the default is a decision about this company, not about a phone's locale.
     """
-    from core.i18n import DEFAULT_LANGUAGE, normalize
+    from bot.config import ADMIN_USER_IDS
+    from core.bot_prefs import default_language_for
+    from core.i18n import normalize
 
     prefs = get_user_preferences(user_id) or {}
     stored = prefs.get("language")
     if stored:
         return normalize(stored)
-    return normalize(fallback) if fallback else DEFAULT_LANGUAGE
+    return default_language_for(user_id, ADMIN_USER_IDS)
 
 
 def save_user_preferences(
