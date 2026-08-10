@@ -14,16 +14,14 @@ import pytest
 
 from core.weekly_report import ProductMove, WeekTotals, WeeklyReport
 from core.weekly_report_image import (
-    BAR,
-    CALM,
-    CHART_BOTTOM,
-    CHART_TOP,
     DOWN,
+    MUTED,
     PAD,
+    STATS_TOP,
     UP,
     H,
     W,
-    _tone,
+    _delta,
     render_weekly_card,
 )
 
@@ -44,12 +42,6 @@ def _report(**overrides) -> WeeklyReport:
         movers=[ProductMove(name="Differ & Deeper Cream",
                             current=19_966, previous=101_885)],
         product_move_total=-339_041.0,
-        baseline_series=tuple(
-            float(v) for v in (
-                1_153_731, 1_582_423, 700_256, 948_058, 826_118, 908_980,
-                1_004_110, 1_126_971, 875_484, 1_631_477, 1_147_640, 1_305_788,
-            )
-        ),
     )
     base.update(overrides)
     return WeeklyReport(**base)
@@ -79,57 +71,32 @@ class TestRendering:
     def test_it_stays_small_enough_to_send_every_week(self):
         assert len(render_weekly_card(_report())) < 400_000
 
-    def test_every_band_of_the_card_is_used(self):
-        """Headline, chart and stats each occupy their own third.
+    def test_both_halves_of_the_card_are_used(self):
+        """The headline and the three stats each occupy their own half.
 
-        A layout regression that drops a block leaves its band flat white, and
+        A layout regression that drops a block leaves its half flat white, and
         nothing else in the suite would notice.
         """
         img = _open(render_weekly_card(_report()))
         for name, box in (
-            ("headline", (0, PAD, W, CHART_TOP - 40)),
-            ("chart", (0, CHART_TOP, W, CHART_BOTTOM)),
-            ("stats", (0, CHART_BOTTOM + 100, W, H - 20)),
+            ("headline", (0, PAD, W, STATS_TOP - 60)),
+            ("stats", (0, STATS_TOP, W, H - 40)),
         ):
-            assert not _uniform(img.crop(box)), f"{name} band is empty"
+            assert not _uniform(img.crop(box)), f"{name} half is empty"
 
+class TestDelta:
+    def test_a_fall_is_red_and_a_rise_is_green(self):
+        assert _delta(-25.8) == ("▼ 25.8%", DOWN)
+        assert _delta(12.3) == ("▲ 12.3%", UP)
 
-class TestChart:
-    def _last_bar_colour(self, report) -> tuple:
-        """The colour of the newest bar, sampled just above its baseline."""
-        img = _open(render_weekly_card(report))
-        return img.getpixel((W - PAD - 20, CHART_BOTTOM - 10))
+    def test_a_tenth_of_a_percent_is_not_a_movement(self):
+        """₴2,729 against ₴2,732 is not something to colour in."""
+        text, colour = _delta(-0.1)
+        assert text == "≈ flat"
+        assert colour == MUTED
 
-    def test_the_newest_week_is_the_one_picked_out(self):
-        """The whole point of the chart is where *this* week sits."""
-        assert self._last_bar_colour(_report()) == CALM
-        # ...and it is the only bar in the accent colour.
-        img = _open(render_weekly_card(_report()))
-        assert img.getpixel((PAD + 20, CHART_BOTTOM - 10)) == BAR
-
-    def test_an_unusually_low_week_is_flagged_on_the_chart_itself(self):
-        low = _report(current=WeekTotals(revenue=100_000, orders=40))
-        assert self._last_bar_colour(low) == DOWN
-
-
-class TestTone:
-    def test_an_ordinary_week_is_painted_calm(self):
-        """A 25% fall inside its own normal range is not an emergency.
-
-        Colouring every dip red is the visual form of crying wolf, and the chip
-        under the headline already carries the direction.
-        """
-        assert _tone(_report()) == CALM
-
-    def test_an_unusually_low_week_is_painted_low(self):
-        assert _tone(_report(current=WeekTotals(revenue=100_000, orders=40))) == DOWN
-
-    def test_an_unusually_high_week_is_painted_high(self):
-        assert _tone(_report(current=WeekTotals(revenue=2_400_000, orders=800))) == UP
-
-    def test_no_history_means_no_verdict_to_colour(self):
-        assert _tone(_report(baseline_sd=None, baseline_mean=None,
-                             baseline_weeks=0)) == CALM
+    def test_no_base_is_marked_rather_than_faked(self):
+        assert _delta(None) == ("—", MUTED)
 
 
 class TestDegradation:
@@ -147,22 +114,21 @@ class TestDegradation:
         def _explode(*args, **kwargs):
             raise RuntimeError("no pixels today")
 
-        monkeypatch.setattr("core.weekly_report_image._draw_chart", _explode)
+        monkeypatch.setattr("core.weekly_report_image._draw_stats", _explode)
         assert render_weekly_card(_report()) is None
 
     @pytest.mark.parametrize("name,overrides", [
         ("first week ever", dict(previous=None, year_ago=None, baseline_mean=None,
-                                 baseline_sd=None, baseline_weeks=0,
-                                 baseline_series=())),
-        ("one prior week", dict(baseline_weeks=1, baseline_series=(500_000.0,),
-                                baseline_sd=None)),
+                                 baseline_sd=None, baseline_weeks=0)),
         ("a dead week", dict(current=WeekTotals(revenue=0, orders=0,
                                                 new_customer_orders=0,
                                                 repeat_orders=0))),
         ("no customer split", dict(current=WeekTotals(revenue=500_000, orders=100))),
-        ("a flat history", dict(baseline_sd=0.0)),
+        ("a week that tripled", dict(current=WeekTotals(
+            revenue=9_999_999, orders=4_000, new_customer_orders=2_000,
+            repeat_orders=2_000))),
     ])
-    def test_thin_data_still_renders_or_declines_cleanly(self, name, overrides):
+    def test_thin_or_extreme_data_still_renders(self, name, overrides):
         data = render_weekly_card(_report(**overrides))
-        if data is not None:
-            assert _open(data).size == (W, H)
+        assert data is not None, name
+        assert _open(data).size == (W, H)
