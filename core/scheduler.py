@@ -5,7 +5,11 @@ Manages all background tasks:
 - Incremental sync (every 60 seconds)
 - Full sync (weekly on Sunday at 2 AM)
 - Inventory snapshot (daily at 1 AM)
-- Cache warming (every 5 minutes)
+
+There is no cache-warming job. This docstring claimed one for months and no
+`_add_job` ever matched it, which is how an audit came to rate a missing cache
+as the standing cause of dashboard latency. Do not re-add the line without the
+job.
 
 Features:
 - Job retry with exponential backoff

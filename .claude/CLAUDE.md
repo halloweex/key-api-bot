@@ -250,8 +250,28 @@ python scripts/force_resync.py --days 365
 
 ## Caching
 
-- **In-memory cache** - 5-minute TTL for API responses
-- **Background warming** - Pre-fetches data every 4 minutes for common periods
+**There is no server-side response cache, and there never has been in
+production.** `core/cache.py` is a Redis client; no Redis container exists in
+`docker-compose.yml` and none ever did (`git log -S redis -- docker-compose.yml`
+is empty), so `cache.get()` returns None and `cache.set()` is a no-op. The one
+call site is `web/routes/api/analytics.py` (summary). `get_or_set` and
+`@cache.cached` are called from nowhere. There is no warming job.
+
+This section used to describe a 5-minute TTL and warming every 4 minutes. It
+was describing a system that has never run, and that fiction is the reason a
+later audit rated the "missing" cache as the standing cause of dashboard
+latency. Measured on prod 2026-08-10 instead: at the TTL the code actually
+uses a cache would hit **0.1%** of requests, and it would hit **none** of the
+slow ones — the slow requests come from a user stepping through dates, where
+every URL is distinct. The real costs are elsewhere; see
+`.planning/redis-cache-investigation/`.
+
+What does exist:
+- **Small in-process caches where evidence demanded them** — `/api/health`
+  stats (60s), product categories, product brands
+- **Client-side caching** — TanStack Query, 2 min for realtime data
+  (`web/frontend/src/hooks/useApi.ts`), which absorbs most repeats before the
+  server sees them
 - **Gzip compression** - ~70% smaller responses
 - **orjson** - Fast JSON serialization
 

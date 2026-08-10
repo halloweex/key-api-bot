@@ -102,6 +102,9 @@ class RedisCache:
         self._stats = CacheStats()
         self._lock = asyncio.Lock()
         self._key_locks: dict[str, asyncio.Lock] = {}  # Per-key locks for get_or_set
+        # How many coroutines hold or are waiting on each key lock, so the last
+        # one out can drop it instead of leaking an entry per date range.
+        self._key_lock_users: dict[str, int] = {}
 
     async def connect(self) -> bool:
         """
@@ -313,28 +316,50 @@ class RedisCache:
         if value is not None:
             return value
 
-        # Get or create a per-key lock to serialize computation
+        # Get or create a per-key lock to serialize computation, and register
+        # as a user of it so the last one out can throw it away.
         async with self._lock:
-            if key not in self._key_locks:
-                self._key_locks[key] = asyncio.Lock()
-            key_lock = self._key_locks[key]
+            key_lock = self._key_locks.get(key)
+            if key_lock is None:
+                key_lock = self._key_locks[key] = asyncio.Lock()
+            self._key_lock_users[key] = self._key_lock_users.get(key, 0) + 1
 
-        async with key_lock:
-            # Re-check cache (another coroutine may have populated it)
-            value = await self.get(key)
-            if value is not None:
+        try:
+            async with key_lock:
+                # Re-check cache (another coroutine may have populated it)
+                value = await self.get(key)
+                if value is not None:
+                    return value
+
+                # Compute value
+                if inspect.iscoroutinefunction(factory):
+                    value = await factory()
+                else:
+                    value = factory()
+
+                # Cache it
+                await self.set(key, value, ttl)
+
                 return value
-
-            # Compute value
-            if inspect.iscoroutinefunction(factory):
-                value = await factory()
-            else:
-                value = factory()
-
-            # Cache it
-            await self.set(key, value, ttl)
-
-            return value
+        finally:
+            # Drop the lock when the last user leaves. `_key_locks` used to only
+            # ever grow, and the keys embed date ranges — the one dimension that
+            # never stops producing new values — so it was unbounded by design.
+            #
+            # The count, rather than `key_lock.locked()`: releasing an
+            # asyncio.Lock wakes a waiter but does not mark the lock held until
+            # that waiter is actually scheduled, so `locked()` reads False while
+            # somebody is still queued. Deleting there would hand the next
+            # arrival a fresh lock and let two coroutines compute the same key
+            # at once — the exact stampede this function exists to prevent.
+            async with self._lock:
+                remaining = self._key_lock_users.get(key, 1) - 1
+                if remaining > 0:
+                    self._key_lock_users[key] = remaining
+                else:
+                    self._key_lock_users.pop(key, None)
+                    if self._key_locks.get(key) is key_lock:
+                        del self._key_locks[key]
 
     def cached(
         self,

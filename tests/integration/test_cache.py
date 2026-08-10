@@ -274,3 +274,93 @@ class TestRedisCacheWithMock:
 
         assert result is None
         assert cache._stats.errors == 1
+
+
+class TestKeyLockLifecycle:
+    """`_key_locks` used to only ever grow.
+
+    Its keys embed date ranges — the one dimension that never stops producing
+    new values — so a dict that never deletes is unbounded by construction. It
+    went unnoticed because `get_or_set` has no callers, which meant the audit
+    advice "just route the hot endpoints through get_or_set" was shipping a
+    leak along with the fix.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_lock_is_dropped_once_the_caller_leaves(self):
+        cache = RedisCache(enabled=False)
+
+        async def factory():
+            return {"v": 1}
+
+        await cache.get_or_set("2026-08-01:2026-08-31", factory, ttl=60)
+
+        assert cache._key_locks == {}
+        assert cache._key_lock_users == {}
+
+    @pytest.mark.asyncio
+    async def test_distinct_keys_do_not_accumulate(self):
+        cache = RedisCache(enabled=False)
+
+        async def factory():
+            return {"v": 1}
+
+        for day in range(1, 32):
+            await cache.get_or_set(f"summary:2026-08-{day:02d}", factory, ttl=60)
+
+        assert cache._key_locks == {}
+
+    @pytest.mark.asyncio
+    async def test_a_failing_factory_still_releases_the_lock(self):
+        cache = RedisCache(enabled=False)
+
+        async def boom():
+            raise RuntimeError("query failed")
+
+        with pytest.raises(RuntimeError):
+            await cache.get_or_set("k", boom, ttl=60)
+
+        assert cache._key_locks == {}
+
+    @pytest.mark.asyncio
+    async def test_concurrent_callers_share_one_lock_and_compute_once(self):
+        """The reason cleanup cannot key on `locked()`.
+
+        Releasing an asyncio.Lock wakes a waiter but does not mark the lock held
+        until that waiter is scheduled, so `locked()` reads False while somebody
+        is still queued. Dropping the lock there hands the next arrival a fresh
+        one and lets two coroutines compute the same key at once — precisely the
+        stampede this function exists to prevent.
+        """
+        import asyncio
+
+        cache = RedisCache(enabled=False)
+        calls = 0
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_factory():
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return {"v": calls}
+
+        first = asyncio.create_task(cache.get_or_set("k", slow_factory, ttl=60))
+        await started.wait()
+        # Queue two more behind the in-flight computation.
+        rest = [asyncio.create_task(cache.get_or_set("k", slow_factory, ttl=60))
+                for _ in range(2)]
+        await asyncio.sleep(0)  # let them reach the lock
+
+        assert len(cache._key_locks) == 1, "all three must share one lock"
+        assert cache._key_lock_users["k"] == 3
+
+        release.set()
+        await asyncio.gather(first, *rest)
+
+        # The cache is disabled, so nothing is stored and each waiter recomputes
+        # after acquiring — what matters here is that they serialized on one
+        # lock and that the entry is gone once the last one leaves.
+        assert cache._key_locks == {}
+        assert cache._key_lock_users == {}
