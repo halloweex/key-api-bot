@@ -90,6 +90,23 @@ class TestMenuButtonsAlwaysWork:
         assert set(MENU_BUTTONS) <= rendered
 
 
+class TestLogsKeepTheToken:
+    def test_httpx_does_not_log_request_urls(self):
+        """Every Telegram URL carries BOT_TOKEN in its path.
+
+        httpx logs each request at INFO, so a ten-second long poll wrote the
+        token into the container log a few hundred times an hour — kept for
+        250 MB per service and readable by anyone with host access.
+        `core/observability.py` has silenced it in the web container all
+        along; the bot configures logging itself and never got it.
+        """
+        import importlib
+        import logging
+
+        importlib.import_module("bot.main")
+        assert logging.getLogger("httpx").level >= logging.WARNING
+
+
 class TestConversationSettings:
     def test_reentry_is_allowed(self, conversation):
         """What actually fixes it — entry points fire mid-conversation."""

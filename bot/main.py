@@ -28,6 +28,18 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
+
+# httpx logs every request at INFO, URL and all — and every Telegram URL
+# carries the bot token in its path. At one long poll every ten seconds that
+# wrote BOT_TOKEN into the container log a few hundred times an hour, kept for
+# 250 MB per service and readable by anyone with host access. It is also
+# essentially all this log contains: 161 lines of getUpdates in the last 25
+# minutes against 4 lines that meant anything.
+#
+# core/observability.py has done this in the web container all along; the bot
+# configures logging itself and never got it.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
