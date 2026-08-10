@@ -58,6 +58,7 @@ def init_database():
                 timezone TEXT DEFAULT 'Europe/Kyiv',
                 default_date_range TEXT DEFAULT 'week',
                 notifications_enabled INTEGER DEFAULT 1,
+                language TEXT DEFAULT 'en',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -71,6 +72,15 @@ def init_database():
 
         try:
             cursor.execute("ALTER TABLE user_preferences ADD COLUMN notifications_enabled INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+        # The interface language, and the language the weekly report arrives in.
+        # Read from the *web* container too — see core/bot_prefs.py — because
+        # the report is built where DuckDB lives and this file is the only
+        # place a user's choice is recorded.
+        try:
+            cursor.execute("ALTER TABLE user_preferences ADD COLUMN language TEXT DEFAULT 'en'")
         except sqlite3.OperationalError:
             pass  # Column already exists
 
@@ -483,6 +493,21 @@ def get_user_preferences(user_id: int) -> Optional[Dict[str, Any]]:
         return None
 
 
+def get_user_language(user_id: int, fallback: str = None) -> str:
+    """The language this user picked, normalised, or the default.
+
+    `fallback` lets a caller pass Telegram's `language_code` so a user who has
+    never opened settings is still met in their own language.
+    """
+    from core.i18n import DEFAULT_LANGUAGE, normalize
+
+    prefs = get_user_preferences(user_id) or {}
+    stored = prefs.get("language")
+    if stored:
+        return normalize(stored)
+    return normalize(fallback) if fallback else DEFAULT_LANGUAGE
+
+
 def save_user_preferences(
     user_id: int,
     default_source: str = None,
@@ -516,7 +541,8 @@ def update_user_preference(user_id: int, key: str, value: Any) -> None:
         save_user_preferences(user_id)
 
     # Only allow specific keys
-    allowed_keys = {'default_source', 'default_report_type', 'timezone', 'default_date_range', 'notifications_enabled'}
+    allowed_keys = {'default_source', 'default_report_type', 'timezone',
+                    'default_date_range', 'notifications_enabled', 'language'}
     if key not in allowed_keys:
         logger.warning(f"Attempted to update invalid preference key: {key}")
         return

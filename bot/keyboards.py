@@ -318,24 +318,52 @@ class Keyboards:
     # ─── Settings Keyboards ────────────────────────────────────────────────
 
     @staticmethod
-    def settings_menu(prefs: dict = None) -> InlineKeyboardMarkup:
+    def settings_menu(prefs: dict = None, lang: str = None) -> InlineKeyboardMarkup:
         """Create settings menu keyboard."""
+        from core.i18n import LANGUAGE_NAMES, normalize, t
+
         prefs = prefs or {}
+        lang = normalize(lang if lang is not None else prefs.get('language'))
         tz = prefs.get('timezone', 'Europe/Kyiv')
         date_range = prefs.get('default_date_range', 'week')
         notif = prefs.get('notifications_enabled', 1)
 
         # Format display values
         tz_display = tz.split('/')[-1] if '/' in tz else tz
-        range_display = {'today': 'Today', 'week': 'Week', 'month': 'Month'}.get(date_range, date_range.title())
-        notif_display = "✅ On" if notif else "❌ Off"
+        range_display = t(f"range.{date_range}", lang) if date_range in (
+            'today', 'week', 'month') else date_range.title()
+        notif_display = f"✅ {t('settings.on', lang)}" if notif else f"❌ {t('settings.off', lang)}"
 
         keyboard = [
-            [InlineKeyboardButton(f"🌍 Timezone: {tz_display}", callback_data="settings_timezone")],
-            [InlineKeyboardButton(f"📅 Default Range: {range_display}", callback_data="settings_date_range")],
-            [InlineKeyboardButton(f"🔔 Notifications: {notif_display}", callback_data="settings_notifications")],
-            [InlineKeyboardButton("🔙 Back", callback_data="cmd_start")]
+            [InlineKeyboardButton(
+                f"🌐 {t('settings.language', lang)}: {LANGUAGE_NAMES[lang]}",
+                callback_data="settings_language")],
+            [InlineKeyboardButton(f"🌍 {t('settings.timezone', lang)}: {tz_display}", callback_data="settings_timezone")],
+            [InlineKeyboardButton(f"📅 {t('settings.date_range', lang)}: {range_display}", callback_data="settings_date_range")],
+            [InlineKeyboardButton(f"🔔 {t('settings.notifications', lang)}: {notif_display}", callback_data="settings_notifications")],
+            [InlineKeyboardButton(f"🔙 {t('settings.back', lang)}", callback_data="cmd_start")]
         ]
+        return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def settings_language(current: str = None) -> InlineKeyboardMarkup:
+        """Create language selection keyboard.
+
+        Named, not flagged. This is a Ukrainian company, and putting a Russian
+        flag in its internal tooling is not a neutral act; a language has a
+        name, and the name is enough.
+        """
+        from core.i18n import LANGUAGE_NAMES, LANGUAGES, normalize, t
+
+        current = normalize(current)
+        keyboard = [
+            [InlineKeyboardButton(
+                f"{'● ' if code == current else ''}{LANGUAGE_NAMES[code]}",
+                callback_data=f"set_lang_{code}")]
+            for code in LANGUAGES
+        ]
+        keyboard.append([InlineKeyboardButton(
+            f"🔙 {t('settings.back', current)}", callback_data="settings_back")])
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod

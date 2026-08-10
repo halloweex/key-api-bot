@@ -1056,6 +1056,21 @@ class DuckDBStore(
             PRIMARY KEY (period_type, period_key, milestone_amount)
         );
 
+        -- Weekly sales report: which weeks have already been delivered.
+        -- The job fires daily and reports the last *complete* week, so this
+        -- ledger is what keeps six of seven firings quiet. It also makes a
+        -- missed Monday self-healing: a weekly CronTrigger that was not alive
+        -- at its instant does not run late, it computes its next fire a week
+        -- out and the week is simply never reported.
+        CREATE TABLE IF NOT EXISTS weekly_report_sends (
+            week_start DATE NOT NULL,
+            sales_type VARCHAR NOT NULL,
+            revenue DECIMAL(14, 2) NOT NULL,
+            orders INTEGER NOT NULL,
+            sent_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (week_start, sales_type)
+        );
+
         -- Role permissions (dynamic permissions matrix)
         CREATE TABLE IF NOT EXISTS role_permissions (
             role VARCHAR NOT NULL,              -- admin, editor, viewer

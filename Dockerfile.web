@@ -21,8 +21,13 @@ FROM python:3.14-slim
 
 WORKDIR /app
 
-# Install system dependencies (libgomp for LightGBM, curl for health checks)
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 curl && rm -rf /var/lib/apt/lists/*
+# Install system dependencies (libgomp for LightGBM, curl for health checks,
+# DejaVu for the weekly report card — python:3.14-slim ships no fonts at all,
+# and DejaVu is the one that carries both Cyrillic and ₴ for ~2 MB. Without it
+# the card is skipped and the report still goes out as text.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 curl fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies
 COPY requirements.txt .

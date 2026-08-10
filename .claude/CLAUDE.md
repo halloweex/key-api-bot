@@ -165,6 +165,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 - `data_quality_runs` / `_issues` / `_diffs` - one row per check run plus its findings; the digest and `/api/health/data-quality` read these. A failed run writes a row too, with `error_message` set — never treat row-existence as "the check ran"
 - `warehouse_refreshes` - ~65k rows back to 2026-03-14, the best forensic trail in the system
 - `order_backfill_misses` - ids KeyCRM cannot supply, or supplies without line items; skipped for 30 days so a repair job cannot loop on them forever
+- `weekly_report_sends` - one row per week delivered by `weekly_report`; what keeps a daily job to one message a week and makes a missed Monday recoverable
 
 **Source filtering:**
 - Included: Instagram (1), Telegram (2), Shopify (4)
@@ -382,6 +383,7 @@ whole reason the group is read from the source now.
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
+| `weekly_report` | daily 09:30 | last complete week's numbers — sends once, then quiet |
 
 **Never schedule anything at 05:00–05:05 Kyiv.** The host cron
 `0 2 * * 0 weekly_compact.sh` is 02:00 UTC — the same instant — and it stops
@@ -393,6 +395,64 @@ nothing to forgive. That cost `dq_reconciliation` every Sunday.
 `BackgroundScheduler.start()` queues a one-off catch-up for any check whose
 last *successful* verdict is older than its cadence (`CATCHUP_CHECKS`), which
 also covers deploys landing on a cron instant.
+
+`weekly_report` solves the same problem a different way: it ticks **daily** and
+reports the last *complete* Monday–Sunday week, recording each delivery in
+`weekly_report_sends`. Six firings out of seven find the week already sent and
+return quiet, and a Monday spent down becomes a Tuesday delivery instead of a
+week nobody ever sees. It defers while `MAX(date)` in Gold is still behind the
+week end, so no report is ever rendered mid-rebuild.
+
+It sends a light PNG card (`core/weekly_report_image.py`) with the text report
+as the caption: revenue against the week before, then orders, basket and the
+new/repeat split. Nothing else — everything the caption already carries stays
+in the caption. Pillow only, no matplotlib, drawn at ~2× display size because
+Telegram re-encodes photos as JPEG. The card needs `fonts-dejavu-core` in the
+image (`Dockerfile.web`): `python:3.14-slim` ships no fonts, and DejaVu is the
+one carrying both Cyrillic and ₴. No font, a caption over Telegram's 1 024, or
+any render failure costs the picture and nothing else — the text still goes
+out.
+
+### The conversation must always be re-enterable
+`/report`, `/search` and `/settings` — and the reply-keyboard buttons standing
+in for them — are ConversationHandler **entry points**, and entry points are
+only checked for users who are *not* already in a conversation. With
+`allow_reentry=False` (the default), picking a report type and walking away
+parked the user in `SELECTING_DATE_RANGE`, whose handlers are all
+`CallbackQueryHandler`s: a text button matched nothing, no entry point could
+fire, and "⚙️ Settings" reached nothing at all until `/cancel`. "ℹ️ Help" and
+"📈 Dashboard" kept working the whole time because they are registered outside
+the conversation — which is why it presented as one broken button.
+
+`allow_reentry=True` and `conversation_timeout` are both set now. Do not remove
+either; `tests/unit/test_conversation_reentry.py` pins them.
+
+### Languages
+`core/i18n.py` holds every translated string for three languages (en/uk/ru) in
+one dict — no gettext, no extraction step, no .po files to drift. A missing key
+or language falls back to English rather than raising: one odd line in a
+delivered report beats no report. A test asserts every key carries every
+language *and* the same `{placeholders}`, which is the failure a hand-written
+table actually invites.
+
+Dates are rendered numerically (`18.05 – 24.05.2026`) on purpose. Ukrainian and
+Russian month names inflect — a date takes the genitive — so a table of
+nominative month names is a table of wrong ones.
+
+The choice lives in `user_preferences.language` in the bot's SQLite, set from
+the bot's settings screen. The weekly report runs in the **web** container and
+reads it through `core/bot_prefs.py`, which opens `data/bot.db` read-only —
+both containers bind-mount `./data`. A locked, missing, or pre-migration
+database all mean the same thing there: English, and the report still goes.
+The job renders once per distinct language among the admins, not once per
+admin.
+
+**Translated so far**: the weekly report (text and card) and the bot's settings
+screen. The rest of the bot UI — `/start`, `/help`, report and search flows,
+`bot/formatters.py` — is still English only.
+
+**No flags in the language picker.** This is a Ukrainian company; a Russian
+flag in its internal tooling is not a neutral act. Languages have names.
 
 ### How a failure reaches a human
 - **Alert throttle** keys on the *condition* (`warehouse:validation_retrying`,
@@ -515,4 +575,4 @@ GET /api/admin/resync/status/{job_id}
 
 ---
 
-*Last updated: 2026-08-09*
+*Last updated: 2026-08-10*

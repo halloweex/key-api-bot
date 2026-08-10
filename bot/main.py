@@ -28,12 +28,29 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
+
+# httpx logs every request at INFO, URL and all — and every Telegram URL
+# carries the bot token in its path. At one long poll every ten seconds that
+# wrote BOT_TOKEN into the container log a few hundred times an hour, kept for
+# 250 MB per service and readable by anyone with host access. It is also
+# essentially all this log contains: 161 lines of getUpdates in the last 25
+# minutes against 4 lines that meant anything.
+#
+# core/observability.py has done this in the web container all along; the bot
+# configures logging itself and never got it.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
 # Holds the running Application so module-level helpers (e.g. send_admin_message,
 # imported by core/scheduler.py) can reach the bot without a circular import.
 _application: Application | None = None
+
+# How long a half-finished report or search may sit before the conversation is
+# dropped. Long enough to answer the door mid-flow, short enough that a state
+# nobody remembers entering does not survive the afternoon.
+CONVERSATION_TIMEOUT_SECONDS = 30 * 60
 
 
 async def send_admin_message(
@@ -165,6 +182,24 @@ def create_conversation_handler() -> ConversationHandler:
         },
         fallbacks=[CommandHandler("cancel", handlers.cancel_command)],
         per_message=False,
+        # Without this, an unfinished flow wedges the menu. Entry points are
+        # only checked for users who are *not* already in a conversation, and
+        # /report, /search and /settings — with their reply-keyboard buttons —
+        # are all entry points. Tap "📊 Report", pick a report type, then walk
+        # away, and from then on "⚙️ Settings" reaches nothing at all: the
+        # conversation is parked in SELECTING_DATE_RANGE, whose only handlers
+        # are CallbackQueryHandlers, so a text button matches nothing and no
+        # entry point is allowed to fire. "ℹ️ Help" and "📈 Dashboard" kept
+        # working throughout, because they are registered outside the
+        # conversation — which is exactly why the failure reads as "the
+        # Settings button is broken" rather than "the bot is stuck".
+        #
+        # Nothing re-armed it either: there was no timeout, and only /cancel
+        # cleared the state. These are top-level menu buttons; pressing one
+        # should always go where it says.
+        allow_reentry=True,
+        # And an abandoned conversation should not live forever in memory.
+        conversation_timeout=CONVERSATION_TIMEOUT_SECONDS,
     )
 
 
