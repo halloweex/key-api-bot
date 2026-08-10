@@ -64,8 +64,6 @@ class SyncEvent(Enum):
     GOALS_UPDATED = "analytics.goals_updated"
 
     # Cache events
-    CACHE_INVALIDATED = "cache.invalidated"
-    CACHE_WARMED = "cache.warmed"
 
     # Scheduler events
     JOB_STARTED = "scheduler.job_started"
@@ -351,10 +349,3 @@ async def emit_orders_synced(count: int, duration_ms: float, **kwargs) -> Event:
         {"count": count, "duration_ms": duration_ms, **kwargs},
     )
 
-
-async def emit_cache_invalidated(keys: List[str], reason: str, **kwargs) -> Event:
-    """Emit cache invalidated event."""
-    return await events.emit(
-        SyncEvent.CACHE_INVALIDATED,
-        {"keys": keys, "reason": reason, **kwargs},
-    )

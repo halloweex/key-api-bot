@@ -24,7 +24,6 @@ from core.config import validate_config, ConfigurationError
 from core.observability import setup_logging, get_logger
 from core.scheduler import start_scheduler, stop_scheduler
 from core.events import events, SyncEvent
-from core.cache import cache, register_cache_invalidation_handlers
 
 # Configure structured logging
 # Use JSON format in production (LOG_FORMAT=json), human-readable otherwise
@@ -202,16 +201,6 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"Prediction service initialization skipped: {e}")
 
-    # Initialize Redis cache (non-fatal if unavailable)
-    try:
-        if await cache.connect():
-            register_cache_invalidation_handlers()
-            logger.info("Redis cache connected")
-        else:
-            logger.info("Redis cache not available, running without cache")
-    except Exception as e:
-        logger.warning(f"Redis cache initialization failed: {e}")
-
     logger.info("Dashboard ready - all queries use DuckDB")
 
 
@@ -283,7 +272,7 @@ def _register_event_handlers():
 
     @events.on(SyncEvent.ORDERS_SYNCED)
     async def on_orders_synced(data: dict):
-        """Log orders synced, broadcast to WebSocket clients, and invalidate caches."""
+        """Log orders synced and broadcast to WebSocket clients."""
         count = data.get("count", 0)
         if count > 0:
             logger.debug(f"Orders synced: {count} orders")
@@ -297,12 +286,6 @@ def _register_event_handlers():
                     "duration_ms": data.get("duration_ms", 0),
                 }
             )
-
-            # Invalidate dashboard cache
-            try:
-                await cache.invalidate_pattern("summary:*")
-            except Exception as e:
-                logger.debug(f"Cache invalidation skipped: {e}")
 
     @events.on(SyncEvent.PRODUCTS_SYNCED)
     async def on_products_synced(data: dict):
@@ -373,12 +356,6 @@ async def shutdown_event():
         await close_client()
     except Exception as e:
         logger.warning(f"Error closing KeyCRM client: {e}")
-
-    # Disconnect Redis cache
-    try:
-        await cache.disconnect()
-    except Exception as e:
-        logger.warning(f"Error disconnecting Redis: {e}")
 
     # Close DuckDB
     try:

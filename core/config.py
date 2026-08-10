@@ -8,7 +8,7 @@ Usage:
     from core.config import config
 
     api_key = config.api.key
-    cache_ttl = config.cache.ttl_seconds
+    page_limit = config.api.page_limit
 """
 
 import os
@@ -36,15 +36,6 @@ class APIConfig:
     request_timeout: int = 30
     rate_limit_delay: float = 0.3
     order_sync_buffer_hours: int = 24
-
-
-@dataclass(frozen=True)
-class CacheConfig:
-    """Caching configuration."""
-
-    ttl_seconds: int = 300  # 5 minutes
-    warming_interval_seconds: int = 240  # 4 minutes
-    warming_batch_size: int = 4
 
 
 @dataclass(frozen=True)
@@ -252,7 +243,6 @@ class AppConfig:
 
     version: str = _VERSION
     api: APIConfig = field(default_factory=APIConfig)
-    cache: CacheConfig = field(default_factory=CacheConfig)
     bot: BotConfig = field(default_factory=BotConfig)
     web: WebConfig = field(default_factory=WebConfig)
     sources: SourceConfig = field(default_factory=SourceConfig)
@@ -282,7 +272,6 @@ RETURN_STATUS_IDS = config.orders.return_status_ids
 TELEGRAM_MANAGER_IDS = config.orders.telegram_manager_ids
 API_PAGE_LIMIT = config.api.page_limit
 API_REQUEST_DELAY = config.api.rate_limit_delay
-CACHE_TTL_SECONDS = config.cache.ttl_seconds
 SYNC_MODE = config.sync.mode
 
 

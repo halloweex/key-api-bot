@@ -132,17 +132,7 @@ async def detailed_health_check(request: Request):
         components["duckdb"] = {"status": "error", "error": str(e)}
         overall_status = "degraded"
 
-    # 2. Redis check
-    try:
-        from core.cache import cache
-        if cache.is_connected:
-            components["redis"] = {"status": "connected", **cache.get_stats()}
-        else:
-            components["redis"] = {"status": "not_connected"}
-    except Exception as e:
-        components["redis"] = {"status": "error", "error": str(e)}
-
-    # 3. Meilisearch check
+    # 2. Meilisearch check
     try:
         import httpx
         import os

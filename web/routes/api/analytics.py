@@ -319,8 +319,6 @@ async def get_summary(
     sales_type: Optional[str] = Query("retail"),
 ):
     """Get summary statistics for dashboard cards."""
-    from core.cache import cache
-
     try:
         validate_period(period)
         validate_source_id(source_id)
@@ -332,26 +330,10 @@ async def get_summary(
         raise HTTPException(status_code=400, detail=str(e))
 
     start, end = dashboard_service.parse_period(period, start_date, end_date)
-    cache_key = f"summary:{start}:{end}:{source_id or ''}:{category_id or ''}:{brand or ''}:{sales_type}:{promocode or ''}"
-
-    try:
-        cached = await cache.get(cache_key)
-        if cached is not None:
-            return cached
-    except Exception as e:
-        logger.warning(f"Cache get failed for {cache_key}: {e}")
-
-    result = await dashboard_service.get_summary_stats(
+    return await dashboard_service.get_summary_stats(
         start, end, category_id, brand=brand, source_id=source_id, sales_type=sales_type,
         promocode=promocode,
     )
-
-    try:
-        await cache.set(cache_key, result, ttl=60)
-    except Exception as e:
-        logger.warning(f"Cache set failed for {cache_key}: {e}")
-
-    return result
 
 
 @router.get("/returns")

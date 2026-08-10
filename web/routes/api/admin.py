@@ -374,33 +374,6 @@ async def get_buyer_stats(request: Request):
     }
 
 
-# ─── Cache ─────────────────────────────────────────────────────────────────────
-
-@router.get("/cache/stats")
-@limiter.limit("60/minute")
-async def get_cache_stats(request: Request):
-    """Get Redis cache statistics."""
-    from core.cache import cache
-    return cache.get_stats()
-
-
-@router.post("/cache/invalidate")
-@limiter.limit("10/minute")
-async def invalidate_cache(
-    request: Request,
-    pattern: str = Query(..., description="Cache key pattern to invalidate"),
-    admin: dict = Depends(require_admin),
-):
-    """Manually invalidate cache by pattern. Requires admin."""
-    from core.cache import cache
-
-    if not cache.is_connected:
-        raise HTTPException(status_code=503, detail="Cache not connected")
-
-    deleted = await cache.invalidate_pattern(pattern)
-    return {"status": "success", "pattern": pattern, "keys_deleted": deleted}
-
-
 # ─── Jobs & Sync ───────────────────────────────────────────────────────────────
 
 @router.get("/jobs", response_model=JobsResponse)

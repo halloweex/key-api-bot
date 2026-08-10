@@ -252,20 +252,26 @@ python scripts/force_resync.py --days 365
 ## Caching
 
 **There is no server-side response cache, and there never has been in
-production.** `core/cache.py` is a Redis client; no Redis container exists in
-`docker-compose.yml` and none ever did (`git log -S redis -- docker-compose.yml`
-is empty), so `cache.get()` returns None and `cache.set()` is a no-op. The one
-call site is `web/routes/api/analytics.py` (summary). `get_or_set` and
-`@cache.cached` are called from nowhere. There is no warming job.
+production.** There was a Redis client (`core/cache.py`) for months, but no
+Redis container ever existed in `docker-compose.yml` (`git log -S redis --
+docker-compose.yml` is empty), so it was a no-op in every environment it ever
+ran in. It was deleted 2026-08-10 along with the `redis` dependency, the
+startup connection attempt, and the TTL/warming config knobs for a job that
+never existed.
 
 This section used to describe a 5-minute TTL and warming every 4 minutes. It
 was describing a system that has never run, and that fiction is the reason a
 later audit rated the "missing" cache as the standing cause of dashboard
 latency. Measured on prod 2026-08-10 instead: at the TTL the code actually
-uses a cache would hit **0.1%** of requests, and it would hit **none** of the
+used, a cache would hit **0.1%** of requests, and it would hit **none** of the
 slow ones — the slow requests come from a user stepping through dates, where
 every URL is distinct. The real costs are elsewhere; see
 `.planning/redis-cache-investigation/`.
+
+**If caching is ever warranted again** — a wall-mounted dashboard, several
+people on one shared link — the shape is a bounded in-process TTL cache with a
+TTL checked against the frontend's refetch cadence, not a datastore. Do not
+reintroduce one without a hit-rate measurement on real traffic first.
 
 What does exist:
 - **Small in-process caches where evidence demanded them** — `/api/health`
