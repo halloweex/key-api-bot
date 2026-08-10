@@ -413,6 +413,20 @@ one carrying both Cyrillic and ₴. No font, a caption over Telegram's 1 024, or
 any render failure costs the picture and nothing else — the text still goes
 out.
 
+### The conversation must always be re-enterable
+`/report`, `/search` and `/settings` — and the reply-keyboard buttons standing
+in for them — are ConversationHandler **entry points**, and entry points are
+only checked for users who are *not* already in a conversation. With
+`allow_reentry=False` (the default), picking a report type and walking away
+parked the user in `SELECTING_DATE_RANGE`, whose handlers are all
+`CallbackQueryHandler`s: a text button matched nothing, no entry point could
+fire, and "⚙️ Settings" reached nothing at all until `/cancel`. "ℹ️ Help" and
+"📈 Dashboard" kept working the whole time because they are registered outside
+the conversation — which is why it presented as one broken button.
+
+`allow_reentry=True` and `conversation_timeout` are both set now. Do not remove
+either; `tests/unit/test_conversation_reentry.py` pins them.
+
 ### Languages
 `core/i18n.py` holds every translated string for three languages (en/uk/ru) in
 one dict — no gettext, no extraction step, no .po files to drift. A missing key
