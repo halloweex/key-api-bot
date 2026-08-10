@@ -1,3 +1,14 @@
+# Docker's json-file driver defaults to one unbounded file per container, on a
+# disk that is already 59% full, and it is discarded when the container is
+# recreated — so every deploy erases the only request history this system has.
+# Bounded rotation caps the cost and keeps ~250 MB per service instead of one
+# file that is either too big or gone.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   meilisearch:
     image: getmeili/meilisearch:v1.6
@@ -14,6 +25,7 @@ services:
       - MEILI_MASTER_KEY=${MEILI_MASTER_KEY:?MEILI_MASTER_KEY must be set in .env}
       - MEILI_NO_ANALYTICS=true
     restart: unless-stopped
+    logging: *default-logging
     mem_limit: 256m
     cpus: 0.25
     healthcheck:
@@ -27,6 +39,7 @@ services:
     image: halloweex/keycrm-bot:latest
     container_name: keycrm-bot
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - .env
     environment:
@@ -47,6 +60,7 @@ services:
     image: halloweex/keycrm-web:latest
     container_name: keycrm-web
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - .env
     environment:
@@ -75,6 +89,7 @@ services:
     image: nginx:alpine
     container_name: keycrm-nginx
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "80:80"
       - "443:443"
