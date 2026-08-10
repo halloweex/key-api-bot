@@ -74,8 +74,9 @@ class TestSkipIfUnchanged:
         store = await _make_store(tmp_path)
         try:
             orders = [_order_payload(1), _order_payload(2)]
-            n = await store.upsert_orders(orders)
-            assert n == 2
+            result = await store.upsert_orders(orders)
+            assert result.count == 2
+            assert sorted(result.changed_ids) == [1, 2], "a first insert changes both"
             assert await _count(store, "orders") == 2
             assert await _count(store, "order_products") == 2
         finally:
@@ -95,8 +96,13 @@ class TestSkipIfUnchanged:
             import asyncio
             await asyncio.sleep(0.05)
 
-            n = await store.upsert_orders(orders)
-            assert n == 2  # both still "successful" (in desired state)
+            result = await store.upsert_orders(orders)
+            assert result.count == 2  # both still "successful" (in desired state)
+            # The distinction the sync loop needs: nothing was written, so there
+            # is nothing to rebuild. Marking the fetched window dirty instead of
+            # this set is what kept the warehouse permanently dirty.
+            assert result.changed_ids == []
+            assert result.skipped_unchanged == 2
             second_sync_at_1 = await _max_synced_at(store, 1)
             assert first_sync_at_1 == second_sync_at_1, (
                 "synced_at must not change when the row was skipped — "
@@ -263,5 +269,162 @@ class TestRegression:
                 f"{len(changed)} synced_at values changed in 60 identity "
                 f"resyncs — write amplification not eliminated"
             )
+        finally:
+            await store.close()
+
+
+class TestOnlyChangesDriveARebuild:
+    """The sync loop must mark dirty what moved, not what it looked at.
+
+    The window is the trailing 24h, so a quiet warehouse still fetches ~200
+    orders a minute. Marking all of them dirty cascaded to those buyers' whole
+    order histories (~1300 orders) and 583 distinct dates, and Gold was rebuilt
+    for all of it every two minutes around the clock — ~1 007 s/day of DuckDB
+    against ~5.6 s/day for every human request combined.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_rerun_with_nothing_new_marks_nothing_dirty(self, tmp_path):
+        from unittest.mock import AsyncMock
+
+        from core.sync_service import SyncService
+
+        store = await _make_store(tmp_path)
+        try:
+            orders = [_order_payload(1), _order_payload(2)]
+            await store.upsert_orders(orders)          # first pass: real writes
+
+            service = SyncService(store=store)
+            store.mark_warehouse_dirty = AsyncMock()
+
+            changed: list[int] = []
+            await service._upsert_orders_with_expenses(orders, changed_ids_out=changed)
+
+            assert changed == [], "identical payload changes nothing"
+            store.mark_warehouse_dirty.assert_not_awaited()
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_only_the_moved_order_is_reported(self, tmp_path):
+        from core.sync_service import SyncService
+
+        store = await _make_store(tmp_path)
+        try:
+            await store.upsert_orders([_order_payload(1), _order_payload(2)])
+
+            service = SyncService(store=store)
+            changed: list[int] = []
+            await service._upsert_orders_with_expenses(
+                [
+                    _order_payload(1),  # untouched
+                    _order_payload(2, updated_at="2026-04-02T10:00:00+00:00",
+                                   grand_total="999.00"),
+                ],
+                changed_ids_out=changed,
+            )
+
+            assert changed == [2], "one order moved, so one order is dirty"
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_forced_upsert_reports_everything(self, tmp_path):
+        """Status refresh runs with force_update because KeyCRM does not bump
+        updated_at on a status change — those rows really are written."""
+        store = await _make_store(tmp_path)
+        try:
+            orders = [_order_payload(1), _order_payload(2)]
+            await store.upsert_orders(orders)
+
+            result = await store.upsert_orders(orders, force_update=True)
+
+            assert sorted(result.changed_ids) == [1, 2]
+            assert result.skipped_unchanged == 0
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_cycle_leaves_the_warehouse_clean(self, tmp_path, monkeypatch):
+        """One real incremental_sync tick over an unchanged window.
+
+        This is the behaviour the whole change is about: the window is the
+        trailing 24h, so a quiet warehouse still fetches its ~200 orders — and
+        must now conclude there is nothing to rebuild.
+        """
+        from unittest.mock import AsyncMock
+
+        from core import sync_service as sync_mod
+        from core.sync_service import SyncService
+
+        store = await _make_store(tmp_path)
+        try:
+            orders = [_order_payload(1), _order_payload(2)]
+            await store.upsert_orders(orders)  # already in the desired state
+
+            service = SyncService(store=store)
+            service._should_skip_sync = lambda: (False, None)
+            monkeypatch.setattr(sync_mod, "get_async_client", AsyncMock())
+            service._fetch_orders_with_date_filter = AsyncMock(return_value=orders)
+            # Every hourly/daily branch has run recently, so none of them fire.
+            store.get_last_sync_time = AsyncMock(
+                return_value=datetime.now(UTC) - timedelta(minutes=1)
+            )
+            store.set_last_sync_time = AsyncMock()
+            store.mark_warehouse_dirty = AsyncMock()
+
+            result = await service.incremental_sync()
+
+            assert result.get("orders") == 2, "the window was still fetched"
+            store.mark_warehouse_dirty.assert_not_awaited()
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_catalog_sync_asks_for_a_rebuild_on_its_own(self, tmp_path, monkeypatch):
+        """Silver reads only `orders`, but Gold joins products and categories.
+
+        A renamed product changes gold rows with no order involved. That used to
+        arrive because the warehouse was permanently dirty and every rebuild
+        swept it up; once dirtiness tells the truth, the catalog has to ask for
+        itself or a rename made at night waits for the next order.
+        """
+        from unittest.mock import AsyncMock
+
+        from core import sync_service as sync_mod
+        from core.sync_service import SyncService
+
+        store = await _make_store(tmp_path)
+        try:
+            orders = [_order_payload(1)]
+            await store.upsert_orders(orders)
+
+            service = SyncService(store=store)
+            service._should_skip_sync = lambda: (False, None)
+
+            class _Client:
+                async def paginate(self, *a, **kw):
+                    # One page of catalog rows; the real client is an async
+                    # generator and `async for` will not accept a coroutine.
+                    yield [{"id": 1, "name": "Cream"}]
+
+            monkeypatch.setattr(sync_mod, "get_async_client",
+                                AsyncMock(return_value=_Client()))
+            service._fetch_orders_with_date_filter = AsyncMock(return_value=orders)
+
+            async def _last_sync(kind):
+                # Products are overdue; everything else is fresh.
+                if kind == "products":
+                    return datetime.now(UTC) - timedelta(hours=2)
+                return datetime.now(UTC) - timedelta(minutes=1)
+
+            store.get_last_sync_time = AsyncMock(side_effect=_last_sync)
+            store.set_last_sync_time = AsyncMock()
+            store.upsert_products = AsyncMock(return_value=7)
+            store.mark_warehouse_dirty = AsyncMock()
+
+            await service.incremental_sync()
+
+            store.mark_warehouse_dirty.assert_awaited_once_with(None)
         finally:
             await store.close()

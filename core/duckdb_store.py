@@ -21,6 +21,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
@@ -43,6 +44,28 @@ from core.repositories import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class UpsertResult:
+    """What an order upsert actually did.
+
+    `count` used to be the whole return, and it counts a row that was already
+    in the desired state as a success — correct for "did this work", useless
+    for "what changed". The sync loop consumed it as the latter and marked the
+    entire fetched window dirty on every cycle, which is how a warehouse with
+    no new data rebuilt 583 dates every two minutes. `changed_ids` is the set
+    of rows actually written, and it is what callers should drive work from.
+    """
+
+    count: int                  # rows in the desired state (written or already correct)
+    changed_ids: List[int]      # rows this call actually wrote
+    skipped_unchanged: int      # rows already in the desired state
+    failed: int                 # rows rejected by a constraint/transaction error
+
+    def __len__(self) -> int:
+        return self.count
+
 
 # Warehouse self-heal bound: how many consecutive failed/errored refreshes we
 # keep auto-retrying (mark dirty → next scheduler tick) before we STOP the loop
@@ -3016,7 +3039,7 @@ class DuckDBStore(
         orders: List[Dict[str, Any]],
         force_update: bool = False,
         skip_products: bool = False,
-    ) -> int:
+    ) -> "UpsertResult":
         """
         Insert or update orders from API response (idempotent).
 
@@ -3036,10 +3059,12 @@ class DuckDBStore(
                           executemany for ~2000 orders worth of product rows.
 
         Returns:
-            Number of orders upserted
+            An UpsertResult. Read `.changed_ids` to find out what actually
+            moved; `.count` includes rows that were already correct, so
+            driving a rebuild from it rebuilds the world every cycle.
         """
         if not orders:
-            return 0
+            return UpsertResult(count=0, changed_ids=[], skipped_unchanged=0, failed=0)
 
         # Parse orders and build DataFrames
         order_rows = []
@@ -3081,7 +3106,7 @@ class DuckDBStore(
                     })
 
         if not order_rows:
-            return 0
+            return UpsertResult(count=0, changed_ids=[], skipped_unchanged=0, failed=0)
 
         # Create DataFrame for orders (products use executemany for simplicity)
         # Deduplicate by id - API can return same order twice in paginated responses
@@ -3250,7 +3275,12 @@ class DuckDBStore(
                 f"Upserted {count}/{len(insert_rows)} orders to DuckDB "
                 f"(written={n_written}, skipped_unchanged={skipped_count})"
             )
-            return count
+            return UpsertResult(
+                count=count,
+                changed_ids=updated_ids,
+                skipped_unchanged=skipped_count,
+                failed=len(failed),
+            )
 
     # ─── H3: bronze order events (append-only audit log) ───────────────────────
 
