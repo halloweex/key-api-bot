@@ -78,6 +78,12 @@ CATCHUP_CHECKS = {
     "dq_integrity_check": ("integrity", 8 * 3600, 120),
 }
 
+# Which book the weekly report reads from. Retail is the business; b2b is one
+# manager's nine orders a week, where a percentage move says nothing, and
+# `internal` is not sales at all — staff orders and shipments to bloggers that
+# carry line items and no money.
+WEEKLY_REPORT_SALES_TYPE = "retail"
+
 
 class JobStatus(Enum):
     """Job execution status."""
@@ -505,6 +511,27 @@ class BackgroundScheduler:
             description="One daily message with WARN+ findings from both DQ layers",
             func=self._run_dq_digest,
             trigger=CronTrigger(hour=9, minute=0),
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Job: Weekly sales report (daily tick at 09:30 Kyiv, delivers once)
+        #
+        # Fires every day and reports the last *complete* week, going quiet on
+        # the six days that week has already been delivered. A weekly
+        # CronTrigger would be the obvious thing and the wrong one: it computes
+        # its next fire from registration, so a container that was not alive at
+        # its Monday instant — the Sunday compact stops both, and so does any
+        # deploy — pushes the next run a full week out and the week is never
+        # reported at all. A daily tick against a ledger turns that into a
+        # Tuesday delivery. 09:30 is after the DQ digest at 09:00, so a broken
+        # warehouse is heard about before its numbers are read.
+        self._add_job(
+            job_id="weekly_report",
+            name="Weekly Sales Report",
+            description="Last complete week's numbers and drivers, once a week",
+            func=self._run_weekly_report,
+            trigger=CronTrigger(hour=9, minute=30),
             max_instances=1,
             coalesce=True,
         )
@@ -1300,6 +1327,83 @@ class BackgroundScheduler:
                 "quiet": message is None,
             }
             logger.info("DQ digest complete", extra=result)
+            return result
+
+    async def _run_weekly_report(self) -> Dict[str, Any]:
+        """Deliver last week's numbers, once, to the admins.
+
+        Three gates, in order of cost: already delivered, warehouse not yet
+        past the week end, nothing to say. The middle one matters — the report
+        is read as fact, and a week rendered while Gold is still catching up
+        would understate revenue with total confidence. It is checked against
+        the warehouse's own last date rather than against seven rows for this
+        sales type, because a quiet type legitimately has days with no orders.
+
+        Failing to send leaves the ledger untouched, so tomorrow's tick tries
+        again rather than dropping the week.
+        """
+        from datetime import datetime as _datetime
+
+        from core.config import DASHBOARD_URL
+        from core.duckdb_store import get_store
+        from core.weekly_report import (
+            already_sent,
+            build_report,
+            format_report,
+            last_complete_week,
+            mark_sent,
+            warehouse_max_date,
+        )
+
+        sales_type = WEEKLY_REPORT_SALES_TYPE
+
+        with correlation_context():
+            store = await get_store()
+            today = _datetime.now(SCHEDULER_TIMEZONE).date()
+            week_start, week_end = last_complete_week(today)
+            week = week_start.isoformat()
+
+            async with store.connection() as conn:
+                if already_sent(conn, week_start, sales_type):
+                    logger.debug("Weekly report for %s already sent", week)
+                    return {"sent": False, "week": week, "reason": "already_sent"}
+
+                max_date = warehouse_max_date(conn)
+                if max_date is None or max_date < week_end:
+                    logger.info(
+                        "Weekly report deferred: warehouse at %s, week ends %s",
+                        max_date, week_end,
+                    )
+                    return {"sent": False, "week": week, "reason": "warehouse_behind"}
+
+                report = build_report(conn, today, sales_type)
+
+            if report.current.orders == 0:
+                logger.warning("Weekly report skipped: no orders in %s", week)
+                return {"sent": False, "week": week, "reason": "no_orders"}
+
+            # Deliberately outside the connection block: store.connection()
+            # holds the single-writer lock for its whole body, and Telegram is
+            # allowed ten seconds per admin. Every other DuckDB reader in this
+            # process would wait behind it.
+            message = format_report(report, DASHBOARD_URL or None)
+            from bot.main import send_admin_message
+            await send_admin_message(message, key=f"weekly_report:{week}")
+
+            async with store.connection() as conn:
+                mark_sent(
+                    conn, week_start, sales_type,
+                    report.current.revenue, report.current.orders,
+                )
+
+            result = {
+                "sent": True,
+                "week": week,
+                "sales_type": sales_type,
+                "revenue": round(report.current.revenue, 2),
+                "orders": report.current.orders,
+            }
+            logger.info("Weekly report sent", extra=result)
             return result
 
     async def _run_order_gap_backfill(self) -> Dict[str, Any]:
