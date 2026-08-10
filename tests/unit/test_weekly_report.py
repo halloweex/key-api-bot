@@ -218,7 +218,7 @@ class TestFormatting:
             previous=None, year_ago=None,
             baseline_mean=None, baseline_sd=None, baseline_weeks=0,
         ))
-        assert "₴968,638" in text
+        assert "₴ 968,638" in text
         assert "What moved" not in text
 
     def test_the_dashboard_link_is_optional(self):
@@ -472,27 +472,44 @@ class TestSchedulerJob:
                 day += timedelta(days=1)
         return start
 
-    def _wire(self, monkeypatch, store, sent, sender=None):
-        # `bot/__init__.py` does `from bot.main import main`, so the *attribute*
-        # `bot.main` is that function. Both a dotted monkeypatch target and
-        # `import bot.main as x` resolve to it; only an explicit module lookup
-        # gets the module.
+    ADMINS = [111, 222]
+
+    def _wire(self, monkeypatch, store, sent, tmp_path=None, languages=None):
+        """Point the job at this store, these admins, and a capturing transport.
+
+        `languages` maps admin id to a language and is written into a throwaway
+        SQLite standing in for the bot's — without it the job would read the
+        developer's real `data/bot.db` and the test would pass or fail by
+        whatever language happens to be stored there.
+        """
         import importlib
+        import sqlite3
 
         from core.scheduler import BackgroundScheduler
-        from core.telegram_alerts import reset_throttle
 
-        bot_main = importlib.import_module("bot.main")
+        # `core/__init__.py` re-exports the AppConfig instance as `config`, so
+        # a dotted monkeypatch target resolves `core.config` to that object
+        # rather than to the module. Only an explicit lookup gets the module.
+        core_config = importlib.import_module("core.config")
 
         async def _get_store():
             return store
 
-        async def _send(text, **kwargs):
+        async def _send_text(text, **kwargs):
             sent.append(text)
+            return len(kwargs.get("admin_ids") or self.ADMINS)
 
-        reset_throttle()
+        db = (tmp_path or store.db_path.parent) / "prefs.db"
+        with sqlite3.connect(db) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS user_preferences "
+                         "(user_id INTEGER PRIMARY KEY, language TEXT)")
+            conn.executemany("INSERT OR REPLACE INTO user_preferences VALUES (?, ?)",
+                             list((languages or {}).items()))
+
+        monkeypatch.setattr("core.bot_prefs.BOT_DB_PATH", db)
+        monkeypatch.setattr(core_config, "ADMIN_USER_IDS", self.ADMINS)
         monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
-        monkeypatch.setattr(bot_main, "send_admin_message", sender or _send)
+        monkeypatch.setattr("core.telegram_alerts.send_admin_message_http", _send_text)
         return BackgroundScheduler()
 
     @pytest.mark.asyncio
@@ -502,7 +519,7 @@ class TestSchedulerJob:
         try:
             await self._seed(store, complete=False)
             sent = []
-            result = await self._wire(monkeypatch, store, sent)._run_weekly_report()
+            result = await self._wire(monkeypatch, store, sent, tmp_path)._run_weekly_report()
 
             assert result == {"sent": False, "reason": "warehouse_behind",
                               "week": result["week"]}
@@ -517,12 +534,13 @@ class TestSchedulerJob:
         try:
             week_start = await self._seed(store, complete=True)
             sent = []
-            scheduler = self._wire(monkeypatch, store, sent)
+            scheduler = self._wire(monkeypatch, store, sent, tmp_path)
 
             first = await scheduler._run_weekly_report()
             assert first["sent"] is True
             assert first["week"] == week_start.isoformat()
             assert first["revenue"] == 35_000
+            assert first["delivered"] == len(self.ADMINS)
             assert len(sent) == 1
             assert "Weekly report" in sent[0]
 
@@ -542,7 +560,7 @@ class TestSchedulerJob:
         try:
             await self._seed(store, complete=True)
             text_sends = []
-            scheduler = self._wire(monkeypatch, store, text_sends)
+            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
 
             calls = []
 
@@ -565,6 +583,57 @@ class TestSchedulerJob:
             await store.close()
 
     @pytest.mark.asyncio
+    async def test_each_admin_is_written_to_in_their_own_language(
+        self, tmp_path, monkeypatch,
+    ):
+        """Two languages among the admins means two renders, not one guess."""
+        store = await _store(tmp_path)
+        try:
+            await self._seed(store, complete=True)
+            scheduler = self._wire(monkeypatch, store, [], tmp_path,
+                                   languages={111: "uk", 222: "en"})
+
+            calls = []
+
+            async def _photo(data, caption="", admin_ids=None, **kwargs):
+                calls.append((caption, list(admin_ids or [])))
+                return len(admin_ids or [])
+
+            monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
+            result = await scheduler._run_weekly_report()
+
+            assert result["delivered"] == 2
+            by_recipient = {tuple(ids): caption for caption, ids in calls}
+            assert by_recipient[(111,)].startswith("📊 <b>Тижневий звіт</b>")
+            assert by_recipient[(222,)].startswith("📊 <b>Weekly report</b>")
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_preferences_db_still_delivers_in_english(
+        self, tmp_path, monkeypatch,
+    ):
+        """The bot's SQLite may be locked, missing, or one deploy behind.
+
+        None of that is a reason for the week to go unreported.
+        """
+        store = await _store(tmp_path)
+        try:
+            await self._seed(store, complete=True)
+            sent = []
+            scheduler = self._wire(monkeypatch, store, sent, tmp_path)
+            monkeypatch.setattr("core.bot_prefs.BOT_DB_PATH",
+                                tmp_path / "does-not-exist.db")
+
+            result = await scheduler._run_weekly_report()
+
+            assert result["sent"] is True
+            assert len(sent) == 1
+            assert "Weekly report" in sent[0]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
     async def test_a_card_that_will_not_send_falls_back_to_text(
         self, tmp_path, monkeypatch,
     ):
@@ -573,7 +642,7 @@ class TestSchedulerJob:
         try:
             await self._seed(store, complete=True)
             text_sends = []
-            scheduler = self._wire(monkeypatch, store, text_sends)
+            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
             monkeypatch.setattr("core.weekly_report_image._font_file",
                                 lambda *a, **k: None)
 
@@ -592,13 +661,17 @@ class TestSchedulerJob:
         store = await _store(tmp_path)
         try:
             week_start = await self._seed(store, complete=True)
+            scheduler = self._wire(monkeypatch, store, [], tmp_path)
 
-            async def _explode(text, **kwargs):
-                raise RuntimeError("telegram is down")
+            async def _reaches_nobody(*args, **kwargs):
+                return 0
 
-            scheduler = self._wire(monkeypatch, store, [], sender=_explode)
-            with pytest.raises(RuntimeError):
-                await scheduler._run_weekly_report()
+            for name in ("send_admin_photo_http", "send_admin_message_http"):
+                monkeypatch.setattr(f"core.telegram_alerts.{name}", _reaches_nobody)
+
+            result = await scheduler._run_weekly_report()
+            assert result == {"sent": False, "reason": "not_delivered",
+                              "week": week_start.isoformat()}
 
             async with store.connection() as conn:
                 assert already_sent(conn, week_start, "retail") is False

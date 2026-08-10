@@ -413,6 +413,33 @@ one carrying both Cyrillic and ₴. No font, a caption over Telegram's 1 024, or
 any render failure costs the picture and nothing else — the text still goes
 out.
 
+### Languages
+`core/i18n.py` holds every translated string for three languages (en/uk/ru) in
+one dict — no gettext, no extraction step, no .po files to drift. A missing key
+or language falls back to English rather than raising: one odd line in a
+delivered report beats no report. A test asserts every key carries every
+language *and* the same `{placeholders}`, which is the failure a hand-written
+table actually invites.
+
+Dates are rendered numerically (`18.05 – 24.05.2026`) on purpose. Ukrainian and
+Russian month names inflect — a date takes the genitive — so a table of
+nominative month names is a table of wrong ones.
+
+The choice lives in `user_preferences.language` in the bot's SQLite, set from
+the bot's settings screen. The weekly report runs in the **web** container and
+reads it through `core/bot_prefs.py`, which opens `data/bot.db` read-only —
+both containers bind-mount `./data`. A locked, missing, or pre-migration
+database all mean the same thing there: English, and the report still goes.
+The job renders once per distinct language among the admins, not once per
+admin.
+
+**Translated so far**: the weekly report (text and card) and the bot's settings
+screen. The rest of the bot UI — `/start`, `/help`, report and search flows,
+`bot/formatters.py` — is still English only.
+
+**No flags in the language picker.** This is a Ukrainian company; a Russian
+flag in its internal tooling is not a neutral act. Languages have names.
+
 ### How a failure reaches a human
 - **Alert throttle** keys on the *condition* (`warehouse:validation_retrying`,
   `dq:{layer}:{severity}:{checks}`, `canary:{failing keys}`), never on message

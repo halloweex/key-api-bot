@@ -12,6 +12,7 @@ from datetime import date
 
 import pytest
 
+from core.i18n import EN, LANGUAGES, UK
 from core.weekly_report import ProductMove, WeekTotals, WeeklyReport
 from core.weekly_report_image import (
     DOWN,
@@ -71,6 +72,13 @@ class TestRendering:
     def test_it_stays_small_enough_to_send_every_week(self):
         assert len(render_weekly_card(_report())) < 400_000
 
+    @pytest.mark.parametrize("lang", LANGUAGES)
+    def test_it_renders_in_every_language(self, lang):
+        """Ukrainian labels are half again as long as the English ones."""
+        img = _open(render_weekly_card(_report(), lang))
+        assert img.size == (W, H)
+        assert not _uniform(img.crop((0, STATS_TOP, W, H - 40)))
+
     def test_both_halves_of_the_card_are_used(self):
         """The headline and the three stats each occupy their own half.
 
@@ -84,19 +92,23 @@ class TestRendering:
         ):
             assert not _uniform(img.crop(box)), f"{name} half is empty"
 
+
 class TestDelta:
     def test_a_fall_is_red_and_a_rise_is_green(self):
-        assert _delta(-25.8) == ("▼ 25.8%", DOWN)
-        assert _delta(12.3) == ("▲ 12.3%", UP)
+        assert _delta(-25.8, EN) == ("▼ 25.8%", DOWN)
+        assert _delta(12.3, EN) == ("▲ 12.3%", UP)
 
     def test_a_tenth_of_a_percent_is_not_a_movement(self):
         """₴2,729 against ₴2,732 is not something to colour in."""
-        text, colour = _delta(-0.1)
+        text, colour = _delta(-0.1, EN)
         assert text == "≈ flat"
         assert colour == MUTED
 
+    def test_it_speaks_the_language_it_is_handed(self):
+        assert _delta(-0.1, UK)[0] == "≈ без змін"
+
     def test_no_base_is_marked_rather_than_faked(self):
-        assert _delta(None) == ("—", MUTED)
+        assert _delta(None, EN) == ("—", MUTED)
 
 
 class TestDegradation:

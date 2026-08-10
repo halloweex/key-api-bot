@@ -1772,13 +1772,17 @@ async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 @authorized
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle /settings command."""
+    from core.i18n import t
+
     user_id = update.effective_user.id
     prefs = database.get_user_preferences(user_id) or {}
+    lang = database.get_user_language(
+        user_id, fallback=getattr(update.effective_user, "language_code", None),
+    )
 
     await update.message.reply_text(
-        "⚙️ <b>Settings</b>\n\n"
-        "Configure your preferences:",
-        reply_markup=Keyboards.settings_menu(prefs),
+        f"⚙️ <b>{t('settings.title', lang)}</b>",
+        reply_markup=Keyboards.settings_menu(prefs, lang),
         parse_mode="HTML"
     )
     return ConversationState.SETTINGS_MENU
@@ -1790,13 +1794,17 @@ async def settings_command_from_callback(update: Update, context: ContextTypes.D
     query = update.callback_query
     await query.answer()
 
+    from core.i18n import t
+
     user_id = update.effective_user.id
     prefs = database.get_user_preferences(user_id) or {}
+    lang = database.get_user_language(
+        user_id, fallback=getattr(update.effective_user, "language_code", None),
+    )
 
     await query.edit_message_text(
-        "⚙️ <b>Settings</b>\n\n"
-        "Configure your preferences:",
-        reply_markup=Keyboards.settings_menu(prefs),
+        f"⚙️ <b>{t('settings.title', lang)}</b>",
+        reply_markup=Keyboards.settings_menu(prefs, lang),
         parse_mode="HTML"
     )
     return ConversationState.SETTINGS_MENU
@@ -1807,36 +1815,58 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     await query.answer()
 
+    from core.i18n import LANGUAGE_NAMES, normalize, t
+
     user_id = update.effective_user.id
     action = query.data
+    # Telegram's own language_code seeds the first visit, so a user who has
+    # never opened this screen still sees it in their language.
+    lang = database.get_user_language(
+        user_id, fallback=getattr(update.effective_user, "language_code", None),
+    )
 
-    if action == "settings_timezone":
+    if action == "settings_language":
         await query.edit_message_text(
-            "🌍 <b>Select Timezone</b>\n\n"
-            "Choose your timezone:",
+            f"🌐 <b>{t('settings.choose_language', lang)}</b>\n\n"
+            f"{t('settings.applies_to_report', lang)}",
+            reply_markup=Keyboards.settings_language(lang),
+            parse_mode="HTML"
+        )
+    elif action.startswith("set_lang_"):
+        chosen = normalize(action.replace("set_lang_", ""))
+        database.update_user_preference(user_id, "language", chosen)
+        prefs = database.get_user_preferences(user_id) or {}
+        # Everything below is rendered in the language just chosen, so the
+        # confirmation is itself the proof that it took.
+        await query.edit_message_text(
+            f"✅ {t('settings.language_set', chosen, name=LANGUAGE_NAMES[chosen])}\n\n"
+            f"⚙️ <b>{t('settings.title', chosen)}</b>",
+            reply_markup=Keyboards.settings_menu(prefs, chosen),
+            parse_mode="HTML"
+        )
+    elif action == "settings_timezone":
+        await query.edit_message_text(
+            f"🌍 <b>{t('settings.timezone', lang)}</b>",
             reply_markup=Keyboards.settings_timezone(),
             parse_mode="HTML"
         )
     elif action == "settings_date_range":
         await query.edit_message_text(
-            "📅 <b>Default Date Range</b>\n\n"
-            "Choose the default date range for reports:",
+            f"📅 <b>{t('settings.date_range', lang)}</b>",
             reply_markup=Keyboards.settings_date_range(),
             parse_mode="HTML"
         )
     elif action == "settings_notifications":
         await query.edit_message_text(
-            "🔔 <b>Notifications</b>\n\n"
-            "Enable or disable notifications:",
+            f"🔔 <b>{t('settings.notifications', lang)}</b>",
             reply_markup=Keyboards.settings_notifications(),
             parse_mode="HTML"
         )
     elif action == "settings_back":
         prefs = database.get_user_preferences(user_id) or {}
         await query.edit_message_text(
-            "⚙️ <b>Settings</b>\n\n"
-            "Configure your preferences:",
-            reply_markup=Keyboards.settings_menu(prefs),
+            f"⚙️ <b>{t('settings.title', lang)}</b>",
+            reply_markup=Keyboards.settings_menu(prefs, lang),
             parse_mode="HTML"
         )
     elif action.startswith("set_tz_"):
@@ -1844,31 +1874,32 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         database.update_user_preference(user_id, "timezone", timezone)
         prefs = database.get_user_preferences(user_id) or {}
         await query.edit_message_text(
-            f"✅ Timezone set to <b>{timezone}</b>\n\n"
-            "⚙️ <b>Settings</b>",
-            reply_markup=Keyboards.settings_menu(prefs),
+            f"✅ {t('settings.timezone', lang)}: <b>{timezone}</b>\n\n"
+            f"⚙️ <b>{t('settings.title', lang)}</b>",
+            reply_markup=Keyboards.settings_menu(prefs, lang),
             parse_mode="HTML"
         )
     elif action.startswith("set_range_"):
         date_range = action.replace("set_range_", "")
         database.update_user_preference(user_id, "default_date_range", date_range)
         prefs = database.get_user_preferences(user_id) or {}
-        range_label = {'today': 'Today', 'week': 'This Week', 'month': 'This Month'}.get(date_range, date_range)
+        range_label = t(f"range.{date_range}", lang) if date_range in (
+            'today', 'week', 'month') else date_range
         await query.edit_message_text(
-            f"✅ Default range set to <b>{range_label}</b>\n\n"
-            "⚙️ <b>Settings</b>",
-            reply_markup=Keyboards.settings_menu(prefs),
+            f"✅ {t('settings.date_range', lang)}: <b>{range_label}</b>\n\n"
+            f"⚙️ <b>{t('settings.title', lang)}</b>",
+            reply_markup=Keyboards.settings_menu(prefs, lang),
             parse_mode="HTML"
         )
     elif action.startswith("set_notif_"):
         enabled = action.replace("set_notif_", "") == "1"
         database.update_user_preference(user_id, "notifications_enabled", 1 if enabled else 0)
         prefs = database.get_user_preferences(user_id) or {}
-        status = "enabled" if enabled else "disabled"
+        status = t('settings.on', lang) if enabled else t('settings.off', lang)
         await query.edit_message_text(
-            f"✅ Notifications <b>{status}</b>\n\n"
-            "⚙️ <b>Settings</b>",
-            reply_markup=Keyboards.settings_menu(prefs),
+            f"✅ {t('settings.notifications', lang)}: <b>{status}</b>\n\n"
+            f"⚙️ <b>{t('settings.title', lang)}</b>",
+            reply_markup=Keyboards.settings_menu(prefs, lang),
             parse_mode="HTML"
         )
 

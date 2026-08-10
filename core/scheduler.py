@@ -1344,7 +1344,7 @@ class BackgroundScheduler:
         """
         from datetime import datetime as _datetime
 
-        from core.config import DASHBOARD_URL
+        from core.config import ADMIN_USER_IDS, DASHBOARD_URL
         from core.duckdb_store import get_store
         from core.weekly_report import (
             already_sent,
@@ -1386,26 +1386,45 @@ class BackgroundScheduler:
             # holds the single-writer lock for its whole body, and Telegram is
             # allowed ten seconds per admin — longer for the card upload. Every
             # other DuckDB reader in this process would wait behind it.
-            message = format_report(report, DASHBOARD_URL or None)
-
-            # The card first, with the report as its caption, so one message
-            # carries both. It is drawn from the same values, so a host with no
-            # fonts or a caption over Telegram's limit costs the picture and
-            # nothing else. No throttle on this path: the ledger above is the
-            # dedup, and the throttle exists for conditions that re-raise every
-            # two minutes.
-            from core.telegram_alerts import send_admin_photo_http
+            #
+            # One render per language, not per admin: admins mostly share a
+            # language, so this is usually a single pass. The grouping exists
+            # so that the day they do not, nobody quietly gets the wrong one.
+            from core.bot_prefs import group_by_language
+            from core.telegram_alerts import (
+                send_admin_message_http,
+                send_admin_photo_http,
+            )
             from core.weekly_report_image import render_weekly_card
 
-            card = render_weekly_card(report)
             delivered = 0
-            if card is not None:
-                delivered = await send_admin_photo_http(
-                    card, caption=message, filename=f"week-{week}.png",
-                )
+            with_card = 0
+            for lang, recipients in group_by_language(ADMIN_USER_IDS).items():
+                message = format_report(report, DASHBOARD_URL or None, lang)
+
+                # The card first, with the report as its caption, so one
+                # message carries both. It is drawn from the same values, so a
+                # host with no fonts or a caption over Telegram's limit costs
+                # the picture and nothing else.
+                card = render_weekly_card(report, lang)
+                sent_here = 0
+                if card is not None:
+                    sent_here = await send_admin_photo_http(
+                        card, caption=message, admin_ids=recipients,
+                        filename=f"week-{week}-{lang}.png",
+                    )
+                    with_card += sent_here
+                if not sent_here:
+                    sent_here = await send_admin_message_http(
+                        message, admin_ids=recipients,
+                    )
+                delivered += sent_here
+
+            # Nobody heard it, so it did not happen: leaving the ledger untouched
+            # is what makes tomorrow's tick try again instead of dropping the week.
             if not delivered:
-                from bot.main import send_admin_message
-                await send_admin_message(message, key=f"weekly_report:{week}")
+                logger.warning("Weekly report for %s reached no admin", week)
+                return {"sent": False, "week": week, "reason": "not_delivered"}
 
             async with store.connection() as conn:
                 mark_sent(
@@ -1419,7 +1438,8 @@ class BackgroundScheduler:
                 "sales_type": sales_type,
                 "revenue": round(report.current.revenue, 2),
                 "orders": report.current.orders,
-                "card": bool(delivered),
+                "delivered": delivered,
+                "card": bool(with_card),
             }
             logger.info("Weekly report sent", extra=result)
             return result

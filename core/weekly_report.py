@@ -31,6 +31,15 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import List, Optional, Tuple
 
+from core.i18n import (
+    DEFAULT_LANGUAGE,
+    fmt_int,
+    fmt_money,
+    fmt_window,
+    normalize,
+    t,
+)
+
 # ─── Tunables ───────────────────────────────────────────────────────────────
 
 # Weeks of history behind the anomaly gate. A quarter is long enough for the
@@ -52,9 +61,6 @@ TOP_MOVERS = 3
 FLAT_PCT = 0.5
 
 MAX_NAME_CHARS = 38
-
-_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
-           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
 # ─── Windows ────────────────────────────────────────────────────────────────
@@ -383,35 +389,34 @@ def mark_sent(
 
 # ─── Rendering ──────────────────────────────────────────────────────────────
 
-def _money(value: float) -> str:
-    return f"₴{value:,.0f}"
+
+def _money(value: float, lang: str) -> str:
+    return fmt_money(value, lang)
 
 
-def _signed_money(value: float) -> str:
-    return f"{'+' if value >= 0 else '-'}₴{abs(value):,.0f}"
+def _signed_money(value: float, lang: str) -> str:
+    return f"{'+' if value >= 0 else '-'}₴ {fmt_int(abs(value), lang)}"
 
 
-def _compact(value: float) -> str:
+def _compact(value: float, lang: str) -> str:
+    """A rounded magnitude for σ, where the exact hryvnia is beside the point.
+
+    K and M are left untranslated: they read the same in all three languages,
+    and a translated suffix beside a Latin σ would be the odder thing.
+    """
     if abs(value) >= 1_000_000:
-        return f"₴{value / 1_000_000:.1f}M"
+        return f"₴ {value / 1_000_000:.1f}M"
     if abs(value) >= 1_000:
-        return f"₴{value / 1_000:.0f}K"
-    return f"₴{value:.0f}"
+        return f"₴ {value / 1_000:.0f}K"
+    return f"₴ {value:.0f}"
 
 
-def _delta(pct: Optional[float]) -> str:
+def _delta(pct: Optional[float], lang: str) -> str:
     if pct is None:
-        return "—"
+        return t("report.no_base", lang)
     if abs(pct) < FLAT_PCT:
-        return "≈ flat"
+        return t("report.flat", lang)
     return f"{'▲' if pct > 0 else '▼'} {abs(pct):.1f}%"
-
-
-def _window(start: date, end: date) -> str:
-    if start.month == end.month:
-        return f"{start.day}–{end.day} {_MONTHS[end.month - 1]} {end.year}"
-    return (f"{start.day} {_MONTHS[start.month - 1]} – "
-            f"{end.day} {_MONTHS[end.month - 1]} {end.year}")
 
 
 def _name(raw: str) -> str:
@@ -427,62 +432,74 @@ def _name(raw: str) -> str:
     return html.escape(trimmed)
 
 
-def format_report(report: WeeklyReport, dashboard_url: Optional[str] = None) -> str:
-    """Render the report as Telegram HTML."""
+def format_report(
+    report: WeeklyReport,
+    dashboard_url: Optional[str] = None,
+    lang: str = DEFAULT_LANGUAGE,
+) -> str:
+    """Render the report as Telegram HTML, in `lang`."""
+    lang = normalize(lang)
     cur, prev, ly = report.current, report.previous, report.year_ago
+
+    # Label widths come from the translations, not from the English ones a
+    # column layout was once eyeballed against: "Замовлення" is half again as
+    # long as "Orders", and a hardcoded pad would stagger the whole block.
+    labels = [t(k, lang) for k in
+              ("report.revenue", "report.orders", "report.avg_check")]
+    pad = max(len(label) for label in labels)
+
     lines: List[str] = [
-        "📊 <b>Weekly report</b>",
-        f"{_window(report.start, report.end)} · {html.escape(report.sales_type)}",
+        f"📊 <b>{t('report.title', lang)}</b>",
+        f"{fmt_window(report.start, report.end, lang)} · "
+        f"{html.escape(report.sales_type)}",
         "",
-        f"Revenue    <b>{_money(cur.revenue)}</b>   "
-        f"{_delta(pct_change(cur.revenue, prev.revenue if prev else None))}",
-        f"Orders     <b>{cur.orders:,}</b>   "
-        f"{_delta(pct_change(cur.orders, prev.orders if prev else None))}",
-        f"Avg check  <b>{_money(cur.avg_check)}</b>   "
-        f"{_delta(pct_change(cur.avg_check, prev.avg_check if prev else None))}",
+        f"{labels[0]:<{pad}}   <b>{_money(cur.revenue, lang)}</b>   "
+        f"{_delta(pct_change(cur.revenue, prev.revenue if prev else None), lang)}",
+        f"{labels[1]:<{pad}}   <b>{fmt_int(cur.orders, lang)}</b>   "
+        f"{_delta(pct_change(cur.orders, prev.orders if prev else None), lang)}",
+        f"{labels[2]:<{pad}}   <b>{_money(cur.avg_check, lang)}</b>   "
+        f"{_delta(pct_change(cur.avg_check, prev.avg_check if prev else None), lang)}",
         "",
     ]
 
     if report.baseline_mean is not None and report.baseline_weeks >= MIN_BASELINE_WEEKS:
         lines.append(
-            f"vs {report.baseline_weeks}-week average   "
-            f"{_delta(pct_change(cur.revenue, report.baseline_mean))}"
+            f"{t('report.vs_average', lang, weeks=report.baseline_weeks)}   "
+            f"{_delta(pct_change(cur.revenue, report.baseline_mean), lang)}"
         )
     if ly:
         ly_year = same_week_last_year(report.start)[0].year
         lines.append(
-            f"vs same week {ly_year}   "
-            f"{_delta(pct_change(cur.revenue, ly.revenue))}"
+            f"{t('report.vs_last_year', lang, year=ly_year)}   "
+            f"{_delta(pct_change(cur.revenue, ly.revenue), lang)}"
         )
 
     z = report.z
     if z is not None:
         if abs(z) < ANOMALY_Z:
-            lines.append(
-                f"✅ Inside the normal range · z {z:+.1f} · "
-                f"σ {_compact(report.baseline_sd)} over {report.baseline_weeks}w"
-            )
+            mark, verdict = "✅", t("report.normal_range", lang)
+        elif z > 0:
+            mark, verdict = "🚀", t("report.unusually_high", lang)
         else:
-            mark = "🚀" if z > 0 else "⚠️"
-            word = "high" if z > 0 else "low"
-            lines.append(
-                f"{mark} Unusually {word} · z {z:+.1f} · "
-                f"σ {_compact(report.baseline_sd)} over {report.baseline_weeks}w"
-            )
+            mark, verdict = "⚠️", t("report.unusually_low", lang)
+        lines.append(
+            f"{mark} {verdict} · z {z:+.1f} · σ {_compact(report.baseline_sd, lang)} "
+            f"{t('report.over_weeks', lang, weeks=report.baseline_weeks)}"
+        )
 
-    lines += _what_moved(report)
-    lines += _top_movers(report)
+    lines += _what_moved(report, lang)
+    lines += _top_movers(report, lang)
 
     if dashboard_url:
         lines += ["", f'🔗 <a href="{html.escape(dashboard_url, quote=True)}">'
-                      f"Open the dashboard</a>"]
+                      f"{t('report.open_dashboard', lang)}</a>"]
 
     while lines and not lines[-1]:
         lines.pop()
     return "\n".join(lines)
 
 
-def _what_moved(report: WeeklyReport) -> List[str]:
+def _what_moved(report: WeeklyReport, lang: str) -> List[str]:
     """The chain: revenue → orders or basket → new or repeat."""
     cur, prev = report.current, report.previous
     if prev is None:
@@ -491,52 +508,54 @@ def _what_moved(report: WeeklyReport) -> List[str]:
     delta = cur.revenue - prev.revenue
     orders_effect, check_effect = decompose(cur, prev)
 
-    headline = f"Revenue {_signed_money(delta)} week on week"
+    headline = t("report.revenue_wow", lang, delta=_signed_money(delta, lang))
     # Name the lever only when one of the two clearly carries the move.
     # A 55/45 split is genuinely both, and saying otherwise is a guess.
     orders_share = share_of(orders_effect, delta)
     check_share = share_of(check_effect, delta)
     if orders_share is not None and orders_share >= 60:
-        headline += " — order count, not basket size:"
+        headline += t("report.lever_orders", lang)
     elif check_share is not None and check_share >= 60:
-        headline += " — basket size, not order count:"
+        headline += t("report.lever_basket", lang)
 
-    out = ["", "<b>What moved</b>", headline,
-           f"• order count  {_signed_money(orders_effect)}",
-           f"• avg check    {_signed_money(check_effect)}"]
+    effects = [t("report.effect_orders", lang), t("report.effect_check", lang)]
+    pad = max(len(label) for label in effects)
+    out = ["", f"<b>{t('report.what_moved', lang)}</b>", headline,
+           f"• {effects[0]:<{pad}}  {_signed_money(orders_effect, lang)}",
+           f"• {effects[1]:<{pad}}  {_signed_money(check_effect, lang)}"]
 
     if cur.new_customer_orders is None or prev.new_customer_orders is None:
         return out
 
+    split = [t("report.new_orders", lang), t("report.repeat_orders", lang)]
+    pad = max(len(label) for label in split)
     out += [
         "",
-        f"Orders from new customers   <b>{cur.new_customer_orders:,}</b>   "
-        f"{_delta(pct_change(cur.new_customer_orders, prev.new_customer_orders))}",
-        f"Repeat orders               <b>{cur.repeat_orders:,}</b>   "
-        f"{_delta(pct_change(cur.repeat_orders, prev.repeat_orders))}",
+        f"{split[0]:<{pad}}   <b>{fmt_int(cur.new_customer_orders, lang)}</b>   "
+        f"{_delta(pct_change(cur.new_customer_orders, prev.new_customer_orders), lang)}",
+        f"{split[1]:<{pad}}   <b>{fmt_int(cur.repeat_orders, lang)}</b>   "
+        f"{_delta(pct_change(cur.repeat_orders, prev.repeat_orders), lang)}",
     ]
 
     order_delta = cur.orders - prev.orders
     new_delta = cur.new_customer_orders - prev.new_customer_orders
     new_share = share_of(new_delta, order_delta)
     if new_share is not None and abs(order_delta) >= 5:
-        word = "gain" if order_delta > 0 else "drop"
-        out.append(f"New-customer orders are {new_share:.0f}% of that {word}.")
+        key = "report.new_share_gain" if order_delta > 0 else "report.new_share_drop"
+        out.append(t(key, lang, share=f"{new_share:.0f}"))
     return out
 
 
-def _top_movers(report: WeeklyReport) -> List[str]:
+def _top_movers(report: WeeklyReport, lang: str) -> List[str]:
     if not report.movers:
         return []
-    out = ["", "<b>Top movers</b> vs previous week"]
+    out = ["", f"<b>{t('report.top_movers', lang)}</b>"]
     for m in report.movers:
-        out.append(f"• {_signed_money(m.delta)}  {_name(m.name)}")
+        out.append(f"• {_signed_money(m.delta, lang)}  {_name(m.name)}")
 
     top_sum = sum(m.delta for m in report.movers)
     top_share = share_of(top_sum, report.product_move_total)
     if top_share is not None:
-        out.append(
-            f"These {len(report.movers)} are {top_share:.0f}% of the week's "
-            f"product-revenue move"
-        )
+        out.append(t("report.movers_share", lang,
+                     count=len(report.movers), share=f"{top_share:.0f}"))
     return out

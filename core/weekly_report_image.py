@@ -23,6 +23,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
+from core.i18n import DEFAULT_LANGUAGE, fmt_int, fmt_money, fmt_window, normalize, t
 from core.weekly_report import WeeklyReport, pct_change
 
 logger = logging.getLogger(__name__)
@@ -108,42 +109,38 @@ def _load_fonts() -> Optional[_Fonts]:
 
 # ─── Small helpers ──────────────────────────────────────────────────────────
 
-def _money(value: float) -> str:
-    # DejaVu sets ₴ tight against a following digit; a space keeps the two from
-    # reading as one glyph.
-    return f"₴ {value:,.0f}"
-
-
-def _delta(pct: Optional[float]) -> Tuple[str, Tuple[int, int, int]]:
+def _delta(pct: Optional[float], lang: str) -> Tuple[str, Tuple[int, int, int]]:
     """A change worth showing, or an honest mark that there is none."""
     if pct is None:
-        return "—", MUTED
+        return t("report.no_base", lang), MUTED
     if abs(pct) < 0.5:
-        return "≈ flat", MUTED
+        return t("report.flat", lang), MUTED
     return f"{'▲' if pct > 0 else '▼'} {abs(pct):.1f}%", UP if pct > 0 else DOWN
 
 
 # ─── The card ───────────────────────────────────────────────────────────────
 
-def _draw_header(d, report: WeeklyReport, fonts: _Fonts) -> None:
+def _draw_header(d, report: WeeklyReport, fonts: _Fonts, lang: str) -> None:
     """Which week, and which book. The caption says the rest."""
-    window = f"{report.start.strftime('%d.%m')} – {report.end.strftime('%d.%m.%Y')}"
+    window = fmt_window(report.start, report.end, lang)
     d.text((PAD, PAD), f"{window}   ·   {report.sales_type}",
            font=fonts.label, fill=MUTED)
 
 
-def _draw_headline(d, report: WeeklyReport, fonts: _Fonts) -> None:
+def _draw_headline(d, report: WeeklyReport, fonts: _Fonts, lang: str) -> None:
     """The number, and how it compares to the week before it."""
     cur, prev = report.current, report.previous
 
     # The currency mark is smaller and dimmer: at 112px bold DejaVu's ₴ is as
     # heavy as a digit, and the eye reads "₴9" as one character.
     d.text((PAD, PAD + 108), "₴", font=fonts.currency, fill=MUTED)
-    d.text((PAD + 52, PAD + 58), f"{cur.revenue:,.0f}", font=fonts.big, fill=TEXT)
+    d.text((PAD + 52, PAD + 58), fmt_int(cur.revenue, lang),
+           font=fonts.big, fill=TEXT)
 
-    text, colour = _delta(pct_change(cur.revenue, prev.revenue if prev else None))
+    text, colour = _delta(
+        pct_change(cur.revenue, prev.revenue if prev else None), lang)
     if prev is not None:
-        text = f"{text} vs last week"
+        text = f"{text} {t('report.vs_last_week', lang)}"
     box = d.textbbox((0, 0), text, font=fonts.chip)
     w, h = box[2] - box[0], box[3] - box[1]
     x, y = PAD, 270
@@ -152,7 +149,7 @@ def _draw_headline(d, report: WeeklyReport, fonts: _Fonts) -> None:
     d.text((x + 22, y + 14), text, font=fonts.chip, fill=colour)
 
 
-def _draw_stats(d, report: WeeklyReport, fonts: _Fonts) -> None:
+def _draw_stats(d, report: WeeklyReport, fonts: _Fonts, lang: str) -> None:
     """Orders, basket, and the split that says which of them moved."""
     cur, prev = report.current, report.previous
     d.line((PAD, STATS_TOP - 40, W - PAD, STATS_TOP - 40), fill=LINE, width=2)
@@ -168,27 +165,30 @@ def _draw_stats(d, report: WeeklyReport, fonts: _Fonts) -> None:
             if i:
                 d.text((cursor, STATS_TOP + 104), " / ", font=fonts.label, fill=LINE)
                 cursor += d.textlength(" / ", font=fonts.label)
-            text, colour = _delta(delta)
+            text, colour = _delta(delta, lang)
             d.text((cursor, STATS_TOP + 104), text, font=fonts.label, fill=colour)
             cursor += d.textlength(text, font=fonts.label)
 
     width = (W - 2 * PAD) / 3
-    cell(PAD, "ORDERS", f"{cur.orders:,}",
+    cell(PAD, t("card.orders", lang), fmt_int(cur.orders, lang),
          [pct_change(cur.orders, prev.orders) if prev else None])
-    cell(PAD + width, "AVG CHECK", _money(cur.avg_check),
+    cell(PAD + width, t("card.avg_check", lang), fmt_money(cur.avg_check, lang),
          [pct_change(cur.avg_check, prev.avg_check) if prev else None])
 
     if cur.new_customer_orders is not None:
-        cell(PAD + 2 * width, "NEW / REPEAT",
-             f"{cur.new_customer_orders:,} / {cur.repeat_orders:,}",
+        cell(PAD + 2 * width, t("card.new_repeat", lang),
+             f"{fmt_int(cur.new_customer_orders, lang)} / "
+             f"{fmt_int(cur.repeat_orders, lang)}",
              [pct_change(cur.new_customer_orders,
                          prev.new_customer_orders if prev else None),
               pct_change(cur.repeat_orders,
                          prev.repeat_orders if prev else None)])
 
 
-def render_weekly_card(report: WeeklyReport) -> Optional[bytes]:
-    """The card as PNG bytes, or None if it could not be drawn.
+def render_weekly_card(
+    report: WeeklyReport, lang: str = DEFAULT_LANGUAGE,
+) -> Optional[bytes]:
+    """The card as PNG bytes in `lang`, or None if it could not be drawn.
 
     Never raises. A card is a nice-to-have wrapped around numbers that are not,
     so every failure here degrades to the text report rather than costing the
@@ -201,12 +201,13 @@ def render_weekly_card(report: WeeklyReport) -> Optional[bytes]:
         if fonts is None:
             return None
 
+        lang = normalize(lang)
         img = Image.new("RGB", (W, H), BG)
         d = ImageDraw.Draw(img)
 
-        _draw_header(d, report, fonts)
-        _draw_headline(d, report, fonts)
-        _draw_stats(d, report, fonts)
+        _draw_header(d, report, fonts, lang)
+        _draw_headline(d, report, fonts, lang)
+        _draw_stats(d, report, fonts, lang)
 
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=True)
