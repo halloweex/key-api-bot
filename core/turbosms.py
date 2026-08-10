@@ -251,18 +251,42 @@ class TurboSmsConfig:
         return bool(self.token and self.viber_sender)
 
 
-def verify_webhook_signature(event_id: str, signature: str, secret: str) -> bool:
+def match_webhook_signature(
+    event_id: str, signature: str, secret: str,
+) -> "str | None":
     """
-    Check a DLR callback's SHA1(secret + id) signature.
+    Name the SHA1 concatenation that produced this signature, or None.
 
-    Without this the endpoint is an open write into campaign results: anyone
-    could post fabricated deliveries and move the measured lift.
+    The gateway's docs say only "SHA1 hash of a string consisting of the secret
+    security key and id" and give no worked example, so the ORDER is undefined
+    in writing. This code guessed `secret + id`, and the 2026-08-05 campaign had
+    every one of its 3 655 callbacks rejected with 401 against a secret the
+    owner has since confirmed matches the panel — which leaves the order as the
+    live suspect.
+
+    Both orders are accepted because both require knowing the secret: an
+    attacker who can produce either has already lost us nothing extra. The
+    matched name is returned so the logs record which one the gateway actually
+    uses, and this ambiguity can be closed by evidence instead of guessing.
     """
     if not secret or not signature or not event_id:
-        return False
-    expected = hashlib.sha1(f"{secret}{event_id}".encode()).hexdigest()
-    # Constant-time compare — the signature is attacker-supplied.
-    return hmac.compare_digest(expected, signature.lower().strip())
+        return None
+    received = signature.lower().strip()
+    candidates = {
+        "sha1(secret+id)": f"{secret}{event_id}",
+        "sha1(id+secret)": f"{event_id}{secret}",
+    }
+    for name, material in candidates.items():
+        expected = hashlib.sha1(material.encode()).hexdigest()
+        # Constant-time compare — the signature is attacker-supplied.
+        if hmac.compare_digest(expected, received):
+            return name
+    return None
+
+
+def verify_webhook_signature(event_id: str, signature: str, secret: str) -> bool:
+    """Whether a DLR callback carries a signature made with our secret."""
+    return match_webhook_signature(event_id, signature, secret) is not None
 
 
 def classify_dlr(status: str) -> Optional[bool]:

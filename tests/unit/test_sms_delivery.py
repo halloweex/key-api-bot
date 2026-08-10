@@ -295,6 +295,17 @@ async def test_delivery_columns_are_added_to_a_pre_existing_table(tmp_path):
             "SELECT COUNT(*) FROM sms_campaign_members WHERE campaign='old'"
         ).fetchone()[0] == 1
 
+    # The message_id index has to be created here rather than alongside the
+    # other indexes: at that point this database has no such column, and a
+    # failed CREATE INDEX would take the whole schema init down with it.
+    async with store.connection() as conn:
+        indexes = {r[0] for r in conn.execute(
+            "SELECT index_name FROM duckdb_indexes() "
+            "WHERE table_name = 'sms_campaign_members'"
+        ).fetchall()}
+
+    assert "idx_sms_members_message_id" in indexes
+
     await store.close()
 
 

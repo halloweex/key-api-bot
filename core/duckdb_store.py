@@ -713,6 +713,9 @@ class DuckDBStore(
             ON sms_campaign_members(campaign, assignment);
         CREATE INDEX IF NOT EXISTS idx_sms_members_buyer
             ON sms_campaign_members(buyer_id);
+        -- idx_sms_members_message_id is created with the delivery-column
+        -- migration instead: on a database predating the TurboSMS work the
+        -- column does not exist yet at this point.
 
         -- Managers/Users table (synced from KeyCRM)
         CREATE TABLE IF NOT EXISTS managers (
@@ -1433,6 +1436,19 @@ class DuckDBStore(
                 )
             except Exception as e:
                 logger.debug(f"Migration note (sms_campaign_members {column}): {e}")
+
+        # Index on message_id, created here rather than with the other indexes
+        # because on a database that predates the TurboSMS work the column only
+        # exists once the loop above has run. Every delivery report looks a
+        # member up by message_id, and a send of 5 000 produces 5 000 of them
+        # inside a minute; without this each one scans the whole table.
+        try:
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sms_members_message_id "
+                "ON sms_campaign_members(message_id)"
+            )
+        except Exception as e:
+            logger.debug(f"Migration note (idx_sms_members_message_id): {e}")
 
         # Migration: Add language column to user_preferences
         try:

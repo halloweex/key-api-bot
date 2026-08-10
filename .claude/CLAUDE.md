@@ -43,6 +43,7 @@ key-api-bot/
 │
 ├── scripts/                      # Utility scripts
 │   ├── check_date.py            # Compare DuckDB vs KeyCRM for date
+│   ├── check_turbosms_signature.py  # Is TURBOSMS_WEBHOOK_SECRET the one the gateway signs with?
 │   └── force_resync.py          # Force rebuild DuckDB from API
 │
 ├── tests/

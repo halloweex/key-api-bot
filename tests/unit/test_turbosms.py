@@ -18,6 +18,7 @@ from core.turbosms import (
     count_segments,
     PartialSendError,
     ViberMessage,
+    match_webhook_signature,
     verify_webhook_signature,
 )
 
@@ -224,6 +225,34 @@ class TestWebhookSignature:
     ])
     def test_rejects_missing_pieces(self, event_id, sig, secret):
         assert verify_webhook_signature(event_id, sig, secret) is False
+
+
+class TestSignatureOrder:
+    """The gateway's docs say "SHA1 of the secret key and id" and never say in
+    which order, with no worked example. This code guessed secret+id, and the
+    2026-08-05 campaign had all 3 655 callbacks rejected against a secret the
+    owner confirmed matches the panel — so the order is the live suspect.
+
+    Both are accepted because both require knowing the secret. What the match
+    is named for is the logs: it closes the ambiguity with evidence.
+    """
+
+    def test_accepts_the_documented_reading(self):
+        sig = hashlib.sha1(b"s3cretevt-1").hexdigest()
+        assert match_webhook_signature("evt-1", sig, "s3cret") == "sha1(secret+id)"
+
+    def test_accepts_the_other_reading(self):
+        sig = hashlib.sha1(b"evt-1s3cret").hexdigest()
+        assert match_webhook_signature("evt-1", sig, "s3cret") == "sha1(id+secret)"
+
+    def test_a_forgery_matches_neither(self):
+        assert match_webhook_signature("evt-1", "deadbeef", "s3cret") is None
+
+    def test_neither_order_helps_without_the_secret(self):
+        """Accepting two orders must not widen the door: both need the secret."""
+        for material in (b"wrongevt-1", b"evt-1wrong"):
+            sig = hashlib.sha1(material).hexdigest()
+            assert match_webhook_signature("evt-1", sig, "s3cret") is None
 
 
 # ─── configuration ───────────────────────────────────────────────────────
