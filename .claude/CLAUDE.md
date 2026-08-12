@@ -184,10 +184,19 @@ VPS_HOST          VPS_USER          EC2_SSH_KEY
 
 ### Auto-Deployment
 Push to `main` → GitHub Actions builds images → pushes to Docker Hub → SSHs to
-the VPS → pulls and restarts. The `deploy` job is gated on the `production`
-environment, so a run sitting in `waiting` is waiting for a human, not a
-runner. Concurrency group `deploy-production`, `cancel-in-progress: false` —
-deploys queue instead of racing.
+the VPS → pulls and restarts. Concurrency group `deploy-production`,
+`cancel-in-progress: false` — deploys queue instead of racing.
+
+**A merge reaches live containers on its own.** The `deploy` job names
+`environment: production`, but that environment has **no required reviewers** —
+the owner removed them on 2026-08-09 — so nothing waits for a human. Verified
+2026-08-12: merging #70 went from merge to `completed/success` in one step. Read
+the declaration as a label, not a gate. If a run ever does sit in `waiting`,
+that is a reviewer requirement someone added back.
+
+`paths-ignore` covers `**/*.md`, `.claude/**`, `.planning/**`, `tests/**` — a
+commit touching only those does not deploy. A commit touching code *and* a doc
+deploys as normal, because the skip needs every changed file to match.
 
 ### Manual Deployment
 ```bash
