@@ -214,6 +214,7 @@ class SyncService:
     async def _upsert_orders_with_expenses(
         self, orders: list, force_update: bool = False, skip_products: bool = False,
         bronze_source: str = "sync_delta",
+        changed_ids_out: "list[int] | None" = None,
     ) -> tuple:
         """Upsert orders and their expenses.
 
@@ -227,6 +228,13 @@ class SyncService:
             bronze_source: Origin tag written to bronze_order_events for audit/
                           replay. H3 Phase 1 captures every upsert to the bronze
                           log as a shadow write — failures are logged only.
+            changed_ids_out: If given, is extended with the ids actually WRITTEN,
+                          which is a subset of what was fetched. An out-list
+                          rather than a wider return because six call sites and
+                          a stack of mocks depend on the 2-tuple, and only the
+                          incremental sync needs to know what moved. In staging
+                          mode nothing is written to `orders` here, so it stays
+                          empty and the promotion job owns dirtiness.
 
         Returns:
             Tuple of (order_count, expense_count)
@@ -268,15 +276,17 @@ class SyncService:
             return bronze_count, expense_count
 
         # Legacy mode: direct upsert to orders table
-        order_count = await self.store.upsert_orders(
+        result = await self.store.upsert_orders(
             orders, force_update=force_update, skip_products=skip_products,
         )
+        if changed_ids_out is not None:
+            changed_ids_out.extend(result.changed_ids)
 
         # Batch upsert all expenses in a single transaction
         orders_with_expenses = [o for o in orders if o.get("expenses")]
         expense_count = await self.store.upsert_expenses_batch(orders_with_expenses)
 
-        return order_count, expense_count
+        return result.count, expense_count
 
     async def sync_managers(self) -> int:
         """
@@ -764,10 +774,16 @@ class SyncService:
                 sync_to.astimezone(DEFAULT_TZ).strftime('%Y-%m-%d %H:%M:%S'),
             )
 
-            order_ids = []
+            # Ids actually WRITTEN, not ids fetched. The sync window is the
+            # trailing 24h, so `orders` is ~200 rows on every run whether or not
+            # anything about them moved; marking all of them dirty cascaded to
+            # their buyers' full histories (~1300 orders) and 583 distinct dates,
+            # and rebuilt Gold for all of it every two minutes around the clock.
+            changed_ids: list[int] = []
             if orders:
-                order_ids = [o["id"] for o in orders if "id" in o]
-                order_count, expense_count = await self._upsert_orders_with_expenses(orders)
+                order_count, expense_count = await self._upsert_orders_with_expenses(
+                    orders, changed_ids_out=changed_ids,
+                )
                 stats["orders"] = order_count
                 stats["expenses"] = expense_count
                 # Use max(updated_at) from SOURCE data, not now()
@@ -836,15 +852,34 @@ class SyncService:
                 # Emit inventory updated event
                 await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
 
-            # Mark warehouse dirty if ORDER data changed (separate job handles refresh).
-            # Product/manager-only changes don't need Silver rebuild (Silver only
-            # reads from `orders`). Gold will pick up product metadata changes on
-            # the next order-triggered refresh (every 1-5 min).
-            if stats["orders"] > 0:
-                await self.store.mark_warehouse_dirty(order_ids)
+            # Mark warehouse dirty only for orders that actually changed
+            # (separate job handles refresh).
+            #
+            # This used to key off stats["orders"], which counts a row already in
+            # the desired state as a success — so it was ~200 every cycle forever
+            # and the warehouse was permanently dirty. Nothing changing now means
+            # nothing to rebuild.
+            if changed_ids:
+                await self.store.mark_warehouse_dirty(changed_ids)
 
-            # Update adaptive backoff based on orders found
-            self._update_backoff(stats["orders"])
+            # Silver reads only `orders`, but Gold joins products and categories,
+            # so a renamed product or a re-parented category changes gold rows
+            # with no order involved. That used to arrive within two minutes for
+            # the wrong reason: the warehouse was permanently dirty, so every
+            # rebuild swept it up. With dirtiness now telling the truth, the
+            # catalog needs to ask for itself — otherwise a rename made at night
+            # would not reach the dashboard until somebody placed an order.
+            #
+            # Full scope (None) because a product touches every date it was ever
+            # sold on, and an hourly full rebuild is cheaper than the 583-date
+            # "incremental" one this commit removes.
+            if stats.get("products") or stats.get("offers"):
+                await self.store.mark_warehouse_dirty(None)
+
+            # Adaptive backoff follows the same number. Keyed on the inflated
+            # count it never saw a quiet period, so it sat on the 60s floor
+            # around the clock instead of stepping out to 300s overnight.
+            self._update_backoff(len(changed_ids))
 
         except KeyCRMConnectionError as e:
             error_occurred = str(e)
