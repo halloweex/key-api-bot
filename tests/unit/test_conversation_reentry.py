@@ -23,6 +23,7 @@ import pytest
 from telegram import Chat, Message, Update, User
 
 from bot.config import ConversationState
+from core.i18n import LANGUAGES, all_translations
 
 # The handler is built with per_message=False, which PTB warns about by design.
 warnings.filterwarnings("ignore", message=".*per_message.*")
@@ -31,9 +32,11 @@ USER = User(id=777, first_name="T", is_bot=False)
 CHAT = Chat(id=777, type="private")
 
 # The three top-level buttons that are entry points, and therefore the three
-# that went dead. Labels must match bot/keyboards.py exactly — the ⚙️ and ℹ️
-# carry a U+FE0F variation selector that a hand-typed copy quietly drops.
-MENU_BUTTONS = ("⚙️ Settings", "📊 Report", "🔍 Search")
+# that went dead — named by key, in every language they are drawn in.
+MENU_KEYS = ("btn.settings", "btn.report", "btn.search")
+MENU_BUTTONS = tuple(
+    label for key in MENU_KEYS for label in all_translations(key)
+)
 
 
 @pytest.fixture
@@ -74,20 +77,30 @@ class TestMenuButtonsAlwaysWork:
             f"{label} is unreachable while parked in {state}"
         )
 
-    def test_the_button_labels_still_match_the_keyboard(self):
-        """A label and its regex are two copies of the same emoji sequence.
+    @pytest.mark.parametrize("lang", LANGUAGES)
+    def test_every_button_the_keyboard_draws_reaches_a_handler(self, conversation, lang):
+        """The matcher and the labels must stay two views of one table.
 
-        ⚙️ is U+2699 U+FE0F; drop the variation selector in one of the two and
-        the button goes dead again, with nothing in the logs to say why.
+        Telegram sends a tap back as plain text, so a label the matcher does
+        not recognise is a button that dies in silence — which happened here
+        once over a single U+FE0F variation selector. Drawing the keyboard and
+        feeding every label back through the handler is the only check that
+        cannot be fooled by a translation added on one side only.
         """
         from bot.keyboards import ReplyKeyboards
 
-        rendered = {
-            button.text
-            for row in ReplyKeyboards.main_menu().keyboard
-            for button in row
-        }
-        assert set(MENU_BUTTONS) <= rendered
+        for row in ReplyKeyboards.main_menu(lang).keyboard:
+            for button in row:
+                update = _message(button.text)
+                reachable = bool(conversation.check_update(update))
+                # Help and Dashboard live outside the conversation; the other
+                # three are entry points and must be matched by it.
+                if not reachable:
+                    from bot.main import button_filter
+                    assert (button_filter("btn.help").check_update(update)
+                            or button_filter("btn.dashboard").check_update(update)), (
+                        f"{button.text!r} ({lang}) reaches nothing"
+                    )
 
 
 class TestLogsKeepTheToken:

@@ -6,7 +6,8 @@ Contains text formatting helpers, message templates, and report formatters.
 import logging
 from datetime import date
 from typing import Dict, List, Tuple
-from bot.config import REPORT_TYPES, SOURCE_MAPPING, MEDALS, VERSION, REVENUE_MILESTONES
+from bot.config import SOURCE_MAPPING, MEDALS, VERSION, REVENUE_MILESTONES
+from core.i18n import DEFAULT_LANGUAGE, fmt_int, fmt_money, t
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,8 @@ TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 TELEGRAM_SAFE_MESSAGE_LENGTH = 3500  # Leave room for formatting
 
 
-def truncate_message(message: str, max_length: int = TELEGRAM_SAFE_MESSAGE_LENGTH) -> str:
+def truncate_message(message: str, max_length: int = TELEGRAM_SAFE_MESSAGE_LENGTH,
+                     lang: str = DEFAULT_LANGUAGE) -> str:
     """
     Truncate message if it exceeds max length.
 
@@ -31,7 +33,7 @@ def truncate_message(message: str, max_length: int = TELEGRAM_SAFE_MESSAGE_LENGT
 
     logger.warning(f"Message truncated from {len(message)} to {max_length} characters")
     truncated = message[:max_length - 50]
-    return truncated + "\n\n⚠️ <i>Message truncated due to length...</i>"
+    return truncated + "\n\n" + t("msg.truncated", lang)
 
 
 def split_message(message: str, max_length: int = TELEGRAM_SAFE_MESSAGE_LENGTH) -> List[str]:
@@ -96,165 +98,131 @@ def create_progress_indicator(current_step: int, total_steps: int) -> str:
 # ─── Message Templates ──────────────────────────────────────────────────────
 
 class Messages:
-    """Standard message templates."""
+    """Standard message templates, rendered in the reader's language."""
 
     @staticmethod
-    def welcome(username: str) -> str:
-        """Generate welcome message."""
+    def welcome(username: str, lang: str = DEFAULT_LANGUAGE) -> str:
+        return t("msg.welcome", lang, name=username)
+
+    @staticmethod
+    def help_text(lang: str = DEFAULT_LANGUAGE) -> str:
+        return t("msg.help", lang, version=VERSION)
+
+    @staticmethod
+    def cancel(lang: str = DEFAULT_LANGUAGE) -> str:
+        return t("msg.cancelled", lang)
+
+    @staticmethod
+    def _header(step: int, total: int, step_key: str, lang: str) -> str:
+        """The generator's title plus its progress line — every step shares it."""
+        progress = create_progress_indicator(step, total)
         return (
-            f"👋 {bold('Welcome, ' + username)}! \n\n"
-            f"I'm your {bold('KoreanStory Sales Report')} assistant. I can help you generate detailed sales reports "
-            f"and analytics.\n\n"
-            f"🚀 {italic('What would you like to do?')}"
+            f"{bold(t('msg.generator_title', lang))}\n\n"
+            f"{progress} {italic(t('msg.step', lang, step=step, total=total, name=t(step_key, lang)))}\n\n"
         )
 
     @staticmethod
-    def help_text() -> str:
-        """Generate help message."""
+    def report_selection(step: int = 1, total_steps: int = 3,
+                         lang: str = DEFAULT_LANGUAGE) -> str:
+        return (Messages._header(step, total_steps, "step.report_type", lang)
+                + t("msg.choose_report_type", lang))
+
+    @staticmethod
+    def date_selection(report_type: str, step: int = 2, total_steps: int = 3,
+                       lang: str = DEFAULT_LANGUAGE) -> str:
         return (
-            f"{bold('📊 KoreanStory Sales Report Bot 📊')}\n\n"
-            f"{bold('Available Commands:')}\n"
-            f"• /report - Generate a sales report\n"
-            f"• /search - Search orders by ID/name/phone\n"
-            f"• /settings - Configure preferences\n"
-            f"• /dashboard - Open web dashboard\n"
-            f"• /cancel - Cancel current operation\n"
-            f"• /help - Show this help message\n\n"
-            f"{bold('Report Types:')}\n"
-            f"📝 {bold('Summary')} - Sales overview by source\n"
-            f"📊 {bold('Excel')} - Detailed Excel report\n"
-            f"🏆 {bold('TOP-10')} - Best-selling products\n\n"
-            f"{bold('Web Dashboard:')}\n"
-            f"📈 http://108.130.86.30:8080\n\n"
-            f"{italic(f'Version {VERSION}')}"
+            Messages._header(step, total_steps, "step.date_range", lang)
+            + t("msg.selected_report_type", lang,
+                type=report_type_label(report_type, lang)) + "\n\n"
+            + t("msg.choose_date_range", lang)
         )
 
     @staticmethod
-    def cancel() -> str:
-        """Generate cancellation message."""
+    def top10_date_selection(source_name: str, step: int = 2, total_steps: int = 3,
+                             lang: str = DEFAULT_LANGUAGE) -> str:
         return (
-            f"{bold('🛑 Operation Cancelled')}\n\n"
-            f"I've cancelled the current operation as requested.\n"
-            f"What would you like to do next?"
+            Messages._header(step, total_steps, "step.date_range", lang)
+            + f"{t('msg.report_label', lang)}: {bold(t('report_type.top10', lang))}\n"
+            + f"{t('msg.source_label', lang)}: {bold(source_name)}\n\n"
+            + t("msg.choose_date_range", lang)
         )
 
     @staticmethod
-    def report_selection(step: int = 1, total_steps: int = 3) -> str:
-        """Generate report type selection message."""
-        progress = create_progress_indicator(step, total_steps)
+    def loading(report_type: str, start_date: date, end_date: date,
+                step: int = 3, total_steps: int = 3,
+                lang: str = DEFAULT_LANGUAGE) -> str:
         return (
-            f"{bold('📊 Sales Report Generator')}\n\n"
-            f"{progress} {italic(f'Step {step} of {total_steps}: Select Report Type')}\n\n"
-            f"Please choose the type of report you'd like to generate:"
+            Messages._header(step, total_steps, "step.generating", lang)
+            + f"{t('msg.report_type_label', lang)}: "
+              f"{bold(report_type_label(report_type, lang))}\n"
+            + f"{t('msg.date_range_label', lang)}: {bold(date_span(start_date, end_date))}\n\n"
+            + t("msg.please_wait", lang)
         )
 
     @staticmethod
-    def date_selection(report_type: str, step: int = 2, total_steps: int = 3) -> str:
-        """Generate date range selection message."""
-        progress = create_progress_indicator(step, total_steps)
-        return (
-            f"{bold('📊 Sales Report Generator')}\n\n"
-            f"{progress} {italic(f'Step {step} of {total_steps}: Select Date Range')}\n\n"
-            f"Selected report type: {bold(REPORT_TYPES.get(report_type, report_type))}\n\n"
-            f"Now, please select the date range for your report:"
-        )
+    def excel_preparing(start_date: date, end_date: date,
+                        lang: str = DEFAULT_LANGUAGE) -> str:
+        return t("msg.excel_preparing", lang, range=date_span(start_date, end_date))
 
     @staticmethod
-    def top10_date_selection(source_name: str, step: int = 2, total_steps: int = 3) -> str:
-        """Generate date selection message for TOP-10 report."""
-        progress = create_progress_indicator(step, total_steps)
-        return (
-            f"{bold('📊 Sales Report Generator')}\n\n"
-            f"{progress} {italic(f'Step {step} of {total_steps}: Select Date Range')}\n\n"
-            f"Report: {bold('TOP-10 Products')}\n"
-            f"Source: {bold(source_name)}\n\n"
-            f"Now, please select the date range:"
-        )
+    def excel_success(start_date: date, end_date: date,
+                      lang: str = DEFAULT_LANGUAGE) -> str:
+        return t("msg.excel_success", lang, range=date_span(start_date, end_date))
 
     @staticmethod
-    def loading(report_type: str, start_date: date, end_date: date, step: int = 3, total_steps: int = 3) -> str:
-        """Generate loading message."""
-        progress = create_progress_indicator(step, total_steps)
-        return (
-            f"{bold('📊 Sales Report Generator')}\n\n"
-            f"{progress} {italic(f'Step {step} of {total_steps}: Generating Report')}\n\n"
-            f"Report type: {bold(REPORT_TYPES.get(report_type, report_type))}\n"
-            f"Date range: {bold(start_date.strftime('%Y-%m-%d'))} to {bold(end_date.strftime('%Y-%m-%d'))}\n\n"
-            f"⏳ {italic('Please wait while I generate your report...')}"
-        )
+    def error(error_msg: str, lang: str = DEFAULT_LANGUAGE) -> str:
+        return t("msg.report_error", lang, error=error_msg)
 
     @staticmethod
-    def excel_preparing(start_date: date, end_date: date) -> str:
-        """Generate Excel file preparation message."""
-        return (
-            f"{bold('📑 Preparing Excel Report')}\n\n"
-            f"📅 {bold('Date Range')}: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
-            f"⏳ {italic('Creating your Excel file...')}\n"
-            f"This may take a moment depending on the amount of data."
-        )
-
-    @staticmethod
-    def excel_success(start_date: date, end_date: date) -> str:
-        """Generate Excel success message."""
-        return (
-            f"{bold('✅ Excel Report Generated!')}\n\n"
-            f"📅 {bold('Date Range')}: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
-            f"📎 Your Excel file has been sent as a separate message.\n"
-            f"📊 {italic('What would you like to do next?')}"
-        )
-
-    @staticmethod
-    def error(error_msg: str) -> str:
-        """Generate error message."""
-        return (
-            f"{bold('⚠️ Error Generating Report')}\n\n"
-            f"I encountered a problem while generating your report:\n"
-            f"{italic(error_msg)}\n\n"
-            f"Please try again with a different date range or contact support if the issue persists."
-        )
-
-    @staticmethod
-    def excel_error(error_msg: str = None) -> str:
-        """Generate Excel error message."""
+    def excel_error(error_msg: str = None, lang: str = DEFAULT_LANGUAGE) -> str:
         if error_msg:
-            return (
-                f"{bold('⚠️ Excel Report Error')}\n\n"
-                f"I encountered an issue while generating your Excel report:\n"
-                f"{italic(error_msg)}\n\n"
-                f"Would you like to try again or generate a summary report instead?"
-            )
-        else:
-            return (
-                f"{bold('⚠️ Excel Report Error')}\n\n"
-                f"I was unable to generate your Excel report.\n\n"
-                f"Would you like to try again or generate a summary report instead?"
-            )
+            return t("msg.excel_error", lang, error=error_msg)
+        return t("msg.excel_error_plain", lang)
 
     @staticmethod
-    def custom_date_prompt(step_name: str, step_num: int, total_steps: int, context: str = "") -> str:
-        """Generate custom date selection prompt."""
+    def custom_date_prompt(step_key: str, step_num: int, total_steps: int,
+                           context: str = "", lang: str = DEFAULT_LANGUAGE) -> str:
+        """`step_key` is an i18n key such as `pick.start_year`."""
         return (
-            f"{bold('📊 Custom Date Selection')}\n\n"
-            f"{italic(f'Step {step_num} of {total_steps}: {step_name}')}\n\n"
+            f"{bold(t('msg.custom_dates_title', lang))}\n\n"
+            f"{italic(t('msg.step', lang, step=step_num, total=total_steps, name=t(step_key, lang)))}\n\n"
             f"{context}"
         )
 
     @staticmethod
-    def top10_source_selection() -> str:
-        """Generate TOP-10 source selection message."""
-        return (
-            f"{bold('🏆 TOP-10 Products Report')}\n\n"
-            f"{italic('Select the source to view TOP-10 products:')}"
-        )
+    def top10_source_selection(lang: str = DEFAULT_LANGUAGE) -> str:
+        return f"{bold(t('top10.title', lang))}\n\n{t('top10.choose_source', lang)}"
 
     @staticmethod
-    def top10_change_source(start_date: date, end_date: date) -> str:
-        """Generate TOP-10 change source message."""
+    def top10_change_source(start_date: date, end_date: date,
+                            lang: str = DEFAULT_LANGUAGE) -> str:
         return (
-            f"{bold('🏆 TOP-10 Products Report')}\n\n"
-            f"📅 Date: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
-            f"{italic('Select a source to view TOP-10 products:')}"
+            f"{bold(t('top10.title', lang))}\n\n"
+            f"📅 {t('msg.date_range_label', lang)}: {date_span(start_date, end_date)}\n\n"
+            f"{t('top10.choose_source', lang)}"
         )
+
+
+def report_type_label(report_type: str, lang: str = DEFAULT_LANGUAGE) -> str:
+    """"summary" → "📊 Зведений звіт". Unknown types pass through unchanged."""
+    key = f"report_type.{report_type}"
+    label = t(key, lang)
+    return report_type if label == key else label
+
+
+def date_range_label(range_key: str, lang: str = DEFAULT_LANGUAGE) -> str:
+    key = f"daterange.{range_key}"
+    label = t(key, lang)
+    return range_key if label == key else label
+
+
+def date_span(start_date: date, end_date: date) -> str:
+    """`03.08.2026 – 09.08.2026`, in every language.
+
+    Numeric because Ukrainian and Russian month names inflect — see
+    `core.i18n.fmt_window` for the full reasoning.
+    """
+    return f"{start_date.strftime('%d.%m.%Y')} – {end_date.strftime('%d.%m.%Y')}"
 
 
 # ─── Report Formatters ──────────────────────────────────────────────────────
@@ -271,21 +239,23 @@ class ReportFormatters:
         total_orders: int,
         start_date: date,
         end_date: date,
-        report_time: str
+        report_time: str,
+        lang: str = DEFAULT_LANGUAGE,
     ) -> str:
         """Format summary sales report."""
-        start_date_str = start_date.strftime("%Y-%m-%d")
-        end_date_str = end_date.strftime("%Y-%m-%d")
-
         report = (
-            f"{bold('📊 SALES SUMMARY REPORT')}\n\n"
-            f"📅 {bold('Date Range')}: {start_date_str} to {end_date_str}\n"
-            f"📈 {bold('Total Orders')}: {total_orders}\n\n"
-            f"{bold('📦 TOTAL Products by Source')}\n"
+            f"{bold(t('summary.title', lang))}\n\n"
+            f"📅 {bold(t('msg.date_range_label', lang))}: "
+            f"{date_span(start_date, end_date)}\n"
+            f"📈 {bold(t('summary.total_orders', lang))}: "
+            f"{fmt_int(total_orders, lang)}\n\n"
+            f"{bold(t('summary.by_source', lang))}\n"
         )
 
-        # Add data for each source - sort by total quantity (sum of all products)
-        for src_id, products_dict in sorted(sales_by_source.items(), key=lambda x: sum(x[1].values()), reverse=True):
+        # Sorted by total quantity, biggest source first.
+        for src_id, products_dict in sorted(
+            sales_by_source.items(), key=lambda x: sum(x[1].values()), reverse=True
+        ):
             qty = sum(products_dict.values())
             name = SOURCE_MAPPING.get(int(src_id), src_id)
             order_count = order_counts.get(src_id, 0)
@@ -293,19 +263,18 @@ class ReportFormatters:
             avg_check = revenue / order_count if order_count > 0 else 0
 
             report += f"\n{bold(name)}:\n"
-            report += f"  • Products: {qty}\n"
-            report += f"  • Orders: {order_count}\n"
-            report += f"  • Avg Check: {avg_check:.2f} UAH\n"
+            report += f"  • {t('summary.products', lang)}: {fmt_int(qty, lang)}\n"
+            report += f"  • {t('summary.orders', lang)}: {fmt_int(order_count, lang)}\n"
+            report += (f"  • {t('summary.avg_check', lang)}: "
+                       f"{fmt_money(avg_check, lang)}\n")
 
-            # Returns data
             returns = returns_by_source.get(src_id, {"count": 0, "revenue": 0})
             if returns["count"] > 0:
-                return_rate = (returns["count"] / order_count * 100) if order_count > 0 else 0
-                report += f"  • Returns/Canceled: {returns['count']} ({return_rate:.1f}%)\n"
+                rate = (returns["count"] / order_count * 100) if order_count > 0 else 0
+                report += (f"  • {t('summary.returns', lang)}: "
+                           f"{returns['count']} ({rate:.1f}%)\n")
 
-        # Add footer
-        report += f"\n📝 {italic(f'Report generated on {report_time}')}"
-
+        report += f"\n📝 {italic(t('summary.generated_at', lang, time=report_time))}"
         return report
 
     @staticmethod
@@ -314,52 +283,49 @@ class ReportFormatters:
         source_name: str,
         emoji: str,
         total_quantity: int,
-        report_time: str
+        report_time: str,
+        lang: str = DEFAULT_LANGUAGE,
     ) -> str:
         """Format TOP-10 products report."""
         if total_quantity == 0:
-            return f"{emoji} {bold(source_name.upper())}: {italic('No sales in this period')}"
+            return (f"{emoji} {bold(source_name.upper())}: "
+                    f"{t('top10.no_sales', lang)}")
 
         report = f"{emoji} {bold(source_name.upper())}\n"
         report += f"{'─' * 30}\n"
-        report += f"📦 Total Sold: {bold(str(total_quantity))}\n\n"
+        report += (f"📦 {t('top10.total_sold', lang)}: "
+                   f"{bold(fmt_int(total_quantity, lang))}\n\n")
 
         for i, (product_name, quantity, percentage) in enumerate(top_products, 1):
-            # Truncate long product names
-            if len(product_name) > 60:
-                display_name = product_name[:57] + "..."
-            else:
-                display_name = product_name
-
+            display_name = (product_name[:57] + "…"
+                            if len(product_name) > 60 else product_name)
             if i <= 3:
-                medal = MEDALS[i - 1]
-                report += f"{medal} {bold(str(quantity))} ({percentage:.1f}%) - {display_name}\n\n"
+                report += (f"{MEDALS[i - 1]} {bold(str(quantity))} "
+                           f"({percentage:.1f}%) — {display_name}\n\n")
             else:
-                report += f"{bold(f'{i}.')} {quantity} ({percentage:.1f}%) - {display_name}\n"
+                report += (f"{bold(f'{i}.')} {quantity} ({percentage:.1f}%) — "
+                           f"{display_name}\n")
                 if i < len(top_products):
                     report += "\n"
 
         report += f"\n{'─' * 30}\n"
         report += f"📝 {italic(report_time)}"
-
         return report
 
     @staticmethod
-    def format_top10_header(title: str, start_date: date, end_date: date) -> str:
+    def format_top10_header(title: str, start_date: date, end_date: date,
+                            lang: str = DEFAULT_LANGUAGE) -> str:
         """Format TOP-10 report header."""
         return (
             f"{bold(title)}\n\n"
-            f"📅 {bold('Date Range')}: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n\n"
-            f"⏳ {italic('Generating report...')}"
+            f"📅 {bold(t('msg.date_range_label', lang))}: "
+            f"{date_span(start_date, end_date)}\n\n"
+            f"{t('msg.generating', lang)}"
         )
 
 
 def get_period_type(start_date: date, end_date: date) -> str:
-    """
-    Determine period type based on date range.
-
-    Returns: 'daily', 'weekly', 'monthly', or None
-    """
+    """Determine period type: 'daily', 'weekly', 'monthly', or None."""
     days = (end_date - start_date).days + 1
 
     if days == 1:
@@ -371,24 +337,14 @@ def get_period_type(start_date: date, end_date: date) -> str:
     return None
 
 
-def check_milestone(total_revenue: float, start_date: date, end_date: date) -> str | None:
-    """
-    Check if revenue hits a milestone and return congratulations message.
-
-    Args:
-        total_revenue: Total revenue for the period
-        start_date: Start date of the report
-        end_date: End date of the report
-
-    Returns:
-        Congratulations message if milestone hit, None otherwise
-    """
+def check_milestone(total_revenue: float, start_date: date, end_date: date,
+                    lang: str = DEFAULT_LANGUAGE) -> str | None:
+    """The congratulation for the highest milestone this period cleared, if any."""
     period_type = get_period_type(start_date, end_date)
 
     if not period_type or period_type not in REVENUE_MILESTONES:
         return None
 
-    # Find the highest milestone reached
     highest_milestone = None
     for milestone in REVENUE_MILESTONES[period_type]:
         if total_revenue >= milestone["amount"]:
@@ -397,20 +353,22 @@ def check_milestone(total_revenue: float, start_date: date, end_date: date) -> s
     if not highest_milestone:
         return None
 
-    # Format amount for display
-    amount = highest_milestone["amount"]
-    if amount >= 1000000:
-        amount_text = f"₴{amount / 1000000:.1f}M"
-    else:
-        amount_text = f"₴{amount / 1000:.0f}K"
+    return format_milestone(highest_milestone, lang)
 
-    emoji = highest_milestone["emoji"]
-    message = highest_milestone["message"]
+
+def format_milestone(milestone: dict, lang: str = DEFAULT_LANGUAGE) -> str:
+    """One milestone banner, shared by the report path and the daily job."""
+    amount = milestone["amount"]
+    if amount >= 1_000_000:
+        amount_text = f"₴{amount / 1_000_000:.1f}M"
+    else:
+        amount_text = f"₴{amount / 1_000:.0f}K"
 
     return (
         f"\n\n{'🎊' * 10}\n\n"
-        f"{emoji} {bold('MILESTONE REACHED!')} {emoji}\n\n"
-        f"🏆 {bold(message)}\n\n"
-        f"💰 Revenue: {bold(amount_text)}\n\n"
+        f"{milestone['emoji']} {bold(t('milestone.reached', lang))} "
+        f"{milestone['emoji']}\n\n"
+        f"🏆 {bold(t(milestone['key'], lang))}\n\n"
+        f"💰 {t('milestone.revenue', lang)}: {bold(amount_text)}\n\n"
         f"{'🎊' * 10}"
     )
