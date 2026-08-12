@@ -240,6 +240,13 @@ class TurboSmsConfig:
     webhook_secret: str = field(
         default_factory=lambda: os.getenv("TURBOSMS_WEBHOOK_SECRET", "")
     )
+    # What one billable segment costs, in UAH. The gateway does not report a
+    # price with the send, so the tariff has to come from somewhere; this is
+    # the contract rate, and it is copied onto each campaign when that campaign
+    # is sent so a later rate change cannot restate an old result.
+    price_per_part: float = field(
+        default_factory=lambda: float(os.getenv("TURBOSMS_PRICE_PER_PART", "1.28"))
+    )
     timeout: float = 20.0
 
     @property

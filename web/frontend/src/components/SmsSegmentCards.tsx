@@ -124,10 +124,17 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
   // and cannibalises VIP, so the roster has to be selectable — and empty means
   // all three, matching what the cards above show.
   const [pickedTiers, setPickedTiers] = useState<SmsTier[]>([])
+  // How much of each tier is withheld. The API has always accepted 0–50, but
+  // the page never offered it, so every campaign went out at the default 10 —
+  // and at 10 a tier cannot show anything short of a 6–12 pp effect, which is
+  // not an effect anyone gets. Precision is bought by withholding more, not by
+  // sending more, so this is the one control on the page that decides whether
+  // the campaign will be measurable at all.
+  const [holdoutPct, setHoldoutPct] = useState(10)
 
   const params = useMemo(
-    () => `ltv_basis=${ltvBasis}&include_customers=false`,
-    [ltvBasis],
+    () => `ltv_basis=${ltvBasis}&holdout_pct=${holdoutPct}&include_customers=false`,
+    [ltvBasis, holdoutPct],
   )
   const { data, isLoading, error, refetch } = useSmsSegments(params)
 
@@ -152,7 +159,10 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
   }
 
   function handleExport() {
-    const p = new URLSearchParams({ ltv_basis: ltvBasis })
+    const p = new URLSearchParams({
+      ltv_basis: ltvBasis,
+      holdout_pct: String(holdoutPct),
+    })
     if (campaignValid) p.set('campaign', campaign)
     if (freeze) p.set('freeze', 'true')
     if (promocode.trim()) p.set('promocode', promocode.trim())
@@ -264,6 +274,39 @@ export const SmsSegmentCards = memo(function SmsSegmentCards() {
                               .reduce((n, s) => n + s.target, 0),
                           ),
                         })}
+                  </p>
+                </div>
+
+                {/* ── How much to withhold ─────────────────────────── */}
+                <div>
+                  <span className="text-xs text-slate-600">{t('sms.holdoutLabel')}</span>
+                  <div
+                    className="mt-1 flex flex-wrap gap-2"
+                    role="group"
+                    aria-label={t('sms.holdoutLabel')}
+                  >
+                    {[10, 20, 30, 40].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        aria-pressed={holdoutPct === pct}
+                        onClick={() => setHoldoutPct(pct)}
+                        className={`px-3 py-1.5 text-xs rounded-md border transition-colors
+                                    tabular-nums ${
+                          holdoutPct === pct
+                            ? 'border-purple-400 bg-purple-50 text-purple-800 font-medium'
+                            : 'border-slate-200 text-slate-600 hover:border-slate-300'
+                        }`}
+                      >
+                        {pct}%
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-500 leading-snug">
+                    {t('sms.holdoutHint', {
+                      target: formatNumber(data?.totals.target ?? 0),
+                      holdout: formatNumber(data?.totals.holdout ?? 0),
+                    })}
                   </p>
                 </div>
 

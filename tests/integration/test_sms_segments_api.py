@@ -743,7 +743,7 @@ class TestPartialSend:
                     {"buyerId": 2, "phone": "380962222222", "tier": "CORE"},
                 ]
 
-            async def record_sms_send(self, campaign, accepted, stoplisted, failed):
+            async def record_sms_send(self, campaign, accepted, stoplisted, failed, **kw):
                 recorded.update({"accepted": accepted, "stoplisted": stoplisted,
                                  "failed": failed})
                 return {"campaign": campaign, "accepted": len(accepted),

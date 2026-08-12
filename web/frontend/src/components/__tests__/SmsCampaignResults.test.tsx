@@ -58,7 +58,7 @@ function comparison(over: Partial<SmsComparison> = {}): SmsComparison {
 function response(over: Partial<SmsCampaignResultsResponse> = {}): SmsCampaignResultsResponse {
   return {
     campaign: 'aug-promo', sentAt: '2026-08-05T15:03:00Z', windowDays: 30,
-    ltvBasis: 'margin', holdoutPct: 10, promocode: null,
+    ltvBasis: 'margin', holdoutPct: 10, promocode: null, costTotal: null,
     overall: { target: stats(), holdout: stats({ contacts: 120, converted: 4 }), comparison: comparison() },
     segments: [
       { tier: 'VIP', target: stats(), holdout: stats({ contacts: 40, converted: 2 }), comparison: comparison() },
@@ -216,6 +216,29 @@ describe('SmsCampaignResults', () => {
     const overall = screen.getAllByRole('row')[1]
     expect(within(overall).getByText('₴12,000').className).toContain('slate-800')
     expect(within(overall).getByText('12.00 sms.perContact')).toBeTruthy()
+  })
+
+  it('states whether the campaign covered what it cost', () => {
+    renderWith(response({ costTotal: 5000 }))
+    // 4 000 added margin against 5 000 spent — it did not.
+    expect(screen.getByText('\u20B4-1,000')).toBeTruthy()
+    expect(screen.getByText('sms.payback')).toBeTruthy()
+  })
+
+  it('says nothing about payback when no cost was recorded', () => {
+    renderWith(response())          // costTotal: null
+    expect(screen.queryByText('sms.payback')).toBeNull()
+  })
+
+  it('marks the payback as an estimate while the verdict is withheld', () => {
+    renderWith(response({
+      costTotal: 1000,
+      overall: {
+        target: stats(), holdout: stats({ contacts: 120, converted: 1 }),
+        comparison: comparison({ verdictReady: false, eventsHoldout: 1 }),
+      },
+    }))
+    expect(screen.getAllByText('sms.moneyEstimate').length).toBeGreaterThan(0)
   })
 
   it('draws no table at all until the results have loaded', () => {
