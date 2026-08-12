@@ -386,6 +386,33 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
               </div>
             )}
 
+            {/* ── Did it pay for itself ───────────────────────────────── */}
+            {data.costTotal != null && data.overall.comparison && (
+              <div className="mt-3 flex flex-wrap items-baseline gap-x-2 gap-y-1
+                              text-sm tabular-nums">
+                <span className="text-slate-600">{t('sms.payback')}</span>
+                <span className="font-medium text-slate-800">
+                  {formatCurrency(
+                    data.overall.comparison.incrementalMarginTotal - data.costTotal,
+                  )}
+                </span>
+                <span className="text-xs text-slate-500">
+                  {t('sms.paybackParts', {
+                    margin: formatCurrency(data.overall.comparison.incrementalMarginTotal),
+                    cost: formatCurrency(data.costTotal),
+                  })}
+                </span>
+                {/* The verdict gates this the same way it gates the money
+                    columns: a margin nobody has measured minus a cost that is
+                    exact is not a profit, it is an exact number of a guess. */}
+                {!data.overall.comparison.verdictReady && (
+                  <span className="text-xs text-slate-400 italic">
+                    {t('sms.moneyEstimate')}
+                  </span>
+                )}
+              </div>
+            )}
+
             {data.promocode && (
               <p className="mt-3 text-xs text-slate-500">
                 {t('sms.promoOrders', {

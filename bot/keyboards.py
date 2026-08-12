@@ -13,19 +13,26 @@ from telegram import (
     KeyboardButton,
     ReplyKeyboardRemove
 )
-from bot.config import REPORT_TYPES, DATE_RANGES, SOURCE_NAMES
+from bot.config import SOURCE_NAMES
+from core.i18n import DEFAULT_LANGUAGE, normalize, t
 
 
 class ReplyKeyboards:
     """Factory class for creating reply keyboards (persistent bottom buttons)."""
 
     @staticmethod
-    def main_menu() -> ReplyKeyboardMarkup:
-        """Create persistent main menu keyboard at bottom of chat."""
+    def main_menu(lang: str = DEFAULT_LANGUAGE) -> ReplyKeyboardMarkup:
+        """Create persistent main menu keyboard at bottom of chat.
+
+        Telegram sends these back as plain text, so `bot/main.py` matches them
+        with a regex built from every translation of the same keys — see
+        `core.i18n.all_translations`. Never hand-write one of these labels
+        anywhere else.
+        """
         keyboard = [
-            [KeyboardButton("📊 Report"), KeyboardButton("🔍 Search")],
-            [KeyboardButton("📈 Dashboard"), KeyboardButton("⚙️ Settings")],
-            [KeyboardButton("ℹ️ Help")],
+            [KeyboardButton(t("btn.report", lang)), KeyboardButton(t("btn.search", lang))],
+            [KeyboardButton(t("btn.dashboard", lang)), KeyboardButton(t("btn.settings", lang))],
+            [KeyboardButton(t("btn.help", lang))],
         ]
         return ReplyKeyboardMarkup(
             keyboard,
@@ -43,64 +50,66 @@ class Keyboards:
     """Factory class for creating inline keyboards."""
 
     @staticmethod
-    def main_menu() -> InlineKeyboardMarkup:
+    def main_menu(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create main menu keyboard with Generate Report and Help buttons."""
         keyboard = [
-            [InlineKeyboardButton("📊 Generate Report", callback_data="cmd_report")],
-            [InlineKeyboardButton("ℹ️ Help", callback_data="cmd_help")]
+            [InlineKeyboardButton(t("btn.generate_report", lang), callback_data="cmd_report")],
+            [InlineKeyboardButton(t("btn.help", lang), callback_data="cmd_help")]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def help_menu() -> InlineKeyboardMarkup:
+    def help_menu(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create help menu keyboard."""
         keyboard = [
-            [InlineKeyboardButton("📊 Generate Report", callback_data="cmd_report")],
-            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="cmd_start")]
+            [InlineKeyboardButton(t("btn.generate_report", lang), callback_data="cmd_report")],
+            [InlineKeyboardButton(t("btn.back_to_main", lang), callback_data="cmd_start")]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def report_types(include_cancel: bool = True) -> InlineKeyboardMarkup:
+    def report_types(include_cancel: bool = True,
+                     lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create report type selection keyboard (Summary, Excel, TOP-10)."""
         keyboard = [
             [
-                InlineKeyboardButton(REPORT_TYPES["summary"], callback_data="report_type_summary"),
-                InlineKeyboardButton(REPORT_TYPES["excel"], callback_data="report_type_excel")
+                InlineKeyboardButton(t("report_type.summary", lang), callback_data="report_type_summary"),
+                InlineKeyboardButton(t("report_type.excel", lang), callback_data="report_type_excel")
             ],
             [
-                InlineKeyboardButton(REPORT_TYPES["top10"], callback_data="report_type_top10")
+                InlineKeyboardButton(t("report_type.top10", lang), callback_data="report_type_top10")
             ]
         ]
 
         if include_cancel:
-            keyboard.append([InlineKeyboardButton("🔙 Cancel", callback_data="go_back")])
+            keyboard.append([InlineKeyboardButton(t("btn.cancel", lang), callback_data="go_back")])
 
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def date_ranges(back_callback: str = "back_to_report_type") -> InlineKeyboardMarkup:
+    def date_ranges(back_callback: str = "back_to_report_type",
+                    lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create date range selection keyboard."""
         keyboard = [
             [
-                InlineKeyboardButton(DATE_RANGES["today"], callback_data="range_today"),
-                InlineKeyboardButton(DATE_RANGES["yesterday"], callback_data="range_yesterday")
+                InlineKeyboardButton(t("daterange.today", lang), callback_data="range_today"),
+                InlineKeyboardButton(t("daterange.yesterday", lang), callback_data="range_yesterday")
             ],
             [
-                InlineKeyboardButton(DATE_RANGES["thisweek"], callback_data="range_thisweek"),
-                InlineKeyboardButton(DATE_RANGES["thismonth"], callback_data="range_thismonth")
+                InlineKeyboardButton(t("daterange.thisweek", lang), callback_data="range_thisweek"),
+                InlineKeyboardButton(t("daterange.thismonth", lang), callback_data="range_thismonth")
             ],
             [
-                InlineKeyboardButton(DATE_RANGES["custom"], callback_data="range_custom")
+                InlineKeyboardButton(t("daterange.custom", lang), callback_data="range_custom")
             ],
             [
-                InlineKeyboardButton("🔙 Back", callback_data=back_callback)
+                InlineKeyboardButton(t("btn.back", lang), callback_data=back_callback)
             ]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def top10_sources() -> InlineKeyboardMarkup:
+    def top10_sources(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create TOP-10 source selection keyboard."""
         keyboard = [
             [
@@ -109,42 +118,45 @@ class Keyboards:
             ],
             [
                 InlineKeyboardButton("✈️ Telegram", callback_data="top10_source_2"),
-                InlineKeyboardButton("🌐 All Sources", callback_data="top10_source_all")
+                InlineKeyboardButton(t("btn.all_sources", lang), callback_data="top10_source_all")
             ],
             [
-                InlineKeyboardButton("🔙 Back", callback_data="back_to_report_type")
+                InlineKeyboardButton(t("btn.back", lang), callback_data="back_to_report_type")
             ]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def year_picker(years: List[int], back_callback: str) -> InlineKeyboardMarkup:
+    def year_picker(years: List[int], back_callback: str,
+                    lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create year picker keyboard with horizontal layout."""
         keyboard = []
         # Put all years in a single row (typically 2-3 years)
         year_row = [InlineKeyboardButton(str(year), callback_data=f"custom_start_year_{year}") for year in years]
         keyboard.append(year_row)
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_callback)])
+        keyboard.append([InlineKeyboardButton(t("btn.back", lang), callback_data=back_callback)])
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def end_year_picker(years: List[int], back_callback: str) -> InlineKeyboardMarkup:
+    def end_year_picker(years: List[int], back_callback: str,
+                    lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create end year picker keyboard with horizontal layout."""
         keyboard = []
         # Put all years in a single row (typically 2-3 years)
         year_row = [InlineKeyboardButton(str(year), callback_data=f"custom_end_year_{year}") for year in years]
         keyboard.append(year_row)
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_callback)])
+        keyboard.append([InlineKeyboardButton(t("btn.back", lang), callback_data=back_callback)])
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def month_picker(back_callback: str, start_callback_prefix: str = "custom_start_month") -> InlineKeyboardMarkup:
+    def month_picker(back_callback: str, start_callback_prefix: str = "custom_start_month",
+                     lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create month picker keyboard with 3 months per row."""
         keyboard = []
         months = []
 
         for month in range(1, 13):
-            month_name = calendar.month_abbr[month]
+            month_name = t(f"month.{month}", lang)
             months.append(InlineKeyboardButton(month_name, callback_data=f"{start_callback_prefix}_{month}"))
 
             if len(months) == 3:  # 3 months per row
@@ -154,17 +166,19 @@ class Keyboards:
         if months:  # Add any remaining months
             keyboard.append(months)
 
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_callback)])
+        keyboard.append([InlineKeyboardButton(t("btn.back", lang), callback_data=back_callback)])
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def month_picker_range(start_month: int, back_callback: str, callback_prefix: str = "custom_end_month") -> InlineKeyboardMarkup:
+    def month_picker_range(start_month: int, back_callback: str,
+                           callback_prefix: str = "custom_end_month",
+                           lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create month picker keyboard for a specific range of months."""
         keyboard = []
         months = []
 
         for month in range(start_month, 13):
-            month_name = calendar.month_abbr[month]
+            month_name = t(f"month.{month}", lang)
             months.append(InlineKeyboardButton(month_name, callback_data=f"{callback_prefix}_{month}"))
 
             if len(months) == 3:  # 3 months per row
@@ -174,11 +188,13 @@ class Keyboards:
         if months:  # Add any remaining months
             keyboard.append(months)
 
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_callback)])
+        keyboard.append([InlineKeyboardButton(t("btn.back", lang), callback_data=back_callback)])
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def day_picker(year: int, month: int, start_day: int, back_callback: str, callback_prefix: str = "custom_start_day") -> InlineKeyboardMarkup:
+    def day_picker(year: int, month: int, start_day: int, back_callback: str,
+                   callback_prefix: str = "custom_start_day",
+                   lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create day picker keyboard with 7 days per row."""
         num_days = calendar.monthrange(year, month)[1]
 
@@ -192,20 +208,22 @@ class Keyboards:
                 keyboard.append(days_row)
                 days_row = []
 
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_callback)])
+        keyboard.append([InlineKeyboardButton(t("btn.back", lang), callback_data=back_callback)])
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def post_report_actions(include_excel: bool = True, include_summary: bool = True, include_top10: bool = True) -> InlineKeyboardMarkup:
+    def post_report_actions(include_excel: bool = True, include_summary: bool = True,
+                            include_top10: bool = True,
+                            lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create post-report action buttons (New Report, Convert formats, Main Menu)."""
         keyboard = []
 
         # First row - format conversions
         format_row = []
         if include_excel:
-            format_row.append(InlineKeyboardButton("📑 Excel Version", callback_data="convert_to_excel"))
+            format_row.append(InlineKeyboardButton(t("btn.excel_version", lang), callback_data="convert_to_excel"))
         if include_summary:
-            format_row.append(InlineKeyboardButton("📊 Summary View", callback_data="convert_to_summary"))
+            format_row.append(InlineKeyboardButton(t("btn.summary_view", lang), callback_data="convert_to_summary"))
 
         if format_row:
             # Split into rows of 2 if needed
@@ -216,30 +234,30 @@ class Keyboards:
 
         # TOP-10 row
         if include_top10:
-            keyboard.append([InlineKeyboardButton("🏆 TOP-10 Products", callback_data="convert_to_top10")])
+            keyboard.append([InlineKeyboardButton(t("report_type.top10", lang), callback_data="convert_to_top10")])
 
         # Navigation row
         keyboard.append([
-            InlineKeyboardButton("📊 New Report", callback_data="cmd_report"),
-            InlineKeyboardButton("🏠 Main Menu", callback_data="cmd_start")
+            InlineKeyboardButton(t("btn.new_report", lang), callback_data="cmd_report"),
+            InlineKeyboardButton(t("btn.main_menu", lang), callback_data="cmd_start")
         ])
 
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def top10_post_report() -> InlineKeyboardMarkup:
+    def top10_post_report(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create post TOP-10 report action buttons."""
         keyboard = [
             [
-                InlineKeyboardButton("📊 New Report", callback_data="cmd_report"),
-                InlineKeyboardButton("🏆 Other Sources", callback_data="change_top10_source")
+                InlineKeyboardButton(t("btn.new_report", lang), callback_data="cmd_report"),
+                InlineKeyboardButton(t("btn.other_sources", lang), callback_data="change_top10_source")
             ],
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="cmd_start")]
+            [InlineKeyboardButton(t("btn.main_menu", lang), callback_data="cmd_start")]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def top10_quick_source_picker() -> InlineKeyboardMarkup:
+    def top10_quick_source_picker(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create quick TOP-10 source picker (for changing sources)."""
         keyboard = [
             [
@@ -248,70 +266,70 @@ class Keyboards:
             ],
             [
                 InlineKeyboardButton("✈️ Telegram", callback_data="quick_top10_2"),
-                InlineKeyboardButton("🌐 All Sources", callback_data="quick_top10_all")
+                InlineKeyboardButton(t("btn.all_sources", lang), callback_data="quick_top10_all")
             ],
             [
-                InlineKeyboardButton("🔙 Main Menu", callback_data="cmd_start")
+                InlineKeyboardButton(t("btn.main_menu", lang), callback_data="cmd_start")
             ]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def error_retry() -> InlineKeyboardMarkup:
+    def error_retry(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create error retry keyboard."""
         keyboard = [
-            [InlineKeyboardButton("🔄 Try Again", callback_data="cmd_report")],
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="cmd_start")]
+            [InlineKeyboardButton(t("btn.try_again", lang), callback_data="cmd_report")],
+            [InlineKeyboardButton(t("btn.main_menu", lang), callback_data="cmd_start")]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def cancel_operation() -> InlineKeyboardMarkup:
+    def cancel_operation(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create cancel operation keyboard."""
         keyboard = [
             [
-                InlineKeyboardButton("📊 New Report", callback_data="cmd_report"),
-                InlineKeyboardButton("ℹ️ Help", callback_data="cmd_help")
+                InlineKeyboardButton(t("btn.new_report", lang), callback_data="cmd_report"),
+                InlineKeyboardButton(t("btn.help", lang), callback_data="cmd_help")
             ],
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="cmd_start")]
+            [InlineKeyboardButton(t("btn.main_menu", lang), callback_data="cmd_start")]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def try_again_or_convert() -> InlineKeyboardMarkup:
+    def try_again_or_convert(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create try again or convert format keyboard (for Excel errors)."""
         keyboard = [
             [
-                InlineKeyboardButton("🔄 Try Again", callback_data="cmd_report"),
-                InlineKeyboardButton("📊 Summary Report", callback_data="convert_to_summary")
+                InlineKeyboardButton(t("btn.try_again", lang), callback_data="cmd_report"),
+                InlineKeyboardButton(t("btn.summary_report", lang), callback_data="convert_to_summary")
             ],
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="cmd_start")]
+            [InlineKeyboardButton(t("btn.main_menu", lang), callback_data="cmd_start")]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     # ─── Search Keyboards ──────────────────────────────────────────────────
 
     @staticmethod
-    def search_type() -> InlineKeyboardMarkup:
+    def search_type(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create search type selection keyboard."""
         keyboard = [
             [
-                InlineKeyboardButton("🔢 Order ID", callback_data="search_type_id"),
-                InlineKeyboardButton("📱 Phone", callback_data="search_type_phone")
+                InlineKeyboardButton(t("btn.order_id", lang), callback_data="search_type_id"),
+                InlineKeyboardButton(t("btn.phone", lang), callback_data="search_type_phone")
             ],
             [
-                InlineKeyboardButton("📧 Email", callback_data="search_type_email")
+                InlineKeyboardButton(t("btn.email", lang), callback_data="search_type_email")
             ],
-            [InlineKeyboardButton("🔙 Cancel", callback_data="cmd_start")]
+            [InlineKeyboardButton(t("btn.cancel", lang), callback_data="cmd_start")]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def search_results_actions() -> InlineKeyboardMarkup:
+    def search_results_actions(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create search results action buttons."""
         keyboard = [
-            [InlineKeyboardButton("🔍 New Search", callback_data="cmd_search")],
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="cmd_start")]
+            [InlineKeyboardButton(t("btn.new_search", lang), callback_data="cmd_search")],
+            [InlineKeyboardButton(t("btn.main_menu", lang), callback_data="cmd_start")]
         ]
         return InlineKeyboardMarkup(keyboard)
 
@@ -320,7 +338,7 @@ class Keyboards:
     @staticmethod
     def settings_menu(prefs: dict = None, lang: str = None) -> InlineKeyboardMarkup:
         """Create settings menu keyboard."""
-        from core.i18n import LANGUAGE_NAMES, normalize, t
+        from core.i18n import LANGUAGE_NAMES
 
         prefs = prefs or {}
         lang = normalize(lang if lang is not None else prefs.get('language'))
@@ -353,7 +371,7 @@ class Keyboards:
         flag in its internal tooling is not a neutral act; a language has a
         name, and the name is enough.
         """
-        from core.i18n import LANGUAGE_NAMES, LANGUAGES, normalize, t
+        from core.i18n import LANGUAGE_NAMES, LANGUAGES
 
         current = normalize(current)
         keyboard = [
@@ -367,7 +385,7 @@ class Keyboards:
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def settings_timezone() -> InlineKeyboardMarkup:
+    def settings_timezone(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create timezone selection keyboard."""
         keyboard = [
             [
@@ -382,33 +400,33 @@ class Keyboards:
                 InlineKeyboardButton("🇺🇸 New York", callback_data="set_tz_America/New_York"),
                 InlineKeyboardButton("🇺🇸 Los Angeles", callback_data="set_tz_America/Los_Angeles")
             ],
-            [InlineKeyboardButton("🔙 Back", callback_data="settings_back")]
+            [InlineKeyboardButton(t("btn.back", lang), callback_data="settings_back")]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def settings_date_range() -> InlineKeyboardMarkup:
+    def settings_date_range(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create default date range selection keyboard."""
         keyboard = [
             [
-                InlineKeyboardButton("📅 Today", callback_data="set_range_today"),
-                InlineKeyboardButton("📆 This Week", callback_data="set_range_week")
+                InlineKeyboardButton(t("daterange.today", lang), callback_data="set_range_today"),
+                InlineKeyboardButton(t("daterange.thisweek", lang), callback_data="set_range_week")
             ],
             [
-                InlineKeyboardButton("📆 This Month", callback_data="set_range_month")
+                InlineKeyboardButton(t("daterange.thismonth", lang), callback_data="set_range_month")
             ],
-            [InlineKeyboardButton("🔙 Back", callback_data="settings_back")]
+            [InlineKeyboardButton(t("btn.back", lang), callback_data="settings_back")]
         ]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def settings_notifications() -> InlineKeyboardMarkup:
+    def settings_notifications(lang: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
         """Create notifications toggle keyboard."""
         keyboard = [
             [
-                InlineKeyboardButton("✅ Enable", callback_data="set_notif_1"),
-                InlineKeyboardButton("❌ Disable", callback_data="set_notif_0")
+                InlineKeyboardButton(t("settings.enable", lang), callback_data="set_notif_1"),
+                InlineKeyboardButton(t("settings.disable", lang), callback_data="set_notif_0")
             ],
-            [InlineKeyboardButton("🔙 Back", callback_data="settings_back")]
+            [InlineKeyboardButton(t("btn.back", lang), callback_data="settings_back")]
         ]
         return InlineKeyboardMarkup(keyboard)

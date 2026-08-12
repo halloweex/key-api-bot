@@ -32,6 +32,7 @@ from bot.config import (
     REVENUE_MILESTONES
 )
 from bot import database
+from core.i18n import DEFAULT_LANGUAGE, LANGUAGE_NAMES, normalize, t
 from bot.keyboards import Keyboards, ReplyKeyboards
 from bot.formatters import Messages, ReportFormatters, create_progress_indicator, truncate_message, check_milestone
 from bot.services import ReportService, KeyCRMAPIError, ReportGenerationError
@@ -42,33 +43,29 @@ logger = logging.getLogger(__name__)
 # Session timeout in minutes
 SESSION_TIMEOUT_MINUTES = 30
 
+def _lang(update: Update) -> str:
+    """The language this reader chose, for whichever kind of update this is.
+
+    Called at the point of use rather than threaded through forty signatures.
+    It is a primary-key read on a local SQLite table a few times per message —
+    cheaper than the Telegram round trip it decorates, and it keeps every call
+    site honest instead of relying on someone remembering to pass a parameter.
+    """
+    user = update.effective_user
+    return database.get_user_language(user.id) if user else DEFAULT_LANGUAGE
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # AUTHORIZATION
 # ═══════════════════════════════════════════════════════════════════════════
 
-ACCESS_DENIED_MESSAGE = (
-    "🔒 <b>Access Denied</b>\n\n"
-    "Your access request was denied.\n"
-    "Please contact the administrator."
-)
+ACCESS_DENIED_MESSAGE = "access.denied"  # i18n key; see _msg() below
 
-ACCESS_FROZEN_MESSAGE = (
-    "🚫 <b>Access Frozen</b>\n\n"
-    "Your account has been frozen due to multiple denied requests.\n"
-    "Please contact the administrator directly."
-)
+ACCESS_FROZEN_MESSAGE = "access.frozen"
 
-ACCESS_PENDING_MESSAGE = (
-    "⏳ <b>Access Pending</b>\n\n"
-    "Your access request is being reviewed.\n"
-    "Please wait for admin approval."
-)
+ACCESS_PENDING_MESSAGE = "access.pending"
 
-REQUEST_ACCESS_MESSAGE = (
-    "🔐 <b>Access Required</b>\n\n"
-    "This bot requires authorization.\n"
-    "Click the button below to request access."
-)
+REQUEST_ACCESS_MESSAGE = "access.required"
 
 
 def authorized(func):
@@ -96,19 +93,19 @@ def authorized(func):
             logger.info(f"New user {user.id} (@{user.username}) - showing access request")
 
             keyboard = [[
-                InlineKeyboardButton("🔑 Request Access", callback_data="auth_request_access")
+                InlineKeyboardButton(t("btn.request_access", _lang(update)), callback_data="auth_request_access")
             ]]
 
             if update.callback_query:
                 await update.callback_query.answer()
                 await update.callback_query.edit_message_text(
-                    REQUEST_ACCESS_MESSAGE,
+                    t(REQUEST_ACCESS_MESSAGE, _lang(update)),
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="HTML"
                 )
             elif update.message:
                 await update.message.reply_text(
-                    REQUEST_ACCESS_MESSAGE,
+                    t(REQUEST_ACCESS_MESSAGE, _lang(update)),
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="HTML"
                 )
@@ -117,17 +114,17 @@ def authorized(func):
         if auth_status['status'] == database.STATUS_PENDING:
             logger.info(f"User {user.id} has pending request")
             if update.callback_query:
-                await update.callback_query.answer("Your request is pending", show_alert=True)
+                await update.callback_query.answer(t("access.pending_alert", _lang(update)), show_alert=True)
             elif update.message:
-                await update.message.reply_text(ACCESS_PENDING_MESSAGE, parse_mode="HTML")
+                await update.message.reply_text(t(ACCESS_PENDING_MESSAGE, _lang(update)), parse_mode="HTML")
             return ConversationHandler.END
 
         if auth_status['status'] == database.STATUS_FROZEN:
             logger.warning(f"Frozen user {user.id} attempted access")
             if update.callback_query:
-                await update.callback_query.answer("Account frozen", show_alert=True)
+                await update.callback_query.answer(t("access.frozen_alert", _lang(update)), show_alert=True)
             elif update.message:
-                await update.message.reply_text(ACCESS_FROZEN_MESSAGE, parse_mode="HTML")
+                await update.message.reply_text(t(ACCESS_FROZEN_MESSAGE, _lang(update)), parse_mode="HTML")
             return ConversationHandler.END
 
         if auth_status['status'] == database.STATUS_DENIED:
@@ -140,13 +137,13 @@ def authorized(func):
             if update.callback_query:
                 await update.callback_query.answer()
                 await update.callback_query.edit_message_text(
-                    ACCESS_DENIED_MESSAGE + "\n\nYou can request access again:",
+                    t(ACCESS_DENIED_MESSAGE, _lang(update)) + "\n\n" + t("access.request_again", _lang(update)),
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="HTML"
                 )
             elif update.message:
                 await update.message.reply_text(
-                    ACCESS_DENIED_MESSAGE + "\n\nYou can request access again:",
+                    t(ACCESS_DENIED_MESSAGE, _lang(update)) + "\n\n" + t("access.request_again", _lang(update)),
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="HTML"
                 )
@@ -258,19 +255,19 @@ def calculate_date_range(range_name: str) -> Tuple[date, date]:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Send a welcome message when /start is issued."""
     user = update.effective_user
-    welcome_message = Messages.welcome(user.first_name)
+    welcome_message = Messages.welcome(user.first_name, lang=_lang(update))
 
     try:
         # Send welcome with persistent reply keyboard
         await update.message.reply_text(
             welcome_message,
-            reply_markup=ReplyKeyboards.main_menu(),
+            reply_markup=ReplyKeyboards.main_menu(lang=_lang(update)),
             parse_mode="HTML"
         )
     except Exception as e:
         logger.error(f"Error sending welcome message: {e}")
         await update.message.reply_text(
-            f"Welcome, {user.first_name}! Use /report to generate a sales report or /help for assistance."
+            t("msg.welcome", _lang(update), name=user.first_name)
         )
 
     return ConversationHandler.END
@@ -281,17 +278,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Send a helpful message when /help is issued."""
     try:
         await update.message.reply_text(
-            Messages.help_text(),
-            reply_markup=Keyboards.help_menu(),
+            Messages.help_text(lang=_lang(update)),
+            reply_markup=Keyboards.help_menu(lang=_lang(update)),
             parse_mode="HTML"
         )
     except Exception:
         await update.message.reply_text(
-            "📊 KeyCRM Sales Report Bot 📊\n\n"
-            "Available Commands:\n"
-            "/report - Generate a sales report\n"
-            "/cancel - Cancel the current operation\n"
-            "/help - Show this help message"
+            t("msg.help", _lang(update), version=VERSION)
         )
 
 
@@ -303,8 +296,8 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         del user_data[user_id]
 
     await update.message.reply_text(
-        Messages.cancel(),
-        reply_markup=Keyboards.cancel_operation(),
+        Messages.cancel(lang=_lang(update)),
+        reply_markup=Keyboards.cancel_operation(lang=_lang(update)),
         parse_mode="HTML"
     )
 
@@ -323,16 +316,16 @@ async def command_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         return await report_command_from_callback(update, context)
     elif command == "help":
         await query.edit_message_text(
-            Messages.help_text(),
-            reply_markup=Keyboards.help_menu(),
+            Messages.help_text(lang=_lang(update)),
+            reply_markup=Keyboards.help_menu(lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationHandler.END
     elif command == "start":
         user = update.effective_user
         await query.edit_message_text(
-            Messages.welcome(user.first_name),
-            reply_markup=Keyboards.main_menu(),
+            Messages.welcome(user.first_name, lang=_lang(update)),
+            reply_markup=Keyboards.main_menu(lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationHandler.END
@@ -348,8 +341,8 @@ async def command_button_handler(update: Update, context: ContextTypes.DEFAULT_T
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Start the report generation process."""
     await update.message.reply_text(
-        Messages.report_selection(),
-        reply_markup=Keyboards.report_types(),
+        Messages.report_selection(lang=_lang(update)),
+        reply_markup=Keyboards.report_types(lang=_lang(update)),
         parse_mode="HTML"
     )
     return ConversationState.SELECTING_REPORT_TYPE
@@ -360,8 +353,8 @@ async def report_command_from_callback(update: Update, context: ContextTypes.DEF
     query = update.callback_query
 
     await query.edit_message_text(
-        Messages.report_selection(),
-        reply_markup=Keyboards.report_types(),
+        Messages.report_selection(lang=_lang(update)),
+        reply_markup=Keyboards.report_types(lang=_lang(update)),
         parse_mode="HTML"
     )
     return ConversationState.SELECTING_REPORT_TYPE
@@ -374,8 +367,8 @@ async def report_type_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if query.data == "go_back":
         await query.edit_message_text(
-            f"Operation canceled. Use /report to start again or select an option below:",
-            reply_markup=Keyboards.cancel_operation()
+            t("msg.cancelled", _lang(update)),
+            reply_markup=Keyboards.cancel_operation(lang=_lang(update))
         )
         return ConversationHandler.END
 
@@ -387,8 +380,8 @@ async def report_type_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         update_user_session(user_id, {"report_type": selected_type})
 
         await query.edit_message_text(
-            Messages.top10_source_selection(),
-            reply_markup=Keyboards.top10_sources(),
+            Messages.top10_source_selection(lang=_lang(update)),
+            reply_markup=Keyboards.top10_sources(lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_TOP10_SOURCE
@@ -398,8 +391,8 @@ async def report_type_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # Ask for date range
     await query.edit_message_text(
-        Messages.date_selection(selected_type),
-        reply_markup=Keyboards.date_ranges(),
+        Messages.date_selection(selected_type, lang=_lang(update)),
+        reply_markup=Keyboards.date_ranges(lang=_lang(update)),
         parse_mode="HTML"
     )
 
@@ -415,7 +408,7 @@ async def prepare_generate_report(update: Update, context: ContextTypes.DEFAULT_
     session = get_user_session(user_id)
     if not session or "start_date" not in session:
         await query.edit_message_text(
-            "⚠️ Session expired. Please start a new report with /report",
+            t("msg.session_expired", _lang(update)),
             parse_mode="HTML"
         )
         return ConversationHandler.END
@@ -426,7 +419,7 @@ async def prepare_generate_report(update: Update, context: ContextTypes.DEFAULT_
 
     # Show loading message
     await query.edit_message_text(
-        Messages.loading(report_type, start_date, end_date),
+        Messages.loading(report_type, start_date, end_date, lang=_lang(update)),
         parse_mode="HTML"
     )
 
@@ -450,16 +443,16 @@ async def date_range_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if query.data == "back_to_report_type":
         await query.edit_message_text(
-            Messages.report_selection(),
-            reply_markup=Keyboards.report_types(),
+            Messages.report_selection(lang=_lang(update)),
+            reply_markup=Keyboards.report_types(lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_REPORT_TYPE
 
     if query.data == "back_to_source_selection":
         await query.edit_message_text(
-            Messages.top10_source_selection(),
-            reply_markup=Keyboards.top10_sources(),
+            Messages.top10_source_selection(lang=_lang(update)),
+            reply_markup=Keyboards.top10_sources(lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_TOP10_SOURCE
@@ -477,14 +470,14 @@ async def date_range_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif selected_range == "custom":
         # Start custom date selection
         message = Messages.custom_date_prompt(
-            "Select START year",
-            1, 6,
-            f"Please select the start year for your custom date range:"
+            "pick.start_year", 1, 6,
+            t("pick.prompt_start_year", _lang(update)),
+            lang=_lang(update),
         )
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.year_picker(get_year_choices(), "back_to_date_range"),
+            reply_markup=Keyboards.year_picker(get_year_choices(), "back_to_date_range", lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_START_YEAR
@@ -499,8 +492,8 @@ async def back_to_date_range(update: Update, context: ContextTypes.DEFAULT_TYPE)
     report_type = user_data[user_id].get("report_type", "summary")
 
     await query.edit_message_text(
-        Messages.date_selection(report_type),
-        reply_markup=Keyboards.date_ranges(),
+        Messages.date_selection(report_type, lang=_lang(update)),
+        reply_markup=Keyboards.date_ranges(lang=_lang(update)),
         parse_mode="HTML"
     )
 
@@ -528,14 +521,14 @@ async def custom_start_year_callback(update: Update, context: ContextTypes.DEFAU
     user_data[user_id]["custom_start_year"] = selected_year
 
     message = Messages.custom_date_prompt(
-        "Select START month",
-        2, 6,
-        f"Selected start year: <b>{selected_year}</b>\nNow select the start month:"
+        "pick.start_month", 2, 6,
+        t("pick.prompt_start_month", _lang(update), year=selected_year),
+        lang=_lang(update),
     )
 
     await query.edit_message_text(
         message,
-        reply_markup=Keyboards.month_picker("back_to_custom_start_year"),
+        reply_markup=Keyboards.month_picker("back_to_custom_start_year", lang=_lang(update)),
         parse_mode="HTML"
     )
 
@@ -549,14 +542,14 @@ async def custom_start_month_callback(update: Update, context: ContextTypes.DEFA
 
     if query.data == "back_to_custom_start_year":
         message = Messages.custom_date_prompt(
-            "Select START year",
-            1, 6,
-            "Please select the start year:"
+            "pick.start_year", 1, 6,
+            t("pick.prompt_start_year", _lang(update)),
+            lang=_lang(update),
         )
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.year_picker(get_year_choices(), "back_to_date_range"),
+            reply_markup=Keyboards.year_picker(get_year_choices(), "back_to_date_range", lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_START_YEAR
@@ -566,17 +559,17 @@ async def custom_start_month_callback(update: Update, context: ContextTypes.DEFA
     user_data[user_id]["custom_start_month"] = selected_month
 
     selected_year = user_data[user_id]["custom_start_year"]
-    month_name = calendar.month_name[selected_month]
+    month_name = t(f"month.{selected_month}", _lang(update))
 
     message = Messages.custom_date_prompt(
-        "Select START day",
-        3, 6,
-        f"Selected start: <b>{month_name} {selected_year}</b>\nNow select the start day:"
+        "pick.start_day", 3, 6,
+        t("pick.prompt_start_day", _lang(update), month=month_name, year=selected_year),
+        lang=_lang(update),
     )
 
     await query.edit_message_text(
         message,
-        reply_markup=Keyboards.day_picker(selected_year, selected_month, 1, "back_to_custom_start_month"),
+        reply_markup=Keyboards.day_picker(selected_year, selected_month, 1, "back_to_custom_start_month", lang=_lang(update)),
         parse_mode="HTML"
     )
 
@@ -593,14 +586,14 @@ async def custom_start_day_callback(update: Update, context: ContextTypes.DEFAUL
         selected_year = user_data[user_id]["custom_start_year"]
 
         message = Messages.custom_date_prompt(
-            "Select START month",
-            2, 6,
-            f"Selected start year: <b>{selected_year}</b>\nNow select the start month:"
+            "pick.start_month", 2, 6,
+            t("pick.prompt_start_month", _lang(update), year=selected_year),
+            lang=_lang(update),
         )
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.month_picker("back_to_custom_start_year"),
+            reply_markup=Keyboards.month_picker("back_to_custom_start_year", lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_START_MONTH
@@ -621,30 +614,31 @@ async def custom_start_day_callback(update: Update, context: ContextTypes.DEFAUL
         user_data[user_id]["custom_end_year"] = current_year
 
         message = Messages.custom_date_prompt(
-            "Select END month",
-            4, 5,
-            f"Start date: <b>{start_date.strftime('%Y-%m-%d')}</b>\n"
-            f"End year: <b>{current_year}</b> (Current year)\n\n"
-            f"Now select the end month:"
+            "pick.end_month", 4, 5,
+            t("pick.prompt_end_month", _lang(update),
+              start=start_date.strftime('%d.%m.%Y'),
+              year=f"{current_year} {t('pick.current_year_note', _lang(update))}"),
+            lang=_lang(update),
         )
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.month_picker_range(start_date.month, "back_to_custom_start_day", "custom_end_month"),
+            reply_markup=Keyboards.month_picker_range(start_date.month, "back_to_custom_start_day", "custom_end_month", lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_END_MONTH
     else:
         # Show year selection for end date (from start year to current year)
         message = Messages.custom_date_prompt(
-            "Select END year",
-            4, 6,
-            f"Start date: <b>{start_date.strftime('%Y-%m-%d')}</b>\n\nNow select the end year:"
+            "pick.end_year", 4, 6,
+            t("pick.prompt_end_year", _lang(update),
+              start=start_date.strftime('%d.%m.%Y')),
+            lang=_lang(update),
         )
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.end_year_picker(get_year_choices(selected_year), "back_to_custom_start_day"),
+            reply_markup=Keyboards.end_year_picker(get_year_choices(selected_year), "back_to_custom_start_day", lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_END_YEAR
@@ -659,17 +653,17 @@ async def custom_end_year_callback(update: Update, context: ContextTypes.DEFAULT
         user_id = update.effective_user.id
         selected_year = user_data[user_id]["custom_start_year"]
         selected_month = user_data[user_id]["custom_start_month"]
-        month_name = calendar.month_name[selected_month]
+        month_name = t(f"month.{selected_month}", _lang(update))
 
         message = Messages.custom_date_prompt(
-            "Select START day",
-            3, 6,
-            f"Selected start: <b>{month_name} {selected_year}</b>\nNow select the start day:"
+            "pick.start_day", 3, 6,
+            t("pick.prompt_start_day", _lang(update), month=month_name, year=selected_year),
+            lang=_lang(update),
         )
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.day_picker(selected_year, selected_month, 1, "back_to_custom_start_month"),
+            reply_markup=Keyboards.day_picker(selected_year, selected_month, 1, "back_to_custom_start_month", lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_START_DAY
@@ -684,16 +678,15 @@ async def custom_end_year_callback(update: Update, context: ContextTypes.DEFAULT
         start_month = start_date.month
 
     message = Messages.custom_date_prompt(
-        "Select END month",
-        5, 6,
-        f"Start date: <b>{start_date.strftime('%Y-%m-%d')}</b>\n"
-        f"End year: <b>{selected_year}</b>\n\n"
-        f"Now select the end month:"
+        "pick.end_month", 5, 6,
+        t("pick.prompt_end_month", _lang(update),
+          start=start_date.strftime('%d.%m.%Y'), year=selected_year),
+        lang=_lang(update),
     )
 
     await query.edit_message_text(
         message,
-        reply_markup=Keyboards.month_picker_range(start_month, "back_to_custom_end_year", "custom_end_month"),
+        reply_markup=Keyboards.month_picker_range(start_month, "back_to_custom_end_year", "custom_end_month", lang=_lang(update)),
         parse_mode="HTML"
     )
 
@@ -710,14 +703,15 @@ async def custom_end_month_callback(update: Update, context: ContextTypes.DEFAUL
         start_date = user_data[user_id]["start_date"]
 
         message = Messages.custom_date_prompt(
-            "Select END year",
-            4, 6,
-            f"Start date: <b>{start_date.strftime('%Y-%m-%d')}</b>\n\nNow select the end year:"
+            "pick.end_year", 4, 6,
+            t("pick.prompt_end_year", _lang(update),
+              start=start_date.strftime('%d.%m.%Y')),
+            lang=_lang(update),
         )
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.end_year_picker(get_year_choices(start_date.year), "back_to_custom_start_day"),
+            reply_markup=Keyboards.end_year_picker(get_year_choices(start_date.year), "back_to_custom_start_day", lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_END_YEAR
@@ -732,18 +726,17 @@ async def custom_end_month_callback(update: Update, context: ContextTypes.DEFAUL
     if selected_year == start_date.year and selected_month == start_date.month:
         start_day = start_date.day
 
-    month_name = calendar.month_name[selected_month]
+    month_name = t(f"month.{selected_month}", _lang(update))
     message = Messages.custom_date_prompt(
-        "Select END day",
-        6, 6,
-        f"Start date: <b>{start_date.strftime('%Y-%m-%d')}</b>\n"
-        f"End date so far: <b>{month_name} {selected_year}</b>\n\n"
-        f"Now select the end day:"
+        "pick.end_day", 6, 6,
+        t("pick.prompt_end_day", _lang(update),
+          start=start_date.strftime('%d.%m.%Y'), month=month_name, year=selected_year),
+        lang=_lang(update),
     )
 
     await query.edit_message_text(
         message,
-        reply_markup=Keyboards.day_picker(selected_year, selected_month, start_day, "back_to_custom_end_month", "custom_end_day"),
+        reply_markup=Keyboards.day_picker(selected_year, selected_month, start_day, "back_to_custom_end_month", "custom_end_day", lang=_lang(update)),
         parse_mode="HTML"
     )
 
@@ -764,16 +757,15 @@ async def custom_end_day_callback(update: Update, context: ContextTypes.DEFAULT_
             start_month = start_date.month
 
         message = Messages.custom_date_prompt(
-            "Select END month",
-            5, 6,
-            f"Start date: <b>{start_date.strftime('%Y-%m-%d')}</b>\n"
-            f"End year: <b>{selected_year}</b>\n\n"
-            f"Now select the end month:"
+            "pick.end_month", 5, 6,
+            t("pick.prompt_end_month", _lang(update),
+              start=start_date.strftime('%d.%m.%Y'), year=selected_year),
+            lang=_lang(update),
         )
 
         await query.edit_message_text(
             message,
-            reply_markup=Keyboards.month_picker_range(start_month, "back_to_custom_end_year", "custom_end_month"),
+            reply_markup=Keyboards.month_picker_range(start_month, "back_to_custom_end_year", "custom_end_month", lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationState.SELECTING_CUSTOM_END_MONTH
@@ -811,8 +803,8 @@ async def top10_source_callback(update: Update, context: ContextTypes.DEFAULT_TY
     source_name = SOURCE_NAMES.get(source_selection, "Unknown")
 
     await query.edit_message_text(
-        Messages.top10_date_selection(source_name),
-        reply_markup=Keyboards.date_ranges("back_to_source_selection"),
+        Messages.top10_date_selection(source_name, lang=_lang(update)),
+        reply_markup=Keyboards.date_ranges("back_to_source_selection", lang=_lang(update)),
         parse_mode="HTML"
     )
     return ConversationState.SELECTING_DATE_RANGE
@@ -830,12 +822,12 @@ async def change_top10_source(update: Update, context: ContextTypes.DEFAULT_TYPE
         end_date = user_data[user_id]["end_date"]
 
         await query.edit_message_text(
-            Messages.top10_change_source(start_date, end_date),
-            reply_markup=Keyboards.top10_quick_source_picker(),
+            Messages.top10_change_source(start_date, end_date, lang=_lang(update)),
+            reply_markup=Keyboards.top10_quick_source_picker(lang=_lang(update)),
             parse_mode="HTML"
         )
     else:
-        await query.edit_message_text("Session expired. Please start a new report.", parse_mode="HTML")
+        await query.edit_message_text(t("msg.session_expired", _lang(update)), parse_mode="HTML")
 
     return ConversationHandler.END
 
@@ -852,8 +844,8 @@ async def quick_top10_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     session = get_user_session(user_id)
     if not session or "start_date" not in session:
         await query.edit_message_text(
-            "⚠️ Session expired. Please start a new report with /report",
-            reply_markup=Keyboards.error_retry(),
+            t("msg.session_expired", _lang(update)),
+            reply_markup=Keyboards.error_retry(lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationHandler.END
@@ -872,7 +864,7 @@ async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TY
     session = get_user_session(user_id)
     if not session or "start_date" not in session:
         await query.edit_message_text(
-            "⚠️ Session expired. Please start a new report with /report",
+            t("msg.session_expired", _lang(update)),
             parse_mode="HTML"
         )
         return ConversationHandler.END
@@ -935,16 +927,16 @@ async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TY
         # Final message
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="✅ Report generated successfully!",
-            reply_markup=Keyboards.top10_post_report(),
+            text=t("msg.report_ready", _lang(update)),
+            reply_markup=Keyboards.top10_post_report(lang=_lang(update)),
             parse_mode="HTML"
         )
 
     except KeyCRMAPIError as e:
         logger.error(f"KeyCRM API error in TOP-10: {e.message} - {e.error_details}")
         await query.edit_message_text(
-            "❌ <b>API Error</b>\n\nFailed to connect to KeyCRM. Please try again later.",
-            reply_markup=Keyboards.error_retry(),
+            t("msg.api_error", _lang(update)),
+            reply_markup=Keyboards.error_retry(lang=_lang(update)),
             parse_mode="HTML"
         )
 
@@ -952,7 +944,7 @@ async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TY
         logger.error(f"Error generating TOP-10 report: {e}", exc_info=True)
         await query.edit_message_text(
             f"⚠️ Error generating report: {str(e)}",
-            reply_markup=Keyboards.error_retry(),
+            reply_markup=Keyboards.error_retry(lang=_lang(update)),
             parse_mode="HTML"
         )
 
@@ -972,7 +964,7 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
     session = get_user_session(user_id)
     if not session or "start_date" not in session:
         await query.edit_message_text(
-            "⚠️ Session expired. Please start a new report with /report",
+            t("msg.session_expired", _lang(update)),
             parse_mode="HTML"
         )
         return ConversationHandler.END
@@ -1013,23 +1005,23 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
         # Send report
         await query.edit_message_text(
             report,
-            reply_markup=Keyboards.post_report_actions(include_summary=False),
+            reply_markup=Keyboards.post_report_actions(include_summary=False, lang=_lang(update)),
             parse_mode="HTML"
         )
 
     except KeyCRMAPIError as e:
         logger.error(f"KeyCRM API error: {e.message} - {e.error_details}")
         await query.edit_message_text(
-            "❌ <b>API Error</b>\n\nFailed to connect to KeyCRM. Please try again later.",
-            reply_markup=Keyboards.error_retry(),
+            t("msg.api_error", _lang(update)),
+            reply_markup=Keyboards.error_retry(lang=_lang(update)),
             parse_mode="HTML"
         )
 
     except Exception as e:
         logger.error(f"Error generating report: {e}", exc_info=True)
         await query.edit_message_text(
-            Messages.error(str(e)),
-            reply_markup=Keyboards.error_retry(),
+            Messages.error(str(e), lang=_lang(update)),
+            reply_markup=Keyboards.error_retry(lang=_lang(update)),
             parse_mode="HTML"
         )
 
@@ -1045,7 +1037,7 @@ async def generate_excel_report(update: Update, context: ContextTypes.DEFAULT_TY
     session = get_user_session(user_id)
     if not session or "start_date" not in session:
         await query.edit_message_text(
-            "⚠️ Session expired. Please start a new report with /report",
+            t("msg.session_expired", _lang(update)),
             parse_mode="HTML"
         )
         return ConversationHandler.END
@@ -1060,7 +1052,7 @@ async def generate_excel_report(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         # Show preparing message
         await query.edit_message_text(
-            Messages.excel_preparing(start_date, end_date),
+            Messages.excel_preparing(start_date, end_date, lang=_lang(update)),
             parse_mode="HTML"
         )
 
@@ -1076,22 +1068,22 @@ async def generate_excel_report(update: Update, context: ContextTypes.DEFAULT_TY
 
         if success:
             await query.edit_message_text(
-                Messages.excel_success(start_date, end_date),
-                reply_markup=Keyboards.post_report_actions(include_excel=False),
+                Messages.excel_success(start_date, end_date, lang=_lang(update)),
+                reply_markup=Keyboards.post_report_actions(include_excel=False, lang=_lang(update)),
                 parse_mode="HTML"
             )
         else:
             await query.edit_message_text(
-                Messages.excel_error(),
-                reply_markup=Keyboards.try_again_or_convert(),
+                Messages.excel_error(lang=_lang(update)),
+                reply_markup=Keyboards.try_again_or_convert(lang=_lang(update)),
                 parse_mode="HTML"
             )
 
     except Exception as e:
         logger.error(f"Error generating Excel report: {e}")
         await query.edit_message_text(
-            Messages.excel_error(str(e)),
-            reply_markup=Keyboards.try_again_or_convert(),
+            Messages.excel_error(str(e), lang=_lang(update)),
+            reply_markup=Keyboards.try_again_or_convert(lang=_lang(update)),
             parse_mode="HTML"
         )
 
@@ -1122,8 +1114,8 @@ async def convert_report_format(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         # No previous date range, need to start from scratch
         await query.edit_message_text(
-            f"Please start a new report to generate a {conversion_type} report.",
-            reply_markup=Keyboards.cancel_operation(),
+            t("msg.session_expired", _lang(update)),
+            reply_markup=Keyboards.cancel_operation(lang=_lang(update)),
             parse_mode="HTML"
         )
         return ConversationHandler.END
@@ -1165,8 +1157,8 @@ async def quick_report_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def reply_keyboard_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle '📊 Report' button from reply keyboard."""
     await update.message.reply_text(
-        Messages.report_selection(),
-        reply_markup=Keyboards.report_types(),
+        Messages.report_selection(lang=_lang(update)),
+        reply_markup=Keyboards.report_types(lang=_lang(update)),
         parse_mode="HTML"
     )
     return ConversationState.SELECTING_REPORT_TYPE
@@ -1176,8 +1168,8 @@ async def reply_keyboard_report(update: Update, context: ContextTypes.DEFAULT_TY
 async def reply_keyboard_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle 'ℹ️ Help' button from reply keyboard."""
     await update.message.reply_text(
-        Messages.help_text(),
-        reply_markup=Keyboards.help_menu(),
+        Messages.help_text(lang=_lang(update)),
+        reply_markup=Keyboards.help_menu(lang=_lang(update)),
         parse_mode="HTML"
     )
 
@@ -1185,10 +1177,9 @@ async def reply_keyboard_help(update: Update, context: ContextTypes.DEFAULT_TYPE
 @authorized
 async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send dashboard link when /dashboard is issued."""
-    keyboard = [[InlineKeyboardButton("📈 Open Dashboard", url=DASHBOARD_URL)]]
+    keyboard = [[InlineKeyboardButton(t("btn.open_dashboard", _lang(update)), url=DASHBOARD_URL)]]
     await update.message.reply_text(
-        f"📈 <b>Sales Dashboard</b>\n\n"
-        f"View interactive charts and analytics:",
+        t("msg.dashboard", _lang(update)),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1236,13 +1227,7 @@ async def auth_request_access(update: Update, context: ContextTypes.DEFAULT_TYPE
         await notify_admins_new_request(context, user)
 
         await query.edit_message_text(
-            "✅ <b>Access Requested!</b>\n\n"
-            f"Your request has been sent to the administrator.\n\n"
-            f"<b>Your details:</b>\n"
-            f"• User ID: <code>{user.id}</code>\n"
-            f"• Username: @{user.username or 'N/A'}\n"
-            f"• Name: {user.first_name or ''} {user.last_name or ''}\n\n"
-            "⏳ Please wait for approval.",
+            t("access.requested", _lang(update)),
             parse_mode="HTML"
         )
     else:
@@ -1250,12 +1235,12 @@ async def auth_request_access(update: Update, context: ContextTypes.DEFAULT_TYPE
         status = database.get_user_auth_status(user.id)
         if status['status'] == database.STATUS_PENDING:
             await query.edit_message_text(
-                ACCESS_PENDING_MESSAGE,
+                t(ACCESS_PENDING_MESSAGE, _lang(update)),
                 parse_mode="HTML"
             )
         elif status['status'] == database.STATUS_DENIED:
             await query.edit_message_text(
-                ACCESS_DENIED_MESSAGE,
+                t(ACCESS_DENIED_MESSAGE, _lang(update)),
                 parse_mode="HTML"
             )
 
@@ -1269,11 +1254,11 @@ async def notify_admins_new_request(context: ContextTypes.DEFAULT_TYPE, user) ->
         return
 
     message = (
-        "🔔 <b>New Access Request</b>\n\n"
-        f"<b>User ID:</b> <code>{user.id}</code>\n"
-        f"<b>Username:</b> @{user.username or 'N/A'}\n"
-        f"<b>Name:</b> {user.first_name or ''} {user.last_name or ''}\n\n"
-        "Choose an action:"
+        t("admin.new_request", DEFAULT_LANGUAGE) + "\n\n"
+        f"<code>{user.id}</code>\n"
+        f"@{user.username or '—'}\n"
+        f"{user.first_name or ''} {user.last_name or ''}\n\n"
+        + t("admin.choose_action", DEFAULT_LANGUAGE)
     )
 
     keyboard = [
@@ -1302,7 +1287,7 @@ async def auth_approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     admin = update.effective_user
 
     if not is_admin(admin.id):
-        await query.answer("You are not authorized to approve users", show_alert=True)
+        await query.answer(t("admin.only", _lang(update)), show_alert=True)
         return
 
     # Extract user_id from callback data
@@ -1312,13 +1297,13 @@ async def auth_approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     success = database.approve_user(target_user_id, admin.id)
 
     if success:
-        await query.answer("User approved!")
+        await query.answer(t("admin.user_approved", _lang(update)))
 
         # Update admin message
         user_info = database.get_user_auth_status(target_user_id)
         await query.edit_message_text(
-            f"✅ <b>User Approved</b>\n\n"
-            f"<b>User ID:</b> <code>{target_user_id}</code>\n"
+            f"✅ <b>{t('admin.user_approved', _lang(update))}</b>\n\n"
+            f"<code>{target_user_id}</code>\n"
             f"<b>Username:</b> @{user_info.get('username') or 'N/A'}\n"
             f"<b>Name:</b> {user_info.get('first_name') or ''} {user_info.get('last_name') or ''}\n\n"
             f"<i>Approved by you</i>",
@@ -1330,17 +1315,14 @@ async def auth_approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await context.bot.send_message(
                 chat_id=target_user_id,
                 text=(
-                    "🎉 <b>Access Granted!</b>\n\n"
-                    "Your access request has been approved.\n"
-                    "You can now use the bot.\n\n"
-                    "Use /start to begin."
+                    t("access.granted", database.get_user_language(target_user_id))
                 ),
                 parse_mode="HTML"
             )
         except Exception as e:
             logger.error(f"Failed to notify user {target_user_id} about approval: {e}")
     else:
-        await query.answer("Failed to approve user", show_alert=True)
+        await query.answer(t("admin.action_failed", _lang(update)), show_alert=True)
 
 
 async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1349,7 +1331,7 @@ async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     admin = update.effective_user
 
     if not is_admin(admin.id):
-        await query.answer("You are not authorized to deny users", show_alert=True)
+        await query.answer(t("admin.only", _lang(update)), show_alert=True)
         return
 
     # Extract user_id from callback data
@@ -1364,12 +1346,12 @@ async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if success:
         if is_frozen:
-            await query.answer("User frozen!")
+            await query.answer(t("admin.user_frozen", _lang(update)))
 
             # Update admin message
             await query.edit_message_text(
-                f"🚫 <b>User Frozen</b>\n\n"
-                f"<b>User ID:</b> <code>{target_user_id}</code>\n"
+                f"🚫 <b>{t('admin.user_frozen', _lang(update))}</b>\n\n"
+                f"<code>{target_user_id}</code>\n"
                 f"<b>Username:</b> @{user_info.get('username') or 'N/A'}\n"
                 f"<b>Name:</b> {user_info.get('first_name') or ''} {user_info.get('last_name') or ''}\n\n"
                 f"<i>Denied {denial_count} times - account frozen</i>",
@@ -1380,18 +1362,18 @@ async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             try:
                 await context.bot.send_message(
                     chat_id=target_user_id,
-                    text=ACCESS_FROZEN_MESSAGE,
+                    text=t(ACCESS_FROZEN_MESSAGE, _lang(update)),
                     parse_mode="HTML"
                 )
             except Exception as e:
                 logger.error(f"Failed to notify user {target_user_id} about freeze: {e}")
         else:
-            await query.answer("User denied!")
+            await query.answer(t("admin.user_denied", _lang(update)))
 
             # Update admin message
             await query.edit_message_text(
-                f"❌ <b>User Denied</b>\n\n"
-                f"<b>User ID:</b> <code>{target_user_id}</code>\n"
+                f"❌ <b>{t('admin.user_denied', _lang(update))}</b>\n\n"
+                f"<code>{target_user_id}</code>\n"
                 f"<b>Username:</b> @{user_info.get('username') or 'N/A'}\n"
                 f"<b>Name:</b> {user_info.get('first_name') or ''} {user_info.get('last_name') or ''}\n\n"
                 f"<i>Denied by you ({denial_count}/{database.MAX_DENIAL_COUNT})</i>",
@@ -1412,7 +1394,7 @@ async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except Exception as e:
                 logger.error(f"Failed to notify user {target_user_id} about denial: {e}")
     else:
-        await query.answer("Failed to deny user", show_alert=True)
+        await query.answer(t("admin.action_failed", _lang(update)), show_alert=True)
 
 
 async def auth_request_again(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1427,7 +1409,7 @@ async def auth_request_again(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if was_frozen:
         await query.edit_message_text(
-            ACCESS_FROZEN_MESSAGE,
+            t(ACCESS_FROZEN_MESSAGE, _lang(update)),
             parse_mode="HTML"
         )
     elif success:
@@ -1435,14 +1417,12 @@ async def auth_request_again(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await notify_admins_new_request(context, user)
 
         await query.edit_message_text(
-            "✅ <b>Access Re-Requested!</b>\n\n"
-            f"Your new request has been sent to the administrator.\n\n"
-            "⏳ Please wait for approval.",
+            t("access.requested", _lang(update)),
             parse_mode="HTML"
         )
     else:
         await query.edit_message_text(
-            "⚠️ Failed to submit request. Please try /start again.",
+            t("msg.request_failed", _lang(update)),
             parse_mode="HTML"
         )
 
@@ -1453,7 +1433,7 @@ async def auth_request_again(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ADMIN USER MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _build_user_list_ui() -> Tuple[str, List[List[InlineKeyboardButton]]]:
+def _build_user_list_ui(lang: str = DEFAULT_LANGUAGE) -> Tuple[str, List[List[InlineKeyboardButton]]]:
     """Build user list message and keyboard for admin management.
 
     Returns:
@@ -1470,45 +1450,45 @@ def _build_user_list_ui() -> Tuple[str, List[List[InlineKeyboardButton]]]:
 
     # Approved users
     if users:
-        message += "👥 <b>Approved Users</b>\n\n"
+        message += t("admin.approved_users", lang) + "\n\n"
         for u in users[:15]:
             username = f"@{u['username']}" if u.get('username') else "N/A"
             name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
             last_active = u.get('last_activity') or u.get('reviewed_at') or "Never"
 
             message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
-            message += f"  Last active: {last_active}\n\n"
+            message += f"  {t('admin.last_active', lang)}: {last_active}\n\n"
 
             keyboard.append([
                 InlineKeyboardButton(
-                    f"🚫 Revoke {name[:15]}",
+                    t("admin.revoke", lang, name=name[:15]),
                     callback_data=f"admin_revoke_{u['user_id']}"
                 )
             ])
 
         if len(users) > 15:
-            message += f"<i>...and {len(users) - 15} more approved users</i>\n\n"
+            message += f"<i>{t('admin.and_more', lang, count=len(users) - 15)}</i>\n\n"
 
     # Frozen users
     if frozen_users:
-        message += "🧊 <b>Frozen Users</b>\n\n"
+        message += t("admin.frozen_users", lang) + "\n\n"
         for u in frozen_users[:10]:
             username = f"@{u['username']}" if u.get('username') else "N/A"
             name = f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip() or "Unknown"
             frozen_at = u.get('reviewed_at') or "Unknown"
 
             message += f"• <code>{u['user_id']}</code> - {name} ({username})\n"
-            message += f"  Frozen: {frozen_at}\n\n"
+            message += f"  {t('admin.frozen_at', lang)}: {frozen_at}\n\n"
 
             keyboard.append([
                 InlineKeyboardButton(
-                    f"🔓 Unfreeze {name[:15]}",
+                    t("admin.unfreeze", lang, name=name[:15]),
                     callback_data=f"admin_unfreeze_{u['user_id']}"
                 )
             ])
 
         if len(frozen_users) > 10:
-            message += f"<i>...and {len(frozen_users) - 10} more frozen users</i>\n"
+            message += f"<i>{t('admin.and_more', lang, count=len(frozen_users) - 10)}</i>\n"
 
     keyboard.append([InlineKeyboardButton("🔙 Close", callback_data="admin_close")])
     return message, keyboard
@@ -1519,14 +1499,14 @@ async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = update.effective_user
 
     if not is_admin(user.id):
-        await update.message.reply_text("⛔ Admin access required.", parse_mode="HTML")
+        await update.message.reply_text(t("admin.only", _lang(update)), parse_mode="HTML")
         return
 
-    message, keyboard = _build_user_list_ui()
+    message, keyboard = _build_user_list_ui(_lang(update))
 
     if message is None:
         await update.message.reply_text(
-            "📋 <b>No users</b>\n\nNo approved or frozen users.",
+            t("admin.no_users", _lang(update)),
             parse_mode="HTML"
         )
         return
@@ -1544,14 +1524,14 @@ async def admin_revoke_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     admin = update.effective_user
 
     if not is_admin(admin.id):
-        await query.answer("Admin access required", show_alert=True)
+        await query.answer(t("admin.only", _lang(update)), show_alert=True)
         return
 
     target_user_id = int(query.data.split('_')[-1])
     user_info = database.get_user_auth_status(target_user_id)
 
     if not user_info:
-        await query.answer("User not found", show_alert=True)
+        await query.answer(t("admin.user_not_found", _lang(update)), show_alert=True)
         return
 
     # Revoke access
@@ -1562,16 +1542,16 @@ async def admin_revoke_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Refresh the user list (silent revoke - no notification to user)
         await show_updated_user_list(query, admin.id)
     else:
-        await query.answer("Failed to revoke access", show_alert=True)
+        await query.answer(t("admin.action_failed", _lang(update)), show_alert=True)
 
 
 async def show_updated_user_list(query, admin_id: int) -> None:
     """Show updated user list after revocation/unfreeze."""
-    message, keyboard = _build_user_list_ui()
+    message, keyboard = _build_user_list_ui(_lang(update))
 
     if message is None:
         await query.edit_message_text(
-            "📋 <b>No users</b>\n\nNo approved or frozen users.",
+            t("admin.no_users", _lang(update)),
             parse_mode="HTML"
         )
         return
@@ -1589,34 +1569,32 @@ async def admin_unfreeze_user(update: Update, context: ContextTypes.DEFAULT_TYPE
     admin = update.effective_user
 
     if not is_admin(admin.id):
-        await query.answer("Admin access required", show_alert=True)
+        await query.answer(t("admin.only", _lang(update)), show_alert=True)
         return
 
     target_user_id = int(query.data.split('_')[-1])
     user_info = database.get_user_auth_status(target_user_id)
 
     if not user_info:
-        await query.answer("User not found", show_alert=True)
+        await query.answer(t("admin.user_not_found", _lang(update)), show_alert=True)
         return
 
     # Unfreeze user
     success = database.unfreeze_user(target_user_id, admin.id)
 
     if success:
-        await query.answer("User unfrozen!")
+        await query.answer(t("admin.user_unfrozen", _lang(update)))
 
         # Notify the user
         try:
+            target_lang = database.get_user_language(target_user_id)
             keyboard = [[
-                InlineKeyboardButton("🔑 Request Access", callback_data="auth_request_access")
+                InlineKeyboardButton(t("btn.request_access", target_lang),
+                                     callback_data="auth_request_access")
             ]]
             await context.bot.send_message(
                 chat_id=target_user_id,
-                text=(
-                    "🔓 <b>Account Unfrozen</b>\n\n"
-                    "Your account has been unfrozen by an administrator.\n"
-                    "You can now request access again:"
-                ),
+                text=t("access.unfrozen", target_lang),
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="HTML"
             )
@@ -1626,14 +1604,14 @@ async def admin_unfreeze_user(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Refresh the user list
         await show_updated_user_list(query, admin.id)
     else:
-        await query.answer("Failed to unfreeze user", show_alert=True)
+        await query.answer(t("admin.action_failed", _lang(update)), show_alert=True)
 
 
 async def admin_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Close admin panel."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("✅ Admin panel closed.", parse_mode="HTML")
+    await query.edit_message_text(t("admin.panel_closed", _lang(update)), parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1644,9 +1622,9 @@ async def admin_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle /search command - start order search."""
     await update.message.reply_text(
-        "🔍 <b>Search Orders</b>\n\n"
-        "How would you like to search?",
-        reply_markup=Keyboards.search_type(),
+        f"{t('search.title', _lang(update))}\n\n"
+        f"{t('search.choose_type', _lang(update))}",
+        reply_markup=Keyboards.search_type(lang=_lang(update)),
         parse_mode="HTML"
     )
     return ConversationState.SEARCH_WAITING_QUERY
@@ -1659,9 +1637,9 @@ async def search_command_from_callback(update: Update, context: ContextTypes.DEF
     await query.answer()
 
     await query.edit_message_text(
-        "🔍 <b>Search Orders</b>\n\n"
-        "How would you like to search?",
-        reply_markup=Keyboards.search_type(),
+        f"{t('search.title', _lang(update))}\n\n"
+        f"{t('search.choose_type', _lang(update))}",
+        reply_markup=Keyboards.search_type(lang=_lang(update)),
         parse_mode="HTML"
     )
     return ConversationState.SEARCH_WAITING_QUERY
@@ -1677,15 +1655,13 @@ async def search_type_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     update_user_session(user_id, {"search_type": search_type})
 
-    type_labels = {
-        "id": "Order ID",
-        "phone": "Phone Number",
-        "email": "Email"
-    }
+    lang = _lang(update)
+    prompts = {"id": "search.prompt_id", "phone": "search.prompt_phone",
+               "email": "search.prompt_email"}
 
     await query.edit_message_text(
-        f"🔍 <b>Search by {type_labels.get(search_type, search_type)}</b>\n\n"
-        f"Please enter {type_labels.get(search_type, 'your query')}:",
+        f"{t('search.title', lang)}\n\n"
+        f"{t(prompts.get(search_type, 'search.choose_type'), lang)}",
         parse_mode="HTML"
     )
     return ConversationState.SEARCH_WAITING_QUERY
@@ -1701,7 +1677,7 @@ async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # Show searching message
     searching_msg = await update.message.reply_text(
-        "🔍 Searching...",
+        t("search.searching", _lang(update)),
         parse_mode="HTML"
     )
 
@@ -1718,27 +1694,27 @@ async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if not orders:
             await searching_msg.edit_text(
-                f"🔍 <b>No Results</b>\n\n"
-                f"No orders found for: <code>{query_text}</code>",
-                reply_markup=Keyboards.search_results_actions(),
+                t("search.nothing_found", _lang(update), query=query_text),
+                reply_markup=Keyboards.search_results_actions(lang=_lang(update)),
                 parse_mode="HTML"
             )
             return ConversationHandler.END
 
         # Format results
-        message = f"🔍 <b>Search Results</b>\n"
-        message += f"Found {len(orders)} order(s) for: <code>{query_text}</code>\n\n"
+        lang = _lang(update)
+        message = f"{t('search.results_title', lang)}\n"
+        message += t("search.found", lang, count=len(orders), query=query_text) + "\n\n"
 
         for order in orders[:5]:  # Limit to 5 results
             order_id = order.get("id", "?")
-            status = order.get("status_group", {}).get("name", "Unknown")
+            status = order.get("status_group", {}).get("name", t("search.unknown", lang))
             buyer = order.get("buyer", {})
-            buyer_name = buyer.get("full_name", "Unknown")
+            buyer_name = buyer.get("full_name", t("search.unknown", lang))
             buyer_phone = buyer.get("phone", "N/A")
             total = order.get("grand_total", 0)
             created = order.get("created_at", "")[:10]
 
-            message += f"📦 <b>Order #{order_id}</b>\n"
+            message += f"📦 <b>{t('search.order', lang)} #{order_id}</b>\n"
             message += f"   👤 {buyer_name}\n"
             message += f"   📱 {buyer_phone}\n"
             message += f"   💰 {total} UAH\n"
@@ -1746,19 +1722,19 @@ async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             message += f"   📅 {created}\n\n"
 
         if len(orders) > 5:
-            message += f"<i>...and {len(orders) - 5} more results</i>\n"
+            message += f"<i>{t('search.more', lang, count=len(orders) - 5)}</i>\n"
 
         await searching_msg.edit_text(
             message,
-            reply_markup=Keyboards.search_results_actions(),
+            reply_markup=Keyboards.search_results_actions(lang=_lang(update)),
             parse_mode="HTML"
         )
 
     except Exception as e:
         logger.error(f"Search error: {e}", exc_info=True)
         await searching_msg.edit_text(
-            f"⚠️ Search failed: {str(e)}",
-            reply_markup=Keyboards.search_results_actions(),
+            t("search.failed", _lang(update), error=str(e)),
+            reply_markup=Keyboards.search_results_actions(lang=_lang(update)),
             parse_mode="HTML"
         )
 
@@ -1772,8 +1748,6 @@ async def search_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 @authorized
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle /settings command."""
-    from core.i18n import t
-
     user_id = update.effective_user.id
     prefs = database.get_user_preferences(user_id) or {}
     lang = database.get_user_language(user_id)
@@ -1792,8 +1766,6 @@ async def settings_command_from_callback(update: Update, context: ContextTypes.D
     query = update.callback_query
     await query.answer()
 
-    from core.i18n import t
-
     user_id = update.effective_user.id
     prefs = database.get_user_preferences(user_id) or {}
     lang = database.get_user_language(user_id)
@@ -1810,8 +1782,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """Handle settings menu callbacks."""
     query = update.callback_query
     await query.answer()
-
-    from core.i18n import LANGUAGE_NAMES, normalize, t
 
     user_id = update.effective_user.id
     action = query.data
@@ -1833,25 +1803,25 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(
             f"✅ {t('settings.language_set', chosen, name=LANGUAGE_NAMES[chosen])}\n\n"
             f"⚙️ <b>{t('settings.title', chosen)}</b>",
-            reply_markup=Keyboards.settings_menu(prefs, chosen),
+            reply_markup=Keyboards.settings_menu(prefs, chosen, lang=_lang(update)),
             parse_mode="HTML"
         )
     elif action == "settings_timezone":
         await query.edit_message_text(
             f"🌍 <b>{t('settings.timezone', lang)}</b>",
-            reply_markup=Keyboards.settings_timezone(),
+            reply_markup=Keyboards.settings_timezone(lang=_lang(update)),
             parse_mode="HTML"
         )
     elif action == "settings_date_range":
         await query.edit_message_text(
             f"📅 <b>{t('settings.date_range', lang)}</b>",
-            reply_markup=Keyboards.settings_date_range(),
+            reply_markup=Keyboards.settings_date_range(lang=_lang(update)),
             parse_mode="HTML"
         )
     elif action == "settings_notifications":
         await query.edit_message_text(
             f"🔔 <b>{t('settings.notifications', lang)}</b>",
-            reply_markup=Keyboards.settings_notifications(),
+            reply_markup=Keyboards.settings_notifications(lang=_lang(update)),
             parse_mode="HTML"
         )
     elif action == "settings_back":

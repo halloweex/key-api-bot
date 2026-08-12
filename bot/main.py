@@ -4,6 +4,7 @@ Main entry point for the refactored KeyCRM Telegram Bot.
 This module wires together all components and starts the bot.
 """
 import logging
+import re
 from telegram import Update, BotCommand, MenuButtonWebApp, WebAppInfo
 from telegram.ext import (
     Application,
@@ -16,6 +17,7 @@ from telegram.ext import (
 )
 
 from bot.config import BOT_TOKEN, KEYCRM_API_KEY, ADMIN_USER_IDS, DASHBOARD_URL, ConversationState
+from core.i18n import LANGUAGES, all_translations, t
 from core.keycrm import SyncKeyCRMClient as KeyCRMClient
 from bot.services import ReportService
 from bot import handlers, handlers_legacy
@@ -96,18 +98,22 @@ async def send_admin_message(
 async def setup_command_menu(application: Application) -> None:
     """Set up the bot commands in the menu."""
     try:
-        commands = [
-            BotCommand("start", "👋 Start the bot"),
-            BotCommand("report", "📊 Generate a sales report"),
-            BotCommand("search", "🔍 Search orders"),
-            BotCommand("settings", "⚙️ User settings"),
-            BotCommand("dashboard", "📈 Open sales dashboard"),
-            BotCommand("help", "ℹ️ Show help information"),
-            BotCommand("cancel", "🛑 Cancel current operation")
-        ]
+        names = ("start", "report", "search", "settings", "dashboard",
+                 "help", "cancel")
 
+        # Telegram keeps one command list per language and picks by the
+        # client's own locale, so this is set once per language rather than
+        # per user. The default list stays English for anyone whose Telegram
+        # is set to something we do not translate.
         logger.info("Setting bot commands...")
-        await application.bot.set_my_commands(commands)
+        await application.bot.set_my_commands(
+            [BotCommand(n, t(f"cmd.{n}")) for n in names]
+        )
+        for code in LANGUAGES:
+            await application.bot.set_my_commands(
+                [BotCommand(n, t(f"cmd.{n}", code)) for n in names],
+                language_code=code,
+            )
         logger.info("Bot commands set successfully")
 
         # Set menu button to open web dashboard (requires HTTPS)
@@ -125,6 +131,19 @@ async def setup_command_menu(application: Application) -> None:
         logger.error(f"Error in setup_command_menu: {e}", exc_info=True)
 
 
+def button_filter(key: str) -> filters.BaseFilter:
+    """Match a reply-keyboard button in any language it is drawn in.
+
+    Telegram sends a tap back as the button's plain text, so the matcher has to
+    recognise every translation. Deriving the alternation from the same table
+    the button is drawn from is what keeps the two from drifting: a label typed
+    by hand into a regex is a button that dies in silence, which happened here
+    once over a single U+FE0F variation selector.
+    """
+    labels = all_translations(key)
+    return filters.Regex("^(" + "|".join(re.escape(x) for x in labels) + ")$")
+
+
 def create_conversation_handler() -> ConversationHandler:
     """Create and configure the conversation handler with all states."""
     return ConversationHandler(
@@ -132,9 +151,9 @@ def create_conversation_handler() -> ConversationHandler:
             CommandHandler("report", handlers.report_command),
             CommandHandler("search", handlers.search_command),
             CommandHandler("settings", handlers.settings_command),
-            MessageHandler(filters.Regex(r"^📊 Report$"), handlers.reply_keyboard_report),
-            MessageHandler(filters.Regex(r"^🔍 Search$"), handlers.reply_keyboard_search),
-            MessageHandler(filters.Regex(r"^⚙️ Settings$"), handlers.reply_keyboard_settings),
+            MessageHandler(button_filter("btn.report"), handlers.reply_keyboard_report),
+            MessageHandler(button_filter("btn.search"), handlers.reply_keyboard_search),
+            MessageHandler(button_filter("btn.settings"), handlers.reply_keyboard_settings),
             CallbackQueryHandler(handlers.report_command_from_callback, pattern=r"^cmd_report$"),
             CallbackQueryHandler(handlers.search_command_from_callback, pattern=r"^cmd_search$"),
             CallbackQueryHandler(handlers.settings_command_from_callback, pattern=r"^cmd_settings$"),
@@ -249,8 +268,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handlers.command_button_handler, pattern=r"^cmd_"))
 
     # Add reply keyboard text handlers (Search and Settings are in ConversationHandler)
-    application.add_handler(MessageHandler(filters.Regex(r"^ℹ️ Help$"), handlers.reply_keyboard_help))
-    application.add_handler(MessageHandler(filters.Regex(r"^📈 Dashboard$"), handlers.reply_keyboard_dashboard))
+    application.add_handler(MessageHandler(button_filter("btn.help"), handlers.reply_keyboard_help))
+    application.add_handler(MessageHandler(button_filter("btn.dashboard"), handlers.reply_keyboard_dashboard))
 
     # Add authorization handlers
     application.add_handler(CallbackQueryHandler(handlers.auth_request_access, pattern=r"^auth_request_access$"))

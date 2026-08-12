@@ -147,15 +147,17 @@ MEDALS = ["🥇", "🥈", "🥉"]
 
 # ─── Revenue Milestones ───────────────────────────────────────────────────────
 # Milestones for celebration (UAH) - period-specific
+# `key` names the congratulation in core/i18n.py rather than spelling it here,
+# so a milestone reads in whatever language its reader chose.
 REVENUE_MILESTONES = {
     "daily": [
-        {"amount": 300000, "message": "300K Daily Revenue!", "emoji": "🎉"},
+        {"amount": 300000, "key": "milestone.daily_300k", "emoji": "🎉"},
     ],
     "weekly": [
-        {"amount": 1000000, "message": "1 MILLION Weekly!", "emoji": "🚀🎆"},
-        {"amount": 2000000, "message": "2 MILLION Weekly!", "emoji": "💎🎇"},
+        {"amount": 1000000, "key": "milestone.weekly_1m", "emoji": "🚀🎆"},
+        {"amount": 2000000, "key": "milestone.weekly_2m", "emoji": "💎🎇"},
     ],
     "monthly": [
-        {"amount": 10000000, "message": "10 MILLION Monthly!", "emoji": "👑🎇🎆"},
+        {"amount": 10000000, "key": "milestone.monthly_10m", "emoji": "👑🎇🎆"},
     ],
 }

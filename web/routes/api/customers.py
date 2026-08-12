@@ -507,7 +507,14 @@ async def send_sms_campaign(
         else:
             failed[buyer_id] = r.status or f"code {r.code}"
 
-    summary = await store.record_sms_send(campaign, accepted, stoplisted, failed)
+    # What it cost, from the message that went and the count the gateway took.
+    billing = count_segments(text)
+    summary = await store.record_sms_send(
+        campaign, accepted, stoplisted, failed,
+        message_text=text,
+        message_parts=billing.parts,
+        price_per_part=TurboSmsConfig().price_per_part,
+    )
 
     logger.info(
         "SMS campaign sent: user=%s campaign=%s channel=%s accepted=%d "

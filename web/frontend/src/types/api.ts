@@ -1404,6 +1404,9 @@ export interface SmsCampaignResultsResponse {
   ltvBasis: SmsLtvBasis
   holdoutPct: number
   promocode: string | null
+  /** What the send was billed. Null for campaigns sent before costs were
+   *  recorded — the page must then say nothing rather than guess. */
+  costTotal: number | null
   segments: SmsResultSegment[]
   overall: {
     target: SmsGroupStats

@@ -664,7 +664,15 @@ class DuckDBStore(
             promocode VARCHAR,                    -- optional, for direct attribution
             exported_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             sent_at TIMESTAMP WITH TIME ZONE,     -- set once the file actually goes out
-            notes VARCHAR
+            notes VARCHAR,
+            -- What the send cost, recorded as it happened. The price is kept
+            -- per campaign, not read from config when the result is displayed,
+            -- so changing the tariff cannot restate a past campaign.
+            message_text VARCHAR,
+            message_parts INTEGER,                -- billable segments per message
+            recipients_sent INTEGER,              -- how many the gateway accepted
+            price_per_part DECIMAL(10, 4),
+            cost_total DECIMAL(14, 2)
         );
 
         CREATE TABLE IF NOT EXISTS sms_campaign_members (
@@ -1408,6 +1416,32 @@ class DuckDBStore(
                     logger.error(f"Migration failed (offer_stocks PK), rolling back: {e}")
         except Exception as e:
             logger.debug(f"Migration note (offer_stocks PK): {e}")
+
+        # Migration: what a campaign cost to send.
+        #
+        # Without these the results page can report added margin but not whether
+        # the campaign paid for itself — on the first real send that arithmetic
+        # was done in someone's head against a figure from the provider's
+        # invoice. The price is stored per campaign rather than read from config
+        # at display time, so a tariff change does not silently restate history.
+        #
+        # No DEFAULT on any of them: ALTER ... ADD COLUMN ... DEFAULT rewrites
+        # the whole table to materialise the value and has OOMed this database
+        # before. Existing campaigns get NULL, which reads as "cost unknown".
+        for col, ddl in (
+            ("message_text", "VARCHAR"),
+            ("message_parts", "INTEGER"),
+            ("recipients_sent", "INTEGER"),
+            ("price_per_part", "DECIMAL(10, 4)"),
+            ("cost_total", "DECIMAL(14, 2)"),
+        ):
+            try:
+                self._connection.execute(
+                    f"ALTER TABLE sms_campaigns ADD COLUMN IF NOT EXISTS {col} {ddl}"
+                )
+            except Exception as e:
+                logger.debug(f"Migration note (sms_campaigns {col}): {e}")
+        logger.debug("Migration: sms_campaigns cost columns added/verified")
 
         # Migration: Add last_stock_out_at column to sku_inventory_status
         try:

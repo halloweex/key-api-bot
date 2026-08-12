@@ -458,9 +458,22 @@ both containers bind-mount `./data`. A locked, missing, or pre-migration
 database all mean the same thing there: fall back, and the report still goes.
 The job renders once per distinct language, not once per reader.
 
-**Translated so far**: the weekly report (text and card) and the bot's settings
-screen. The rest of the bot UI — `/start`, `/help`, report and search flows,
-`bot/formatters.py` — is still English only.
+**Everything user-facing is translated**: the weekly report and its card, and
+the whole bot — `/start`, `/help`, the report builder and its date picker,
+search, settings, the access-request flow and the admin panel. Handlers resolve
+the reader's language at the point of use with `_lang(update)` rather than
+threading a parameter through forty signatures.
+
+**Reply-keyboard labels and their matchers come from the same table.** Telegram
+sends a tap back as plain text, so `bot/main.py` builds each `MessageHandler`
+filter with `button_filter(key)` over `all_translations(key)`. Never write one
+of those labels into a regex by hand — a mismatch is a button that dies in
+silence, which happened once over a single U+FE0F. A test draws the keyboard in
+every language and feeds each label back through the handlers.
+
+Month names exist in the table (`month.1`…`month.12`) for **standalone labels
+only** — picker buttons, which are nominative. Dates stay numeric, because a
+month after a day number takes the genitive in both Slavic languages.
 
 **No flags in the language picker.** This is a Ukrainian company; a Russian
 flag in its internal tooling is not a neutral act. Languages have names.

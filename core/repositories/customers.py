@@ -1341,6 +1341,9 @@ class CustomersMixin:
         stoplisted: List[int],
         failed: Dict[int, str],
         sent_at: Optional[datetime] = None,
+        message_text: Optional[str] = None,
+        message_parts: Optional[int] = None,
+        price_per_part: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Store the gateway's answer and stamp the campaign as sent.
@@ -1352,6 +1355,14 @@ class CustomersMixin:
         Stoplisted buyers are also written to marketing_optouts: the provider
         already refuses to deliver to them, and without a record of our own they
         would be re-selected by every future export.
+
+        ``message_text``, ``message_parts`` and ``price_per_part`` record what
+        the send cost. The total is ``accepted × parts × price``, computed from
+        what the gateway actually took rather than from the roster — a send that
+        dies partway bills for what left, not for what was planned. Passing them
+        is optional so a caller that only wants the roster stamped still can,
+        but without them the results page cannot say whether the campaign paid
+        for itself.
         """
         async with self.connection() as conn:
             for buyer_id, message_id in accepted.items():
@@ -1415,9 +1426,23 @@ class CustomersMixin:
                 [campaign],
             ).fetchall()
 
+            # The cost is recorded here, from what actually left, rather than
+            # estimated later from the roster: only the gateway knows how many
+            # it accepted, and only this moment knows the tariff in force.
+            cost_total = (
+                round(len(accepted) * message_parts * price_per_part, 2)
+                if message_parts and price_per_part is not None
+                else None
+            )
             conn.execute(
-                "UPDATE sms_campaigns SET sent_at = ? WHERE campaign = ?",
-                [sent_at or datetime.now(), campaign],
+                """
+                UPDATE sms_campaigns
+                SET sent_at = ?, message_text = ?, message_parts = ?,
+                    recipients_sent = ?, price_per_part = ?, cost_total = ?
+                WHERE campaign = ?
+                """,
+                [sent_at or datetime.now(), message_text, message_parts,
+                 len(accepted), price_per_part, cost_total, campaign],
             )
 
         return {
@@ -1539,12 +1564,12 @@ class CustomersMixin:
         """
         async with self.connection() as conn:
             camp = conn.execute(
-                "SELECT sent_at, promocode, ltv_basis, holdout_pct"
+                "SELECT sent_at, promocode, ltv_basis, holdout_pct, cost_total"
                 " FROM sms_campaigns WHERE campaign = ?", [campaign],
             ).fetchone()
             if camp is None:
                 raise ValueError(f"campaign {campaign!r} is not frozen")
-            sent_at, promocode, ltv_basis, holdout_pct = camp
+            sent_at, promocode, ltv_basis, holdout_pct, cost_total = camp
             if sent_at is None:
                 raise ValueError(
                     f"campaign {campaign!r} has no send date — mark it sent before "
@@ -1719,6 +1744,11 @@ class CustomersMixin:
             "ltvBasis": ltv_basis,
             "holdoutPct": holdout_pct,
             "promocode": promocode,
+            # What the send cost, so the one question the whole page exists to
+            # answer — did this pay for itself — can be asked on the page rather
+            # than against a provider invoice. None for campaigns sent before
+            # the cost was recorded, and for those the page must not guess.
+            "costTotal": float(cost_total) if cost_total is not None else None,
             "segments": segments,
             "overall": {
                 "target": overall_t,

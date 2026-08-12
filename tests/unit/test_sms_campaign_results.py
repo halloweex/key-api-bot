@@ -663,3 +663,62 @@ async def test_delivery_filter_keeps_recipients_with_no_report(tmp_path):
     assert restricted["holdout"]["contacts"] == 10
 
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_send_records_what_it_cost(tmp_path):
+    """Added margin means nothing without the figure it has to beat."""
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=10, holdouts=2)
+
+    await store.record_sms_send(
+        "aug", accepted={i: f"msg-{i}" for i in range(1, 9)},
+        stoplisted=[9], failed={10: "error"},
+        message_text="Красуне, -30%", message_parts=2, price_per_part=1.28,
+    )
+
+    res = await store.get_sms_campaign_results("aug")
+    # Eight accepted, two segments each, at 1.28 — the two the gateway refused
+    # are not billed, so the roster size is the wrong number to multiply.
+    assert res["costTotal"] == pytest.approx(8 * 2 * 1.28)
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_campaign_sent_before_costs_were_recorded_reports_none(tmp_path):
+    """Older campaigns have no cost on file, and the page must not invent one."""
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=5, holdouts=2)
+    await store.record_sms_send("aug", accepted={1: "m"}, stoplisted=[], failed={})
+
+    res = await store.get_sms_campaign_results("aug")
+
+    assert res["costTotal"] is None
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_tariff_is_frozen_onto_the_campaign(tmp_path):
+    """A later price change must not restate what a past campaign cost."""
+    store = await _make_store(tmp_path)
+    await _seed_campaign(store, targets=4, holdouts=1)
+    await store.record_sms_send(
+        "aug", accepted={1: "m", 2: "m"}, stoplisted=[], failed={},
+        message_text="hi", message_parts=1, price_per_part=1.28,
+    )
+
+    async with store.connection() as conn:
+        stored = conn.execute(
+            "SELECT message_text, message_parts, recipients_sent,"
+            " price_per_part, cost_total FROM sms_campaigns WHERE campaign = 'aug'"
+        ).fetchone()
+
+    assert stored[0] == "hi"
+    assert stored[1] == 1
+    assert stored[2] == 2, "billed for what the gateway took, not the roster"
+    assert float(stored[3]) == pytest.approx(1.28)
+    assert float(stored[4]) == pytest.approx(2 * 1.28)
+
+    await store.close()
