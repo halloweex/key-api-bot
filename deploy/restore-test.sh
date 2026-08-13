@@ -75,6 +75,13 @@ fi
 mkdir -p "$TMP/data"
 tar -xf "$TMP/$LATEST" -C "$TMP/data"
 
+# The container runs as a non-root user, and mktemp -d plus any modes carried
+# by the archive can leave this tree unreadable to it — which surfaces as an
+# empty /app/data and a "missing manifest" error rather than a permission one.
+# Belt and braces with the producer-side fix, because archives already shipped
+# still carry the old modes.
+chmod -R a+rX "$TMP/data"
+
 if [ ! -f "$TMP/data/export_parquet/_manifest.json" ]; then
   echo "FAIL: archive has no export_parquet/_manifest.json" >&2
   exit 1
