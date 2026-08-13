@@ -78,6 +78,12 @@ CATCHUP_CHECKS = {
     "dq_integrity_check": ("integrity", 8 * 3600, 120),
 }
 
+# The inventory snapshot gets its own catch-up rather than a row above, because
+# its liveness signal is not a data_quality layer age — it is whether
+# inventory_sku_history has a row for today. See _schedule_catchup_runs.
+# Staggered after the two checks there so the startup rush stays spread out.
+INVENTORY_CATCHUP_DELAY_S = 420
+
 # Which book the weekly report reads from. Retail is the business; b2b is one
 # manager's nine orders a week, where a percentage move says nothing, and
 # `internal` is not sales at all — staff orders and shipments to bloggers that
@@ -209,11 +215,55 @@ class BackgroundScheduler:
             store = await get_store()
             async with store.connection() as conn:
                 ages = fetch_last_success_ages(conn)
+                # Nested: a missing inventory_sku_history must not disable the
+                # data-quality catch-ups above it.
+                try:
+                    inventory_today = conn.execute(
+                        "SELECT 1 FROM inventory_sku_history "
+                        "WHERE date = CURRENT_DATE LIMIT 1"
+                    ).fetchone()
+                except Exception as exc:
+                    logger.debug("inventory catch-up probe skipped: %s", exc)
+                    inventory_today = ()  # treat as present → queue nothing
         except Exception as e:
             logger.warning(f"Catch-up check skipped: {e}")
             return
 
         now = datetime.now(timezone.utc)
+
+        # The inventory snapshot is the one job whose missed run cannot be
+        # repaid later: it photographs current per-SKU stock, and the API serves
+        # current stock only, so the day it did not run is gone. A CronTrigger
+        # at 01:00 does not fire for a process that was not alive at 01:00, and
+        # misfire_grace_time has nothing to forgive — the job did not exist when
+        # it was due. This cannot recover a past day; it turns "the container was
+        # down at 01:00, so today is lost too" into "today was recorded late".
+        #
+        # Safe unconditionally: record_sku_inventory_snapshot is idempotent per
+        # day and returns False when today is already there. The probe above only
+        # avoids queueing a run that would certainly be a no-op.
+        if inventory_today is None:
+            job = self._scheduler.get_job("inventory_snapshot") if self._scheduler else None
+            if job is not None:
+                run_at = now + timedelta(seconds=INVENTORY_CATCHUP_DELAY_S)
+                try:
+                    self._scheduler.add_job(
+                        job.func,
+                        trigger=DateTrigger(run_date=run_at),
+                        id="inventory_snapshot_catchup",
+                        name=f"{job.name} (catch-up)",
+                        misfire_grace_time=DEFAULT_MISFIRE_GRACE_SECONDS,
+                        max_instances=1,
+                        coalesce=True,
+                        replace_existing=True,
+                    )
+                    logger.warning(
+                        "No inventory snapshot for today yet — catch-up run "
+                        "queued for %s. A day without one cannot be backfilled.",
+                        run_at.isoformat(timespec="seconds"),
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not queue inventory catch-up: {e}")
         for job_id, (layer, max_age_s, delay_s) in CATCHUP_CHECKS.items():
             entry = ages.get(layer) or {}
             age = entry.get("age_seconds")

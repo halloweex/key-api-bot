@@ -303,3 +303,150 @@ class TestIntendedShipmentsAreCountedNotWarnedAbout:
             assert "5,000.00" in counted.description
         finally:
             await store.close()
+
+
+# ─── Inventory snapshot continuity ────────────────────────────────────────────
+
+
+from datetime import date, datetime, timedelta, timezone  # noqa: E402
+
+from core.data_quality import (  # noqa: E402
+    INVENTORY_CONTINUITY_WINDOW_DAYS,
+    _inventory_snapshot_continuity_check,
+)
+
+
+def _snapshot(conn, day: date, offers: int = 3):
+    """Write one day's per-SKU snapshot, the way the 01:00 job would."""
+    for offer_id in range(1, offers + 1):
+        conn.execute(
+            "INSERT INTO inventory_sku_history (date, offer_id, quantity, reserve, price) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [day, offer_id, 10, 0, "9.99"],
+        )
+
+
+def _days_back(now: datetime, n: int) -> date:
+    return now.date() - timedelta(days=n)
+
+
+class TestInventorySnapshotContinuity:
+    """A missed snapshot is the one loss here that cannot be re-fetched.
+
+    Stock history is written from *current* stock and KeyCRM serves current
+    stock only, so a day the job did not run is gone the moment the day is.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_history_is_not_an_accusation(self, tmp_path):
+        """A fresh install has no snapshots and has lost nothing."""
+        store = await _make_store(tmp_path)
+        try:
+            async with store.connection() as conn:
+                assert _inventory_snapshot_continuity_check(conn) == []
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_unbroken_run_is_silent(self, tmp_path):
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now().astimezone()
+            async with store.connection() as conn:
+                for n in range(1, 8):
+                    _snapshot(conn, _days_back(now, n))
+                assert _inventory_snapshot_continuity_check(conn, now=now) == []
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_missing_today_alone_is_silent(self, tmp_path):
+        """The job runs at 01:00; before that, today legitimately has none."""
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now().astimezone()
+            async with store.connection() as conn:
+                for n in range(1, 5):
+                    _snapshot(conn, _days_back(now, n))
+                assert _inventory_snapshot_continuity_check(conn, now=now) == []
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_missing_yesterday_warns(self, tmp_path):
+        """Yesterday absent means the job is failing now, and today is next."""
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now().astimezone()
+            async with store.connection() as conn:
+                for n in (2, 3, 4, 5):
+                    _snapshot(conn, _days_back(now, n))
+                issues = _inventory_snapshot_continuity_check(conn, now=now)
+            assert len(issues) == 1
+            assert issues[0].severity == Severity.WARN
+            assert issues[0].check_name == "inventory_snapshot_gaps"
+            assert issues[0].count == 1
+            assert "cannot be backfilled" in issues[0].description
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_old_gap_is_counted_not_warned(self, tmp_path):
+        """Already-permanent losses are reported so the number is visible, but
+        they are not a live fault — there is nothing left to act on."""
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now().astimezone()
+            async with store.connection() as conn:
+                for n in range(1, 11):
+                    if n in (6, 7):      # a two-day hole, safely in the past
+                        continue
+                    _snapshot(conn, _days_back(now, n))
+                issues = _inventory_snapshot_continuity_check(conn, now=now)
+            assert len(issues) == 1
+            assert issues[0].severity == Severity.INFO
+            assert issues[0].count == 2
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_gaps_before_the_first_snapshot_are_not_gaps(self, tmp_path):
+        """History starting three days ago has not "missed" the days before it."""
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now().astimezone()
+            async with store.connection() as conn:
+                for n in (1, 2, 3):
+                    _snapshot(conn, _days_back(now, n))
+                assert _inventory_snapshot_continuity_check(conn, now=now) == []
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_losses_older_than_the_window_stop_being_reported(self, tmp_path):
+        """The 2026 hole is permanent. Reporting it forever is noise, and noise
+        is the failure mode that let it happen."""
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now().astimezone()
+            old_gap = INVENTORY_CONTINUITY_WINDOW_DAYS + 5
+            async with store.connection() as conn:
+                _snapshot(conn, _days_back(now, old_gap + 1))
+                for n in range(1, INVENTORY_CONTINUITY_WINDOW_DAYS + 1):
+                    _snapshot(conn, _days_back(now, n))
+                assert _inventory_snapshot_continuity_check(conn, now=now) == []
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_wired_into_the_full_integrity_run(self, tmp_path):
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now().astimezone()
+            async with store.connection() as conn:
+                for n in (2, 3, 4):
+                    _snapshot(conn, _days_back(now, n))
+                names = {i.check_name for i in check_internal_integrity(conn)}
+            assert "inventory_snapshot_gaps" in names
+        finally:
+            await store.close()

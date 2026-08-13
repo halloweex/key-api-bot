@@ -524,6 +524,96 @@ def _freshness_check(conn, now: Optional[datetime] = None) -> List[IntegrityIssu
     return issues
 
 
+# How far back the inventory continuity check looks. Long enough that a hole
+# is still visible after a few days of not reading Telegram; short enough that
+# gaps which are already permanent stop being reported forever, since there is
+# nothing left to do about them.
+INVENTORY_CONTINUITY_WINDOW_DAYS = 30
+
+
+def _inventory_snapshot_continuity_check(
+    conn, now: Optional[datetime] = None,
+) -> List[IntegrityIssue]:
+    """Flag days with no per-SKU inventory snapshot.
+
+    `inventory_sku_history` is written once a day from *current* stock, and
+    KeyCRM serves current stock only. A day the job did not run is therefore a
+    day that cannot be reconstructed from anything, ever — unlike almost
+    everything else here, it is not re-fetchable at any price.
+
+    It has already happened. Between 2026-01-27 and 2026-08-09 the table holds
+    170 of 195 calendar days; twenty-one of the twenty-five missing ones are a
+    single unbroken run. Nothing reported it at the time and nothing reports it
+    now: a failed job increments an in-memory counter, and a container restart
+    clears even that.
+
+    Yesterday is the unit that matters. Today may legitimately have no snapshot
+    yet (the job runs at 01:00), and gaps older than the window are permanent —
+    reporting them forever would be noise, which is its own failure mode.
+    """
+    if now is None:
+        now = datetime.now().astimezone()
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+
+    row = conn.execute(
+        "SELECT MIN(date), MAX(date) FROM inventory_sku_history"
+    ).fetchone()
+    if not row or row[0] is None:
+        # No history at all → fresh install, not a stall. Same reasoning as
+        # _freshness_check: do not accuse a bootstrap of losing data.
+        return []
+
+    first_day = row[0]
+    # A snapshot cannot be missing from before the first one ever taken.
+    window_start = max(first_day, today - timedelta(days=INVENTORY_CONTINUITY_WINDOW_DAYS))
+    if window_start > yesterday:
+        return []
+
+    missing = [r[0] for r in conn.execute(
+        """
+        WITH cal AS (
+            SELECT UNNEST(GENERATE_SERIES(?::DATE, ?::DATE, INTERVAL 1 DAY))::DATE AS d
+        )
+        SELECT cal.d
+        FROM cal
+        LEFT JOIN (SELECT DISTINCT date FROM inventory_sku_history) h ON h.date = cal.d
+        WHERE h.date IS NULL
+        ORDER BY cal.d
+        """,
+        [window_start, yesterday],
+    ).fetchall()]
+
+    if not missing:
+        return []
+
+    # Yesterday missing means the job is failing now and today is at risk too.
+    # Older gaps inside the window are already unrecoverable: worth stating,
+    # not worth waking anyone.
+    stale_now = yesterday in missing
+    span = f"{window_start.isoformat()}..{yesterday.isoformat()}"
+    if stale_now:
+        description = (
+            f"no inventory snapshot for yesterday ({yesterday.isoformat()}); "
+            f"{len(missing)} day(s) missing in {span}. Stock history is built "
+            f"from current stock only — a missed day cannot be backfilled."
+        )
+    else:
+        description = (
+            f"{len(missing)} day(s) with no inventory snapshot in {span} "
+            f"(most recent {missing[-1].isoformat()}); permanently unrecoverable, "
+            f"reported so the count is a number rather than a silence."
+        )
+
+    return [IntegrityIssue(
+        check_name="inventory_snapshot_gaps",
+        table_name="inventory_sku_history",
+        severity=Severity.WARN if stale_now else Severity.INFO,
+        count=len(missing),
+        description=description,
+    )]
+
+
 def _orders_without_line_items_check(
     conn, severity: "Severity" = None, min_total: float = 0.01,
 ) -> List[IntegrityIssue]:
@@ -981,6 +1071,14 @@ def check_internal_integrity(conn) -> List[IntegrityIssue]:
     # An order with revenue and no products is a half-written order. The header
     # makes it look complete, so nothing goes back for it on its own.
     issues += _orders_without_line_items_check(conn)
+
+    # A missed inventory snapshot is the one loss here with no second chance:
+    # the API serves current stock, so yesterday's is gone the moment yesterday
+    # is. Twenty-five days went missing in 2026 without anything saying so.
+    try:
+        issues += _inventory_snapshot_continuity_check(conn)
+    except Exception as exc:  # inventory_sku_history predates some schemas
+        logger.debug("inventory_snapshot_continuity check skipped: %s", exc)
 
     return issues
 
