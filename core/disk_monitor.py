@@ -1,17 +1,33 @@
-"""Disk growth watchdog.
+"""Disk capacity watchdog.
 
-Catches two failure modes early:
+Pages when the filesystem is filling: WARN at 75% used, CRITICAL at 90%.
+The scheduler job also samples (db_size, disk_pct) every 6 h into
+`disk_samples`; nothing pages on that history yet, and it must keep
+accruing anyway — see below.
 
-1. **Capacity** — disk fills slowly (e.g. WAL never checkpointed,
-   bronze regrows, log rotation broken). We want a Telegram alert at
-   75% used, escalating to CRITICAL at 90%. The 90% threshold is below
-   the empirical "compact preflight needs 22 GB free" line on our 75 GB
-   Hetzner box, so we still have headroom to act.
+**There is deliberately no percentage-growth alert here.** There was one,
+and it could not work. The weekly compact (`scripts/weekly_compact.sh`,
+Sunday 02:00 UTC) rebuilds the DB from Parquet and drops it to ~80 MB, so
+the 24h-ago baseline resets every week. Against a baseline that small a
+perfectly healthy +620 MB/day reads as +456% on Monday and +33.7% by
+Wednesday: the same measured rate, with a deceleration manufactured
+entirely by the denominator. Ten consecutive real samples in August 2026
+varied by ±6% as MB/day and by 1350% as reported percentages.
 
-2. **Growth rate** — DB file grows much faster than business volume.
-   This signals a sync amplification regression (like the 1440x bug we
-   fixed) or a bronze-style accumulation. Compare current DB size vs a
-   sample from ~24 h ago.
+To read below the old 10% WARN line the baseline had to exceed 6300 MB.
+The weekly pre-compact peak is 4.4 GB. So the check could not return "OK"
+at any point in any week — 15 CRITICAL, 9 WARN and 0 quiet evaluations
+per week, by construction, forever. The better the compact worked, the
+lower the floor and the louder the false alarm. It ran that way for
+weeks, and when a real regression finally arrived it named the database
+as the cause — while what had actually consumed the space was a pile of
+files alongside it that `sample_disk_state` does not look at.
+
+Its replacement is absolute growth (MB/day) measured over the whole data
+directory with per-path attribution, so an alert can name what grew. That
+is not written yet: its thresholds depend on the backup retention design,
+which is changing. Until then this module measures the 24h delta and logs
+it (`BackgroundScheduler._run_disk_watchdog`) but pages on capacity only.
 
 The evaluator is pure (no I/O). Sample storage + scheduler job live
 elsewhere; this file owns only the contract.
@@ -26,122 +42,65 @@ from core.data_quality import Severity
 
 
 # Thresholds — tuned for the 75 GB Hetzner host.
+#
+# 90% of 75 GB leaves 7.5 GB free, and the compact needs
+# `source × 0.50 + 1.0 GB` (compact_duckdb.compute_disk_requirements) —
+# ~3.2 GB at the current 4.4 GB weekly peak. So CRITICAL still leaves room
+# to compact our way out.
+#
+# An earlier comment here justified the 90% line against an empirical
+# "compact preflight needs 22 GB free". That number was
+# compute_disk_requirements(43.0): correct for the 43 GB database of April
+# 2026, wrong by 7x for the one we have, and never re-derived.
 WARN_DISK_PCT = 75.0
 CRITICAL_DISK_PCT = 90.0
-
-# Growth thresholds: 10% / 24h is fast (would fill disk in ~10 days from
-# 50% used). 25% / 24h is a runaway — the May 2026 bronze regression hit
-# this kind of rate before we noticed.
-WARN_GROWTH_PCT_24H = 10.0
-CRITICAL_GROWTH_PCT_24H = 25.0
-
-# Below this DB size, percentage growth is noisy. Skip growth check.
-MIN_DB_SIZE_FOR_GROWTH_CHECK_MB = 100.0
 
 
 @dataclass(frozen=True)
 class DiskAlert:
-    """A single disk/DB health concern. Multiple concerns roll up via
-    severity — caller picks the worst one for paging."""
+    """A filesystem capacity concern, ready to page on."""
     severity: Severity
     reason: str
     disk_pct_used: float
     disk_free_gb: float
     db_size_mb: float
-    growth_pct_24h: Optional[float]  # None if no 24h-ago sample
 
 
-def evaluate_disk_growth(
+def evaluate_disk_capacity(
     *,
     disk_pct_used: float,
     disk_free_gb: float,
     db_size_mb: float,
-    db_size_24h_ago_mb: Optional[float],
 ) -> Optional[DiskAlert]:
-    """Return a DiskAlert if anything is concerning, else None.
-
-    The alert reflects the WORST of:
-      - disk_pct_used vs WARN/CRITICAL_DISK_PCT
-      - growth_pct_24h vs WARN/CRITICAL_GROWTH_PCT_24H
-
-    Bootstrap (db_size_24h_ago_mb is None or DB too small):
-      - Capacity check still fires.
-      - Growth check is skipped.
+    """Return a DiskAlert if the filesystem is filling, else None.
 
     Args:
         disk_pct_used: 0.0-100.0, current % of filesystem used.
         disk_free_gb: free GB on the same filesystem.
-        db_size_mb: current DuckDB file size in MB.
-        db_size_24h_ago_mb: closest available sample from ~24h ago,
-            or None on the first run / after compaction.
+        db_size_mb: current DuckDB file size in MB. Carried into the alert
+            for context only — it is never a trigger. The DB is not the
+            only thing on this disk, and in August 2026 it was not the
+            thing that filled it.
 
     Returns:
         DiskAlert when severity >= WARN, else None.
     """
-    # Capacity check
-    capacity_severity: Optional[Severity] = None
-    capacity_reason = ""
     if disk_pct_used >= CRITICAL_DISK_PCT:
-        capacity_severity = Severity.CRITICAL
-        capacity_reason = (
-            f"disk {disk_pct_used:.1f}% used (>= {CRITICAL_DISK_PCT:.0f}% "
-            f"critical); {disk_free_gb:.1f} GB free"
-        )
+        severity, threshold, label = Severity.CRITICAL, CRITICAL_DISK_PCT, "critical"
     elif disk_pct_used >= WARN_DISK_PCT:
-        capacity_severity = Severity.WARN
-        capacity_reason = (
-            f"disk {disk_pct_used:.1f}% used (>= {WARN_DISK_PCT:.0f}% "
-            f"warn); {disk_free_gb:.1f} GB free"
-        )
-
-    # Growth check (only when we have history and the DB is non-trivially sized)
-    growth_pct_24h: Optional[float] = None
-    growth_severity: Optional[Severity] = None
-    growth_reason = ""
-    if (db_size_24h_ago_mb is not None
-            and db_size_24h_ago_mb >= MIN_DB_SIZE_FOR_GROWTH_CHECK_MB):
-        growth_pct_24h = 100.0 * (db_size_mb - db_size_24h_ago_mb) / db_size_24h_ago_mb
-        # Negative growth (e.g. after compact) is never an alert
-        if growth_pct_24h >= CRITICAL_GROWTH_PCT_24H:
-            growth_severity = Severity.CRITICAL
-            growth_reason = (
-                f"DB grew {growth_pct_24h:+.1f}% in 24h "
-                f"({db_size_24h_ago_mb:.0f} → {db_size_mb:.0f} MB; "
-                f">= {CRITICAL_GROWTH_PCT_24H:.0f}% critical)"
-            )
-        elif growth_pct_24h >= WARN_GROWTH_PCT_24H:
-            growth_severity = Severity.WARN
-            growth_reason = (
-                f"DB grew {growth_pct_24h:+.1f}% in 24h "
-                f"({db_size_24h_ago_mb:.0f} → {db_size_mb:.0f} MB; "
-                f">= {WARN_GROWTH_PCT_24H:.0f}% warn)"
-            )
-
-    # Pick worst-of severity. Each Severity has rank() — higher = more urgent.
-    candidates = []
-    if capacity_severity is not None:
-        candidates.append((capacity_severity, capacity_reason))
-    if growth_severity is not None:
-        candidates.append((growth_severity, growth_reason))
-
-    if not candidates:
+        severity, threshold, label = Severity.WARN, WARN_DISK_PCT, "warn"
+    else:
         return None
 
-    # Sort by severity rank descending; pick first
-    candidates.sort(key=lambda c: -c[0].rank())
-    chosen_severity, chosen_reason = candidates[0]
-
-    # If both fired, mention both in reason — operator sees the whole picture
-    if len(candidates) > 1:
-        chosen_reason = " | ".join(c[1] for c in candidates)
-
     return DiskAlert(
-        severity=chosen_severity,
-        reason=chosen_reason,
+        severity=severity,
+        reason=(
+            f"disk {disk_pct_used:.1f}% used (>= {threshold:.0f}% "
+            f"{label}); {disk_free_gb:.1f} GB free"
+        ),
         disk_pct_used=disk_pct_used,
         disk_free_gb=disk_free_gb,
         db_size_mb=db_size_mb,
-        growth_pct_24h=growth_pct_24h,
     )
 
 
