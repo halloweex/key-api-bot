@@ -205,6 +205,12 @@ JSON
         echo "note: .env not shipped, BACKUP_ENV_PASSFILE unset — a restore will need the config rebuilt by hand" >&2
     fi
 
+    # `tar -C "$STAGE" .` archives the staging directory itself, and mktemp -d
+    # makes it 0700 root. Extracting that entry stamps 0700 onto whatever
+    # directory the archive is unpacked into — which is the bind-mount point of
+    # a container running as a non-root user, so the restore sees an empty
+    # /app/data and reports a missing manifest. Widen it before it is captured.
+    chmod 755 "$STAGE"
     # Already ZSTD inside; compressing the tar again buys nothing.
     tar -cf "$ARCHIVE_DIR/$name" -C "$STAGE" .
     local size
