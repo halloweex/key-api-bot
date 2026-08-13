@@ -1738,52 +1738,18 @@ class BackgroundScheduler:
             logger.warning(f"Failed to send bronze alert: {e}")
 
     # ─── Memory Monitor ───────────────────────────────────────────────────────
-
-    # Thresholds (fraction of container memory limit)
-    _MEM_WARN_THRESHOLD = 0.75   # 75% → warning (once per 24h)
-    _MEM_CRITICAL_THRESHOLD = 0.90  # 90% → critical (once per 6h)
+    #
+    # Thresholds, the working-set definition and the evaluator live in
+    # core/memory_monitor.py, which explains at length why this no longer
+    # judges memory.current. Short version: that number is half page cache on
+    # this host, so it tracked database size rather than memory pressure.
 
     # Cooldowns per level to avoid alert spam (seconds)
     _MEM_ALERT_COOLDOWNS = {
-        "warning": 86400,   # 24 hours
-        "critical": 21600,  # 6 hours
+        "WARN": 86400,      # 24 hours
+        "CRITICAL": 21600,  # 6 hours
     }
     _mem_last_alert: Dict[str, float] = {}
-
-    @staticmethod
-    def _read_cgroup_memory() -> Optional[Dict[str, int]]:
-        """Read memory stats from cgroup v2 filesystem.
-
-        Returns dict with current, peak, max (bytes) or None if not in a container.
-        """
-        import pathlib
-
-        try:
-            cgroup = pathlib.Path("/sys/fs/cgroup")
-            current = int((cgroup / "memory.current").read_text().strip())
-            max_mem = (cgroup / "memory.max").read_text().strip()
-            max_bytes = int(max_mem) if max_mem != "max" else None
-
-            # Peak since container start
-            peak_path = cgroup / "memory.peak"
-            peak = int(peak_path.read_text().strip()) if peak_path.exists() else current
-
-            # OOM event count
-            events_path = cgroup / "memory.events"
-            oom_count = 0
-            if events_path.exists():
-                for line in events_path.read_text().splitlines():
-                    if line.startswith("oom_kill "):
-                        oom_count = int(line.split()[1])
-
-            return {
-                "current": current,
-                "peak": peak,
-                "max": max_bytes,
-                "oom_kills": oom_count,
-            }
-        except (FileNotFoundError, PermissionError, ValueError):
-            return None
 
     @staticmethod
     def _get_db_size_mb() -> Optional[float]:
@@ -1831,91 +1797,124 @@ class BackgroundScheduler:
                     logger.error(f"Telegram alert to {uid} error: {e}")
 
     async def _run_memory_monitor(self) -> Dict[str, Any]:
-        """Check container memory usage and alert admin if thresholds crossed."""
-        mem = self._read_cgroup_memory()
-        if not mem or not mem["max"]:
-            return {"skipped": True, "reason": "not in cgroup or no limit"}
+        """Sample container memory, persist it, and alert on real pressure.
 
-        current = mem["current"]
-        peak = mem["peak"]
-        limit = mem["max"]
-        usage_pct = current / limit
-        peak_pct = peak / limit
+        Persisting is not bookkeeping. The kernel's oom_kill counter resets
+        when the container is recreated, so comparing against the previous
+        *stored* sample is the only way a kill that happened before a restart
+        is still visible afterwards.
+        """
+        from core.memory_monitor import (
+            evaluate_memory,
+            fetch_last_sample,
+            fetch_peak_working_set_mb,
+            insert_sample,
+            prune_old_samples,
+            read_cgroup_memory,
+        )
+
+        mem = read_cgroup_memory()
+        if not mem:
+            return {"skipped": True, "reason": "not in a cgroup v2 container"}
+
+        previous_oom = None
+        peak_24h = None
+        try:
+            from core.duckdb_store import get_store
+            store = await get_store()
+            async with store.connection() as conn:
+                last = fetch_last_sample(conn)
+                previous_oom = last["oom_kills"] if last else None
+                insert_sample(conn, mem)
+                peak_24h = fetch_peak_working_set_mb(conn, hours=24)
+                prune_old_samples(conn, retention_days=14)
+        except Exception as e:
+            # A memory check that cannot reach the database must still report
+            # memory. Losing the OOM-across-restart comparison is the only cost.
+            logger.warning(f"Memory sample not persisted: {e}")
+
+        mb = 1024 * 1024
+        alert = evaluate_memory(
+            working_set_bytes=mem["working_set"],
+            page_cache_bytes=mem["page_cache"],
+            limit_bytes=mem["limit"],
+            oom_kills=mem["oom_kills"],
+            previous_oom_kills=previous_oom,
+        )
 
         result = {
-            "current_mb": round(current / (1024 * 1024)),
-            "peak_mb": round(peak / (1024 * 1024)),
-            "limit_mb": round(limit / (1024 * 1024)),
-            "usage_pct": round(usage_pct * 100, 1),
-            "peak_pct": round(peak_pct * 100, 1),
+            "working_set_mb": round(mem["working_set"] / mb),
+            "page_cache_mb": round(mem["page_cache"] / mb),
+            "limit_mb": round(mem["limit"] / mb) if mem["limit"] else None,
             "oom_kills": mem["oom_kills"],
+            "peak_working_set_mb_24h": round(peak_24h) if peak_24h else None,
+            "alert_sent": None,
         }
 
         db_size = self._get_db_size_mb()
         if db_size:
             result["db_size_mb"] = round(db_size)
 
-        now = datetime.now(SCHEDULER_TIMEZONE).timestamp()
-
-        # Determine alert level from current usage. memory.peak in cgroup v2
-        # is monotonic for the container lifetime, so triggering on peak_pct
-        # fires every 24h forever once it crosses the threshold — even if
-        # current usage has dropped back to normal.
-        level = None
-        if usage_pct >= self._MEM_CRITICAL_THRESHOLD:
-            level = "critical"
-        elif usage_pct >= self._MEM_WARN_THRESHOLD:
-            level = "warning"
-
-        if level:
-            cooldown = self._MEM_ALERT_COOLDOWNS[level]
-            last = self._mem_last_alert.get(level, 0)
-
-            if now - last >= cooldown:
-                self._mem_last_alert[level] = now
-
-                cur_gb = current / (1024 ** 3)
-                peak_gb = peak / (1024 ** 3)
-                limit_gb = limit / (1024 ** 3)
-                headroom_gb = (limit - peak) / (1024 ** 3)
-
-                icon = "\u26a0\ufe0f" if level == "warning" else "\U0001f6a8"
-                title = "Memory Warning" if level == "warning" else "MEMORY CRITICAL"
-
-                lines = [
-                    f"{icon} <b>{title}</b>",
-                    "",
-                    f"<b>Current:</b> {cur_gb:.1f} GB / {limit_gb:.1f} GB ({usage_pct:.0%})",
-                    f"<b>Peak:</b> {peak_gb:.1f} GB ({peak_pct:.0%})",
-                    f"<b>Headroom:</b> {headroom_gb:.1f} GB",
-                ]
-
-                if db_size:
-                    lines.append(f"<b>DuckDB:</b> {db_size:.0f} MB")
-
-                if mem["oom_kills"] > 0:
-                    lines.append(f"\U0001f4a5 <b>OOM kills:</b> {mem['oom_kills']}")
-
-                if level == "critical":
-                    lines += [
-                        "",
-                        "\U0001f449 <b>Action needed:</b> upgrade Hetzner instance",
-                        "or reduce DuckDB <code>memory_limit</code>",
-                    ]
-                else:
-                    lines += [
-                        "",
-                        "\U0001f4c8 Memory trending high — plan upgrade soon",
-                    ]
-
-                await self._send_admin_telegram("\n".join(lines))
-                result["alert_sent"] = level
-                logger.warning(f"Memory {level}: {usage_pct:.0%} used, peak {peak_pct:.0%}")
-            else:
-                result["alert_suppressed"] = level
-        else:
+        if alert is None:
+            pct = (mem["working_set"] / mem["limit"]) if mem["limit"] else 0
+            # info, not debug, and it names both halves: the whole point is that
+            # the big number and the number that matters are different.
+            logger.info(
+                f"Memory OK: working set {result['working_set_mb']:,} MB"
+                + (f" of {result['limit_mb']:,} MB ({pct:.0%})" if mem["limit"] else "")
+                + f", page cache {result['page_cache_mb']:,} MB (not counted)"
+            )
             result["status"] = "ok"
+            return result
 
+        level = alert.severity.value
+        now = datetime.now(SCHEDULER_TIMEZONE).timestamp()
+        cooldown = self._MEM_ALERT_COOLDOWNS.get(level, 21600)
+        last_sent = self._mem_last_alert.get(level, 0)
+
+        logger.warning(f"Memory {level}: {alert.reason}")
+
+        # An OOM kill is a fact about the past and is never throttled: it can
+        # only be reported once per occurrence anyway, since the comparison is
+        # against the previous stored sample.
+        if alert.oom_kills_delta == 0 and now - last_sent < cooldown:
+            result["alert_suppressed"] = level
+            return result
+
+        self._mem_last_alert[level] = now
+        icon = "\U0001f4a5" if alert.oom_kills_delta else (
+            "\u26a0\ufe0f" if level == "WARN" else "\U0001f6a8"
+        )
+        title = (
+            "OOM KILL" if alert.oom_kills_delta
+            else ("Memory Warning" if level == "WARN" else "MEMORY CRITICAL")
+        )
+
+        lines = [
+            f"{icon} <b>{title}</b>",
+            "",
+            f"<b>Working set:</b> {alert.working_set_mb:,.0f} MB"
+            + (f" / {alert.limit_mb:,.0f} MB" if alert.limit_mb else ""),
+            f"<b>Free:</b> {alert.headroom_mb:,.0f} MB",
+            f"<b>Page cache:</b> {alert.page_cache_mb:,.0f} MB (reclaimable, not counted)",
+        ]
+        if peak_24h:
+            lines.append(f"<b>Peak 24h:</b> {peak_24h:,.0f} MB")
+        if db_size:
+            lines.append(f"<b>DuckDB file:</b> {db_size:,.0f} MB")
+        if alert.oom_kills_delta:
+            lines.append(f"<b>Processes killed:</b> {alert.oom_kills_delta}")
+
+        lines += ["", f"<i>{alert.reason}</i>"]
+        if level == "CRITICAL":
+            lines += [
+                "",
+                "\U0001f449 Reduce <code>DUCKDB_MEMORY_LIMIT</code> or raise the "
+                "container limit. Check what ran: <code>docker logs keycrm-web</code>",
+            ]
+
+        await self._send_admin_telegram("\n".join(lines))
+        result["alert_sent"] = level
         return result
 
     # ═══════════════════════════════════════════════════════════════════════════

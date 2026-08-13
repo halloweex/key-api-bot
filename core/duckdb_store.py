@@ -1668,6 +1668,28 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (disk_samples): {e}")
 
+        # Same shape, for memory. Persisted because the kernel's own counters
+        # (memory.peak, memory.events oom_kill) reset when the container is
+        # recreated — which is how a 5.3 GB reading in August 2026 became
+        # impossible to decompose an hour later.
+        try:
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS memory_samples (
+                    sampled_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    working_set_mb DOUBLE NOT NULL,
+                    page_cache_mb DOUBLE NOT NULL,
+                    limit_mb DOUBLE,
+                    oom_kills INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_samples_at "
+                "ON memory_samples(sampled_at DESC)"
+            )
+            logger.debug("Migration: memory_samples table added/verified")
+        except Exception as e:
+            logger.debug(f"Migration note (memory_samples): {e}")
+
         # Migration: Fix sequences after EXPORT/IMPORT compaction.
         # DuckDB doesn't support ALTER SEQUENCE, and IMPORT resets sequences to
         # START value (1) even though tables already have rows. Fix by DROP+CREATE
