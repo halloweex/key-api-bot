@@ -28,7 +28,7 @@ SSH_KEY="${BACKUP_SSH_KEY:-$HOME/.ssh/storagebox_ed25519}"
 REMOTE="${BACKUP_REMOTE:-}"
 REMOTE_DIR="${BACKUP_REMOTE_DIR:-key-api-bot}"
 IMAGE="${BACKUP_RESTORE_IMAGE:-halloweex/keycrm-web:latest}"
-MAX_AGE_HOURS="${BACKUP_MAX_ARCHIVE_AGE_HOURS:-216}"   # 9 days: weekly + slack
+MAX_AGE_HOURS="${BACKUP_MAX_ARCHIVE_AGE_HOURS:-36}"   # nightly + slack
 
 # Two arrays, because the port flag is not the same letter in both tools:
 # ssh (and so rsync -e ssh) takes -p, sftp takes -P and uses -p for "preserve
