@@ -51,7 +51,13 @@ ENV_PASSFILE="${BACKUP_ENV_PASSFILE:-}"     # unset → ship data without secret
 # looks fine until you need it.
 MAX_EXPORT_AGE_DAYS="${BACKUP_MAX_EXPORT_AGE_DAYS:-8}"
 
+# Two arrays, because the port flag is not the same letter in both tools:
+# ssh (and so rsync -e ssh) takes -p, sftp takes -P and uses -p for "preserve
+# permissions". Sharing one array silently sent `-p 23` to sftp, which read 23
+# as a hostname, printed its usage and exited 1 — so rsync shipped the archive
+# and every sftp call after it failed. Do not merge these back together.
 SSH_OPTS=(-p "$SSH_PORT" -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+SFTP_OPTS=(-P "$SSH_PORT" -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 
 # Off-site not configured: a real problem, but a different one from "the push
 # failed", and the alert wording depends on telling them apart.
@@ -222,13 +228,13 @@ JSON
     # directory onto the off-site copy and erase the whole history.
     local remote_files old seen kept
     remote_files="$(printf 'cd %s\nls -1\n' "$REMOTE_DIR" \
-        | sftp -b - "${SSH_OPTS[@]}" "$REMOTE" 2>/dev/null \
+        | sftp -b - "${SFTP_OPTS[@]}" "$REMOTE" 2>/dev/null \
         | grep -o 'ks-warehouse-[0-9]\{8\}-[0-9]\{6\}\.tar' | sort -r)"
 
     old="$(printf '%s\n' "$remote_files" | tail -n +$((RETAIN + 1)))"
     if [ -n "$old" ]; then
         { printf 'cd %s\n' "$REMOTE_DIR"; printf 'rm %s\n' $old; } \
-            | sftp -b - "${SSH_OPTS[@]}" "$REMOTE" >/dev/null
+            | sftp -b - "${SFTP_OPTS[@]}" "$REMOTE" >/dev/null
     fi
 
     seen="$(printf '%s\n' "$remote_files" | grep -c . || true)"

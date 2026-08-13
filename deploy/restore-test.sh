@@ -30,7 +30,13 @@ REMOTE_DIR="${BACKUP_REMOTE_DIR:-key-api-bot}"
 IMAGE="${BACKUP_RESTORE_IMAGE:-halloweex/keycrm-web:latest}"
 MAX_AGE_HOURS="${BACKUP_MAX_ARCHIVE_AGE_HOURS:-216}"   # 9 days: weekly + slack
 
+# Two arrays, because the port flag is not the same letter in both tools:
+# ssh (and so rsync -e ssh) takes -p, sftp takes -P and uses -p for "preserve
+# permissions". Sharing one array silently sent `-p 23` to sftp, which read 23
+# as a hostname, printed its usage and exited 1 — so rsync shipped the archive
+# and every sftp call after it failed. Do not merge these back together.
 SSH_OPTS=(-p "$SSH_PORT" -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+SFTP_OPTS=(-P "$SSH_PORT" -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 
 if [ -z "$REMOTE" ]; then
     echo "FAIL: BACKUP_REMOTE is not set — there is no off-site copy to test." >&2
@@ -43,7 +49,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # --- pick the newest off-site archive ---------------------------------------
 LATEST="$(printf 'cd %s\nls -1\n' "$REMOTE_DIR" \
-  | sftp -b - "${SSH_OPTS[@]}" "$REMOTE" 2>/dev/null \
+  | sftp -b - "${SFTP_OPTS[@]}" "$REMOTE" 2>/dev/null \
   | grep -o 'ks-warehouse-[0-9]\{8\}-[0-9]\{6\}\.tar' | sort -r | head -1)"
 
 if [ -z "$LATEST" ]; then
@@ -53,7 +59,7 @@ fi
 echo "restoring from off-site: $LATEST"
 
 printf 'cd %s\nget %s %s/\n' "$REMOTE_DIR" "$LATEST" "$TMP" \
-  | sftp -b - "${SSH_OPTS[@]}" "$REMOTE" >/dev/null
+  | sftp -b - "${SFTP_OPTS[@]}" "$REMOTE" >/dev/null
 
 # A backup that stopped happening looks exactly like a backup that works, until
 # you need it — so check how old the newest one is. (GNU date; on the server.)
