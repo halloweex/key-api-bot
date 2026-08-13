@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from core.snapshot_validation import (
+    DERIVED,
     MAY_BE_EMPTY,
     MUST_BE_NONEMPTY,
     validate_snapshot,
@@ -171,3 +172,26 @@ class TestChecksums:
     def test_missing_checksums_are_not_an_error(self):
         v = validate_snapshot(_healthy(), previous_counts=_healthy(), checksums=None)
         assert v.ok
+
+
+class TestDerivedLayers:
+    """The manifest counts every table, but the derived layers are deliberately
+    not exported — the app rebuilds them from bronze in seconds, which is most
+    of why the snapshot is small enough to ship nightly. An empty one is the
+    design working."""
+
+    def test_an_empty_derived_table_is_neither_error_nor_warning(self):
+        v = validate_snapshot(
+            _healthy(gold_product_pairs=0, silver_orders=0),
+            previous_counts=_healthy(),
+        )
+        assert v.ok
+        assert not v.warnings
+
+    def test_derived_tables_are_not_listed_as_declared_empty(self):
+        """They are not part of the snapshot, so saying they are empty in it
+        would be answering a question nobody asked."""
+        v = validate_snapshot(
+            _healthy(gold_daily_revenue=0), previous_counts=_healthy(),
+        )
+        assert "gold_daily_revenue" not in v.empty_tables
