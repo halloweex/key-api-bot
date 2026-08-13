@@ -2943,7 +2943,7 @@ class DuckDBStore(
             logger.warning(f"Failed to send warehouse alert: {e}")
 
     async def backup_database(
-        self, dest_dir: "Path | str | None" = None, keep: int = 7,
+        self, dest_dir: "Path | str | None" = None, keep: int = 2,
     ) -> Dict[str, Any]:
         """Create a consistent on-disk backup of the DuckDB file (A9-1).
 
