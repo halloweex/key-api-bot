@@ -25,9 +25,10 @@ CONFIG="deploy/backup.env"
 [ -f "$CONFIG" ] && . "$CONFIG"
 
 MARKER="${BACKUP_MARKER:-data/.offsite_last_ok}"
-# The push is weekly (it rides the Sunday compact), so 9 days is one missed run
-# plus slack. Tighten this to ~36h if the push ever moves to daily.
-MAX_AGE_HOURS="${BACKUP_MAX_ARCHIVE_AGE_HOURS:-216}"
+# deploy/daily_offsite.sh ships nightly, so this is one missed run plus slack.
+# It was 216h when the push rode the weekly compact; a threshold left at a
+# cadence the system no longer has is a check that has stopped checking.
+MAX_AGE_HOURS="${BACKUP_MAX_ARCHIVE_AGE_HOURS:-36}"
 
 # `|| true` is load-bearing: grep exits 2 when .env is absent and 1 when the key
 # is, pipefail propagates that, and under `set -e` the caller dies with grep's
