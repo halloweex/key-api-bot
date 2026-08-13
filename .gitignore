@@ -178,6 +178,20 @@ cython_debug/
 # The repository is public — keep hosts, users, keys and staff names out of it.
 !.claude/CLAUDE.md
 
+# Session handoffs and investigation notes.
+#
+# Same rule as the line above, and these could not satisfy it. A handoff is
+# written to be complete rather than publishable: the ones tracked until now
+# carried the post-mortem of a customer-data exposure, campaign revenue and
+# margin, a payment balance, server paths and notes on how production is laid
+# out. CLAUDE.md gets curated for this repo before it lands; a handoff written
+# at the end of a long session does not, and expecting it to is the same
+# mistake in a new place.
+#
+# They stay on disk, so the next local session still finds them. They just
+# stop being published.
+.planning/
+
 # SQLite Database
 data/
 *.db
