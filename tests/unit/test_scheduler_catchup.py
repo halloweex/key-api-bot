@@ -16,7 +16,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from apscheduler.triggers.cron import CronTrigger
 
-from core.scheduler import CATCHUP_CHECKS, BackgroundScheduler
+from core.scheduler import (
+    CATCHUP_CHECKS,
+    INVENTORY_CATCHUP_DELAY_S,
+    BackgroundScheduler,
+)
 
 
 class _FakeJob:
@@ -38,12 +42,30 @@ class _FakeScheduler:
         self.added[kwargs.get("id")] = kwargs
 
 
-def _scheduler_with(monkeypatch, ages, known=("dq_reconciliation", "dq_integrity_check")):
+_NO_TABLE = object()
+
+
+def _scheduler_with(
+    monkeypatch, ages, known=("dq_reconciliation", "dq_integrity_check"),
+    inventory_today=_NO_TABLE,
+):
     scheduler = BackgroundScheduler()
     scheduler._scheduler = _FakeScheduler(known)
 
     class _Conn:
-        pass
+        def execute(self, sql, *args):
+            # The only raw SQL _schedule_catchup_runs issues is the probe for
+            # today's inventory snapshot. The default is a schema without that
+            # table, which must degrade quietly rather than disable the
+            # data-quality catch-ups above it.
+            if inventory_today is _NO_TABLE:
+                raise RuntimeError("Catalog Error: inventory_sku_history does not exist")
+
+            class _Result:
+                def fetchone(_self):
+                    return (1,) if inventory_today else None
+
+            return _Result()
 
     class _Ctx:
         async def __aenter__(self):
@@ -267,3 +289,83 @@ class TestReconcileEndpointDoesNotHoldTheRequestOpen:
         assert res.status_code == 200
         assert res.json()["discrepancies_count"] == 0
         assert seen == [7], "the window must reach the job"
+
+
+class TestInventorySnapshotCatchUp:
+    """The snapshot is the one missed run that cannot be repaid.
+
+    It photographs current per-SKU stock and KeyCRM serves current stock only,
+    so a day the job did not run is gone with the day. Twenty-five are already
+    missing from 2026, twenty-one of them consecutive, and nothing said so.
+
+    The catch-up cannot recover a past day — nothing can. It turns "the
+    container was down at 01:00, so today is lost too" into "today was recorded
+    late", which is the only part still available to fix.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_snapshot_today_queues_a_catchup(self, monkeypatch):
+        scheduler = _scheduler_with(
+            monkeypatch, _ages(3600, 3600),
+            known=("dq_reconciliation", "dq_integrity_check", "inventory_snapshot"),
+            inventory_today=False,
+        )
+
+        await scheduler._schedule_catchup_runs()
+
+        assert "inventory_snapshot_catchup" in scheduler._scheduler.added
+
+    @pytest.mark.asyncio
+    async def test_a_snapshot_already_taken_queues_nothing(self, monkeypatch):
+        scheduler = _scheduler_with(
+            monkeypatch, _ages(3600, 3600),
+            known=("dq_reconciliation", "dq_integrity_check", "inventory_snapshot"),
+            inventory_today=True,
+        )
+
+        await scheduler._schedule_catchup_runs()
+
+        assert scheduler._scheduler.added == {}
+
+    @pytest.mark.asyncio
+    async def test_the_run_is_staggered_after_the_dq_catchups(self, monkeypatch):
+        """Startup already carries the initial sync, model training and the
+        first warehouse refresh. This waits its turn."""
+        scheduler = _scheduler_with(
+            monkeypatch, _ages(3600, 3600),
+            known=("dq_reconciliation", "dq_integrity_check", "inventory_snapshot"),
+            inventory_today=False,
+        )
+        before = datetime.now(timezone.utc)
+
+        await scheduler._schedule_catchup_runs()
+
+        run_at = scheduler._scheduler.added["inventory_snapshot_catchup"]["trigger"].run_date
+        delay = (run_at - before).total_seconds()
+        assert delay > max(d for _, _, d in CATCHUP_CHECKS.values())
+        assert delay <= INVENTORY_CATCHUP_DELAY_S + 5
+
+    @pytest.mark.asyncio
+    async def test_a_schema_without_the_table_does_not_break_the_others(self, monkeypatch):
+        """The probe is nested inside its own try for this reason: an older
+        schema must not cost us the data-quality catch-ups."""
+        scheduler = _scheduler_with(
+            monkeypatch, _ages(30 * 3600, 30 * 3600),
+            known=("dq_reconciliation", "dq_integrity_check", "inventory_snapshot"),
+        )  # inventory probe raises
+
+        await scheduler._schedule_catchup_runs()
+
+        assert set(scheduler._scheduler.added) == {
+            "dq_reconciliation_catchup", "dq_integrity_check_catchup",
+        }
+
+    @pytest.mark.asyncio
+    async def test_an_unregistered_snapshot_job_is_skipped(self, monkeypatch):
+        scheduler = _scheduler_with(
+            monkeypatch, _ages(3600, 3600), inventory_today=False,
+        )  # inventory_snapshot not in known jobs
+
+        await scheduler._schedule_catchup_runs()
+
+        assert scheduler._scheduler.added == {}
