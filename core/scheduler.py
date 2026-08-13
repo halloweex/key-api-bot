@@ -438,12 +438,24 @@ class BackgroundScheduler:
         )
 
         # Job: Daily DuckDB backup (A9-1) at a low-traffic hour.
-        # Holds the store lock briefly for a consistent CHECKPOINT+copy; protects
-        # data NOT recoverable from KeyCRM (goals, manual expenses, roles).
+        # Holds the store lock briefly for a consistent CHECKPOINT+copy.
+        #
+        # Retention is 2, not 7. Seven daily copies of a file that is mostly
+        # derived tables cost ~18 GB to defend one threat — logical corruption
+        # noticed within a week — and defended nothing else, because they sit on
+        # the volume they are copies of. Now that deploy/offsite_parquet.sh puts
+        # a validated archive somewhere else, on-disk copies only serve fast RTO
+        # on a bad write, and two is enough for that.
+        #
+        # The trade this makes explicit: local granularity is now 2 days, while
+        # the off-site copy is weekly. Corruption discovered on day 4 is
+        # recoverable from off-site, but at up to a week's resolution. If that
+        # becomes uncomfortable, the fix is a more frequent off-site push, not
+        # more copies on the same disk.
         self._add_job(
             job_id="db_backup",
             name="DB Backup",
-            description="Consistent on-disk backup of analytics.duckdb (retains 7)",
+            description="Consistent on-disk backup of analytics.duckdb (retains 2)",
             func=self._run_backup,
             trigger=CronTrigger(hour=4, minute=30),
             max_instances=1,
@@ -874,7 +886,7 @@ class BackgroundScheduler:
             store = await get_store()
             with correlation_context() as corr_id:
                 logger.info("Starting daily DB backup")
-                result = await store.backup_database(keep=7)
+                result = await store.backup_database(keep=2)
                 logger.info(f"DB backup job complete: {result.get('status')}")
                 return result
 

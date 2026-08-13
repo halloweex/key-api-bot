@@ -32,13 +32,13 @@ line of defence, not the second.
 
 ## How the backup works
 A daily scheduler job (`db_backup`, 04:30 Europe/Kyiv) calls
-`DuckDBStore.backup_database(keep=7)`:
+`DuckDBStore.backup_database(keep=2)`:
 1. Acquires the store lock + `CHECKPOINT` (folds the WAL into the main file).
 2. Copies the file **while the lock is held** → byte-consistent snapshot (no
    concurrent writer). Copy runs in the executor so the event loop isn't blocked.
 3. Validates the copy read-only (`SELECT COUNT(*) FROM orders` > 0).
 4. Atomically renames into `data/backups/analytics-YYYYmmdd-HHMMSS.duckdb`.
-5. Prunes to the newest 7. Disk-space guarded (needs ~1.1× the DB size free);
+5. Prunes to the newest 2. Disk-space guarded (needs ~1.1× the DB size free);
    aborts + Telegram-alerts otherwise. Any failure alerts admins.
 
 Trade-off: the lock is held for the copy (tens of seconds on a multi-GB DB) — that
