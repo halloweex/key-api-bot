@@ -42,10 +42,47 @@ single directory, so the blast radius is that directory.
 ```bash
 ssh-keygen -t ed25519 -N '' -f /root/.ssh/storagebox_ed25519 \
     -C "ks-backup@$(hostname)"
-
-cat /root/.ssh/storagebox_ed25519.pub \
-    | ssh -p23 uXXXXXX-sub1@uXXXXXX.your-storagebox.de install-ssh-key
 ```
+
+The main account takes its public key in the console. **A sub-account has no
+such field** — its key is a file you write into its home directory, using the
+main account's own sftp access:
+
+```bash
+printf -- '-mkdir key-api-bot/.ssh
+put /root/.ssh/storagebox_ed25519.pub key-api-bot/.ssh/authorized_keys
+chmod 700 key-api-bot/.ssh
+chmod 600 key-api-bot/.ssh/authorized_keys
+' | sftp -b - -P 23 -i /root/.ssh/storagebox_ed25519 \
+        -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+        uXXXXXX@uXXXXXX.your-storagebox.de
+```
+
+Four things there are load-bearing:
+
+- **`-b -`** — batch mode, commands on stdin. A Storage Box has no shell, so
+  `ssh host 'command'` cannot work at all; everything goes through sftp.
+- **`-P 23`, capital.** Lowercase `-p` means *preserve permissions* to sftp,
+  and the `23` after it is then read as a hostname. This is the bug that shipped
+  an archive and then silently failed to prune it.
+- **the `-` before `mkdir`** — ignore failure of that one command. Without it a
+  re-run stops on "directory exists" and never writes the key.
+- **relative paths.** The main account lands in `/home`, so `key-api-bot/.ssh`
+  is the sub-account's home. The sub-account itself lands *inside* that
+  directory, which is why its `BACKUP_REMOTE_DIR` is `.` and not the folder name.
+
+Then verify — and verify like cron will, not like a human would:
+
+```bash
+printf 'pwd\nls -1\n' | sftp -b - -P 23 -i /root/.ssh/storagebox_ed25519 \
+    -o BatchMode=yes \
+    uXXXXXX-subN@uXXXXXX-subN.your-storagebox.de
+```
+
+`BatchMode=yes` forbids falling back to a password. An interactive login proves
+nothing here: it will prompt, you will type the password, and it will look
+configured while cron still cannot get in. Note the host is the sub-account's
+own — the main domain refuses that login.
 
 ## 3. Passphrase for the config copy
 
