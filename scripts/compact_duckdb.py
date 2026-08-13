@@ -412,9 +412,16 @@ def phase2_import(manifest: dict) -> float:
     conn.execute("CHECKPOINT")
 
     new_size_mb = NEW_DB.stat().st_size / (1024**2)
-    source_size_mb = SOURCE_DB.stat().st_size / (1024**2)
-    reduction = 100 * (1 - new_size_mb / source_size_mb) if source_size_mb > 0 else 0
-    log(f"New DB: {new_size_mb:.1f} MB (was {source_size_mb:.0f} MB, {reduction:.0f}% smaller)", "OK")
+    # The source is present when compacting, and absent when restoring an
+    # export onto a machine that has no database yet — which is the case a
+    # backup exists for. This line only reports a ratio, so it must not be the
+    # thing that fails an import that has already succeeded.
+    if SOURCE_DB.exists():
+        source_size_mb = SOURCE_DB.stat().st_size / (1024**2)
+        reduction = 100 * (1 - new_size_mb / source_size_mb) if source_size_mb > 0 else 0
+        log(f"New DB: {new_size_mb:.1f} MB (was {source_size_mb:.0f} MB, {reduction:.0f}% smaller)", "OK")
+    else:
+        log(f"New DB: {new_size_mb:.1f} MB (no source to compare — restoring, not compacting)", "OK")
 
     conn.close()
     store._connection = None
