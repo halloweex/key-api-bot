@@ -136,9 +136,39 @@ fi
 
 docker rm duckdb-compact 2>/dev/null || true
 
+# Ship the Parquet export off the box while it is fresh.
+#
+# Here, and not in an independent cron, because this is the moment the export
+# exists and has just been proven: phase 3 validated it row-for-row and phase 4
+# rebuilt the live database out of it. It runs after the health check so a slow
+# upload cannot extend the downtime.
+#
+# Best-effort on purpose. This script has no `set -e`, and a failed upload must
+# never turn a successful compact into an aborted one — abort() would delete the
+# export. The push does its own alerting; the status only rides along in the
+# weekly summary so the message says whether a copy actually left the machine.
+OFFSITE_STATUS="skipped"
+if [ -x "$COMPOSE_DIR/deploy/offsite_parquet.sh" ]; then
+    log "Pushing Parquet export off-site..."
+    if "$COMPOSE_DIR/deploy/offsite_parquet.sh" >> "$LOG" 2>&1; then
+        OFFSITE_STATUS="✅ off-site"
+    else
+        RC=$?
+        # 78 = EX_UNCONFIGURED: the export is fine, there is nowhere to send it.
+        # A different sentence from "the push failed", and worth keeping apart.
+        if [ "$RC" -eq 78 ]; then
+            OFFSITE_STATUS="⚠️ off-site not configured"
+        else
+            OFFSITE_STATUS="❌ off-site FAILED (rc=$RC)"
+        fi
+    fi
+    log "Off-site: $OFFSITE_STATUS"
+fi
+
 SIZE_AFTER=$(du -h "$DATA_DIR/analytics.duckdb" | cut -f1)
 DISK_AFTER=$(df -h / | awk 'NR==2 {print $5}')
 log "Done: $SIZE_BEFORE → $SIZE_AFTER | disk: $DISK_BEFORE → $DISK_AFTER used"
-notify "✅ Weekly compact: ${SIZE_BEFORE} → ${SIZE_AFTER}, disk ${DISK_BEFORE} → ${DISK_AFTER}"
+notify "✅ Weekly compact: ${SIZE_BEFORE} → ${SIZE_AFTER}, disk ${DISK_BEFORE} → ${DISK_AFTER}
+${OFFSITE_STATUS}"
 
 log "=== WEEKLY COMPACT END ==="

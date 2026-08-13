@@ -130,6 +130,10 @@ celerybeat.pid
 
 # Environments
 .env
+# Server-specific backup target (see deploy/backup.env.example). Being ignored
+# is what keeps it alive: the deploy does `git reset --hard <sha>`, so tracked
+# files are overwritten on every release and ignored ones survive.
+deploy/backup.env
 .venv
 .venv-spike/
 env/
