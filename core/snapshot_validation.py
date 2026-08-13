@@ -72,6 +72,18 @@ MAY_BE_EMPTY = frozenset({
 })
 
 
+# Derived layers. The manifest counts every table, but these are deliberately
+# not exported — the app rebuilds them from bronze in seconds, which is most of
+# why the snapshot is small enough to ship nightly. An empty one is the design
+# working, so warning about it is noise, and noise is what this whole module
+# exists to keep out of the daily line.
+DERIVED = frozenset({
+    "silver_orders", "silver_order_utm",
+    "gold_daily_revenue", "gold_daily_products",
+    "gold_daily_traffic", "gold_product_pairs",
+})
+
+
 @dataclass(frozen=True)
 class SnapshotVerdict:
     """Whether a snapshot may be shipped, and what to say about it."""
@@ -136,9 +148,10 @@ def validate_snapshot(
                 )
 
     # Tier 3 — empty is fine, silence is not.
-    empty_tables = sorted(t for t, n in counts.items() if n <= 0)
+    empty_tables = sorted(t for t, n in counts.items() if n <= 0 and t not in DERIVED)
     for table in empty_tables:
-        if table not in MAY_BE_EMPTY and table not in MUST_BE_NONEMPTY:
+        if (table not in MAY_BE_EMPTY and table not in MUST_BE_NONEMPTY
+                and table not in DERIVED):
             # Not classified either way: report it rather than pick a side. An
             # unclassified empty table is exactly the case the old validator
             # walked past.
