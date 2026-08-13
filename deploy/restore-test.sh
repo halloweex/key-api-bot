@@ -75,12 +75,16 @@ fi
 mkdir -p "$TMP/data"
 tar -xf "$TMP/$LATEST" -C "$TMP/data"
 
-# The container runs as a non-root user, and mktemp -d plus any modes carried
-# by the archive can leave this tree unreadable to it — which surfaces as an
-# empty /app/data and a "missing manifest" error rather than a permission one.
-# Belt and braces with the producer-side fix, because archives already shipped
-# still carry the old modes.
-chmod -R a+rX "$TMP/data"
+# The container runs as a non-root user and needs to both read the archive and
+# write the rebuilt database beside it, so this needs w as well as rX — read
+# alone gets as far as "Permission denied" on analytics_clean.duckdb.
+#
+# Widening the whole tree rather than chowning to the image's UID keeps this
+# working whoever the image runs as. It is safe because $TMP itself stays 0700
+# root: nothing else on the host can traverse into this directory, and Docker
+# resolves the bind mount as root at mount time rather than walking the path as
+# the container user.
+chmod -R a+rwX "$TMP/data"
 
 if [ ! -f "$TMP/data/export_parquet/_manifest.json" ]; then
   echo "FAIL: archive has no export_parquet/_manifest.json" >&2
