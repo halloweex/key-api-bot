@@ -452,15 +452,17 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
-        # Job: Disk growth watchdog (every 6h)
-        # Captures a (db_size, disk_pct) sample and compares against the
-        # closest sample from ~24h ago. Alerts on capacity threshold
-        # (75% / 90%) and growth rate (10% / 25% per 24h).
+        # Job: Disk capacity watchdog (every 6h)
+        # Captures a (db_size, disk_pct) sample into disk_samples, then alerts
+        # on the capacity thresholds (75% / 90%). The 24h DB delta is recorded
+        # in the job result and the log but is NOT an alerting condition: the
+        # docstring in core/disk_monitor.py explains what the percentage-growth
+        # rule did here and what has to replace it.
         self._add_job(
-            job_id="disk_growth_check",
-            name="Disk Growth Watchdog",
-            description="Sample disk + DB size, alert on capacity or growth-rate breach",
-            func=self._run_disk_growth_check,
+            job_id="disk_watchdog",
+            name="Disk Capacity Watchdog",
+            description="Sample disk + DB size, alert on a disk capacity breach",
+            func=self._run_disk_watchdog,
             trigger=CronTrigger(hour=INVARIANT_CHECK_HOURS),
             max_instances=1,
             coalesce=True,
@@ -943,20 +945,26 @@ class BackgroundScheduler:
             logger.info("DQ Layer-1 integrity scan complete", extra=result)
             return result
 
-    # ─── Disk growth watchdog ─────────────────────────────────────────────────
+    # ─── Disk capacity watchdog ───────────────────────────────────────────────
 
     _disk_alert_last_sent: float = 0.0
     _DISK_ALERT_COOLDOWN_S = 86400  # 24h
 
-    async def _run_disk_growth_check(self) -> Dict[str, Any]:
-        """Sample disk + DB state, alert on capacity or growth rate breach.
+    async def _run_disk_watchdog(self) -> Dict[str, Any]:
+        """Sample disk + DB state, alert on a capacity breach.
 
-        Independent of dq_* jobs: this is about RESOURCES (disk filling,
-        DB ballooning), not data quality. Co-located in scheduler only
-        because the cadence is the same (6h).
+        Independent of dq_* jobs: this is about RESOURCES (disk filling),
+        not data quality. Co-located in scheduler only because the cadence
+        is the same (6h).
+
+        The 24h DB delta is measured and logged but never paged on — see
+        the module docstring in core/disk_monitor.py for why the old
+        percentage-growth alert was incapable of returning "OK", and what
+        has to replace it. Sampling continues regardless: that history is
+        what the replacement will be calibrated from.
         """
         from core.disk_monitor import (
-            evaluate_disk_growth,
+            evaluate_disk_capacity,
             fetch_sample_at_age,
             insert_sample,
             prune_old_samples,
@@ -968,7 +976,6 @@ class BackgroundScheduler:
             store = await get_store()
             sample = sample_disk_state(str(store.db_path))
 
-            # Compare against ~24h-ago sample. None → bootstrap, skip growth check.
             async with store.connection() as conn:
                 history = fetch_sample_at_age(conn, hours=24, slack_hours=2)
                 insert_sample(conn, sample)
@@ -976,12 +983,15 @@ class BackgroundScheduler:
                 deleted = prune_old_samples(conn, retention_days=14)
 
             db_24h_ago = history["db_size_mb"] if history else None
+            growth_mb_24h = (
+                round(sample["db_size_mb"] - db_24h_ago, 2)
+                if db_24h_ago is not None else None
+            )
 
-            alert = evaluate_disk_growth(
+            alert = evaluate_disk_capacity(
                 disk_pct_used=sample["disk_pct_used"],
                 disk_free_gb=sample["disk_free_gb"],
                 db_size_mb=sample["db_size_mb"],
-                db_size_24h_ago_mb=db_24h_ago,
             )
 
             result = {
@@ -989,14 +999,23 @@ class BackgroundScheduler:
                 "disk_pct_used": sample["disk_pct_used"],
                 "disk_free_gb": sample["disk_free_gb"],
                 "db_24h_ago_mb": db_24h_ago,
+                "db_growth_mb_24h": growth_mb_24h,
                 "pruned_old_samples": deleted,
                 "alert_fired": False,
             }
 
             if alert is None:
-                logger.debug(
+                growth_str = (
+                    f"{growth_mb_24h:+,.0f} MB/24h" if growth_mb_24h is not None
+                    else "no 24h baseline"
+                )
+                # info, not debug: a watchdog that only speaks on bad news is
+                # indistinguishable from a dead one, and this one has already
+                # been on the wrong side of that. Silence must mean something.
+                logger.info(
                     f"Disk OK: {sample['disk_pct_used']:.1f}% used, "
-                    f"DB={sample['db_size_mb']:.0f} MB"
+                    f"{sample['disk_free_gb']:.1f} GB free, "
+                    f"DB={sample['db_size_mb']:,.0f} MB ({growth_str})"
                 )
                 return result
 

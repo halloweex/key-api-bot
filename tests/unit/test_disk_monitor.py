@@ -1,7 +1,18 @@
-"""Tests for evaluate_disk_growth.
+"""Tests for evaluate_disk_capacity and the disk_samples persistence helpers.
 
-Pure function — the I/O wrapper (sample_disk_state) is intentionally
-not covered here; it's tested by the scheduler integration on prod.
+Fixtures here are production readings, dated, with their source named.
+
+That rule exists because of how this file failed. It used to assert that
+"as of 2026-05-21" production sat at 25% disk with a 7.2 GB database and
+~0% daily growth. That stopped being true on 2026-05-31, when the weekly
+compact began cutting the database to ~70 MB every Sunday. The suite
+stayed green for weeks while the thresholds it was guarding drifted
+into firing CRITICAL every week by construction — and a green suite
+asserting a world that has ended is worse than no suite, because it is
+what convinces the next reader the calibration is still good.
+
+So: when the production regime changes, these fixtures change with it, and
+every docstring says when its numbers were read.
 """
 from __future__ import annotations
 
@@ -9,46 +20,54 @@ import pytest
 
 from core.data_quality import Severity
 from core.disk_monitor import (
-    CRITICAL_DISK_PCT,
-    CRITICAL_GROWTH_PCT_24H,
-    DiskAlert,
-    MIN_DB_SIZE_FOR_GROWTH_CHECK_MB,
     WARN_DISK_PCT,
-    WARN_GROWTH_PCT_24H,
-    evaluate_disk_growth,
+    evaluate_disk_capacity,
 )
+
+
+# Ten consecutive samples read out of production `disk_samples` on
+# 2026-08-12, covering 2026-08-10 07:00 → 2026-08-12 19:00 Kyiv.
+# Measured growth across them: 607-682 MB/24h. A flat line.
+# The percentage rule this module used to carry reported the same flat line
+# as +456% decaying to +33.7% — a deceleration manufactured entirely by a
+# denominator that the Sunday compact resets to ~80 MB.
+SAWTOOTH_WEEK_DB_MB = [
+    831.76, 1025.26, 1235.01, 1398.26, 1463.76,
+    1654.76, 1855.76, 2014.26, 2082.00, 2480.00,
+]
+
+# Whole-disk usage over that same window, both endpoints as recorded.
+SAWTOOTH_WEEK_DISK_PCT = (54.71, 61.26)
 
 
 # ─── No-alert (healthy) ───────────────────────────────────────────────────────
 
 
 class TestHealthy:
-    def test_low_disk_no_growth_no_alert(self):
-        result = evaluate_disk_growth(
+    def test_low_disk_no_alert(self):
+        result = evaluate_disk_capacity(
             disk_pct_used=25.0,
             disk_free_gb=55.0,
             db_size_mb=7_000,
-            db_size_24h_ago_mb=6_900,  # +1.4% — well below warn
         )
         assert result is None
 
     def test_below_warn_threshold_no_alert(self):
-        result = evaluate_disk_growth(
+        result = evaluate_disk_capacity(
             disk_pct_used=74.9,
             disk_free_gb=19.0,
             db_size_mb=10_000,
-            db_size_24h_ago_mb=10_000,
         )
         assert result is None
 
-    def test_negative_growth_after_compact_no_alert(self):
-        """Post-compact: DB shrank from 43 GB to 7 GB → -84% growth.
-        Must NOT alert (this is the success state)."""
-        result = evaluate_disk_growth(
+    def test_huge_db_on_a_roomy_disk_is_not_an_alert(self):
+        """Size alone is never the trigger. A 43 GB database on a disk at
+        25% is exactly what the pre-compact regime looked like, and it was
+        fine — the compact was keeping up."""
+        result = evaluate_disk_capacity(
             disk_pct_used=25.0,
             disk_free_gb=55.0,
-            db_size_mb=7_200,
-            db_size_24h_ago_mb=43_000,
+            db_size_mb=43_000,
         )
         assert result is None
 
@@ -58,11 +77,10 @@ class TestHealthy:
 
 class TestCapacityAlerts:
     def test_warn_at_75_pct(self):
-        result = evaluate_disk_growth(
+        result = evaluate_disk_capacity(
             disk_pct_used=75.0,
             disk_free_gb=18.75,
             db_size_mb=7_000,
-            db_size_24h_ago_mb=7_000,
         )
         assert result is not None
         assert result.severity == Severity.WARN
@@ -70,11 +88,10 @@ class TestCapacityAlerts:
         assert "18.7" in result.reason or "18.8" in result.reason
 
     def test_critical_at_90_pct(self):
-        result = evaluate_disk_growth(
+        result = evaluate_disk_capacity(
             disk_pct_used=92.0,
             disk_free_gb=6.0,
             db_size_mb=40_000,
-            db_size_24h_ago_mb=40_000,
         )
         assert result is not None
         assert result.severity == Severity.CRITICAL
@@ -82,116 +99,58 @@ class TestCapacityAlerts:
 
     def test_below_warn_threshold_boundary(self):
         """Just below the floor — must not alert."""
-        result = evaluate_disk_growth(
+        result = evaluate_disk_capacity(
             disk_pct_used=WARN_DISK_PCT - 0.01,
             disk_free_gb=19.0,
             db_size_mb=7_000,
-            db_size_24h_ago_mb=7_000,
         )
         assert result is None
 
-
-# ─── Growth tier ──────────────────────────────────────────────────────────────
-
-
-class TestGrowthAlerts:
-    def test_warn_at_10_pct_growth(self):
-        """The May 2026 bronze regression hit this rate before we noticed."""
-        result = evaluate_disk_growth(
-            disk_pct_used=30.0,
-            disk_free_gb=50.0,
-            db_size_mb=11_000,
-            db_size_24h_ago_mb=10_000,  # +10%
-        )
-        assert result is not None
-        assert result.severity == Severity.WARN
-        assert "10.0%" in result.reason
-
-    def test_critical_at_25_pct_growth(self):
-        """Runaway growth — disk would fill in days."""
-        result = evaluate_disk_growth(
-            disk_pct_used=30.0,
-            disk_free_gb=50.0,
-            db_size_mb=13_000,
-            db_size_24h_ago_mb=10_000,  # +30%
-        )
-        assert result is not None
-        assert result.severity == Severity.CRITICAL
-        assert "30.0%" in result.reason
-
-    def test_below_growth_threshold_no_alert(self):
-        result = evaluate_disk_growth(
-            disk_pct_used=30.0,
-            disk_free_gb=50.0,
-            db_size_mb=10_900,
-            db_size_24h_ago_mb=10_000,  # +9% — below warn
-        )
-        assert result is None
-
-
-# ─── Bootstrap (no history) ───────────────────────────────────────────────────
-
-
-class TestBootstrap:
-    def test_no_24h_sample_skips_growth_check(self):
-        """First run after deploy — no 24h-ago sample. Capacity check still
-        fires; growth check stays silent."""
-        result = evaluate_disk_growth(
-            disk_pct_used=30.0,
-            disk_free_gb=50.0,
-            db_size_mb=7_000,
-            db_size_24h_ago_mb=None,
-        )
-        assert result is None
-
-    def test_no_24h_sample_capacity_still_fires(self):
-        result = evaluate_disk_growth(
+    def test_db_size_is_carried_but_not_judged(self):
+        result = evaluate_disk_capacity(
             disk_pct_used=92.0,
             disk_free_gb=6.0,
-            db_size_mb=7_000,
-            db_size_24h_ago_mb=None,
+            db_size_mb=2_480,
         )
         assert result is not None
-        assert result.severity == Severity.CRITICAL
+        assert result.db_size_mb == 2_480
+        # The DB is reported for context; the reason names the disk.
+        assert "disk" in result.reason
 
-    def test_tiny_db_skips_growth_check(self):
-        """DB < 100 MB — percentage growth is dominated by noise. Skip."""
-        result = evaluate_disk_growth(
-            disk_pct_used=30.0,
-            disk_free_gb=50.0,
-            db_size_mb=80,
-            db_size_24h_ago_mb=50,  # +60%, but tiny absolute
+
+# ─── Regression: the sawtooth that could not be quiet ─────────────────────────
+
+
+class TestSawtoothRegression:
+    """The defect this module was changed to fix.
+
+    weekly_compact.sh rebuilds the DB every Sunday 02:00 UTC and leaves it
+    near 80 MB, so any percentage measured against a 24h-old baseline is
+    measured against a denominator that resets weekly. To read below the
+    old 10% WARN line the baseline had to exceed 6300 MB; the weekly peak
+    is 4.4 GB. A healthy week produced 15 CRITICAL and 9 WARN evaluations
+    and zero quiet ones. It must now be silent end to end.
+    """
+
+    @pytest.mark.parametrize("db_size_mb", SAWTOOTH_WEEK_DB_MB)
+    @pytest.mark.parametrize("disk_pct_used", SAWTOOTH_WEEK_DISK_PCT)
+    def test_healthy_sawtooth_week_never_alerts(self, db_size_mb, disk_pct_used):
+        result = evaluate_disk_capacity(
+            disk_pct_used=disk_pct_used,
+            disk_free_gb=25.0,
+            db_size_mb=db_size_mb,
         )
         assert result is None
 
-
-# ─── Worst-of-N: both tiers fire ──────────────────────────────────────────────
-
-
-class TestCombinedAlerts:
-    def test_both_warn_picks_warn(self):
-        result = evaluate_disk_growth(
-            disk_pct_used=78.0,    # WARN
-            disk_free_gb=16.5,
-            db_size_mb=11_200,
-            db_size_24h_ago_mb=10_000,  # +12% WARN
+    def test_the_alert_that_started_this_is_now_silent(self):
+        """2026-08-12 07:00 Kyiv paged CRITICAL: "DB grew +42.2% in 24h
+        (1464 -> 2082 MB)". Same reading, same disk, nothing wrong."""
+        result = evaluate_disk_capacity(
+            disk_pct_used=61.8,
+            disk_free_gb=25.4,
+            db_size_mb=2_082.0,
         )
-        assert result is not None
-        assert result.severity == Severity.WARN
-        # Both reasons combined
-        assert "78" in result.reason
-        assert "12" in result.reason
-
-    def test_critical_dominates_warn(self):
-        """Disk at WARN + growth at CRITICAL → overall CRITICAL."""
-        result = evaluate_disk_growth(
-            disk_pct_used=78.0,  # WARN
-            disk_free_gb=16.5,
-            db_size_mb=14_000,
-            db_size_24h_ago_mb=10_000,  # +40% CRITICAL
-        )
-        assert result is not None
-        assert result.severity == Severity.CRITICAL
+        assert result is None
 
 
 # ─── Regression markers ───────────────────────────────────────────────────────
@@ -199,41 +158,42 @@ class TestCombinedAlerts:
 
 class TestProductionScenarios:
     def test_current_state_is_quiet(self):
-        """As of 2026-05-21: 25% disk, 7.2 GB DB, ~0% daily growth.
-        Must not alert."""
-        result = evaluate_disk_growth(
-            disk_pct_used=25.0,
-            disk_free_gb=55.0,
-            db_size_mb=7_200,
-            db_size_24h_ago_mb=7_180,  # +0.3%/day post-skip-fix
+        """Read from the host on 2026-08-12 19:00: 62.4% disk, 25.0 GB
+        free, 2.5 GB database mid-week. Must not alert."""
+        result = evaluate_disk_capacity(
+            disk_pct_used=62.4,
+            disk_free_gb=25.0,
+            db_size_mb=2_480,
         )
         assert result is None
 
-    def test_pre_compact_bloat_would_have_alerted(self):
-        """If this watchdog had existed in April, it would have fired
-        on the slow approach to 73% disk."""
-        result = evaluate_disk_growth(
-            disk_pct_used=73.0,
-            disk_free_gb=20.0,
-            db_size_mb=43_000,
-            db_size_24h_ago_mb=42_000,  # +2.4%/day
+    def test_the_2026_08_05_regression_is_below_capacity_reach(self):
+        """A change once moved the post-compact disk floor by tens of points
+        in a single week, by adding files that were not the database.
+
+        Capacity does not catch that, and this test says so on purpose: 58%
+        is well under WARN. The detector that would catch it — absolute
+        growth of the whole data directory, with per-path attribution so
+        the alert can name what grew — is not written yet. Nothing here
+        should be read as claiming that gap is covered.
+        """
+        result = evaluate_disk_capacity(
+            disk_pct_used=58.0,
+            disk_free_gb=31.0,
+            db_size_mb=81,
         )
-        # 73% < 75% WARN — quiet (the cumulative was the problem, not 24h delta)
         assert result is None
 
-    def test_bronze_regression_would_have_fired(self):
-        """If something like the May 2026 bronze accumulation kicked off
-        today, the 24h growth rate would trigger WARN before the diskpct
-        hit 75%."""
-        result = evaluate_disk_growth(
-            disk_pct_used=30.0,
-            disk_free_gb=50.0,
-            db_size_mb=8_000,   # +14% in one day = catastrophe rate
-            db_size_24h_ago_mb=7_000,
+    def test_the_same_trend_continuing_does_fire(self):
+        """What capacity is for: one more regression of that size, and the
+        disk crosses 75%."""
+        result = evaluate_disk_capacity(
+            disk_pct_used=76.0,
+            disk_free_gb=18.0,
+            db_size_mb=2_480,
         )
         assert result is not None
         assert result.severity == Severity.WARN
-        assert "14" in result.reason
 
 
 # ─── Persistence: insert / fetch_at_age / prune ───────────────────────────────
@@ -358,14 +318,13 @@ class TestPersistence:
 # ─── Scheduler integration ────────────────────────────────────────────────────
 
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 
 class TestSchedulerJob:
     @pytest.mark.asyncio
     async def test_bootstrap_run_persists_sample_no_alert(self, tmp_path):
-        """First run: no history → growth check skipped, sample inserted."""
+        """First run: no history → no 24h delta to report, sample inserted."""
         from core.scheduler import BackgroundScheduler
         from core.duckdb_store import DuckDBStore
 
@@ -384,10 +343,11 @@ class TestSchedulerJob:
                 },
             ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
                patch("bot.main.send_admin_message", new_callable=AsyncMock) as send:
-                result = await scheduler._run_disk_growth_check()
+                result = await scheduler._run_disk_watchdog()
 
             assert result["alert_fired"] is False
             assert result["db_24h_ago_mb"] is None
+            assert result["db_growth_mb_24h"] is None
             send.assert_not_called()
 
             async with store.connection() as conn:
@@ -399,7 +359,10 @@ class TestSchedulerJob:
             await store.close()
 
     @pytest.mark.asyncio
-    async def test_critical_growth_fires_alert(self, tmp_path):
+    async def test_growth_is_measured_and_reported_but_never_paged(self, tmp_path):
+        """A mid-week sawtooth reading: +618 MB in 24h, the exact delta that
+        paged CRITICAL on 2026-08-12. The number must reach the job result
+        and the log. It must not reach anyone's phone."""
         from core.scheduler import BackgroundScheduler
         from core.duckdb_store import DuckDBStore
         from core.disk_monitor import insert_sample
@@ -411,11 +374,10 @@ class TestSchedulerJob:
 
             now = datetime.now(timezone.utc)
             async with store.connection() as conn:
-                # 24h-ago sample showing much smaller DB
                 insert_sample(conn, {
                     "sampled_at": now - timedelta(hours=24),
-                    "db_size_mb": 7_000, "disk_pct_used": 25.0,
-                    "disk_free_gb": 55.0,
+                    "db_size_mb": 1_463.76, "disk_pct_used": 61.2,
+                    "disk_free_gb": 25.8,
                 })
 
             scheduler = BackgroundScheduler()
@@ -423,12 +385,40 @@ class TestSchedulerJob:
                 "core.disk_monitor.sample_disk_state",
                 return_value={
                     "sampled_at": now,
-                    "db_size_mb": 10_000, "disk_pct_used": 35.0,
-                    "disk_free_gb": 48.0,
+                    "db_size_mb": 2_082.0, "disk_pct_used": 61.8,
+                    "disk_free_gb": 25.4,
                 },
             ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
                patch("bot.main.send_admin_message", new_callable=AsyncMock) as send:
-                result = await scheduler._run_disk_growth_check()
+                result = await scheduler._run_disk_watchdog()
+
+            assert result["alert_fired"] is False
+            assert result["db_growth_mb_24h"] == pytest.approx(618.24)
+            send.assert_not_called()
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_capacity_breach_fires_alert(self, tmp_path):
+        from core.scheduler import BackgroundScheduler
+        from core.duckdb_store import DuckDBStore
+
+        store = DuckDBStore(db_path=tmp_path / "test.duckdb")
+        await store.connect()
+        try:
+            BackgroundScheduler._disk_alert_last_sent = 0.0
+
+            scheduler = BackgroundScheduler()
+            with patch(
+                "core.disk_monitor.sample_disk_state",
+                return_value={
+                    "sampled_at": datetime.now(timezone.utc),
+                    "db_size_mb": 2_480, "disk_pct_used": 92.0,
+                    "disk_free_gb": 6.0,
+                },
+            ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
+               patch("bot.main.send_admin_message", new_callable=AsyncMock) as send:
+                result = await scheduler._run_disk_watchdog()
 
             assert result["alert_fired"] is True
             send.assert_called_once()
@@ -442,7 +432,6 @@ class TestSchedulerJob:
         """A persistent breach must not page admins every 6h."""
         from core.scheduler import BackgroundScheduler
         from core.duckdb_store import DuckDBStore
-        from core.disk_monitor import insert_sample
         import time as _time
 
         store = DuckDBStore(db_path=tmp_path / "test.duckdb")
@@ -451,25 +440,17 @@ class TestSchedulerJob:
             # Pretend we alerted 1 minute ago
             BackgroundScheduler._disk_alert_last_sent = _time.time() - 60
 
-            now = datetime.now(timezone.utc)
-            async with store.connection() as conn:
-                insert_sample(conn, {
-                    "sampled_at": now - timedelta(hours=24),
-                    "db_size_mb": 7_000, "disk_pct_used": 25.0,
-                    "disk_free_gb": 55.0,
-                })
-
             scheduler = BackgroundScheduler()
             with patch(
                 "core.disk_monitor.sample_disk_state",
                 return_value={
-                    "sampled_at": now,
-                    "db_size_mb": 12_000, "disk_pct_used": 35.0,
-                    "disk_free_gb": 48.0,
+                    "sampled_at": datetime.now(timezone.utc),
+                    "db_size_mb": 2_480, "disk_pct_used": 92.0,
+                    "disk_free_gb": 6.0,
                 },
             ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
                patch("bot.main.send_admin_message", new_callable=AsyncMock) as send:
-                result = await scheduler._run_disk_growth_check()
+                result = await scheduler._run_disk_watchdog()
 
             assert result["alert_fired"] is False
             send.assert_not_called()  # throttled
