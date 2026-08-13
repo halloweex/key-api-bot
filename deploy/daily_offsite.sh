@@ -87,6 +87,18 @@ ln "$LATEST" "$WORK/analytics.duckdb"
 # is recreated every night, and the container sees nothing outside it.
 [ -f data/.last_snapshot.json ] && cp data/.last_snapshot.json "$WORK/.last_snapshot.json"
 
+# The export writes into /app/data — export_parquet/, duckdb_tmp/ and the
+# updated baseline — and the image runs as a non-root user, so root's freshly
+# made directory is unwritable to it. Ask the image who it runs as rather than
+# hardcoding a uid that is only true until the image changes.
+#
+# Only the directory and the json, never "$WORK/analytics.duckdb": that is a
+# hard link, so chown -R would change the ownership of the backup itself
+# through the shared inode.
+APPUID="$(docker run --rm --entrypoint id "$IMAGE" -u)"
+chown "$APPUID:$APPUID" "$WORK"
+[ -f "$WORK/.last_snapshot.json" ] && chown "$APPUID:$APPUID" "$WORK/.last_snapshot.json"
+
 docker run --rm \
     --memory=6500m \
     -e DUCKDB_MEMORY_LIMIT=4GB \
