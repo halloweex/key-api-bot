@@ -93,10 +93,16 @@ fi
 # COMPACT_AUTO_SWAP is deliberately absent: restore_from_export.py never calls
 # phase 4, and this makes that true twice.
 echo "rebuilding in $IMAGE ..."
+# deploy/ is not in the image, and should not be: the image carries what the
+# service runs, and a restore drill is operator tooling. Mounting it keeps the
+# drill in step with the checkout without an image rebuild, and a real restore
+# has the repo anyway — the archive records the deploy SHA precisely so you can
+# check out the commit that wrote it.
 docker run --rm \
   --memory=6500m \
   -e DUCKDB_MEMORY_LIMIT=4GB \
   -v "$TMP/data:/app/data" \
+  -v "$PWD/deploy/restore_from_export.py:/app/deploy/restore_from_export.py:ro" \
   --env-file .env \
   "$IMAGE" \
   python /app/deploy/restore_from_export.py
