@@ -38,14 +38,30 @@ DERIVED_TABLES = frozenset({
     "silver_orders", "silver_order_utm",
     "gold_daily_revenue", "gold_daily_products",
     "gold_daily_traffic",
-    # Nothing creates gold_product_pairs any more — its DDL is gone. The name
-    # stays here until the table is absent from the production database, for
-    # one specific reason: all_tables below is read from the *source* db, so
-    # removing the name would move the surviving rows into export_tables, write
-    # them to Parquet, import them into the new database, and put them in the
-    # off-site archive on the way — recreating exactly what was deleted.
-    # Safe to drop once a compact has run and the table no longer appears.
+
+    # ── Dropped from the schema, still present in the production database ──
+    #
+    # Neither of these has a DDL any more, so _init_schema() does not create
+    # them in the new database. They are listed here — the set that decides
+    # what is *not* exported — because all_tables is read from the *source*
+    # database, which still has both.
+    #
+    # Leaving either one out is not a no-op, and the two failure modes differ:
+    #
+    #   gold_product_pairs (5,185 rows) would be exported to Parquet and
+    #   imported back, recreating the table this deletion removed and putting
+    #   its rows in the off-site archive on the way.
+    #
+    #   orders_v2 (0 rows) would be exported too, and then `INSERT INTO
+    #   "orders_v2"` would fail against a schema that no longer defines it.
+    #   That error is not a duplicate-key error, so it lands in import_errors
+    #   and phase 2 exits 1 — the whole weekly compact aborts, and with it the
+    #   off-site export that runs after it.
+    #
+    # Remove a name from here only after a compact has run and the table is
+    # gone from the production database.
     "gold_product_pairs",
+    "orders_v2",
 })
 
 MEM_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "6GB")
