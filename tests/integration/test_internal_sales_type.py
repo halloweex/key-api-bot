@@ -107,20 +107,12 @@ class TestTheGate:
         res = as_admin.get("/api/summary?period=today&sales_type=internal")
         assert res.status_code != 403
 
-    def test_the_batch_body_is_gated_too(self, as_viewer):
-        """The gate reads the query string; batch carries it in the body."""
-        res = as_viewer.post(
-            "/api/dashboard/batch",
-            json={"sections": ["summary"], "period": "today", "sales_type": "internal"},
-        )
-        assert res.status_code == 403
-
-    def test_the_batch_body_passes_for_an_admin(self, as_admin):
-        res = as_admin.post(
-            "/api/dashboard/batch",
-            json={"sections": ["summary"], "period": "today", "sales_type": "internal"},
-        )
-        assert res.status_code != 403
+    # Two tests here covered /api/dashboard/batch, the one route that carried
+    # sales_type in a request body where api_gate — which reads the query
+    # string — could not see it. That route is gone, and it was the only
+    # body-carrying one, so the gap it guarded has no shape to test. Restore
+    # both from git history alongside any new POST that takes sales_type in a
+    # body; the gate still cannot see one.
 
     def test_an_anonymous_request_is_still_401_not_403(self, client):
         """Authentication comes first; the category rule is not a login page."""

@@ -14,7 +14,7 @@ from slowapi.errors import RateLimitExceeded
 
 from web.config import STATIC_DIR, STATIC_V2_DIR, VERSION
 from web.ratelimit import limiter
-from web.routes import api, pages, auth, chat, batch, websocket
+from web.routes import api, pages, auth, chat, websocket
 from web.routes.auth import api_gate, require_admin
 from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
 from bot.database import init_database
@@ -124,7 +124,6 @@ app.mount("/static-v2", StaticFiles(directory=str(STATIC_V2_DIR)), name="static-
 _api_gate = [Depends(api_gate)]
 app.include_router(auth.router)  # /login, /logout, /auth/* — explicitly public
 app.include_router(api.router, prefix="/api", dependencies=_api_gate)
-app.include_router(batch.router, prefix="/api", dependencies=_api_gate)
 app.include_router(websocket.router)  # WebSocket routes (no /api prefix) — self-gated
 app.include_router(chat.router, prefix="/api", dependencies=[Depends(api_gate), Depends(require_admin)])
 app.include_router(pages.router)  # SPA catch-all must be last

@@ -33,7 +33,6 @@ key-api-bot/
 │   ├── routes/
 │   │   ├── api/                 # Package, 16 modules; __init__ include_routers them
 │   │   ├── auth.py              # Authentication routes
-│   │   ├── batch.py             # POST /api/dashboard/batch (no client calls it)
 │   │   └── pages.py             # HTML page routes (React SPA)
 │   ├── services/
 │   │   └── dashboard_service.py # Data transformations (async)
@@ -381,9 +380,14 @@ otherwise                                 → internal
 **Retail is a fixed list of retail managers and b2b is the wholesale manager;
 nobody else is mixed into either.** `internal` is everyone else — staff whose
 work is neither: their own sales, and shipments to bloggers that carry line
-items and no money at all. It is admin-only, enforced in `api_gate` (and again
-in `/api/dashboard/batch`, which carries `sales_type` in the body where the
-gate cannot see it). `sales_type=all` spans every category and is not gated.
+items and no money at all. It is admin-only, enforced in `api_gate`.
+`sales_type=all` spans every category and is not gated.
+
+`api_gate` reads `sales_type` from the **query string**. That was sufficient
+once `/api/dashboard/batch` was deleted — it was the only route that took
+`sales_type` in a request body, and it needed its own check for exactly that
+reason. Any new POST accepting `sales_type` in a body reopens the hole and
+needs the same treatment.
 
 `managers.is_retail` is seeded from `RETAIL_MANAGER_IDS` for managers the
 warehouse has never seen and **never overwritten afterwards** — it used to be
