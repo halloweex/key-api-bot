@@ -49,6 +49,33 @@ def _no_telegram_from_tests(monkeypatch):
         )
 
 
+@pytest.fixture(autouse=True)
+def _never_the_production_database(monkeypatch, tmp_path):
+    """No test may open the real analytics database. Ever.
+
+    `DuckDBStore()` with no argument opens DB_PATH, and `get_store()` — which
+    every route reaches through Depends — builds exactly that. So a single
+    `TestClient(app)` request was enough: tests/integration/test_internal_sales_type.py
+    opened the 8.7 GB production file on every run, and the only reason it did
+    no damage is that this machine holds a copy rather than the live one. On a
+    host where data/ is the real volume, running the suite would have opened
+    the database the bot and the web container are using.
+
+    Redirecting DB_PATH is only possible because __init__ resolves it at call
+    time; it used to be a default argument, frozen at import.
+
+    Function-scoped against tmp_path, so each test gets an empty database and
+    none of them can see another's writes. A test that wants a specific file
+    still passes db_path= explicitly and is unaffected.
+    """
+    monkeypatch.setattr(
+        "core.duckdb_store.DB_PATH", tmp_path / "test-analytics.duckdb",
+    )
+    # get_store() caches a singleton, and one built before this fixture ran
+    # would keep the old path for the rest of the session.
+    monkeypatch.setattr("core.duckdb_store._store_instance", None, raising=False)
+
+
 @pytest.fixture
 def sample_order() -> Dict[str, Any]:
     """Sample order data from KeyCRM API."""

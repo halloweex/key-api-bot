@@ -164,8 +164,15 @@ class DuckDBStore(
     # __init__ still read cleanly.
     _last_stuck_rebuild: "float | None" = None
 
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[Path] = None):
+        # Resolved here rather than bound as a default argument. A default is
+        # evaluated once, when this function is defined, so `db_path=DB_PATH`
+        # made the production path permanent and unpatchable: nothing a test
+        # did to core.duckdb_store.DB_PATH afterwards could change where a
+        # store built with no argument would open. Reading the module global at
+        # call time is what lets tests/conftest.py redirect it — see the
+        # `_never_the_production_database` fixture there.
+        self.db_path = db_path if db_path is not None else DB_PATH
         self._connection: Optional[duckdb.DuckDBPyConnection] = None
         self._lock = asyncio.Lock()  # Serializes all database access
 
