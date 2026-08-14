@@ -352,6 +352,19 @@ def phase2_import(manifest: dict) -> float:
         if not parquet_path.exists():
             continue
 
+        # The table list comes from the snapshot's manifest, and the schema
+        # comes from today's code, so a restore of an older archive can name a
+        # table this version no longer defines. Without this check the INSERT
+        # below raises a Catalog Error, which is not a duplicate-key error, so
+        # it reaches import_errors and aborts the run — meaning one table
+        # dropped from the schema would make every archive taken before that
+        # commit unrestorable. Announced rather than passed over in silence:
+        # the rows are real and they are not being restored.
+        if t not in created_tables:
+            log(f"  {t}: not in this version's schema — {counts.get(t, 0):,} "
+                f"rows in the archive are NOT being restored", "WARN")
+            continue
+
         expected = counts.get(t, 0)
         try:
             conn.execute(
