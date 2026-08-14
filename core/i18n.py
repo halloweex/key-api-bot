@@ -349,7 +349,6 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "daterange.custom": {
         EN: "🗓️ Custom Date Range", UK: "🗓️ Свій період", RU: "🗓️ Свой период",
     },
-    "source.all": {EN: "All Sources", UK: "Усі джерела", RU: "Все источники"},
 
     # ── Commands, as Telegram shows them in the menu ──
     "cmd.start": {EN: "👋 Start the bot", UK: "👋 Запустити бота", RU: "👋 Запустить бота"},
@@ -622,16 +621,6 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         UK: "<i>Оберіть джерело, щоб побачити ТОП-10:</i>",
         RU: "<i>Выберите источник, чтобы увидеть ТОП-10:</i>",
     },
-    "top10.by_source": {
-        EN: "🏆 TOP-10 PRODUCTS BY SOURCE",
-        UK: "🏆 ТОП-10 ТОВАРІВ ЗА ДЖЕРЕЛАМИ",
-        RU: "🏆 ТОП-10 ТОВАРОВ ПО ИСТОЧНИКАМ",
-    },
-    "top10.for_source": {
-        EN: "🏆 TOP-10 PRODUCTS — {source}",
-        UK: "🏆 ТОП-10 ТОВАРІВ — {source}",
-        RU: "🏆 ТОП-10 ТОВАРОВ — {source}",
-    },
     "top10.no_sales": {
         EN: "<i>no sales in this period</i>",
         UK: "<i>продажів за цей період немає</i>",
@@ -665,10 +654,6 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "summary.generated_at": {
         EN: "Generated {time}", UK: "Сформовано {time}", RU: "Сформировано {time}",
     },
-    "milestone.reached": {
-        EN: "MILESTONE REACHED!", UK: "РУБІЖ ДОСЯГНУТО!", RU: "РУБЕЖ ДОСТИГНУТ!",
-    },
-    "milestone.revenue": {EN: "Revenue", UK: "Виручка", RU: "Выручка"},
     "milestone.daily_300k": {
         EN: "₴300K in a single day!",
         UK: "₴300 тис. за один день!",
@@ -794,11 +779,6 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     },
     "search.order": {EN: "Order", UK: "Замовлення", RU: "Заказ"},
     "search.unknown": {EN: "Unknown", UK: "Невідомо", RU: "Неизвестно"},
-    "search.by_type": {
-        EN: "🔍 <b>Search by {type}</b>\n\nSend me the value:",
-        UK: "🔍 <b>Пошук за: {type}</b>\n\nНадішліть значення:",
-        RU: "🔍 <b>Поиск по: {type}</b>\n\nПришлите значение:",
-    },
     "admin.only": {
         EN: "⛔ Admin access required", UK: "⛔ Потрібні права адміністратора",
         RU: "⛔ Нужны права администратора",
