@@ -300,9 +300,8 @@ def main() -> None:
     # Periodic database cleanup job
     async def cleanup_database(context):
         cache_count = database.cache_cleanup()
-        history_count = database.cleanup_old_history(days=30)
-        if cache_count > 0 or history_count > 0:
-            logger.debug(f"DB cleanup: {cache_count} cache, {history_count} history")
+        if cache_count > 0:
+            logger.debug(f"DB cleanup: {cache_count} cache")
 
     # Periodic inactive user revocation (runs daily)
     async def revoke_inactive_users(context):
