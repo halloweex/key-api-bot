@@ -246,14 +246,6 @@ class DuckDBStore(
                 self._connection.execute("CHECKPOINT")
                 logger.info("DuckDB checkpoint completed")
 
-    def get_connection_info(self) -> Dict[str, Any]:
-        """Get connection info for monitoring."""
-        return {
-            "status": "active" if self._connection else "not_initialized",
-            "total_queries": self._total_queries,
-            "db_path": str(self.db_path),
-        }
-
     @asynccontextmanager
     async def connection(self):
         """Get database connection with automatic reconnection.
@@ -268,33 +260,6 @@ class DuckDBStore(
             yield self._connection
 
     # ─── Query Execution with Timeout ────────────────────────────────────────
-
-    async def _execute_with_timeout(
-        self,
-        query: str,
-        params: list = None,
-        timeout: float = DEFAULT_QUERY_TIMEOUT,
-    ) -> None:
-        """
-        Execute a query with timeout (for INSERT/UPDATE/DELETE).
-
-        Args:
-            query: SQL query string
-            params: Query parameters
-            timeout: Timeout in seconds
-
-        Raises:
-            QueryTimeoutError: If query exceeds timeout
-        """
-        async with self.connection() as conn:
-            try:
-                loop = asyncio.get_running_loop()
-                await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, conn.execute, query, params or []),
-                    timeout=timeout
-                )
-            except asyncio.TimeoutError:
-                raise QueryTimeoutError(query, timeout, "Execute failed")
 
     async def _fetch_one(
         self,
@@ -369,43 +334,6 @@ class DuckDBStore(
                 )
             except asyncio.TimeoutError:
                 raise QueryTimeoutError(query, timeout, "Fetch all failed")
-
-    async def _fetch_df(
-        self,
-        query: str,
-        params: list = None,
-        timeout: float = DEFAULT_QUERY_TIMEOUT,
-    ) -> "pd.DataFrame":
-        """
-        Execute query and return DataFrame with timeout.
-
-        Offloads blocking DB work to thread pool to avoid blocking event loop.
-
-        Args:
-            query: SQL query string
-            params: Query parameters
-            timeout: Timeout in seconds
-
-        Returns:
-            pandas DataFrame
-
-        Raises:
-            QueryTimeoutError: If query exceeds timeout
-        """
-        async with self.connection() as conn:
-            self._total_queries += 1
-            try:
-                loop = asyncio.get_running_loop()
-
-                def _run():
-                    return conn.execute(query, params or []).fetchdf()
-
-                return await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, _run),
-                    timeout=timeout
-                )
-            except asyncio.TimeoutError:
-                raise QueryTimeoutError(query, timeout, "Fetch DataFrame failed")
 
     async def _init_schema(self) -> None:
         """Create database schema if not exists."""
@@ -1802,18 +1730,6 @@ class DuckDBStore(
         GROUP BY bucket
         ORDER BY bucket;
 
-        -- View: Daily inventory trend (from history)
-        CREATE OR REPLACE VIEW v_inventory_trend AS
-        SELECT
-            date,
-            COUNT(*) as sku_count,
-            SUM(quantity) as total_quantity,
-            SUM(quantity - reserve) as available,
-            SUM(quantity * price) as total_value
-        FROM inventory_sku_history
-        GROUP BY date
-        ORDER BY date;
-
         -- ═══════════════════════════════════════════════════════════════════════
         -- LAYER 3b: Turnover & ABC Analytics Views
         -- ═══════════════════════════════════════════════════════════════════════
@@ -3043,15 +2959,6 @@ class DuckDBStore(
             )
             return {"status": "error", "error": str(e)}
 
-    async def get_order_count_for_date(self, date_str: str) -> int:
-        """Get count of orders in DuckDB for a specific date (in Kyiv timezone)."""
-        async with self.connection() as conn:
-            result = conn.execute(f"""
-                SELECT COUNT(*) FROM orders
-                WHERE {_date_in_kyiv('ordered_at')} = ?
-            """, [date_str]).fetchone()
-            return result[0] if result else 0
-
     async def get_order_summaries_by_date(
         self, start_date: str, end_date: str,
     ) -> dict:
@@ -3956,18 +3863,6 @@ class DuckDBStore(
             count = result.fetchone()
             logger.info(f"Updated manager statistics")
             return count[0] if count else 0
-
-    async def get_retail_manager_ids(self) -> List[int]:
-        """Get list of retail manager IDs from managers table.
-
-        Returns:
-            List of manager IDs where is_retail = TRUE
-        """
-        async with self.connection() as conn:
-            result = conn.execute(
-                "SELECT id FROM managers WHERE is_retail = TRUE"
-            ).fetchall()
-            return [row[0] for row in result]
 
     async def set_manager_retail_status(self, manager_id: int, is_retail: bool) -> None:
         """Update retail status for a specific manager.
