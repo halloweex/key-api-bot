@@ -96,8 +96,21 @@ if [ -f "$WATCHDOG_MARKER" ]; then
     WD_AGE=$(( ( $(date +%s) - $(stat -c %Y "$WATCHDOG_MARKER") ) / 3600 ))
     WD_LINE="${WD_AGE}h ago"
 else
-    WD_AGE=9999
-    WD_LINE="never"
+    # No marker is not the same fact as a stopped watchdog, and conflating them
+    # would page after every deploy — several times a day — which is the crying
+    # wolf this check was added to replace, not to reproduce.
+    #
+    # The sampler fires on a cron inside the app, so a container younger than
+    # one period has legitimately not reached its first run yet. Judge the
+    # absence against uptime, and only call it stopped once it has had time.
+    UP_H=$(( ( $(date +%s) - $(date -d "$(docker inspect -f '{{.State.StartedAt}}' "${WATCHDOG_CONTAINER:-keycrm-web}" 2>/dev/null)" +%s 2>/dev/null || echo 0) ) / 3600 ))
+    if [ "$UP_H" -lt "$WATCHDOG_MAX_AGE_HOURS" ] 2>/dev/null; then
+        WD_AGE=0
+        WD_LINE="pending first sample (container up ${UP_H}h)"
+    else
+        WD_AGE=9999
+        WD_LINE="never, and the container has been up ${UP_H}h"
+    fi
 fi
 
 if [ "$WD_AGE" -gt "$WATCHDOG_MAX_AGE_HOURS" ]; then
