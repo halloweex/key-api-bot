@@ -350,6 +350,13 @@ class TestSchedulerJob:
             assert result["db_growth_mb_24h"] is None
             send.assert_not_called()
 
+            # The heartbeat host cron reads. Without it, a watchdog that has
+            # stopped sampling is indistinguishable from one with nothing to
+            # say — which is how this one went blind for eleven weeks.
+            beat = tmp_path / "health" / "watchdog_last_sample"
+            assert beat.exists(), "the run must leave evidence outside the process"
+            assert beat.read_text().startswith(str(datetime.now(timezone.utc).year))
+
             async with store.connection() as conn:
                 count = conn.execute(
                     "SELECT COUNT(*) FROM disk_samples"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Daily: has an off-site copy left this machine recently enough?
+# Daily: are the instruments alive, and has a copy left this machine?
 #
 # This runs from the HOST crontab, not the application scheduler, and that is
 # the whole design. An in-process check cannot attest to its own liveness: a
@@ -25,6 +25,10 @@ CONFIG="deploy/backup.env"
 [ -f "$CONFIG" ] && . "$CONFIG"
 
 MARKER="${BACKUP_MARKER:-data/.offsite_last_ok}"
+# The in-app disk watchdog touches this on every 6-hourly sample. Two periods
+# plus slack: later than this and it has stopped, whatever it last logged.
+WATCHDOG_MARKER="${WATCHDOG_MARKER:-data/health/watchdog_last_sample}"
+WATCHDOG_MAX_AGE_HOURS="${WATCHDOG_MAX_AGE_HOURS:-14}"
 # deploy/daily_offsite.sh ships nightly, so this is one missed run plus slack.
 # It was 216h when the push rode the weekly compact; a threshold left at a
 # cadence the system no longer has is a check that has stopped checking.
@@ -84,4 +88,33 @@ if [ "$AGE_HOURS" -gt "$MAX_AGE_HOURS" ]; then
     exit 1
 fi
 
-echo "off-site copy age: ${AGE_HOURS}h (ok, max ${MAX_AGE_HOURS}h)"
+# --- is the in-app watchdog still sampling? -----------------------------------
+# This is the check that did not exist. Its subject is not a threshold being
+# crossed but a job having quietly stopped, and it cannot live in the process
+# it is judging.
+if [ -f "$WATCHDOG_MARKER" ]; then
+    WD_AGE=$(( ( $(date +%s) - $(stat -c %Y "$WATCHDOG_MARKER") ) / 3600 ))
+    WD_LINE="${WD_AGE}h ago"
+else
+    WD_AGE=9999
+    WD_LINE="never"
+fi
+
+if [ "$WD_AGE" -gt "$WATCHDOG_MAX_AGE_HOURS" ]; then
+    echo "CRITICAL: disk watchdog last sampled $WD_LINE (max ${WATCHDOG_MAX_AGE_HOURS}h)"
+    notify "$(printf '%s\n\n%s\n\n%s\n\n%s' \
+        "🚨 The disk watchdog has stopped sampling" \
+        "Last sample: $WD_LINE. It runs every 6h, so this is not a late run." \
+        "It has done this before and went unnoticed for eleven weeks, because a monitor that stops and a monitor with nothing to report look identical. That is what this line exists to tell apart." \
+        "$(_where)")"
+    exit 1
+fi
+
+# Speak on a good day too. A check that only ever appears when something is
+# wrong teaches nobody what its silence means, and its own absence becomes
+# invisible — which is the failure it is here to prevent, applied to itself.
+echo "instruments ok: off-site ${AGE_HOURS}h, watchdog ${WD_LINE}"
+notify "$(printf '%s\n%s\n%s' \
+    "🫀 Приборы в порядке" \
+    "внешняя копия: ${AGE_HOURS}ч назад (порог ${MAX_AGE_HOURS}ч)" \
+    "сторож диска: ${WD_LINE} (порог ${WATCHDOG_MAX_AGE_HOURS}ч)")"

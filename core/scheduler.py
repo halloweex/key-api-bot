@@ -1071,6 +1071,22 @@ class BackgroundScheduler:
                     warn_gb=BOOTSTRAP_STEP_GB, critical_gb=BOOTSTRAP_STEP_GB * 2,
                 )
 
+            # A heartbeat something outside this process can read. The
+            # watchdog spent eleven weeks taking no samples and nothing said
+            # so, because a monitor that has stopped and one with nothing to
+            # report emit the same silence. No in-process check can close that
+            # — it would be the same process attesting to itself — so the
+            # attestation is a file, and the reader is host cron.
+            try:
+                from datetime import timezone as _tz
+                health_dir = store.db_path.parent / "health"
+                health_dir.mkdir(exist_ok=True)
+                (health_dir / "watchdog_last_sample").write_text(
+                    datetime.now(_tz.utc).isoformat(timespec="seconds")
+                )
+            except Exception as exc:
+                logger.warning(f"Could not write watchdog heartbeat: {exc}")
+
             db_24h_ago = history["db_size_mb"] if history else None
             growth_mb_24h = (
                 round(sample["db_size_mb"] - db_24h_ago, 2)
