@@ -24,14 +24,19 @@ log() {
 notify() {
     local msg="$1"
     [ -f "$COMPOSE_DIR/.env" ] || return 0
-    local token id
+    local token ids id
     token=$(grep -E '^BOT_TOKEN=' "$COMPOSE_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"')
-    id=$(grep -E '^ADMIN_USER_IDS=' "$COMPOSE_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"' | cut -d, -f1)
-    if [ -n "$token" ] && [ -n "$id" ]; then
-        curl -fsS --max-time 10 \
-            "https://api.telegram.org/bot${token}/sendMessage" \
-            -d "chat_id=${id}" \
-            -d "text=${msg}" > /dev/null 2>&1 || true
+    # Every admin, not the first. Technical messages are an admin concern and
+    # all admins are admins; the business channel (the weekly report) picks its
+    # own audience and does not come through here.
+    ids=$(grep -E '^ADMIN_USER_IDS=' "$COMPOSE_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"' | tr ',' ' ')
+    if [ -n "$token" ] && [ -n "$ids" ]; then
+        for id in $ids; do
+            curl -fsS --max-time 10 \
+                "https://api.telegram.org/bot${token}/sendMessage" \
+                -d "chat_id=${id}" \
+                -d "text=${msg}" > /dev/null 2>&1 || true
+        done
     fi
 }
 

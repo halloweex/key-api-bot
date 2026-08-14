@@ -37,15 +37,39 @@ trap cleanup EXIT
 
 _env_value() { grep -m1 "^$1=" .env 2>/dev/null | cut -d= -f2- | tr -d '\r' || true; }
 
+# Technical alerts go to every admin, not the first one. The app-side path
+# (bot/main.py:88, core/telegram_alerts.py:122) has always broadcast to the
+# whole list; these host-cron scripts took `cut -d, -f1`, so one admin saw
+# "the off-site copy did not leave" and "the watchdog stopped" while both saw
+# the data-quality digest. Nobody decided that — the two paths were simply
+# never compared.
+alert_chat_ids() {
+    if [ -n "${BACKUP_ALERT_CHAT_ID:-}" ]; then
+        printf '%s' "$BACKUP_ALERT_CHAT_ID" | tr ',' '\n'
+        return 0
+    fi
+    _env_value ADMIN_USER_IDS | tr ',' '\n' | tr -d '[:space:]' || true
+}
+
 notify() {
-    local text="$1" token chat
+    local text="$1" token chat sent=0
     token="$(_env_value BOT_TOKEN)"
-    chat="${BACKUP_ALERT_CHAT_ID:-$(_env_value ADMIN_USER_IDS | cut -d, -f1 | tr -d '[:space:]' || true)}"
-    [ -n "$token" ] && [ -n "$chat" ] || { echo "cannot alert: credentials missing from .env" >&2; return 0; }
-    curl -sS -m 15 -o /dev/null \
-        --data-urlencode "chat_id=$chat" \
-        --data-urlencode "text=$text" \
-        "https://api.telegram.org/bot${token}/sendMessage" || echo "alert delivery failed" >&2
+    if [ -z "$token" ]; then
+        echo "cannot alert: BOT_TOKEN missing from .env" >&2
+        return 0
+    fi
+    while read -r chat; do
+        [ -n "$chat" ] || continue
+        sent=1
+        # Never let a failed notification change the script's own outcome, and
+        # never let one unreachable admin stop the others being told.
+        curl -sS -m 15 -o /dev/null \
+            --data-urlencode "chat_id=$chat" \
+            --data-urlencode "text=$text" \
+            "https://api.telegram.org/bot${token}/sendMessage" || \
+            echo "alert delivery failed for one recipient" >&2
+    done <<< "$(alert_chat_ids)"
+    [ "$sent" -eq 1 ] || echo "cannot alert: ADMIN_USER_IDS is empty" >&2
 }
 
 on_error() {
