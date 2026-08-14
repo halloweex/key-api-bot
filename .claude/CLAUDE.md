@@ -36,9 +36,7 @@ key-api-bot/
 │   │   ├── batch.py             # POST /api/dashboard/batch (no client calls it)
 │   │   └── pages.py             # HTML page routes (React SPA)
 │   ├── services/
-│   │   ├── dashboard_service.py # Data transformations (async)
-│   │   ├── category_service.py  # Product category filtering (async)
-│   │   └── brand_service.py     # Brand extraction from custom_fields (async)
+│   │   └── dashboard_service.py # Data transformations (async)
 │   ├── frontend/                # React Dashboard (TypeScript + Vite)
 │   │   └── src/
 │   │       ├── api/             # API client with error handling
