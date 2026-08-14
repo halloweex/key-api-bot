@@ -272,31 +272,3 @@ def with_retry(
     return decorator
 
 
-def with_circuit_breaker(circuit_breaker: CircuitBreaker):
-    """
-    Decorator for adding circuit breaker to async functions.
-
-    Usage:
-        cb = CircuitBreaker()
-
-        @with_circuit_breaker(cb)
-        async def call_api():
-            ...
-    """
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            if not await circuit_breaker.can_execute():
-                raise CircuitOpenError(
-                    f"Circuit breaker is open, request rejected"
-                )
-
-            try:
-                result = await func(*args, **kwargs)
-                await circuit_breaker.record_success()
-                return result
-            except Exception as e:
-                await circuit_breaker.record_failure()
-                raise
-        return wrapper
-    return decorator
