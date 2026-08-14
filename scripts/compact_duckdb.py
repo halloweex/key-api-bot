@@ -381,10 +381,19 @@ def phase2_import(manifest: dict) -> float:
             if "Duplicate" in err_str or "UNIQUE" in err_str or "PRIMARY" in err_str:
                 log(f"  {t}: duplicate key — deduplicating...", "WARN")
                 conn.execute(f'DELETE FROM "{t}"')
-                pk_cols = [r[0] for r in conn.execute(
-                    f"SELECT column_name FROM duckdb_constraints() "
-                    f"WHERE table_name='{t}' AND constraint_type='PRIMARY KEY'"
-                ).fetchall()]
+                # duckdb_constraints() has no `column_name`; it returns one row
+                # per constraint carrying a LIST in constraint_column_names.
+                # Asking for the wrong name raised a Binder Error here — inside
+                # the handler meant to recover from duplicates — so the
+                # recovery itself crashed the import it was written to rescue.
+                pk_cols = [
+                    col
+                    for (cols,) in conn.execute(
+                        f"SELECT constraint_column_names FROM duckdb_constraints() "
+                        f"WHERE table_name='{t}' AND constraint_type='PRIMARY KEY'"
+                    ).fetchall()
+                    for col in cols
+                ]
                 if pk_cols:
                     partition = ", ".join(f'"{c}"' for c in pk_cols)
                     conn.execute(f"""
@@ -532,10 +541,14 @@ def phase3_validate(manifest: dict) -> None:
                  "managers", "order_products", "offers", "expense_types"]
     for t in pk_tables:
         try:
-            pk_cols = [r[0] for r in v.execute(
-                f"SELECT column_name FROM duckdb_constraints() "
-                f"WHERE table_name='{t}' AND constraint_type='PRIMARY KEY'"
-            ).fetchall()]
+            pk_cols = [
+                col
+                for (cols,) in v.execute(
+                    f"SELECT constraint_column_names FROM duckdb_constraints() "
+                    f"WHERE table_name='{t}' AND constraint_type='PRIMARY KEY'"
+                ).fetchall()
+                for col in cols
+            ]
             if not pk_cols:
                 continue
             col = pk_cols[0]
