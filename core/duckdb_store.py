@@ -878,25 +878,6 @@ class DuckDBStore(
         );
 
         -- ═══════════════════════════════════════════════════════════════════════
-        -- GOLD LAYER: Pre-aggregated product pairs (association rules)
-        -- ═══════════════════════════════════════════════════════════════════════
-        CREATE TABLE IF NOT EXISTS gold_product_pairs (
-            sales_type VARCHAR NOT NULL,
-            product_a_id INTEGER,
-            product_a_name VARCHAR NOT NULL,
-            product_b_id INTEGER,
-            product_b_name VARCHAR NOT NULL,
-            co_occurrence INTEGER NOT NULL,
-            product_a_orders INTEGER NOT NULL,
-            product_b_orders INTEGER NOT NULL,
-            total_orders INTEGER NOT NULL,
-            support DOUBLE NOT NULL,
-            confidence_a_to_b DOUBLE NOT NULL,
-            confidence_b_to_a DOUBLE NOT NULL,
-            lift DOUBLE NOT NULL
-        );
-
-        -- ═══════════════════════════════════════════════════════════════════════
         -- WAREHOUSE REFRESH AUDIT LOG
         -- ═══════════════════════════════════════════════════════════════════════
         CREATE SEQUENCE IF NOT EXISTS warehouse_refresh_seq START 1;
@@ -956,9 +937,6 @@ class DuckDBStore(
         CREATE INDEX IF NOT EXISTS idx_silver_active_return ON silver_orders(is_active_source, is_return, order_date);
         CREATE INDEX IF NOT EXISTS idx_gold_prod_cat_date ON gold_daily_products(category_id, date, sales_type);
         CREATE INDEX IF NOT EXISTS idx_gold_prod_brand_date ON gold_daily_products(brand, date, sales_type);
-        CREATE INDEX IF NOT EXISTS idx_gold_pairs_co ON gold_product_pairs(sales_type, co_occurrence DESC);
-        CREATE INDEX IF NOT EXISTS idx_gold_pairs_prod_a ON gold_product_pairs(sales_type, product_a_id);
-        CREATE INDEX IF NOT EXISTS idx_gold_pairs_prod_b ON gold_product_pairs(sales_type, product_b_id);
 
         -- ═══════════════════════════════════════════════════════════════════════
         -- SILVER LAYER: UTM tracking data (parsed from manager_comment)
@@ -2474,12 +2452,6 @@ class DuckDBStore(
                         pass
                     raise
 
-            # ── Step 3.5: Gold product pairs (full rebuild, skip for status refresh) ──
-            # Uses staged temp tables to keep peak memory low (avoids OOM
-            # gold_product_pairs is never read — API computes pairs on the fly
-            # via CTE in get_frequently_bought_together(). Skip rebuild entirely.
-            gold_pairs_rows = 0
-
             # ── Step 4: Validation + audit log ──
             needs_full_retry = False
             validation_alert: str | None = None
@@ -2703,7 +2675,7 @@ class DuckDBStore(
             logger.info(
                 f"Warehouse layers refreshed ({trigger}): "
                 f"silver={silver_rows} ({silver_mode}), gold_rev={gold_revenue_rows}, "
-                f"gold_prod={gold_products_rows}, gold_pairs={gold_pairs_rows}, "
+                f"gold_prod={gold_products_rows}, "
                 f"duration={duration_ms:.0f}ms, valid={validation_passed}"
                 f"{incremental_info}"
             )

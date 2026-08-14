@@ -37,7 +37,15 @@ MANIFEST_PATH = EXPORT_DIR / "_manifest.json"
 DERIVED_TABLES = frozenset({
     "silver_orders", "silver_order_utm",
     "gold_daily_revenue", "gold_daily_products",
-    "gold_daily_traffic", "gold_product_pairs",
+    "gold_daily_traffic",
+    # Nothing creates gold_product_pairs any more — its DDL is gone. The name
+    # stays here until the table is absent from the production database, for
+    # one specific reason: all_tables below is read from the *source* db, so
+    # removing the name would move the surviving rows into export_tables, write
+    # them to Parquet, import them into the new database, and put them in the
+    # off-site archive on the way — recreating exactly what was deleted.
+    # Safe to drop once a compact has run and the table no longer appears.
+    "gold_product_pairs",
 })
 
 MEM_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "6GB")
