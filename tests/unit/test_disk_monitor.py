@@ -456,3 +456,171 @@ class TestSchedulerJob:
             send.assert_not_called()  # throttled
         finally:
             await store.close()
+
+
+# ─── Growth across the whole data directory ───────────────────────────────────
+
+
+from core.disk_monitor import (  # noqa: E402
+    CRITICAL_GROWTH_GB_168H,
+    WARN_GROWTH_GB_168H,
+    evaluate_dir_growth,
+    fetch_dir_sample_at_age,
+    insert_dir_samples,
+    prune_old_dir_samples,
+    sample_data_dir,
+)
+
+_GB = 1024 ** 3
+
+# The directory as it stood on 2026-08-14, after the clean-up: two local
+# backups, one pre-compact copy, the live database and its WAL.
+HEALTHY_DIR = {
+    "live_db": int(2.6 * _GB),
+    "wal": int(0.04 * _GB),
+    "old": int(4.6 * _GB),
+    "backups": int(5.1 * _GB),
+    "export_parquet": int(0.008 * _GB),
+    "other": int(0.001 * _GB),
+}
+
+
+class TestDirGrowth:
+    def test_a_steady_week_is_silent(self):
+        """Week-over-week drift on a healthy system is business growth. The
+        sawtooth itself cancels because the lag is the compact's own period."""
+        after = dict(HEALTHY_DIR, live_db=HEALTHY_DIR["live_db"] + int(0.2 * _GB))
+        assert evaluate_dir_growth(current=after, baseline=HEALTHY_DIR) is None
+
+    def test_no_baseline_is_not_an_alert(self):
+        assert evaluate_dir_growth(current=HEALTHY_DIR, baseline=None) is None
+
+    def test_shrinking_is_never_an_alert(self):
+        """The compact and the prune both make this number fall. That is them
+        working, and it is the reading the old percentage rule inverted."""
+        after = dict(HEALTHY_DIR, backups=int(0.5 * _GB))
+        assert evaluate_dir_growth(current=after, baseline=HEALTHY_DIR) is None
+
+    def test_warn_threshold(self):
+        after = dict(HEALTHY_DIR,
+                     backups=HEALTHY_DIR["backups"] + int(WARN_GROWTH_GB_168H * _GB))
+        alert = evaluate_dir_growth(current=after, baseline=HEALTHY_DIR)
+        assert alert is not None
+        assert alert.severity == Severity.WARN
+
+    def test_critical_threshold(self):
+        after = dict(HEALTHY_DIR,
+                     backups=HEALTHY_DIR["backups"] + int(CRITICAL_GROWTH_GB_168H * _GB))
+        alert = evaluate_dir_growth(current=after, baseline=HEALTHY_DIR)
+        assert alert is not None
+        assert alert.severity == Severity.CRITICAL
+
+    def test_the_2026_08_05_event_is_caught_and_named(self):
+        """The regression this detector exists for: 8.93 GB of hand-made copies
+        appeared beside the database in one afternoon. The old check sampled the
+        database file alone, saw nothing, and blamed the database anyway.
+
+        Twelve times the CRITICAL line, and the alert has to say 'other'."""
+        after = dict(HEALTHY_DIR, other=HEALTHY_DIR["other"] + int(8.93 * _GB))
+        alert = evaluate_dir_growth(current=after, baseline=HEALTHY_DIR)
+        assert alert is not None
+        assert alert.severity == Severity.CRITICAL
+        assert alert.top_group == "other"
+        assert alert.total_delta_gb == pytest.approx(8.93, abs=0.02)
+        assert "other" in alert.reason
+
+    def test_a_group_that_is_new_since_the_baseline_still_counts(self):
+        """A newcomer has no baseline entry. Treating a missing key as 'no
+        change' is how a whole new directory hides."""
+        baseline = {k: v for k, v in HEALTHY_DIR.items() if k != "backups"}
+        alert = evaluate_dir_growth(current=HEALTHY_DIR, baseline=baseline)
+        assert alert is not None
+        assert alert.top_group == "backups"
+
+    def test_growth_spread_thinly_still_totals(self):
+        """No single group crosses the line; together they do. The threshold is
+        on the total for exactly this case."""
+        after = {k: v + int(0.4 * _GB) for k, v in HEALTHY_DIR.items()}
+        alert = evaluate_dir_growth(current=after, baseline=HEALTHY_DIR)
+        assert alert is not None
+        assert alert.severity == Severity.CRITICAL
+
+    def test_the_bootstrap_window_reuses_the_same_evaluator(self):
+        """Before a week of history exists, a step change is still a step
+        change — same function, tighter window, its own thresholds."""
+        after = dict(HEALTHY_DIR, backups=HEALTHY_DIR["backups"] + int(1.5 * _GB))
+        alert = evaluate_dir_growth(
+            current=after, baseline=HEALTHY_DIR,
+            window_hours=6, warn_gb=1.0, critical_gb=2.0,
+        )
+        assert alert is not None
+        assert alert.severity == Severity.WARN
+        assert "6h" in alert.reason
+
+
+class TestDirSampling:
+    def test_paths_are_grouped_the_way_the_alert_reports_them(self, tmp_path):
+        (tmp_path / "analytics.duckdb").write_bytes(b"x" * 100)
+        (tmp_path / "analytics.duckdb.wal").write_bytes(b"x" * 10)
+        (tmp_path / "analytics.duckdb.old").write_bytes(b"x" * 50)
+        (tmp_path / "backups").mkdir()
+        (tmp_path / "backups" / "a.duckdb").write_bytes(b"x" * 200)
+        (tmp_path / "backups" / "b.duckdb").write_bytes(b"x" * 300)
+        (tmp_path / "stray.bak").write_bytes(b"x" * 7)
+
+        totals = sample_data_dir(str(tmp_path))
+        assert totals["live_db"] == 100
+        assert totals["wal"] == 10
+        assert totals["old"] == 50
+        assert totals["backups"] == 500      # summed across the directory
+        assert totals["other"] == 7          # the catch-all keeps the sum honest
+
+    def test_a_missing_directory_is_empty_not_an_exception(self, tmp_path):
+        assert sample_data_dir(str(tmp_path / "nope")) == {}
+
+    @pytest.mark.asyncio
+    async def test_a_sample_set_round_trips(self, tmp_path):
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now(timezone.utc)
+            async with store.connection() as conn:
+                insert_dir_samples(conn, HEALTHY_DIR, sampled_at=now - timedelta(hours=168))
+                fetched = fetch_dir_sample_at_age(conn, hours=168, slack_hours=12)
+            assert fetched == HEALTHY_DIR
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_groups_never_come_from_two_different_runs(self, tmp_path):
+        """Differencing a mix of timestamps would invent growth out of nothing.
+        The fetch pins one sampled_at and returns only that set."""
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now(timezone.utc)
+            async with store.connection() as conn:
+                insert_dir_samples(conn, {"live_db": 1, "backups": 2},
+                                   sampled_at=now - timedelta(hours=170))
+                insert_dir_samples(conn, {"live_db": 999},
+                                   sampled_at=now - timedelta(hours=166))
+                fetched = fetch_dir_sample_at_age(conn, hours=168, slack_hours=12)
+            assert fetched in ({"live_db": 1, "backups": 2}, {"live_db": 999})
+            assert not (fetched.get("live_db") == 999 and "backups" in fetched)
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_retention_outlives_the_comparison_window(self, tmp_path):
+        """Pruning at 14 days would delete the baseline a 168h lag needs on a
+        scheduler that missed a few runs. 21 days leaves slack."""
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now(timezone.utc)
+            async with store.connection() as conn:
+                insert_dir_samples(conn, {"live_db": 1}, sampled_at=now - timedelta(days=25))
+                insert_dir_samples(conn, {"live_db": 2}, sampled_at=now - timedelta(days=8))
+                deleted = prune_old_dir_samples(conn, retention_days=21)
+                kept = conn.execute("SELECT COUNT(*) FROM data_dir_samples").fetchone()[0]
+            assert deleted == 1
+            assert kept == 1
+        finally:
+            await store.close()

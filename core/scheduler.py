@@ -1026,10 +1026,16 @@ class BackgroundScheduler:
         what the replacement will be calibrated from.
         """
         from core.disk_monitor import (
+            BOOTSTRAP_STEP_GB,
+            evaluate_dir_growth,
             evaluate_disk_capacity,
+            fetch_dir_sample_at_age,
             fetch_sample_at_age,
+            insert_dir_samples,
             insert_sample,
+            prune_old_dir_samples,
             prune_old_samples,
+            sample_data_dir,
             sample_disk_state,
         )
         from core.duckdb_store import get_store
@@ -1038,11 +1044,32 @@ class BackgroundScheduler:
             store = await get_store()
             sample = sample_disk_state(str(store.db_path))
 
+            # The whole directory, not just the database file. The 27 GB that
+            # arrived in August 2026 sat next to analytics.duckdb, so a check
+            # that sampled only the file could not see it — and blamed the file.
+            dir_now = sample_data_dir(str(store.db_path.parent))
+
             async with store.connection() as conn:
                 history = fetch_sample_at_age(conn, hours=24, slack_hours=2)
                 insert_sample(conn, sample)
                 # Keep the table tiny: ~56 rows max (14 days x 4 samples/day).
                 deleted = prune_old_samples(conn, retention_days=14)
+
+                dir_week_ago = fetch_dir_sample_at_age(conn, hours=168, slack_hours=12)
+                dir_six_ago = fetch_dir_sample_at_age(conn, hours=6, slack_hours=2)
+                if dir_now:
+                    insert_dir_samples(conn, dir_now)
+                    prune_old_dir_samples(conn, retention_days=21)
+
+            growth = evaluate_dir_growth(current=dir_now, baseline=dir_week_ago)
+            if growth is None and dir_week_ago is None:
+                # Bootstrap: no week of history yet. A step change is still a
+                # step change, and a detector silent for its first seven days is
+                # missing exactly when a fresh deploy is most likely to regress.
+                growth = evaluate_dir_growth(
+                    current=dir_now, baseline=dir_six_ago, window_hours=6,
+                    warn_gb=BOOTSTRAP_STEP_GB, critical_gb=BOOTSTRAP_STEP_GB * 2,
+                )
 
             db_24h_ago = history["db_size_mb"] if history else None
             growth_mb_24h = (
@@ -1056,12 +1083,29 @@ class BackgroundScheduler:
                 db_size_mb=sample["db_size_mb"],
             )
 
+            # Capacity outranks growth only when it is worse: a filling disk is
+            # a deadline, a growing directory is a cause. Reporting the cause
+            # first is what the last incident needed and did not get.
+            if growth is not None and (
+                alert is None or growth.severity.rank() >= alert.severity.rank()
+            ):
+                from core.disk_monitor import DiskAlert
+                alert = DiskAlert(
+                    severity=growth.severity,
+                    reason=growth.reason + (f" | {alert.reason}" if alert else ""),
+                    disk_pct_used=sample["disk_pct_used"],
+                    disk_free_gb=sample["disk_free_gb"],
+                    db_size_mb=sample["db_size_mb"],
+                )
+
             result = {
                 "db_size_mb": sample["db_size_mb"],
                 "disk_pct_used": sample["disk_pct_used"],
                 "disk_free_gb": sample["disk_free_gb"],
                 "db_24h_ago_mb": db_24h_ago,
                 "db_growth_mb_24h": growth_mb_24h,
+                "data_dir_mb": round(sum(dir_now.values()) / (1024 ** 2)) if dir_now else None,
+                "data_dir_growth_gb_168h": growth.total_delta_gb if growth else None,
                 "pruned_old_samples": deleted,
                 "alert_fired": False,
             }
