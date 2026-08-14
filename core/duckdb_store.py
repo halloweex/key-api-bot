@@ -1690,6 +1690,25 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (memory_samples): {e}")
 
+        # One row per path group per sample. The growth detector differences
+        # this at a 168h lag — the compact's own period — so everything
+        # periodic cancels and only trend survives.
+        try:
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS data_dir_samples (
+                    sampled_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    path_group VARCHAR NOT NULL,
+                    bytes BIGINT NOT NULL
+                )
+            """)
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_data_dir_samples_at "
+                "ON data_dir_samples(sampled_at DESC)"
+            )
+            logger.debug("Migration: data_dir_samples table added/verified")
+        except Exception as e:
+            logger.debug(f"Migration note (data_dir_samples): {e}")
+
         # Migration: Fix sequences after EXPORT/IMPORT compaction.
         # DuckDB doesn't support ALTER SEQUENCE, and IMPORT resets sequences to
         # START value (1) even though tables already have rows. Fix by DROP+CREATE
