@@ -144,9 +144,6 @@ jobs:
               echo "$DIRTY"
             fi
             git reset --hard "$GH_SHA"
-            # Stop monitor container if running (disabled in docker-compose.yml)
-            docker stop keycrm-monitor 2>/dev/null || true
-            docker rm keycrm-monitor 2>/dev/null || true
             docker compose pull
             # Recreate only what actually changed. --force-recreate replaced
             # every service, healthy dependencies included, and a dependent
