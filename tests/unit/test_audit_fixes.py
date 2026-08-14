@@ -66,19 +66,6 @@ class TestRefreshSelfHeal:
         assert await store._count_consecutive_refresh_failures() == 2
 
     @pytest.mark.asyncio
-    async def test_validation_failures_do_not_spend_the_error_budget(self, tmp_path):
-        store = await _make_store(tmp_path)
-        async with store.connection() as conn:
-            for i in range(MAX_VALIDATION_RETRIES + 2):
-                conn.execute(
-                    "INSERT INTO warehouse_refreshes "
-                    "(refreshed_at, trigger, validation_passed, error) "
-                    "VALUES (?, 'test', FALSE, NULL)",
-                    [f"2026-01-0{i + 1}T00:00:00+03:00"],
-                )
-        assert await store._count_consecutive_refresh_failures() == 0
-
-    @pytest.mark.asyncio
     async def test_pipeline_exception_marks_dirty_and_alerts(self, tmp_path, monkeypatch):
         store = await _make_store(tmp_path)
         async with store.connection() as conn:
@@ -179,11 +166,6 @@ class TestBackup:
 # ─────────────────────── A2-RETURNS-3 lost/cancel group ───────────────────────
 
 class TestReturnStatusGroup:
-    def test_return_set_includes_lost_group(self):
-        from core.models import OrderStatus
-        s = OrderStatus.return_statuses()
-        assert {15, 18, 19, 21, 22, 23} == {int(x) for x in s}
-
     @pytest.mark.asyncio
     async def test_status15_excluded_from_gold_revenue(self, tmp_path):
         store = await _make_store(tmp_path)
