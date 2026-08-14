@@ -3,5 +3,10 @@
 -r requirements.txt
 
 pytest>=8.0.0
-pytest-asyncio>=0.23.0
+# Upper bound is deliberate. Whether a locally defined `event_loop` fixture
+# overrides the plugin's own changed at the 1.0 boundary: below it the override
+# is honoured, from 1.0 it was removed from the API and a redefinition does
+# nothing at all. Unpinned, the suite's behaviour depended on whatever pip last
+# resolved, which is not a thing test results should depend on.
+pytest-asyncio>=1.0,<2.0
 pytest-cov>=4.1.0
