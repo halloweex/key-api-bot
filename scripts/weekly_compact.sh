@@ -168,7 +168,24 @@ fi
 SIZE_AFTER=$(du -h "$DATA_DIR/analytics.duckdb" | cut -f1)
 DISK_AFTER=$(df -h / | awk 'NR==2 {print $5}')
 log "Done: $SIZE_BEFORE → $SIZE_AFTER | disk: $DISK_BEFORE → $DISK_AFTER used"
+
+# The floor this compact just left is the cheapest regression signal available:
+# a post-compact size is the database with every dead byte removed, so nothing
+# periodic remains to cancel. If it rises, something is being retained that was
+# not retained before — a different statement from "the database grew".
+#
+# Runs after the Done: line, because that line is what it reads. Best-effort:
+# this script has no `set -e`, and a judgement about last week must never turn
+# a successful compact into a failed one.
+FLOOR_STATUS=""
+if [ -x "$COMPOSE_DIR/deploy/compact_floor_check.py" ]; then
+    FLOOR_OUT=$(python3 "$COMPOSE_DIR/deploy/compact_floor_check.py" "$LOG" 2>&1)
+    FLOOR_RC=$?
+    log "Floor check: $FLOOR_OUT"
+    [ "$FLOOR_RC" -ne 0 ] && FLOOR_STATUS="
+⚠️ $FLOOR_OUT"
+fi
 notify "✅ Weekly compact: ${SIZE_BEFORE} → ${SIZE_AFTER}, disk ${DISK_BEFORE} → ${DISK_AFTER}
-${OFFSITE_STATUS}"
+${OFFSITE_STATUS}${FLOOR_STATUS}"
 
 log "=== WEEKLY COMPACT END ==="
