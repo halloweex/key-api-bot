@@ -22,16 +22,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
-from zoneinfo import ZoneInfo
 
 import duckdb
 import pandas as pd
 
-from core.models import LOST_STATUS_GROUP_ID, Order, SourceId, OrderStatus
-from bot.config import DEFAULT_TIMEZONE, TELEGRAM_MANAGER_IDS
+from core.models import LOST_STATUS_GROUP_ID, Order, OrderStatus
 from core.exceptions import QueryTimeoutError
 from core.duckdb_constants import (
     DB_DIR, DB_PATH, DEFAULT_TZ, DEFAULT_QUERY_TIMEOUT, LONG_QUERY_TIMEOUT,

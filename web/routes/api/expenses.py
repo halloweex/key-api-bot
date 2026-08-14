@@ -1,5 +1,4 @@
 """Expense types, expense summary, profit analysis, manual expenses endpoints."""
-from datetime import date as date_type
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional

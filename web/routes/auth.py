@@ -4,7 +4,7 @@ Authentication routes for Telegram Login.
 import os
 import logging
 from fastapi import APIRouter, Request, Response, HTTPException, Depends
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 

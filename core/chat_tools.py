@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 
 from core.duckdb_store import get_store
 from core.meilisearch_client import get_meili_client
-from core.config import config
 from core.observability import get_logger
 
 logger = get_logger(__name__)

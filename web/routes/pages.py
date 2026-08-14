@@ -4,7 +4,7 @@ Page routes for serving HTML templates and React SPA.
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 
 from web.config import STATIC_V2_DIR
 from web.routes.auth import require_auth

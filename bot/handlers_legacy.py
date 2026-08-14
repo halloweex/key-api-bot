@@ -35,7 +35,7 @@ from bot import database
 from core.i18n import DEFAULT_LANGUAGE, LANGUAGE_NAMES, normalize, t
 from bot.keyboards import Keyboards, ReplyKeyboards
 from bot.formatters import Messages, ReportFormatters, truncate_message
-from bot.services import ReportService, KeyCRMAPIError, ReportGenerationError
+from bot.services import ReportService, KeyCRMAPIError
 
 # Logger
 logger = logging.getLogger(__name__)

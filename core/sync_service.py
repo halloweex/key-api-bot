@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from core.keycrm import get_async_client
 from core.duckdb_store import get_store, DuckDBStore
 from core.exceptions import KeyCRMError, KeyCRMConnectionError, KeyCRMAPIError
-from core.observability import get_logger, Timer, correlation_context
+from core.observability import get_logger, correlation_context
 from core.events import (
     events,
     SyncEvent,

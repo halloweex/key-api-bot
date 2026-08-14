@@ -1,7 +1,6 @@
 """DuckDBStore revenue and analytics methods."""
 from __future__ import annotations
 
-import re
 from datetime import date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 

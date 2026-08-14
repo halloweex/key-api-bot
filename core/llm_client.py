@@ -4,7 +4,6 @@ LLM client for chat assistant using Anthropic Claude.
 Provides streaming responses and function calling capabilities.
 Supports Ukrainian, Russian, and English responses.
 """
-import asyncio
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from dataclasses import dataclass
 

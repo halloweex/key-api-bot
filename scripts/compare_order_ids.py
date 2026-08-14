@@ -8,7 +8,6 @@ Usage:
 import asyncio
 import argparse
 import sys
-from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo

@@ -13,12 +13,11 @@ Features:
 import asyncio
 import os
 from typing import Dict, List, Any, Optional, AsyncGenerator
-from contextlib import asynccontextmanager
 
 import httpx
 
-from core.exceptions import KeyCRMAPIError, KeyCRMConnectionError, KeyCRMDataError
-from core.models import Order, Product, Category, Buyer
+from core.exceptions import KeyCRMAPIError, KeyCRMConnectionError
+from core.models import Order, Product, Buyer
 from core.observability import get_logger, get_correlation_id, Timer
 from core.resilience import (
     CircuitBreaker,

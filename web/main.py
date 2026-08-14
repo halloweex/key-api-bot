@@ -8,7 +8,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import ORJSONResponse, JSONResponse, FileResponse
 from starlette.middleware.gzip import GZipMiddleware
 
-from slowapi import _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 

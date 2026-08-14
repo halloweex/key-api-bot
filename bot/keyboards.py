@@ -13,7 +13,6 @@ from telegram import (
     KeyboardButton,
     ReplyKeyboardRemove
 )
-from bot.config import SOURCE_NAMES
 from core.i18n import DEFAULT_LANGUAGE, normalize, t
 
 

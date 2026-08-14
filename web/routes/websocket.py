@@ -14,7 +14,7 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 
-from core.websocket_manager import manager, WebSocketEvent
+from core.websocket_manager import manager
 from web.routes.auth import get_current_user_ws, require_user
 
 router = APIRouter(tags=["websocket"])

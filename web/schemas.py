@@ -3,7 +3,6 @@ Pydantic response models for API endpoints.
 
 Provides type-safe response models with automatic validation and documentation.
 """
-from datetime import date, datetime
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 

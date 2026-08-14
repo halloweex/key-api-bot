@@ -6,7 +6,6 @@ import logging
 from collections import defaultdict
 from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any
-from zoneinfo import ZoneInfo
 
 from core.duckdb_constants import DEFAULT_TZ, _date_in_kyiv
 from core.models import OrderStatus

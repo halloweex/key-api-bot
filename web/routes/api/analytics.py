@@ -1,6 +1,6 @@
 """Revenue, summary, returns, sales-by-source, products, brands, categories endpoints."""
 import logging
-from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
+from datetime import datetime as _datetime, timedelta as _timedelta
 from zoneinfo import ZoneInfo
 
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")

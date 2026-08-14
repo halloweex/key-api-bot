@@ -14,7 +14,7 @@ Usage:
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Set
 
 from dotenv import load_dotenv
 
