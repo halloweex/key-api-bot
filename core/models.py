@@ -568,19 +568,3 @@ class SummaryStats:
         }
 
 
-@dataclass
-class CustomerInsights:
-    """Customer analytics for a period."""
-    new_customers: int
-    returning_customers: int
-    repeat_rate: float
-    aov_trend: List[Dict[str, Any]] = field(default_factory=list)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dict for JSON serialization."""
-        return {
-            "new_customers": self.new_customers,
-            "returning_customers": self.returning_customers,
-            "repeat_rate": round(self.repeat_rate, 1),
-            "aov_trend": self.aov_trend,
-        }
