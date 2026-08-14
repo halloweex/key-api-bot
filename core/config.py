@@ -267,7 +267,6 @@ ADMIN_USER_IDS = config.bot.admin_user_ids
 DASHBOARD_URL = config.web.dashboard_url
 DEFAULT_TIMEZONE = config.orders.default_timezone
 SOURCE_MAPPING = config.sources.mapping
-SOURCE_COLORS = config.sources.colors
 RETURN_STATUS_IDS = config.orders.return_status_ids
 TELEGRAM_MANAGER_IDS = config.orders.telegram_manager_ids
 API_PAGE_LIMIT = config.api.page_limit
