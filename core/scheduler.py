@@ -78,6 +78,11 @@ CATCHUP_CHECKS = {
     "dq_integrity_check": ("integrity", 8 * 3600, 120),
 }
 
+# Where the digest remembers its last delivery. In `sync_metadata` and not on
+# the scheduler object, because the weekly restatement beat has to outlive a
+# deploy — otherwise every release re-announces the same standing WARN.
+DQ_DIGEST_LAST_SENT_KEY = "dq_digest_last_sent"
+
 # The inventory snapshot gets its own catch-up rather than a row above, because
 # its liveness signal is not a data_quality layer age — it is whether
 # inventory_sku_history has a row for today. See _schedule_catchup_runs.
@@ -1406,9 +1411,15 @@ class BackgroundScheduler:
         against the previous run so a growing problem does not read like the
         one you already know about.
 
-        Sends nothing when every layer is fresh and clean. Silence here means
-        "nothing new to report" — proving the checks are still running is the
-        canary's job, off this host and on its own clock.
+        Sends nothing when every layer is fresh and clean, and nothing when
+        the only findings are ones it already reported at the same numbers —
+        a standing WARN goes out again on the weekly beat, not every morning.
+        Silence here means "nothing new to report"; proving the checks are
+        still running is the canary's job, off this host and on its own clock.
+
+        The last send is remembered in `sync_metadata` rather than on this
+        object, so the weekly beat survives a deploy. Restarting the process
+        used to be the one reliable way to make an alert repeat itself.
         """
         from datetime import datetime, timezone
         from core.data_quality import (
@@ -1426,8 +1437,21 @@ class BackgroundScheduler:
             store = await get_store()
             now = datetime.now(timezone.utc)
             sections: List[DigestSection] = []
+            last_sent_at: Optional[datetime] = None
 
             async with store.connection() as conn:
+                row = conn.execute(
+                    "SELECT value FROM sync_metadata WHERE key = ?",
+                    [DQ_DIGEST_LAST_SENT_KEY],
+                ).fetchone()
+                if row and row[0]:
+                    try:
+                        last_sent_at = datetime.fromisoformat(row[0])
+                    except ValueError:
+                        # An unreadable marker must not mute the digest; the
+                        # next send overwrites it with something parseable.
+                        logger.warning("Unparseable DQ digest marker: %r", row[0])
+
                 for layer in WATCHED_LAYERS:
                     run = fetch_latest_run(conn, layer=layer)
                     if run is None:
@@ -1449,10 +1473,14 @@ class BackgroundScheduler:
                             fetch_run_issues(conn, previous["run_id"], limit=20)
                             if previous else []
                         ),
+                        previous_diffs=(
+                            fetch_run_diffs(conn, previous["run_id"], limit=20)
+                            if previous else []
+                        ),
                         age_hours=age_hours,
                     ))
 
-            message = build_digest(sections)
+            message = build_digest(sections, last_sent_at=last_sent_at, now=now)
             sent = False
             if message:
                 try:
@@ -1461,6 +1489,16 @@ class BackgroundScheduler:
                     sent = True
                 except Exception as e:
                     logger.warning(f"DQ digest send failed: {e}")
+
+            if sent:
+                # Only a delivered digest moves the beat. Marking a failed
+                # send as delivered would mute the next seven days on the
+                # strength of a message nobody received.
+                async with store.connection() as conn:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                    """, [DQ_DIGEST_LAST_SENT_KEY, now.isoformat()])
 
             result = {
                 "layers": len(sections),
