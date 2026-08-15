@@ -448,8 +448,27 @@ def phase2_import(manifest: dict) -> float:
                     restart_val = max(restart_val, max_id + 1)
                 except Exception:
                     pass
-            conn.execute(f"ALTER SEQUENCE {seq_name} RESTART WITH {restart_val}")
-            log(f"  {seq_name}: restart at {restart_val}", "OK")
+            # DuckDB 1.5.5 has no way to *set* a sequence. `ALTER SEQUENCE ...
+            # RESTART` raises "Not implemented Error", and CREATE OR REPLACE
+            # cannot run at all here — every one of these sequences backs a
+            # column DEFAULT, so replacing it is a DependencyException and
+            # DROP ... CASCADE would take the DEFAULT with it.
+            #
+            # So advance it instead: read where it stands, then burn the
+            # difference in one statement. duckdb_sequences().last_value gives
+            # the position without consuming a value (NULL when untouched,
+            # which is the state right after phase 2 builds the schema).
+            row = conn.execute(
+                "SELECT last_value FROM duckdb_sequences() "
+                f"WHERE sequence_name = '{seq_name}'"
+            ).fetchone()
+            current = row[0] if row and row[0] is not None else 0
+            gap = restart_val - 1 - current
+            if gap > 0:
+                conn.execute(f"SELECT nextval('{seq_name}') FROM range({gap})")
+                log(f"  {seq_name}: advanced {gap:,} to hand out {restart_val} next", "OK")
+            else:
+                log(f"  {seq_name}: already past {restart_val}", "OK")
         except Exception as e:
             log(f"  {seq_name}: {e}", "WARN")
 
