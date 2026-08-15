@@ -3,22 +3,47 @@ set -euo pipefail
 
 # bump_version.sh — Called by CI after deploy to increment patch version,
 # generate changelog entry, commit, tag, and push.
+#
+# Order is the whole story here. The sync with origin/main must happen while
+# the working tree is still clean, because `git rebase` refuses outright to
+# run with unstaged changes — even when there is nothing to rebase. Writing
+# VERSION and CHANGELOG.md first and syncing afterwards therefore failed on
+# every single run, and `|| exit 0` reported that failure as success: from
+# 2026-04-10 (the commit that added the rebase) to 2026-08-15, twelve deploys
+# shipped with no bump, no tag and no changelog entry, every one of them on a
+# green check. VERSION sat at 3.0.76 while both Docker images kept being
+# pushed under that same tag, so no version identified a build any more.
+#
+# Syncing first also does the job the rebase was added for, and does it
+# better: a concurrent run's bump is now visible *before* this run picks the
+# next number, rather than after it has already committed to one.
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION_FILE="$REPO_ROOT/VERSION"
 CHANGELOG_FILE="$REPO_ROOT/CHANGELOG.md"
 
-# 1. Read current version
-CURRENT_VERSION=$(cat "$VERSION_FILE" | tr -d '[:space:]')
+# 1. Sync to the tip of main, tree still clean. Tags come too — the changelog
+#    range below is measured from the newest one.
+git fetch origin main --tags
+git checkout -B main origin/main
+
+# 2. Read current version, after the sync so a concurrent bump counts
+CURRENT_VERSION=$(tr -d '[:space:]' < "$VERSION_FILE")
 echo "Current version: $CURRENT_VERSION"
 
-# 2. Increment patch
+# 3. Increment patch
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
 NEW_PATCH=$((PATCH + 1))
 NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
 echo "New version: $NEW_VERSION"
 
-# 3. Generate changelog entry from git log since last tag
+# 4. Nothing to do if another run already claimed this number
+if git ls-remote --tags origin "refs/tags/v$NEW_VERSION" | grep -q .; then
+    echo "Tag v$NEW_VERSION already exists on remote — concurrent run handled it"
+    exit 0
+fi
+
+# 5. Generate changelog entry from git log since last tag
 LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 if [ -n "$LAST_TAG" ]; then
     COMMITS=$(git log "$LAST_TAG"..HEAD --oneline --no-merges 2>/dev/null || echo "No changes recorded")
@@ -36,7 +61,7 @@ while IFS= read -r line; do
     fi
 done <<< "$COMMITS"
 
-# 4. Prepend entry to CHANGELOG.md (after the header)
+# 6. Prepend entry to CHANGELOG.md (after the header)
 HEADER=$(head -3 "$CHANGELOG_FILE")
 BODY=$(tail -n +4 "$CHANGELOG_FILE")
 {
@@ -46,18 +71,8 @@ BODY=$(tail -n +4 "$CHANGELOG_FILE")
     echo "$BODY"
 } > "$CHANGELOG_FILE"
 
-# 5. Write new version
+# 7. Write new version
 echo "$NEW_VERSION" > "$VERSION_FILE"
-
-# 6. Pull latest to avoid conflicts from concurrent CI runs
-git fetch origin main
-git rebase origin/main || { echo "Rebase failed — another CI run may have bumped already"; exit 0; }
-
-# 7. Check if this version was already bumped by another CI run
-if git ls-remote --tags origin "refs/tags/v$NEW_VERSION" | grep -q .; then
-    echo "Tag v$NEW_VERSION already exists on remote — skipping bump (concurrent CI run already handled it)"
-    exit 0
-fi
 
 # 8. Commit with [skip ci]
 git config user.name "github-actions[bot]"
@@ -68,8 +83,16 @@ git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
 # 9. Create git tag
 git tag "v$NEW_VERSION"
 
-# 10. Push commit + tag
-git push origin main
+# 10. Push commit, then tag.
+#     A rejected push means main moved under us between the fetch above and
+#     now. That is the one failure worth surviving quietly, and it is stated
+#     as itself — not as a blanket "something went wrong, call it a success".
+#     Everything else fails the step, loudly, which is what four silent
+#     months cost.
+if ! git push origin main; then
+    echo "::warning::push rejected — main moved during this run; the next deploy's bump will catch up"
+    exit 0
+fi
 git push origin "v$NEW_VERSION"
 
 echo "Bumped to $NEW_VERSION and pushed tag v$NEW_VERSION"
