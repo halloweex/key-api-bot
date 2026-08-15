@@ -2,6 +2,193 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.77
+
+- Bump the version again, after four months of green no-ops (#100)
+- Say a standing DQ finding once, not every morning (#99)
+- Fix the two defects the cleanup listed and left (#98)
+- Remove 6151 lines of dead code, behind a suite that now runs (#97)
+- Send technical alerts to every admin, not the first one (#96)
+- Do not call a restarted watchdog a stopped one (#95)
+- Let something outside the process say the watchdog is alive (#94)
+- Watch the floor the compact leaves behind (#93)
+- Watch the whole directory, and name what grew (#92)
+- Document how a sub-account key actually gets installed (#91)
+- Stop warning about the layers the snapshot deliberately omits (#90)
+- Let the snapshot container write to its own work directory (#89)
+- Take the off-site copy nightly instead of weekly (#88)
+- Measure memory that has to fit, not memory the kernel lends back (#87)
+- Keep two local backups, not seven (#86)
+- Let the import finish when there is no source database (#85)
+- Give the restore drill write access, not just read (#84)
+- Let a non-root container read the restored archive (#83)
+- Mount the drill script instead of baking it into the image (#82)
+- Give sftp its own port flag (#81)
+- Ship the warehouse export off the box every week (#78)
+- Notice when a day of stock history goes missing (#79)
+- Stop paging on a percentage that resets every compaction (#77)
+- Stop publishing the session handoffs (#80)
+- Put the two handoffs where the next session will find them
+- Rebuild what changed, not what was looked at (#70)
+- Speak the whole bot in the reader's language, not just the report (#76)
+- Send the week to everyone, in the language each of them reads (#74)
+- Weekly report, three languages, and a menu that stays reachable (#73)
+- Record the Redis investigation and what came of it
+- Delete the cache that was never there (#72)
+- Log how long a request actually took (#68)
+- Stop dropping every SMS delivery report (#67)
+- Stop documenting a cache that has never run (#69)
+- Do not hold a request open for ten minutes (#66)
+- Let the reconciliation look further back than ninety days (#65)
+- Check the thirteen columns nothing was checking (#64)
+- Do not deploy a paragraph (#63)
+- Track the project doc, minus the things a public repo should not carry (#62)
+- The test suite must not be able to page anyone (#61)
+- Compare the cells, and stop calling a job a defect (#60)
+- Add the column to the table that already exists (#59)
+- Ask KeyCRM what counts as a sale, instead of remembering (#58)
+- Give the third category a name, and a door with a lock (#56)
+- Run the check we were not alive for (#55)
+- Recompute the date an order left, not only the one it arrived at (#54)
+- Do not call the wholesale manager unclassified (#53)
+- Let a human say who is retail, and notice revenue that is neither (#52)
+- Report the next run APScheduler actually has (#51)
+- Say the findings out loud, and say each one once (#50)
+- Notice when a check stops producing verdicts (#49)
+- Queue deploys instead of letting them fight over a container (#48)
+- Let jobs run late instead of not at all (#47)
+- Register three data agents, and give them what the incidents cost (#46)
+- Give the integrity module the logger it was already calling (#45)
+- Let the backfill finish: stop hiding failures and stop fearing a 404 (#44)
+- Fetch back the orders no date-window sync can reach (#43)
+- Compare orders, not just their monthly sums (#42)
+- Count a customer as new only if they have never bought before (#41)
+- Credit an order to the month it was ordered in, whoever finds it (#40)
+- Let a stuck warehouse try again instead of waiting for a human (#39)
+- Say it once — an alarm that repeats every two minutes is furniture (#38)
+- Stop blaming the warehouse for the ruler's own bends (#37)
+- Give the warehouse room to breathe, and a voice when it cannot (#36)
+- Take the DuckDB patches that fix our own failure modes (#35)
+- Take 5 550 customers' phone numbers out of a public repository (#34)
+- Let the money look as unsettled as it is (#33)
+- Stop certifying a campaign nobody has measured yet (#31) (#32)
+- Read a campaign down a column, not across four cards (#30)
+- Let the window match an offer that lasts two days (#29)
+- Write the status the results already read (#28)
+- Put every arm of a campaign on one axis (#27)
+- Say what the result figures mean, and show revenue beside margin (#26)
+- Keep the never-messaged out of the arm they never joined (#25)
+- Measure from the moment the message went out (#24)
+- Claim a campaign before sending it, not after (#23)
+- Split a roster the gateway will not take in one call (#22)
+- Count an emoji as the two units the operator bills (#21)
+- Stop recreating containers the deploy did not change (#20)
+- Let a campaign choose which tiers it is for (#19)
+- Treat every TurboSMS success code as a success (#18)
+- Send over Viber, with SMS as the fallback (#17)
+- Report what the server said, not what the status code implies (#16)
+- Rehearse an SMS before it becomes a campaign (#15)
+- Say why the SMS list is the size it is (#14)
+- Send a campaign from the dashboard (#12)
+- Migrate delivery columns onto an existing sms_campaign_members (#10)
+- TurboSMS integration: send, delivery reports, and opt-outs (#9)
+- SMS campaigns UI: tiers, export, and results read against the control (#8)
+- Measure a campaign against its holdout, with an interval (#6)
+- Freeze the SMS campaign roster, and carry the last order into the export (#5)
+- Data platform fixes (#3)
+- docs: ultra-deep audit findings (parser, NULL-overwrite, 'other' bucket)
+- upsert_orders: never overwrite manager_comment with NULL
+- Harden UTM parser: recover metadata the strict format was dropping
+- UTM Campaigns table: sortable columns + traffic type / platform filters
+- docs: Traffic Attribution deep-dive (pipeline, classification, gaps)
+- Traffic: UTM campaigns table, Google ads/organic split, fix TOF/MOF misattribution
+- Disk growth watchdog: alert on capacity and 24h growth-rate breaches
+- compact: auto-swap inside sidecar removes "operator died" outage class
+- upsert_orders: skip-if-unchanged eliminates 1440x write amplification
+- Data Quality framework: orchestrator + scheduler jobs + endpoint
+- Data Quality framework: Layer 1 + Layer 2 foundations
+- Bronze invariant watchdog: catch config drift in 6h, not 30 days
+- Bronze alert: defense-in-depth mode gate
+- Bronze shadow-write becomes opt-in in legacy mode
+- Bronze prune: mode-aware retention policy
+- Fix compact preflight: account for source DB already on disk
+- Fix: UserRow falls back to generated avatar on photo_url 404
+- Security followup 2 (commit D2): robustness — case-insensitive prod detection, clean stale defaults, surface dirty server tree before reset
+- Security followup 2 (commit C2): close audit-invariant escape hatches
+- Security followup 2 (commit B2): delete dead /v1 dashboard
+- Security followup 2 (commit A2): fix WebApp auth — server-side HttpOnly cookie
+- Security followup (commit I): drop brittle spelling-grep assertion
+- Security followup (commit H): advisory pip-audit in build job
+- Security followup (commit G): tighten rate-limit key, trim docstring
+- Security followup (commit F): deploy pinned to approved commit SHA
+- Security followup (commit E): chat router gated once at include level
+- Security followup (commit D): tighten CSP — drop 'unsafe-inline' from script-src
+- Security followup (commit C): nginx headers via include + expires
+- Security followup (commit B): unify /api lockdown behind a single api_gate
+- Security followup (commit A): Tier 1 bug fixes from review
+- CI/CD hardening: split build/deploy, manual-approval gate, SHA-pin actions
+- Fix Dockerfile.web: glob web/*.py so new modules are included
+- Add security-hardening regression tests
+- Security hardening: medium/low findings (#10-#16)
+- Security hardening: lock down API surface, fix auth gaps (#1-#9)
+- Refactor UI: enforce component visual boundaries (#1)
+- Lower compact preflight margin 1.5x → 0.8x source size
+- Add internal canary: HTTPS health probe + cert expiry watcher
+- Add weekly_compact.sh: host-cron wrapper for automated compaction
+- Reallocate memory budget: 7g container + 3g DuckDB buffer
+- Traffic analytics: detect AI assistants (ChatGPT) as new 'ai' platform
+- Hide cost basis from SKU table and Brand rotation reports
+- SkuRotationTable: show retail value alongside cost basis
+- SkuRotationTable: add Last sale column
+- SKU rotation table: 4 action presets, smart suggestions, CSV export
+- Dead stock deep analytics: cost basis, GMROI, NPV decision, brand rotation
+- Add unit tests for Silver incremental refresh
+- Silver incremental: clean orphan rows by including silver-side scope
+- Silver incremental refresh: scope DELETE+INSERT to changed_ids + cascade
+- Support automated compact: ship scripts/ + register bronze sequence
+- Fix stale buyer_name in Meili orders index
+- Reduce memory pressure: incremental Meili sync, hourly checkpoint, fix alert
+- Add sync_mode field to HealthResponse schema
+- H3 Phase 3-5: SYNC_MODE cutover, backfill, prune, replay, alerts
+- H3 Phase 2: promotion job bronze → orders_v2 shadow table with diff
+- H3 Phase 1: bronze_order_events audit log with dual-write shadow path
+- Make reconciliation endpoint non-blocking by default
+- Add compact_duckdb.py maintenance script
+- Expand UTM classifier: Advantage+, fbsales, telegram, cpc* prefixes
+- Add memory monitor job with Telegram alerts at 75%/90%
+- Rewrite reconciliation to compare per-order, not counts
+- Replace ON CONFLICT with explicit SELECT→UPDATE/INSERT in upsert_orders
+- Fix gold_daily_traffic GROUP BY: repeat COALESCE expressions explicitly
+- Fix gold_daily_traffic PK violation: GROUP BY COALESCE'd aliases, not raw NULLs
+- Fix gold_daily_traffic PK conflict on incremental UTM rebuild
+- Fix UTM refresh holding DB lock for 37K rows, blocking health checks
+- Fix deadlock: mark_warehouse_dirty called inside connection lock
+- Fix warehouse refresh destroying silver: always full rebuild + fix sequences
+- Fix ImportError in rebuild-silver: import constants from duckdb_constants, not config
+- Add /warehouse/rebuild-silver: DROP+CREATE+INSERT to bypass MVCC corruption
+- Bump DuckDB 1.5.1 → 1.5.2 for race condition and index bugfixes
+- Add admin endpoint to purge poisoned orders and CHECKPOINT
+- Catch ConstraintException in upsert_orders, fallback to UPDATE
+- Isolate poisoned rows in orders upsert: skip, don't block batch
+- Stabilize DuckDB writes: drop RMW, raise WAL threshold, serialize warehouse refresh
+- Fix orders upsert for DuckDB 1.5: autocommit per-row ON CONFLICT
+- Fix PK violation: fallback to UPDATE when ON CONFLICT fails
+- Fix orders upsert: use per-row execute instead of broken executemany
+- Fix orders upsert: use ON CONFLICT instead of INSERT OR REPLACE
+- Fix PK violation in upsert_orders: use INSERT OR REPLACE
+- Serve React SPA at root (/) instead of /v2
+- Add date filter support to marketing report (any period, not just months)
+- Pin DuckDB <1.6.0 to prevent unexpected major version upgrades
+- Fix DuckDB 1.5 NaN→INT32 conversion error breaking sync
+- Fix login 500 error: update TemplateResponse for Starlette 1.0
+- Add same month previous year (YoY) comparison to marketing report
+- Fix SyntaxError: use list comprehension instead of generator for unpacking
+- Add CSV export for marketing report (3 months side by side)
+- Add monthly marketing report to Marketing tab
+- Fix DuckDB upsert_orders write-write conflict and PK violations
+- Fix CI version bump race condition on concurrent pushes
+
+
 ## 3.0.76
 
 - Fix silver_orders OOM: two-pass rebuild, skip warehouse refresh on non-order changes
