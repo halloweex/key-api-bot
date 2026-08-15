@@ -80,14 +80,6 @@ REPORT_TYPES = {
     "top10": "🏆 TOP-10 Products"
 }
 
-# ─── Date Ranges ────────────────────────────────────────────────────────────
-DATE_RANGES = {
-    "today": "📅 Today",
-    "yesterday": "📅 Yesterday",
-    "thisweek": "📆 This Week",
-    "thismonth": "📆 This Month",
-    "custom": "🗓️ Custom Date Range"
-}
 
 # ─── Source Names with Emojis ───────────────────────────────────────────────
 SOURCE_NAMES = {

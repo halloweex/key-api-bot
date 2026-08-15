@@ -17,7 +17,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.sync_service import force_resync, get_sync_service
+from core.sync_service import force_resync
 from core.duckdb_store import get_store
 
 logging.basicConfig(

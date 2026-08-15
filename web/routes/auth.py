@@ -4,12 +4,13 @@ Authentication routes for Telegram Login.
 import os
 import logging
 from fastapi import APIRouter, Request, Response, HTTPException, Depends
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 from core.config import config, is_production_url
 from core.permissions import is_hardcoded_admin
+from web.config import TEMPLATES_DIR
 from web.services.auth_service import (
     verify_telegram_auth,
     verify_webapp_auth,
@@ -36,8 +37,11 @@ session_serializer = URLSafeTimedSerializer(SECRET_KEY)
 
 router = APIRouter(tags=["auth"])
 
-# Templates
-templates = Jinja2Templates(directory="web/templates")
+# Templates. TEMPLATES_DIR is absolute, derived from this package's location;
+# the literal "web/templates" that used to be here resolved against the working
+# directory, so the login page rendered only when the process happened to start
+# at the repository root.
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 # Bot username from environment (without @)
 BOT_USERNAME = os.getenv("BOT_USERNAME", "ksorderbot")

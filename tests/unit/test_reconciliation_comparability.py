@@ -162,38 +162,3 @@ class TestStillCountsWhatItShould:
             "returns_count": 0, "returns_revenue": 0.0,
         }
 
-
-class TestDuckDbExclusion:
-    """The DuckDB rollup must honour the ids KeyCRM held back."""
-
-    @pytest.mark.asyncio
-    async def test_excluded_ids_are_dropped(self, tmp_path):
-        import duckdb
-        from core.reconciliation_io import duckdb_monthly_source_rollup
-
-        conn = duckdb.connect(str(tmp_path / "t.duckdb"))
-        conn.execute("""
-            CREATE TABLE orders (id BIGINT, source_id INTEGER, status_id INTEGER,
-                                 grand_total DOUBLE, ordered_at TIMESTAMPTZ,
-                                 updated_at TIMESTAMPTZ)
-        """)
-        conn.execute("CREATE TABLE order_products (order_id BIGINT, quantity INTEGER)")
-        conn.execute("""
-            INSERT INTO orders VALUES
-              (1, 1, 12, 100.0, '2026-06-10 10:00:00+00', '2026-06-10 10:00:00+00'),
-              (2, 1, 12, 250.0, '2026-06-11 10:00:00+00', '2026-06-11 10:00:00+00')
-        """)
-
-        both = duckdb_monthly_source_rollup(
-            conn, date(2026, 6, 1), date(2026, 6, 30), watermark=WATERMARK,
-        )
-        assert both[("2026-06", 1)]["orders"] == 2
-        assert both[("2026-06", 1)]["revenue"] == 350.0
-
-        one = duckdb_monthly_source_rollup(
-            conn, date(2026, 6, 1), date(2026, 6, 30), watermark=WATERMARK,
-            exclude_ids={2},
-        )
-        assert one[("2026-06", 1)]["orders"] == 1
-        assert one[("2026-06", 1)]["revenue"] == 100.0
-        conn.close()

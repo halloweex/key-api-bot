@@ -13,12 +13,11 @@ Features:
 import asyncio
 import os
 from typing import Dict, List, Any, Optional, AsyncGenerator
-from contextlib import asynccontextmanager
 
 import httpx
 
-from core.exceptions import KeyCRMAPIError, KeyCRMConnectionError, KeyCRMDataError
-from core.models import Order, Product, Category, Buyer
+from core.exceptions import KeyCRMAPIError, KeyCRMConnectionError
+from core.models import Order, Product, Buyer
 from core.observability import get_logger, get_correlation_id, Timer
 from core.resilience import (
     CircuitBreaker,
@@ -310,22 +309,6 @@ class KeyCRMClient:
         params = {"include": include} if include else None
         return await self._request("GET", f"order/{order_id}", params=params)
 
-    async def create_order(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new order."""
-        return await self._request("POST", "order", json=data)
-
-    async def update_order(
-        self,
-        order_id: int,
-        data: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Update an existing order."""
-        return await self._request("PUT", f"order/{order_id}", json=data)
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # CUSTOMER METHODS
-    # ═══════════════════════════════════════════════════════════════════════════
-
     async def get_customers(
         self,
         params: Optional[Dict[str, Any]] = None
@@ -337,36 +320,12 @@ class KeyCRMClient:
         """Get single customer by ID."""
         return await self._request("GET", f"buyer/{customer_id}")
 
-    async def create_customer(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new customer."""
-        return await self._request("POST", "buyer", json=data)
-
-    async def update_customer(
-        self,
-        customer_id: int,
-        data: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Update an existing customer."""
-        return await self._request("PUT", f"buyer/{customer_id}", json=data)
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # PRODUCT METHODS
-    # ═══════════════════════════════════════════════════════════════════════════
-
     async def get_products(
         self,
         params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Get products with optional filtering."""
         return await self._request("GET", "products", params=params)
-
-    async def get_product(self, product_id: int) -> Dict[str, Any]:
-        """Get single product by ID."""
-        return await self._request("GET", f"products/{product_id}")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # CATEGORY METHODS
-    # ═══════════════════════════════════════════════════════════════════════════
 
     async def get_categories(
         self,
@@ -386,39 +345,6 @@ class KeyCRMClient:
 
     # ═══════════════════════════════════════════════════════════════════════════
     # USER/MANAGER METHODS
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    async def get_users(
-        self,
-        params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Get users/managers from KeyCRM."""
-        return await self._request("GET", "users", params=params)
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # STOCK METHODS
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    async def get_offers(
-        self,
-        params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Get offers (product variations) from KeyCRM.
-
-        Each offer links offer_id to product_id, enabling proper joins
-        between offer_stocks and products tables.
-        """
-        return await self._request("GET", "offers", params=params)
-
-    async def get_stocks(
-        self,
-        params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Get offer stocks from KeyCRM."""
-        return await self._request("GET", "offers/stocks", params=params)
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # SEARCH METHODS
     # ═══════════════════════════════════════════════════════════════════════════
 
     async def search_orders(
@@ -469,28 +395,6 @@ class KeyCRMClient:
             params["filter[buyer_email]"] = query
 
         return await self._request("GET", "order", params=params)
-
-    async def get_order_count(self, created_between: str) -> int:
-        """Get total order count from API for a date range (uses limit=1 to minimize data).
-
-        Args:
-            created_between: Date range string, e.g. "2026-04-01 00:00:00, 2026-04-02 00:00:00"
-
-        Returns:
-            Total order count from API pagination metadata
-        """
-        response = await self._request("GET", "order", params={
-            "limit": 1,
-            "filter[created_between]": created_between,
-        })
-        # KeyCRM returns pagination in 'meta' or at top level
-        if "meta" in response:
-            return response["meta"].get("total", 0)
-        return response.get("total", len(response.get("data", [])))
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # PAGINATION HELPERS
-    # ═══════════════════════════════════════════════════════════════════════════
 
     async def paginate(
         self,
@@ -605,42 +509,6 @@ class KeyCRMClient:
             page += parallel_batches
 
         return all_items
-
-    async def fetch_all_orders(
-        self,
-        params: Optional[Dict[str, Any]] = None,
-        max_pages: int = 100,
-    ) -> List[Order]:
-        """
-        Fetch all orders and parse into Order models.
-
-        Args:
-            params: Query params for filtering
-            max_pages: Maximum pages to fetch
-
-        Returns:
-            List of Order objects
-        """
-        raw_orders = await self.fetch_all("order", params, max_pages=max_pages)
-        return [Order.from_api(data) for data in raw_orders]
-
-    async def fetch_all_products(
-        self,
-        params: Optional[Dict[str, Any]] = None,
-        max_pages: int = 100,
-    ) -> List[Product]:
-        """
-        Fetch all products and parse into Product models.
-
-        Args:
-            params: Query params for filtering
-            max_pages: Maximum pages to fetch
-
-        Returns:
-            List of Product objects
-        """
-        raw_products = await self.fetch_all("products", params, max_pages=max_pages)
-        return [Product.from_api(data) for data in raw_products]
 
     async def fetch_all_offers(
         self,

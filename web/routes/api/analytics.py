@@ -1,6 +1,6 @@
 """Revenue, summary, returns, sales-by-source, products, brands, categories endpoints."""
 import logging
-from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
+from datetime import datetime as _datetime, timedelta as _timedelta
 from zoneinfo import ZoneInfo
 
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
@@ -10,15 +10,7 @@ from typing import Optional, List
 
 from web.routes.auth import require_admin
 from web.services import dashboard_service
-from web.schemas import (
-    SummaryStatsResponse,
-    RevenueTrendResponse,
-    SalesBySourceResponse,
-    TopProductsResponse,
-    BrandAnalyticsResponse,
-    CategoryResponse,
-    BrandResponse,
-)
+from web.schemas import CategoryResponse, BrandResponse
 from ._deps import (
     limiter, get_store,
     validate_period, validate_source_id, validate_category_id,

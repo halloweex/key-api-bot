@@ -43,8 +43,20 @@ async def _seed(store, n=4):
     An incremental refresh scoped to order 1 rebuilds only its own date, so
     the older cell is the one a corruption can survive in — which is exactly
     the situation the audit exists for.
+
+    Anchored to midday UTC on purpose. Silver derives order_date as the *Kyiv*
+    calendar date (`duckdb_store.py:2206`), while the tests below address rows
+    by `.date()` of the UTC instant seeded here. Those two agree at every hour
+    except 21:00-24:00 UTC, when Kyiv has already turned over — and in that
+    window the corrupting UPDATE matched no row, the audit correctly found
+    nothing, and the test failed. It was broken three hours out of every
+    twenty-four for as long as it existed, which nothing noticed because
+    nothing ran the suite. Midday is far enough from both edges that no
+    offset Kyiv has ever used can move the date.
     """
-    when = datetime.now(timezone.utc) - timedelta(days=1)
+    when = datetime.now(timezone.utc).replace(
+        hour=12, minute=0, second=0, microsecond=0
+    ) - timedelta(days=1)
     older = when - timedelta(days=3)
     async with store.connection() as conn:
         _insert_order(conn, 1, 11, when)

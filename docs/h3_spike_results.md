@@ -1,8 +1,11 @@
 # H3 Phase 0 Spike — Results
 
 **Date:** 2026-04-17
-**DuckDB:** 1.5.2 (isolated venv `.venv-spike/`, matches production)
-**Script:** `scripts/spike_h3_batch_upsert.py`
+**DuckDB:** 1.5.2 (isolated venv `.venv-spike/`, matched production *then*)
+**Script:** `scripts/spike_h3_batch_upsert.py` — deleted 2026-08-14; this
+document is the result it was run to produce. It pinned DuckDB 1.5.2 against a
+project now on 1.5.5, so re-running it would have measured a version nobody
+ships. Recover it from git history if the question ever reopens.
 
 ## Verdict
 

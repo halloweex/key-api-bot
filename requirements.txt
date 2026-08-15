@@ -44,6 +44,3 @@ pillow>=12.0.0
 anthropic>=0.40.0
 sse-starlette>=2.0.0
 meilisearch>=0.31.0
-
-# Docker monitoring
-aiohttp>=3.9.0

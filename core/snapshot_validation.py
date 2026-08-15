@@ -80,7 +80,10 @@ MAY_BE_EMPTY = frozenset({
 DERIVED = frozenset({
     "silver_orders", "silver_order_utm",
     "gold_daily_revenue", "gold_daily_products",
-    "gold_daily_traffic", "gold_product_pairs",
+    "gold_daily_traffic",
+    # Kept for snapshots taken before the table was dropped; its DDL is gone.
+    # See the matching note in scripts/compact_duckdb.py.
+    "gold_product_pairs",
 })
 
 

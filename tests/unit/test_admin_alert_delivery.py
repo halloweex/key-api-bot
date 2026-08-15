@@ -128,14 +128,3 @@ class TestTheSuiteCannotReachTelegram:
 
         assert delivered == 0, "the autouse guard in conftest is missing"
 
-    @pytest.mark.asyncio
-    async def test_a_failing_warehouse_alert_goes_nowhere(self, monkeypatch):
-        from core.telegram_alerts import reset_throttle
-
-        reset_throttle()
-        monkeypatch.setattr(bot_main, "_application", None)
-        # The exact path the cell guard takes on a failed validation.
-        await bot_main.send_admin_message(
-            "⚠️ Warehouse validation failed — full retry scheduled (attempt 1/3).",
-            key="warehouse:validation_retrying",
-        )

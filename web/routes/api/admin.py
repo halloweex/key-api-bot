@@ -620,22 +620,6 @@ async def get_bronze_stats(request: Request):
         return {"status": "error", "error": str(e)}
 
 
-@router.post("/bronze/promote")
-@limiter.limit("10/minute")
-async def promote_bronze(
-    request: Request,
-    batch_size: int = Query(2000, ge=1, le=10000),
-):
-    """Run one promotion cycle: bronze_order_events → orders_v2 (shadow). (Admin enforced at router level.)"""
-    try:
-        store = await get_store()
-        result = await store.promote_bronze_to_shadow(batch_size=batch_size)
-        return {"status": "ok", **result}
-    except Exception as e:
-        logger.exception("Bronze promotion failed")
-        return {"status": "error", "error": str(e)}
-
-
 @router.post("/bronze/promote-live")
 @limiter.limit("10/minute")
 async def promote_bronze_live(
@@ -701,19 +685,6 @@ async def replay_bronze(
         return {"status": "ok", "replayed": count}
     except Exception as e:
         logger.exception("Bronze replay failed")
-        return {"status": "error", "error": str(e)}
-
-
-@router.get("/bronze/diff")
-@limiter.limit("30/minute")
-async def diff_orders(request: Request, limit: int = Query(100, ge=1, le=1000)):
-    """Compare orders vs orders_v2 — shows mismatches for validation."""
-    try:
-        store = await get_store()
-        result = await store.diff_orders_v2(limit=limit)
-        return {"status": "ok", **result}
-    except Exception as e:
-        logger.exception("Orders diff failed")
         return {"status": "error", "error": str(e)}
 
 

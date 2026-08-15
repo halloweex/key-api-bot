@@ -4,9 +4,6 @@ Web dashboard configuration.
 import os
 from pathlib import Path
 
-# Web server settings
-WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
-WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 
 # Paths
 BASE_DIR = Path(__file__).resolve().parent

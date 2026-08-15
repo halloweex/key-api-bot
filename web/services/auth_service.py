@@ -8,7 +8,7 @@ import hmac
 import time
 import json
 import logging
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs
 from typing import Optional, Dict, Any
 
 from bot.config import BOT_TOKEN

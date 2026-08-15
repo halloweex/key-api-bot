@@ -5,32 +5,37 @@ Automated sales reporting Telegram bot for KoreanStory with interactive web dash
 
 ## Architecture
 
+Selective — only the entries worth naming. `core/` alone holds 43 modules; the
+listing below is not a directory dump and should not be read as one.
+
 ```
 key-api-bot/
-├── core/                         # Shared modules (bot + web)
-│   ├── cache.py                 # AsyncCache with TTL, stats, decorator
+├── core/                         # Shared modules (bot + web), 43 files
 │   ├── config.py                # Shared configuration
 │   ├── keycrm.py                # Unified async KeyCRM client
+│   ├── duckdb_store.py          # The analytics store; repositories/ mix into it
+│   ├── repositories/            # Nine mixins composed into DuckDBStore
 │   ├── models.py                # Data models (Order, Product, Category, Buyer)
 │   ├── filters.py               # Date period parsing (DateRange, parse_period)
+│   ├── scheduler.py             # APScheduler jobs, addressed by string id
 │   └── prediction_service.py    # LightGBM revenue prediction (train, predict, forecast)
 │
 ├── bot/                          # Telegram bot package
 │   ├── config.py                # Configuration, constants, enums
 │   ├── services.py              # Business logic (sales aggregation, reports)
-│   ├── handlers.py              # Telegram command/callback handlers
-│   └── main.py                  # Bot entry point
+│   ├── handlers_legacy.py       # Every command/callback handler actually lives here
+│   ├── handlers/__init__.py     # Re-export facade over handlers_legacy; adds nothing
+│   ├── keyboards.py             # Keyboards; bound to handlers only by callback_data
+│   └── main.py                  # Bot entry point; registers handlers imperatively
 │
 ├── web/                          # Web dashboard (FastAPI + React)
 │   ├── main.py                  # FastAPI app entry point
 │   ├── routes/
-│   │   ├── api.py               # JSON API endpoints + health check
+│   │   ├── api/                 # Package, 16 modules; __init__ include_routers them
 │   │   ├── auth.py              # Authentication routes
 │   │   └── pages.py             # HTML page routes (React SPA)
 │   ├── services/
-│   │   ├── dashboard_service.py # Data transformations (async)
-│   │   ├── category_service.py  # Product category filtering (async)
-│   │   └── brand_service.py     # Brand extraction from custom_fields (async)
+│   │   └── dashboard_service.py # Data transformations (async)
 │   ├── frontend/                # React Dashboard (TypeScript + Vite)
 │   │   └── src/
 │   │       ├── api/             # API client with error handling
@@ -41,13 +46,23 @@ key-api-bot/
 │   ├── static/                  # Static assets
 │   └── static-v2/               # Built React app (generated, gitignored)
 │
-├── scripts/                      # Utility scripts
+├── scripts/                      # Utility scripts. Whole dir is COPYied into the
+│   │                            # web image — the compact sidecar runs from it.
+│   ├── compact_duckdb.py        # Host cron, Sunday 02:00 UTC. Do not touch.
+│   ├── weekly_compact.sh        # The cron entry itself
 │   ├── check_date.py            # Compare DuckDB vs KeyCRM for date
 │   ├── check_turbosms_signature.py  # Is TURBOSMS_WEBHOOK_SECRET the one the gateway signs with?
 │   └── force_resync.py          # Force rebuild DuckDB from API
 │
-├── tests/
-│   └── test_data_consistency.py # KeyCRM vs DuckDB data validation
+├── deploy/                       # Reached only from host cron, never imported
+│   ├── daily_offsite.sh         # 02:45 daily — snapshot + ship off-site
+│   ├── offsite_check.sh         # 09:00 daily — freshness, in-app watchdog liveness
+│   └── restore_from_export.py   # The only restore path. Never delete.
+│
+├── tests/                        # 67 files. pytest.ini sets testpaths, so only
+│   │                            # this tree is collected — scripts/ is not.
+│   └── test_data_consistency.py # KeyCRM vs DuckDB; marked `external`,
+│                                # deselected by default, run with -m external
 │
 ├── nginx/nginx.conf             # Reverse proxy configuration
 ├── .github/workflows/deploy.yml # GitHub Actions auto-deployment
@@ -245,12 +260,20 @@ docker-compose logs --tail=50 nginx
 
 ## Testing
 
-```bash
-# The suite (unit + integration, ~1000 tests, no network)
-PYTHONPATH=. pytest tests/unit tests/integration -q
+`pytest.ini` sets `testpaths`, `asyncio_mode = strict`, and deselects the
+`external` and `slow` markers by default, so a bare `pytest` is the safe run —
+no paths to remember, nothing reaching the network.
 
-# Run data consistency tests
-PYTHONPATH=. pytest tests/test_data_consistency.py -v
+**Baseline as of 2026-08-14 (`d81b194`): 1297 passed, 7 deselected, 39s.**
+Any change that lowers the passing count is a regression until explained.
+
+```bash
+# The suite. No network, no production data.
+pytest -q
+
+# The external tests, deliberately: these reach the live KeyCRM API and the
+# production DuckDB file.
+pytest -m external -v
 
 # Check specific date
 PYTHONPATH=. python tests/test_data_consistency.py 2025-12-07
@@ -357,9 +380,14 @@ otherwise                                 → internal
 **Retail is a fixed list of retail managers and b2b is the wholesale manager;
 nobody else is mixed into either.** `internal` is everyone else — staff whose
 work is neither: their own sales, and shipments to bloggers that carry line
-items and no money at all. It is admin-only, enforced in `api_gate` (and again
-in `/api/dashboard/batch`, which carries `sales_type` in the body where the
-gate cannot see it). `sales_type=all` spans every category and is not gated.
+items and no money at all. It is admin-only, enforced in `api_gate`.
+`sales_type=all` spans every category and is not gated.
+
+`api_gate` reads `sales_type` from the **query string**. That was sufficient
+once `/api/dashboard/batch` was deleted — it was the only route that took
+`sales_type` in a request body, and it needed its own check for exactly that
+reason. Any new POST accepting `sales_type` in a body reopens the hole and
+needs the same treatment.
 
 `managers.is_retail` is seeded from `RETAIL_MANAGER_IDS` for managers the
 warehouse has never seen and **never overwritten afterwards** — it used to be
@@ -559,11 +587,19 @@ Reliable solution for completely re-uploading historical data to DuckDB from scr
 ```
 
 ### Files to Create
-| File | Purpose |
-|------|---------|
-| `core/resync_service.py` | Core resync logic, verification |
-| `scripts/full_resync.py` | CLI interface |
-| `web/routes/api.py` | API endpoint (admin) |
+
+**Stale — this was built differently.** The admin endpoint exists as
+`POST /duckdb/resync` in `web/routes/api/admin.py:21` and nginx already routes
+it (`nginx.conf:103`). Neither `core/resync_service.py` nor
+`scripts/full_resync.py` was ever created; the CLI equivalent is
+`scripts/force_resync.py`. Kept for the design rationale below, not as a task
+list — do not implement it a second time.
+
+| File | Purpose | Status |
+|------|---------|--------|
+| `core/resync_service.py` | Core resync logic, verification | never created |
+| `scripts/full_resync.py` | CLI interface | superseded by `scripts/force_resync.py` |
+| `web/routes/api.py` | API endpoint (admin) | shipped as `web/routes/api/admin.py:21` |
 
 ### CLI Usage
 ```bash

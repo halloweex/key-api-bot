@@ -16,7 +16,6 @@ from web.ratelimit import limiter  # single app-wide limiter instance
 from web.services.search_service import get_search_service
 from web.services.chat_service import get_chat_service
 from core.observability import get_logger
-from core.config import config
 
 logger = get_logger(__name__)
 

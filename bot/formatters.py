@@ -6,7 +6,7 @@ Contains text formatting helpers, message templates, and report formatters.
 import logging
 from datetime import date
 from typing import Dict, List, Tuple
-from bot.config import SOURCE_MAPPING, MEDALS, VERSION, REVENUE_MILESTONES
+from bot.config import SOURCE_MAPPING, MEDALS, VERSION
 from core.i18n import DEFAULT_LANGUAGE, fmt_int, fmt_money, t
 
 logger = logging.getLogger(__name__)
@@ -35,43 +35,6 @@ def truncate_message(message: str, max_length: int = TELEGRAM_SAFE_MESSAGE_LENGT
     truncated = message[:max_length - 50]
     return truncated + "\n\n" + t("msg.truncated", lang)
 
-
-def split_message(message: str, max_length: int = TELEGRAM_SAFE_MESSAGE_LENGTH) -> List[str]:
-    """
-    Split a long message into multiple parts.
-
-    Args:
-        message: The message to split
-        max_length: Maximum length per part
-
-    Returns:
-        List of message parts
-    """
-    if len(message) <= max_length:
-        return [message]
-
-    parts = []
-    lines = message.split('\n')
-    current_part = ""
-
-    for line in lines:
-        # If adding this line would exceed limit, start a new part
-        if len(current_part) + len(line) + 1 > max_length:
-            if current_part:
-                parts.append(current_part.rstrip())
-            current_part = line + '\n'
-        else:
-            current_part += line + '\n'
-
-    # Add the last part
-    if current_part:
-        parts.append(current_part.rstrip())
-
-    logger.info(f"Message split into {len(parts)} parts")
-    return parts
-
-
-# ─── Text Formatting Helpers ────────────────────────────────────────────────
 
 def bold(text: str) -> str:
     """Make text bold in Telegram HTML format."""
@@ -337,38 +300,3 @@ def get_period_type(start_date: date, end_date: date) -> str:
     return None
 
 
-def check_milestone(total_revenue: float, start_date: date, end_date: date,
-                    lang: str = DEFAULT_LANGUAGE) -> str | None:
-    """The congratulation for the highest milestone this period cleared, if any."""
-    period_type = get_period_type(start_date, end_date)
-
-    if not period_type or period_type not in REVENUE_MILESTONES:
-        return None
-
-    highest_milestone = None
-    for milestone in REVENUE_MILESTONES[period_type]:
-        if total_revenue >= milestone["amount"]:
-            highest_milestone = milestone
-
-    if not highest_milestone:
-        return None
-
-    return format_milestone(highest_milestone, lang)
-
-
-def format_milestone(milestone: dict, lang: str = DEFAULT_LANGUAGE) -> str:
-    """One milestone banner, shared by the report path and the daily job."""
-    amount = milestone["amount"]
-    if amount >= 1_000_000:
-        amount_text = f"₴{amount / 1_000_000:.1f}M"
-    else:
-        amount_text = f"₴{amount / 1_000:.0f}K"
-
-    return (
-        f"\n\n{'🎊' * 10}\n\n"
-        f"{milestone['emoji']} {bold(t('milestone.reached', lang))} "
-        f"{milestone['emoji']}\n\n"
-        f"🏆 {bold(t(milestone['key'], lang))}\n\n"
-        f"💰 {t('milestone.revenue', lang)}: {bold(amount_text)}\n\n"
-        f"{'🎊' * 10}"
-    )

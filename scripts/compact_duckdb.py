@@ -37,7 +37,31 @@ MANIFEST_PATH = EXPORT_DIR / "_manifest.json"
 DERIVED_TABLES = frozenset({
     "silver_orders", "silver_order_utm",
     "gold_daily_revenue", "gold_daily_products",
-    "gold_daily_traffic", "gold_product_pairs",
+    "gold_daily_traffic",
+
+    # ── Dropped from the schema, still present in the production database ──
+    #
+    # Neither of these has a DDL any more, so _init_schema() does not create
+    # them in the new database. They are listed here — the set that decides
+    # what is *not* exported — because all_tables is read from the *source*
+    # database, which still has both.
+    #
+    # Leaving either one out is not a no-op, and the two failure modes differ:
+    #
+    #   gold_product_pairs (5,185 rows) would be exported to Parquet and
+    #   imported back, recreating the table this deletion removed and putting
+    #   its rows in the off-site archive on the way.
+    #
+    #   orders_v2 (0 rows) would be exported too, and then `INSERT INTO
+    #   "orders_v2"` would fail against a schema that no longer defines it.
+    #   That error is not a duplicate-key error, so it lands in import_errors
+    #   and phase 2 exits 1 — the whole weekly compact aborts, and with it the
+    #   off-site export that runs after it.
+    #
+    # Remove a name from here only after a compact has run and the table is
+    # gone from the production database.
+    "gold_product_pairs",
+    "orders_v2",
 })
 
 MEM_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "6GB")
@@ -328,6 +352,19 @@ def phase2_import(manifest: dict) -> float:
         if not parquet_path.exists():
             continue
 
+        # The table list comes from the snapshot's manifest, and the schema
+        # comes from today's code, so a restore of an older archive can name a
+        # table this version no longer defines. Without this check the INSERT
+        # below raises a Catalog Error, which is not a duplicate-key error, so
+        # it reaches import_errors and aborts the run — meaning one table
+        # dropped from the schema would make every archive taken before that
+        # commit unrestorable. Announced rather than passed over in silence:
+        # the rows are real and they are not being restored.
+        if t not in created_tables:
+            log(f"  {t}: not in this version's schema — {counts.get(t, 0):,} "
+                f"rows in the archive are NOT being restored", "WARN")
+            continue
+
         expected = counts.get(t, 0)
         try:
             conn.execute(
@@ -344,10 +381,19 @@ def phase2_import(manifest: dict) -> float:
             if "Duplicate" in err_str or "UNIQUE" in err_str or "PRIMARY" in err_str:
                 log(f"  {t}: duplicate key — deduplicating...", "WARN")
                 conn.execute(f'DELETE FROM "{t}"')
-                pk_cols = [r[0] for r in conn.execute(
-                    f"SELECT column_name FROM duckdb_constraints() "
-                    f"WHERE table_name='{t}' AND constraint_type='PRIMARY KEY'"
-                ).fetchall()]
+                # duckdb_constraints() has no `column_name`; it returns one row
+                # per constraint carrying a LIST in constraint_column_names.
+                # Asking for the wrong name raised a Binder Error here — inside
+                # the handler meant to recover from duplicates — so the
+                # recovery itself crashed the import it was written to rescue.
+                pk_cols = [
+                    col
+                    for (cols,) in conn.execute(
+                        f"SELECT constraint_column_names FROM duckdb_constraints() "
+                        f"WHERE table_name='{t}' AND constraint_type='PRIMARY KEY'"
+                    ).fetchall()
+                    for col in cols
+                ]
                 if pk_cols:
                     partition = ", ".join(f'"{c}"' for c in pk_cols)
                     conn.execute(f"""
@@ -402,8 +448,27 @@ def phase2_import(manifest: dict) -> float:
                     restart_val = max(restart_val, max_id + 1)
                 except Exception:
                     pass
-            conn.execute(f"ALTER SEQUENCE {seq_name} RESTART WITH {restart_val}")
-            log(f"  {seq_name}: restart at {restart_val}", "OK")
+            # DuckDB 1.5.5 has no way to *set* a sequence. `ALTER SEQUENCE ...
+            # RESTART` raises "Not implemented Error", and CREATE OR REPLACE
+            # cannot run at all here — every one of these sequences backs a
+            # column DEFAULT, so replacing it is a DependencyException and
+            # DROP ... CASCADE would take the DEFAULT with it.
+            #
+            # So advance it instead: read where it stands, then burn the
+            # difference in one statement. duckdb_sequences().last_value gives
+            # the position without consuming a value (NULL when untouched,
+            # which is the state right after phase 2 builds the schema).
+            row = conn.execute(
+                "SELECT last_value FROM duckdb_sequences() "
+                f"WHERE sequence_name = '{seq_name}'"
+            ).fetchone()
+            current = row[0] if row and row[0] is not None else 0
+            gap = restart_val - 1 - current
+            if gap > 0:
+                conn.execute(f"SELECT nextval('{seq_name}') FROM range({gap})")
+                log(f"  {seq_name}: advanced {gap:,} to hand out {restart_val} next", "OK")
+            else:
+                log(f"  {seq_name}: already past {restart_val}", "OK")
         except Exception as e:
             log(f"  {seq_name}: {e}", "WARN")
 
@@ -442,10 +507,23 @@ def phase3_validate(manifest: dict) -> None:
     v = duckdb.connect(str(NEW_DB), read_only=True)
     failures = []
 
+    # Tables this version of the schema actually defines. The manifest lists
+    # what the *snapshot* held, and a restore of an older archive legitimately
+    # names tables since dropped — phase 2 skips those, so counting rows in
+    # them here would fail the run for a table nobody expected to be present.
+    present = {r[0] for r in v.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema='main' AND table_type='BASE TABLE'"
+    ).fetchall()}
+
     # ── Row count validation ──
     log("Row counts:")
     for t in export_tables:
         expected = counts.get(t, 0)
+        if t not in present:
+            log(f"  {t}: not in this version's schema — {expected:,} rows "
+                f"in the archive were not restored", "WARN")
+            continue
         if expected <= 0:
             continue
         try:
@@ -495,10 +573,14 @@ def phase3_validate(manifest: dict) -> None:
                  "managers", "order_products", "offers", "expense_types"]
     for t in pk_tables:
         try:
-            pk_cols = [r[0] for r in v.execute(
-                f"SELECT column_name FROM duckdb_constraints() "
-                f"WHERE table_name='{t}' AND constraint_type='PRIMARY KEY'"
-            ).fetchall()]
+            pk_cols = [
+                col
+                for (cols,) in v.execute(
+                    f"SELECT constraint_column_names FROM duckdb_constraints() "
+                    f"WHERE table_name='{t}' AND constraint_type='PRIMARY KEY'"
+                ).fetchall()
+                for col in cols
+            ]
             if not pk_cols:
                 continue
             col = pk_cols[0]
@@ -535,9 +617,13 @@ def phase3_validate(manifest: dict) -> None:
         try:
             cnt = v2.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
             log(f"  {t}: exists ({cnt} rows, will be rebuilt on startup)", "OK")
-        except Exception as e:
-            log(f"  {t}: missing — {e}", "WARN")
-            log(f"    Will be created by _init_schema() on app startup")
+        except Exception:
+            # DERIVED_TABLES also carries names kept only to keep them out of
+            # the export while the production database still holds them — see
+            # the comment on the set. Those have no DDL, so "startup will
+            # create it" is not true of them and saying so sends the reader
+            # looking for a bug in _init_schema.
+            log(f"  {t}: absent — no DDL defines it; nothing will create it", "OK")
 
     db_size = v2.execute("SELECT database_size FROM pragma_database_size()").fetchone()[0]
     log(f"\nFinal DB size: {db_size}")

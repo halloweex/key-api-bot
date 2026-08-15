@@ -4,7 +4,11 @@ Data consistency tests between KeyCRM API and DuckDB.
 These tests verify that data in DuckDB matches what KeyCRM API returns,
 accounting for timezone differences and return order filtering.
 
-Run with: pytest tests/test_data_consistency.py -v
+These reach the live KeyCRM API and the production DuckDB file, so the whole
+module is marked `external` and deselected by default. That is the only reason
+it can live in tests/ without a default run touching production.
+
+Run with: pytest tests/test_data_consistency.py -v -m external
 """
 import asyncio
 import pytest
@@ -15,6 +19,8 @@ from decimal import Decimal
 from core.keycrm import get_async_client
 from core.duckdb_store import get_store
 from core.models import OrderStatus
+
+pytestmark = pytest.mark.external
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 RETURN_STATUSES = set(int(s) for s in OrderStatus.return_statuses())

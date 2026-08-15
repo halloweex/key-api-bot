@@ -4,7 +4,6 @@ Search service for quick inline search using Meilisearch.
 Provides fast, typo-tolerant search without LLM involvement.
 """
 from typing import Optional, List, Dict, Any
-from datetime import datetime
 
 from core.meilisearch_client import get_meili_client
 from core.duckdb_store import get_store

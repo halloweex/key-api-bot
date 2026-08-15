@@ -109,7 +109,6 @@ class TestApiRequiresAuth:
         "/api/expenses",
         "/api/stocks/snapshot/refresh",
         "/api/duckdb/sync-buyers",
-        "/api/dashboard/batch",
     ]
 
     @pytest.mark.parametrize("path", PROTECTED_GETS)
@@ -224,12 +223,10 @@ class TestRateLimiterShared:
         from web.ratelimit import limiter as shared
         from web.main import limiter as main_limiter
         from web.routes.api._deps import limiter as deps_limiter
-        from web.routes.batch import limiter as batch_limiter
         from web.routes.chat import limiter as chat_limiter
 
         assert main_limiter is shared
         assert deps_limiter is shared
-        assert batch_limiter is shared
         assert chat_limiter is shared
 
     def test_app_state_limiter_is_shared(self):
