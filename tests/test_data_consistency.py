@@ -14,9 +14,7 @@ import asyncio
 import pytest
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
-from decimal import Decimal
 
-from core.keycrm import get_async_client
 from core.duckdb_store import get_store
 from core.models import OrderStatus
 

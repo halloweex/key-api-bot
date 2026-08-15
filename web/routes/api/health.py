@@ -113,8 +113,6 @@ async def health_check(request: Request):
 @limiter.limit("30/minute")
 async def detailed_health_check(request: Request):
     """Detailed health check with component-level status."""
-    import psutil
-
     components = {}
     overall_status = "healthy"
 
@@ -180,6 +178,13 @@ async def detailed_health_check(request: Request):
     # System metrics
     uptime_seconds = int(time.time() - START_TIME)
     try:
+        # Imported here rather than at the top of the handler. psutil is not in
+        # requirements.txt and never has been, so a module-level import made
+        # every call to this endpoint a 500 — while the block below was already
+        # written to fall back to uptime alone when the metrics cannot be read.
+        # The guard existed; the import stood outside it.
+        import psutil
+
         process = psutil.Process()
         memory_info = process.memory_info()
         sys_metrics = {

@@ -38,7 +38,13 @@ CONFIG="deploy/backup.env"
 
 EXPORT_DIR="${BACKUP_EXPORT_DIR:-data/export_parquet}"
 MARKER="${BACKUP_MARKER:-data/.offsite_last_ok}"
-RETAIN="${BACKUP_RETAIN:-8}"                # weekly cadence → ~2 months
+# 30 archives ≈ a month, because the snapshot goes off-site nightly (#88), not
+# weekly. The old default of 8 was written for the weekly cadence, where it
+# meant two months; after #88 nobody changed it, so it silently became eight
+# days of history. deploy/backup.env.example has said 30 since then — this is
+# the code catching up to the template rather than the other way round.
+# At ~8 MB an archive, a month of them is a rounding error on a 1 TB box.
+RETAIN="${BACKUP_RETAIN:-30}"               # nightly cadence → ~1 month
 SSH_PORT="${BACKUP_SSH_PORT:-23}"           # Hetzner Storage Box speaks SSH on 23
 SSH_KEY="${BACKUP_SSH_KEY:-$HOME/.ssh/storagebox_ed25519}"
 REMOTE="${BACKUP_REMOTE:-}"                 # u123456-sub1@u123456.your-storagebox.de
