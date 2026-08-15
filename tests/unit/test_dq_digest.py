@@ -189,6 +189,190 @@ class TestBuildDigest:
         assert "…and 17 more" in msg
 
 
+# ─── The unchanged standing WARN ────────────────────────────────────────────
+
+class TestStandingFindingsGoQuiet:
+    """`headline_vs_line_items: 414 (unchanged)` went out every morning for six
+    days. The delta that says nobody needs to hear it again was already being
+    computed, and the send decision ignored it."""
+
+    NOW = datetime(2026, 8, 15, 9, 0, tzinfo=timezone.utc)
+
+    def _standing(self, count=414):
+        return [DigestSection(
+            layer="integrity", run=_run("WARN"), age_hours=2,
+            issues=[_row("headline_vs_line_items", count)],
+            previous_issues=[_row("headline_vs_line_items", count)],
+        )]
+
+    def test_unchanged_warn_stays_quiet_the_day_after_it_was_sent(self):
+        assert build_digest(
+            self._standing(),
+            last_sent_at=self.NOW - timedelta(days=1),
+            now=self.NOW,
+        ) is None
+
+    def test_still_quiet_six_days_on(self):
+        assert build_digest(
+            self._standing(),
+            last_sent_at=self.NOW - timedelta(days=6, hours=23),
+            now=self.NOW,
+        ) is None
+
+    def test_restated_once_a_week(self):
+        msg = build_digest(
+            self._standing(),
+            last_sent_at=self.NOW - timedelta(days=7),
+            now=self.NOW,
+        )
+        assert msg is not None
+        assert "headline_vs_line_items: 414" in msg
+        assert "Repeated weekly" in msg
+
+    def test_a_finding_that_moves_by_one_is_news_at_once(self):
+        """+1 order is the whole signal this check exists to give. It must not
+        wait six days behind the cooldown of the number it grew from."""
+        sections = [DigestSection(
+            layer="integrity", run=_run("WARN"), age_hours=2,
+            issues=[_row("headline_vs_line_items", 415)],
+            previous_issues=[_row("headline_vs_line_items", 414)],
+        )]
+        msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
+        assert msg is not None
+        assert "415 (+1 since the last run)" in msg
+        assert "Repeated weekly" not in msg
+
+    def test_a_new_check_beside_a_standing_one_is_news(self):
+        sections = [DigestSection(
+            layer="integrity", run=_run("WARN"), age_hours=2,
+            issues=[_row("headline_vs_line_items", 414), _row("fk_orphans", 3)],
+            previous_issues=[_row("headline_vs_line_items", 414)],
+        )]
+        msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
+        assert msg is not None
+        assert "fk_orphans: 3 (new)" in msg
+
+    def test_a_stale_layer_speaks_through_the_quiet(self):
+        """Silence has to mean "nothing changed", never "the checks stopped"."""
+        sections = self._standing() + [
+            DigestSection(layer="reconciliation", run=_run("PASS"), age_hours=52),
+        ]
+        msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
+        assert msg is not None
+        assert "52h old" in msg
+
+    def test_an_unchanged_warn_below_the_truncation_line_is_not_swallowed(self):
+        """A finding with no line has no delta the reader can check."""
+        sections = [DigestSection(
+            layer="integrity", run=_run("WARN"), age_hours=2,
+            issues=[_row(f"check_{i}", 5) for i in range(6)],
+            previous_issues=[_row(f"check_{i}", 5) for i in range(6)],
+        )]
+        msg = build_digest(
+            sections, max_issue_lines=2,
+            last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW,
+        )
+        assert msg is not None
+        assert "…and 4 more" in msg
+
+    def test_info_alone_does_not_get_restated_either(self):
+        """A week of silence does not turn blogger seeding into a problem."""
+        sections = [DigestSection(
+            layer="integrity", run=_run("PASS"), age_hours=2,
+            issues=[_row("goods_shipped_without_sale", 774, severity="INFO")],
+            previous_issues=[_row("goods_shipped_without_sale", 774, severity="INFO")],
+        )]
+        assert build_digest(
+            sections, last_sent_at=self.NOW - timedelta(days=30), now=self.NOW,
+        ) is None
+
+    def test_a_caller_that_remembers_nothing_still_gets_told(self):
+        """No marker means no evidence the reader has heard it. Say it."""
+        msg = build_digest(self._standing(), now=self.NOW)
+        assert msg is not None
+        assert "headline_vs_line_items: 414" in msg
+
+    def test_a_naive_marker_is_read_as_utc_rather_than_crashing(self):
+        msg = build_digest(
+            self._standing(),
+            last_sent_at=datetime(2026, 8, 1, 9, 0),
+            now=self.NOW,
+        )
+        assert msg is not None
+
+
+class TestStandingDiscrepancies:
+    """`2026-04 / src=1: qty DK=981 KC=2,112` went out word for word on nine
+    consecutive mornings in July, because a discrepancy had no delta at all."""
+
+    NOW = datetime(2026, 8, 15, 9, 0, tzinfo=timezone.utc)
+
+    def _diff(self, dk=981.0, kc=2112.0, month="2026-04", field="qty"):
+        return {
+            "month": month, "source_id": 1, "field": field,
+            "dk_value": dk, "kc_value": kc,
+            "diff_class": "TOTAL_MISMATCH", "severity": "WARN",
+            "order_ids": [1, 2, 3],
+        }
+
+    def _section(self, diffs, previous_diffs):
+        return [DigestSection(
+            layer="reconciliation", run=_run("WARN"), age_hours=3,
+            diffs=diffs, previous_diffs=previous_diffs,
+        )]
+
+    def test_the_same_drift_at_the_same_distance_is_not_news(self):
+        assert build_digest(
+            self._section([self._diff()], [self._diff()]),
+            last_sent_at=self.NOW - timedelta(days=1), now=self.NOW,
+        ) is None
+
+    def test_a_drift_that_widened_is_news(self):
+        msg = build_digest(
+            self._section([self._diff(dk=890.0)], [self._diff(dk=981.0)]),
+            last_sent_at=self.NOW - timedelta(days=1), now=self.NOW,
+        )
+        assert msg is not None
+        assert "DK=890" in msg
+
+    def test_a_second_drift_beside_a_standing_one_is_news(self):
+        msg = build_digest(
+            self._section(
+                [self._diff(), self._diff(month="2026-05")],
+                [self._diff()],
+            ),
+            last_sent_at=self.NOW - timedelta(days=1), now=self.NOW,
+        )
+        assert msg is not None
+
+    def test_a_drift_that_healed_is_news(self):
+        """A layer going clean is the one change nobody should have to notice
+        by the absence of a message."""
+        msg = build_digest(
+            [DigestSection(layer="reconciliation", run=_run("PASS"), age_hours=3,
+                           diffs=[], previous_diffs=[self._diff()])],
+            last_sent_at=self.NOW - timedelta(days=1), now=self.NOW,
+        )
+        assert msg is not None
+        assert "clean" in msg
+
+    def test_a_reshuffled_order_id_sample_is_not_a_change(self):
+        a = self._diff()
+        b = dict(self._diff(), order_ids=[9, 8, 7])
+        assert build_digest(
+            self._section([a], [b]),
+            last_sent_at=self.NOW - timedelta(days=1), now=self.NOW,
+        ) is None
+
+    def test_a_standing_drift_is_restated_weekly(self):
+        msg = build_digest(
+            self._section([self._diff()], [self._diff()]),
+            last_sent_at=self.NOW - timedelta(days=7, hours=1), now=self.NOW,
+        )
+        assert msg is not None
+        assert "Repeated weekly" in msg
+
+
 # ─── fetch_previous_run ─────────────────────────────────────────────────────
 
 async def _make_store(tmp_path: Path) -> DuckDBStore:

@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1391,6 +1391,11 @@ def fetch_latest_run_by_id(conn, run_id: int) -> Optional[Dict[str, Any]]:
 # One cycle plus grace, same reasoning as the canary's thresholds.
 DIGEST_MAX_AGE_HOURS = {"reconciliation": 30, "integrity": 12}
 
+# How long a standing finding may go unmentioned before the digest says it
+# again. Long enough that a known problem stops being daily wallpaper, short
+# enough that it cannot be forgotten.
+DIGEST_RESTATE_AFTER = timedelta(days=7)
+
 
 @dataclass
 class DigestSection:
@@ -1400,6 +1405,7 @@ class DigestSection:
     issues: List[Dict[str, Any]] = field(default_factory=list)
     diffs: List[Dict[str, Any]] = field(default_factory=list)
     previous_issues: List[Dict[str, Any]] = field(default_factory=list)
+    previous_diffs: List[Dict[str, Any]] = field(default_factory=list)
     age_hours: Optional[float] = None       # age of `run`, None if never ran
 
 
@@ -1414,30 +1420,76 @@ def _delta_note(check_name: str, count: int, previous: List[Dict[str, Any]]) -> 
     return "new"
 
 
+def _diff_signature(diffs: List[Dict[str, Any]]) -> frozenset:
+    """What a set of discrepancies looks like, for telling two runs apart.
+
+    Month, source, field and class say which drift it is; the two values say
+    how far it has drifted. A run reporting the same drift at the same
+    distance has told the reader nothing new.
+
+    Measured over 2026-07-20…08-15, that case is rare: the recon numbers move
+    on nearly every run while the warehouse catches up, and each morning is
+    genuinely a different figure. What this earns instead is the other
+    direction — an empty set against a non-empty one, so a drift that healed
+    is said out loud rather than left to be inferred from silence.
+
+    Order and `order_ids` are left out: the sample is capped at `max_ids` and
+    reshuffles between runs without anything actually moving.
+    """
+    return frozenset(
+        (d["month"], d["source_id"], d["field"], d["diff_class"],
+         round(float(d["dk_value"]), 2), round(float(d["kc_value"]), 2))
+        for d in diffs
+    )
+
+
 def build_digest(
     sections: List[DigestSection],
     *,
     max_issue_lines: int = 8,
     max_diff_lines: int = 6,
+    last_sent_at: Optional[datetime] = None,
+    now: Optional[datetime] = None,
+    restate_after: timedelta = DIGEST_RESTATE_AFTER,
 ) -> Optional[str]:
     """Render the daily digest, or None when there is nothing to say.
 
     WARN findings are persisted on every run and alerted on none — only
     CRITICAL is pushed at the moment it happens. Two standing WARNs worth
     ₴5.6M had therefore never been said out loud to anyone. This is the
-    surface for them: once a day, with a delta so a growing problem reads
-    differently from a known one.
+    surface for them: with a delta so a growing problem reads differently
+    from a known one.
 
-    Returns None when every layer is fresh and clean, so a quiet day stays
-    quiet. Liveness is the canary's job, not the digest's.
+    "Nothing to say" includes a standing finding that has not moved. The
+    delta was already being computed and then ignored by the send decision,
+    so `headline_vs_line_items: 414 (unchanged)` went out every morning from
+    2026-08-10 to 08-15 — the exact wallpaper this module refuses to make of
+    INFO findings, applied to WARN ones instead.
+
+    A finding is news when it is new, when it moved, when it healed, or when
+    a layer went stale or silent; otherwise the reader already knows, and
+    `restate_after` brings it back once a week so known does not decay into
+    forgotten. Note what this does not do: nothing here decides a finding is
+    unimportant. A number that moves by one is news the same morning it
+    moves, and a layer that stopped running is news every morning it stays
+    down — replayed over 2026-07-20…08-15, the only mornings this silences
+    are the six above.
+
+    `last_sent_at` is when the digest last actually reached a human, and
+    `now` defaults to the current time. Passing neither restates on every
+    call, which is what a caller with no memory of previous sends deserves.
+
+    Returns None when there is no news and nothing due for restatement, so a
+    quiet day stays quiet. Liveness is the canary's job, not the digest's.
     """
     body: List[str] = []
-    worth_sending = False
+    news = False           # something a reader does not already know
+    standing = False       # a finding worth restating on the weekly beat
 
     for s in sorted(sections, key=lambda x: x.layer):
         if s.run is None:
             body.append(f"*{s.layer}* — no successful run on record")
-            worth_sending = True
+            news = True
             continue
 
         limit = DIGEST_MAX_AGE_HOURS.get(s.layer)
@@ -1446,7 +1498,7 @@ def build_digest(
         head = f"*{s.layer}* · {s.run.get('status')} · {when}"
         if stale:
             head += f" · ⏳ {s.age_hours:.0f}h old (>{limit}h)"
-            worth_sending = True
+            news = True
         body.append(head)
 
         if s.issues:
@@ -1454,19 +1506,35 @@ def build_digest(
             # to bloggers is a number worth reading beside a real problem and
             # not worth a message of its own — a digest that arrives every day
             # regardless is one that stops being read on the day it matters.
-            if any(i.get("severity") != "INFO" for i in s.issues):
-                worth_sending = True
             for i in s.issues[:max_issue_lines]:
                 note = _delta_note(i["check_name"], int(i["count"]), s.previous_issues)
+                if i.get("severity") != "INFO":
+                    standing = True
+                    if note != "unchanged":
+                        news = True
                 body.append(f"• {i['check_name']}: {i['count']:,} ({note})")
                 desc = (i.get("description") or "").strip()
                 if desc:
                     body.append(f"  ↳ {desc[:200]}")
             if len(s.issues) > max_issue_lines:
                 body.append(f"  …and {len(s.issues) - max_issue_lines} more")
+                # A finding past the cut has no line and so no delta of its
+                # own. Suppressing on a "quiet" the reader cannot see would be
+                # a guess; say the digest and let them scroll.
+                if any(i.get("severity") != "INFO" for i in s.issues[max_issue_lines:]):
+                    news = True
+
+        # Compared even when the list is empty today: a drift that healed is
+        # the one change a reader must not have to infer from the absence of
+        # a message. Safe to trust here in a way a vanished *issue* is not —
+        # failed runs never reach the digest, and the recon layer reports its
+        # discrepancies as one set, where an integrity check can be skipped
+        # out of a run that still succeeds and read as fixed.
+        if _diff_signature(s.diffs) != _diff_signature(s.previous_diffs):
+            news = True
 
         if s.diffs:
-            worth_sending = True
+            standing = True
             for d in s.diffs[:max_diff_lines]:
                 body.append(
                     f"• {d['month']} / src={d['source_id']}: {d['field']} "
@@ -1478,10 +1546,31 @@ def build_digest(
         if not s.issues and not s.diffs and not stale:
             body.append("• clean")
 
-    if not worth_sending:
+    if news:
+        return "\n".join(["📋 *Data quality digest*", ""] + body)
+
+    if not standing:
         return None
 
-    return "\n".join(["📋 *Data quality digest*", ""] + body)
+    now = now or datetime.now(timezone.utc)
+    if last_sent_at is not None:
+        since = last_sent_at
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        if now - since < restate_after:
+            return None
+        days = max(1, int((now - since).days))
+        footer = (
+            f"_Nothing has changed since the last digest {days}d ago. "
+            "Repeated weekly so a standing finding is not forgotten; "
+            "the days in between stay quiet._"
+        )
+    else:
+        footer = (
+            "_Standing findings, restated. The digest is quiet on days "
+            "nothing changes._"
+        )
+    return "\n".join(["📋 *Data quality digest*", ""] + body + ["", footer])
 
 
 def fetch_last_success_ages(
