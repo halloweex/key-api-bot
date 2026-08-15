@@ -488,10 +488,23 @@ def phase3_validate(manifest: dict) -> None:
     v = duckdb.connect(str(NEW_DB), read_only=True)
     failures = []
 
+    # Tables this version of the schema actually defines. The manifest lists
+    # what the *snapshot* held, and a restore of an older archive legitimately
+    # names tables since dropped — phase 2 skips those, so counting rows in
+    # them here would fail the run for a table nobody expected to be present.
+    present = {r[0] for r in v.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema='main' AND table_type='BASE TABLE'"
+    ).fetchall()}
+
     # ── Row count validation ──
     log("Row counts:")
     for t in export_tables:
         expected = counts.get(t, 0)
+        if t not in present:
+            log(f"  {t}: not in this version's schema — {expected:,} rows "
+                f"in the archive were not restored", "WARN")
+            continue
         if expected <= 0:
             continue
         try:
@@ -585,9 +598,13 @@ def phase3_validate(manifest: dict) -> None:
         try:
             cnt = v2.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
             log(f"  {t}: exists ({cnt} rows, will be rebuilt on startup)", "OK")
-        except Exception as e:
-            log(f"  {t}: missing — {e}", "WARN")
-            log(f"    Will be created by _init_schema() on app startup")
+        except Exception:
+            # DERIVED_TABLES also carries names kept only to keep them out of
+            # the export while the production database still holds them — see
+            # the comment on the set. Those have no DDL, so "startup will
+            # create it" is not true of them and saying so sends the reader
+            # looking for a bug in _init_schema.
+            log(f"  {t}: absent — no DDL defines it; nothing will create it", "OK")
 
     db_size = v2.execute("SELECT database_size FROM pragma_database_size()").fetchone()[0]
     log(f"\nFinal DB size: {db_size}")
