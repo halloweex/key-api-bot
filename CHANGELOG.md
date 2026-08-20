@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.90
+
+- Back up the bot's database, and give the language one home (#113)
+
+
 ## 3.0.89
 
 - Let the schema ledger reach /api/health (#112)
