@@ -35,6 +35,7 @@ from core.exceptions import QueryTimeoutError
 from core.duckdb_constants import (
     DB_DIR, DB_PATH, DEFAULT_TZ, DEFAULT_QUERY_TIMEOUT, LONG_QUERY_TIMEOUT,
     B2B_MANAGER_ID, RETAIL_MANAGER_IDS, KNOWN_SALES_TYPES, DISPLAY_TIMEZONE, _date_in_kyiv,
+    line_window_where,
     EXHIBITION_SOURCE_ID, REVENUE_SOURCE_IDS,
 )
 from core.repositories import (
@@ -166,7 +167,7 @@ SILVER_ORDER_LINES_VIEW_SQL = """CREATE OR REPLACE VIEW silver_order_lines AS
             op.id                                        AS line_id,
             op.order_id,
             op.product_id,
-            op.name                                      AS product_name,
+            op.name                                      AS product_name,  -- as sold
             op.quantity,
             op.price_sold,
             CAST(op.quantity * op.price_sold AS DECIMAL(14, 2)) AS line_amount,
@@ -187,10 +188,12 @@ SILVER_ORDER_LINES_VIEW_SQL = """CREATE OR REPLACE VIEW silver_order_lines AS
             -- the catalog, denormalised. 8.2 % of lines carry no product_id and
             -- 31 % no category; both stay NULL rather than being dropped, which
             -- is the difference between a level and a filter.
+            p.name                                       AS catalog_product_name,
             p.brand,
             p.sku,
             p.category_id,
             c.name                                       AS category_name,
+            c.parent_id                                  AS parent_category_id,
             parent_c.name                                AS parent_category_name
         FROM order_products op
         JOIN silver_orders s ON s.id = op.order_id
@@ -198,6 +201,7 @@ SILVER_ORDER_LINES_VIEW_SQL = """CREATE OR REPLACE VIEW silver_order_lines AS
         LEFT JOIN categories c ON c.id = p.category_id
         LEFT JOIN categories parent_c ON parent_c.id = c.parent_id
 """
+
 
 # ─── The one definition of a Silver row ──────────────────────────────────────
 #
