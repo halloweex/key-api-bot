@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.80
+
+- A catalog change widens one scope, not four (#103)
+
+
 ## 3.0.79
 
 - Rebuild gold_daily_traffic for the dates that moved (#102)
