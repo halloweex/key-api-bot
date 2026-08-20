@@ -2,6 +2,8 @@
 import asyncio
 import logging
 
+from datetime import date
+
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
@@ -451,14 +453,31 @@ async def set_manager_retail_status(
     request: Request,
     manager_id: int,
     is_retail: bool = Query(..., description="TRUE counts this manager's orders as retail"),
+    effective_from: Optional[date] = Query(
+        None,
+        description=(
+            "First order date the new classification applies to (YYYY-MM-DD). "
+            "Defaults to today: past reports keep the answer they were given. "
+            "Backdate only to correct a genuine misclassification."
+        ),
+    ),
+    note: Optional[str] = Query(
+        None, max_length=500, description="Why, for the audit trail"
+    ),
     admin: dict = Depends(require_admin),
 ):
-    """Classify a manager as retail or not, durably.
+    """Classify a manager as retail or not, durably and from a date.
 
     `upsert_managers` seeds this from a constant for managers it has never
     seen and never touches it again, so what is set here survives the next
     sync. `sales_type` is materialised into Silver, so the warehouse is
     marked dirty: the classification only reaches the pages after a rebuild.
+
+    **The change applies forward from `effective_from`, not to all history.**
+    Until 2026-08-20 there was no choice in it: one UPDATE moved every order
+    the manager had ever taken, so correcting somebody today restated last
+    year's reports on the next refresh. Backdating is still available, but it
+    is now something you ask for.
     """
     store = await get_store()
     managers = {m["id"] for m in await store.get_all_managers()}
@@ -467,15 +486,21 @@ async def set_manager_retail_status(
 
     # set_manager_retail_status marks the warehouse dirty itself now, so every
     # caller gets the rebuild, not only this one.
-    await store.set_manager_retail_status(manager_id, is_retail)
+    await store.set_manager_retail_status(
+        manager_id, is_retail,
+        effective_from=effective_from,
+        set_by=admin.get("user_id"),
+        note=note,
+    )
     logger.info(
-        "Manager %s retail status set to %s by admin %s",
-        manager_id, is_retail, admin.get("user_id"),
+        "Manager %s retail status set to %s from %s by admin %s",
+        manager_id, is_retail, effective_from or "today", admin.get("user_id"),
     )
     return {
         "status": "ok",
         "manager_id": manager_id,
         "is_retail": is_retail,
+        "effective_from": str(effective_from) if effective_from else "today",
         "note": "warehouse marked dirty; sales_type updates on the next refresh",
     }
 
