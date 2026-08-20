@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.82
+
+- Move order_status_refresh off the compaction instant, and mark dirty in the method (#105)
+
+
 ## 3.0.81
 
 - Drop every index on gold_daily_products (#104)
