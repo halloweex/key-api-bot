@@ -535,8 +535,9 @@ async def set_manager_retail_status(
     if manager_id not in managers:
         raise HTTPException(status_code=404, detail=f"Manager {manager_id} not found")
 
+    # set_manager_retail_status marks the warehouse dirty itself now, so every
+    # caller gets the rebuild, not only this one.
     await store.set_manager_retail_status(manager_id, is_retail)
-    await store.mark_warehouse_dirty(None)
     logger.info(
         "Manager %s retail status set to %s by admin %s",
         manager_id, is_retail, admin.get("user_id"),
