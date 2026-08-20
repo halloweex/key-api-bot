@@ -301,3 +301,53 @@ class TestOrderStatusRefreshIsOffTheCompactionInstant:
         assert (hour, minute) != (5, 30), (
             "05:30 Kyiv already belongs to dq_reconciliation"
         )
+
+
+class TestSilverHasOneDefinition:
+    """Two copies of the Silver build existed and drifted apart in under a day.
+
+    On 2026-08-20 the exhibition source was added to `duckdb_store.py` and not
+    to the `rebuild-silver` endpoint's copy — by someone who knew about the
+    duplicate and was checking for exactly this. Running that endpoint would
+    have silently reverted the fix and dropped 178 orders back out of revenue.
+    """
+
+    def test_the_rebuild_endpoint_restates_nothing(self):
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "web" / "routes" / "api" / "admin.py"
+        ).read_text(encoding="utf-8")
+
+        for fragment, what in (
+            ("WHEN o.manager_id", "the sales_type CASE"),
+            # `AS is_active_source`, not the bare name: reading the column in
+            # a WHERE clause is what it is for. Only defining it is a copy.
+            ("AS is_active_source", "the revenue-source list"),
+            ("AS source_name", "the source_name CASE"),
+            ("is_new_customer = CASE", "the is_new_customer rule"),
+            ("CREATE TABLE silver_orders", "the silver_orders DDL"),
+        ):
+            assert fragment not in source, (
+                f"admin.py restates {what} instead of importing it from "
+                "core/duckdb_store.py. That duplicate drifted once already."
+            )
+
+    def test_every_revenue_source_is_a_synced_source(self):
+        from core.duckdb_constants import REVENUE_SOURCE_IDS, SYNCED_SOURCE_IDS
+
+        assert set(REVENUE_SOURCE_IDS) <= set(SYNCED_SOURCE_IDS), (
+            "revenue cannot come from a source we do not sync and reconcile"
+        )
+
+    def test_the_exhibition_branch_comes_before_the_manager_branches(self):
+        """Source wins over manager, or a retail-listed manager reclaims it."""
+        from core.duckdb_constants import EXHIBITION_SOURCE_ID
+        from core.duckdb_store import silver_sales_type_case
+
+        case = silver_sales_type_case()
+        assert case.index(f"o.source_id = {EXHIBITION_SOURCE_ID}") < case.index("o.manager_id"), (
+            "the exhibition was staffed by a manager on the retail list, so a "
+            "manager-based branch placed first would pull it into retail"
+        )
