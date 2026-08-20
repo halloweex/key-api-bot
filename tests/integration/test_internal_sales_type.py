@@ -83,13 +83,21 @@ class TestTheCategoryExists:
             validate_sales_type("wholesale")
 
     def test_silver_emits_internal_for_unlisted_managers(self):
-        """The value comes from one CASE, and this is its last branch."""
-        import inspect
-        from core import duckdb_store
+        """The value comes from one CASE, and this is its last branch.
 
-        source = inspect.getsource(duckdb_store.DuckDBStore.refresh_warehouse_layers)
-        assert "ELSE 'internal'" in source
-        assert "ELSE 'other'" not in source
+        Reads the CASE itself rather than the 600-line method that used to
+        contain it: the definition moved to module level so the copy in
+        `admin.py` could import it instead of restating it.
+        """
+        from core.duckdb_store import silver_sales_type_case
+
+        case = silver_sales_type_case()
+        assert case.rstrip().endswith("END")
+        assert "ELSE 'internal'" in case, (
+            "the partition is exhaustive by construction — the last branch is "
+            "what makes that true"
+        )
+        assert "ELSE 'other'" not in case
 
 
 class TestTheGate:

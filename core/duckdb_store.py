@@ -34,7 +34,7 @@ from core.exceptions import QueryTimeoutError
 from core.duckdb_constants import (
     DB_DIR, DB_PATH, DEFAULT_TZ, DEFAULT_QUERY_TIMEOUT, LONG_QUERY_TIMEOUT,
     B2B_MANAGER_ID, RETAIL_MANAGER_IDS, KNOWN_SALES_TYPES, DISPLAY_TIMEZONE, _date_in_kyiv,
-    EXHIBITION_SOURCE_ID,
+    EXHIBITION_SOURCE_ID, REVENUE_SOURCE_IDS,
 )
 from core.repositories import (
     UsersMixin, TrafficMixin, CustomersMixin, GoalsMixin,
@@ -118,6 +118,128 @@ def _memory_limit() -> str:
 #
 # `{date_filter}` is substituted by the caller — a date list for an incremental
 # rebuild, `order_date IS NOT NULL` for everything.
+SILVER_ORDERS_DDL = """CREATE TABLE IF NOT EXISTS silver_orders (
+            id INTEGER PRIMARY KEY,
+            source_id INTEGER NOT NULL,
+            status_id INTEGER NOT NULL,
+            grand_total DECIMAL(12, 2) NOT NULL,
+            ordered_at TIMESTAMP WITH TIME ZONE,
+            buyer_id INTEGER,
+            manager_id INTEGER,
+            order_date DATE NOT NULL,
+            is_return BOOLEAN NOT NULL,
+            sales_type VARCHAR NOT NULL,
+            is_active_source BOOLEAN NOT NULL,
+            source_name VARCHAR NOT NULL,
+            is_new_customer BOOLEAN NOT NULL DEFAULT FALSE,
+            buyer_first_order_date DATE,
+            promocode VARCHAR
+)"""
+
+
+# ─── The one definition of a Silver row ──────────────────────────────────────
+#
+# Two copies of this existed: here and in `web/routes/api/admin.py`'s
+# `rebuild-silver` endpoint. On 2026-08-20 the exhibition source was added to
+# one of them and not the other, by someone who knew about the duplicate and
+# was checking for exactly this — so `rebuild-silver` would have silently
+# reverted the fix and dropped 178 orders back out of revenue. The divergence
+# took under a day.
+#
+# `GOLD_REVENUE_SELECT_SQL` below is the pattern done right: one home, imported
+# by whoever needs it. These do the same for Silver. A test fails if a second
+# copy appears.
+
+
+def silver_sales_type_case() -> str:
+    """`sales_type`, the one place it is decided.
+
+    The exhibition branch is first on purpose: that fair was staffed by a
+    retail manager, so a manager-based rule would quietly pull a one-off
+    channel into the retail trend it would distort.
+    """
+    manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
+    return f"""CASE
+            WHEN o.source_id = {EXHIBITION_SOURCE_ID} THEN 'exhibition'
+            WHEN o.manager_id IS NULL THEN 'retail'
+            WHEN o.manager_id = {B2B_MANAGER_ID} THEN 'b2b'
+            WHEN o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'
+            WHEN NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
+                 AND o.manager_id IN ({manager_list}) THEN 'retail'
+            ELSE 'internal'
+        END"""
+
+
+def silver_select_sql() -> str:
+    """Every column of a Silver row, selected `FROM orders o`."""
+    # KeyCRM's own grouping decides when we have it; the id list covers rows
+    # synced before the column existed. Verified equal for every status the
+    # warehouse holds — see core/models.py.
+    return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+    revenue_sources = ", ".join(str(s) for s in REVENUE_SOURCE_IDS)
+    return f"""
+            o.id, o.source_id, o.status_id, o.grand_total,
+            o.ordered_at, o.buyer_id, o.manager_id,
+            {_date_in_kyiv('o.ordered_at')} AS order_date,
+            CASE
+                WHEN o.status_group_id IS NOT NULL
+                    THEN o.status_group_id = {LOST_STATUS_GROUP_ID}
+                ELSE o.status_id IN {return_statuses}
+            END AS is_return,
+            {silver_sales_type_case()} AS sales_type,
+            o.source_id IN ({revenue_sources}) AS is_active_source,
+            CASE o.source_id
+                WHEN 1 THEN 'Instagram'
+                WHEN 2 THEN 'Telegram'
+                WHEN 4 THEN 'Shopify'
+                WHEN {EXHIBITION_SOURCE_ID} THEN 'Виставка'
+                ELSE 'Other'
+            END AS source_name,
+            FALSE AS is_new_customer,
+            NULL  AS buyer_first_order_date,
+            o.promocode
+    """
+
+
+def silver_pass2_sql(buyer_filter: str = "") -> str:
+    """Recompute `is_new_customer` from each buyer's MIN(order_date).
+
+    Empty `buyer_filter` runs on every Silver row (full mode); otherwise it is
+    scoped to the affected buyers, keeping the write set bounded.
+    """
+    inner_filter = "buyer_id IS NOT NULL" if not buyer_filter else f"buyer_id IN ({buyer_filter})"
+    outer_filter = "" if not buyer_filter else f"AND silver_orders.buyer_id IN ({buyer_filter})"
+    return f"""
+                UPDATE silver_orders SET
+                    buyer_first_order_date = fo.first_order_date,
+                    is_new_customer = CASE
+                        WHEN silver_orders.buyer_id IS NOT NULL
+                             AND NOT silver_orders.is_return
+                             AND silver_orders.is_active_source
+                             AND silver_orders.order_date = fo.first_order_date
+                        THEN TRUE ELSE FALSE
+                    END
+                FROM (
+                    -- The baseline deliberately does NOT filter is_active_source.
+                    -- A purchase on a retired channel is still a purchase: with
+                    -- Opencart excluded here, 419 buyers whose first order was
+                    -- placed there counted as brand new the next time they bought
+                    -- on Instagram — 422 orders and ₴1,081,979.59 of repeat
+                    -- business booked as acquisition, overstating new customers
+                    -- by 3.9% across 2025.
+                    -- Returns stay excluded: a cancelled first order is not a
+                    -- purchase, so the next one genuinely is their first.
+                    SELECT buyer_id, MIN(order_date) AS first_order_date
+                    FROM silver_orders
+                    WHERE {inner_filter}
+                      AND NOT is_return
+                    GROUP BY buyer_id
+                ) fo
+                WHERE silver_orders.buyer_id = fo.buyer_id
+                  {outer_filter}
+    """
+
+
 GOLD_REVENUE_SELECT_SQL = """
 SELECT
     order_date AS date,
@@ -2123,80 +2245,11 @@ class DuckDBStore(
         start_time = time.perf_counter()
         error_msg = None
 
-        # Pre-compute SQL fragments used across steps
-        manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
-        retail_filter = f"""
-            WHEN o.source_id = {EXHIBITION_SOURCE_ID} THEN 'exhibition'
-            WHEN o.manager_id IS NULL THEN 'retail'
-            WHEN o.manager_id = {B2B_MANAGER_ID} THEN 'b2b'
-            WHEN o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'
-            WHEN NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
-                 AND o.manager_id IN ({manager_list}) THEN 'retail'
-            ELSE 'internal'
-        """
-        # KeyCRM's own grouping decides when we have it; the id list covers
-        # rows synced before the column existed. Verified equal for every
-        # status the warehouse holds — see core/models.py.
-        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-
-        # ── Silver SELECT clause — shared by full and incremental paths ──
-        _silver_select_cols = f"""
-            o.id, o.source_id, o.status_id, o.grand_total,
-            o.ordered_at, o.buyer_id, o.manager_id,
-            {_date_in_kyiv('o.ordered_at')} AS order_date,
-            CASE
-                WHEN o.status_group_id IS NOT NULL
-                    THEN o.status_group_id = {LOST_STATUS_GROUP_ID}
-                ELSE o.status_id IN {return_statuses}
-            END AS is_return,
-            CASE {retail_filter} END AS sales_type,
-            o.source_id IN (1, 2, 4, {EXHIBITION_SOURCE_ID}) AS is_active_source,
-            CASE o.source_id
-                WHEN 1 THEN 'Instagram'
-                WHEN 2 THEN 'Telegram'
-                WHEN 4 THEN 'Shopify'
-                WHEN 5 THEN 'Виставка'
-                ELSE 'Other'
-            END AS source_name,
-            FALSE AS is_new_customer,
-            NULL  AS buyer_first_order_date,
-            o.promocode
-        """
-        # Pass 2 SQL — recomputes is_new_customer from per-buyer MIN(order_date).
-        # When buyer_filter is empty string, runs on all silver rows (full mode).
-        # Otherwise scoped to affected buyers (incremental mode) — bounded write set.
-        def _silver_pass2_sql(buyer_filter: str = "") -> str:
-            inner_filter = "buyer_id IS NOT NULL" if not buyer_filter else f"buyer_id IN ({buyer_filter})"
-            outer_filter = "" if not buyer_filter else f"AND silver_orders.buyer_id IN ({buyer_filter})"
-            return f"""
-                UPDATE silver_orders SET
-                    buyer_first_order_date = fo.first_order_date,
-                    is_new_customer = CASE
-                        WHEN silver_orders.buyer_id IS NOT NULL
-                             AND NOT silver_orders.is_return
-                             AND silver_orders.is_active_source
-                             AND silver_orders.order_date = fo.first_order_date
-                        THEN TRUE ELSE FALSE
-                    END
-                FROM (
-                    -- The baseline deliberately does NOT filter is_active_source.
-                    -- A purchase on a retired channel is still a purchase: with
-                    -- Opencart excluded here, 419 buyers whose first order was
-                    -- placed there counted as brand new the next time they bought
-                    -- on Instagram — 422 orders and ₴1,081,979.59 of repeat
-                    -- business booked as acquisition, overstating new customers
-                    -- by 3.9% across 2025.
-                    -- Returns stay excluded: a cancelled first order is not a
-                    -- purchase, so the next one genuinely is their first.
-                    SELECT buyer_id, MIN(order_date) AS first_order_date
-                    FROM silver_orders
-                    WHERE {inner_filter}
-                      AND NOT is_return
-                    GROUP BY buyer_id
-                ) fo
-                WHERE silver_orders.buyer_id = fo.buyer_id
-                  {outer_filter}
-            """
+        # Silver's shape lives at module level — see silver_select_sql above.
+        # It used to be built here and copied into web/routes/api/admin.py,
+        # which is how the two drifted apart in under a day.
+        _silver_select_cols = silver_select_sql()
+        _silver_pass2_sql = silver_pass2_sql
 
         try:
             # ── Step 1: Silver layer ──
