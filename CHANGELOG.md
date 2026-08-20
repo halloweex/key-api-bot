@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.86
+
+- Move basket intelligence, chat tools and search onto the level (#109)
+
+
 ## 3.0.85
 
 - Name the order line: silver_order_lines (#108)
