@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.79
+
+- Rebuild gold_daily_traffic for the dates that moved (#102)
+
+
 ## 3.0.78
 
 - Name KeyCRM source 5 «Виставка» and give it its own sales_type (#101)
