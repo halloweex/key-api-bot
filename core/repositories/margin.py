@@ -14,12 +14,12 @@ class MarginMixin:
     def _margin_base_where(self, sales_type: str, params: list) -> str:
         """Build common WHERE clause for margin queries."""
         clauses = [
-            "s.order_date BETWEEN ? AND ?",
-            "NOT s.is_return",
-            "s.is_active_source",
+            "l.order_date BETWEEN ? AND ?",
+            "NOT l.is_return",
+            "l.is_active_source",
         ]
         if sales_type != "all":
-            clauses.append("s.sales_type = ?")
+            clauses.append("l.sales_type = ?")
             params.append(sales_type)
         return " AND ".join(clauses)
 
@@ -36,19 +36,17 @@ class MarginMixin:
 
             row = conn.execute(f"""
                 SELECT
-                    COALESCE(SUM(op.price_sold * op.quantity), 0) as total_revenue,
+                    COALESCE(SUM(l.line_amount), 0) as total_revenue,
                     COALESCE(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN op.price_sold * op.quantity ELSE 0 END), 0) as costed_revenue,
+                        THEN l.line_amount ELSE 0 END), 0) as costed_revenue,
                     COALESCE(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN os.purchased_price * op.quantity ELSE 0 END), 0) as cogs,
+                        THEN os.purchased_price * l.quantity ELSE 0 END), 0) as cogs,
                     COUNT(DISTINCT CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN p.sku END) as skus_with_cost,
-                    COUNT(DISTINCT p.sku) as total_skus,
-                    COALESCE(SUM(op.quantity), 0) as total_units
-                FROM silver_orders s
-                JOIN order_products op ON s.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
-                LEFT JOIN offer_stocks os ON p.sku = os.sku
+                        THEN l.sku END) as skus_with_cost,
+                    COUNT(DISTINCT l.sku) as total_skus,
+                    COALESCE(SUM(l.quantity), 0) as total_units
+                FROM silver_order_lines l
+                LEFT JOIN offer_stocks os ON l.sku = os.sku
                 WHERE {where}
             """, params).fetchone()
 
@@ -85,21 +83,19 @@ class MarginMixin:
 
             rows = conn.execute(f"""
                 SELECT
-                    COALESCE(NULLIF(TRIM(p.brand), ''), 'Unknown') as brand,
-                    SUM(op.quantity) as total_units,
-                    ROUND(SUM(op.price_sold * op.quantity), 2) as total_revenue,
+                    COALESCE(NULLIF(TRIM(l.brand), ''), 'Unknown') as brand,
+                    SUM(l.quantity) as total_units,
+                    ROUND(SUM(l.line_amount), 2) as total_revenue,
                     SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN op.quantity ELSE 0 END) as costed_units,
+                        THEN l.quantity ELSE 0 END) as costed_units,
                     ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN op.price_sold * op.quantity ELSE 0 END), 2) as costed_revenue,
+                        THEN l.line_amount ELSE 0 END), 2) as costed_revenue,
                     ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN os.purchased_price * op.quantity ELSE 0 END), 2) as cogs
-                FROM silver_orders s
-                JOIN order_products op ON s.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
-                LEFT JOIN offer_stocks os ON p.sku = os.sku
+                        THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs
+                FROM silver_order_lines l
+                LEFT JOIN offer_stocks os ON l.sku = os.sku
                 WHERE {where}
-                  AND TRIM(p.brand) != '' AND p.brand IS NOT NULL
+                  AND TRIM(l.brand) != '' AND l.brand IS NOT NULL
                 GROUP BY 1
                 ORDER BY total_revenue DESC
                 LIMIT ?
@@ -144,19 +140,17 @@ class MarginMixin:
                 )
                 SELECT
                     COALESCE(rc.root_name, 'Uncategorized') as category,
-                    SUM(op.quantity) as total_units,
-                    ROUND(SUM(op.price_sold * op.quantity), 2) as total_revenue,
+                    SUM(l.quantity) as total_units,
+                    ROUND(SUM(l.line_amount), 2) as total_revenue,
                     ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN op.price_sold * op.quantity ELSE 0 END), 2) as costed_revenue,
+                        THEN l.line_amount ELSE 0 END), 2) as costed_revenue,
                     ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN os.purchased_price * op.quantity ELSE 0 END), 2) as cogs,
-                    ROUND(100.0 * SUM(op.price_sold * op.quantity)
-                        / SUM(SUM(op.price_sold * op.quantity)) OVER (), 1) as rev_share_pct
-                FROM silver_orders s
-                JOIN order_products op ON s.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
-                LEFT JOIN offer_stocks os ON p.sku = os.sku
-                LEFT JOIN root_cat rc ON p.category_id = rc.id
+                        THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs,
+                    ROUND(100.0 * SUM(l.line_amount)
+                        / SUM(SUM(l.line_amount)) OVER (), 1) as rev_share_pct
+                FROM silver_order_lines l
+                LEFT JOIN offer_stocks os ON l.sku = os.sku
+                LEFT JOIN root_cat rc ON l.category_id = rc.id
                 WHERE {where}
                 GROUP BY 1
                 ORDER BY total_revenue DESC
@@ -194,16 +188,14 @@ class MarginMixin:
 
             rows = conn.execute(f"""
                 SELECT
-                    strftime(s.order_date, '%Y-%m') as month,
+                    strftime(l.order_date, '%Y-%m') as month,
                     ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN op.price_sold * op.quantity ELSE 0 END), 2) as costed_revenue,
+                        THEN l.line_amount ELSE 0 END), 2) as costed_revenue,
                     ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN os.purchased_price * op.quantity ELSE 0 END), 2) as cogs,
-                    ROUND(SUM(op.price_sold * op.quantity), 2) as total_revenue
-                FROM silver_orders s
-                JOIN order_products op ON s.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
-                LEFT JOIN offer_stocks os ON p.sku = os.sku
+                        THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs,
+                    ROUND(SUM(l.line_amount), 2) as total_revenue
+                FROM silver_order_lines l
+                LEFT JOIN offer_stocks os ON l.sku = os.sku
                 WHERE {where}
                 GROUP BY 1
                 ORDER BY 1
@@ -246,22 +238,20 @@ class MarginMixin:
                     LEFT JOIN categories c2 ON c1.parent_id = c2.id
                 )
                 SELECT
-                    COALESCE(NULLIF(TRIM(p.brand), ''), 'Unknown') as brand,
+                    COALESCE(NULLIF(TRIM(l.brand), ''), 'Unknown') as brand,
                     COALESCE(rc.root_name, 'Uncategorized') as category,
-                    SUM(op.quantity) as total_units,
-                    ROUND(SUM(op.price_sold * op.quantity), 2) as total_revenue,
+                    SUM(l.quantity) as total_units,
+                    ROUND(SUM(l.line_amount), 2) as total_revenue,
                     ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN op.price_sold * op.quantity ELSE 0 END), 2) as costed_revenue,
+                        THEN l.line_amount ELSE 0 END), 2) as costed_revenue,
                     ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN os.purchased_price * op.quantity ELSE 0 END), 2) as cogs
-                FROM silver_orders s
-                JOIN order_products op ON s.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
-                LEFT JOIN offer_stocks os ON p.sku = os.sku
-                LEFT JOIN root_cat rc ON p.category_id = rc.id
+                        THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs
+                FROM silver_order_lines l
+                LEFT JOIN offer_stocks os ON l.sku = os.sku
+                LEFT JOIN root_cat rc ON l.category_id = rc.id
                 WHERE {where}
                 GROUP BY 1, 2
-                HAVING SUM(op.price_sold * op.quantity) > ?
+                HAVING SUM(l.line_amount) > ?
                 ORDER BY brand, total_revenue DESC
             """, params + [min_revenue]).fetchall()
 
@@ -299,21 +289,19 @@ class MarginMixin:
 
             rows = conn.execute(f"""
                 SELECT
-                    COALESCE(NULLIF(TRIM(p.brand), ''), 'Unknown') as brand,
-                    SUM(op.quantity) as total_units,
-                    ROUND(SUM(op.price_sold * op.quantity), 2) as total_revenue,
+                    COALESCE(NULLIF(TRIM(l.brand), ''), 'Unknown') as brand,
+                    SUM(l.quantity) as total_units,
+                    ROUND(SUM(l.line_amount), 2) as total_revenue,
                     ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN op.price_sold * op.quantity ELSE 0 END), 2) as costed_revenue,
+                        THEN l.line_amount ELSE 0 END), 2) as costed_revenue,
                     ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                        THEN os.purchased_price * op.quantity ELSE 0 END), 2) as cogs
-                FROM silver_orders s
-                JOIN order_products op ON s.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
-                LEFT JOIN offer_stocks os ON p.sku = os.sku
+                        THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs
+                FROM silver_order_lines l
+                LEFT JOIN offer_stocks os ON l.sku = os.sku
                 WHERE {where}
                 GROUP BY 1
                 HAVING SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
-                    THEN op.price_sold * op.quantity ELSE 0 END) > ?
+                    THEN l.line_amount ELSE 0 END) > ?
                 ORDER BY total_revenue DESC
             """, params + [min_revenue]).fetchall()
 

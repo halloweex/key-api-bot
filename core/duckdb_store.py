@@ -138,6 +138,67 @@ SILVER_ORDERS_DDL = """CREATE TABLE IF NOT EXISTS silver_orders (
 )"""
 
 
+
+# ─── The one definition of an order line ─────────────────────────────────────
+#
+# Silver has one grain — the order — so anything asked about a *product* had to
+# re-join `order_products` at the point of use. That join is written 49 times
+# across the codebase, and 22 of those also carry `silver_orders`, which is the
+# single largest obstacle to splitting this store in two: a line and its order
+# would have to live in different databases.
+#
+# A view rather than a table, deliberately. Measured on the production backup
+# (146,910 lines): the view is indistinguishable from writing the join out by
+# hand — 21.0 ms vs 21.6 ms, 65.2 ms vs 66.5 ms on the heaviest shape — because
+# DuckDB inlines it. Materialising it is 2–4× faster in relative terms and 48 ms
+# in absolute ones, and it would cost 271 ms of lock time on every full refresh,
+# 45 times a day, plus a fourth large table for the weekly compaction to carry.
+# Nothing measured yet asks for that. Promotion to a table is a one-line change
+# here and touches no call site, which is the point of naming the level now.
+#
+# Equivalence is pinned by a test, not by hope: under Gold's own predicate this
+# reproduces `gold_daily_products` to the kopeck — ₴132,077,453.75 on both
+# sides, 986 dates on both sides, zero disagreeing. The ₴11.2M it holds *above*
+# Gold is returns (₴5.67M) and inactive sources (₴6.26M), which Gold excludes
+# on purpose and this level leaves to the caller.
+SILVER_ORDER_LINES_VIEW_SQL = """CREATE OR REPLACE VIEW silver_order_lines AS
+        SELECT
+            op.id                                        AS line_id,
+            op.order_id,
+            op.product_id,
+            op.name                                      AS product_name,
+            op.quantity,
+            op.price_sold,
+            CAST(op.quantity * op.price_sold AS DECIMAL(14, 2)) AS line_amount,
+            -- the order, denormalised: every predicate a page applies to
+            -- revenue applies here too, and re-deriving them was the bug
+            s.order_date,
+            s.sales_type,
+            s.source_id,
+            s.source_name,
+            s.is_return,
+            s.is_active_source,
+            s.buyer_id,
+            s.manager_id,
+            s.is_new_customer,
+            s.buyer_first_order_date,
+            s.promocode,
+            s.grand_total                                AS order_grand_total,
+            -- the catalog, denormalised. 8.2 % of lines carry no product_id and
+            -- 31 % no category; both stay NULL rather than being dropped, which
+            -- is the difference between a level and a filter.
+            p.brand,
+            p.sku,
+            p.category_id,
+            c.name                                       AS category_name,
+            parent_c.name                                AS parent_category_name
+        FROM order_products op
+        JOIN silver_orders s ON s.id = op.order_id
+        LEFT JOIN products p ON p.id = op.product_id
+        LEFT JOIN categories c ON c.id = p.category_id
+        LEFT JOIN categories parent_c ON parent_c.id = c.parent_id
+"""
+
 # ─── The one definition of a Silver row ──────────────────────────────────────
 #
 # Two copies of this existed: here and in `web/routes/api/admin.py`'s
@@ -922,23 +983,11 @@ class DuckDBStore(
         -- ═══════════════════════════════════════════════════════════════════════
         -- SILVER LAYER: Enriched orders (one row per order)
         -- ═══════════════════════════════════════════════════════════════════════
-        CREATE TABLE IF NOT EXISTS silver_orders (
-            id INTEGER PRIMARY KEY,
-            source_id INTEGER NOT NULL,
-            status_id INTEGER NOT NULL,
-            grand_total DECIMAL(12, 2) NOT NULL,
-            ordered_at TIMESTAMP WITH TIME ZONE,
-            buyer_id INTEGER,
-            manager_id INTEGER,
-            order_date DATE NOT NULL,
-            is_return BOOLEAN NOT NULL,
-            sales_type VARCHAR NOT NULL,
-            is_active_source BOOLEAN NOT NULL,
-            source_name VARCHAR NOT NULL,
-            is_new_customer BOOLEAN NOT NULL DEFAULT FALSE,
-            buyer_first_order_date DATE,
-            promocode VARCHAR
-        );
+        -- silver_orders itself is created from SILVER_ORDERS_DDL just before
+        -- this script runs. It was declared here too, byte-for-byte identical,
+        -- which is the same duplication that let the exhibition fix land in one
+        -- copy of the Silver SELECT and not the other. Two identical copies are
+        -- one edit away from two different ones.
 
         -- Silver orders indexes (defined in consolidated block below)
 
@@ -1246,7 +1295,14 @@ class DuckDBStore(
             ON bronze_order_events(event_ts);
 
         """
+        # Silver's shape has one home; the schema script above no longer
+        # carries a copy of it.
+        self._connection.execute(SILVER_ORDERS_DDL)
         self._connection.execute(schema_sql)
+
+        # The order-line level. A view, so it is always exactly as fresh as
+        # Silver and costs the file nothing — see SILVER_ORDER_LINES_VIEW_SQL.
+        self._connection.execute(SILVER_ORDER_LINES_VIEW_SQL)
 
         # Create analytics views (Layer 3 & 4)
         await self._create_inventory_views()
