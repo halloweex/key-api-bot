@@ -204,6 +204,35 @@ run_push() {
 }
 JSON
 
+    # bot.db rides along. 1.3 MB, and the only copy of things KeyCRM cannot give
+    # back: who is allowed to use the bot, which milestones have been
+    # celebrated, and each person's language. Until 2026-08-20 it was in no
+    # backup at all — the analytics file this bundle is built from carries empty
+    # duplicates of two of those tables, and the backup routine's own docstring
+    # named them as protected, which is most of why nobody noticed.
+    #
+    # SQLite's backup API rather than cp: the bot writes to this file while we
+    # read it, and a naive copy of a live SQLite database is a torn one — the
+    # same lesson `cp` of a live .duckdb taught on the analytics side.
+    local bot_db_state="skipped (data/bot.db not found)"
+    if [ -f data/bot.db ]; then
+        step "copy bot.db"
+        python3 - "$STAGE/bot.db" <<'SQLITE_BACKUP'
+import sqlite3
+import sys
+
+src = sqlite3.connect("file:data/bot.db?mode=ro", uri=True)
+dst = sqlite3.connect(sys.argv[1])
+with dst:
+    src.backup(dst)
+dst.close()
+src.close()
+SQLITE_BACKUP
+        bot_db_state="included ($(( $(stat -c %s "$STAGE/bot.db") / 1024 )) KB)"
+    else
+        echo "note: data/bot.db not found - bot users and preferences are NOT in this archive" >&2
+    fi
+
     # The host's .env and the laptop's have already diverged — each holds keys
     # the other lacks — so neither is a complete recovery source. A restored
     # warehouse with no config is a database nothing can start against.
@@ -232,7 +261,7 @@ JSON
     tar -cf "$ARCHIVE_DIR/$name" -C "$STAGE" .
     local size
     size="$(stat -c %s "$ARCHIVE_DIR/$name")"
-    echo "staging: $name ($(( size / 1024 )) KB), .env $env_state"
+    echo "staging: $name ($(( size / 1024 )) KB), .env $env_state, bot.db $bot_db_state"
 
     step "off-site push"
     if [ -z "$REMOTE" ]; then

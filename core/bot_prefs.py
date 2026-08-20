@@ -4,9 +4,17 @@ The weekly report is built in the *web* container, because that is where
 DuckDB lives. Who may read it, and in what language, is recorded in the *bot*
 container's `data/bot.db`, because that is where the approval flow and the
 settings screen run. Both containers bind-mount `./data`, so the file is simply
-there — this module opens it read-only and asks it two questions.
+there, and this module is the one door to it from outside the bot.
 
-Read-only and forgiving on purpose. The bot's SQLite runs in its default
+Mostly read-only, and forgiving where reading is all that is at stake.
+`write_language` is the exception and is deliberately not forgiving: it exists
+because the dashboard used to write the same setting into DuckDB instead, so a
+language chosen in one interface was invisible to the other and to the weekly
+report. A write that quietly fails would recreate that in a new shape, so it
+raises.
+
+Everything else here is read-only and forgiving on purpose. The bot's SQLite
+runs in its default
 rollback-journal mode, so a reader that arrives mid-write gets SQLITE_BUSY;
 a locked database, a missing file, a column that predates this feature, and a
 container started before the bot has ever run all mean the same thing here —
@@ -115,6 +123,61 @@ def read_user_languages(
         if language:
             languages[int(user_id)] = normalize(language)
     return languages
+
+
+def read_language(
+    user_id: int,
+    default: str = DEFAULT_LANGUAGE,
+    db_path: Optional[Path] = None,
+) -> str:
+    """One user's language, with a per-user fallback. See `read_user_languages`."""
+    uid = int(user_id)
+    return read_user_languages([uid], db_path=db_path, defaults={uid: default})[uid]
+
+
+def write_language(
+    user_id: int,
+    language: str,
+    db_path: Optional[Path] = None,
+) -> str:
+    """Store a user's language choice where every reader already looks.
+
+    This is the only writer in this module, and the only place outside the bot
+    that writes `bot.db`. It exists because the dashboard used to write language
+    into DuckDB's own `user_preferences` — a second table, with the same name and
+    columns, that the bot and the weekly report never read. The setting appeared
+    to work in whichever interface you last used and nowhere else.
+
+    Both containers bind-mount `./data`, so this is the same file the bot writes;
+    SQLite's own locking is what keeps the two apart, and BUSY_TIMEOUT_SECONDS is
+    what it waits.
+
+    Unlike the readers here, this raises. A settings screen that reports success
+    while storing nothing is the exact failure this function was written to end.
+    """
+    path = Path(db_path) if db_path is not None else BOT_DB_PATH
+    if not path.exists():
+        raise FileNotFoundError(
+            f"bot database not found at {path}; the bot has never run here, and "
+            f"creating one without its schema would leave two half-databases"
+        )
+
+    normalized = normalize(language)
+    with sqlite3.connect(str(path), timeout=BUSY_TIMEOUT_SECONDS) as conn:
+        # No ON CONFLICT: the bot has run this schema since long before upserts
+        # were available in every SQLite this may meet, and two statements are
+        # clear about what they do. The row may not exist — a user who has never
+        # opened the bot's settings has no preferences row at all.
+        conn.execute(
+            "INSERT OR IGNORE INTO user_preferences (user_id) VALUES (?)",
+            [int(user_id)],
+        )
+        conn.execute(
+            "UPDATE user_preferences SET language = ?, updated_at = CURRENT_TIMESTAMP "
+            "WHERE user_id = ?",
+            [normalized, int(user_id)],
+        )
+    return normalized
 
 
 def default_language_for(user_id: int, admin_ids: Iterable[int]) -> str:

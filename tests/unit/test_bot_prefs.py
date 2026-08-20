@@ -7,6 +7,7 @@ that still goes out.
 """
 from __future__ import annotations
 
+import pathlib
 import sqlite3
 
 import pytest
@@ -15,7 +16,9 @@ from core.bot_prefs import (
     default_language_for,
     group_by_language,
     read_approved_user_ids,
+    read_language,
     read_user_languages,
+    write_language,
 )
 from core.i18n import DEFAULT_LANGUAGE, EN, RU, UK
 
@@ -29,7 +32,8 @@ def bot_db(tmp_path):
             CREATE TABLE user_preferences (
                 user_id INTEGER PRIMARY KEY,
                 timezone TEXT DEFAULT 'Europe/Kyiv',
-                language TEXT DEFAULT 'en'
+                language TEXT DEFAULT 'en',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         conn.executemany(
@@ -156,3 +160,66 @@ class TestGrouping:
                              [(1, "uk"), (2, "uk")])
         monkeypatch.setattr("core.bot_prefs.BOT_DB_PATH", path)
         assert group_by_language([1, 2]) == {UK: [1, 2]}
+
+
+class TestOneHomeForTheChoice:
+    """The dashboard used to store this in a different database.
+
+    DuckDB and SQLite each declared a `user_preferences` table with the same
+    name and the same columns. `/api/me/preferences` wrote the DuckDB one; the
+    bot's settings screen, `read_user_languages` and the weekly report all used
+    the SQLite one. Whichever interface you set it in, the other never saw it —
+    and the DuckDB copy held zero rows in production for the whole of its life,
+    which is why nobody noticed. These pin the single home.
+    """
+
+    def test_a_choice_written_here_is_read_back_here(self, bot_db):
+        assert write_language(7, "uk", bot_db) == UK
+        assert read_language(7, db_path=bot_db) == UK
+
+    def test_it_reaches_the_readers_the_weekly_report_uses(self, bot_db):
+        """The end-to-end shape: set it, then ask the question the report asks."""
+        write_language(1, "ru", bot_db)
+
+        assert read_user_languages([1], bot_db) == {1: RU}
+        import core.bot_prefs as prefs
+
+        original = prefs.BOT_DB_PATH
+        prefs.BOT_DB_PATH = bot_db
+        try:
+            assert group_by_language([1, 2]) == {RU: [1, 2]}
+        finally:
+            prefs.BOT_DB_PATH = original
+
+    def test_a_user_with_no_row_yet_gets_one(self, bot_db):
+        """Anyone who has never opened the bot's settings has no row at all."""
+        assert write_language(404, "en", bot_db) == EN
+        assert read_language(404, db_path=bot_db) == EN
+
+    def test_an_unsupported_language_is_normalised_not_stored_raw(self, bot_db):
+        """Rows outlive code, so nothing unsupported should get in either."""
+        assert write_language(8, "de", bot_db) == DEFAULT_LANGUAGE
+        assert read_language(8, db_path=bot_db) == DEFAULT_LANGUAGE
+
+    def test_a_missing_database_raises_instead_of_pretending(self, tmp_path):
+        """Readers here fall back on purpose. A writer must not: a settings
+        screen that reports success and stores nothing is the original bug."""
+        with pytest.raises(FileNotFoundError):
+            write_language(1, "uk", tmp_path / "nope.db")
+
+
+class TestTheDashboardUsesIt:
+    def test_me_endpoint_does_not_reach_for_duckdb(self):
+        """Structural, because the defect was structural: the endpoint asked the
+        wrong database, and every functional test of it passed."""
+        source = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "web" / "routes" / "api" / "me.py"
+        ).read_text()
+
+        assert "FROM user_preferences" not in source, (
+            "the endpoint is querying a preferences table directly again"
+        )
+        assert "INSERT INTO user_preferences" not in source
+        assert "get_store" not in source, "preferences do not live in DuckDB"
+        assert "write_language" in source and "read_language" in source

@@ -2755,7 +2755,16 @@ class DuckDBStore(
         replicated OFF-HOST (rclone/S3) — see docs/backup_runbook.md.
 
         Protects data that is NOT recoverable from KeyCRM: revenue_goals,
-        manual_expenses, users/roles, user_preferences, celebrated_milestones.
+        manual_expenses, users and roles.
+
+        It does NOT protect the bot's own database, and for a long time this
+        docstring said otherwise. `user_preferences` and `celebrated_milestones`
+        are declared in DuckDB *and* in `data/bot.db`, and the live rows are in
+        the SQLite one — 24 approved users, 25 celebrated milestones, everybody's
+        language — while these copies sat empty. Naming them here made a file
+        that was in no backup at all look covered. It rides in the off-site
+        bundle since 2026-08-20 (deploy/offsite_parquet.sh); this copy still
+        does not include it, because this is a copy of the analytics file.
         """
         import os
         import shutil
