@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.78
+
+- Name KeyCRM source 5 «Виставка» and give it its own sales_type (#101)
+
+
 ## 3.0.77
 
 - Bump the version again, after four months of green no-ops (#100)
