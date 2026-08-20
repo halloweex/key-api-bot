@@ -865,17 +865,32 @@ class DuckDBStore(
         CREATE INDEX IF NOT EXISTS idx_silver_sales_type ON silver_orders(sales_type, order_date);
         CREATE INDEX IF NOT EXISTS idx_silver_buyer ON silver_orders(buyer_id);
         CREATE INDEX IF NOT EXISTS idx_gold_rev_date ON gold_daily_revenue(date, sales_type);
-        CREATE INDEX IF NOT EXISTS idx_gold_prod_date ON gold_daily_products(date, sales_type);
-        CREATE INDEX IF NOT EXISTS idx_gold_prod_product ON gold_daily_products(product_id);
-        CREATE INDEX IF NOT EXISTS idx_gold_prod_brand ON gold_daily_products(brand);
-        CREATE INDEX IF NOT EXISTS idx_gold_prod_category ON gold_daily_products(category_id);
+
+        -- gold_daily_products deliberately carries NO index. In DuckDB 1.5.5 a
+        -- single ART index — a PRIMARY KEY counts — disables row-group
+        -- vacuuming for the whole table, and it is binary: one index costs
+        -- exactly what six do. Measured on a clone of this table at its real
+        -- size, a full DELETE+INSERT rebuild leaks 0.000 MB/cycle with no
+        -- index and 1.171 MB with any number of them. At ~45 full rebuilds a
+        -- day that was 53 MB/day — the largest single contributor to the file
+        -- growth behind the weekly stop-the-world compaction.
+        --
+        -- What the six bought, measured against the real query shapes:
+        --   top products for a month      1.18 ms -> 1.16 ms without
+        --   revenue by brand for a month  0.65 ms -> 0.65 ms
+        --   revenue by category           0.69 ms -> 0.63 ms
+        --   brand breakdown for a year    0.84 ms -> 0.81 ms
+        --   one product, all time         0.16 ms -> 0.26 ms
+        -- Four of five unchanged; the fifth costs a tenth of a millisecond.
+        -- 87 906 rows is nothing to a columnar scan, and the zone maps on
+        -- `date` already do the work these indexes were added for.
+        --
+        -- Do not add one back without measuring both sides again.
         CREATE INDEX IF NOT EXISTS idx_warehouse_refreshes_at ON warehouse_refreshes(refreshed_at);
 
         -- Composite indexes for drill-down queries (30-40% speedup)
         CREATE INDEX IF NOT EXISTS idx_silver_source_date_type ON silver_orders(source_id, order_date, sales_type);
         CREATE INDEX IF NOT EXISTS idx_silver_active_return ON silver_orders(is_active_source, is_return, order_date);
-        CREATE INDEX IF NOT EXISTS idx_gold_prod_cat_date ON gold_daily_products(category_id, date, sales_type);
-        CREATE INDEX IF NOT EXISTS idx_gold_prod_brand_date ON gold_daily_products(brand, date, sales_type);
 
         -- ═══════════════════════════════════════════════════════════════════════
         -- SILVER LAYER: UTM tracking data (parsed from manager_comment)
@@ -1122,6 +1137,24 @@ class DuckDBStore(
         # No DEFAULT: on a table this size, materialising one rewrites every
         # row and has OOM-ed the container before. Existing rows get NULL,
         # which reads correctly as "we did not record this".
+        # Migration: drop every index on gold_daily_products.
+        #
+        # They are gone from the schema above; this removes them from databases
+        # that already have them. Existing dead row versions are NOT reclaimed
+        # by the DROP — that needs a vacuum, which needs an exclusive lock a
+        # two-minute refresh loop rarely yields. Growth stops immediately; the
+        # ~197 MB already accumulated comes back at the next window that gets
+        # the lock, or at the weekly compaction.
+        for _idx in (
+            "idx_gold_prod_date", "idx_gold_prod_product", "idx_gold_prod_brand",
+            "idx_gold_prod_category", "idx_gold_prod_cat_date",
+            "idx_gold_prod_brand_date",
+        ):
+            try:
+                self._connection.execute(f"DROP INDEX IF EXISTS {_idx}")
+            except Exception as e:
+                logger.warning("Migration (drop %s) failed: %s", _idx, e)
+
         try:
             self._connection.execute(
                 "ALTER TABLE warehouse_refreshes ADD COLUMN IF NOT EXISTS silver_mode VARCHAR"

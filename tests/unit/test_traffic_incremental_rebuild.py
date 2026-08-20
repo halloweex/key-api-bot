@@ -133,3 +133,53 @@ class TestCatalogDirtyScope:
         assert sorted(ids) == [11, 22], (
             "consuming the catalog flag swallowed the order scope"
         )
+
+
+class TestGoldProductsCarriesNoIndex:
+    """One ART index costs exactly what six do, and these six bought nothing.
+
+    In DuckDB 1.5.5 a single index — a PRIMARY KEY counts — disables row-group
+    vacuuming for the whole table. Measured on a clone at the real size, a full
+    DELETE+INSERT rebuild leaks 0.000 MB/cycle with no index and 1.171 MB with
+    any number of them. At ~45 full rebuilds a day that was 53 MB/day, the
+    largest single contributor to the growth behind the weekly compaction.
+
+    Against the real query shapes the six saved nothing measurable: four of
+    five unchanged, the fifth a tenth of a millisecond. 87 906 rows is nothing
+    to a columnar scan.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_database_creates_none(self, tmp_path):
+        store = await _make_store(tmp_path)
+        async with store.connection() as conn:
+            rows = conn.execute(
+                "SELECT index_name FROM duckdb_indexes() "
+                "WHERE table_name = 'gold_daily_products'"
+            ).fetchall()
+        assert rows == [], (
+            f"gold_daily_products grew an index again: {[r[0] for r in rows]}. "
+            "Measure the rebuild cost and the query benefit on both sides "
+            "before adding one — see the note in _init_schema."
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_existing_index_is_migrated_away(self, tmp_path):
+        """A database created before this change must lose them on connect."""
+        store = await _make_store(tmp_path)
+        async with store.connection() as conn:
+            conn.execute(
+                "CREATE INDEX idx_gold_prod_brand ON gold_daily_products(brand)"
+            )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM duckdb_indexes() "
+                "WHERE table_name = 'gold_daily_products'"
+            ).fetchone()[0] == 1
+
+        await store._run_migrations()
+
+        async with store.connection() as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM duckdb_indexes() "
+                "WHERE table_name = 'gold_daily_products'"
+            ).fetchone()[0] == 0
