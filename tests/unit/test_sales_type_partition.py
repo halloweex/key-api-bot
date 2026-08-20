@@ -239,3 +239,65 @@ class TestSalesTypeSurfacesAgree:
             for sales_type in KNOWN_SALES_TYPES:
                 key = f"filter.{sales_type}"
                 assert keys.get(key), f"{key} missing or empty in {lang}.json"
+
+
+class TestClassificationReachesTheWarehouse:
+    """A classification nobody rebuilds for changes nothing a reader can see.
+
+    `sales_type` is materialised into silver_orders by one CASE at rebuild
+    time. The route has always marked the warehouse dirty after calling this;
+    the method never did, so any other caller left Silver stale and no test
+    would have noticed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_setting_retail_status_marks_the_warehouse_dirty(self, tmp_path):
+        store = await _make_store(tmp_path)
+        try:
+            await store.upsert_managers([_api_manager(4, "Someone")])
+            # Clear whatever the sync left behind.
+            await store.consume_warehouse_dirty()
+
+            await store.set_manager_retail_status(4, False)
+
+            is_dirty, changed_ids = await store.consume_warehouse_dirty()
+            assert is_dirty is True, (
+                "reclassifying a manager left the warehouse clean, so Silver "
+                "keeps the old sales_type until something else triggers a rebuild"
+            )
+            assert changed_ids is None, (
+                "the scope must be full: the classification applies to every "
+                "order the manager ever took, not to a list of changed ids"
+            )
+        finally:
+            await store.close()
+
+
+class TestOrderStatusRefreshIsOffTheCompactionInstant:
+    """The host cron stops the containers at 05:00:01–05:00:39 Kyiv on Sundays.
+
+    A CronTrigger due at that instant does not exist when it is due — the
+    scheduler comes back at 05:00:51 and sets the next fire a day out. That
+    cost order_status_refresh every Sunday for six weeks running.
+    """
+
+    def test_it_is_not_due_in_the_forbidden_window(self):
+        import re
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[2] / "core" / "scheduler.py"
+        ).read_text(encoding="utf-8")
+
+        block = source.split('job_id="order_status_refresh"', 1)[1][:600]
+        match = re.search(r"CronTrigger\(hour=(\d+), minute=(\d+)\)", block)
+        assert match, "order_status_refresh no longer registers a CronTrigger"
+
+        hour, minute = int(match.group(1)), int(match.group(2))
+        assert not (hour == 5 and minute <= 5), (
+            f"order_status_refresh is due at {hour:02d}:{minute:02d} Kyiv, inside "
+            "the window the weekly compaction has the containers stopped"
+        )
+        assert (hour, minute) != (5, 30), (
+            "05:30 Kyiv already belongs to dq_reconciliation"
+        )

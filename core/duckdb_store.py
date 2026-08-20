@@ -4052,6 +4052,16 @@ class DuckDBStore(
     async def set_manager_retail_status(self, manager_id: int, is_retail: bool) -> None:
         """Update retail status for a specific manager.
 
+        `sales_type` is materialised into silver_orders by one CASE at rebuild
+        time, so a classification that is not followed by a rebuild changes
+        nothing a reader can see. Marking the warehouse dirty here rather than
+        in the route makes that true for every caller, not just the one that
+        remembered — the route has always done it, and the method has always
+        let anyone else forget.
+
+        Full scope, not an id list: the classification applies to every order
+        the manager ever took.
+
         Args:
             manager_id: Manager ID to update
             is_retail: TRUE for retail, FALSE for B2B/other
@@ -4062,6 +4072,11 @@ class DuckDBStore(
                 [is_retail, manager_id]
             )
             logger.info(f"Manager {manager_id} retail status set to {is_retail}")
+
+        # Outside the connection block on purpose: asyncio.Lock is not
+        # reentrant, and mark_warehouse_dirty takes it again. Calling it inside
+        # deadlocked the validation retry path once already.
+        await self.mark_warehouse_dirty(None)
 
     async def get_all_managers(self) -> List[Dict[str, Any]]:
         """Get all managers with their statistics.

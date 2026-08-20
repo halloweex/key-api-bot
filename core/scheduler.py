@@ -393,12 +393,23 @@ class BackgroundScheduler:
         # Job: Order status refresh (daily at 5 AM)
         # KeyCRM doesn't update updated_at when status changes, so we need to
         # periodically re-fetch recent orders to catch status changes (like cancellations)
+        #
+        # 05:15 and not 05:00. The host cron `0 2 * * 0 weekly_compact.sh` is
+        # 02:00 UTC = 05:00 Kyiv: it stops the containers at 02:00:01, swaps the
+        # database and starts them at 02:00:39, and the scheduler comes up at
+        # 02:00:51 — past the cron instant, so CronTrigger sets the next fire a
+        # day out. The job is not late; it does not exist when it is due, which
+        # is why misfire_grace_time cannot help. That mechanism was diagnosed on
+        # 2026-08-09 for dq_reconciliation and fixed there with a catch-up. This
+        # job sat on the same instant and nobody checked: it ran 35 times in 42
+        # days, missing 12/19/26 Jul and 2/9/16 Aug — every Sunday, no other day.
+        # 05:15 clears both the restart and dq_reconciliation at 05:30.
         self._add_job(
             job_id="order_status_refresh",
             name="Order Status Refresh",
             description="Re-fetch recent orders to catch status changes (KeyCRM workaround)",
             func=self._run_order_status_refresh,
-            trigger=CronTrigger(hour=5, minute=0),
+            trigger=CronTrigger(hour=5, minute=15),
             max_instances=1,
             coalesce=True,
         )

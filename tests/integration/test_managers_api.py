@@ -91,6 +91,10 @@ class _FakeStore:
 
     async def set_manager_retail_status(self, manager_id, is_retail):
         self.set_calls.append((manager_id, is_retail))
+        # Mirrors the real method, which marks the warehouse dirty itself so
+        # that every caller triggers the rebuild — not only the route. A fake
+        # that omits it would let this test pass while production regressed.
+        await self.mark_warehouse_dirty(None)
 
     async def mark_warehouse_dirty(self, changed_order_ids=None):
         self.dirty_calls.append(changed_order_ids)
