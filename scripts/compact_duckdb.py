@@ -430,7 +430,6 @@ def phase2_import(manifest: dict) -> float:
         "seq_stock_movements_id": ("stock_movements", "id"),
         "seq_buyer_contacts_id": ("buyer_contacts", "id"),
         "seq_manual_expenses_id": ("manual_expenses", "id"),
-        "seq_report_history_id": ("report_history", "id"),
         "warehouse_refresh_seq": ("warehouse_refreshes", "id"),
         "reconciliation_seq": ("reconciliation_log", "id"),
         "data_quality_run_seq": ("data_quality_runs", "run_id"),

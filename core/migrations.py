@@ -480,11 +480,18 @@ def _m0018_sms_members_message_id_index(self) -> None:
 
 
 def _m0019_user_preferences_language(self) -> None:
-    # Migration: Add language column to user_preferences
-    self._connection.execute(
-        "ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS language VARCHAR DEFAULT 'en'"
-    )
-    logger.debug("Migration: language column added/verified on user_preferences")
+    # Migration: Add language column to user_preferences — now a tombstone.
+    #
+    # The table this altered is gone: `user_preferences` lives in the bot's
+    # SQLite, and 0028 drops the empty DuckDB duplicate. The step stays because
+    # ids are what `schema_migrations` remembers and every production database
+    # already records this one as applied; deleting it would make those rows
+    # refer to nothing. On a fresh database it must not fail, and an ALTER
+    # against a table that no longer exists would.
+    #
+    # The rule this obeys: a step's id and its position never change. A step
+    # whose subject has been removed becomes a no-op that says why.
+    return
 
 
 def _m0020_promocode_on_orders_and_silver(self) -> None:
@@ -670,7 +677,6 @@ def _m0027_reset_sequences_after_compaction(self) -> None:
         ("seq_stock_movements_id", "stock_movements", "id"),
         ("seq_buyer_contacts_id", "buyer_contacts", "id"),
         ("seq_manual_expenses_id", "manual_expenses", "id"),
-        ("seq_report_history_id", "report_history", "id"),
         ("seq_bronze_order_events_id", "bronze_order_events", "id"),
     ]
     for seq_name, table_name, col in _seq_table_map:
@@ -689,6 +695,42 @@ def _m0027_reset_sequences_after_compaction(self) -> None:
                     logger.info(f"Sequence {seq_name} reset: {cur} → {new_start}")
         except Exception as e:
             logger.debug(f"Sequence fix note ({seq_name}): {e}")
+
+
+def _m0028_drop_bot_owned_duplicates(self) -> None:
+    # Migration: drop the DuckDB copies of three tables the bot owns.
+    #
+    # `user_preferences`, `report_history` and `celebrated_milestones` were
+    # declared in both stores. The live rows are in `data/bot.db` — the bot
+    # writes them, and it cannot write this file at all, because DuckDB allows a
+    # single writer and the web container holds it. So the direction
+    # scripts/migrate_sqlite_to_duckdb.py imagined was never available, and the
+    # copies here stayed empty for their whole life while the backup routine's
+    # docstring named two of them as protected data. That is how `bot.db` sat in
+    # no backup at all without anyone noticing.
+    #
+    # Guarded, not blind: a table with rows in it is left alone and reported at
+    # ERROR. Nothing here is worth destroying data over, and if any database
+    # anywhere does hold rows in these, that fact is worth a human reading it.
+    for table in ("user_preferences", "report_history", "celebrated_milestones"):
+        try:
+            row = self._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        except Exception:
+            continue  # already gone, or never existed here
+        count = int(row[0] or 0) if row else 0
+        if count:
+            logger.error(
+                "Migration 0028: %s holds %d row(s) in DuckDB and was NOT dropped. "
+                "The bot's SQLite is the home for this table — copy them across "
+                "before this can be cleaned up.",
+                table, count,
+            )
+            continue
+        self._connection.execute(f"DROP TABLE IF EXISTS {table}")
+        logger.info("Migration 0028: dropped empty duplicate table %s", table)
+
+    self._connection.execute("DROP SEQUENCE IF EXISTS seq_report_history_id")
+
 
 
 MIGRATIONS: List[Migration] = [
@@ -718,4 +760,5 @@ MIGRATIONS: List[Migration] = [
     Migration("0025_memory_samples", ONCE, _m0025_memory_samples),
     Migration("0026_data_dir_samples", ONCE, _m0026_data_dir_samples),
     Migration("0027_reset_sequences_after_compaction", ALWAYS, _m0027_reset_sequences_after_compaction),
+    Migration("0028_drop_bot_owned_duplicates", ONCE, _m0028_drop_bot_owned_duplicates),
 ]

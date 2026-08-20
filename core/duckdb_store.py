@@ -1211,40 +1211,17 @@ class DuckDBStore(
         CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 
         -- User preferences
-        CREATE TABLE IF NOT EXISTS user_preferences (
-            user_id BIGINT PRIMARY KEY,
-            default_source VARCHAR,
-            default_report_type VARCHAR DEFAULT 'summary',
-            timezone VARCHAR DEFAULT 'Europe/Kyiv',
-            default_date_range VARCHAR DEFAULT 'week',
-            notifications_enabled BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP WITH TIME ZONE
-        );
+        -- user_preferences, report_history and celebrated_milestones used to be
+        -- declared here as well as in the bot's SQLite. The live rows were always
+        -- in `data/bot.db` — the bot writes them, and it cannot write this file
+        -- at all, because DuckDB takes a single writer and the web container
+        -- holds it. These copies sat empty in production for their whole life
+        -- while the backup routine's docstring named two of them as protected
+        -- data, which is how `bot.db` stayed out of every backup unnoticed.
+        --
+        -- One home: `data/bot.db`. Read it through core/bot_prefs.py.
+        -- Migration 0028 drops the leftovers, and only if they are empty.
 
-        -- Report history
-        CREATE SEQUENCE IF NOT EXISTS seq_report_history_id START 1;
-        CREATE TABLE IF NOT EXISTS report_history (
-            id INTEGER PRIMARY KEY DEFAULT nextval('seq_report_history_id'),
-            user_id BIGINT NOT NULL,
-            report_type VARCHAR NOT NULL,
-            start_date DATE NOT NULL,
-            end_date DATE NOT NULL,
-            source VARCHAR,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_report_history_user ON report_history(user_id, created_at DESC);
-
-        -- Celebrated milestones
-        CREATE TABLE IF NOT EXISTS celebrated_milestones (
-            period_type VARCHAR NOT NULL,
-            period_key VARCHAR NOT NULL,
-            milestone_amount INTEGER NOT NULL,
-            revenue DECIMAL(14, 2) NOT NULL,
-            celebrated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (period_type, period_key, milestone_amount)
-        );
 
         -- Weekly sales report: which weeks have already been delivered.
         -- The job fires daily and reports the last *complete* week, so this
