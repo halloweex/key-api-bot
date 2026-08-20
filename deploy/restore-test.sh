@@ -94,6 +94,31 @@ fi
 PARQUET_COUNT="$(find "$TMP/data/export_parquet" -name '*.parquet' | wc -l | tr -d ' ')"
 echo "unpacked: $PARQUET_COUNT parquet files"
 
+# An off-site copy of a SQLite file proves nothing until it opens. A torn copy
+# - which is what `cp` of a live database produces - passes every size and
+# presence check, and fails only when somebody needs it.
+if [ -f "$TMP/data/bot.db" ]; then
+  BOT_REPORT="$(python3 - "$TMP/data/bot.db" <<'SQLITE_CHECK'
+import sqlite3
+import sys
+
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+ok = db.execute("PRAGMA integrity_check").fetchone()[0]
+users = db.execute("SELECT COUNT(*) FROM authorized_users").fetchone()[0]
+prefs = db.execute("SELECT COUNT(*) FROM user_preferences").fetchone()[0]
+print(f"{ok}|{users}|{prefs}")
+SQLITE_CHECK
+  )" || { echo "FAIL: bot.db in the archive would not open" >&2; exit 1; }
+  BOT_OK="${BOT_REPORT%%|*}"
+  if [ "$BOT_OK" != "ok" ]; then
+    echo "FAIL: bot.db integrity_check says: $BOT_OK" >&2
+    exit 1
+  fi
+  echo "bot.db: integrity ok, $(echo "$BOT_REPORT" | cut -d'|' -f2) authorized users, $(echo "$BOT_REPORT" | cut -d'|' -f3) preference rows"
+else
+  echo "NOTE: archive carries no bot.db - bot users, milestones and languages would have to be rebuilt by hand" >&2
+fi
+
 if [ -f "$TMP/data/env.gpg" ]; then
   echo "archive carries an encrypted .env (not decrypted by this drill)"
 else

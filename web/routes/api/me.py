@@ -8,7 +8,8 @@ import logging
 from fastapi import APIRouter, Request, HTTPException, Depends
 
 from web.routes.auth import require_user
-from core.duckdb_store import get_store
+from core.bot_prefs import default_language_for, read_language, write_language
+from core.config import ADMIN_USER_IDS
 from core.permissions import get_permissions_for_role_async
 
 logger = logging.getLogger(__name__)
@@ -30,16 +31,17 @@ async def get_current_user_info(user: dict = Depends(require_user)):
 
     permissions = await get_permissions_for_role_async(role)
 
-    preferences = {"language": "en"}
+    # The bot's SQLite, not DuckDB. Both databases declare a `user_preferences`
+    # table with the same columns, and until 2026-08-20 this endpoint used the
+    # DuckDB one while the bot, the settings screen and the weekly report all
+    # used the other. A language chosen here reached nothing; a language chosen
+    # in the bot never showed here. The DuckDB copy held zero rows in production
+    # the whole time, which is how it went unnoticed.
+    preferences = {"language": default_language_for(user_id, ADMIN_USER_IDS)}
     try:
-        store = await get_store()
-        async with store.connection() as conn:
-            result = conn.execute(
-                "SELECT language FROM user_preferences WHERE user_id = ?",
-                [user_id],
-            ).fetchone()
-            if result:
-                preferences["language"] = result[0] or "en"
+        preferences["language"] = read_language(
+            user_id, default=preferences["language"]
+        )
     except Exception as e:
         logger.debug(f"Failed to load preferences for user {user_id}: {e}")
 
@@ -74,22 +76,18 @@ async def update_preferences(request: Request, user: dict = Depends(require_user
             detail=f"Unsupported language: {language}. Supported: {', '.join(sorted(SUPPORTED_LANGUAGES))}",
         )
 
-    store = await get_store()
-    async with store.connection() as conn:
-        if language:
-            conn.execute(
-                """
-                INSERT INTO user_preferences (user_id, language, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT (user_id)
-                DO UPDATE SET language = excluded.language, updated_at = CURRENT_TIMESTAMP
-                """,
-                [user_id, language],
+    fallback = default_language_for(user_id, ADMIN_USER_IDS)
+    if language:
+        try:
+            # Raises rather than swallowing: a settings screen that reports
+            # success while storing nothing somewhere else is the bug this
+            # replaced.
+            return {"language": write_language(user_id, language)}
+        except Exception as e:
+            logger.error("Could not store language for user %s: %s", user_id, e)
+            raise HTTPException(
+                status_code=503,
+                detail="Preferences are temporarily unavailable; nothing was changed",
             )
 
-        result = conn.execute(
-            "SELECT language FROM user_preferences WHERE user_id = ?",
-            [user_id],
-        ).fetchone()
-
-    return {"language": result[0] if result else "en"}
+    return {"language": read_language(user_id, default=fallback)}
