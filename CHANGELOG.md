@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.81
+
+- Drop every index on gold_daily_products (#104)
+
+
 ## 3.0.80
 
 - A catalog change widens one scope, not four (#103)
