@@ -181,3 +181,61 @@ class TestPartitionAssertion:
             assert "internal=₴500.00" in partition[0][0]
         finally:
             await store.close()
+
+
+class TestSalesTypeSurfacesAgree:
+    """Every layer that names a sales_type must know all of them.
+
+    `exhibition` came within one deploy of shipping as a dashboard button the
+    API answered with 400: the Silver CASE, the partition assertion and the
+    frontend union were updated, and `validate_sales_type`'s hardcoded
+    whitelist was not. Five hand-copied lists, four changed. These tests are
+    cheap and they fail loudly on the fifth.
+    """
+
+    def test_validator_accepts_every_known_type(self):
+        from core.validators import validate_sales_type
+
+        for sales_type in KNOWN_SALES_TYPES:
+            assert validate_sales_type(sales_type) == sales_type
+
+    def test_validator_still_rejects_an_unknown_type(self):
+        from core.exceptions import ValidationError
+        from core.validators import validate_sales_type
+
+        with pytest.raises(ValidationError):
+            validate_sales_type("not_a_sales_type")
+
+    def test_frontend_union_covers_every_known_type(self):
+        """The TS union is a sixth copy; nothing but a test can hold it in step."""
+        from pathlib import Path
+
+        filters_ts = (
+            Path(__file__).resolve().parents[2]
+            / "web" / "frontend" / "src" / "types" / "filters.ts"
+        )
+        source = filters_ts.read_text(encoding="utf-8")
+        union_line = next(
+            line for line in source.splitlines()
+            if line.startswith("export type SalesType")
+        )
+        for sales_type in KNOWN_SALES_TYPES:
+            assert f"'{sales_type}'" in union_line, (
+                f"{sales_type} is in KNOWN_SALES_TYPES but not in the "
+                f"SalesType union in {filters_ts.name}"
+            )
+
+    def test_every_known_type_has_a_filter_label_in_every_language(self):
+        """A button with no label renders blank rather than failing."""
+        import json
+        from pathlib import Path
+
+        locales = (
+            Path(__file__).resolve().parents[2]
+            / "web" / "frontend" / "src" / "locales"
+        )
+        for lang in ("en", "uk", "ru"):
+            keys = json.loads((locales / f"{lang}.json").read_text(encoding="utf-8"))
+            for sales_type in KNOWN_SALES_TYPES:
+                key = f"filter.{sales_type}"
+                assert keys.get(key), f"{key} missing or empty in {lang}.json"

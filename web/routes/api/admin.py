@@ -117,12 +117,15 @@ async def rebuild_silver_from_scratch(
     DROP + CREATE + INSERT silver_orders from bronze. Bypasses MVCC —
     use when silver has corrupted rows blocking DELETE+INSERT rebuild.
     """
-    from core.duckdb_constants import B2B_MANAGER_ID, RETAIL_MANAGER_IDS, _date_in_kyiv
+    from core.duckdb_constants import (
+        B2B_MANAGER_ID, RETAIL_MANAGER_IDS, EXHIBITION_SOURCE_ID, _date_in_kyiv,
+    )
     from core.models import LOST_STATUS_GROUP_ID, OrderStatus
 
     store = await get_store()
     manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
     retail_filter = f"""
+        WHEN o.source_id = {EXHIBITION_SOURCE_ID} THEN 'exhibition'
         WHEN o.manager_id IS NULL THEN 'retail'
         WHEN o.manager_id = {B2B_MANAGER_ID} THEN 'b2b'
         WHEN o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'

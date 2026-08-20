@@ -25,6 +25,7 @@
   "filter.custom": "Custom",
   "filter.retail": "Retail",
   "filter.b2b": "B2B",
+  "filter.exhibition": "Exhibition",
   "filter.internal": "Internal",
   "filter.all": "All",
   "filter.allSources": "All Sources",

@@ -117,6 +117,7 @@ class SourceConfig:
         2: "Telegram",
         3: "Opencart",
         4: "Shopify",
+        5: "Виставка",
     })
 
     # Emojis for each source
@@ -125,6 +126,7 @@ class SourceConfig:
         2: "✈️",
         3: "🌐",
         4: "🛍️",
+        5: "🎪",
     })
 
     # Colors for charts
@@ -133,10 +135,11 @@ class SourceConfig:
         2: "#2563EB",  # Telegram - blue
         3: "#F59E0B",  # Opencart - orange
         4: "#eb4200",  # Shopify - orange-red
+        5: "#0D9488",  # Виставка - teal
     })
 
     # Sources included in dashboard visualizations (excludes deprecated Opencart)
-    dashboard_sources: List[int] = field(default_factory=lambda: [1, 2, 4])
+    dashboard_sources: List[int] = field(default_factory=lambda: [1, 2, 4, 5])
 
     # Sources available for TOP-10 reports
     top10_sources: List[tuple] = field(default_factory=lambda: [

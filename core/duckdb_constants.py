@@ -34,7 +34,15 @@ RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]
 # unrelated things at once — genuine sales by staff outside those two roles,
 # and goods shipped to bloggers with no sale at all. Naming it does not
 # separate them, but it stops the bucket pretending to be an error.
-KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
+# Виставка (KeyCRM source 5) — offline sales from a trade fair. It is a real
+# sales channel with real buyers and line items, so it counts as revenue and
+# appears on the dashboard. It is deliberately NOT retail: exhibition takings
+# are a one-off channel and must not move the retail trend they would otherwise
+# distort. Source wins over manager here — the fair was staffed by a retail
+# manager, so a manager-based rule would silently pull it into retail.
+EXHIBITION_SOURCE_ID = 5
+
+KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 
 # Timezone for date extraction - KeyCRM stores timestamps in +04:00 (server time)
 # but UI displays in Kyiv timezone, so we convert for consistency

@@ -11,6 +11,9 @@ import type { SalesType } from '../types/filters'
 const SALES_TYPES: { value: SalesType; labelKey: string; adminOnly?: boolean }[] = [
   { value: 'retail', labelKey: 'filter.retail' },
   { value: 'b2b', labelKey: 'filter.b2b' },
+  // Виставка (source 5) is a real sales channel, not staff activity, so it is
+  // visible to every viewer — and the API does not gate it either.
+  { value: 'exhibition', labelKey: 'filter.exhibition' },
   { value: 'internal', labelKey: 'filter.internal', adminOnly: true },
   { value: 'all', labelKey: 'filter.all' },
 ]

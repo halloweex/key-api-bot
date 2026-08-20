@@ -34,6 +34,7 @@ from core.exceptions import QueryTimeoutError
 from core.duckdb_constants import (
     DB_DIR, DB_PATH, DEFAULT_TZ, DEFAULT_QUERY_TIMEOUT, LONG_QUERY_TIMEOUT,
     B2B_MANAGER_ID, RETAIL_MANAGER_IDS, KNOWN_SALES_TYPES, DISPLAY_TIMEZONE, _date_in_kyiv,
+    EXHIBITION_SOURCE_ID,
 )
 from core.repositories import (
     UsersMixin, TrafficMixin, CustomersMixin, GoalsMixin,
@@ -2065,6 +2066,7 @@ class DuckDBStore(
         # Pre-compute SQL fragments used across steps
         manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
         retail_filter = f"""
+            WHEN o.source_id = {EXHIBITION_SOURCE_ID} THEN 'exhibition'
             WHEN o.manager_id IS NULL THEN 'retail'
             WHEN o.manager_id = {B2B_MANAGER_ID} THEN 'b2b'
             WHEN o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'
@@ -2088,11 +2090,12 @@ class DuckDBStore(
                 ELSE o.status_id IN {return_statuses}
             END AS is_return,
             CASE {retail_filter} END AS sales_type,
-            o.source_id IN (1, 2, 4) AS is_active_source,
+            o.source_id IN (1, 2, 4, {EXHIBITION_SOURCE_ID}) AS is_active_source,
             CASE o.source_id
                 WHEN 1 THEN 'Instagram'
                 WHEN 2 THEN 'Telegram'
                 WHEN 4 THEN 'Shopify'
+                WHEN 5 THEN 'Виставка'
                 ELSE 'Other'
             END AS source_name,
             FALSE AS is_new_customer,
