@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.88
+
+- Give the schema a ledger: migrations run once, and cannot fail in silence (#111)
+
+
 ## 3.0.87
 
 - Move revenue, SMS segments and campaign results onto the level (#110)
