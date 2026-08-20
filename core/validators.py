@@ -8,6 +8,7 @@ import re
 from datetime import date, datetime
 from typing import Optional, Tuple
 
+from core.duckdb_constants import KNOWN_SALES_TYPES
 from core.exceptions import ValidationError
 
 
@@ -321,7 +322,7 @@ def validate_sales_type(
     allow_none: bool = True
 ) -> Optional[str]:
     """
-    Validate a sales type filter (retail/b2b/internal/all).
+    Validate a sales type filter against KNOWN_SALES_TYPES, plus `all`.
 
     Args:
         value: Sales type string to validate
@@ -334,11 +335,17 @@ def validate_sales_type(
     Raises:
         ValidationError: If sales type is invalid
     """
+    # Derived from KNOWN_SALES_TYPES rather than restated. A hardcoded copy
+    # here is how `exhibition` came within one deploy of shipping as a filter
+    # the API rejected with 400: the Silver CASE, the partition assertion, the
+    # frontend union and this whitelist all had to agree, and only three of
+    # them were changed. One source, checked by a test.
+    #
     # `internal` is everyone outside the retail list and the wholesale
     # manager. Reachable through the API and the dashboard for admins only —
     # enforced in `api_gate`, not here, because this function never sees who
     # is asking.
-    valid_types = {"retail", "b2b", "internal", "all"}
+    valid_types = set(KNOWN_SALES_TYPES) | {"all"}
 
     if value is None or value == "":
         if allow_none:

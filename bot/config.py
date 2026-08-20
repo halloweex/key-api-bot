@@ -52,7 +52,8 @@ SOURCE_MAPPING = {
     1: 'Instagram',
     2: 'Telegram',
     3: 'Opencart',
-    4: 'Shopify'
+    4: 'Shopify',
+    5: 'Виставка'
 }
 
 # ─── Conversation States ────────────────────────────────────────────────────
