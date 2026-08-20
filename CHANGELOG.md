@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.91
+
+- Drop the DuckDB copies of three tables the bot owns (#114)
+
+
 ## 3.0.90
 
 - Back up the bot's database, and give the language one home (#113)
