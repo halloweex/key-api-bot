@@ -870,11 +870,16 @@ class SyncService:
             # catalog needs to ask for itself — otherwise a rename made at night
             # would not reach the dashboard until somebody placed an order.
             #
-            # Full scope (None) because a product touches every date it was ever
-            # sold on, and an hourly full rebuild is cheaper than the 583-date
-            # "incremental" one this commit removes.
+            # A product touches every date it was ever sold on, so the scope
+            # genuinely has to widen — but only for gold_daily_products, the
+            # one rebuilt table that joins the catalog. This used to mark the
+            # whole warehouse dirty, which also rebuilt silver_orders (no
+            # product column at all), gold_daily_revenue and gold_daily_traffic
+            # from scratch. Those three rewrites were pure waste, and Silver's
+            # was the second-largest source of the file growth that forced a
+            # weekly stop-the-world compaction.
             if stats.get("products") or stats.get("offers"):
-                await self.store.mark_warehouse_dirty(None)
+                await self.store.mark_catalog_dirty()
 
             # Adaptive backoff follows the same number. Keyed on the inflated
             # count it never saw a quiet period, so it sat on the 60s floor

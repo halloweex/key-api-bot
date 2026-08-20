@@ -86,3 +86,50 @@ class TestTrafficRebuildScope:
         result = await store._traffic_rebuild_dates(set(), set())
         assert result == set()
         assert result is not None
+
+
+class TestCatalogDirtyScope:
+    """A catalog change widens one scope, not four.
+
+    silver_orders reads only `orders`; gold_daily_revenue reads only
+    silver_orders; gold_daily_traffic reads silver_orders and silver_order_utm.
+    None of the three can be changed by a product rename. Only
+    gold_daily_products joins products and categories.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_flag_survives_until_a_refresh_consumes_it(self, tmp_path):
+        store = await _make_store(tmp_path)
+
+        assert await store._consume_catalog_dirty() is False
+
+        await store.mark_catalog_dirty()
+        assert await store._consume_catalog_dirty() is True
+
+        # Consumed once, gone. Otherwise every later refresh would keep
+        # widening its scope for a rename that already landed.
+        assert await store._consume_catalog_dirty() is False
+
+    @pytest.mark.asyncio
+    async def test_marking_twice_still_consumes_once(self, tmp_path):
+        store = await _make_store(tmp_path)
+        await store.mark_catalog_dirty()
+        await store.mark_catalog_dirty()
+        assert await store._consume_catalog_dirty() is True
+        assert await store._consume_catalog_dirty() is False
+
+    @pytest.mark.asyncio
+    async def test_catalog_and_order_dirtiness_are_independent(self, tmp_path):
+        """Two axes, two flags. Consuming one must not clear the other."""
+        store = await _make_store(tmp_path)
+
+        await store.mark_catalog_dirty()
+        await store.mark_warehouse_dirty([11, 22])
+
+        assert await store._consume_catalog_dirty() is True
+
+        is_dirty, ids = await store.consume_warehouse_dirty()
+        assert is_dirty is True
+        assert sorted(ids) == [11, 22], (
+            "consuming the catalog flag swallowed the order scope"
+        )

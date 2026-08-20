@@ -1111,6 +1111,28 @@ class DuckDBStore(
         except Exception as e:
             logger.debug(f"Migration note (manager_comment): {e}")
 
+        # Migration: record which mode a refresh actually ran in.
+        #
+        # warehouse_refreshes has 69k rows and is the best forensic trail in
+        # the system, but it never recorded whether Silver was rebuilt whole
+        # or incrementally — so the file growth that forced a weekly
+        # stop-the-world compaction could not be attributed to a cause. Twice
+        # now an estimate has been made by extrapolation and been wrong.
+        #
+        # No DEFAULT: on a table this size, materialising one rewrites every
+        # row and has OOM-ed the container before. Existing rows get NULL,
+        # which reads correctly as "we did not record this".
+        try:
+            self._connection.execute(
+                "ALTER TABLE warehouse_refreshes ADD COLUMN IF NOT EXISTS silver_mode VARCHAR"
+            )
+        except Exception as e:
+            # WARNING, not DEBUG. A swallowed ALTER is exactly how the
+            # 2026-08-09 incident began: the migration failed quietly, the
+            # code read the column anyway, and the self-heal turned a one-off
+            # into a rebuild every two minutes for hours.
+            logger.warning("Migration (warehouse_refreshes.silver_mode) failed: %s", e)
+
         # Migration 2: Recreate order_products without FK constraint (DuckDB FK bug workaround)
         try:
             # Check if FK constraint exists
@@ -2284,6 +2306,12 @@ class DuckDBStore(
                 if not affected_dates:
                     affected_dates = None  # Fall back to full rebuild
 
+            # gold_daily_products is the only rebuilt table that joins the
+            # catalog, so a product or offer change widens that scope alone.
+            # Everything else keeps whatever scope the orders gave it.
+            catalog_dirty = await self._consume_catalog_dirty()
+            gold_products_dates = None if catalog_dirty else affected_dates
+
             # ── Step 2: Gold daily revenue (lock acquired + released) ──
             # Single SQL template for both incremental and full rebuild
             _GOLD_REVENUE_SQL = "INSERT INTO gold_daily_revenue\n" + GOLD_REVENUE_SELECT_SQL
@@ -2343,8 +2371,8 @@ class DuckDBStore(
             async with self.connection() as conn:
                 conn.execute("BEGIN TRANSACTION")
                 try:
-                    if affected_dates:
-                        date_params = list(affected_dates)
+                    if gold_products_dates:
+                        date_params = list(gold_products_dates)
                         date_placeholders = ",".join("?" * len(date_params))
                         conn.execute(f"DELETE FROM gold_daily_products WHERE date IN ({date_placeholders})", date_params)
                         conn.execute(_GOLD_PRODUCTS_SQL.format(date_filter=f"s.order_date IN ({date_placeholders})"), date_params)
@@ -2552,18 +2580,34 @@ class DuckDBStore(
 
                 duration_ms = (time.perf_counter() - start_time) * 1000
 
-                conn.execute("""
-                    INSERT INTO warehouse_refreshes
-                        (refreshed_at, trigger, duration_ms, bronze_orders, silver_rows,
-                         gold_revenue_rows, gold_products_rows, silver_revenue_checksum,
-                         gold_revenue_checksum, checksum_match, validation_passed, error)
-                    VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, [
+                _audit_values = [
                     trigger, round(duration_ms, 2),
                     bronze_orders, silver_rows, gold_revenue_rows, gold_products_rows,
                     round(silver_revenue, 2), round(gold_revenue, 2),
-                    checksum_match, validation_passed, None
-                ])
+                    checksum_match, validation_passed, None,
+                ]
+                _audit_cols = (
+                    "refreshed_at, trigger, duration_ms, bronze_orders, silver_rows, "
+                    "gold_revenue_rows, gold_products_rows, silver_revenue_checksum, "
+                    "gold_revenue_checksum, checksum_match, validation_passed, error"
+                )
+                try:
+                    conn.execute(
+                        f"INSERT INTO warehouse_refreshes ({_audit_cols}, silver_mode) "
+                        f"VALUES (CURRENT_TIMESTAMP, {', '.join('?' * len(_audit_values))}, ?)",
+                        _audit_values + [f"{silver_mode}{'+catalog' if catalog_dirty else ''}"],
+                    )
+                except Exception:
+                    # The column may not exist yet: a deploy can reach this line
+                    # before its migration lands, and losing the audit row is a
+                    # worse outcome than losing one field of it. This is the
+                    # 2026-08-09 failure mode written down as a fallback rather
+                    # than left to be rediscovered.
+                    conn.execute(
+                        f"INSERT INTO warehouse_refreshes ({_audit_cols}) "
+                        f"VALUES (CURRENT_TIMESTAMP, {', '.join('?' * len(_audit_values))})",
+                        _audit_values,
+                    )
 
             # Mark dirty OUTSIDE the connection block to avoid deadlock
             # (mark_warehouse_dirty also acquires self._lock via self.connection())
@@ -2816,6 +2860,48 @@ class DuckDBStore(
                 INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
                 VALUES ('warehouse_dirty', ?, CURRENT_TIMESTAMP)
             """, [value])
+
+    async def mark_catalog_dirty(self) -> None:
+        """A product, offer or category changed — not an order.
+
+        Kept apart from `mark_warehouse_dirty` because the two mean different
+        things and only one of the four rebuilt tables cares:
+
+            silver_orders        <- orders                     no catalog
+            gold_daily_revenue   <- silver_orders              no catalog
+            gold_daily_traffic   <- silver + silver_order_utm  no catalog
+            gold_daily_products  <- silver + order_products
+                                    + products + categories    YES
+
+        A rename therefore has to widen exactly one scope. Marking the whole
+        warehouse dirty instead rebuilt all four, and silver_orders — which has
+        no product column at all — was the second-largest contributor to the
+        file growth that forced a weekly stop-the-world compaction.
+        """
+        async with self.connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
+                VALUES ('warehouse_catalog_dirty', '1', CURRENT_TIMESTAMP)
+            """)
+
+    async def _consume_catalog_dirty(self) -> bool:
+        """Read and clear the catalog flag.
+
+        Consumed inside `refresh_warehouse_layers` rather than alongside the
+        order flag so that every caller honours it — the scheduler, a manual
+        trigger and the admin endpoint alike — without each having to know it
+        exists.
+        """
+        async with self.connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM sync_metadata WHERE key = 'warehouse_catalog_dirty'"
+            ).fetchone()
+            if not row or not row[0]:
+                return False
+            conn.execute(
+                "DELETE FROM sync_metadata WHERE key = 'warehouse_catalog_dirty'"
+            )
+            return True
 
     async def consume_warehouse_dirty(self) -> tuple[bool, list[int] | None]:
         """Atomically read and clear the dirty flag. Returns (is_dirty, changed_ids_or_None)."""
