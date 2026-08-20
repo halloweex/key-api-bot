@@ -68,3 +68,26 @@ DISPLAY_TIMEZONE = 'Europe/Kyiv'
 def _date_in_kyiv(column: str) -> str:
     """Generate SQL for extracting date in Kyiv timezone."""
     return f"DATE(timezone('{DISPLAY_TIMEZONE}', {column}))"
+
+
+def line_window_where(sales_type: str, params: list, alias: str = "l") -> str:
+    """The predicate every page applies to `silver_order_lines`.
+
+    Six copies of these four clauses existed — one in the margin repository and
+    five in products_intel, written out by hand each time. They agreed, which is
+    the only reason nobody noticed; `sales_type` acquiring a fifth value in #101
+    is the kind of change that visits one copy and not the others.
+
+    The caller has already appended the two dates to `params`; this appends
+    `sales_type` when it filters. That order is the contract, and it is why the
+    function takes the list rather than returning one.
+    """
+    clauses = [
+        f"{alias}.order_date BETWEEN ? AND ?",
+        f"NOT {alias}.is_return",
+        f"{alias}.is_active_source",
+    ]
+    if sales_type != "all":
+        clauses.append(f"{alias}.sales_type = ?")
+        params.append(sales_type)
+    return " AND ".join(clauses)

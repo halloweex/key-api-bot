@@ -577,17 +577,19 @@ async def _get_top_products(period: str, by: str, limit: int) -> Dict[str, Any]:
 
         results = conn.execute(f"""
             SELECT
-                COALESCE(p.name, op.name) as product_name,
-                p.brand,
-                SUM(op.quantity) as total_quantity,
-                SUM(op.quantity * op.price_sold) as total_revenue
-            FROM order_products op
-            JOIN silver_orders o ON op.order_id = o.id
-            LEFT JOIN products p ON op.product_id = p.id
-            WHERE o.order_date BETWEEN ? AND ?
-                AND NOT o.is_return
-                AND o.sales_type = 'retail'
-            GROUP BY COALESCE(p.name, op.name), p.brand
+                COALESCE(l.catalog_product_name, l.product_name) as product_name,
+                l.brand,
+                SUM(l.quantity) as total_quantity,
+                SUM(l.line_amount) as total_revenue
+            FROM silver_order_lines l
+            -- NOTE: no `is_active_source` here, unlike every dashboard page.
+            -- Deliberately left as it was — this is a conversion, not a fix —
+            -- but it means the assistant counts Opencart, which was retired,
+            -- and will not match the numbers on screen.
+            WHERE l.order_date BETWEEN ? AND ?
+                AND NOT l.is_return
+                AND l.sales_type = 'retail'
+            GROUP BY COALESCE(l.catalog_product_name, l.product_name), l.brand
             ORDER BY {order_by}
             LIMIT ?
         """, [start_date, end_date, limit]).fetchall()

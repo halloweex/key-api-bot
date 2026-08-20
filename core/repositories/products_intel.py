@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional, Dict, Any, List
 
+from core.duckdb_constants import line_window_where
+
 
 class ProductsIntelMixin:
 
@@ -16,22 +18,15 @@ class ProductsIntelMixin:
         """Get basket KPIs: avg size, multi-item %, revenue uplift, top pair."""
         async with self.connection() as conn:
             params: list = [start_date, end_date]
-            where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
-
-            if sales_type != "all":
-                where.append("s.sales_type = ?")
-                params.append(sales_type)
-
-            where_sql = " AND ".join(where)
+            where_sql = line_window_where(sales_type, params)
 
             result = conn.execute(f"""
                 WITH order_sizes AS (
-                    SELECT s.id AS order_id, s.grand_total,
-                           COUNT(DISTINCT COALESCE(op.product_id, op.id)) AS item_count
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
+                    SELECT l.order_id, l.order_grand_total AS grand_total,
+                           COUNT(DISTINCT COALESCE(l.product_id, l.line_id)) AS item_count
+                    FROM silver_order_lines l
                     WHERE {where_sql}
-                    GROUP BY s.id, s.grand_total
+                    GROUP BY l.order_id, l.order_grand_total
                 )
                 SELECT
                     COALESCE(AVG(item_count), 0) AS avg_basket_size,
@@ -54,13 +49,12 @@ class ProductsIntelMixin:
             # Top pair by co-occurrence (date-filtered)
             top_pair = conn.execute(f"""
                 WITH oi AS (
-                    SELECT s.id AS order_id,
-                           COALESCE(op.product_id, op.id) AS product_id,
-                           ANY_VALUE(op.name) AS product_name
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
+                    SELECT l.order_id,
+                           COALESCE(l.product_id, l.line_id) AS product_id,
+                           ANY_VALUE(l.product_name) AS product_name
+                    FROM silver_order_lines l
                     WHERE {where_sql}
-                    GROUP BY s.id, COALESCE(op.product_id, op.id)
+                    GROUP BY l.order_id, COALESCE(l.product_id, l.line_id)
                 ),
                 multi AS (
                     SELECT order_id, product_id, product_name
@@ -107,13 +101,7 @@ class ProductsIntelMixin:
         """Get top product pairs by co-occurrence within date range."""
         async with self.connection() as conn:
             params: list = [start_date, end_date]
-            where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
-
-            if sales_type != "all":
-                where.append("s.sales_type = ?")
-                params.append(sales_type)
-
-            where_sql = " AND ".join(where)
+            where_sql = line_window_where(sales_type, params)
 
             # Dynamic threshold: >= 2 for 14+ day ranges, >= 1 for shorter
             days_span = (end_date - start_date).days + 1
@@ -126,13 +114,12 @@ class ProductsIntelMixin:
 
             rows = conn.execute(f"""
                 WITH order_items AS (
-                    SELECT s.id AS order_id,
-                           COALESCE(op.product_id, op.id) AS product_id,
-                           ANY_VALUE(op.name) AS product_name
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
+                    SELECT l.order_id,
+                           COALESCE(l.product_id, l.line_id) AS product_id,
+                           ANY_VALUE(l.product_name) AS product_name
+                    FROM silver_order_lines l
                     WHERE {where_sql}
-                    GROUP BY s.id, COALESCE(op.product_id, op.id)
+                    GROUP BY l.order_id, COALESCE(l.product_id, l.line_id)
                 ),
                 multi_orders AS (
                     SELECT order_id, product_id, product_name
@@ -213,22 +200,15 @@ class ProductsIntelMixin:
         """Get basket size distribution with AOV per bucket."""
         async with self.connection() as conn:
             params: list = [start_date, end_date]
-            where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
-
-            if sales_type != "all":
-                where.append("s.sales_type = ?")
-                params.append(sales_type)
-
-            where_sql = " AND ".join(where)
+            where_sql = line_window_where(sales_type, params)
 
             rows = conn.execute(f"""
                 WITH order_sizes AS (
-                    SELECT s.id AS order_id, s.grand_total,
-                           COUNT(DISTINCT COALESCE(op.product_id, op.id)) AS item_count
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
+                    SELECT l.order_id, l.order_grand_total AS grand_total,
+                           COUNT(DISTINCT COALESCE(l.product_id, l.line_id)) AS item_count
+                    FROM silver_order_lines l
                     WHERE {where_sql}
-                    GROUP BY s.id, s.grand_total
+                    GROUP BY l.order_id, l.order_grand_total
                 ),
                 bucketed AS (
                     SELECT
@@ -280,24 +260,14 @@ class ProductsIntelMixin:
         """Get top category pair combinations from multi-item orders."""
         async with self.connection() as conn:
             params: list = [start_date, end_date]
-            where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
-
-            if sales_type != "all":
-                where.append("s.sales_type = ?")
-                params.append(sales_type)
-
-            where_sql = " AND ".join(where)
+            where_sql = line_window_where(sales_type, params)
 
             rows = conn.execute(f"""
                 WITH order_cats AS (
-                    SELECT DISTINCT s.id AS order_id,
-                           COALESCE(parent_c.name, c.name, 'Unknown') AS category_name,
-                           COALESCE(parent_c.id, c.id) AS category_id
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
-                    LEFT JOIN products p ON op.product_id = p.id
-                    LEFT JOIN categories c ON p.category_id = c.id
-                    LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
+                    SELECT DISTINCT l.order_id,
+                           COALESCE(l.parent_category_name, l.category_name, 'Unknown') AS category_name,
+                           COALESCE(l.parent_category_id, l.category_id) AS category_id
+                    FROM silver_order_lines l
                     WHERE {where_sql}
                 ),
                 cat_pairs AS (
@@ -334,25 +304,17 @@ class ProductsIntelMixin:
         """Get top brand pair co-purchases within date range."""
         async with self.connection() as conn:
             params: list = [start_date, end_date]
-            where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
-
-            if sales_type != "all":
-                where.append("s.sales_type = ?")
-                params.append(sales_type)
-
-            where_sql = " AND ".join(where)
+            where_sql = line_window_where(sales_type, params)
 
             days_span = (end_date - start_date).days + 1
             having_threshold = 2 if days_span >= 14 else 1
 
             rows = conn.execute(f"""
                 WITH order_brands AS (
-                    SELECT DISTINCT s.id AS order_id, p.brand
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
-                    JOIN products p ON op.product_id = p.id
+                    SELECT DISTINCT l.order_id, l.brand
+                    FROM silver_order_lines l
                     WHERE {where_sql}
-                      AND p.brand IS NOT NULL AND p.brand != ''
+                      AND l.brand IS NOT NULL AND l.brand != ''
                 ),
                 brand_pairs AS (
                     SELECT a.brand AS brand_a, b.brand AS brand_b,

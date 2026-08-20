@@ -5,6 +5,8 @@ import logging
 from datetime import date
 from typing import Dict, List, Any
 
+from core.duckdb_constants import line_window_where
+
 logger = logging.getLogger(__name__)
 
 
@@ -12,16 +14,9 @@ class MarginMixin:
     """Margin analysis queries using silver_orders + offer_stocks."""
 
     def _margin_base_where(self, sales_type: str, params: list) -> str:
-        """Build common WHERE clause for margin queries."""
-        clauses = [
-            "l.order_date BETWEEN ? AND ?",
-            "NOT l.is_return",
-            "l.is_active_source",
-        ]
-        if sales_type != "all":
-            clauses.append("l.sales_type = ?")
-            params.append(sales_type)
-        return " AND ".join(clauses)
+        """The line predicate, which is not margin's to define — see
+        `core.duckdb_store.line_window_where`."""
+        return line_window_where(sales_type, params)
 
     async def get_margin_overview(
         self,

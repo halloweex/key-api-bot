@@ -293,13 +293,12 @@ class SearchService:
                 # Get sales stats
                 stats = conn.execute("""
                     SELECT
-                        COUNT(DISTINCT op.order_id) as total_orders,
-                        SUM(op.quantity) as total_quantity,
-                        SUM(op.quantity * op.price_sold) as total_revenue,
-                        AVG(op.price_sold) as avg_price
-                    FROM order_products op
-                    JOIN silver_orders o ON op.order_id = o.id
-                    WHERE op.product_id = ? AND NOT o.is_return
+                        COUNT(DISTINCT l.order_id) as total_orders,
+                        SUM(l.quantity) as total_quantity,
+                        SUM(l.line_amount) as total_revenue,
+                        AVG(l.price_sold) as avg_price
+                    FROM silver_order_lines l
+                    WHERE l.product_id = ? AND NOT l.is_return
                 """, [product_id]).fetchone()
 
                 product_dict["stats"] = dict(stats) if stats else {}
