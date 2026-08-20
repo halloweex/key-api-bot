@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.87
+
+- Move revenue, SMS segments and campaign results onto the level (#110)
+
+
 ## 3.0.86
 
 - Move basket intelligence, chat tools and search onto the level (#109)
