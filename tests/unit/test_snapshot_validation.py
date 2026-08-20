@@ -37,11 +37,13 @@ def _healthy(**overrides) -> dict:
         "reconciliation_log": 1_711,
         "data_quality_runs": 78,
         "warehouse_refreshes": 66_332,
-        # Live features nobody has used yet.
+        # Live features nobody has used yet. user_preferences and
+        # celebrated_milestones were here too until 2026-08-20, when the DuckDB
+        # duplicates were dropped — their rows live in the bot's SQLite and
+        # always did, so a snapshot of the analytics file should not carry them
+        # at all, empty or otherwise.
         "revenue_goals": 0,
         "manual_expenses": 0,
-        "user_preferences": 0,
-        "celebrated_milestones": 0,
         "marketing_optouts": 0,
     }
     counts.update(overrides)
@@ -110,13 +112,19 @@ class TestMonotone:
 
 class TestEmptyMustBeDeclared:
     def test_the_historical_case_passes_but_is_named(self):
-        """The four runbook tables were empty for the whole period the nightly
-        backup reported success. They are allowed to be empty. They are not
-        allowed to be empty silently."""
+        """The runbook tables were empty for the whole period the nightly backup
+        reported success. They are allowed to be empty. They are not allowed to
+        be empty silently.
+
+        Two of the original four — user_preferences and celebrated_milestones —
+        are no longer in this database at all. Their emptiness here was not a
+        quiet feature waiting to be used; it was a duplicate of a table the bot
+        owns, and naming it as protected data is how the bot's own database
+        stayed out of every backup.
+        """
         v = validate_snapshot(_healthy(), previous_counts=_healthy())
         assert v.ok
-        for table in ("revenue_goals", "manual_expenses",
-                      "user_preferences", "celebrated_milestones"):
+        for table in ("revenue_goals", "manual_expenses"):
             assert table in v.empty_tables
 
     def test_every_declared_empty_table_is_classified(self):

@@ -64,12 +64,14 @@ MONOTONE = frozenset({
 MAY_BE_EMPTY = frozenset({
     "revenue_goals",
     "manual_expenses",
-    "user_preferences",
-    "celebrated_milestones",
-    "report_history",
     "bronze_order_events",
     "marketing_optouts",
 })
+
+# user_preferences, celebrated_milestones and report_history were listed here
+# until 2026-08-20. They are not empty tables any more; they are not tables in
+# this database at all. Their home is the bot's SQLite, which now rides in the
+# off-site archive in its own right — see deploy/offsite_parquet.sh.
 
 
 # Derived layers. The manifest counts every table, but these are deliberately

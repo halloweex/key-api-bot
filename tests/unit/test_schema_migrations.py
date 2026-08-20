@@ -170,3 +170,92 @@ class TestItReachesTheOutside:
 
         assert payload["migrations"]["failed"][0]["error"] == "boom"
         assert payload["migrations"]["pending"] == ["0009_gold_daily_traffic_sales_type"]
+
+
+class TestDroppingTheBotsDuplicates:
+    """0028 removes three tables the bot owns — but only if they are empty.
+
+    They were declared in DuckDB and in `data/bot.db` both, and the live rows
+    were always in SQLite: the bot writes them and cannot write the analytics
+    file at all, since DuckDB takes one writer and the web container holds it.
+    The copies here were empty in production for their whole life, while the
+    backup routine named two of them as protected data — which is how bot.db
+    stayed out of every backup.
+
+    Dropping a table is the one irreversible thing in this ledger, so it is
+    guarded by a count and not by a belief.
+    """
+
+    async def _reset_step(self, store):
+        async with store.connection() as conn:
+            conn.execute(
+                "DELETE FROM schema_migrations WHERE id = '0028_drop_bot_owned_duplicates'"
+            )
+
+    @pytest.mark.asyncio
+    async def test_an_empty_duplicate_is_dropped(self, tmp_path):
+        store = await _make_store(tmp_path, "drop_empty.duckdb")
+        try:
+            async with store.connection() as conn:
+                conn.execute(
+                    "CREATE TABLE celebrated_milestones (period_key VARCHAR)"
+                )
+            await self._reset_step(store)
+            await store._run_migrations()
+
+            async with store.connection() as conn:
+                still_here = conn.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_name = 'celebrated_milestones'"
+                ).fetchone()[0]
+            assert still_here == 0
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_duplicate_with_rows_is_left_alone_and_said_out_loud(
+        self, tmp_path, caplog
+    ):
+        """If any database anywhere does hold rows here, that is worth a human
+        reading — not a DROP."""
+        store = await _make_store(tmp_path, "drop_full.duckdb")
+        try:
+            async with store.connection() as conn:
+                conn.execute(
+                    "CREATE TABLE report_history (user_id BIGINT, report_type VARCHAR)"
+                )
+                conn.execute("INSERT INTO report_history VALUES (1, 'summary')")
+            await self._reset_step(store)
+
+            with caplog.at_level(logging.ERROR):
+                await store._run_migrations()
+
+            async with store.connection() as conn:
+                assert conn.execute(
+                    "SELECT COUNT(*) FROM report_history"
+                ).fetchone()[0] == 1
+            assert any("was NOT dropped" in r.getMessage() for r in caplog.records)
+            assert store.schema_status()["failed"] == [], (
+                "refusing to drop is not a migration failure"
+            )
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_database_never_creates_them(self, tmp_path):
+        """The point of the exercise: they are gone from the schema, not merely
+        emptied. A snapshot of this file should not carry them at all."""
+        store = await _make_store(tmp_path, "fresh.duckdb")
+        try:
+            async with store.connection() as conn:
+                present = {
+                    r[0] for r in conn.execute(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = 'main'"
+                    ).fetchall()
+                }
+            assert not present & {
+                "user_preferences", "report_history", "celebrated_milestones"
+            }
+        finally:
+            await store.close()
