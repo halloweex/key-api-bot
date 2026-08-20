@@ -86,6 +86,11 @@ STUCK_REBUILD_COOLDOWN_SECONDS = 6 * 60 * 60
 # spill to temp_directory.
 DEFAULT_DUCKDB_MEMORY_LIMIT = "4GB"
 
+# Above this many freshly-parsed UTM orders, resolving their dates costs more
+# than the full traffic rebuild it would save, so we just rebuild everything.
+# A parse this large is a backfill or a first run, not a steady-state tick.
+UTM_DATE_LOOKUP_LIMIT = 5000
+
 
 def _memory_limit() -> str:
     """Resolve the DuckDB memory limit from DUCKDB_MEMORY_LIMIT.
@@ -2587,12 +2592,40 @@ class DuckDBStore(
             utm_count = 0
             traffic_rows = 0
             try:
-                utm_count = await self.refresh_utm_silver_layer()
-                # Always full rebuild: UTM parsing may touch dates outside
-                # affected_dates, causing PK conflicts on incremental insert
-                traffic_rows = await self.refresh_traffic_gold_layer(
-                    affected_dates=None,
+                utm_order_ids = await self.refresh_utm_silver_layer()
+                utm_count = len(utm_order_ids)
+
+                # Rebuild the dates that moved, not all 987 of them.
+                #
+                # This passed affected_dates=None unconditionally — a full
+                # DELETE+INSERT of gold_daily_traffic on every one of ~240
+                # refreshes a day. DuckDB cannot reclaim what that leaves
+                # behind while a writer is live: vacuuming deletes needs an
+                # exclusive lock a 2-minute refresh loop never yields, and
+                # `vacuum_rebuild_indexes` is off by default so an indexed
+                # table is skipped anyway. gold_daily_traffic reached 3.86M
+                # stored rows behind 5 781 live ones — 667x amplification,
+                # and the single largest contributor to the ~90 MB a day the
+                # database file grew between weekly compactions.
+                #
+                # The old comment was right that UTM parsing can touch dates
+                # outside affected_dates. The answer is to ask which ones
+                # rather than to avoid the question: refresh_utm_silver_layer
+                # now returns the ids it parsed, so the two sets union.
+                traffic_dates = await self._traffic_rebuild_dates(
+                    affected_dates, utm_order_ids,
                 )
+                if traffic_dates is None or traffic_dates:
+                    traffic_rows = await self.refresh_traffic_gold_layer(
+                        affected_dates=traffic_dates,
+                    )
+                else:
+                    # Nothing moved and nothing parsed — the layer is already
+                    # right. Report its size without rewriting it.
+                    async with self.connection() as conn:
+                        traffic_rows = conn.execute(
+                            "SELECT COUNT(*) FROM gold_daily_traffic"
+                        ).fetchone()[0]
             except Exception as utm_error:
                 logger.warning(f"UTM layer refresh failed (non-critical): {utm_error}")
 
@@ -2662,6 +2695,38 @@ class DuckDBStore(
                 "duration_ms": round(duration_ms, 2),
                 "error": error_msg,
             }
+
+    async def _traffic_rebuild_dates(
+        self,
+        affected_dates: "set[date] | None",
+        utm_order_ids: "set[int]",
+    ) -> "set[date] | None":
+        """Which dates gold_daily_traffic must be rebuilt for.
+
+        `None` means every date. A non-empty set means exactly those. An
+        **empty** set means none at all — and the caller must skip the rebuild
+        rather than pass it on, because refresh_traffic_gold_layer reads a
+        falsy value as "rebuild everything".
+        """
+        if affected_dates is None:
+            # Silver was rebuilt whole, so Gold follows it whole. Same rule
+            # the revenue and products layers already obey above.
+            return None
+
+        dates = set(affected_dates)
+        if not utm_order_ids:
+            return dates
+        if len(utm_order_ids) > UTM_DATE_LOOKUP_LIMIT:
+            return None
+
+        async with self.connection() as conn:
+            ids = list(utm_order_ids)
+            ph = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"SELECT DISTINCT order_date FROM silver_orders WHERE id IN ({ph})",
+                ids,
+            ).fetchall()
+        return dates | {r[0] for r in rows if r[0] is not None}
 
     async def get_warehouse_status(self) -> Dict[str, Any]:
         """Get warehouse layer status for admin monitoring."""

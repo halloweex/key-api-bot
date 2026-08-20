@@ -42,6 +42,22 @@ RETAIL_MANAGER_IDS = [4, 8, 11, 16, 17, 19, 22]
 # manager, so a manager-based rule would silently pull it into retail.
 EXHIBITION_SOURCE_ID = 5
 
+# Two different questions, and conflating them cost ₴266 059 of September 2025
+# revenue that sat in the warehouse and appeared in no dashboard figure.
+#
+# SYNCED_SOURCE_IDS — everything we pull from KeyCRM and reconcile against it.
+# Includes Opencart (3), retired in 2024: its orders are history we still hold,
+# and the comparator must see them on both sides or it reports a phantom drift.
+#
+# REVENUE_SOURCE_IDS — what counts as revenue on the dashboard. Opencart is
+# excluded deliberately; it was decommissioned and its takings are not part of
+# the business anyone is looking at.
+#
+# The invariant is REVENUE_SOURCE_IDS <= SYNCED_SOURCE_IDS, pinned by a test.
+# Revenue can never come from a source we do not sync.
+SYNCED_SOURCE_IDS = (1, 2, 3, 4, 5)
+REVENUE_SOURCE_IDS = (1, 2, 4, 5)
+
 KNOWN_SALES_TYPES = ("retail", "b2b", "internal", "exhibition")
 
 # Timezone for date extraction - KeyCRM stores timestamps in +04:00 (server time)

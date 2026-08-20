@@ -109,7 +109,7 @@ async def backfill_utm(days_back: int = 730):
         conn.execute("DELETE FROM silver_order_utm")
 
     logger.info("Refreshing UTM silver layer...")
-    utm_count = await store.refresh_utm_silver_layer()
+    utm_count = len(await store.refresh_utm_silver_layer())
     logger.info(f"Parsed UTM for {utm_count} orders")
 
     logger.info("Refreshing traffic gold layer...")

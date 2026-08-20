@@ -205,7 +205,7 @@ async def refresh_traffic_data(
     store = await get_store()
 
     try:
-        utm_count = await store.refresh_utm_silver_layer()
+        utm_count = len(await store.refresh_utm_silver_layer())
         traffic_rows = await store.refresh_traffic_gold_layer()
 
         return {
@@ -235,7 +235,7 @@ async def reclassify_traffic(
         async with store.connection() as conn:
             conn.execute("DELETE FROM silver_order_utm")
 
-        utm_count = await store.refresh_utm_silver_layer()
+        utm_count = len(await store.refresh_utm_silver_layer())
         traffic_rows = await store.refresh_traffic_gold_layer()
 
         return {
@@ -352,7 +352,7 @@ async def _run_backfill(days: int):
             ).fetchone()[0]
         logger.info(f"UTM backfill: {remaining_null} orders still have NULL mc (was {null_count})")
 
-        utm_count = await store.refresh_utm_silver_layer()
+        utm_count = len(await store.refresh_utm_silver_layer())
         traffic_rows = await store.refresh_traffic_gold_layer()
 
         logger.info(f"UTM backfill complete: {utm_count} UTM records, {traffic_rows} traffic rows")
