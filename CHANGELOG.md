@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.85
+
+- Name the order line: silver_order_lines (#108)
+
+
 ## 3.0.84
 
 - Resolve a manager's classification as of the order's date (#107)
