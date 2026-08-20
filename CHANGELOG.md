@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.89
+
+- Let the schema ledger reach /api/health (#112)
+
+
 ## 3.0.88
 
 - Give the schema a ledger: migrations run once, and cannot fail in silence (#111)
