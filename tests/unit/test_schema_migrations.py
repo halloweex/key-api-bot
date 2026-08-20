@@ -133,3 +133,40 @@ class TestTheLedger:
             "0006_seed_manager_classifications",
             "0027_reset_sequences_after_compaction",
         }
+
+
+class TestItReachesTheOutside:
+    """A ledger nobody can see is the problem it was built to solve.
+
+    The first cut of this shipped with the field missing from `HealthResponse`,
+    so FastAPI dropped it on the way out and `/api/health` reported `null` —
+    a fact about silent failures, failing silently. Hence this test.
+    """
+
+    def test_health_declares_the_ledger_field(self):
+        from web.schemas import HealthResponse
+
+        assert "migrations" in HealthResponse.model_fields, (
+            "the response model drops any key it does not declare"
+        )
+
+    def test_the_model_keeps_the_ledger_intact(self):
+        """Declaring the field is not enough if the shape gets flattened."""
+        from web.schemas import HealthResponse
+
+        payload = HealthResponse(
+            status="degraded",
+            version="0.0.0",
+            uptime_seconds=1,
+            duckdb={"status": "connected"},
+            migrations={
+                "status": "failed",
+                "applied": 22,
+                "total": 23,
+                "pending": ["0009_gold_daily_traffic_sales_type"],
+                "failed": [{"id": "0009_gold_daily_traffic_sales_type", "error": "boom"}],
+            },
+        ).model_dump()
+
+        assert payload["migrations"]["failed"][0]["error"] == "boom"
+        assert payload["migrations"]["pending"] == ["0009_gold_daily_traffic_sales_type"]

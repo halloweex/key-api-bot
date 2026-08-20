@@ -66,6 +66,14 @@ class HealthResponse(BaseModel):
     data_quality: Optional[Dict[str, DataQualityFreshness]] = Field(
         None, description="Per-layer age of the last successful data-quality run"
     )
+    migrations: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Schema ledger as of connect: how many steps are applied, which are "
+            "pending, and which failed. Named `migrations` rather than `schema` "
+            "because Pydantic already owns that word."
+        ),
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
