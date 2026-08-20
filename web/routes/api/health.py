@@ -93,8 +93,20 @@ async def health_check(request: Request):
     stats = dict(duckdb_stats or {})
     data_quality = stats.pop("data_quality", None)
 
+    # The schema ledger. A migration that fails is retried on the next boot and
+    # never recorded as applied, so it cannot be skipped past — but somebody has
+    # to be able to see it without reading container logs, which is this.
+    try:
+        store = await get_store()
+        schema = store.schema_status()
+    except Exception as e:
+        schema = {"status": "unknown", "error": str(e)}
+
     return {
-        "status": "healthy" if duckdb_stats else "degraded",
+        "status": (
+            "degraded" if not duckdb_stats or schema.get("status") == "failed"
+            else "healthy"
+        ),
         "version": VERSION,
         "uptime_seconds": uptime_seconds,
         "correlation_id": get_correlation_id(),
@@ -104,6 +116,7 @@ async def health_check(request: Request):
             "latency_ms": db_latency_ms,
             **stats
         },
+        "schema": schema,
         "sync": sync_status,
         "data_quality": data_quality,
     }

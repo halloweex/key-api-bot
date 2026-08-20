@@ -394,6 +394,12 @@ class DuckDBStore(
         # Stats for monitoring
         self._total_queries = 0
 
+        # Migrations that failed on the last connect. Empty is the normal state;
+        # non-empty is published on /api/health rather than left in a log line
+        # nobody reads.
+        self._failed_migrations: List[Dict[str, Any]] = []
+        self._schema_status: Dict[str, Any] = {"status": "unknown", "reason": "not connected"}
+
     async def connect(self) -> None:
         """Initialize database connection, schema, and thread pool."""
         DB_DIR.mkdir(parents=True, exist_ok=True)
@@ -1318,652 +1324,128 @@ class DuckDBStore(
         logger.info("DuckDB schema initialized")
 
     async def _run_migrations(self) -> None:
-        """Run database migrations for schema changes."""
-        # Migration 1: Add updated_at column to orders table (for idempotent sync)
-        try:
-            self._connection.execute(
-                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE"
-            )
-            logger.debug("Migration: updated_at column added/verified")
-        except Exception as e:
-            # Column might already exist or ALTER TABLE not supported
-            logger.debug(f"Migration note: {e}")
+        """Apply every pending migration, in order, and record what happened.
 
-        # Migration: Add status_group_id to orders. KeyCRM's own grouping of the
-        # status — 6 is lost/cancel — read off the order payload and preferred
-        # over our hardcoded id list wherever it is known.
-        #
-        # No DEFAULT, deliberately: `ADD COLUMN ... DEFAULT x` rewrites every
-        # row to materialise the value and has OOM-killed this container on a
-        # multi-GB database before. Existing rows get NULL, which is exactly
-        # what the fallback in the Silver CASE expects.
-        try:
-            self._connection.execute(
-                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS status_group_id INTEGER"
-            )
-            logger.debug("Migration: status_group_id column added/verified")
-        except Exception as e:
-            logger.debug(f"Migration note: {e}")
+        This used to be 647 lines of `try / except / logger.debug`: thirty-seven
+        blocks re-run on every boot, any of which could fail leaving nothing
+        above DEBUG behind. The 2026-08-09 incident began exactly there — an
+        ALTER failed quietly, the code read the column anyway, and a one-off
+        became a rebuild every two minutes for hours.
 
-        # Migration: Add manager_comment column to orders table (for UTM tracking)
-        try:
-            self._connection.execute(
-                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS manager_comment TEXT"
-            )
-            logger.debug("Migration: manager_comment column added/verified")
-        except Exception as e:
-            logger.debug(f"Migration note (manager_comment): {e}")
+        The SQL did not change; it lives in `core/migrations.py` now, one named
+        step at a time. What changed is that each step runs **once**, and its
+        outcome is written down. A failure is logged at ERROR, recorded with its
+        message, published on /api/health, and retried on the next boot — it is
+        not recorded as applied, so it cannot be skipped past.
 
-        # Migration: record which mode a refresh actually ran in.
-        #
-        # warehouse_refreshes has 69k rows and is the best forensic trail in
-        # the system, but it never recorded whether Silver was rebuilt whole
-        # or incrementally — so the file growth that forced a weekly
-        # stop-the-world compaction could not be attributed to a cause. Twice
-        # now an estimate has been made by extrapolation and been wrong.
-        #
-        # No DEFAULT: on a table this size, materialising one rewrites every
-        # row and has OOM-ed the container before. Existing rows get NULL,
-        # which reads correctly as "we did not record this".
-        # Migration: drop every index on gold_daily_products.
-        #
-        # They are gone from the schema above; this removes them from databases
-        # that already have them. Existing dead row versions are NOT reclaimed
-        # by the DROP — that needs a vacuum, which needs an exclusive lock a
-        # two-minute refresh loop rarely yields. Growth stops immediately; the
-        # ~197 MB already accumulated comes back at the next window that gets
-        # the lock, or at the weekly compaction.
-        for _idx in (
-            "idx_gold_prod_date", "idx_gold_prod_product", "idx_gold_prod_brand",
-            "idx_gold_prod_category", "idx_gold_prod_cat_date",
-            "idx_gold_prod_brand_date",
-        ):
+        A failed migration does not abort startup. Taking the dashboard and the
+        bot down over one bad ALTER trades a silent failure for a total one; the
+        point is that somebody finds out, and `schema_migrations` plus the health
+        endpoint are how.
+        """
+        from core.migrations import MIGRATIONS, ONCE, SCHEMA_MIGRATIONS_DDL
+
+        self._connection.execute(SCHEMA_MIGRATIONS_DDL)
+        applied = {
+            row[0] for row in self._connection.execute(
+                "SELECT id FROM schema_migrations WHERE outcome = 'applied'"
+            ).fetchall()
+        }
+        self._failed_migrations = []
+        newly_applied = 0
+
+        for migration in MIGRATIONS:
+            if migration.mode == ONCE and migration.id in applied:
+                continue
+            started = time.perf_counter()
             try:
-                self._connection.execute(f"DROP INDEX IF EXISTS {_idx}")
+                migration.run(self)
             except Exception as e:
-                logger.warning("Migration (drop %s) failed: %s", _idx, e)
-
-        try:
-            self._connection.execute(
-                "ALTER TABLE warehouse_refreshes ADD COLUMN IF NOT EXISTS silver_mode VARCHAR"
-            )
-        except Exception as e:
-            # WARNING, not DEBUG. A swallowed ALTER is exactly how the
-            # 2026-08-09 incident began: the migration failed quietly, the
-            # code read the column anyway, and the self-heal turned a one-off
-            # into a rebuild every two minutes for hours.
-            logger.warning("Migration (warehouse_refreshes.silver_mode) failed: %s", e)
-
-        # Migration: freeze today's classification as each manager's first
-        # interval. Runs every startup so a manager who syncs later still gets
-        # a baseline; it never touches a manager who already has one, which is
-        # what keeps a human's forward-dated answer from being overwritten by
-        # the seed that used to fight it.
-        #
-        # 1970-01-01 rather than the manager's first order: the floor has to
-        # precede every order the warehouse will ever hold, and the earliest is
-        # 2023-12-02.
-        try:
-            self._connection.execute("""
-                CREATE TABLE IF NOT EXISTS manager_classifications (
-                    manager_id INTEGER NOT NULL,
-                    is_retail BOOLEAN NOT NULL,
-                    valid_from DATE NOT NULL,
-                    valid_to DATE,
-                    set_by INTEGER,
-                    set_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    note VARCHAR,
-                    PRIMARY KEY (manager_id, valid_from)
+                elapsed = (time.perf_counter() - started) * 1000
+                logger.error(
+                    "Migration %s FAILED after %.0f ms: %s",
+                    migration.id, elapsed, e, exc_info=True,
                 )
-            """)
-            seeded = self._connection.execute("""
-                INSERT INTO manager_classifications
-                    (manager_id, is_retail, valid_from, valid_to, set_by, note)
-                SELECT m.id, COALESCE(m.is_retail, FALSE), DATE '1970-01-01',
-                       NULL, NULL, 'baseline frozen from managers.is_retail'
-                FROM managers m
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM manager_classifications mc
-                    WHERE mc.manager_id = m.id
-                )
-                RETURNING manager_id
-            """).fetchall()
-            if seeded:
-                logger.info(
-                    "Migration: seeded %d manager classification baselines",
-                    len(seeded),
-                )
-        except Exception as e:
-            # WARNING, not DEBUG: if this table is empty the Silver CASE falls
-            # back to `managers.is_retail` and the as-of-date guarantee is
-            # quietly gone. That is precisely the failure mode this project has
-            # already paid for once.
-            logger.warning("Migration (manager_classifications seed) failed: %s", e)
+                self._failed_migrations.append({"id": migration.id, "error": str(e)})
+                self._record_migration(migration.id, "failed", elapsed, str(e))
+                continue
 
-        # Migration 2: Recreate order_products without FK constraint (DuckDB FK bug workaround)
-        try:
-            # Check if FK constraint exists
-            has_fk = False
-            try:
-                result = self._connection.execute("""
-                    SELECT COUNT(*) FROM duckdb_constraints()
-                    WHERE table_name = 'order_products' AND constraint_type = 'FOREIGN KEY'
-                """).fetchone()
-                has_fk = result[0] > 0 if result else False
-            except Exception:
-                # duckdb_constraints() might not be available, check by trying a test delete
-                # If FK exists, we need to remove it
-                logger.debug("duckdb_constraints() not available, checking FK via schema")
-                # Alternative: check if REFERENCES exists in table definition
-                try:
-                    schema = self._connection.execute("""
-                        SELECT sql FROM sqlite_master WHERE type='table' AND name='order_products'
-                    """).fetchone()
-                    if schema and 'REFERENCES' in str(schema[0]).upper():
-                        has_fk = True
-                except Exception:
-                    # Try pragma approach
-                    try:
-                        fk_list = self._connection.execute("PRAGMA foreign_key_list('order_products')").fetchall()
-                        has_fk = len(fk_list) > 0
-                    except Exception:
-                        pass
+            elapsed = (time.perf_counter() - started) * 1000
+            if migration.mode == ONCE:
+                self._record_migration(migration.id, "applied", elapsed, None)
+                newly_applied += 1
+                logger.info("Migration %s applied in %.0f ms", migration.id, elapsed)
 
-            if has_fk:
-                logger.info("Migration: Removing FK constraint from order_products...")
-                self._connection.execute("BEGIN TRANSACTION")
-                try:
-                    # Backup data
-                    self._connection.execute("""
-                        CREATE TABLE order_products_backup AS SELECT * FROM order_products
-                    """)
-                    # Drop old table
-                    self._connection.execute("DROP TABLE order_products")
-                    # Create new table without FK
-                    self._connection.execute("""
-                        CREATE TABLE order_products (
-                            id INTEGER PRIMARY KEY,
-                            order_id INTEGER NOT NULL,
-                            product_id INTEGER,
-                            name VARCHAR NOT NULL,
-                            quantity INTEGER NOT NULL,
-                            price_sold DECIMAL(12, 2) NOT NULL
-                        )
-                    """)
-                    # Restore data
-                    self._connection.execute("""
-                        INSERT INTO order_products SELECT * FROM order_products_backup
-                    """)
-                    # Drop backup
-                    self._connection.execute("DROP TABLE order_products_backup")
-                    self._connection.execute("COMMIT")
-                    logger.info("Migration: order_products FK constraint removed successfully")
-                except Exception as e:
-                    self._connection.execute("ROLLBACK")
-                    logger.error(f"Migration failed (FK removal), rolling back: {e}")
-                    raise
-        except Exception as e:
-            logger.error(f"Migration error (order_products FK removal): {e}")
+        if newly_applied:
+            logger.info("Schema: %d migration(s) applied this start", newly_applied)
+        if self._failed_migrations:
+            logger.error(
+                "Schema: %d migration(s) FAILED: %s",
+                len(self._failed_migrations),
+                ", ".join(m["id"] for m in self._failed_migrations),
+            )
 
-        # Migration 3: Remove FK from expenses table (same DuckDB bug)
-        try:
-            has_fk = False
-            try:
-                result = self._connection.execute("""
-                    SELECT COUNT(*) FROM duckdb_constraints()
-                    WHERE table_name = 'expenses' AND constraint_type = 'FOREIGN KEY'
-                """).fetchone()
-                has_fk = result[0] > 0 if result else False
-            except Exception:
-                # Fallback: check via PRAGMA
-                try:
-                    fk_list = self._connection.execute("PRAGMA foreign_key_list('expenses')").fetchall()
-                    has_fk = len(fk_list) > 0
-                except Exception:
-                    pass
+        self._schema_status = self._read_schema_status()
 
-            if has_fk:
-                logger.info("Migration: Removing FK constraint from expenses...")
-                self._connection.execute("BEGIN TRANSACTION")
-                try:
-                    self._connection.execute("""
-                        CREATE TABLE expenses_backup AS SELECT * FROM expenses
-                    """)
-                    self._connection.execute("DROP TABLE expenses")
-                    self._connection.execute("""
-                        CREATE TABLE expenses (
-                            id INTEGER PRIMARY KEY,
-                            order_id INTEGER NOT NULL,
-                            expense_type_id INTEGER,
-                            amount DECIMAL(12, 2) NOT NULL,
-                            description VARCHAR,
-                            status VARCHAR,
-                            payment_date TIMESTAMP WITH TIME ZONE,
-                            created_at TIMESTAMP WITH TIME ZONE,
-                            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """)
-                    self._connection.execute("""
-                        INSERT INTO expenses SELECT * FROM expenses_backup
-                    """)
-                    self._connection.execute("DROP TABLE expenses_backup")
-                    self._connection.execute("COMMIT")
-                    logger.info("Migration: expenses FK constraint removed successfully")
-                except Exception as e:
-                    self._connection.execute("ROLLBACK")
-                    logger.error(f"Migration failed (expenses FK removal), rolling back: {e}")
-                    raise
-        except Exception as e:
-            logger.error(f"Migration error (expenses FK removal): {e}")
+    def _record_migration(
+        self, migration_id: str, outcome: str, duration_ms: float, error: Optional[str]
+    ) -> None:
+        """Write one row to the ledger. If *this* fails, say so loudly.
 
-        # Migration: Add sales_type column to gold_daily_traffic
+        A ledger that cannot be written is indistinguishable from a migration
+        that never ran, and the next boot would replay the step. That is safe —
+        every step is idempotent — but it is not something to discover later.
+        """
         try:
             self._connection.execute(
-                "ALTER TABLE gold_daily_traffic ADD COLUMN IF NOT EXISTS sales_type VARCHAR NOT NULL DEFAULT 'retail'"
+                "DELETE FROM schema_migrations WHERE id = ?", [migration_id]
             )
-            logger.debug("Migration: sales_type column added/verified on gold_daily_traffic")
+            self._connection.execute(
+                "INSERT INTO schema_migrations "
+                "(id, applied_at, duration_ms, outcome, error_message) "
+                "VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?)",
+                [migration_id, round(duration_ms, 2), outcome, error],
+            )
         except Exception as e:
-            logger.debug(f"Migration note (gold_daily_traffic sales_type): {e}")
+            logger.error("Could not record migration %s in the ledger: %s", migration_id, e)
 
-        # Migration: Add platform column to manual_expenses (for ad spend tracking)
+    def schema_status(self) -> Dict[str, Any]:
+        """What the ledger knew at connect time, for /api/health.
+
+        Returns the snapshot taken during `_run_migrations` rather than querying.
+        The ledger only changes when migrations run, which is once per process,
+        and `/api/health` is served from the event loop while a refresh may be
+        using the one DuckDB connection from the executor — reading here would be
+        two threads on a connection that is not thread-safe, for a table whose
+        contents cannot have changed.
+        """
+        return dict(self._schema_status)
+
+    def _read_schema_status(self) -> Dict[str, Any]:
+        """Snapshot the ledger. Called once, from `_run_migrations`.
+
+        `pending` and `failed` are kept apart on purpose: a step that has never
+        run and a step that ran and blew up look identical from outside unless
+        somebody says which is which.
+        """
+        from core.migrations import MIGRATIONS, ONCE
+
         try:
-            self._connection.execute(
-                "ALTER TABLE manual_expenses ADD COLUMN IF NOT EXISTS platform VARCHAR"
-            )
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_manual_expenses_platform ON manual_expenses(platform)"
-            )
-            # Backfill existing marketing rows
-            self._connection.execute("""
-                UPDATE manual_expenses SET platform = CASE
-                    WHEN LOWER(expense_type) LIKE '%facebook%' OR LOWER(expense_type) LIKE '%fb %' THEN 'facebook'
-                    WHEN LOWER(expense_type) LIKE '%tiktok%' THEN 'tiktok'
-                    WHEN LOWER(expense_type) LIKE '%google%' THEN 'google'
-                END WHERE category = 'marketing' AND platform IS NULL
-            """)
-            logger.debug("Migration: platform column added/verified on manual_expenses")
+            rows = self._connection.execute(
+                "SELECT id, outcome FROM schema_migrations"
+            ).fetchall()
         except Exception as e:
-            logger.debug(f"Migration note (manual_expenses platform): {e}")
+            return {"status": "unknown", "error": str(e)}
+        applied = {r[0] for r in rows if r[1] == "applied"}
+        once = [m.id for m in MIGRATIONS if m.mode == ONCE]
+        return {
+            "status": "failed" if self._failed_migrations else "ok",
+            "applied": len(applied),
+            "total": len(once),
+            "pending": [m for m in once if m not in applied],
+            "failed": list(self._failed_migrations),
+        }
 
-        # Migration: order_products.id INTEGER → BIGINT (overflow safety)
-        try:
-            col_type = self._connection.execute("""
-                SELECT data_type FROM information_schema.columns
-                WHERE table_name = 'order_products' AND column_name = 'id'
-            """).fetchone()
-            if col_type and col_type[0] == 'INTEGER':
-                logger.info("Migration: order_products.id INTEGER → BIGINT")
-                self._connection.execute("BEGIN TRANSACTION")
-                try:
-                    self._connection.execute("CREATE TABLE order_products_new AS SELECT * FROM order_products")
-                    self._connection.execute("DROP TABLE order_products")
-                    self._connection.execute("""
-                        CREATE TABLE order_products (
-                            id BIGINT PRIMARY KEY,
-                            order_id INTEGER NOT NULL,
-                            product_id INTEGER,
-                            name VARCHAR NOT NULL,
-                            quantity INTEGER NOT NULL,
-                            price_sold DECIMAL(12, 2) NOT NULL
-                        )
-                    """)
-                    self._connection.execute("INSERT INTO order_products SELECT * FROM order_products_new")
-                    self._connection.execute("DROP TABLE order_products_new")
-                    self._connection.execute("CREATE INDEX IF NOT EXISTS idx_order_products_order ON order_products(order_id)")
-                    self._connection.execute("CREATE INDEX IF NOT EXISTS idx_order_products_product ON order_products(product_id)")
-                    self._connection.execute("COMMIT")
-                    logger.info("Migration: order_products.id BIGINT migration complete")
-                except Exception as e:
-                    self._connection.execute("ROLLBACK")
-                    logger.error(f"Migration failed (order_products BIGINT), rolling back: {e}")
-                    raise
-        except Exception as e:
-            logger.debug(f"Migration note (order_products BIGINT): {e}")
-
-        # Migration: Recreate offer_stocks with PRIMARY KEY if missing
-        # (CREATE TABLE IF NOT EXISTS doesn't alter existing tables, so old tables
-        # may lack PK constraint. This enables INSERT OR REPLACE instead of DELETE+INSERT.)
-        try:
-            has_pk = False
-            try:
-                result = self._connection.execute("""
-                    SELECT COUNT(*) FROM duckdb_constraints()
-                    WHERE table_name = 'offer_stocks' AND constraint_type = 'PRIMARY KEY'
-                """).fetchone()
-                has_pk = result[0] > 0
-            except Exception:
-                pass
-
-            if not has_pk:
-                logger.info("Migration: Adding PRIMARY KEY to offer_stocks...")
-                self._connection.execute("BEGIN TRANSACTION")
-                try:
-                    self._connection.execute("ALTER TABLE offer_stocks RENAME TO _offer_stocks_old")
-                    self._connection.execute("""
-                        CREATE TABLE offer_stocks (
-                            id INTEGER PRIMARY KEY,
-                            sku VARCHAR,
-                            price DECIMAL(12, 2),
-                            purchased_price DECIMAL(12, 2),
-                            quantity INTEGER DEFAULT 0,
-                            reserve INTEGER DEFAULT 0,
-                            synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """)
-                    self._connection.execute("""
-                        INSERT INTO offer_stocks SELECT * FROM _offer_stocks_old
-                    """)
-                    self._connection.execute("DROP TABLE _offer_stocks_old")
-                    self._connection.execute("COMMIT")
-                    logger.info("Migration: offer_stocks PRIMARY KEY migration complete")
-                except Exception as e:
-                    try:
-                        self._connection.execute("ROLLBACK")
-                    except Exception:
-                        pass
-                    logger.error(f"Migration failed (offer_stocks PK), rolling back: {e}")
-        except Exception as e:
-            logger.debug(f"Migration note (offer_stocks PK): {e}")
-
-        # Migration: what a campaign cost to send.
-        #
-        # Without these the results page can report added margin but not whether
-        # the campaign paid for itself — on the first real send that arithmetic
-        # was done in someone's head against a figure from the provider's
-        # invoice. The price is stored per campaign rather than read from config
-        # at display time, so a tariff change does not silently restate history.
-        #
-        # No DEFAULT on any of them: ALTER ... ADD COLUMN ... DEFAULT rewrites
-        # the whole table to materialise the value and has OOMed this database
-        # before. Existing campaigns get NULL, which reads as "cost unknown".
-        for col, ddl in (
-            ("message_text", "VARCHAR"),
-            ("message_parts", "INTEGER"),
-            ("recipients_sent", "INTEGER"),
-            ("price_per_part", "DECIMAL(10, 4)"),
-            ("cost_total", "DECIMAL(14, 2)"),
-        ):
-            try:
-                self._connection.execute(
-                    f"ALTER TABLE sms_campaigns ADD COLUMN IF NOT EXISTS {col} {ddl}"
-                )
-            except Exception as e:
-                logger.debug(f"Migration note (sms_campaigns {col}): {e}")
-        logger.debug("Migration: sms_campaigns cost columns added/verified")
-
-        # Migration: Add last_stock_out_at column to sku_inventory_status
-        try:
-            self._connection.execute(
-                "ALTER TABLE sku_inventory_status ADD COLUMN IF NOT EXISTS last_stock_out_at DATE"
-            )
-            logger.debug("Migration: last_stock_out_at column added/verified on sku_inventory_status")
-        except Exception as e:
-            logger.debug(f"Migration note (sku_inventory_status last_stock_out_at): {e}")
-
-        # Migration: Add model_wape column to revenue_predictions
-        try:
-            self._connection.execute(
-                "ALTER TABLE revenue_predictions ADD COLUMN IF NOT EXISTS model_wape DECIMAL(6, 2)"
-            )
-            logger.debug("Migration: model_wape column added/verified on revenue_predictions")
-        except Exception as e:
-            logger.debug(f"Migration note (revenue_predictions model_wape): {e}")
-
-        # Migration: delivery columns on sms_campaign_members.
-        #
-        # The table ships from CREATE TABLE IF NOT EXISTS, which does nothing to
-        # a table that already exists — so a database created before the
-        # TurboSMS work has the roster but none of the delivery columns, and
-        # every delivery report 500s. No DEFAULT on these: ALTER TABLE ... ADD
-        # COLUMN ... DEFAULT rewrites the whole table and OOMs on a large DB.
-        for column, ddl_type in (
-            ("message_id", "VARCHAR"),
-            ("delivery_status", "VARCHAR"),
-            ("delivered", "BOOLEAN"),
-            ("delivered_at", "TIMESTAMP WITH TIME ZONE"),
-        ):
-            try:
-                self._connection.execute(
-                    f"ALTER TABLE sms_campaign_members "
-                    f"ADD COLUMN IF NOT EXISTS {column} {ddl_type}"
-                )
-                logger.debug(
-                    "Migration: %s column added/verified on sms_campaign_members",
-                    column,
-                )
-            except Exception as e:
-                logger.debug(f"Migration note (sms_campaign_members {column}): {e}")
-
-        # Index on message_id, created here rather than with the other indexes
-        # because on a database that predates the TurboSMS work the column only
-        # exists once the loop above has run. Every delivery report looks a
-        # member up by message_id, and a send of 5 000 produces 5 000 of them
-        # inside a minute; without this each one scans the whole table.
-        try:
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sms_members_message_id "
-                "ON sms_campaign_members(message_id)"
-            )
-        except Exception as e:
-            logger.debug(f"Migration note (idx_sms_members_message_id): {e}")
-
-        # Migration: Add language column to user_preferences
-        try:
-            self._connection.execute(
-                "ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS language VARCHAR DEFAULT 'en'"
-            )
-            logger.debug("Migration: language column added/verified on user_preferences")
-        except Exception as e:
-            logger.debug(f"Migration note (user_preferences language): {e}")
-
-        # Migration: Add promocode column to orders and silver_orders
-        try:
-            self._connection.execute(
-                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS promocode VARCHAR"
-            )
-            self._connection.execute(
-                "ALTER TABLE silver_orders ADD COLUMN IF NOT EXISTS promocode VARCHAR"
-            )
-            logger.debug("Migration: promocode column added/verified on orders and silver_orders")
-        except Exception as e:
-            logger.debug(f"Migration note (promocode): {e}")
-
-        # Migration: Add audit columns to orders (first_seen_at, update_count)
-        # No DEFAULT in ALTER — avoids full table rewrite on 9GB+ DB (OOM).
-        # CREATE TABLE schema has defaults for new rows; existing rows get NULL/NULL.
-        try:
-            self._connection.execute(
-                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMP WITH TIME ZONE"
-            )
-            self._connection.execute(
-                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS update_count INTEGER"
-            )
-            logger.debug("Migration: audit columns (first_seen_at, update_count) added/verified on orders")
-        except Exception as e:
-            logger.debug(f"Migration note (audit columns): {e}")
-
-        # Migration: Add reconciliation_log table
-        try:
-            self._connection.execute(
-                "CREATE SEQUENCE IF NOT EXISTS reconciliation_seq START 1"
-            )
-            self._connection.execute("""
-                CREATE TABLE IF NOT EXISTS reconciliation_log (
-                    id INTEGER DEFAULT(nextval('reconciliation_seq')),
-                    check_date DATE NOT NULL,
-                    api_count INTEGER NOT NULL,
-                    db_count INTEGER NOT NULL,
-                    discrepancy INTEGER NOT NULL,
-                    discrepancy_pct DECIMAL(6, 2) NOT NULL,
-                    status VARCHAR NOT NULL,
-                    checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            logger.debug("Migration: reconciliation_log table added/verified")
-        except Exception as e:
-            logger.debug(f"Migration note (reconciliation_log): {e}")
-
-        # Migration: Data Quality framework (Layer 1+2) — run+diff schema.
-        # Replaces single-row-per-check pattern with proper run/diff
-        # parent-child for trend and audit. Old reconciliation_log stays.
-        try:
-            self._connection.execute(
-                "CREATE SEQUENCE IF NOT EXISTS data_quality_run_seq START 1"
-            )
-            self._connection.execute("""
-                CREATE TABLE IF NOT EXISTS data_quality_runs (
-                    run_id BIGINT PRIMARY KEY DEFAULT(nextval('data_quality_run_seq')),
-                    started_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                    ended_at TIMESTAMP WITH TIME ZONE,
-                    as_of TIMESTAMP WITH TIME ZONE NOT NULL,
-                    window_start DATE NOT NULL,
-                    window_end DATE NOT NULL,
-                    layer VARCHAR NOT NULL,          -- 'integrity' | 'reconciliation' | 'combined'
-                    status VARCHAR NOT NULL,          -- 'PASS' | 'WARN' | 'CRITICAL' | 'FAILED'
-                    integrity_issues_count INTEGER DEFAULT 0,
-                    discrepancies_count INTEGER DEFAULT 0,
-                    critical_count INTEGER DEFAULT 0,
-                    warn_count INTEGER DEFAULT 0,
-                    api_calls_used INTEGER DEFAULT 0,
-                    duration_ms INTEGER,
-                    error_message VARCHAR
-                )
-            """)
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_dqr_started_at ON data_quality_runs(started_at DESC)"
-            )
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_dqr_layer ON data_quality_runs(layer)"
-            )
-
-            # Child table: layer-1 issues
-            self._connection.execute("""
-                CREATE TABLE IF NOT EXISTS data_quality_issues (
-                    run_id BIGINT NOT NULL,
-                    check_name VARCHAR NOT NULL,
-                    table_name VARCHAR NOT NULL,
-                    severity VARCHAR NOT NULL,
-                    count INTEGER NOT NULL,
-                    sample_ids VARCHAR,    -- JSON array
-                    description VARCHAR
-                )
-            """)
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_dqi_run ON data_quality_issues(run_id)"
-            )
-
-            # Child table: layer-2 discrepancies
-            self._connection.execute("""
-                CREATE TABLE IF NOT EXISTS data_quality_diffs (
-                    run_id BIGINT NOT NULL,
-                    month VARCHAR NOT NULL,        -- 'YYYY-MM'
-                    source_id INTEGER NOT NULL,
-                    diff_class VARCHAR NOT NULL,
-                    field VARCHAR NOT NULL,
-                    dk_value DOUBLE NOT NULL,
-                    kc_value DOUBLE NOT NULL,
-                    severity VARCHAR NOT NULL,
-                    order_ids VARCHAR              -- JSON array, may be NULL
-                )
-            """)
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_dqd_run ON data_quality_diffs(run_id)"
-            )
-            logger.debug("Migration: data_quality_* tables added/verified")
-        except Exception as e:
-            logger.debug(f"Migration note (data_quality_*): {e}")
-
-        # Migration: disk samples for the growth watchdog.
-        # Tiny table — one row per 6h sample, retained ~14 days = ~56 rows.
-        # No sequence: composite of sampled_at is enough; nobody queries by id.
-        try:
-            self._connection.execute("""
-                CREATE TABLE IF NOT EXISTS disk_samples (
-                    sampled_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                    db_size_mb DOUBLE NOT NULL,
-                    disk_pct_used DOUBLE NOT NULL,
-                    disk_free_gb DOUBLE NOT NULL
-                )
-            """)
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_disk_samples_at "
-                "ON disk_samples(sampled_at DESC)"
-            )
-            logger.debug("Migration: disk_samples table added/verified")
-        except Exception as e:
-            logger.debug(f"Migration note (disk_samples): {e}")
-
-        # Same shape, for memory. Persisted because the kernel's own counters
-        # (memory.peak, memory.events oom_kill) reset when the container is
-        # recreated — which is how a 5.3 GB reading in August 2026 became
-        # impossible to decompose an hour later.
-        try:
-            self._connection.execute("""
-                CREATE TABLE IF NOT EXISTS memory_samples (
-                    sampled_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                    working_set_mb DOUBLE NOT NULL,
-                    page_cache_mb DOUBLE NOT NULL,
-                    limit_mb DOUBLE,
-                    oom_kills INTEGER NOT NULL DEFAULT 0
-                )
-            """)
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memory_samples_at "
-                "ON memory_samples(sampled_at DESC)"
-            )
-            logger.debug("Migration: memory_samples table added/verified")
-        except Exception as e:
-            logger.debug(f"Migration note (memory_samples): {e}")
-
-        # One row per path group per sample. The growth detector differences
-        # this at a 168h lag — the compact's own period — so everything
-        # periodic cancels and only trend survives.
-        try:
-            self._connection.execute("""
-                CREATE TABLE IF NOT EXISTS data_dir_samples (
-                    sampled_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                    path_group VARCHAR NOT NULL,
-                    bytes BIGINT NOT NULL
-                )
-            """)
-            self._connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_data_dir_samples_at "
-                "ON data_dir_samples(sampled_at DESC)"
-            )
-            logger.debug("Migration: data_dir_samples table added/verified")
-        except Exception as e:
-            logger.debug(f"Migration note (data_dir_samples): {e}")
-
-        # Migration: Fix sequences after EXPORT/IMPORT compaction.
-        # DuckDB doesn't support ALTER SEQUENCE, and IMPORT resets sequences to
-        # START value (1) even though tables already have rows. Fix by DROP+CREATE
-        # with START = max(id) + 1.
-        _seq_table_map = [
-            ("warehouse_refresh_seq", "warehouse_refreshes", "id"),
-            ("reconciliation_seq", "reconciliation_log", "id"),
-            ("data_quality_run_seq", "data_quality_runs", "run_id"),
-            ("seq_stock_movements_id", "stock_movements", "id"),
-            ("seq_buyer_contacts_id", "buyer_contacts", "id"),
-            ("seq_manual_expenses_id", "manual_expenses", "id"),
-            ("seq_report_history_id", "report_history", "id"),
-            ("seq_bronze_order_events_id", "bronze_order_events", "id"),
-        ]
-        for seq_name, table_name, col in _seq_table_map:
-            try:
-                row = self._connection.execute(
-                    f"SELECT COALESCE(MAX({col}), 0) FROM {table_name}"
-                ).fetchone()
-                max_id = row[0] if row else 0
-                if max_id > 0:
-                    # Check current sequence value by peeking at nextval
-                    cur = self._connection.execute(f"SELECT nextval('{seq_name}')").fetchone()[0]
-                    if cur <= max_id:
-                        new_start = max_id + 1
-                        self._connection.execute(f"DROP SEQUENCE {seq_name}")
-                        self._connection.execute(f"CREATE SEQUENCE {seq_name} START {new_start}")
-                        logger.info(f"Sequence {seq_name} reset: {cur} → {new_start}")
-            except Exception as e:
-                logger.debug(f"Sequence fix note ({seq_name}): {e}")
 
     async def _create_inventory_views(self) -> None:
         """Create Layer 3 & 4 analytics views for inventory."""
