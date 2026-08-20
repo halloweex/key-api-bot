@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, date
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
+from zoneinfo import ZoneInfo
 
 import duckdb
 import pandas as pd
@@ -157,14 +158,33 @@ def silver_sales_type_case() -> str:
     The exhibition branch is first on purpose: that fair was staffed by a
     retail manager, so a manager-based rule would quietly pull a one-off
     channel into the retail trend it would distort.
+
+    **Retail is resolved as of the order's own date**, from
+    `manager_classifications`, not from the manager's classification today.
+    Reclassifying somebody used to rewrite their whole history on the next
+    rebuild — the owner ruled that out on 2026-08-20. The two fallbacks below
+    keep a manager nobody has ever classified behaving exactly as before: the
+    first for a manager with no interval, the second for a database whose
+    `managers` table has not synced yet.
     """
     manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
+    order_date = _date_in_kyiv("o.ordered_at")
     return f"""CASE
             WHEN o.source_id = {EXHIBITION_SOURCE_ID} THEN 'exhibition'
             WHEN o.manager_id IS NULL THEN 'retail'
             WHEN o.manager_id = {B2B_MANAGER_ID} THEN 'b2b'
-            WHEN o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'
-            WHEN NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
+            WHEN EXISTS (
+                     SELECT 1 FROM manager_classifications mc
+                     WHERE mc.manager_id = o.manager_id
+                       AND mc.is_retail
+                       AND {order_date} >= mc.valid_from
+                       AND (mc.valid_to IS NULL OR {order_date} < mc.valid_to)
+                 ) THEN 'retail'
+            WHEN NOT EXISTS (SELECT 1 FROM manager_classifications mc
+                             WHERE mc.manager_id = o.manager_id)
+                 AND o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'
+            WHEN NOT EXISTS (SELECT 1 FROM manager_classifications)
+                 AND NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
                  AND o.manager_id IN ({manager_list}) THEN 'retail'
             ELSE 'internal'
         END"""
@@ -822,6 +842,31 @@ class DuckDBStore(
             synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Manager classification, effective-dated. `managers.is_retail` is the
+        -- current answer; this is the answer *as of the order's date*.
+        --
+        -- Until 2026-08-20 a reclassification silently restated every report
+        -- ever written: `sales_type` is materialised from the manager's state
+        -- at rebuild time, so flipping one manager rewrote last year's numbers
+        -- on the next refresh. Nobody chose that. The owner chose as-of-order-
+        -- date: existing history is frozen as the first interval and a change
+        -- applies forward only.
+        --
+        -- `valid_from` is inclusive, `valid_to` exclusive, NULL means open.
+        -- The PRIMARY KEY costs nothing here despite the ART-index rule that
+        -- governs the Gold tables: that cost is paid per DELETE+INSERT rebuild
+        -- cycle, and this table is written by hand a few times a year.
+        CREATE TABLE IF NOT EXISTS manager_classifications (
+            manager_id INTEGER NOT NULL,
+            is_retail BOOLEAN NOT NULL,
+            valid_from DATE NOT NULL,
+            valid_to DATE,
+            set_by INTEGER,                       -- admin user id; NULL = seeded baseline
+            set_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            note VARCHAR,
+            PRIMARY KEY (manager_id, valid_from)
+        );
+
         -- Buyers/Customers table (synced from KeyCRM)
         CREATE TABLE IF NOT EXISTS buyers (
             -- Core
@@ -1287,6 +1332,52 @@ class DuckDBStore(
             # code read the column anyway, and the self-heal turned a one-off
             # into a rebuild every two minutes for hours.
             logger.warning("Migration (warehouse_refreshes.silver_mode) failed: %s", e)
+
+        # Migration: freeze today's classification as each manager's first
+        # interval. Runs every startup so a manager who syncs later still gets
+        # a baseline; it never touches a manager who already has one, which is
+        # what keeps a human's forward-dated answer from being overwritten by
+        # the seed that used to fight it.
+        #
+        # 1970-01-01 rather than the manager's first order: the floor has to
+        # precede every order the warehouse will ever hold, and the earliest is
+        # 2023-12-02.
+        try:
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS manager_classifications (
+                    manager_id INTEGER NOT NULL,
+                    is_retail BOOLEAN NOT NULL,
+                    valid_from DATE NOT NULL,
+                    valid_to DATE,
+                    set_by INTEGER,
+                    set_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    note VARCHAR,
+                    PRIMARY KEY (manager_id, valid_from)
+                )
+            """)
+            seeded = self._connection.execute("""
+                INSERT INTO manager_classifications
+                    (manager_id, is_retail, valid_from, valid_to, set_by, note)
+                SELECT m.id, COALESCE(m.is_retail, FALSE), DATE '1970-01-01',
+                       NULL, NULL, 'baseline frozen from managers.is_retail'
+                FROM managers m
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM manager_classifications mc
+                    WHERE mc.manager_id = m.id
+                )
+                RETURNING manager_id
+            """).fetchall()
+            if seeded:
+                logger.info(
+                    "Migration: seeded %d manager classification baselines",
+                    len(seeded),
+                )
+        except Exception as e:
+            # WARNING, not DEBUG: if this table is empty the Silver CASE falls
+            # back to `managers.is_retail` and the as-of-date guarantee is
+            # quietly gone. That is precisely the failure mode this project has
+            # already paid for once.
+            logger.warning("Migration (manager_classifications seed) failed: %s", e)
 
         # Migration 2: Recreate order_products without FK constraint (DuckDB FK bug workaround)
         try:
@@ -2193,33 +2284,42 @@ class DuckDBStore(
         logger.info("Inventory analytics views created")
 
     def _build_sales_type_filter(self, sales_type: str, table_alias: str = "o") -> str:
-        """Build SQL clause for retail/b2b/all filtering based on manager_id.
+        """Build the SQL clause selecting one `sales_type`, for any orders-shaped table.
 
-        Uses managers table if populated, otherwise falls back to hardcoded RETAIL_MANAGER_IDS.
+        This reads the answer Silver already stored; it does **not** re-derive
+        it from `manager_id`. Deriving it a second time was a second definition
+        in all but name, and the two had already parted company: #101 gave
+        source 5 its own `sales_type`, and this filter — knowing only about
+        managers — went on counting those 176 orders (₴267,416) as retail while
+        Gold counted them as exhibition. Ten of its eleven call sites query raw
+        `orders`, which is how a Gold-free corner of the dashboard ended up with
+        its own opinion.
+
+        Reading the column also makes the classification as-of-order-date for
+        every consumer at once, which is the whole point of
+        `manager_classifications`.
+
+        Silver covers every order — 46,272 of 46,272, verified 2026-08-20 — so
+        the EXISTS excludes nothing the old clause admitted.
 
         Args:
-            sales_type: 'retail', 'b2b', or 'all'
-            table_alias: Table alias for orders table (default 'o')
+            sales_type: one of KNOWN_SALES_TYPES, or 'all' for no filter
+            table_alias: alias of the orders-shaped table to constrain
 
         Returns:
             SQL WHERE clause fragment
         """
         if sales_type == "all":
-            # All = no manager filter
             return "1=1"
-        elif sales_type == "b2b":
-            # B2B = only Olga D (manager_id = 15)
-            return f"{table_alias}.manager_id = {B2B_MANAGER_ID}"
-        else:
-            # Retail = managers marked as retail + Shopify orders (NULL manager)
-            # Uses managers table with fallback to hardcoded IDs if table is empty
-            manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
-            return f"""(
-                {table_alias}.manager_id IS NULL
-                OR {table_alias}.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE)
-                OR (NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
-                    AND {table_alias}.manager_id IN ({manager_list}))
-            )"""
+        if sales_type not in KNOWN_SALES_TYPES:
+            raise ValueError(
+                f"unknown sales_type {sales_type!r}; expected one of "
+                f"{', '.join(KNOWN_SALES_TYPES)} or 'all'"
+            )
+        return (
+            f"EXISTS (SELECT 1 FROM silver_orders sv "
+            f"WHERE sv.id = {table_alias}.id AND sv.sales_type = '{sales_type}')"
+        )
 
     # ─── Warehouse Layer Refresh ─────────────────────────────────────────────
 
@@ -4102,7 +4202,14 @@ class DuckDBStore(
             logger.info(f"Updated manager statistics")
             return count[0] if count else 0
 
-    async def set_manager_retail_status(self, manager_id: int, is_retail: bool) -> None:
+    async def set_manager_retail_status(
+        self,
+        manager_id: int,
+        is_retail: bool,
+        effective_from: Optional[date] = None,
+        set_by: Optional[int] = None,
+        note: Optional[str] = None,
+    ) -> None:
         """Update retail status for a specific manager.
 
         `sales_type` is materialised into silver_orders by one CASE at rebuild
@@ -4112,19 +4219,56 @@ class DuckDBStore(
         remembered — the route has always done it, and the method has always
         let anyone else forget.
 
-        Full scope, not an id list: the classification applies to every order
-        the manager ever took.
+        **Forward-dated, not retroactive.** The open interval is closed at
+        `effective_from` and a new one opened, so orders before that date keep
+        the answer they were given. This used to be a single UPDATE, which
+        restated every report the manager had ever appeared in the moment the
+        warehouse rebuilt — the owner ruled that out on 2026-08-20. Pass an
+        explicit `effective_from` to correct a genuine misclassification
+        backwards; that is now a deliberate act rather than the only behaviour.
+
+        `managers.is_retail` is kept in step as the current answer, because the
+        manager list and the seeding path both read it.
 
         Args:
             manager_id: Manager ID to update
             is_retail: TRUE for retail, FALSE for B2B/other
+            effective_from: first order date the new answer applies to;
+                defaults to today in the display timezone
+            set_by: admin user id, recorded for the audit trail
+            note: free-text reason, recorded alongside
         """
+        if effective_from is None:
+            effective_from = datetime.now(ZoneInfo(DISPLAY_TIMEZONE)).date()
+
         async with self.connection() as conn:
+            # An interval already starting on this date is replaced, not
+            # stacked: two rows with the same valid_from would make the
+            # resolution ambiguous, and the PK would reject the second anyway.
+            conn.execute(
+                "DELETE FROM manager_classifications "
+                "WHERE manager_id = ? AND valid_from = ?",
+                [manager_id, effective_from],
+            )
+            conn.execute(
+                "UPDATE manager_classifications SET valid_to = ? "
+                "WHERE manager_id = ? AND valid_to IS NULL AND valid_from < ?",
+                [effective_from, manager_id, effective_from],
+            )
+            conn.execute(
+                "INSERT INTO manager_classifications "
+                "(manager_id, is_retail, valid_from, valid_to, set_by, note) "
+                "VALUES (?, ?, ?, NULL, ?, ?)",
+                [manager_id, is_retail, effective_from, set_by, note],
+            )
             conn.execute(
                 "UPDATE managers SET is_retail = ? WHERE id = ?",
                 [is_retail, manager_id]
             )
-            logger.info(f"Manager {manager_id} retail status set to {is_retail}")
+            logger.info(
+                f"Manager {manager_id} retail status set to {is_retail} "
+                f"from {effective_from}"
+            )
 
         # Outside the connection block on purpose: asyncio.Lock is not
         # reentrant, and mark_warehouse_dirty takes it again. Calling it inside

@@ -8,6 +8,7 @@ and setting it must mark the warehouse dirty: `sales_type` is materialised
 into Silver, so a classification that never triggers a rebuild changes nothing
 a human can see.
 """
+from datetime import date
 import time
 
 import pytest
@@ -89,8 +90,10 @@ class _FakeStore:
             {"id": 99, "name": "Never Sold", "is_retail": False, "order_count": 0},
         ]
 
-    async def set_manager_retail_status(self, manager_id, is_retail):
-        self.set_calls.append((manager_id, is_retail))
+    async def set_manager_retail_status(
+        self, manager_id, is_retail, effective_from=None, set_by=None, note=None
+    ):
+        self.set_calls.append((manager_id, is_retail, effective_from, set_by, note))
         # Mirrors the real method, which marks the warehouse dirty itself so
         # that every caller triggers the rebuild — not only the route. A fake
         # that omits it would let this test pass while production regressed.
@@ -197,8 +200,25 @@ class TestBehaviour:
         res = client.post(f"{SET_PATH}?is_retail=true")
 
         assert res.status_code == 200
-        assert store.set_calls == [(34, True)]
+        assert len(store.set_calls) == 1
+        manager_id, is_retail, effective_from, _set_by, _note = store.set_calls[0]
+        assert (manager_id, is_retail) == (34, True)
+        assert effective_from is None, "no date given means today, decided in the store"
         assert store.dirty_calls == [None], "must request a FULL rebuild"
+
+    def test_classification_is_forward_dated_unless_backdated(self, client, store):
+        """A reclassification must not restate last year's reports by default.
+
+        The route carries the date; the store turns it into an interval. What
+        this pins is that a caller who says nothing gets *today*, and only an
+        explicit date reaches back — that asymmetry is the owner's 2026-08-20
+        decision, and it used to be impossible to express at all.
+        """
+        res = client.post(f"{SET_PATH}?is_retail=true&effective_from=2026-01-01")
+
+        assert res.status_code == 200
+        assert store.set_calls[0][2] == date(2026, 1, 1)
+        assert res.json()["effective_from"] == "2026-01-01"
 
     def test_unknown_manager_is_rejected(self, client, store):
         res = client.post("/api/managers/99999/retail-status?is_retail=true")

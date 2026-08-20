@@ -739,10 +739,26 @@ def _headline_vs_line_items_check(
 ) -> List[IntegrityIssue]:
     """Flag completed orders billed at zero that still carry line items.
 
-    KeyCRM lets an order be saved with grand_total = 0 while its products are
-    invoiced separately. Revenue reads grand_total; the product, brand and
-    category pages read line items. The two therefore disagree by exactly these
-    orders — ₴4.16M across 1 177 of them as of 2026-08 — and nothing said so.
+    KeyCRM lets an order be saved with grand_total = 0 while its line items
+    stand. Revenue reads grand_total; the product, brand and category pages
+    read line items. The two therefore disagree by exactly these orders —
+    **418 of them, ₴865,918**, measured against the nightly backup on
+    2026-08-20 — and nothing said so.
+
+    That figure was misquoted as ₴4.16M across 1 177 orders from 2026-08-09
+    onward, including in the list of decisions waiting on the owner. It is this
+    same query with `internal` left in, and `internal` alone is 780 orders and
+    ₴3.37M of deliberate blogger seeding — already counted, as INFO, by
+    `_goods_shipped_without_sale_check`. Four fifths of the alarming number was
+    work behaving exactly as intended.
+
+    The "invoiced separately" reading is unsupported: none of the 418 has a
+    sibling order from the same buyer at a matching amount within 14 days.
+    Switching the product pages to line items would therefore not double count
+    — but nothing shows the money arrived either. Three quarters of the value
+    is the wholesale manager on Telegram, and the share of line-item value is
+    growing: 0.49 % (2024), 0.61 % (2025), 0.93 % (2026).
+
     The gap is created upstream and cannot be fixed here, but it can stop being
     invisible.
 
