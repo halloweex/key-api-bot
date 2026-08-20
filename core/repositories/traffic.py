@@ -210,14 +210,18 @@ class TrafficMixin:
 
     _UTM_BATCH_SIZE = 1000
 
-    async def refresh_utm_silver_layer(self) -> int:
+    async def refresh_utm_silver_layer(self) -> set[int]:
         """Parse UTM data from orders and populate silver_order_utm table.
 
         Processes in batches of _UTM_BATCH_SIZE, releasing the DB lock
         between batches so health checks and other queries aren't blocked.
 
         Returns:
-            Number of orders processed
+            The ids of the orders parsed. Callers that only want the count
+            take ``len()``; ``refresh_warehouse_layers`` needs the ids
+            themselves, to work out which dates gold_daily_traffic has to be
+            rebuilt for. Returning a count and leaving the caller to guess
+            is what forced a full rebuild of that table ~240 times a day.
         """
         # Step 1: fetch IDs + comments that need parsing (short lock)
         async with self.connection() as conn:
@@ -234,7 +238,7 @@ class TrafficMixin:
             """).fetchall()
 
         if not orders:
-            return 0
+            return set()
 
         # Step 2: parse UTM in Python — no lock held
         utm_rows = []
@@ -277,7 +281,7 @@ class TrafficMixin:
 
         num_batches = (len(utm_rows) + self._UTM_BATCH_SIZE - 1) // self._UTM_BATCH_SIZE
         logger.info(f"Parsed UTM data for {total} orders ({num_batches} batches)")
-        return total
+        return {order_id for order_id, _ in orders}
 
     async def refresh_traffic_gold_layer(
         self, affected_dates: set[date] | None = None,
@@ -288,7 +292,10 @@ class TrafficMixin:
         When affected_dates is provided, only rebuilds those dates.
 
         Args:
-            affected_dates: Dates to rebuild (None = full rebuild)
+            affected_dates: Dates to rebuild. ``None`` rebuilds every date.
+                An **empty** set also rebuilds every date, because the check
+                below is truthiness — so a caller that means "nothing moved"
+                must skip the call rather than pass an empty set.
 
         Returns:
             Number of rows in gold_daily_traffic
