@@ -98,13 +98,13 @@ async def health_check(request: Request):
     # to be able to see it without reading container logs, which is this.
     try:
         store = await get_store()
-        schema = store.schema_status()
+        migrations = store.schema_status()
     except Exception as e:
-        schema = {"status": "unknown", "error": str(e)}
+        migrations = {"status": "unknown", "error": str(e)}
 
     return {
         "status": (
-            "degraded" if not duckdb_stats or schema.get("status") == "failed"
+            "degraded" if not duckdb_stats or migrations.get("status") == "failed"
             else "healthy"
         ),
         "version": VERSION,
@@ -116,7 +116,7 @@ async def health_check(request: Request):
             "latency_ms": db_latency_ms,
             **stats
         },
-        "schema": schema,
+        "migrations": migrations,
         "sync": sync_status,
         "data_quality": data_quality,
     }
