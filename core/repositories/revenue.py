@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
-from core.duckdb_constants import _date_in_kyiv
 from core.models import OrderStatus
 
 
@@ -26,40 +25,39 @@ class RevenueMixin:
                 # Use Silver layer with JOINs for correct distinct order counts
                 # (gold_daily_products can't deduplicate orders with multiple matching products)
                 params = [start_date, end_date]
-                where_clauses = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+                where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
 
                 if sales_type != "all":
-                    where_clauses.append("s.sales_type = ?")
+                    where_clauses.append("l.sales_type = ?")
                     params.append(sales_type)
 
                 if source_id:
-                    where_clauses.append("s.source_id = ?")
+                    where_clauses.append("l.source_id = ?")
                     params.append(source_id)
 
                 cat_ids = None
                 if category_id:
                     cat_ids = await self._get_category_with_children(conn, category_id)
-                    where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                    where_clauses.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
                     params.extend(cat_ids)
 
                 if brand:
-                    where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                    where_clauses.append("LOWER(l.brand) = LOWER(?)")
                     params.append(brand)
 
                 if promocode:
-                    where_clauses.append("UPPER(s.promocode) = UPPER(?)")
+                    where_clauses.append("UPPER(l.promocode) = UPPER(?)")
                     params.append(promocode)
 
                 where_sql = " AND ".join(where_clauses)
 
-                # Query Silver + order_products + products for correct distinct counts
+                # The line level: distinct order counts stay correct because the
+                # level keeps the order id beside every line.
                 result = conn.execute(f"""
                     SELECT
-                        COUNT(DISTINCT s.id) as total_orders,
-                        COALESCE(SUM(op.price_sold * op.quantity), 0) as total_revenue
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
-                    LEFT JOIN products p ON op.product_id = p.id
+                        COUNT(DISTINCT l.order_id) as total_orders,
+                        COALESCE(SUM(l.line_amount), 0) as total_revenue
+                    FROM silver_order_lines l
                     WHERE {where_sql}
                 """, params).fetchone()
 
@@ -291,26 +289,26 @@ class RevenueMixin:
     ) -> Tuple[str, list]:
         """Build a query against Silver layer for revenue trend with product filters.
 
-        Uses silver_orders + order_products JOIN for correct distinct order counts.
+        Reads `silver_order_lines`, which keeps distinct order counts correct.
         Returns (sql, params) that SELECTs day, revenue, order_count.
         """
         params: list = [start_date, end_date]
-        where_clauses = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+        where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
 
         if sales_type != "all":
-            where_clauses.append("s.sales_type = ?")
+            where_clauses.append("l.sales_type = ?")
             params.append(sales_type)
 
         if source_id:
-            where_clauses.append("s.source_id = ?")
+            where_clauses.append("l.source_id = ?")
             params.append(source_id)
 
         if category_ids:
-            where_clauses.append(f"p.category_id IN ({','.join('?' * len(category_ids))})")
+            where_clauses.append(f"l.category_id IN ({','.join('?' * len(category_ids))})")
             params.extend(category_ids)
 
         if brand:
-            where_clauses.append("LOWER(p.brand) = LOWER(?)")
+            where_clauses.append("LOWER(l.brand) = LOWER(?)")
             params.append(brand)
 
         if promocode:
@@ -319,15 +317,13 @@ class RevenueMixin:
 
         where_sql = " AND ".join(where_clauses)
         sql = f"""
-            SELECT s.order_date AS day,
-                   COALESCE(SUM(op.price_sold * op.quantity), 0) AS revenue,
-                   COUNT(DISTINCT s.id) AS order_count
-            FROM silver_orders s
-            JOIN order_products op ON s.id = op.order_id
-            LEFT JOIN products p ON op.product_id = p.id
+            SELECT l.order_date AS day,
+                   COALESCE(SUM(l.line_amount), 0) AS revenue,
+                   COUNT(DISTINCT l.order_id) AS order_count
+            FROM silver_order_lines l
             WHERE {where_sql}
-            GROUP BY s.order_date
-            ORDER BY s.order_date
+            GROUP BY l.order_date
+            ORDER BY l.order_date
         """
         return sql, params
 
@@ -482,36 +478,34 @@ class RevenueMixin:
             if category_id or brand or promocode:
                 # Use Silver layer with JOINs for correct distinct order counts
                 params = [start_date, end_date]
-                where_clauses = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+                where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
 
                 if sales_type != "all":
-                    where_clauses.append("s.sales_type = ?")
+                    where_clauses.append("l.sales_type = ?")
                     params.append(sales_type)
 
                 if category_id:
                     cat_ids = await self._get_category_with_children(conn, category_id)
-                    where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                    where_clauses.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
                     params.extend(cat_ids)
 
                 if brand:
-                    where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                    where_clauses.append("LOWER(l.brand) = LOWER(?)")
                     params.append(brand)
 
                 if promocode:
-                    where_clauses.append("UPPER(s.promocode) = UPPER(?)")
+                    where_clauses.append("UPPER(l.promocode) = UPPER(?)")
                     params.append(promocode)
 
                 where_sql = " AND ".join(where_clauses)
 
                 results = conn.execute(f"""
-                    SELECT s.source_id,
-                           COUNT(DISTINCT s.id) as orders,
-                           COALESCE(SUM(op.price_sold * op.quantity), 0) as revenue
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
-                    LEFT JOIN products p ON op.product_id = p.id
+                    SELECT l.source_id,
+                           COUNT(DISTINCT l.order_id) as orders,
+                           COALESCE(SUM(l.line_amount), 0) as revenue
+                    FROM silver_order_lines l
                     WHERE {where_sql}
-                    GROUP BY s.source_id
+                    GROUP BY l.source_id
                     ORDER BY revenue DESC
                 """, params).fetchall()
 
@@ -582,33 +576,31 @@ class RevenueMixin:
             if promocode:
                 # Silver path: gold_daily_products lacks promocode
                 silver_params = [start_date, end_date]
-                silver_where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+                silver_where = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
                 if sales_type != "all":
-                    silver_where.append("s.sales_type = ?")
+                    silver_where.append("l.sales_type = ?")
                     silver_params.append(sales_type)
                 if source_id:
-                    silver_where.append("s.source_id = ?")
+                    silver_where.append("l.source_id = ?")
                     silver_params.append(source_id)
                 if category_id:
                     cat_ids = await self._get_category_with_children(conn, category_id)
-                    silver_where.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                    silver_where.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
                     silver_params.extend(cat_ids)
                 if brand:
-                    silver_where.append("LOWER(p.brand) = LOWER(?)")
+                    silver_where.append("LOWER(l.brand) = LOWER(?)")
                     silver_params.append(brand)
-                silver_where.append("UPPER(s.promocode) = UPPER(?)")
+                silver_where.append("UPPER(l.promocode) = UPPER(?)")
                 silver_params.append(promocode)
                 silver_params.append(limit)
                 silver_sql = " AND ".join(silver_where)
                 results = conn.execute(f"""
                     SELECT
-                        ANY_VALUE(op.name) as product_name,
-                        SUM(op.quantity) as total_qty
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
-                    LEFT JOIN products p ON op.product_id = p.id
+                        ANY_VALUE(l.product_name) as product_name,
+                        SUM(l.quantity) as total_qty
+                    FROM silver_order_lines l
                     WHERE {silver_sql}
-                    GROUP BY COALESCE(CAST(op.product_id AS VARCHAR), op.name)
+                    GROUP BY COALESCE(CAST(l.product_id AS VARCHAR), l.product_name)
                     ORDER BY total_qty DESC
                     LIMIT ?
                 """, silver_params).fetchall()
@@ -766,46 +758,40 @@ class RevenueMixin:
             if promocode:
                 # Silver path: gold_daily_products lacks promocode
                 silver_params = [start_date, end_date]
-                silver_where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+                silver_where = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
                 if sales_type != "all":
-                    silver_where.append("s.sales_type = ?")
+                    silver_where.append("l.sales_type = ?")
                     silver_params.append(sales_type)
                 if source_id:
-                    silver_where.append("s.source_id = ?")
+                    silver_where.append("l.source_id = ?")
                     silver_params.append(source_id)
                 if brand:
-                    silver_where.append("LOWER(p.brand) = LOWER(?)")
+                    silver_where.append("LOWER(l.brand) = LOWER(?)")
                     silver_params.append(brand)
-                silver_where.append("UPPER(s.promocode) = UPPER(?)")
+                silver_where.append("UPPER(l.promocode) = UPPER(?)")
                 silver_params.append(promocode)
                 silver_sql = " AND ".join(silver_where)
 
                 top_results = conn.execute(f"""
                     SELECT
-                        ANY_VALUE(op.name) as product_name,
-                        SUM(op.price_sold * op.quantity) as revenue,
-                        SUM(op.quantity) as quantity
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
-                    LEFT JOIN products p ON op.product_id = p.id
+                        ANY_VALUE(l.product_name) as product_name,
+                        SUM(l.line_amount) as revenue,
+                        SUM(l.quantity) as quantity
+                    FROM silver_order_lines l
                     WHERE {silver_sql}
-                    GROUP BY COALESCE(CAST(op.product_id AS VARCHAR), op.name)
+                    GROUP BY COALESCE(CAST(l.product_id AS VARCHAR), l.product_name)
                     ORDER BY revenue DESC
                     LIMIT 10
                 """, silver_params).fetchall()
 
                 cat_results = conn.execute(f"""
                     SELECT
-                        COALESCE(pc.name, c.name, 'Other') as category_name,
-                        SUM(op.price_sold * op.quantity) as revenue,
-                        SUM(op.quantity) as quantity
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
-                    LEFT JOIN products p ON op.product_id = p.id
-                    LEFT JOIN categories c ON p.category_id = c.id
-                    LEFT JOIN categories pc ON c.parent_id = pc.id
+                        COALESCE(l.parent_category_name, l.category_name, 'Other') as category_name,
+                        SUM(l.line_amount) as revenue,
+                        SUM(l.quantity) as quantity
+                    FROM silver_order_lines l
                     WHERE {silver_sql}
-                    GROUP BY COALESCE(pc.name, c.name, 'Other')
+                    GROUP BY COALESCE(l.parent_category_name, l.category_name, 'Other')
                     ORDER BY revenue DESC
                 """, silver_params).fetchall()
             else:
@@ -893,17 +879,24 @@ class RevenueMixin:
     ) -> Dict[str, Any]:
         """Get sales breakdown by subcategories for a given parent category."""
         async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             params = [start_date, end_date]
+            # This was the last query in the file reading raw `orders`, with its
+            # own date conversion, its own return-status list and its own copy of
+            # the sales_type rule. The level answers all three, and answers them
+            # the way Gold does: `is_return` prefers KeyCRM's status *group*,
+            # which is what caught status 20 in July.
             where_clauses = [
-                f"{_date_in_kyiv('o.ordered_at')} BETWEEN ? AND ?",
-                f"o.status_id NOT IN {return_statuses}",
-                "o.source_id IN (1, 2, 4)",  # Exclude Opencart (deprecated)
-                self._build_sales_type_filter(sales_type)
+                "l.order_date BETWEEN ? AND ?",
+                "NOT l.is_return",
+                "l.source_id IN (1, 2, 4)",  # Exclude Opencart (deprecated)
             ]
 
+            if sales_type != "all":
+                where_clauses.append("l.sales_type = ?")
+                params.append(sales_type)
+
             if source_id:
-                where_clauses.append("o.source_id = ?")
+                where_clauses.append("l.source_id = ?")
                 params.append(source_id)
 
             where_sql = " AND ".join(where_clauses)
@@ -912,31 +905,28 @@ class RevenueMixin:
             brand_filter = ""
             brand_params = []
             if brand:
-                brand_filter = "AND LOWER(p.brand) = LOWER(?)"
+                brand_filter = "AND LOWER(l.brand) = LOWER(?)"
                 brand_params.append(brand)
 
             promocode_filter = ""
             promocode_params = []
             if promocode:
-                promocode_filter = "AND UPPER(o.promocode) = UPPER(?)"
+                promocode_filter = "AND UPPER(l.promocode) = UPPER(?)"
                 promocode_params.append(promocode)
 
             # Get subcategories for the parent category
             subcategory_sql = f"""
                 SELECT
-                    c.name as subcategory_name,
-                    SUM(op.price_sold * op.quantity) as revenue,
-                    SUM(op.quantity) as quantity
-                FROM orders o
-                JOIN order_products op ON o.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
-                LEFT JOIN categories c ON p.category_id = c.id
-                LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
+                    l.category_name as subcategory_name,
+                    SUM(l.line_amount) as revenue,
+                    SUM(l.quantity) as quantity
+                FROM silver_order_lines l
                 WHERE {where_sql}
-                    AND (parent_c.name = ? OR (c.name = ? AND c.parent_id IS NULL))
+                    AND (l.parent_category_name = ?
+                         OR (l.category_name = ? AND l.parent_category_id IS NULL))
                     {brand_filter}
                     {promocode_filter}
-                GROUP BY c.name
+                GROUP BY l.category_name
                 ORDER BY revenue DESC
             """
             # Build final params: base params + parent_category (twice) + brand + promocode
@@ -1060,11 +1050,11 @@ class RevenueMixin:
             cat_ids = None
             if category_id:
                 cat_ids = await self._get_category_with_children(conn, category_id)
-                where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                where_clauses.append(f"s.category_id IN ({','.join('?' * len(cat_ids))})")
                 params.extend(cat_ids)
 
             if brand:
-                where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                where_clauses.append("LOWER(s.brand) = LOWER(?)")
                 params.append(brand)
 
             where_sql = " AND ".join(where_clauses)
@@ -1073,11 +1063,15 @@ class RevenueMixin:
 
             if need_product_filter:
                 # Filter orders that contain matching products, then aggregate
+                # The level, aliased `s` on purpose: this method shares one
+                # predicate between a line-grain filter and an order-grain
+                # aggregate, and every clause it can emit — dates, sales_type,
+                # source, category, brand — exists on both relations under the
+                # same name. The catalog clauses only appear when the product
+                # filter is on, which is the only branch that reaches here.
                 order_filter_sql = f"""
-                    SELECT DISTINCT s.id
-                    FROM silver_orders s
-                    JOIN order_products op ON s.id = op.order_id
-                    LEFT JOIN products p ON op.product_id = p.id
+                    SELECT DISTINCT s.order_id AS id
+                    FROM silver_order_lines s
                     WHERE {where_sql}
                 """
                 results = conn.execute(f"""
@@ -1085,6 +1079,11 @@ class RevenueMixin:
                     SELECT
                         s.source_id,
                         COUNT(CASE WHEN NOT s.is_return THEN 1 END) as orders_count,
+                        -- Still order-grain, and deliberately so: this counts
+                        -- orders, and an order with no line items at all — 323
+                        -- of them carry revenue — must still be counted. Rolling
+                        -- the whole query onto the level would drop those, which
+                        -- is the boundary of what a line level can replace.
                         COALESCE(SUM(CASE WHEN NOT s.is_return THEN (
                             SELECT SUM(op2.quantity) FROM order_products op2 WHERE op2.order_id = s.id
                         ) ELSE 0 END), 0) as products_sold,
@@ -1173,23 +1172,23 @@ class RevenueMixin:
         """Get top products report with rank, quantity, revenue, orders."""
         async with self.connection() as conn:
             params: list = [start_date, end_date]
-            where_clauses = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+            where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
 
             if sales_type != "all":
-                where_clauses.append("s.sales_type = ?")
+                where_clauses.append("l.sales_type = ?")
                 params.append(sales_type)
 
             if source_id:
-                where_clauses.append("s.source_id = ?")
+                where_clauses.append("l.source_id = ?")
                 params.append(source_id)
 
             if category_id:
                 cat_ids = await self._get_category_with_children(conn, category_id)
-                where_clauses.append(f"p.category_id IN ({','.join('?' * len(cat_ids))})")
+                where_clauses.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
                 params.extend(cat_ids)
 
             if brand:
-                where_clauses.append("LOWER(p.brand) = LOWER(?)")
+                where_clauses.append("LOWER(l.brand) = LOWER(?)")
                 params.append(brand)
 
             params.append(limit)
@@ -1197,17 +1196,17 @@ class RevenueMixin:
 
             results = conn.execute(f"""
                 SELECT
-                    COALESCE(p.name, op.name, 'Unknown') as product_name,
-                    COALESCE(p.sku, '') as sku,
-                    SUM(op.quantity) as quantity,
-                    COALESCE(SUM(op.price_sold * op.quantity), 0) as revenue,
-                    COUNT(DISTINCT s.id) as orders_count
-                FROM silver_orders s
-                JOIN order_products op ON s.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
+                    COALESCE(l.catalog_product_name, l.product_name, 'Unknown') as product_name,
+                    COALESCE(l.sku, '') as sku,
+                    SUM(l.quantity) as quantity,
+                    COALESCE(SUM(l.line_amount), 0) as revenue,
+                    COUNT(DISTINCT l.order_id) as orders_count
+                FROM silver_order_lines l
                 WHERE {where_sql}
-                GROUP BY COALESCE(p.name, op.name, 'Unknown'), COALESCE(p.sku, '')
-                ORDER BY quantity DESC
+                GROUP BY COALESCE(l.catalog_product_name, l.product_name, 'Unknown'), COALESCE(l.sku, '')
+                -- Ties decide who makes the top-N cut here, so they cannot be
+                -- left to the plan.
+                ORDER BY quantity DESC, product_name
                 LIMIT ?
             """, params).fetchall()
 
@@ -1237,25 +1236,26 @@ class RevenueMixin:
 
         async with self.connection() as conn:
             params: list = [start_date, end_date]
-            where_clauses = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+            where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
 
             if sales_type != "all":
-                where_clauses.append("s.sales_type = ?")
+                where_clauses.append("l.sales_type = ?")
                 params.append(sales_type)
 
             where_sql = " AND ".join(where_clauses)
 
             results = conn.execute(f"""
                 SELECT
-                    s.source_id,
-                    COALESCE(p.name, op.name, 'Unknown') as product_name,
-                    SUM(op.quantity) as quantity
-                FROM silver_orders s
-                JOIN order_products op ON s.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
+                    l.source_id,
+                    COALESCE(l.catalog_product_name, l.product_name, 'Unknown') as product_name,
+                    SUM(l.quantity) as quantity
+                FROM silver_order_lines l
                 WHERE {where_sql}
-                GROUP BY s.source_id, COALESCE(p.name, op.name, 'Unknown')
-                ORDER BY s.source_id, quantity DESC
+                GROUP BY l.source_id, COALESCE(l.catalog_product_name, l.product_name, 'Unknown')
+                -- product_name breaks ties: without it the order among equal
+                -- quantities was whatever the plan happened to produce, so the
+                -- same report could come out in a different order twice.
+                ORDER BY l.source_id, quantity DESC, product_name
             """, params).fetchall()
 
             # Group by source

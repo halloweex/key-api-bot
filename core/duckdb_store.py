@@ -174,6 +174,7 @@ SILVER_ORDER_LINES_VIEW_SQL = """CREATE OR REPLACE VIEW silver_order_lines AS
             -- the order, denormalised: every predicate a page applies to
             -- revenue applies here too, and re-deriving them was the bug
             s.order_date,
+            s.ordered_at,
             s.sales_type,
             s.source_id,
             s.source_name,
