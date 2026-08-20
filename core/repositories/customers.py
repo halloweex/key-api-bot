@@ -1606,16 +1606,15 @@ class CustomersMixin:
                     FROM sms_campaign_members WHERE campaign = ?
                 ),
                 window_orders AS (
-                    SELECT o.buyer_id, o.id AS order_id, o.grand_total, o.promocode,
-                           op.price_sold * op.quantity AS line_revenue,
+                    SELECT l.buyer_id, l.order_id, l.order_grand_total AS grand_total,
+                           l.promocode,
+                           l.line_amount AS line_revenue,
                            CASE WHEN os.purchased_price > 0
-                                THEN os.purchased_price * op.quantity END AS line_cogs
-                    FROM silver_orders o
-                    JOIN order_products op ON op.order_id = o.id
-                    LEFT JOIN products p ON p.id = op.product_id
-                    LEFT JOIN offer_stocks os ON os.sku = p.sku
-                    WHERE NOT o.is_return
-                      AND o.is_active_source
+                                THEN os.purchased_price * l.quantity END AS line_cogs
+                    FROM silver_order_lines l
+                    LEFT JOIN offer_stocks os ON os.sku = l.sku
+                    WHERE NOT l.is_return
+                      AND l.is_active_source
                       -- From the moment the message went out, not from midnight
                       -- that day. Rounding the start down to a date credited
                       -- the campaign with every purchase made earlier the same
@@ -1623,8 +1622,8 @@ class CustomersMixin:
                       -- between the two arms, which on day one is the whole
                       -- reading. Both columns carry a timezone, so this
                       -- compares instants.
-                      AND o.ordered_at >= ?
-                      AND o.ordered_at < ? + INTERVAL '{int(window_days)} days'
+                      AND l.ordered_at >= ?
+                      AND l.ordered_at < ? + INTERVAL '{int(window_days)} days'
                 ),
                 alloc AS (
                     SELECT buyer_id, order_id, promocode, line_cogs,
@@ -1884,7 +1883,7 @@ class CustomersMixin:
         async with self.connection() as conn:
             # Silver already classifies each order, so filter on the column
             # rather than re-deriving retail/b2b from manager_id here.
-            sales_type_filter = "" if sales_type == "all" else "AND o.sales_type = ?"
+            sales_type_filter = "" if sales_type == "all" else "AND l.sales_type = ?"
 
             # Phones are stored as free text; normalise to digits and keep only
             # full Ukrainian MSISDNs (380 + 9 digits). Everything shorter is a
@@ -1895,22 +1894,20 @@ class CustomersMixin:
             query = f"""
             WITH line_items AS (
                 SELECT
-                    o.id AS order_id,
-                    o.buyer_id,
-                    o.order_date,
-                    o.grand_total,
-                    op.price_sold * op.quantity AS line_revenue,
+                    l.order_id,
+                    l.buyer_id,
+                    l.order_date,
+                    l.order_grand_total AS grand_total,
+                    l.line_amount AS line_revenue,
                     CASE WHEN os.purchased_price > 0
-                         THEN os.purchased_price * op.quantity END AS line_cogs
-                FROM silver_orders o
-                JOIN order_products op ON op.order_id = o.id
-                LEFT JOIN products p ON p.id = op.product_id
-                LEFT JOIN offer_stocks os ON os.sku = p.sku
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
+                         THEN os.purchased_price * l.quantity END AS line_cogs
+                FROM silver_order_lines l
+                LEFT JOIN offer_stocks os ON os.sku = l.sku
+                WHERE l.buyer_id IS NOT NULL
+                  AND NOT l.is_return
                   -- Same revenue definition the Gold layer uses: deprecated
                   -- sources (Opencart et al.) must not inflate LTV or recency.
-                  AND o.is_active_source
+                  AND l.is_active_source
                   {sales_type_filter}
             ),
             allocated AS (
@@ -1952,14 +1949,14 @@ class CustomersMixin:
                     array_to_string(
                         list_transform(
                             list_slice(
-                                array_agg(op.name ORDER BY op.quantity DESC, op.name), 1, 3
+                                array_agg(l.product_name ORDER BY l.quantity DESC, l.product_name), 1, 3
                             ),
                             x -> CASE WHEN length(x) > 60
                                       THEN left(x, 57) || chr(8230) ELSE x END
                         ), ' | '
                     ) AS last_order_items
                 FROM last_order lo
-                JOIN order_products op ON op.order_id = lo.order_id
+                JOIN silver_order_lines l ON l.order_id = lo.order_id
                 GROUP BY lo.buyer_id, lo.order_id, lo.order_total
             ),
             cust AS (
