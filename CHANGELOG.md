@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.93
+
+- Bring Postgres home: the store lives beside the app that writes it (#115)
+
+
 ## 3.0.92
 
 - The Ark: freeze the warehouse so it outlives the code that wrote it
