@@ -9,7 +9,145 @@ x-logging: &default-logging
     max-size: "50m"
     max-file: "5"
 
+networks:
+  # Declared external and by a fixed name so `ks-tg-bot` — a different compose
+  # project — can reach this Postgres. Created once, by hand, and it already
+  # exists on the host:  docker network create ks-data
+  #
+  # THE TRAP, and it now lives in this file: the moment a service here gains a
+  # `networks:` key it stops joining `default` implicitly. `postgres` below
+  # therefore lists BOTH. Do not add a `networks:` key to web, bot, nginx or
+  # meilisearch without also listing `default` — nginx would lose
+  # `proxy_pass http://web` and fail silently, because it only resolves the
+  # name when a request arrives, so nothing complains at startup.
+  ks-data:
+    external: true
+
 services:
+  # ── Postgres: the system of record ───────────────────────────────────────
+  #
+  # Lives here, not in `ks-data-platform`, by the owner's decision of
+  # 2026-08-23: a store lives beside its primary writer, and this one is
+  # written row by row by this application on this application's deploy.
+  # ClickHouse stays in the platform repo — it is written in rare batches by
+  # an ETL, which is a different lifecycle.
+  #
+  # Rule 12 of the charter: no `ports:` key, ever. `ufw` is off on this host,
+  # the server takes ~1000 scanner requests a day, and "just while we set it
+  # up" means "we opened it". Reach it from another container on one of the
+  # two networks above, or with `docker compose exec`.
+  postgres:
+    image: postgres:17.2-alpine
+    container_name: ks-postgres
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [default, ks-data]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in .env}
+      POSTGRES_DB: ks
+      # Off-host backups need reproducible collation; the alpine image defaults
+      # to C, and saying so out loud stops a future image bump from moving it.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      KS_APP_PASSWORD: ${KS_APP_PASSWORD:?set it in .env}
+      KS_READONLY_PASSWORD: ${KS_READONLY_PASSWORD:?set it in .env}
+    # Sized for a host with 7.7 GiB total that already peaks near 5 GiB during
+    # the nightly export.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=40
+      - -c
+      - wal_compression=on
+      # THE MINE, defused. Default is -1, meaning a replication slot whose
+      # consumer has gone away holds WAL *forever* — until the disk is full.
+      # The disk here is one 75 GB partition shared by the OS, the images, the
+      # DuckDB warehouse, every backup and both databases; filling it takes
+      # everything down, not just Postgres. With a ceiling the slot is
+      # invalidated instead: PITR continuity breaks and needs a fresh base
+      # backup, which is a bad morning rather than an outage.
+      - -c
+      - max_slot_wal_keep_size=4GB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, on an empty data directory. Roles and schemas only — no
+      # tables. Charter rule 11: the platform owns servers, the application
+      # owns its DDL.
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+      - ./backups/postgres:/backups
+    mem_limit: 512m
+    memswap_limit: 512m
+    healthcheck:
+      # NOT `pg_isready`. Charter rule 13, added 2026-08-22: a check that does
+      # not do the system's work only proves the process is alive. `pg_isready`
+      # executes no query, which is why 9 connection failures out of 20 at
+      # concurrency 20 — caused by a 64 MB `/dev/shm` — were invisible to it.
+      # Verified against the live container before this line was written.
+      test: ["CMD-SHELL", "psql -U postgres -d ks -tAc 'SELECT 1' >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Continuous WAL, i.e. the recovery point ──────────────────────────────
+  #
+  # Owner's decision 2026-08-22: RPO five minutes. Not for the orders — those
+  # come back from KeyCRM, which stays the source of truth — but for what
+  # nothing can return: inventory snapshots, campaign membership, opt-outs,
+  # manager classifications, the bots' own state. Twenty-five days of stock
+  # history are already missing and cannot be recovered from anywhere.
+  #
+  # WHY STREAMING AND NOT `archive_command`. An archive command ships whole
+  # 16 MB segments, so the recovery point is "when the segment filled" —
+  # forcing five minutes means `archive_timeout=300`, which writes a padded
+  # 16 MB segment every five minutes whether or not anything happened: about
+  # 4.6 GB a day of mostly zeroes. Streaming writes what there is, when there
+  # is: measured WAL volume on this database is 23.3 MiB/day. And streaming
+  # needs no restart, where `archive_mode` would.
+  #
+  # Read `max_slot_wal_keep_size` above before changing anything here: this
+  # service is the slot's consumer, and the two are a pair.
+  pg-receivewal:
+    image: postgres:17.2-alpine
+    container_name: ks-pg-receivewal
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [default, ks-data]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set it in .env}
+    # --synchronous: flush on receipt rather than per segment. On 23 MiB/day
+    # the fsync cost is noise, and without it the recovery point silently
+    # becomes "whatever the OS had not written yet".
+    command:
+      - pg_receivewal
+      - --host=postgres
+      - --username=postgres
+      - --directory=/wal
+      # The slot is created by postgres/initdb/20-replication-hba.sh, not by
+      # --create-slot: that flag creates the slot and exits zero, which under
+      # `restart: unless-stopped` is a loop that reports success and streams
+      # nothing.
+      - --slot=ks_pitr
+      # gzip, not zstd: the server compresses WAL with zstd happily, but
+      # pg_receivewal itself answers "compression with ZSTD is not yet
+      # supported" and restart-loops. Client and server do not share the codec
+      # list, and the error only appears at run time.
+      - --compress=gzip:6
+      - --synchronous
+      - --no-loop
+    volumes:
+      - ./backups/pg_wal:/wal
+    mem_limit: 64m
+    memswap_limit: 64m
+
   meilisearch:
     image: getmeili/meilisearch:v1.6
     container_name: keycrm-meili
@@ -112,3 +250,13 @@ services:
 
 volumes:
   meili_data:
+  # Declared external under its original name so the swap moves no bytes. The
+  # volume already holds the verified state — roles, empty schemas,
+  # btree_gist 1.7, replication slot `ks_pitr` — and a rehearsed restore was
+  # timed against exactly this data directory (charter rule 2: nothing moves
+  # before a rehearsed restore). Renaming it to `key-api-bot_pgdata` is a
+  # separate, optional step for a separate window; it buys tidiness and costs
+  # a copy, and doing both at once would make one rollback undo two things.
+  pgdata:
+    external: true
+    name: ks-data-platform_pgdata
