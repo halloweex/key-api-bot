@@ -83,12 +83,47 @@ docker compose -f /opt/key-api-bot/docker-compose.yml ps postgres pg-receivewal
 docker exec ks-postgres psql -U postgres -d ks -tAc \
   "SELECT slot_name, active FROM pg_replication_slots"   # expect: ks_pitr|t
 ls -t /opt/key-api-bot/backups/pg_wal | head -3           # segments still arriving
-docker exec ks-tg-bot sh -c 'nc -z postgres 5432 && echo reachable'
+
+# AND THE ONE THAT ACTUALLY BIT — see below. Not the deploy's own gate.
+curl -fsS -o /dev/null -w '%{http_code}\n' https://ksanalytics.duckdns.org/api/health
 ```
 
-The slot reading `active = t` is the one that matters: it proves
+The slot reading `active = t` is the one that matters for Postgres: it proves
 `pg_receivewal` reconnected to the same slot rather than silently starting a new
 recovery point.
+
+There is deliberately **no** `ks-tg-bot` reachability check here. That container
+does not join `ks-data` until step 03 of the migration plan; testing it now
+fails for the wrong reason.
+
+### The four-minute outage this caused on the first run, and how to avoid it
+
+Adding two services to `default` **shifts IP allocation**. On 2026-08-23
+`keycrm-web` came back on `172.18.0.6` instead of `172.18.0.4`, and
+`keycrm-nginx` — up for two days, not recreated by the deploy — was still
+holding `172.18.0.4`, because nginx resolves an upstream hostname **once, at its
+own startup**, and this config has no `resolver` directive. Every request got
+502 for about four minutes.
+
+The cure is one command, and it belongs in part 2 of any deploy that changes
+network membership:
+
+```bash
+cd /opt/key-api-bot && docker compose restart nginx
+```
+
+Two standing defects were found underneath this and are **not** fixed by this
+change:
+
+* **The deploy's health gate does not gate anything.** It runs
+  `curl -fsS http://127.0.0.1/api/health`, which nginx answers with a **301** to
+  HTTPS. `curl -f` does not fail on a 3xx and there is no `-L`, so the gate
+  exits 0 without ever reaching `web`. It reported success throughout the
+  outage. It needs `-L`, or the HTTPS vhost, or an explicit status assertion.
+* **nginx never re-resolves.** Normally `web` reclaims its previous address on
+  recreate, so this is invisible; it becomes visible exactly when membership
+  changes. A `resolver 127.0.0.11 valid=10s;` with the upstream in a variable
+  would fix it permanently.
 
 ### 4. Finish the platform side
 
