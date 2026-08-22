@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.95
+
+- Make the deploy's health gate reach web, which it never did (#117)
+
+
 ## 3.0.94
 
 - The Postgres backup and its drill follow the server that they back up (#116)
