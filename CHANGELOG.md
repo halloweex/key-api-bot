@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.92
+
+- The Ark: freeze the warehouse so it outlives the code that wrote it
+
+
 ## 3.0.91
 
 - Drop the DuckDB copies of three tables the bot owns (#114)
