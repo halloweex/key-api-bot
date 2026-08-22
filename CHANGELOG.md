@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.96
+
+- Let nginx find web again after it moves (#118)
+
+
 ## 3.0.95
 
 - Make the deploy's health gate reach web, which it never did (#117)
