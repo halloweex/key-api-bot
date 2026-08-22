@@ -112,18 +112,41 @@ network membership:
 cd /opt/key-api-bot && docker compose restart nginx
 ```
 
-Two standing defects were found underneath this and are **not** fixed by this
-change:
+Three defects were found underneath this. **All three are now fixed** — the
+history is kept because each one hid the next.
 
-* **The deploy's health gate does not gate anything.** It runs
+* **The deploy's health gate did not gate anything** (#117). It ran
   `curl -fsS http://127.0.0.1/api/health`, which nginx answers with a **301** to
-  HTTPS. `curl -f` does not fail on a 3xx and there is no `-L`, so the gate
-  exits 0 without ever reaching `web`. It reported success throughout the
-  outage. It needs `-L`, or the HTTPS vhost, or an explicit status assertion.
-* **nginx never re-resolves.** Normally `web` reclaims its previous address on
-  recreate, so this is invisible; it becomes visible exactly when membership
-  changes. A `resolver 127.0.0.11 valid=10s;` with the upstream in a variable
-  would fix it permanently.
+  HTTPS. `curl -f` does not fail on a 3xx and there was no `-L`, so the gate
+  exited 0 without ever reaching `web`. It reported success throughout the
+  outage. Now HTTPS on loopback via `--resolve`, with `= 200` asserted.
+* **nginx never re-resolved its upstream** (#118). An `upstream` block resolves
+  the name once, at config load, and open-source nginx cannot re-resolve it.
+  Now `resolver 127.0.0.11 valid=10s` with the host in a variable. The
+  keepalive pool was the price, measured at ~0.3 ms/request — inside the
+  run-to-run spread at this traffic level.
+* **A single-file bind mount does not see a `git reset --hard`.** Found while
+  deploying the fix above, and it is the most transferable of the three:
+
+  ```
+  host   nginx/nginx.conf   6 occurrences of web_upstream
+  in the container          0
+  ```
+
+  `git reset --hard` **replaces** a file — new inode — and a bind mount of a
+  single *file* is bound to the inode it saw at container creation. So the host
+  file changes and the container keeps the old one. `docker compose restart`
+  does not help, and `nginx -s reload` re-reads the *old* file and reports
+  success.
+
+  **`docker compose up -d --force-recreate <service>` is the only thing that
+  works.** Three mounts in this compose file have this property —
+  `nginx/nginx.conf`, `nginx/security-headers.conf`, `nginx/error.html`.
+  Directory mounts such as `postgres/initdb` do not: names are resolved inside
+  the directory on each open.
+
+  Corollary worth holding onto: **any nginx config change needs a recreate, and
+  a deploy alone will silently not apply it.**
 
 ### 4. Finish the platform side
 
