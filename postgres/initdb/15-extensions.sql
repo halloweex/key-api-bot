@@ -1,0 +1,23 @@
+-- Extensions the application's schema needs but cannot install itself.
+--
+-- Rule 11 puts servers, databases, roles and schemas here and tables in the
+-- application. An extension is none of those: it is a capability of the
+-- database, and installing one needs superuser or the database owner. `ks_app`
+-- is deliberately neither — it does not own the objects it writes, which is
+-- what makes row-level security mean anything later. So the application cannot
+-- run this, and asking it to would mean giving it rights that exist for one
+-- CREATE and never go away.
+--
+-- btree_gist: `EXCLUDE USING gist (manager_id WITH =, valid_during WITH &&)`
+-- is how the manager classification stops two intervals from overlapping —
+-- owner's decision of 2026-08-20, classification as of the order date. GiST
+-- has no default operator class for integers without it, and the schema fails
+-- to create with
+--
+--     ERROR: data type integer has no default operator class
+--            for access method "gist"
+--
+-- Found by running the proposed DDL against a real 17.2 rather than reading
+-- it: the step was named in no document, and `ks_app` gets
+-- "permission denied to create extension" if it tries.
+CREATE EXTENSION IF NOT EXISTS btree_gist;

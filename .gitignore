@@ -208,3 +208,10 @@ web/static-v2/
 *.xlsx
 *.csv
 !tests/**/*.csv
+
+# Postgres backups and the WAL stream. Never tracked: this is live database
+# content, `backups/pg_wal` is written continuously by pg_receivewal, and a
+# base backup committed by accident is a customer-data leak with a date on it.
+# Being ignored is also what keeps it alive — the deploy does
+# `git reset --hard <sha>`, which leaves ignored paths untouched.
+backups/
