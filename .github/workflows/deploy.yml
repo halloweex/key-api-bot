@@ -158,8 +158,31 @@ jobs:
             # A container that starts and then falls over must fail the run,
             # not pass it quietly. web is not published on the host, so the
             # gate goes through nginx — which also proves the proxy is up.
+            #
+            # IT DID NOT DO THAT UNTIL 2026-08-23. The line here used to be
+            #   curl -fsS http://127.0.0.1/api/health
+            # and nginx answers plain HTTP with a blanket 301 to HTTPS
+            # (nginx/nginx.conf:42). `curl -f` does not fail on a 3xx and there
+            # was no `-L`, so the gate exited 0 on the redirect without ever
+            # touching web. It reported success for the whole of a four-minute
+            # 502 outage that day. A check that answers instead of doing is
+            # exactly what charter rule 13 is about, and it was sitting inside
+            # the pipeline that enforces the charter.
+            #
+            # `--resolve` keeps this on loopback — no public DNS round trip —
+            # while still sending the SNI and Host the HTTPS vhost matches on.
+            # `-k` skips certificate verification on purpose: whether the
+            # certificate is valid is a different question from whether this
+            # release is serving, and UptimeRobot already watches expiry.
+            # The status is compared to 200 explicitly rather than left to
+            # `-f`, so this cannot quietly go back to accepting a redirect.
+            #
+            # Verified both ways on the host before it was committed: 200 and
+            # exit 0 against the live vhost, and exit 124 against a dead port.
             timeout 180 sh -c \
-              'until curl -fsS http://127.0.0.1/api/health >/dev/null 2>&1; do sleep 5; done'
+              'until [ "$(curl -sk -o /dev/null -w "%{http_code}" \
+                 --resolve ksanalytics.duckdns.org:443:127.0.0.1 \
+                 https://ksanalytics.duckdns.org/api/health)" = 200 ]; do sleep 5; done'
             docker image prune -f
 
       - name: Bump version
