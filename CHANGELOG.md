@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.97
+
+- Give the shop a schema of its own, and a way for provisioning to reach a live database (#119)
+- Record the third defect, the one that hid while fixing the second
+
+
 ## 3.0.96
 
 - Let nginx find web again after it moves (#118)
