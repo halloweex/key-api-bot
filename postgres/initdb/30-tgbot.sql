@@ -30,6 +30,15 @@ CREATE SCHEMA IF NOT EXISTS tgbot AUTHORIZATION tgbot_app;
 
 GRANT CONNECT ON DATABASE ks TO tgbot_app;
 
+-- Everything this role creates lands in its own schema without anyone having
+-- to remember to qualify it. That includes Alembic's `alembic_version` table:
+-- `migrations/env.py` sets no schema and no `version_table_schema`, so without
+-- this line revision 001 would create twelve tables and a version ledger in
+-- `public` — quietly, and correctly by Postgres's rules.
+--
+-- `public` stays on the path behind it because extensions live there.
+ALTER ROLE tgbot_app SET search_path = tgbot, public;
+
 -- The shop reads the CRM side rather than keeping its own copy of it — that is
 -- the point of one shared instance. The grant is declared now and lands when
 -- the `keycrm` schema arrives at step 05; until then it simply has nothing to
