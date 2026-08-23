@@ -95,6 +95,44 @@ services:
       retries: 5
       start_period: 20s
 
+  # ── Provisioning that must survive a non-empty data directory ────────────
+  #
+  # `/docker-entrypoint-initdb.d` runs ONLY against an empty data directory.
+  # That is not a quirk to work around later: it already cost the platform a
+  # healthy server with no databases and no warning after a failed first boot.
+  # So the same files are re-applied here on every `up -d`, and every statement
+  # in them is written to be a no-op the second time.
+  #
+  # Only `*.sql` — `20-replication-hba.sh` edits pg_hba.conf from inside the
+  # server's own container and has already run; it is idempotent too, but it is
+  # not psql's to execute.
+  #
+  # `restart: "no"` and it exits: this is an init container, so `Exited (0)` in
+  # `docker compose ps` is the healthy steady state. A non-zero exit means a
+  # statement failed, and `ON_ERROR_STOP=1` makes sure it does not pass quietly
+  # — Rule 13 applies to provisioning as much as to healthchecks.
+  postgres-bootstrap:
+    image: postgres:17.2-alpine
+    container_name: ks-postgres-bootstrap
+    restart: "no"
+    logging: *default-logging
+    networks: [default]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set it in .env}
+      KS_APP_PASSWORD: ${KS_APP_PASSWORD:?set it in .env}
+      KS_READONLY_PASSWORD: ${KS_READONLY_PASSWORD:?set it in .env}
+      TGBOT_APP_PASSWORD: ${TGBOT_APP_PASSWORD:?set it in .env}
+    volumes:
+      - ./postgres/initdb:/initdb:ro
+    entrypoint:
+      - sh
+      - -c
+      - 'set -e; for f in /initdb/*.sql; do echo "── $$f"; psql -v ON_ERROR_STOP=1 -h postgres -U postgres -d ks -f "$$f"; done'
+    mem_limit: 64m
+    memswap_limit: 64m
+
   # ── Continuous WAL, i.e. the recovery point ──────────────────────────────
   #
   # Owner's decision 2026-08-22: RPO five minutes. Not for the orders — those
