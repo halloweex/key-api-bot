@@ -123,7 +123,6 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?set it in .env}
       KS_APP_PASSWORD: ${KS_APP_PASSWORD:?set it in .env}
       KS_READONLY_PASSWORD: ${KS_READONLY_PASSWORD:?set it in .env}
-      TGBOT_APP_PASSWORD: ${TGBOT_APP_PASSWORD:?set it in .env}
     volumes:
       - ./postgres/initdb:/initdb:ro
     entrypoint:
