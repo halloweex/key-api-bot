@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.98
+
+- Send the shop's tables to the shop's schema, not to public (#120)
+
+
 ## 3.0.97
 
 - Give the shop a schema of its own, and a way for provisioning to reach a live database (#119)
