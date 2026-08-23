@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.102
+
+- Say which measure the revenue trend is showing, and stop a filter changing it (#124)
+
+
 ## 3.0.101
 
 - Watch the landing→Silver arc, which only a row count watched (#123)
