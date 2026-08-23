@@ -88,6 +88,24 @@ jobs:
           cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-bot:buildcache-arm64
           cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-bot:buildcache-arm64,mode=max
 
+      # The migration runner. Tiny — slim base plus three pure wheels, no gcc,
+      # no libgomp, no frontend — and built here rather than being a command on
+      # the web image so that Alembic stays out of the application's own
+      # images. See Dockerfile.migrate for why that separation is structural
+      # rather than tidiness.
+      - name: Build and push migrate Docker image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
+        with:
+          context: .
+          file: ./Dockerfile.migrate
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/keycrm-migrate:latest
+            ${{ secrets.DOCKER_USERNAME }}/keycrm-migrate:${{ env.VERSION }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-migrate:buildcache-arm64
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-migrate:buildcache-arm64,mode=max
+
       - name: Build and push web Docker image
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
         with:

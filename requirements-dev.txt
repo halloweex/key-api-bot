@@ -23,3 +23,9 @@ alembic==1.18.5
 # so the reason travels with it. The alternative was psycopg for migrations
 # and asyncpg for the app: two drivers' behaviour to know, for one database.
 sqlalchemy[asyncio]>=2.0
+
+# The compose file and the deploy workflow are read as data by
+# tests/unit/test_migrate_service.py. It arrives transitively today, which is
+# not a reason to leave it undeclared: a test that skips when its dependency
+# is missing is a test nobody reads.
+PyYAML>=6.0

@@ -1,0 +1,51 @@
+# The migration runner: Alembic, the revisions, and nothing else.
+#
+# A third image rather than a command on the web one, and that is the whole
+# point. Charter rule 11 says the application declares the schema version it
+# needs and fails closed — it does not heal itself. If Alembic shipped inside
+# the app image, the next person to hit an un-migrated database has
+# `alembic.command.upgrade()` one import away from application startup, and
+# this codebase's history is a list of self-healing that turned a one-off
+# fault into a loop: 2026-08-09, one failed ALTER inside try/except, then a
+# rebuild every two minutes for hours.
+#
+# Keeping the tool out of the image makes that structural instead of a
+# convention someone has to remember.
+#
+# Size: python:3.14-slim plus three pure wheels. No gcc, no libgomp, no
+# frontend build — this is not the web image with a different command.
+
+FROM python:3.14-slim
+
+WORKDIR /app
+
+# Pinned to the same versions the application and its dev suite carry, so the
+# revision that was tested is the revision that runs. asyncpg 0.31.0 and not
+# the sibling repository's 0.30.0: that release predates Python 3.14 and ships
+# no cp314 wheel, so pip would fall back to compiling the C extension and this
+# image has no gcc.
+RUN pip install --no-cache-dir \
+        "asyncpg==0.31.0" \
+        "alembic==1.18.5" \
+        "sqlalchemy[asyncio]>=2.0"
+
+COPY alembic.ini ./
+COPY migrations/ ./migrations/
+
+# `core/pg.py` alone, and deliberately WITHOUT `core/__init__.py`.
+#
+# `migrations/env.py` needs three constants from it — the DSN variable and
+# where the version table lives — and duplicating them here is how Alembic
+# ends up writing its bookkeeping to a schema the application does not read.
+# One home for those, charter rule 1.
+#
+# Omitting `__init__.py` makes `core` a namespace package, so `core.pg`
+# imports without running the real package's `__init__`, which pulls in
+# config, validators, pagination and httpx. Verified: the import succeeds
+# with an empty environment and loads none of them.
+COPY core/pg.py ./core/pg.py
+
+# No ENTRYPOINT. The command is given by compose and visible in the file that
+# schedules it, because "what did the migration container actually run" is a
+# question people ask during an incident.
+CMD ["alembic", "upgrade", "head"]
