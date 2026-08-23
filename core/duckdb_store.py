@@ -3447,34 +3447,33 @@ class DuckDBStore(
             return len(result)
 
     async def upsert_products(self, products: List[Dict[str, Any]]) -> int:
-        """Insert or update products from API response."""
+        """Insert or update products from API response.
+
+        The payload — including pulling `brand` out of KeyCRM's custom fields —
+        is read by `core.landing_rows`. Step 05 hands the same rows to
+        Postgres, and brand is exactly the rule that must not acquire a second
+        reading: it is typed by a human into a custom field, 6% of goods have
+        none, and the dashboard's `Unknown` bucket is built on what this
+        returns.
+        """
         if not products:
             return 0
+
+        from core.landing_rows import product_rows
+
+        rows = product_rows(products)
 
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
                 count = 0
-                for prod_data in products:
-                    # Extract brand from custom_fields
-                    brand = None
-                    for cf in prod_data.get("custom_fields", []):
-                        if cf.get("uuid") == "CT_1001" or cf.get("name") == "Brand":
-                            values = cf.get("value", [])
-                            if values and isinstance(values, list):
-                                brand = values[0]
-                            break
-
+                for row in rows:
                     conn.execute("""
                         INSERT OR REPLACE INTO products (id, name, category_id, brand, sku, price, synced_at)
                         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """, [
-                        prod_data.get("id"),
-                        prod_data.get("name", "Unknown"),
-                        prod_data.get("category_id"),
-                        brand,
-                        prod_data.get("sku"),
-                        prod_data.get("min_price") or prod_data.get("price")
+                        row.id, row.name, row.category_id,
+                        row.brand, row.sku, row.price,
                     ])
                     count += 1
 
@@ -3490,23 +3489,29 @@ class DuckDBStore(
                 raise
 
     async def upsert_categories(self, categories: List[Dict[str, Any]]) -> int:
-        """Insert or update categories from API response."""
+        """Insert or update categories from API response.
+
+        The payload is read by `core.landing_rows`, not here: step 05 hands the
+        same rows to Postgres, and a store that reads the payload for itself is
+        a second home for the rule (charter rule 1). `synced_at` stays local —
+        it is this copy's bookkeeping, not a fact about the category.
+        """
         if not categories:
             return 0
+
+        from core.landing_rows import category_rows
+
+        rows = category_rows(categories)
 
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
                 count = 0
-                for cat_data in categories:
+                for row in rows:
                     conn.execute("""
                         INSERT OR REPLACE INTO categories (id, name, parent_id, synced_at)
                         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                    """, [
-                        cat_data.get("id"),
-                        cat_data.get("name", "Unknown"),
-                        cat_data.get("parent_id")
-                    ])
+                    """, [row.id, row.name, row.parent_id])
                     count += 1
 
                 conn.execute("COMMIT")
