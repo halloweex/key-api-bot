@@ -185,6 +185,56 @@ services:
     mem_limit: 64m
     memswap_limit: 64m
 
+  # ── The schema, applied on the deploy that carries it ────────────────────
+  #
+  # Same shape as `postgres-bootstrap` above, one level up: that one creates
+  # roles and schemas and never a table, this one creates tables and never a
+  # schema. Charter rule 11, as two containers.
+  #
+  # `restart: "no"` and it exits — an init container, so `Exited (0)` in
+  # `docker compose ps` is the healthy steady state and a non-zero exit means
+  # a revision failed. Verified against a real server: a missing KS_PG_DSN, a
+  # wrong password and an unreachable host all exit 1 with the reason on
+  # stderr, which is what makes the exit code worth reading.
+  #
+  # WHY THIS IS NOT `web` WITH A DIFFERENT COMMAND. Alembic is deliberately
+  # absent from the application images. Rule 11 says the app declares the
+  # version it needs and fails closed; if the tool were sitting in the image,
+  # `alembic.command.upgrade()` would be one import away from startup, and
+  # this system's history is a list of self-healing that turned a one-off
+  # fault into a loop. Keeping the tool out makes that structural.
+  #
+  # NOTHING DEPENDS ON IT YET, ON PURPOSE. When `web` first reads Postgres it
+  # gains `condition: service_completed_successfully` here. Adding that today
+  # would mean a failed migration takes the dashboard down over a database no
+  # code touches — charter rule 8 says the step leaves the system working.
+  migrate:
+    image: halloweex/keycrm-migrate:latest
+    container_name: ks-migrate
+    restart: "no"
+    logging: *default-logging
+    networks: [default]
+    depends_on:
+      postgres: {condition: service_healthy}
+      # On `postgres-bootstrap`, not just on a healthy server. The schemas this
+      # writes into are created there, and `service_healthy` alone is a race:
+      # it happens to hold on a fresh volume, because `initdb` runs inside the
+      # entrypoint before the server ever reports healthy — but the whole
+      # reason `postgres-bootstrap` exists is the case where the data directory
+      # is NOT empty and `initdb` is skipped. In that case both start the
+      # moment Postgres is healthy, and a migration can reach `meta` before
+      # anything has created it.
+      postgres-bootstrap: {condition: service_completed_successfully}
+    environment:
+      # Built here rather than read whole from .env so the credentials stay in
+      # one place: the same KS_APP_PASSWORD `postgres` and `postgres-bootstrap`
+      # already take. `ks_app` and not `postgres` — the schema belongs to the
+      # role that will own the tables, and a migration run as superuser leaves
+      # tables the application cannot alter.
+      KS_PG_DSN: postgresql://ks_app:${KS_APP_PASSWORD:?set it in .env}@postgres:5432/ks
+    mem_limit: 128m
+    memswap_limit: 128m
+
   meilisearch:
     image: getmeili/meilisearch:v1.6
     container_name: keycrm-meili
