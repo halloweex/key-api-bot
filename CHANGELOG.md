@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.100
+
+- Hand the shop its own provisioning back, and give this application a schema of its own (#122)
+
+
 ## 3.0.99
 
 - Stop the shop from owning its own tables, so row level security can ever apply (#121)
