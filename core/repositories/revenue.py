@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
+from core.duckdb_constants import UNKNOWN_BRAND, brand_where
 from core.models import OrderStatus
 
 
@@ -42,8 +43,7 @@ class RevenueMixin:
                     params.extend(cat_ids)
 
                 if brand:
-                    where_clauses.append("LOWER(l.brand) = LOWER(?)")
-                    params.append(brand)
+                    where_clauses.append(brand_where(brand, params, "l"))
 
                 if promocode:
                     where_clauses.append("UPPER(l.promocode) = UPPER(?)")
@@ -383,8 +383,7 @@ class RevenueMixin:
             params.extend(category_ids)
 
         if brand:
-            where_clauses.append("LOWER(l.brand) = LOWER(?)")
-            params.append(brand)
+            where_clauses.append(brand_where(brand, params, "l"))
 
         if promocode:
             # `l`, not `s`: the FROM clause below binds `silver_order_lines l`
@@ -617,8 +616,7 @@ class RevenueMixin:
                     params.extend(cat_ids)
 
                 if brand:
-                    where_clauses.append("LOWER(l.brand) = LOWER(?)")
-                    params.append(brand)
+                    where_clauses.append(brand_where(brand, params, "l"))
 
                 if promocode:
                     where_clauses.append("UPPER(l.promocode) = UPPER(?)")
@@ -715,8 +713,7 @@ class RevenueMixin:
                     silver_where.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
                     silver_params.extend(cat_ids)
                 if brand:
-                    silver_where.append("LOWER(l.brand) = LOWER(?)")
-                    silver_params.append(brand)
+                    silver_where.append(brand_where(brand, silver_params, "l"))
                 silver_where.append("UPPER(l.promocode) = UPPER(?)")
                 silver_params.append(promocode)
                 silver_params.append(limit)
@@ -749,8 +746,7 @@ class RevenueMixin:
                     params.extend(cat_ids)
 
                 if brand:
-                    where_clauses.append("LOWER(g.brand) = LOWER(?)")
-                    params.append(brand)
+                    where_clauses.append(brand_where(brand, params, "g"))
 
                 params.append(limit)
                 where_sql = " AND ".join(where_clauses)
@@ -801,14 +797,34 @@ class RevenueMixin:
             return [{"id": row[0], "name": row[1]} for row in results]
 
     async def get_brands(self) -> List[Dict[str, str]]:
-        """Get all unique brands for filter dropdown."""
+        """Every brand the filter can be set to, plus the unknown bucket.
+
+        Brand analytics has always drawn a bucket for goods with no brand —
+        `COALESCE(g.brand, 'Unknown')`, ₴3.5M of retail, fifth by revenue —
+        and this list has always left it out, so it was the one slice on the
+        chart a user could see and not click into.
+
+        Offered only when there is something in it. Where it lands in the list
+        is not decided here — `BrandFilter` sorts the whole list by label — so
+        it reads alphabetically in the dropdown, which is where someone
+        looking for it would look.
+        """
         async with self.connection() as conn:
             results = conn.execute("""
                 SELECT DISTINCT brand FROM products
                 WHERE brand IS NOT NULL AND brand != ''
                 ORDER BY brand
             """).fetchall()
-            return [{"name": row[0]} for row in results]
+            brands = [{"name": row[0]} for row in results]
+
+            has_unbranded = conn.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM products WHERE brand IS NULL OR TRIM(brand) = ''
+                )
+            """).fetchone()[0]
+            if has_unbranded:
+                brands.append({"name": UNKNOWN_BRAND})
+            return brands
 
     async def get_promocodes(self) -> List[Dict[str, str]]:
         """Get all unique promocodes for filter dropdown."""
@@ -893,8 +909,7 @@ class RevenueMixin:
                     silver_where.append("l.source_id = ?")
                     silver_params.append(source_id)
                 if brand:
-                    silver_where.append("LOWER(l.brand) = LOWER(?)")
-                    silver_params.append(brand)
+                    silver_where.append(brand_where(brand, silver_params, "l"))
                 silver_where.append("UPPER(l.promocode) = UPPER(?)")
                 silver_params.append(promocode)
                 silver_sql = " AND ".join(silver_where)
@@ -934,8 +949,7 @@ class RevenueMixin:
                     params.append(source_id)
 
                 if brand:
-                    where_clauses.append("LOWER(g.brand) = LOWER(?)")
-                    params.append(brand)
+                    where_clauses.append(brand_where(brand, params, "g"))
 
                 where_sql = " AND ".join(where_clauses)
 
@@ -1032,8 +1046,7 @@ class RevenueMixin:
             brand_filter = ""
             brand_params = []
             if brand:
-                brand_filter = "AND LOWER(l.brand) = LOWER(?)"
-                brand_params.append(brand)
+                brand_filter = "AND " + brand_where(brand, brand_params, "l")
 
             promocode_filter = ""
             promocode_params = []
@@ -1181,8 +1194,7 @@ class RevenueMixin:
                 params.extend(cat_ids)
 
             if brand:
-                where_clauses.append("LOWER(s.brand) = LOWER(?)")
-                params.append(brand)
+                where_clauses.append(brand_where(brand, params, "s"))
 
             where_sql = " AND ".join(where_clauses)
 
@@ -1315,8 +1327,7 @@ class RevenueMixin:
                 params.extend(cat_ids)
 
             if brand:
-                where_clauses.append("LOWER(l.brand) = LOWER(?)")
-                params.append(brand)
+                where_clauses.append(brand_where(brand, params, "l"))
 
             params.append(limit)
             where_sql = " AND ".join(where_clauses)

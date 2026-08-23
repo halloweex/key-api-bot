@@ -91,3 +91,35 @@ def line_window_where(sales_type: str, params: list, alias: str = "l") -> str:
         clauses.append(f"{alias}.sales_type = ?")
         params.append(sales_type)
     return " AND ".join(clauses)
+
+
+# What the dashboard calls goods whose brand we do not know, and the value the
+# filter sends back to mean them. Brand analytics has always displayed this
+# bucket; until it reached the filter it was the one bucket a user could see
+# and not click.
+UNKNOWN_BRAND = "Unknown"
+
+
+def brand_where(brand: str, params: list, alias: str = "l") -> str:
+    """The predicate for "this brand", including the unknown bucket.
+
+    Ten call sites wrote `LOWER(x.brand) = LOWER(?)` by hand across three
+    different aliases — `l` for the order line, `g` for Gold, `s` where the
+    line level is aliased as the order. That is the shape that produced the
+    `UPPER(s.promocode)` binder error in #124: a predicate copied often enough
+    that one copy drifts to the wrong alias, and nothing compares them.
+
+    It is also why `Unknown` could be shown but never selected. Equality does
+    not match NULL, so `LOWER(brand) = LOWER('Unknown')` returns nothing for
+    the 6% of goods — ₴3.5M of retail — whose brand is absent. Naming the
+    bucket here is what makes it reachable.
+
+    Follows `line_window_where`'s contract: appends its own bound values to
+    `params` and returns the fragment.
+    """
+    col = f"{alias}.brand"
+    if brand.strip().casefold() == UNKNOWN_BRAND.casefold():
+        # Both spellings of absent: never synced, and synced empty.
+        return f"({col} IS NULL OR TRIM({col}) = '')"
+    params.append(brand)
+    return f"LOWER({col}) = LOWER(?)"
