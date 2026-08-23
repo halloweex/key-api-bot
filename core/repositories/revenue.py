@@ -258,7 +258,18 @@ class RevenueMixin:
                         ORDER BY date
                     """
             else:
-                sql = f"SELECT NULL::DATE, 0, 0 WHERE FALSE"
+                # Gold holds no column for this source, so it cannot answer.
+                # `params` is emptied with the SQL: the two used to part ways
+                # here, and passing three bound values to a statement taking
+                # none raised `Parameter argument/count mismatch` — a 500 on
+                # every /api/revenue/trend?source_id=5.
+                #
+                # `get_revenue_trend` no longer routes an unanswerable source
+                # here at all; it goes to `_build_silver_orders_revenue_query`,
+                # which returns the real number. This stays consistent for any
+                # future caller rather than staying a trap.
+                sql = "SELECT NULL::DATE, 0, 0 WHERE FALSE"
+                params = []
         else:
             if needs_group_by:
                 sql = f"""
@@ -275,6 +286,70 @@ class RevenueMixin:
                     WHERE {where_sql}
                     ORDER BY date
                 """
+        return sql, params
+
+    # Which source ids `gold_daily_revenue` can answer for on its own. The Gold
+    # row carries one column per source, so a source without a column cannot be
+    # asked about here — it is not a missing filter but an absent column.
+    _GOLD_SOURCE_COLUMNS = {1: "instagram", 2: "telegram", 4: "shopify"}
+
+    def _build_silver_orders_revenue_query(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "retail",
+        source_id: Optional[int] = None,
+        promocode: Optional[str] = None,
+    ) -> Tuple[str, list]:
+        """Revenue at the ORDER grain, for order-level filters Gold cannot express.
+
+        Same measure as `_build_gold_revenue_query` — `SUM(grand_total)` over
+        non-return rows on an active source — computed from `silver_orders`
+        instead of read from the pre-aggregate. Gold is the fast path for the
+        shapes it holds a column for; this is the general one.
+
+        Two filters need it, and both used to be a 500 rather than an answer.
+        `promocode` has no Gold column at all. And a `source_id` Gold has no
+        column for fell to a guard that builds
+        `SELECT NULL::DATE, 0, 0 WHERE FALSE` while still returning three
+        bound parameters, so DuckDB raised
+        `Parameter argument/count mismatch` — that is what
+        `/api/revenue/trend?source_id=5` did, on the Виставка source worth
+        ₴266k that PR #101 had just finished putting back into the numbers.
+
+        Deliberately NOT the line-grain query: an order-level filter selects
+        whole orders, so the answer is the money those orders brought in. The
+        line-grain query answers a different question and is only correct when
+        the filter is line-level.
+        """
+        params: list = [start_date, end_date]
+        where = [
+            "order_date BETWEEN ? AND ?",
+            "NOT is_return",
+            "is_active_source",
+        ]
+
+        if sales_type != "all":
+            where.append("sales_type = ?")
+            params.append(sales_type)
+
+        if source_id:
+            where.append("source_id = ?")
+            params.append(source_id)
+
+        if promocode:
+            where.append("UPPER(promocode) = UPPER(?)")
+            params.append(promocode)
+
+        sql = f"""
+            SELECT order_date AS day,
+                   COALESCE(SUM(grand_total), 0) AS revenue,
+                   COUNT(*) AS order_count
+            FROM silver_orders
+            WHERE {" AND ".join(where)}
+            GROUP BY order_date
+            ORDER BY order_date
+        """
         return sql, params
 
     def _build_silver_products_revenue_query(
@@ -312,7 +387,12 @@ class RevenueMixin:
             params.append(brand)
 
         if promocode:
-            where_clauses.append("UPPER(s.promocode) = UPPER(?)")
+            # `l`, not `s`: the FROM clause below binds `silver_order_lines l`
+            # and nothing else, so `s.promocode` raised
+            # `Binder Error: Referenced table "s" not found!` — every request
+            # to /api/revenue/trend carrying a promocode was a 500. The other
+            # five promocode predicates in this file already say `l`.
+            where_clauses.append("UPPER(l.promocode) = UPPER(?)")
             params.append(promocode)
 
         where_sql = " AND ".join(where_clauses)
@@ -339,21 +419,56 @@ class RevenueMixin:
         compare_type: str = "previous_period",
         promocode: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Get daily revenue trend for chart (from Gold layer)."""
+        """Get daily revenue trend for chart.
+
+        **Two measures live here, and which one you get depends on the filter.**
+        That is deliberate, and the response says which one it used.
+
+        - A **line-level** filter — category or brand — selects part of an
+          order, and `grand_total` cannot be split by it. The answer is the
+          value of the goods sold: `SUM(price_sold * quantity)`. This is what
+          brand analytics is for, and the owner ruled on 2026-08-23 that it is
+          counted honestly — all goods of that brand across every order in the
+          period, whatever the customer paid with.
+        - An **order-level** filter — promocode, source, sales_type — selects
+          whole orders, so the answer stays money that came in:
+          `SUM(grand_total)`.
+
+        The two do not add up to each other and are not meant to: retail goods
+        come to ₴57.7M against ₴56.9M of revenue, and 99.4% of that ₴0.8M gap
+        is gift certificates, whose goods were paid for when the certificate
+        was sold. See `_headline_vs_line_items_check`.
+
+        The bug this replaced was not that both exist. It was that
+        `use_products` also switched on `promocode` — an order-level filter —
+        so applying one silently changed the measure by ₴1.5M lifetime, with
+        nothing in the response saying so.
+        """
         async with self.connection() as conn:
             cat_ids = None
             if category_id:
                 cat_ids = await self._get_category_with_children(conn, category_id)
 
-            use_products = bool(category_id or brand or promocode)
+            # Line-level filters only. A promocode selects whole orders and
+            # belongs on the order grain; it used to land here and change the
+            # measure as a side effect.
+            use_lines = bool(category_id or brand)
+            gold_can_answer = (
+                not promocode
+                and (not source_id or source_id in self._GOLD_SOURCE_COLUMNS)
+            )
 
-            if use_products:
+            if use_lines:
                 sql, params = self._build_silver_products_revenue_query(
                     start_date, end_date, sales_type, source_id, cat_ids, brand, promocode
                 )
-            else:
+            elif gold_can_answer:
                 sql, params = self._build_gold_revenue_query(
                     start_date, end_date, sales_type, source_id
+                )
+            else:
+                sql, params = self._build_silver_orders_revenue_query(
+                    start_date, end_date, sales_type, source_id, promocode
                 )
 
             results = conn.execute(sql, params).fetchall()
@@ -397,13 +512,20 @@ class RevenueMixin:
                     prev_end = start_date - timedelta(days=1)
                     prev_start = prev_end - timedelta(days=period_days - 1)
 
-                if use_products:
+                # The comparison period has to be measured the same way as the
+                # current one, or the growth percentage is a ratio between two
+                # different questions.
+                if use_lines:
                     prev_sql, prev_params = self._build_silver_products_revenue_query(
                         prev_start, prev_end, sales_type, source_id, cat_ids, brand, promocode
                     )
-                else:
+                elif gold_can_answer:
                     prev_sql, prev_params = self._build_gold_revenue_query(
                         prev_start, prev_end, sales_type, source_id
+                    )
+                else:
+                    prev_sql, prev_params = self._build_silver_orders_revenue_query(
+                        prev_start, prev_end, sales_type, source_id, promocode
                     )
 
                 # Only need day + revenue for comparison
@@ -455,7 +577,12 @@ class RevenueMixin:
                 "labels": labels,
                 "revenue": data,
                 "orders": orders_data,
-                "datasets": datasets
+                "datasets": datasets,
+                # Which of the two measures the numbers above are. A caller
+                # that draws them under one axis label without reading this
+                # reintroduces the defect: the series steps by ~1.5% when a
+                # brand filter goes on, and nothing on screen says why.
+                "measure": "goods_value" if use_lines else "revenue",
             }
             if comparison:
                 result["comparison"] = comparison

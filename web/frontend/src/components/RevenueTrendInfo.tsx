@@ -4,13 +4,19 @@ import { FORECAST_BAR_COLOR } from './revenueTrendTypes'
 interface InfoProps {
   title: string
   hasForecast: boolean
+  showsGoods?: boolean
   t: (key: string) => string
 }
 
-export function RevenueTrendInfo({ title, hasForecast, t }: InfoProps) {
+export function RevenueTrendInfo({ title, hasForecast, showsGoods, t }: InfoProps) {
   return (
     <InfoPopover title={title}>
       <div className="space-y-2">
+        {showsGoods && (
+          <p className="text-xs text-slate-300">
+            <strong className="text-amber-400">{t('chart.rtGoodsLabel')}</strong> {t('chart.rtGoodsDesc')}
+          </p>
+        )}
         <p className="text-xs text-slate-300">
           <strong className="text-blue-400">{t('chart.rtBarsLabel')}</strong> {t('chart.rtBarsDesc')}
         </p>
