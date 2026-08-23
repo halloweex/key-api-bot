@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.106
+
+- Read what the migration exited with, instead of assuming (#128)
+
+
 ## 3.0.105
 
 - Apply the schema on the deploy that carries it (#127)
