@@ -48,6 +48,7 @@
   "summary.noReturnOrders": "No return orders found",
   "summary.failedToLoad": "Failed to load summary data",
   "chart.revenueTrend": "Revenue Trend",
+  "chart.goodsTrend": "Goods Sold Trend",
   "chart.revenueTrendInfo": "Chart information",
   "chart.revenueTrendBars": "Bars: Daily revenue for selected period.",
   "chart.revenueTrendPredicted": "Lighter bars: ML-predicted revenue for remaining days.",
@@ -900,5 +901,7 @@
   "sms.forestKeyProven": "interval clear of zero — effect shown",
   "sms.forestKeyUnproven": "interval crosses zero — not shown",
   "sms.forestDetail": "messaged {{target}}% against {{control}}% in the control, interval {{lo}} to {{hi}} pp, p={{p}}, {{contacts}} recipients",
-  "sms.forestHint": "Hover a row for the figures"
+  "sms.forestHint": "Hover a row for the figures",
+  "chart.rtGoodsLabel": "Goods, not revenue:",
+  "chart.rtGoodsDesc": "A category or brand filter shows what those goods sold for, because an order's total cannot be split between categories. It runs slightly above revenue: gift-certificate goods were paid for when the certificate was bought."
 }

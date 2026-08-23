@@ -55,10 +55,26 @@ export interface RevenueForecast {
   forecast_end?: string
 }
 
+/**
+ * Which of two measures the `revenue` series holds.
+ *
+ * `revenue`     — money that came in: SUM(grand_total).
+ * `goods_value` — what the goods sold for: SUM(price_sold × quantity). This is
+ *                 what a category or brand filter returns, because grand_total
+ *                 is an order-level number and cannot be split by them.
+ *
+ * The two do not add up to each other, and the gap is almost entirely gift
+ * certificates — goods paid for when the certificate was sold. The chart must
+ * say which one it is showing; a series that steps by ~1.5% when a brand filter
+ * goes on, under an unchanged axis label, is the defect this field exists for.
+ */
+export type RevenueMeasure = 'revenue' | 'goods_value'
+
 export interface RevenueTrendResponse {
   labels: string[]
   revenue: number[]
   orders: number[]
+  measure?: RevenueMeasure
   comparison?: {
     labels: string[]
     revenue: number[]

@@ -50,10 +50,24 @@ export const RevenueTrendChart = memo(function RevenueTrendChart() {
 
   const isEmpty = !isLoading && chartData.length === 0
 
+  // A category or brand filter cannot be answered with grand_total, so the
+  // series becomes the value of the goods instead. Retitling is the point: the
+  // chart is answering a different question, and the numbers step by ~1.5%
+  // because gift-certificate goods were paid for before this order.
+  const showsGoods = data?.measure === 'goods_value'
+  const chartTitle = t(showsGoods ? 'chart.goodsTrend' : 'chart.revenueTrend')
+
   return (
     <ChartContainer
-      title={t('chart.revenueTrend')}
-      titleExtra={<RevenueTrendInfo title={t('chart.revenueTrend')} hasForecast={hasForecast} t={t} />}
+      title={chartTitle}
+      titleExtra={
+        <RevenueTrendInfo
+          title={chartTitle}
+          hasForecast={hasForecast}
+          showsGoods={showsGoods}
+          t={t}
+        />
+      }
       isLoading={isLoading}
       error={error as Error | null}
       onRetry={refetch}
