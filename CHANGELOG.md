@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.101
+
+- Watch the landing→Silver arc, which only a row count watched (#123)
+
+
 ## 3.0.100
 
 - Hand the shop its own provisioning back, and give this application a schema of its own (#122)
