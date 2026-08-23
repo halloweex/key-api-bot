@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.104
+
+- Give this repository a Postgres connection and a schema it owns (#126)
+
+
 ## 3.0.103
 
 - Let the Unknown brand be selected, not just seen (#125)
