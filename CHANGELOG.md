@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.107
+
+- Write down the two preflight steps that only the host can do (#129)
+
+
 ## 3.0.106
 
 - Read what the migration exited with, instead of assuming (#128)
