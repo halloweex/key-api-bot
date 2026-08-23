@@ -118,6 +118,52 @@ class TestItRunsAsTheRoleThatOwnsTheTables:
         assert "ports" not in SERVICES["migrate"]
 
 
+class TestTheDeployReadsTheExitCode:
+    """The failure this file was one PR late in noticing.
+
+    `docker compose up -d` starts a one-off container and returns without
+    waiting for it or looking at what it exited with — verified on a
+    throwaway compose project: a service exiting 1 still leaves `up -d` at 0.
+    So a revision that failed would deploy green, which is precisely the
+    301-redirect gate's disease, in the same pipeline, three PRs after that
+    one was fixed.
+    """
+
+    @staticmethod
+    def _script() -> str:
+        step = next(
+            s for s in WORKFLOW["jobs"]["deploy"]["steps"]
+            if "script" in (s.get("with") or {})
+        )
+        return step["with"]["script"]
+
+    def test_it_waits_for_the_migration_container(self):
+        assert "docker wait ks-migrate" in self._script()
+
+    def test_a_non_zero_exit_fails_the_run(self):
+        script = self._script()
+        assert 'MIGRATE_RC" != "0"' in script
+        assert "exit 1" in script
+
+    def test_a_missing_container_is_a_failure_too(self):
+        """The service is declared, so `up -d` was supposed to produce it.
+        Absent means something is wrong, not that there was nothing to do."""
+        assert "echo missing" in self._script()
+
+    def test_the_logs_are_printed_before_giving_up(self):
+        """An exit code alone sends whoever is on call to the host to find
+        out what it said."""
+        assert "docker logs" in self._script()
+
+    def test_the_gate_runs_before_the_health_check(self):
+        """No point asking whether the app serves when its schema did not
+        apply — and the health endpoint would answer 200 either way."""
+        script = self._script()
+        assert script.index("docker wait ks-migrate") < script.index(
+            "ksanalytics.duckdns.org/api/health"
+        )
+
+
 class TestTheImageIsActuallyBuilt:
     def test_the_workflow_builds_and_pushes_it(self):
         """A compose file naming an image nothing publishes is a deploy that
