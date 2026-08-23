@@ -10,3 +10,16 @@ pytest>=8.0.0
 # resolved, which is not a thing test results should depend on.
 pytest-asyncio>=1.0,<2.0
 pytest-cov>=4.1.0
+
+# Alembic owns the Postgres schema, and is deliberately NOT in the runtime
+# image: migrations are applied by a person or a deploy step, never by the
+# application on boot. Charter rule 11 — the app declares the revision it
+# needs and fails closed; it does not heal itself. Brings SQLAlchemy, which
+# is why the runtime does not need it.
+alembic==1.18.5
+# SQLAlchemy's async engine runs the sync DBAPI shim on a greenlet, and the
+# dependency is an extra rather than a default — without it `alembic upgrade
+# head` dies with "the greenlet library is required". Named through the extra
+# so the reason travels with it. The alternative was psycopg for migrations
+# and asyncpg for the app: two drivers' behaviour to know, for one database.
+sqlalchemy[asyncio]>=2.0
