@@ -17,6 +17,17 @@ httpx>=0.27.0
 nest-asyncio>=1.6.0
 slowapi>=0.1.9
 
+# Postgres (step 05 of the migration). Nothing reads or writes it yet —
+# core/pg.py opens a pool on first use and never at import.
+#
+# NOT 0.30.0, which is what the sibling bot pins. That release predates
+# Python 3.14 and ships no cp314 wheel, so pip falls back to building the C
+# extension from source — and `python:3.14-slim` has no gcc. Verified: the
+# image build fails with "error: [Errno 2] No such file or directory: 'gcc'".
+# 0.31.0 is the first release with a cp314 wheel, and it installs and imports
+# in the production base image.
+asyncpg==0.31.0
+
 # DuckDB analytics
 duckdb==1.5.5
 pandas>=2.0.0
