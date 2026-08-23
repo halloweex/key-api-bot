@@ -1020,6 +1020,262 @@ def _gold_cell_values_check(
     )]
 
 
+# Every column a Silver row carries, and how closely a recomputed value has to
+# match. `grand_total` is DECIMAL(12,2) and gets a cent of slack; the rest are
+# ids, flags, dates and labels, where any difference is a difference. Those use
+# `IS DISTINCT FROM` rather than `<>`: a promocode going from NULL to a value,
+# or a buyer_first_order_date arriving, has to register, and `<>` answers NULL
+# to both.
+_SILVER_ROW_COLUMNS = (
+    ("source_id", 0),
+    ("status_id", 0),
+    ("grand_total", 0.01),
+    ("ordered_at", 0),
+    ("buyer_id", 0),
+    ("manager_id", 0),
+    ("order_date", 0),
+    ("is_return", 0),
+    ("sales_type", 0),
+    ("is_active_source", 0),
+    ("source_name", 0),
+    ("is_new_customer", 0),
+    ("buyer_first_order_date", 0),
+    ("promocode", 0),
+)
+
+# A row written to `orders` is not in Silver until the next warehouse refresh,
+# and that runs every two minutes. Anything inside this window is in flight,
+# not missing — without it the check fires on every sync. Outside it, seven
+# refreshes have had their chance, and a row still absent is absent.
+_SILVER_ARC_GRACE_MINUTES = 15
+
+
+def _silver_arc_check(
+    conn,
+    missing_severity: "Severity" = None,
+    drift_severity: "Severity" = None,
+    max_samples: int = 10,
+    grace_minutes: int = _SILVER_ARC_GRACE_MINUTES,
+) -> List[IntegrityIssue]:
+    """Rebuild every Silver row from landing and compare it to the stored one.
+
+    The arc had exactly one instrument, and it counts. `row_count_match` in
+    the warehouse validation asserts
+    `COUNT(*) FROM orders == COUNT(*) FROM silver_orders`, and it joins
+    `validation_passed`, so it drives the self-heal: a plainly missing Silver
+    row makes the count disagree, the warehouse is marked dirty and the next
+    rebuild restores it. That much already worked, and this check does not
+    replace it.
+
+    Three things a count cannot do:
+
+    - **Say which rows.** The count's answer is a full rebuild of everything.
+      Three named ids tell you whether the loss is systematic or a one-off.
+    - **Notice two faults cancelling.** One row missing and one ghost keeps
+      `COUNT(*)` equal on both sides, and every scalar and the cell guard
+      stay green.
+    - **See a row present on both sides and wrong.** Nothing in the warehouse
+      validation compares a Silver row's *values* against landing at all.
+
+    That third one is the live risk, and it is structural rather than
+    hypothetical. `silver_mode` has been incremental for its entire recorded
+    history — `full` has never once been written — and an incremental rebuild
+    only rewrites rows inside its scope. So when landing moves and the row is
+    not in scope, Silver keeps the old values indefinitely; and when the
+    projection itself changes on a deploy, the new rule reaches only the rows
+    something later happens to touch. PR #101 changed `is_active_source`, and
+    nothing in this file could have said whether that fix reached every row
+    or only the rows that were rebuilt afterwards. This can.
+
+    Three findings, because three different things go wrong and each has its
+    own runbook:
+
+    - ``silver_missing_rows`` — landing holds the order, Silver does not. Its
+      money is absent from every dashboard number. CRITICAL, and named rather
+      than counted: if the self-heal is working this never fires, so when it
+      does the ids are the whole story.
+    - ``silver_orphan_rows``  — Silver holds a row landing does not. A ghost,
+      inflating the numbers instead of shorting them.
+    - ``silver_row_values``   — both sides hold the row and disagree on at
+      least one of fourteen columns. The one the count cannot reach.
+
+    Report-only in the same structural sense as the Gold check: an integrity
+    finding cannot reach `validation_passed`, so none of this can start a
+    rebuild loop.
+
+    What it cannot see is what the Gold check cannot see either — a lie that
+    arrived from KeyCRM, and a projection that is wrong in the same way on
+    both sides. Silver is recomputed here with the *current*
+    `silver_select_sql` over current landing, so this answers "does stored
+    Silver match what the rule says today", not "is the rule right".
+    Reconciliation against KeyCRM remains the only check that sees the latter.
+    """
+    from core.duckdb_store import silver_select_sql
+
+    missing_severity = missing_severity or Severity.CRITICAL
+    drift_severity = drift_severity or Severity.WARN
+    issues: List[IntegrityIssue] = []
+
+    # f-string, not a parameter: DuckDB rejects `INTERVAL ? MINUTE`. The value
+    # is a function argument, never user input.
+    settled = (
+        "(o.synced_at IS NULL OR "
+        f"o.synced_at < now() - INTERVAL '{int(grace_minutes)} minutes')"
+    )
+
+    # ── landing has it, Silver does not ──
+    row = conn.execute(f"""
+        SELECT COUNT(*), COALESCE(SUM(o.grand_total), 0)
+        FROM orders o
+        LEFT JOIN silver_orders s ON s.id = o.id
+        WHERE s.id IS NULL AND {settled}
+    """).fetchone()
+    missing_count = int(row[0] or 0)
+    if missing_count:
+        sample = tuple(r[0] for r in conn.execute(f"""
+            SELECT o.id
+            FROM orders o
+            LEFT JOIN silver_orders s ON s.id = o.id
+            WHERE s.id IS NULL AND {settled}
+            ORDER BY o.grand_total DESC
+            LIMIT {int(max_samples)}
+        """).fetchall())
+        issues.append(IntegrityIssue(
+            check_name="silver_missing_rows",
+            table_name="silver_orders",
+            severity=missing_severity,
+            count=missing_count,
+            sample_ids=sample,
+            description=(
+                f"{missing_count} order(s) worth {float(row[1] or 0):,.2f} sit in "
+                f"landing with no Silver row after {int(grace_minutes)} minutes. "
+                "Every dashboard number is short by that much. A warehouse "
+                "refresh repairs it; if refreshes are running and it persists, "
+                "the incremental rebuild's scope is losing rows."
+            ),
+        ))
+
+    # ── Silver has it, landing does not ──
+    row = conn.execute("""
+        SELECT COUNT(*), COALESCE(SUM(s.grand_total), 0)
+        FROM silver_orders s
+        LEFT JOIN orders o ON o.id = s.id
+        WHERE o.id IS NULL
+    """).fetchone()
+    orphan_count = int(row[0] or 0)
+    if orphan_count:
+        sample = tuple(r[0] for r in conn.execute("""
+            SELECT s.id
+            FROM silver_orders s
+            LEFT JOIN orders o ON o.id = s.id
+            WHERE o.id IS NULL
+            ORDER BY s.grand_total DESC
+            LIMIT ?
+        """, [int(max_samples)]).fetchall())
+        issues.append(IntegrityIssue(
+            check_name="silver_orphan_rows",
+            table_name="silver_orders",
+            severity=drift_severity,
+            count=orphan_count,
+            sample_ids=sample,
+            description=(
+                f"{orphan_count} Silver row(s) worth {float(row[1] or 0):,.2f} "
+                "have no order behind them in landing. They inflate every "
+                "number that reads Silver. No grace window applies — Silver is "
+                "only ever written from landing, so a ghost is never in flight."
+            ),
+        ))
+
+    # ── both hold the row, and disagree ──
+    #
+    # Pass 2 is recomputed here as well, from the recomputed rows rather than
+    # from stored Silver. That is the point: the real pass 2 takes its baseline
+    # from whatever `silver_orders` currently holds, so a stale baseline
+    # reproduces itself, and only a recompute from landing can tell.
+    # The LEFT JOIN reproduces pass 2's own semantics for a buyer with no
+    # qualifying order — the real UPDATE joins those rows away and leaves
+    # pass 1's `FALSE` / `NULL` standing.
+    diffs = []
+    for column, tolerance in _SILVER_ROW_COLUMNS:
+        if tolerance:
+            diffs.append(
+                f"ABS(COALESCE(r.{column}, 0) - COALESCE(s.{column}, 0)) > {tolerance}"
+            )
+        else:
+            diffs.append(f"r.{column} IS DISTINCT FROM s.{column}")
+
+    rows = conn.execute(f"""
+        WITH pass1 AS (
+            SELECT {silver_select_sql()} FROM orders o
+        ),
+        baseline AS (
+            SELECT buyer_id, MIN(order_date) AS first_order_date
+            FROM pass1
+            WHERE buyer_id IS NOT NULL AND NOT is_return
+            GROUP BY buyer_id
+        ),
+        recomputed AS (
+            SELECT p.id, p.source_id, p.status_id, p.grand_total, p.ordered_at,
+                   p.buyer_id, p.manager_id, p.order_date, p.is_return,
+                   p.sales_type, p.is_active_source, p.source_name,
+                   CASE
+                       WHEN p.buyer_id IS NOT NULL
+                            AND NOT p.is_return
+                            AND p.is_active_source
+                            AND p.order_date = b.first_order_date
+                       THEN TRUE ELSE FALSE
+                   END AS is_new_customer,
+                   b.first_order_date AS buyer_first_order_date,
+                   p.promocode
+            FROM pass1 p
+            LEFT JOIN baseline b ON b.buyer_id = p.buyer_id
+        )
+        SELECT r.id,
+               {", ".join(f"r.{c} AS r_{c}, s.{c} AS s_{c}" for c, _ in _SILVER_ROW_COLUMNS)}
+        FROM recomputed r
+        JOIN silver_orders s ON s.id = r.id
+        JOIN orders o ON o.id = r.id
+        WHERE {settled} AND ({" OR ".join(diffs)})
+        ORDER BY r.id DESC
+        LIMIT {int(max_samples)}
+    """).fetchall()
+
+    if rows:
+        # Name the columns that actually moved, not just the rows.
+        offenders: Dict[str, int] = {}
+        for row in rows:
+            for idx, (column, tolerance) in enumerate(_SILVER_ROW_COLUMNS):
+                r_val, s_val = row[1 + idx * 2], row[2 + idx * 2]
+                if r_val is None and s_val is None:
+                    continue
+                differs = (
+                    abs(float(r_val or 0) - float(s_val or 0)) > tolerance
+                    if tolerance else (r_val != s_val)
+                )
+                if differs:
+                    offenders[column] = offenders.get(column, 0) + 1
+
+        worst = ", ".join(
+            f"{c} ({n})" for c, n in sorted(offenders.items(), key=lambda kv: -kv[1])[:5]
+        )
+        issues.append(IntegrityIssue(
+            check_name="silver_row_values",
+            table_name="silver_orders",
+            severity=drift_severity,
+            count=len(rows),
+            sample_ids=tuple(int(r[0]) for r in rows),
+            description=(
+                f"{len(rows)} Silver row(s) disagree with a recompute from "
+                f"landing (showing at most {max_samples}). Columns: {worst}. "
+                "Report only — a value that was already wrong in landing is "
+                "reproduced on both sides here and compares equal; only "
+                "reconciliation against KeyCRM sees that."
+            ),
+        ))
+
+    return issues
+
+
 def check_internal_integrity(conn) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
 
@@ -1069,6 +1325,16 @@ def check_internal_integrity(conn) -> List[IntegrityIssue]:
         issues += _headline_vs_line_items_check(conn)
     except Exception as exc:  # silver_orders may not exist yet on a fresh DB
         logger.debug("headline_vs_line_items check skipped: %s", exc)
+
+    # The landing→Silver arc. Everything above reads landing in isolation and
+    # everything below reads Silver→Gold; this is the arc between them, which
+    # had nothing on it at all. Incremental rebuilds only touch rows in scope,
+    # and `silver_mode` has never once been `full`, so a row that fell out of
+    # scope stayed wrong while every other check reported clean.
+    try:
+        issues += _silver_arc_check(conn)
+    except Exception as exc:  # silver_orders may not exist yet on a fresh DB
+        logger.debug("silver_arc check skipped: %s", exc)
 
     # Fourteen Gold columns against a recompute from Silver. Report-only by
     # construction: an integrity finding cannot reach validation_passed.
