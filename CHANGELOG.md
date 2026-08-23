@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.99
+
+- Stop the shop from owning its own tables, so row level security can ever apply (#121)
+
+
 ## 3.0.98
 
 - Send the shop's tables to the shop's schema, not to public (#120)
