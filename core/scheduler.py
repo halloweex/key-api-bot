@@ -76,6 +76,7 @@ INVARIANT_CHECK_HOURS = "1,7,13,19"
 CATCHUP_CHECKS = {
     "dq_reconciliation": ("reconciliation", 26 * 3600, 300),
     "dq_integrity_check": ("integrity", 8 * 3600, 120),
+    "dq_mirror_landing": ("mirror_landing", 26 * 3600, 180),
 }
 
 # Where the digest remembers its last delivery. In `sync_metadata` and not on
@@ -567,6 +568,21 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Reconciliation A — landing in Postgres against landing in DuckDB
+        # (daily at 07:30 Kyiv). Step 05's closing criterion: zero findings,
+        # with a tolerance of zero, because landing is a copy and not a
+        # computation. Between the 07:00 integrity scan and the 09:00 digest so
+        # the morning's message carries the same morning's verdict.
+        self._add_job(
+            job_id="dq_mirror_landing",
+            name="DQ: Mirror (landing)",
+            description="Reconciliation A: Postgres landing vs DuckDB landing",
+            func=self._run_dq_mirror_landing,
+            trigger=CronTrigger(hour=7, minute=30),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Half-written order repair (every 2 h)
         # Orders with revenue and no line items. Detection is a table scan of
         # our own data, so an idle run costs nothing; a working one costs one
@@ -1021,6 +1037,96 @@ class BackgroundScheduler:
                 "error": error_message,
             }
             logger.info("DQ Layer-1 integrity scan complete", extra=result)
+            return result
+
+    async def _run_dq_mirror_landing(self) -> Dict[str, Any]:
+        """Reconciliation A: is the Postgres mirror of landing equal to DuckDB?
+
+        The closing criterion for step 05 is this reporting zero, so it runs on
+        its own layer with its own age rather than riding along with the
+        integrity scan — one layer covering two jobs would make a stale mirror
+        check invisible behind a fresh integrity one.
+
+        07:30 Kyiv: after the 07:00 integrity scan, before the 09:00 digest, so
+        the morning's message carries the same morning's verdict. Nowhere near
+        05:00–05:05, which the Sunday host cron takes away.
+
+        Skips when there is no Postgres configured at all. That is a developer's
+        machine, and persisting a failed run every morning there would teach
+        `fetch_last_success_ages` that the layer is broken rather than absent.
+        """
+        from datetime import datetime, timezone
+        from core.data_quality import (
+            Severity,
+            alert_fingerprint,
+            format_alert_message,
+            overall_severity,
+            persist_run,
+        )
+        from core.duckdb_store import get_store
+        from core.mirror_reconciliation import (
+            MIRROR_LAYER,
+            configured,
+            read_duckdb_side,
+            reconcile_mirror,
+        )
+
+        with correlation_context():
+            if not configured():
+                logger.info("Mirror reconciliation skipped: KS_PG_DSN is not set")
+                return {"skipped": "KS_PG_DSN is not set"}
+
+            started_at = datetime.now(timezone.utc)
+            logger.info("Mirror reconciliation (landing PG vs DuckDB) starting")
+
+            store = await get_store()
+            error_message = None
+            issues = []
+            try:
+                # The DuckDB read and the Postgres round-trips are deliberately
+                # in separate blocks: the store's lock is not held across the
+                # network.
+                async with store.connection() as conn:
+                    dk_side = read_duckdb_side(conn)
+                issues = await reconcile_mirror(dk_side)
+            except Exception as e:
+                error_message = f"{type(e).__name__}: {e}"
+                logger.exception("Mirror reconciliation raised")
+
+            ended_at = datetime.now(timezone.utc)
+            window_day = ended_at.date()
+
+            run_id = None
+            try:
+                async with store.connection() as conn:
+                    run_id = persist_run(
+                        conn,
+                        started_at=started_at, ended_at=ended_at,
+                        as_of=ended_at,
+                        window_start=window_day, window_end=window_day,
+                        layer=MIRROR_LAYER,
+                        issues=issues, discrepancies=[],
+                        error_message=error_message,
+                    )
+            except Exception as e:
+                logger.exception(f"Mirror reconciliation persist failed: {e}")
+
+            sev = overall_severity(issues, [])
+            if sev == Severity.CRITICAL and not error_message:
+                msg = format_alert_message(MIRROR_LAYER, sev, issues, [])
+                await self._send_dq_alert_throttled(
+                    MIRROR_LAYER, msg,
+                    alert_fingerprint(MIRROR_LAYER, sev, issues, []),
+                )
+
+            result = {
+                "run_id": run_id,
+                "issues_count": len(issues),
+                "severity": sev.value,
+                "duration_ms": int((ended_at - started_at).total_seconds() * 1000),
+                "error": error_message,
+            }
+            logger.info("Mirror reconciliation complete", extra=result)
             return result
 
     # ─── Disk capacity watchdog ───────────────────────────────────────────────

@@ -419,6 +419,7 @@ whole reason the group is read from the source now.
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order |
+| `dq_mirror_landing` | 07:30 | Reconciliation A: landing in Postgres against landing in DuckDB, tolerance zero |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 
@@ -527,6 +528,39 @@ flag in its internal tooling is not a neutral act. Languages have names.
   too, so row-existence alone reads green. `bot/canary.py` judges it from the
   *other* container every 15 min: 30 h for reconciliation, 12 h for integrity.
   A missing block or a layer that never succeeded both count as failures.
+
+### Reconciliation A — the two stores against each other
+`dq_mirror_landing` (layer `mirror_landing`, daily 07:30) compares
+`bronze.products` and `bronze.categories` in Postgres against `products` and
+`categories` in DuckDB, **column by column with a tolerance of zero**. Landing
+is a copy, not a computation — the same parsed tuple from `core/landing_rows.py`
+goes to both stores in the same call — so any difference at all is a defect in
+the mirror, and a tolerance would only be somewhere for one to hide. This is
+step 05's closing criterion.
+
+**A row DuckDB has and Postgres does not is two different things**, and
+`meta.mirror_state.last_ok_at` is what tells them apart. Every successful mirror
+ships the *whole* catalogue, so after a success at T, Postgres holds everything
+KeyCRM served at T:
+
+- `synced_at <= last_ok_at` → KeyCRM has **retired** the row. DuckDB keeps it
+  because upsert never deletes; a payload-fed mirror can never learn of it
+  again. INFO, counted. Production has exactly one, product 1055, last synced
+  2026-06-13 — that is the whole 1004-vs-1003 gap.
+- `synced_at > last_ok_at` → in flight inside the 15-minute grace, **lost**
+  past it. CRITICAL.
+
+A table with no `last_ok_at` at all reports `mirror_never_shipped` and
+**suppresses the row-level findings**, so `bronze.categories` — written only by
+the weekly full sync — does not report 28 missing rows every morning until
+Sunday.
+
+Report-only, like the Silver arc and the Gold cell check: a finding cannot
+reach `validation_passed`, and a mirror that quietly re-shipped whatever it
+noticed missing would destroy the signal. `mirror_landing` is in
+`WATCHED_LAYERS` (digest section, layer age, catch-up) but deliberately not yet
+in the canary's `DQ_MAX_AGE_S` — that dict pages, and the canary's first probe
+is 90 s after the bot starts, before the catch-up run can finish.
 
 ### What the warehouse validation can and cannot see
 `validation_passed` covers: Bronze→Silver row counts, Silver→Gold revenue
