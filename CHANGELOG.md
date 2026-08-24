@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.109
+
+- Give the catalogue a home in Postgres (#131)
+
+
 ## 3.0.108
 
 - Read a KeyCRM payload once, for however many stores want it (#130)
