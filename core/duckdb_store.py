@@ -2904,44 +2904,15 @@ class DuckDBStore(
         if not orders:
             return UpsertResult(count=0, changed_ids=[], skipped_unchanged=0, failed=0)
 
-        # Parse orders and build DataFrames
-        order_rows = []
-        product_rows = []
+        # Parse orders into rows. The shaping lives in `core.landing_rows` so
+        # that the Postgres mirror below is fed the *same* tuples rather than
+        # reading the payload for itself — charter rule 1, one home per rule.
+        # The `ordered_at` skip and the synthetic line-item id moved with it.
+        from core.landing_rows import landed_orders
 
-        for order_data in orders:
-            order = Order.from_api(order_data)
-
-            # Skip invalid orders
-            if not order.ordered_at:
-                continue
-
-            order_rows.append({
-                "id": order.id,
-                "source_id": order.source_id,
-                "status_id": order.status_id,
-                "status_group_id": order.status_group_id,
-                "grand_total": float(order.grand_total),
-                "ordered_at": order.ordered_at,  # Keep as datetime
-                "created_at": order.created_at,  # Keep as datetime
-                "updated_at": order.updated_at,  # Keep as datetime
-                "buyer_id": order.buyer.id if order.buyer else None,
-                "manager_id": order.manager.id if order.manager else None,
-                "manager_comment": order.manager_comment,
-                "promocode": order.promocode,
-            })
-
-            # Build product rows (skip for status-only refresh to avoid OOM)
-            if not skip_products:
-                # ID generation: order_id * 1000 + position (supports up to 1000 products/order, order IDs up to ~2M)
-                for i, prod in enumerate(order.products):
-                    product_rows.append({
-                        "id": order.id * 1000 + i,
-                        "order_id": order.id,
-                        "product_id": prod.product_id,
-                        "name": prod.name,
-                        "quantity": prod.quantity,
-                        "price_sold": float(prod.price_sold),
-                    })
+        landed = landed_orders(orders, with_products=not skip_products)
+        order_rows = landed.orders
+        product_rows = landed.products
 
         if not order_rows:
             return UpsertResult(count=0, changed_ids=[], skipped_unchanged=0, failed=0)
@@ -3081,7 +3052,7 @@ class DuckDBStore(
             # 3. Insert products for actually-updated orders only
             if not skip_products and product_rows and updated_ids:
                 updated_set = set(updated_ids)
-                products_to_insert = [p for p in product_rows if p["order_id"] in updated_set]
+                products_to_insert = [p for p in product_rows if p.order_id in updated_set]
                 if products_to_insert:
                     conn.execute("BEGIN TRANSACTION")
                     try:
@@ -3089,8 +3060,9 @@ class DuckDBStore(
                             INSERT OR REPLACE INTO order_products (id, order_id, product_id, name, quantity, price_sold)
                             VALUES (?, ?, ?, ?, ?, ?)
                         """, [
-                            (p["id"], p["order_id"], p["product_id"], p["name"], p["quantity"], p["price_sold"])
-                            for p in products_to_insert
+                            # Column order is the row's own field order — see
+                            # core.landing_rows.ORDER_PRODUCT_COLUMNS.
+                            tuple(p) for p in products_to_insert
                         ])
                         conn.execute("COMMIT")
                     except Exception:
@@ -3113,12 +3085,36 @@ class DuckDBStore(
                 f"Upserted {count}/{len(insert_rows)} orders to DuckDB "
                 f"(written={n_written}, skipped_unchanged={skipped_count})"
             )
-            return UpsertResult(
+            result = UpsertResult(
                 count=count,
                 changed_ids=updated_ids,
                 skipped_unchanged=skipped_count,
                 failed=len(failed),
             )
+
+        # Step 05. The mirror ships exactly what this store wrote — `updated_ids`
+        # and no more. Not the whole page: a row DuckDB skipped as unchanged is
+        # already correct on both sides, and a row it failed on must not exist in
+        # Postgres and nowhere else. Whatever predates the mirror belongs to the
+        # backfill, not to this call.
+        #
+        # Outside the `connection()` block deliberately: awaiting a network
+        # round-trip while holding a lock the whole application shares is how a
+        # sync becomes a stall. `mirror_orders` never raises.
+        if updated_ids:
+            from core.pg_landing import mirror_orders
+
+            written_ids = set(updated_ids)
+            # Duplicates collapse keeping the last, the same rule the DataFrame
+            # above applies — the API repeats an order across paginated pages.
+            deduped = {r.id: r for r in order_rows if r.id in written_ids}
+            await mirror_orders(
+                list(deduped.values()),
+                [p for p in product_rows if p.order_id in written_ids],
+                replace_products=not skip_products,
+            )
+
+        return result
 
     # ─── H3: bronze order events (append-only audit log) ───────────────────────
 

@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,33 @@ ON CONFLICT (id) DO UPDATE SET {sets}, mirrored_at = now()
 """
 
 
+_WATERMARK_OK = """
+INSERT INTO meta.mirror_state
+       (table_name, last_attempted_at, last_ok_at,
+        failures_since_ok, last_error, last_rows)
+VALUES ($1, now(), now(), 0, NULL, $2)
+ON CONFLICT (table_name) DO UPDATE SET
+    last_attempted_at = now(),
+    last_ok_at        = now(),
+    failures_since_ok = 0,
+    last_error        = NULL,
+    last_rows         = EXCLUDED.last_rows
+"""
+
+
+def _record_ok(table: str, rows: int) -> None:
+    _failures.pop(table, None)
+    _last_error.pop(table, None)
+    logger.info("mirror: %s ok, %d row(s)", table, rows)
+
+
+def _record_error(table: str, rows: int, detail: str) -> None:
+    _failures[table] = _failures.get(table, 0) + 1
+    _last_error[table] = detail
+    # ERROR, not DEBUG. The whole point.
+    logger.error("mirror: %s failed after %d row(s): %s", table, rows, detail)
+
+
 def _statement(table: str, columns: Sequence[str]) -> str:
     cols = ", ".join(columns)
     vals = ", ".join(f"${i}" for i in range(1, len(columns) + 1))
@@ -119,21 +147,7 @@ async def _write(table: str, columns: Sequence[str], rows: Sequence[tuple]) -> N
         async with conn.transaction():
             if rows:
                 await conn.executemany(_statement(table, columns), rows)
-            await conn.execute(
-                """
-                INSERT INTO meta.mirror_state
-                       (table_name, last_attempted_at, last_ok_at,
-                        failures_since_ok, last_error, last_rows)
-                VALUES ($1, now(), now(), 0, NULL, $2)
-                ON CONFLICT (table_name) DO UPDATE SET
-                    last_attempted_at = now(),
-                    last_ok_at        = now(),
-                    failures_since_ok = 0,
-                    last_error        = NULL,
-                    last_rows         = EXCLUDED.last_rows
-                """,
-                table, len(rows),
-            )
+            await conn.execute(_WATERMARK_OK, table, len(rows))
 
 
 async def _record_failure(table: str, error: str) -> None:
@@ -178,19 +192,12 @@ async def _mirror(table: str, columns: Sequence[str], rows: List[tuple]) -> Mirr
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
         out.error = detail
-        _failures[table] = _failures.get(table, 0) + 1
-        _last_error[table] = detail
-        # ERROR, not DEBUG. The whole point.
-        logger.error(
-            "mirror: %s failed after %d row(s): %s", table, len(rows), detail,
-        )
+        _record_error(table, len(rows), detail)
         await _record_failure(table, detail)
         return out
 
     out.ok = True
-    _failures.pop(table, None)
-    _last_error.pop(table, None)
-    logger.info("mirror: %s ok, %d row(s)", table, len(rows))
+    _record_ok(table, len(rows))
     return out
 
 
@@ -206,3 +213,204 @@ async def mirror_products(payloads: List[Dict[str, Any]]) -> MirrorOutcome:
 
     rows = [tuple(r) for r in product_rows(payloads)]
     return await _mirror("bronze.products", PRODUCT_COLUMNS, rows)
+
+
+# ─── Orders ───────────────────────────────────────────────────────────────────
+#
+# Two tables, one transaction, and three things the catalogue never had to
+# think about.
+#
+# 1. `manager_comment` IS NOT OVERWRITTEN WITH NULL.
+#
+#    `DuckDBStore.upsert_orders` updates it as
+#    `COALESCE(?, manager_comment)` — a payload that omits the field keeps
+#    whatever is stored — because that column carries UTM attribution that a
+#    backfill restored and the Silver UTM layer parses out of it. 14,179 of
+#    46,446 orders have it NULL today, so a plain `EXCLUDED.manager_comment`
+#    here would not be a subtle divergence: it would erase attribution on one
+#    side only, and the reconciliation would report a difference this mirror
+#    had itself created.
+#
+# 2. LINE ITEMS ARE REPLACED, NOT UPSERTED.
+#
+#    Their ids are `order_id * 1000 + position`, so an order that drops from
+#    three items to two leaves `…002` behind under a plain upsert — a line item
+#    Postgres holds and DuckDB does not. DuckDB deletes an order's products and
+#    reinserts them; so does this, in the same transaction as the header.
+#
+# 3. THE PRODUCTS WATERMARK ONLY MOVES WHEN PRODUCTS MOVED.
+#
+#    `skip_products=True` is the status-only refresh path: it rewrites headers
+#    and deliberately leaves line items alone. Stamping `bronze.order_products`
+#    as freshly shipped there would tell the reconciliation that line items are
+#    current when nothing looked at them, which is the one thing the watermark
+#    exists to prevent.
+
+ORDERS_TABLE = "bronze.orders"
+ORDER_PRODUCTS_TABLE = "bronze.order_products"
+
+# Every column except `manager_comment`, which has the COALESCE above.
+_ORDER_UPSERT = """
+INSERT INTO bronze.orders
+       (id, source_id, status_id, status_group_id, grand_total,
+        ordered_at, created_at, updated_at, buyer_id, manager_id,
+        manager_comment, promocode)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+ON CONFLICT (id) DO UPDATE SET
+    source_id       = EXCLUDED.source_id,
+    status_id       = EXCLUDED.status_id,
+    status_group_id = EXCLUDED.status_group_id,
+    grand_total     = EXCLUDED.grand_total,
+    ordered_at      = EXCLUDED.ordered_at,
+    created_at      = EXCLUDED.created_at,
+    updated_at      = EXCLUDED.updated_at,
+    buyer_id        = EXCLUDED.buyer_id,
+    manager_id      = EXCLUDED.manager_id,
+    manager_comment = COALESCE(EXCLUDED.manager_comment, bronze.orders.manager_comment),
+    promocode       = EXCLUDED.promocode,
+    mirrored_at     = now()
+"""
+
+_ORDER_PRODUCT_INSERT = """
+INSERT INTO bronze.order_products
+       (id, order_id, product_id, name, quantity, price_sold)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (id) DO UPDATE SET
+    order_id    = EXCLUDED.order_id,
+    product_id  = EXCLUDED.product_id,
+    name        = EXCLUDED.name,
+    quantity    = EXCLUDED.quantity,
+    price_sold  = EXCLUDED.price_sold,
+    mirrored_at = now()
+"""
+
+
+def _numeric(value: Any) -> Optional[Decimal]:
+    """A money column as Postgres wants it.
+
+    `NUMERIC(12,2)` on this side, `DECIMAL(12,2)` on the other, and a Python
+    float in between — `OrderRow.grand_total` is `float(order.grand_total)`
+    because that is what the DuckDB path has always been handed. Converted via
+    `str` rather than `Decimal(float)` so that 100.10 stays 100.10 instead of
+    becoming 100.099999999999994315658113919198513031005859375, and left
+    unquantized so the column's own rounding applies — the same rounding
+    DuckDB's DECIMAL(12,2) applies to the same value.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
+def _order_params(row: Sequence[Any]) -> tuple:
+    """One OrderRow with its money column typed for Postgres."""
+    values = list(row)
+    values[4] = _numeric(values[4])          # grand_total
+    return tuple(values)
+
+
+def _order_product_params(row: Sequence[Any]) -> tuple:
+    values = list(row)
+    values[5] = _numeric(values[5])          # price_sold
+    return tuple(values)
+
+
+async def write_orders(
+    orders: Sequence[Any],
+    products: Sequence[Any],
+    *,
+    replace_products: bool,
+) -> None:
+    """Headers, line items and both watermarks, in one transaction.
+
+    Public and **raises** — the opposite contract to `mirror_orders`, which
+    wraps this and never does. The sync path must not be broken by Postgres;
+    the backfill has nothing to protect and every reason to stop loudly.
+
+    One transaction across both tables because a half-applied order — header
+    updated, line items still the old ones — is the exact state the
+    `orders_without_line_items` check spent months chasing on the other store.
+    """
+    from core.pg import get_pool
+
+    order_ids = [int(r[0]) for r in orders]
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if orders:
+                await conn.executemany(
+                    _ORDER_UPSERT, [_order_params(r) for r in orders],
+                )
+
+            if replace_products and order_ids:
+                # Delete first, then insert: the ids are positional, so the
+                # only way to lose a dropped line item is to remove the whole
+                # order's set and lay down what the payload actually carries.
+                await conn.execute(
+                    "DELETE FROM bronze.order_products WHERE order_id = ANY($1::int[])",
+                    order_ids,
+                )
+                if products:
+                    # Deduplicate by id, keeping the last — the API repeats an
+                    # order across paginated pages and a repeat would otherwise
+                    # collide with itself inside one statement.
+                    deduped = {int(p[0]): p for p in products}
+                    await conn.executemany(
+                        _ORDER_PRODUCT_INSERT,
+                        [_order_product_params(p) for p in deduped.values()],
+                    )
+
+            await conn.execute(_WATERMARK_OK, ORDERS_TABLE, len(orders))
+            if replace_products:
+                await conn.execute(
+                    _WATERMARK_OK, ORDER_PRODUCTS_TABLE, len(products),
+                )
+
+
+async def mirror_orders(
+    orders: Sequence[Any],
+    products: Sequence[Any],
+    *,
+    replace_products: bool = True,
+) -> List[MirrorOutcome]:
+    """Mirror order headers and their line items. Never raises.
+
+    Takes rows, not payloads: `DuckDBStore.upsert_orders` has already parsed
+    them through `core.landing_rows` and — more importantly — has already
+    decided which ones it wrote. The mirror ships that decision rather than
+    making its own, so the two stores cannot disagree about what a sync did.
+    """
+    tables = [ORDERS_TABLE] + ([ORDER_PRODUCTS_TABLE] if replace_products else [])
+    counts = {ORDERS_TABLE: len(orders), ORDER_PRODUCTS_TABLE: len(products)}
+    outcomes = [
+        MirrorOutcome(table=t, rows=counts[t]) for t in tables
+    ]
+
+    if not enabled():
+        for out in outcomes:
+            out.skipped = f"{MIRROR_ENV} is off"
+        return outcomes
+
+    if not orders:
+        # Nothing to ship is not a success: moving the watermark here would
+        # date-stamp a shipment that did not happen.
+        for out in outcomes:
+            out.skipped = "no rows"
+        return outcomes
+
+    try:
+        await write_orders(orders, products, replace_products=replace_products)
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        for out in outcomes:
+            out.error = detail
+            _record_error(out.table, out.rows, detail)
+            await _record_failure(out.table, detail)
+        return outcomes
+
+    for out in outcomes:
+        out.ok = True
+        _record_ok(out.table, out.rows)
+    return outcomes

@@ -124,11 +124,21 @@ class TestTheChainIsIntact:
         assert _rev.down_revision == "0001_mirror_state"
         assert _rev.revision == "0002_landing_catalog"
 
-    def test_the_code_requires_it(self):
-        """`test_pg_plumbing` pins head against REQUIRED_REVISION; this says
-        which revision that is, so a reader of this file does not have to
-        infer it."""
-        assert pg.REQUIRED_REVISION == "0002_landing_catalog"
+    def test_it_is_in_the_chain_the_code_requires(self):
+        """This revision is no longer head — 0003 added the orders tables —
+        so what matters here is that it is still an ancestor of what the code
+        requires. `test_pg_plumbing` owns the head-vs-REQUIRED_REVISION pin;
+        asserting head again here only meant every future revision broke a
+        test about the catalogue."""
+        from tests.unit.test_pg_plumbing import _revisions
+
+        revs = _revisions()
+        assert _rev.revision in revs
+        seen, cursor = set(), pg.REQUIRED_REVISION
+        while cursor:
+            seen.add(cursor)
+            cursor = revs.get(cursor)
+        assert _rev.revision in seen
 
     def test_it_can_be_undone(self):
         assert "DROP TABLE IF EXISTS bronze.products" in DOWN
