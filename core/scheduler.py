@@ -1298,6 +1298,162 @@ class BackgroundScheduler:
 
             return result
 
+    async def _reconcile_postgres(
+        self, kc_orders, kc_rollup, *, window_start, window_end, as_of, inflight_ids,
+    ):
+        """Compare the Postgres mirror against the KeyCRM snapshot already in hand.
+
+        The owner's closing criterion for step 05 is two things, not one: zero
+        differences between the stores, **and** a reconciliation against the
+        source. Reconciliation A gives the first. Two copies can agree
+        perfectly and both be wrong — that is not a hypothetical here, it is
+        the whole reason the warehouse validation cannot see a lie arriving
+        from Bronze — so this gives the second.
+
+        **No extra API calls, by construction.** It is handed the orders and
+        the rollup the DuckDB comparison already fetched. Doubling KeyCRM
+        traffic for a second opinion would be a poor trade at any time and a
+        particularly poor one on a job that spent 57 runs out of 84 failing on
+        429s.
+
+        Returns what the caller needs to persist, or `None` when there is
+        nothing to say — which is not the same as a clean run and is never
+        recorded as one.
+        """
+        from core.data_quality import IntegrityIssue, Severity
+        from core.mirror_reconciliation import configured
+        from core.reconciliation_io import (
+            postgres_orders_in_window,
+            rollup_from_orders,
+        )
+
+        if not configured():
+            return None
+
+        from core.data_quality import (
+            classify_discrepancies,
+            classify_order_discrepancies,
+        )
+        from core.mirror_reconciliation import fetch_watermarks
+        from core.pg import get_pool, require_revision
+        from core.pg_landing import ORDERS_TABLE
+
+        issues: list = []
+        discrepancies: list = []
+        error_message = None
+
+        try:
+            pool = await get_pool()
+            await require_revision()
+
+            # The same gate Reconciliation A uses, and for the same reason: the
+            # mirror ships a delta, so before the backfill has carried history
+            # across, every order older than the mirror is missing from
+            # Postgres and none of it is a discrepancy with KeyCRM.
+            watermarks = await fetch_watermarks(pool)
+            if (watermarks.get(ORDERS_TABLE) or {}).get("backfilled_at") is None:
+                issues.append(IntegrityIssue(
+                    check_name="mirror_backfill_pending",
+                    table_name=ORDERS_TABLE,
+                    severity=Severity.WARN,
+                    count=0,
+                    description=(
+                        "Postgres has not been backfilled, so it cannot be "
+                        "reconciled against KeyCRM: every order predating the "
+                        "mirror would read as missing from the source's point "
+                        "of view. Run POST /api/mirror/backfill/orders."
+                    ),
+                ))
+                return {"issues": issues, "discrepancies": [], "error": None}
+
+            pg_orders = await postgres_orders_in_window(
+                pool, window_start, window_end,
+                watermark=as_of, exclude_ids=inflight_ids,
+            )
+            pg_rollup = rollup_from_orders(pg_orders)
+            # `classify_discrepancies` compares money with a tolerance, and on
+            # this path that is not politeness — it is required. Measured over
+            # 90 days of production: the per-order facts from the two stores
+            # are *identical* (`dk == pg` is True), and their rollups still
+            # differ, because the two databases return rows in different orders
+            # and float addition is not associative. Largest observed gap:
+            # 2.1e-09 on a 1,834,807.24 revenue cell. Anyone who "tightens"
+            # this to exact equality buys a daily discrepancy of two
+            # nanohryvnia.
+            discrepancies = classify_discrepancies(pg_rollup, kc_rollup)
+            discrepancies += classify_order_discrepancies(pg_orders, kc_orders)
+            logger.info(
+                f"DQ reconciliation (Postgres): pg_cells={len(pg_rollup)} "
+                f"kc_cells={len(kc_rollup)} discrepancies={len(discrepancies)}"
+            )
+        except Exception as e:
+            error_message = f"{type(e).__name__}: {e}"
+            logger.exception("DQ reconciliation against Postgres raised")
+
+        return {
+            "issues": issues,
+            "discrepancies": discrepancies,
+            "error": error_message,
+        }
+
+    async def _persist_postgres_reconciliation(
+        self, result, *, started_at, as_of, window_start, window_end,
+    ) -> None:
+        """Write the Postgres verdict as its own run, and alert on CRITICAL.
+
+        Its own layer rather than extra findings on `reconciliation`: one layer
+        covering two comparisons would give them one age between them, and a
+        Postgres comparison that stopped running would hide behind a fresh
+        DuckDB one. It is also the number that closes step 05, so it deserves
+        to be readable on its own.
+
+        **No repair path, deliberately.** The DuckDB layer re-fetches orders it
+        is missing, because a delta sync keyed on `updated_at` can never reach
+        an order it does not hold. Postgres has a different answer to the same
+        problem — the backfill — and re-fetching from KeyCRM here would repair
+        the wrong store.
+        """
+        from datetime import datetime, timezone
+        from core.data_quality import (
+            Severity,
+            alert_fingerprint,
+            format_alert_message,
+            overall_severity,
+            persist_run,
+        )
+        from core.duckdb_store import get_store
+
+        layer = "reconciliation_pg"
+        issues = result["issues"]
+        discrepancies = result["discrepancies"]
+        error_message = result["error"]
+
+        store = await get_store()
+        try:
+            async with store.connection() as conn:
+                persist_run(
+                    conn,
+                    started_at=started_at,
+                    ended_at=datetime.now(timezone.utc),
+                    as_of=as_of,
+                    window_start=window_start, window_end=window_end,
+                    layer=layer,
+                    issues=issues, discrepancies=discrepancies,
+                    # Zero, and that is the point: this comparison rides on the
+                    # fetch the DuckDB one already paid for.
+                    api_calls_used=0,
+                    error_message=error_message,
+                )
+        except Exception as e:
+            logger.exception(f"DQ Postgres reconciliation persist failed: {e}")
+
+        sev = overall_severity(issues, discrepancies)
+        if sev == Severity.CRITICAL and not error_message:
+            msg = format_alert_message(layer, sev, issues, discrepancies)
+            await self._send_dq_alert_throttled(
+                layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
+            )
+
     async def _run_dq_reconciliation(self, window_days: int = 90) -> Dict[str, Any]:
         """Layer-2 source-of-truth reconciliation vs KeyCRM.
 
@@ -1346,6 +1502,7 @@ class BackgroundScheduler:
             issues: list = []
             discrepancies: list = []
             api_calls = 0
+            pg_result = None
 
             try:
                 # 1. KeyCRM orders (counts API calls). Runs first because it
@@ -1375,6 +1532,16 @@ class BackgroundScheduler:
                     f"DQ reconciliation: dk_cells={len(dk_rollup)} "
                     f"kc_cells={len(kc_rollup)} discrepancies={len(discrepancies)}"
                 )
+                # The same KeyCRM snapshot, compared a second time — against
+                # Postgres. Free: the API calls are the expensive part and they
+                # have already been made, and comparing both stores to the
+                # *identical* fetch is what makes the two verdicts mean
+                # anything next to each other.
+                pg_result = await self._reconcile_postgres(
+                    kc_orders, kc_rollup,
+                    window_start=window_start, window_end=window_end,
+                    as_of=as_of, inflight_ids=inflight_ids,
+                )
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("DQ reconciliation raised")
@@ -1397,6 +1564,16 @@ class BackgroundScheduler:
                     )
             except Exception as e:
                 logger.exception(f"DQ reconciliation persist failed: {e}")
+
+            # 4b. The Postgres verdict, on its own layer so it gets its own age
+            #     and its own digest section. Never allowed to disturb the one
+            #     above it: if this raised, the DuckDB reconciliation still
+            #     happened and still has to be reported.
+            if pg_result is not None:
+                await self._persist_postgres_reconciliation(
+                    pg_result, started_at=started_at, as_of=as_of,
+                    window_start=window_start, window_end=window_end,
+                )
 
             # 5. Repair what can only be repaired by id. A delta sync keyed on
             #    updated_at can never reach an order we do not hold, so finding

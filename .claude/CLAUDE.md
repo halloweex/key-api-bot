@@ -419,7 +419,7 @@ whole reason the group is read from the source now.
 | `warehouse_refresh` | every 2 min | Silver + Gold rebuild, validation, cell guard |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
-| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order |
+| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **both stores**, one fetch |
 | `dq_mirror_landing` | 07:30 | Reconciliation A: landing in Postgres against landing in DuckDB, tolerance zero |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
@@ -567,6 +567,44 @@ check that can say which rows disagree. Measured end to end against the
 production backup on a throwaway Postgres 17.2: 46 446 orders and 147 508 line
 items in **13.2 s**, then compared column by column — **0 differing rows on
 both tables**.
+
+### Postgres against KeyCRM — the other half of the criterion
+Reconciliation A proves the two stores agree with each other. That is not the
+same as being right: two copies can agree perfectly and both disagree with the
+source. So step 05 closes on **two** things — zero differences between the
+stores *and* a reconciliation against KeyCRM.
+
+`dq_reconciliation` now compares the KeyCRM snapshot it already fetched against
+**both** stores and writes two runs: layer `reconciliation` (DuckDB) and layer
+`reconciliation_pg` (Postgres). **No extra API calls** — the fetch is the
+expensive part and it has already happened, and comparing both stores to the
+identical snapshot is what makes the two verdicts comparable at all.
+
+Separate layers, not extra findings on one: a single layer would give the two
+comparisons one age between them, and a Postgres half that stopped running
+would hide behind a fresh DuckDB one.
+
+**No repair path on the Postgres side.** The DuckDB layer re-fetches orders it
+is missing, because a delta sync keyed on `updated_at` can never reach an order
+it does not hold. Postgres has a different answer to the same problem — the
+backfill — and re-fetching from KeyCRM there would repair the wrong store.
+
+Gated on `backfilled_at`, like Reconciliation A and for the same reason.
+
+`core.reconciliation_io.postgres_orders_in_window` is a deliberate
+transliteration of the DuckDB extractor, not a rewrite — same columns, window,
+source filter, watermark and exclusions. Verified over the production
+catalogue: **44 352 orders across a 900-day window, 0 only on either side, 0
+differing**, and the per-order facts compare `==` outright. `AT TIME ZONE
+'Europe/Kyiv'` means the same thing in both engines, which matters because
+1 007 orders have a Kyiv date different from their UTC one.
+
+**The rollups still do not compare equal, and must not be made to.** With
+identical per-order facts, the two databases return rows in different orders
+and float addition is not associative: the largest observed gap is **2.1e-09**
+on a ₴1 834 807.24 cell. The tolerance in `classify_discrepancies` is
+load-bearing here — exact equality would buy a daily discrepancy of two
+nanohryvnia.
 
 ### Reconciliation A — the two stores against each other
 `dq_mirror_landing` (layer `mirror_landing`, daily 07:30) compares
