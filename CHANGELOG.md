@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.115
+
+- Reconcile Postgres against KeyCRM, on the fetch we already paid for (#136)
+- Record that the Ark left the machine
+
+
 ## 3.0.114
 
 - Compare orders between the two stores, at a size that forbids the obvious method (#135)
