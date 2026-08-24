@@ -105,8 +105,19 @@ class TestTheChainIsIntact:
         assert _rev.down_revision == "0002_landing_catalog"
         assert _rev.revision == "0003_landing_orders"
 
-    def test_it_is_what_the_code_requires(self):
-        assert pg.REQUIRED_REVISION == "0003_landing_orders"
+    def test_it_is_in_the_chain_the_code_requires(self):
+        """Head moved on with 0004; what matters here is that this revision is
+        still an ancestor of it. `test_pg_plumbing` owns the head pin —
+        asserting it again per revision only breaks a test about orders every
+        time an unrelated revision lands."""
+        from tests.unit.test_pg_plumbing import _revisions
+
+        revs = _revisions()
+        seen, cursor = set(), pg.REQUIRED_REVISION
+        while cursor:
+            seen.add(cursor)
+            cursor = revs.get(cursor)
+        assert _rev.revision in seen
 
     def test_it_can_be_undone_children_first(self):
         assert DOWN.index("bronze.order_products") < DOWN.index("bronze.orders")

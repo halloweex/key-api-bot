@@ -77,7 +77,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -216,7 +216,7 @@ async def fetch_watermarks(pool) -> Dict[str, Dict[str, Any]]:
         records = await conn.fetch(
             """
             SELECT table_name, last_attempted_at, last_ok_at,
-                   failures_since_ok, last_error, last_rows
+                   failures_since_ok, last_error, last_rows, backfilled_at
             FROM meta.mirror_state
             """
         )
@@ -226,21 +226,18 @@ async def fetch_watermarks(pool) -> Dict[str, Dict[str, Any]]:
 # ─── The comparison (pure) ────────────────────────────────────────────────────
 
 
-def compare_table(
-    spec: MirroredTable,
-    dk_rows: Mapping[int, Tuple[Any, ...]],
-    dk_synced: Mapping[int, Optional[datetime]],
-    pg_rows: Mapping[int, Tuple[Any, ...]],
-    watermark: Optional[Mapping[str, Any]],
-    *,
-    now: Optional[datetime] = None,
-    grace_minutes: int = MIRROR_GRACE_MINUTES,
-    max_samples: int = 10,
-) -> List[IntegrityIssue]:
-    """Both sides of one table, already read. No I/O, so it is testable whole."""
-    now = now or datetime.now(timezone.utc)
+def _watermark_findings(
+    table: str, watermark: Optional[Mapping[str, Any]], dk_count: int,
+) -> Tuple[List[IntegrityIssue], Optional[datetime]]:
+    """What `meta.mirror_state` alone says about a table.
+
+    Returns the findings and the last successful shipment, or `None` for that
+    second value when the row-level comparison must not run at all. Shared by
+    both comparison shapes because both need exactly this gate first: a table
+    the mirror has never reached, or is failing to reach, cannot be compared
+    row by row without the report becoming a restatement of that one fact.
+    """
     issues: List[IntegrityIssue] = []
-    table = spec.pg_table
 
     failures = int((watermark or {}).get("failures_since_ok") or 0)
     if failures:
@@ -262,26 +259,48 @@ def compare_table(
     if last_ok_at is None:
         # Never shipped. Report that once, and do not also report every row in
         # the table as missing — the first is a fact about the schedule, the
-        # second would be 1,004 lines of noise saying the same thing.
+        # second would be thousands of lines saying the same thing.
         issues.append(IntegrityIssue(
             check_name="mirror_never_shipped",
             table_name=table,
             severity=Severity.WARN,
-            count=len(dk_rows),
+            count=dk_count,
             description=(
                 f"{table} has never been mirrored: no successful write is "
                 f"recorded in meta.mirror_state, and DuckDB holds "
-                f"{len(dk_rows)} row(s). Categories are only written by the "
+                f"{dk_count} row(s). Categories are only written by the "
                 "weekly full sync, so this is expected until the first one "
                 "runs; for any other table it means the mirror is not reaching "
                 "this table at all. Row-level findings are suppressed until it "
                 "has shipped once."
             ),
         ))
-        return issues
+        return issues, None
 
     if last_ok_at.tzinfo is None:
         last_ok_at = last_ok_at.replace(tzinfo=timezone.utc)
+    return issues, last_ok_at
+
+
+def compare_table(
+    spec: MirroredTable,
+    dk_rows: Mapping[int, Tuple[Any, ...]],
+    dk_synced: Mapping[int, Optional[datetime]],
+    pg_rows: Mapping[int, Tuple[Any, ...]],
+    watermark: Optional[Mapping[str, Any]],
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = MIRROR_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Both sides of one table, already read. No I/O, so it is testable whole."""
+    now = now or datetime.now(timezone.utc)
+    issues: List[IntegrityIssue] = []
+    table = spec.pg_table
+
+    issues, last_ok_at = _watermark_findings(table, watermark, len(dk_rows))
+    if last_ok_at is None:
+        return issues
     cutoff = now - timedelta(minutes=int(grace_minutes))
 
     # ── DuckDB has it, Postgres does not ──
@@ -458,4 +477,465 @@ async def reconcile_mirror(
             grace_minutes=grace_minutes,
             max_samples=max_samples,
         )
+    return issues
+
+
+# ─── Orders: the same question, at a size that forbids the same method ────────
+#
+# The catalogue is compared by pulling both sides whole — 1,004 tuples against
+# 1,004. Orders are 46,487 rows and 147,648 line items, and a daily job that
+# materialises 194,000 tuples from two databases into one Python process, in a
+# container that already gives DuckDB a 4 GB ceiling, is a memory incident
+# waiting for a busy morning.
+#
+# So: fingerprint, then drill down.
+#
+# **Phase 1** groups both sides into buckets of 1,000 ids and computes an
+# additive fingerprint per bucket — a count and one SUM per column. Roughly 47
+# rows come back from each store. Buckets whose fingerprints agree are not
+# looked at again.
+#
+# **Phase 2** pulls the full rows for the buckets that disagree, from both
+# sides, and compares them column by column. A bucket is at most 1,000 orders,
+# so the drill-down is bounded even when something is badly wrong — and capped
+# again by `max_buckets`, because "every bucket disagrees" is a finding in
+# itself and not a reason to read the whole table.
+#
+# WHAT AN ADDITIVE FINGERPRINT CAN AND CANNOT SEE
+#
+# It catches any change to a number, any change to a timestamp, and any change
+# to a text column's *length*. It cannot see a text edit of exactly equal
+# length that happens to fall in a bucket where nothing else moved — swapping
+# one Cyrillic character for its Latin twin, say. That is the trade, and it is
+# taken knowingly: the alternative is a cross-engine row hash, which needs both
+# databases to format numerics and timestamps into text identically, and they
+# do not.
+#
+# WHY NOT `updated_at`, WHICH WOULD BE EXACT AND CHEAP
+#
+# Because it lies here, and the code says so out loud: `upsert_orders` takes
+# `force_update` "for status refresh since KeyCRM doesn't update updated_at when
+# status changes". An order can move from status 12 to status 20 — from revenue
+# to revenue, or out of it — with `updated_at` untouched on both sides. A
+# comparison keyed on it would have been blind to precisely the field the
+# business cares about most.
+#
+# THE GATE
+#
+# `last_ok_at` cannot license a tolerance of zero here the way it does for the
+# catalogue. That rule works because a catalogue mirror ships the whole table,
+# so a successful write proves what Postgres held. The orders mirror ships
+# `updated_ids`, which proves only that the last delta landed. Until the
+# backfill has carried history across, "missing from Postgres" means "not
+# carried yet" — so the comparison is gated on
+# `meta.mirror_state.backfilled_at`, and once that is set, any difference is a
+# defect with nothing left to excuse it.
+
+BUCKET_SIZE = 1000
+
+# One SUM per column, and the column's kind decides which SUM.
+_INT, _NUMERIC, _TS, _TEXT = "int", "numeric", "ts", "text"
+
+
+@dataclass(frozen=True)
+class BucketedTable:
+    """A table too large to compare row by row every morning."""
+    pg_table: str
+    dk_table: str
+    columns: Tuple[str, ...]
+    fields: Tuple[Tuple[str, str], ...]     # (column, kind), for the fingerprint
+    bucket_column: str
+    numeric: Tuple[str, ...]
+    dk_rows_sql: str                        # one bucket, plus DuckDB's synced_at
+    pg_rows_sql: str
+
+
+_ORDER_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("id", _INT), ("source_id", _INT), ("status_id", _INT),
+    ("status_group_id", _INT), ("grand_total", _NUMERIC),
+    ("ordered_at", _TS), ("created_at", _TS), ("updated_at", _TS),
+    ("buyer_id", _INT), ("manager_id", _INT),
+    ("manager_comment", _TEXT), ("promocode", _TEXT),
+)
+
+_ORDER_PRODUCT_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("id", _INT), ("order_id", _INT), ("product_id", _INT),
+    ("name", _TEXT), ("quantity", _INT), ("price_sold", _NUMERIC),
+)
+
+_ORDER_COLS = tuple(c for c, _ in _ORDER_FIELDS)
+_ORDER_PRODUCT_COLS = tuple(c for c, _ in _ORDER_PRODUCT_FIELDS)
+
+ORDER_TABLES: Tuple[BucketedTable, ...] = (
+    BucketedTable(
+        pg_table="bronze.orders",
+        dk_table="orders",
+        columns=_ORDER_COLS,
+        fields=_ORDER_FIELDS,
+        bucket_column="id",
+        numeric=("grand_total",),
+        dk_rows_sql=(
+            f"SELECT {', '.join(_ORDER_COLS)}, synced_at FROM orders "
+            f"WHERE (id // {BUCKET_SIZE}) = ?"
+        ),
+        pg_rows_sql=(
+            f"SELECT {', '.join(_ORDER_COLS)} FROM bronze.orders "
+            f"WHERE (id / {BUCKET_SIZE}) = $1"
+        ),
+    ),
+    BucketedTable(
+        pg_table="bronze.order_products",
+        dk_table="order_products",
+        columns=_ORDER_PRODUCT_COLS,
+        fields=_ORDER_PRODUCT_FIELDS,
+        bucket_column="order_id",
+        numeric=("price_sold",),
+        # A line item has no `synced_at` of its own; its order's is the right
+        # one, because the two are written in the same call on both sides.
+        dk_rows_sql=(
+            "SELECT "
+            + ", ".join(f"p.{c}" for c in _ORDER_PRODUCT_COLS)
+            + ", o.synced_at FROM order_products p "
+            "LEFT JOIN orders o ON o.id = p.order_id "
+            f"WHERE (p.order_id // {BUCKET_SIZE}) = ?"
+        ),
+        pg_rows_sql=(
+            f"SELECT {', '.join(_ORDER_PRODUCT_COLS)} FROM bronze.order_products "
+            f"WHERE (order_id / {BUCKET_SIZE}) = $1"
+        ),
+    ),
+)
+
+
+def _dk_term(column: str, kind: str) -> str:
+    if kind == _TS:
+        # Microseconds as an integer. Not `extract(epoch ...)`, which is a
+        # float on one side and a numeric on the other and would compare two
+        # roundings rather than two values.
+        return f"SUM(COALESCE(epoch_us({column}), 0))"
+    if kind == _TEXT:
+        return f"SUM(LENGTH(COALESCE({column}, '')))"
+    return f"SUM(COALESCE({column}, 0))"
+
+
+def _pg_term(column: str, kind: str) -> str:
+    if kind == _TS:
+        return (
+            f"SUM(COALESCE((EXTRACT(EPOCH FROM {column}) * 1000000)::bigint, 0))"
+        )
+    if kind == _TEXT:
+        return f"SUM(LENGTH(COALESCE({column}, '')))"
+    return f"SUM(COALESCE({column}, 0))"
+
+
+def duckdb_fingerprint_sql(spec: BucketedTable) -> str:
+    terms = ", ".join(_dk_term(c, k) for c, k in spec.fields)
+    return (
+        f"SELECT ({spec.bucket_column} // {BUCKET_SIZE})::BIGINT AS bucket, "
+        f"COUNT(*), {terms} FROM {spec.dk_table} GROUP BY 1 ORDER BY 1"
+    )
+
+
+def postgres_fingerprint_sql(spec: BucketedTable) -> str:
+    terms = ", ".join(_pg_term(c, k) for c, k in spec.fields)
+    return (
+        f"SELECT ({spec.bucket_column} / {BUCKET_SIZE})::bigint AS bucket, "
+        f"COUNT(*), {terms} FROM {spec.pg_table} GROUP BY 1 ORDER BY 1"
+    )
+
+
+def _as_comparable(value: Any) -> Any:
+    """One numeric type for a fingerprint cell.
+
+    DuckDB returns int, Decimal or HUGEINT; asyncpg returns int or Decimal for
+    the same expressions. `int == Decimal` already holds in Python, so this
+    only has to make sure nothing arrives as a float — which would compare two
+    roundings instead of two values.
+    """
+    if value is None:
+        return Decimal(0)
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return value
+
+
+def fingerprints(conn, spec: BucketedTable) -> Dict[int, Tuple[Any, ...]]:
+    """One row per bucket from DuckDB: the count and one SUM per column."""
+    return {
+        int(row[0]): tuple(_as_comparable(v) for v in row[1:])
+        for row in conn.execute(duckdb_fingerprint_sql(spec)).fetchall()
+    }
+
+
+async def pg_fingerprints(pool, spec: BucketedTable) -> Dict[int, Tuple[Any, ...]]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(postgres_fingerprint_sql(spec))
+    return {
+        int(r[0]): tuple(_as_comparable(v) for v in tuple(r)[1:])
+        for r in rows
+    }
+
+
+def disagreeing_buckets(
+    dk: Mapping[int, Tuple[Any, ...]], pg: Mapping[int, Tuple[Any, ...]],
+) -> List[int]:
+    """Every bucket the two stores do not agree on, present-on-one-side included."""
+    return sorted(
+        b for b in set(dk) | set(pg)
+        if dk.get(b) != pg.get(b)
+    )
+
+
+def _read_dk_bucket(
+    conn, spec: BucketedTable, bucket: int,
+) -> Tuple[Dict[int, Tuple[Any, ...]], Dict[int, Optional[datetime]]]:
+    rows = conn.execute(spec.dk_rows_sql, [bucket]).fetchall()
+    width = len(spec.columns)
+    values, synced = {}, {}
+    for row in rows:
+        row_id = int(row[0])
+        values[row_id] = _normalise_row(row[:width], spec.columns, spec.numeric)
+        synced[row_id] = row[width]
+    return values, synced
+
+
+async def _read_pg_bucket(
+    pool, spec: BucketedTable, bucket: int,
+) -> Dict[int, Tuple[Any, ...]]:
+    async with pool.acquire() as conn:
+        records = await conn.fetch(spec.pg_rows_sql, bucket)
+    return {
+        int(r[0]): _normalise_row(
+            [r[c] for c in spec.columns], spec.columns, spec.numeric,
+        )
+        for r in records
+    }
+
+
+@dataclass
+class _Divergence:
+    """What the drill-down found, accumulated across buckets."""
+    missing: List[int] = field(default_factory=list)     # in DuckDB, not in Postgres
+    orphans: List[int] = field(default_factory=list)     # in Postgres, not in DuckDB
+    differing: List[int] = field(default_factory=list)   # in both, and unequal
+    offenders: Dict[str, int] = field(default_factory=dict)
+
+
+def compare_bucket(
+    spec: BucketedTable,
+    dk_rows: Mapping[int, Tuple[Any, ...]],
+    dk_synced: Mapping[int, Optional[datetime]],
+    pg_rows: Mapping[int, Tuple[Any, ...]],
+    found: _Divergence,
+    *,
+    now: datetime,
+    grace_minutes: int,
+) -> None:
+    """One bucket's rows, compared exactly. Accumulates into `found`.
+
+    The grace window is the only leniency, and it is not a tolerance: the two
+    writes are consecutive statements in one sync call, so a row DuckDB wrote
+    seconds ago may legitimately still be in flight. Everything older than the
+    window is a defect, because after the backfill there is nothing else a
+    difference could be.
+    """
+    cutoff = now - timedelta(minutes=int(grace_minutes))
+
+    def _in_flight(row_id: int) -> bool:
+        synced = dk_synced.get(row_id)
+        if synced is None:
+            return False
+        if synced.tzinfo is None:
+            synced = synced.replace(tzinfo=timezone.utc)
+        return synced > cutoff
+
+    for row_id in dk_rows.keys() - pg_rows.keys():
+        if not _in_flight(row_id):
+            found.missing.append(row_id)
+
+    found.orphans.extend(pg_rows.keys() - dk_rows.keys())
+
+    for row_id in dk_rows.keys() & pg_rows.keys():
+        dk_row, pg_row = dk_rows[row_id], pg_rows[row_id]
+        if dk_row == pg_row or _in_flight(row_id):
+            continue
+        found.differing.append(row_id)
+        for column, dk_value, pg_value in zip(spec.columns, dk_row, pg_row):
+            if dk_value != pg_value:
+                found.offenders[column] = found.offenders.get(column, 0) + 1
+
+
+def _divergence_findings(
+    spec: BucketedTable, found: _Divergence, *, max_samples: int,
+) -> List[IntegrityIssue]:
+    issues: List[IntegrityIssue] = []
+    table = spec.pg_table
+
+    if found.missing:
+        issues.append(IntegrityIssue(
+            check_name="mirror_missing_rows",
+            table_name=table,
+            severity=Severity.CRITICAL,
+            count=len(found.missing),
+            sample_ids=tuple(sorted(found.missing)[:max_samples]),
+            description=(
+                f"{len(found.missing)} row(s) are in DuckDB and not in {table}. "
+                "History has been carried across (meta.mirror_state.backfilled_at "
+                "is set) and these are older than the grace window, so there is "
+                "nothing left for this to be except rows the mirror lost. "
+                "Re-running the backfill ships them; find out why they were "
+                "missed first."
+            ),
+        ))
+
+    if found.orphans:
+        issues.append(IntegrityIssue(
+            check_name="mirror_orphan_rows",
+            table_name=table,
+            severity=Severity.WARN,
+            count=len(found.orphans),
+            sample_ids=tuple(sorted(found.orphans)[:max_samples]),
+            description=(
+                f"{len(found.orphans)} row(s) in {table} have nothing behind "
+                "them in DuckDB. Nothing writes this table except the mirror "
+                "and the backfill, and both only ever write what DuckDB holds — "
+                "so either DuckDB lost a row it once had, or something else "
+                "wrote to Postgres."
+            ),
+        ))
+
+    if found.differing:
+        worst = ", ".join(
+            f"{c} ({n})"
+            for c, n in sorted(found.offenders.items(), key=lambda kv: -kv[1])[:5]
+        )
+        issues.append(IntegrityIssue(
+            check_name="mirror_row_values",
+            table_name=table,
+            severity=Severity.CRITICAL,
+            count=len(found.differing),
+            sample_ids=tuple(sorted(found.differing)[:max_samples]),
+            description=(
+                f"{len(found.differing)} row(s) are in both stores and "
+                f"disagree. Columns: {worst}. Both sides are written from the "
+                "same parsed tuple in the same call, so there is no arithmetic "
+                "between them that could drift — a disagreement here is a "
+                "defect in the write path."
+            ),
+        ))
+
+    return issues
+
+
+async def reconcile_orders(
+    store,
+    *,
+    specs: Sequence[BucketedTable] = ORDER_TABLES,
+    now: Optional[datetime] = None,
+    grace_minutes: int = MIRROR_GRACE_MINUTES,
+    max_samples: int = 10,
+    max_buckets: int = 20,
+) -> List[IntegrityIssue]:
+    """Reconciliation A for the tables that are too big to pull whole.
+
+    Takes the store rather than an open connection, because this interleaves:
+    fingerprints from DuckDB, fingerprints from Postgres, then the rows of the
+    buckets that disagree from both. Each DuckDB acquisition is short and none
+    of them spans a network round-trip — the store's lock is what every
+    dashboard request queues behind.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        return []          # `reconcile_mirror` already says so, once.
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    # Phase 1, DuckDB side: one acquisition for every table.
+    async with store.connection() as conn:
+        dk_prints = {s.pg_table: fingerprints(conn, s) for s in specs}
+
+    issues: List[IntegrityIssue] = []
+    suspects: Dict[str, List[int]] = {}
+    for spec in specs:
+        dk_print = dk_prints[spec.pg_table]
+        dk_count = sum(int(v[0]) for v in dk_print.values())
+        watermark = watermarks.get(spec.pg_table)
+
+        found, last_ok_at = _watermark_findings(spec.pg_table, watermark, dk_count)
+        issues += found
+        if last_ok_at is None:
+            continue
+
+        if (watermark or {}).get("backfilled_at") is None:
+            # The gate. Without it every order that predates the mirror reads
+            # as lost, and the first run of this check would file tens of
+            # thousands of CRITICAL findings for a job nobody has run yet.
+            pg_count = sum(
+                int(v[0]) for v in (await pg_fingerprints(pool, spec)).values()
+            )
+            issues.append(IntegrityIssue(
+                check_name="mirror_backfill_pending",
+                table_name=spec.pg_table,
+                severity=Severity.WARN,
+                count=max(dk_count - pg_count, 0),
+                description=(
+                    f"{spec.pg_table} holds {pg_count} row(s) against DuckDB's "
+                    f"{dk_count}, and no completed backfill is recorded. The "
+                    "mirror ships only what a sync writes, so history does not "
+                    "arrive on its own: run POST /api/mirror/backfill/orders. "
+                    "Row-level comparison is suppressed until it completes — "
+                    "before that, 'missing' and 'lost' are the same picture."
+                ),
+            ))
+            continue
+
+        pg_print = await pg_fingerprints(pool, spec)
+        differing = disagreeing_buckets(dk_print, pg_print)
+        if len(differing) > max_buckets:
+            issues.append(IntegrityIssue(
+                check_name="mirror_buckets_disagree",
+                table_name=spec.pg_table,
+                severity=Severity.CRITICAL,
+                count=len(differing),
+                sample_ids=tuple(differing[:max_samples]),
+                description=(
+                    f"{len(differing)} of {len(set(dk_print) | set(pg_print))} "
+                    f"id buckets disagree between the two stores — more than "
+                    f"the {max_buckets} this check will open. That is a whole-"
+                    "table problem, not a row problem, and reading them all "
+                    "would turn a daily check into a table scan of both stores. "
+                    f"Buckets are {BUCKET_SIZE} ids wide."
+                ),
+            ))
+            differing = differing[:max_buckets]
+        suspects[spec.pg_table] = differing
+
+    if not any(suspects.values()):
+        return issues
+
+    # Phase 2: only the buckets that disagree, one acquisition for all of them.
+    dk_buckets: Dict[str, Dict[int, Any]] = {}
+    async with store.connection() as conn:
+        for spec in specs:
+            dk_buckets[spec.pg_table] = {
+                bucket: _read_dk_bucket(conn, spec, bucket)
+                for bucket in suspects.get(spec.pg_table, ())
+            }
+
+    for spec in specs:
+        found = _Divergence()
+        for bucket in suspects.get(spec.pg_table, ()):
+            dk_rows, dk_synced = dk_buckets[spec.pg_table][bucket]
+            pg_rows = await _read_pg_bucket(pool, spec, bucket)
+            compare_bucket(
+                spec, dk_rows, dk_synced, pg_rows, found,
+                now=now, grace_minutes=grace_minutes,
+            )
+        issues += _divergence_findings(spec, found, max_samples=max_samples)
+
     return issues

@@ -56,21 +56,17 @@ class _Ships:
         ))
 
 
-def _patches(ships, *, already_in_pg=()):
-    return (
-        patch("core.pg_landing.write_orders", new=ships),
-        patch("core.pg.get_pool", new=AsyncMock(return_value=object())),
-        patch("core.pg.require_revision", new=AsyncMock()),
-        patch("core.pg_backfill._postgres_order_ids",
-              new=AsyncMock(return_value=set(already_in_pg))),
-    )
-
-
 async def _run(store, *, already_in_pg=(), **kwargs):
     ships = _Ships()
-    a, b, c, d = _patches(ships, already_in_pg=already_in_pg)
-    with a, b, c, d:
+    marked = AsyncMock()
+    with patch("core.pg_landing.write_orders", new=ships), \
+         patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
+         patch("core.pg.require_revision", new=AsyncMock()), \
+         patch("core.pg_backfill._mark_backfilled", new=marked), \
+         patch("core.pg_backfill._postgres_order_ids",
+               new=AsyncMock(return_value=set(already_in_pg))):
         result = await backfill_orders(store, **kwargs)
+    ships.marked = marked
     return result, ships
 
 
@@ -85,6 +81,7 @@ class TestItShipsTheDifference:
         assert result["line_items_shipped"] == 6
         assert result["complete"] is True
         assert ships.chunks[0][0] == [1, 2, 3]
+        ships.marked.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_what_postgres_already_holds_is_not_re_shipped(self, tmp_path):
@@ -139,6 +136,9 @@ class TestChunking:
         assert result["remaining"] == 3
         assert result["complete"] is False
         assert len(ships.chunks) == 1
+        # The gate Reconciliation A reads stays shut: a partial backfill that
+        # claimed completion turns every un-carried order into a CRITICAL.
+        ships.marked.assert_not_called()
 
 
 class TestItRefusesRatherThanMisleads:

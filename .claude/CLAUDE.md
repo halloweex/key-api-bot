@@ -598,13 +598,37 @@ Report-only, like the Silver arc and the Gold cell check: a finding cannot
 reach `validation_passed`, and a mirror that quietly re-shipped whatever it
 noticed missing would destroy the signal.
 
-**Orders are mirrored but not yet compared.** `bronze.orders` and
-`bronze.order_products` land through `mirror_orders`, and the catalogue's
-retired/lost rule **does not transfer to them**: it works because a catalogue
-mirror ships the whole table every hour, so `last_ok_at` proves what Postgres
-held at that instant. The orders mirror ships only `updated_ids`, so a row
-missing from Postgres means "not backfilled yet" until the backfill has run to
-completion — which is the criterion their comparison will use instead. `mirror_landing` is in
+**Orders are compared differently, because 46 487 rows and 147 648 line items
+cannot be pulled whole every morning.** Both sides are folded into one
+fingerprint per 1 000-id bucket — a count and one SUM per column — and only the
+buckets that disagree are opened and compared row by row. ~47 rows come back
+from each store; the full check costs **0.27 s** measured over the whole
+catalogue of orders.
+
+The fingerprint sees any change to a number, a timestamp, or a text column's
+*length*. It cannot see a text edit of exactly equal length in a bucket where
+nothing else moved — measured and confirmed, not assumed. The alternative is a
+cross-engine row hash, which needs both databases to render numerics and
+timestamps to text identically, and they do not.
+
+**Not keyed on `updated_at`, which would be exact and cheap.** KeyCRM does not
+bump it on a status change — that is why `upsert_orders` has `force_update` —
+so an order can move from status 12 to 20 with `updated_at` untouched on both
+sides. Verified: the fingerprint catches exactly that change.
+
+**The gate is `meta.mirror_state.backfilled_at`.** `last_ok_at` licenses a
+tolerance of zero for the catalogue because a catalogue mirror ships the whole
+table. The orders mirror ships `updated_ids`, so it proves only that the last
+delta landed. Until the backfill has carried history across, every order older
+than the mirror looks exactly like a lost one — so the row-level comparison is
+suppressed and one `mirror_backfill_pending` is reported instead. The column is
+written by `core/pg_backfill.py` only on a run that finished with nothing
+remaining. A partial backfill claiming completion would file tens of thousands
+of CRITICALs.
+
+`mirror_buckets_disagree` caps the drill-down: more than 20 disagreeing buckets
+is a whole-table problem, and reading them all would turn a daily check into a
+table scan of both stores. `mirror_landing` is in
 `WATCHED_LAYERS` (digest section, layer age, catch-up) but deliberately not yet
 in the canary's `DQ_MAX_AGE_S` — that dict pages, and the canary's first probe
 is 90 s after the bot starts, before the catch-up run can finish.

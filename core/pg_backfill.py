@@ -88,6 +88,32 @@ def _read_chunk(conn, ids: Sequence[int]) -> tuple:
     return orders, products
 
 
+async def _mark_backfilled(pool) -> None:
+    """Stamp `backfilled_at` for both order tables.
+
+    Both, not one: the backfill carries a header and its line items in the same
+    transaction, so history is present for both tables or for neither, and a
+    check gated on only one of them would open the other's comparison too
+    early.
+
+    `ON CONFLICT` rather than `UPDATE`: a table whose mirror has never
+    succeeded has no watermark row yet, and a backfill into an empty Postgres
+    is exactly that case.
+    """
+    from core.pg_landing import ORDERS_TABLE, ORDER_PRODUCTS_TABLE
+
+    async with pool.acquire() as conn:
+        for table in (ORDERS_TABLE, ORDER_PRODUCTS_TABLE):
+            await conn.execute(
+                """
+                INSERT INTO meta.mirror_state (table_name, backfilled_at)
+                VALUES ($1, now())
+                ON CONFLICT (table_name) DO UPDATE SET backfilled_at = now()
+                """,
+                table,
+            )
+
+
 async def backfill_orders(
     store,
     *,
@@ -152,6 +178,13 @@ async def backfill_orders(
         )
 
     remaining = len(missing) - shipped_orders
+    if remaining == 0:
+        # The gate Reconciliation A reads. Written only on a run that left
+        # nothing behind, because a partial backfill that claimed completion
+        # would turn every un-carried order into a CRITICAL finding — which is
+        # exactly the noise the gate exists to prevent.
+        await _mark_backfilled(pool)
+
     result = {
         "duckdb_orders": len(available),
         "postgres_orders_before": len(existing),
