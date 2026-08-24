@@ -1069,6 +1069,7 @@ class BackgroundScheduler:
             configured,
             read_duckdb_side,
             reconcile_mirror,
+            reconcile_orders,
         )
 
         with correlation_context():
@@ -1089,6 +1090,10 @@ class BackgroundScheduler:
                 async with store.connection() as conn:
                     dk_side = read_duckdb_side(conn)
                 issues = await reconcile_mirror(dk_side)
+                # Orders are compared by fingerprint and drill-down instead,
+                # and that interleaves the two stores — so it takes the store
+                # and manages its own short acquisitions.
+                issues += await reconcile_orders(store)
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("Mirror reconciliation raised")
