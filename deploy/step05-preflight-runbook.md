@@ -172,15 +172,54 @@ belt to that braces, and it also survives a careless `rm -rf data/*`.
 
 Undo with `chattr -i -R`.
 
-### B4. Get it off this disk
+### B4. Get it off this disk — DONE 2026-08-24
 
 A copy on the same disk survives a deletion and does not survive the disk. The
-off-site job ships `analytics-*.duckdb` and will **not** pick this up.
+off-site job ships `ks-warehouse-*.tar` and will **not** pick this up.
 
 ```bash
-tar -C /opt/key-api-bot/data/ark -czf "/tmp/ark-$STAMP.tar.gz" "$STAMP"
-# move it off the host, then delete the tarball
+STAMP=20260823T212918Z
+cd /opt/key-api-bot && . deploy/backup.env
+SSH_OPTS=(-p "${BACKUP_SSH_PORT:-23}" -i "$BACKUP_SSH_KEY" \
+          -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+
+tar -C data/ark -czf "/tmp/ark-$STAMP.tar.gz" "$STAMP"
+sha256sum "/tmp/ark-$STAMP.tar.gz"
+
+# `ark/`, not the archive directory itself. Nothing there is pruned today —
+# `deploy/offsite_parquet.sh` selects victims with
+# `grep -o 'ks-warehouse-[0-9]\{8\}-[0-9]\{6\}\.tar'`, which cannot match
+# this name — but relying on somebody never widening that regex is not a plan.
+printf 'cd %s\n-mkdir ark\n' "$BACKUP_REMOTE_DIR" \
+    | sftp -b - -P "${BACKUP_SSH_PORT:-23}" -i "$BACKUP_SSH_KEY" "$BACKUP_REMOTE"
+rsync --archive --partial -e "ssh ${SSH_OPTS[*]}" \
+    "/tmp/ark-$STAMP.tar.gz" "$BACKUP_REMOTE:${BACKUP_REMOTE_DIR}/ark/"
+
+# Prove it, then delete the tarballs. A size match is not a read.
+rsync --archive -e "ssh ${SSH_OPTS[*]}" \
+    "$BACKUP_REMOTE:${BACKUP_REMOTE_DIR}/ark/ark-$STAMP.tar.gz" /tmp/ark-rt.tar.gz
+sha256sum "/tmp/ark-$STAMP.tar.gz" /tmp/ark-rt.tar.gz   # must agree
+tar -tzf /tmp/ark-rt.tar.gz | wc -l                     # 64
+rm -f "/tmp/ark-$STAMP.tar.gz" /tmp/ark-rt.tar.gz
 ```
+
+**Result, 2026-08-24.** 571 MB of Ark compressed to **208 642 742 bytes**;
+shipped, pulled back, and both copies hash to
+`66b4065704936def5a9c3852a29a5367d4741ba315d1420231c90bb441c820a6`. The
+returned archive opens and lists its 64 entries, so what is over there is a
+readable file and not a length that matches. Local tarballs deleted; the Ark
+itself stays on disk under `chattr +i`, which is now the *second* copy rather
+than the only one.
+
+**What this does and does not buy.** It survives this disk, this filesystem and
+this host. It does not survive the provider: the Storage Box is Hetzner, same
+as the VPS, so one account-level event still takes both. Naming that is not a
+plan to fix it — for a frozen pre-migration snapshot the disk was the risk
+worth closing — but nobody should read "off-site" as more than it is.
+
+**Retention.** Nothing prunes it, here or there. That is deliberate: this is
+one cold artifact taken once, not a rotation, and the day it needs deleting is
+the day the migration is finished and somebody decides so on purpose.
 
 ### The first Ark, 2026-08-23
 
@@ -193,7 +232,7 @@ verify  L0 59 files 0 bad · L1 45 tables 0 mismatched · L2 45 replayed 0 misma
 chattr  ----i---------
 ```
 
-B4 is still owed.
+B4 done 2026-08-24 — see above. The Ark now exists twice.
 
 ---
 
