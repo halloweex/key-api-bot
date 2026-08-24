@@ -294,6 +294,11 @@ services:
       # room. Raise before a full warehouse rebuild; 3GB is what OOM'd on
       # 2026-08-02 and truncated the Gold layer.
       - DUCKDB_MEMORY_LIMIT=4GB
+      # Step 05: the landing mirror. `ks_app`, same credential the migration
+      # runner and the bootstrap already take. Absent, the mirror logs an
+      # error on every sync instead of writing — which is why it is set here
+      # rather than left to whoever remembers.
+      - KS_PG_DSN=postgresql://ks_app:${KS_APP_PASSWORD:?set it in .env}@postgres:5432/ks
     volumes:
       - ./data:/app/data
     expose:

@@ -27,6 +27,7 @@ from core.events import (
     emit_orders_synced,
 )
 from core.meilisearch_client import get_meili_client, init_meilisearch
+from core.pg_landing import mirror_categories, mirror_products
 from bot.config import DEFAULT_TIMEZONE
 
 logger = get_logger(__name__)
@@ -647,12 +648,16 @@ class SyncService:
             # Upsert to database (sequential due to DuckDB single-writer)
             stats["categories"] = await self.store.upsert_categories(categories)
             await self.store.set_last_sync_time("categories")
+            # Step 05. Same payloads, read through the same `landing_rows`;
+            # never raises, so a Postgres fault cannot stop a sync.
+            await mirror_categories(categories)
 
             stats["expense_types"] = await self.store.upsert_expense_types(expense_types)
             await self.store.set_last_sync_time("expense_types")
 
             stats["products"] = await self.store.upsert_products(products)
             await self.store.set_last_sync_time("products")
+            await mirror_products(products)
 
             # Sync orders with expenses - in chunks to avoid pagination limit (100 pages × 50 = 5000 orders max)
             # IMPORTANT: Save each chunk immediately to preserve progress on timeout/crash
@@ -816,6 +821,7 @@ class SyncService:
                     products.extend(batch)
                 stats["products"] = await self.store.upsert_products(products)
                 await self.store.set_last_sync_time("products")
+                await mirror_products(products)
 
                 # Emit products synced event
                 await events.emit(SyncEvent.PRODUCTS_SYNCED, {"count": stats["products"]})
