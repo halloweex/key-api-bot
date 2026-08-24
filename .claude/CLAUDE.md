@@ -135,6 +135,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/health/data-quality` | Latest integrity + reconciliation run, with issues/diffs |
 | `/api/warehouse/status` | Last refresh, checksums, validation_passed |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
+| `/api/mirror/backfill/orders` | Ship the orders Postgres is missing; idempotent (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
 
@@ -529,6 +530,44 @@ flag in its internal tooling is not a neutral act. Languages have names.
   *other* container every 15 min: 30 h for reconciliation, 12 h for integrity.
   A missing block or a layer that never succeeded both count as failures.
 
+### The Postgres mirror of landing
+One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed
+rows; DuckDB and Postgres each write the rows they are handed. Bookkeeping
+columns are *not* shared — DuckDB stamps `synced_at`, Postgres `mirrored_at` —
+because two correct copies differ on those by construction.
+
+**The catalogue re-ships whole; orders ship a delta.** `mirror_products` sends
+all 1,003 products every hour. `upsert_orders` sends `updated_ids` — what it
+actually wrote — because a page of 500 orders usually changes a handful, and
+re-sending the page every minute would be thousands of no-op writes. That
+difference is why orders need `POST /api/mirror/backfill/orders` and the
+catalogue never did.
+
+Three things the orders path must keep doing, each with a reason that is not
+obvious from the code:
+
+- **`manager_comment` is `COALESCE(EXCLUDED, stored)`, never overwritten with
+  NULL** — it carries UTM attribution a backfill restored, and 14 179 of 46 446
+  orders have it NULL. A plain `EXCLUDED` would erase attribution on one store
+  only, and the reconciliation would then report a difference the mirror had
+  created.
+- **Line items are deleted per order and re-inserted, never upserted.** Ids are
+  `order_id * 1000 + position`, so an order dropping from three items to two
+  leaves `…002` behind under an upsert.
+- **The `order_products` watermark only moves when line items moved.**
+  `skip_products=True` (the status-only refresh) rewrites headers and does not
+  look at line items; stamping them as shipped there would tell the
+  reconciliation they are current when nothing touched them.
+
+The backfill has **no cursor**: it asks both stores which order ids they hold,
+ships the difference in chunks, and stops. Interrupt it anywhere and the next
+run resumes by recomputing. It does *not* repair an order that exists on both
+sides and differs — that is the reconciliation's business, downstream of a
+check that can say which rows disagree. Measured end to end against the
+production backup on a throwaway Postgres 17.2: 46 446 orders and 147 508 line
+items in **13.2 s**, then compared column by column — **0 differing rows on
+both tables**.
+
 ### Reconciliation A — the two stores against each other
 `dq_mirror_landing` (layer `mirror_landing`, daily 07:30) compares
 `bronze.products` and `bronze.categories` in Postgres against `products` and
@@ -557,7 +596,15 @@ Sunday.
 
 Report-only, like the Silver arc and the Gold cell check: a finding cannot
 reach `validation_passed`, and a mirror that quietly re-shipped whatever it
-noticed missing would destroy the signal. `mirror_landing` is in
+noticed missing would destroy the signal.
+
+**Orders are mirrored but not yet compared.** `bronze.orders` and
+`bronze.order_products` land through `mirror_orders`, and the catalogue's
+retired/lost rule **does not transfer to them**: it works because a catalogue
+mirror ships the whole table every hour, so `last_ok_at` proves what Postgres
+held at that instant. The orders mirror ships only `updated_ids`, so a row
+missing from Postgres means "not backfilled yet" until the backfill has run to
+completion — which is the criterion their comparison will use instead. `mirror_landing` is in
 `WATCHED_LAYERS` (digest section, layer age, catch-up) but deliberately not yet
 in the canary's `DQ_MAX_AGE_S` — that dict pages, and the canary's first probe
 is 90 s after the bot starts, before the catch-up run can finish.

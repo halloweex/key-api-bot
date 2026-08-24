@@ -88,6 +88,64 @@ async def refresh_order_statuses(
         raise HTTPException(status_code=500, detail=f"Status refresh failed: {str(e)}")
 
 
+# ─── Postgres mirror ───────────────────────────────────────────────────────────
+
+@router.post("/mirror/backfill/orders")
+@limiter.limit("2/hour")
+async def backfill_mirror_orders(
+    request: Request,
+    chunk_size: int = Query(2000, ge=100, le=10000),
+    max_chunks: Optional[int] = Query(None, ge=1, description="Cap one invocation"),
+    background: bool = Query(True, description="Run detached (recommended)"),
+    admin: dict = Depends(require_admin),
+):
+    """Ship the orders Postgres is missing. Idempotent; safe to re-run.
+
+    Step 05. The sync mirrors only what it writes, so Postgres starts at the
+    last few minutes of activity with 46,446 orders of history behind it. This
+    closes that gap, computing the difference fresh on every call rather than
+    remembering a cursor — interrupt it and the next run resumes by definition.
+
+    Foreground for a capped run you want to watch; background for the whole
+    thing, which takes minutes and would otherwise sit on an HTTP request.
+    """
+    from core.pg_backfill import backfill_orders
+
+    store = await get_store()
+
+    async def run():
+        try:
+            return await backfill_orders(
+                store, chunk_size=chunk_size, max_chunks=max_chunks,
+            )
+        except asyncio.CancelledError:
+            logger.warning("Mirror backfill was cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Mirror backfill failed: {e}", exc_info=True)
+            raise
+
+    if background:
+        task = asyncio.create_task(run(), name="mirror_backfill_orders")
+        # A strong reference, or the loop may collect the task mid-flight.
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
+        task.add_done_callback(
+            lambda t: logger.error(f"Mirror backfill failed: {t.exception()}")
+            if not t.cancelled() and t.exception() else None
+        )
+        return {
+            "status": "started",
+            "message": "Backfill running in background",
+            "note": "Progress is in the web log; re-run to see what is left.",
+        }
+
+    try:
+        return {"status": "success", "stats": await run()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
+
+
 # ─── Warehouse ─────────────────────────────────────────────────────────────────
 
 @router.get("/warehouse/status")
