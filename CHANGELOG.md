@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.112
+
+- Check that Postgres holds what DuckDB holds (#133)
+
+
 ## 3.0.111
 
 
