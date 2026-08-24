@@ -119,6 +119,72 @@ def duckdb_orders_in_window(
     }
 
 
+async def postgres_orders_in_window(
+    pool,
+    window_start: date,
+    window_end: date,
+    *,
+    watermark: datetime,
+    exclude_ids: "set[int] | frozenset[int] | None" = None,
+) -> OrderFacts:
+    """The same per-order facts, from the Postgres mirror.
+
+    A deliberate transliteration of `duckdb_orders_in_window`, not a rewrite:
+    same columns, same window, same source filter, same watermark, same
+    exclusions. Anything expressed differently here would show up as drift that
+    exists only in the comparison — the failure this module's docstring opens
+    with, and the one that cost three comparator bugs and 286 phantom orders in
+    PR #37.
+
+    Two expressions changed dialect and neither changes meaning:
+    `list_contains(CAST(? AS BIGINT[]), id)` becomes `id = ANY($4)`, and
+    `CAST(x AS DOUBLE)` becomes `::double precision`. The Kyiv date is written
+    identically on both sides — `AT TIME ZONE 'Europe/Kyiv'` means the same
+    thing in both engines, which is the one thing here worth doubting, and it
+    was checked against real orders rather than assumed.
+
+    **Why this exists.** The mirror reconciliation compares the two stores
+    against each other, and two copies can agree perfectly while both disagree
+    with KeyCRM. This is the other half of the owner's closing criterion for
+    step 05: zero differences between the stores *and* a reconciliation against
+    the source.
+    """
+    excluded = [int(i) for i in (exclude_ids or ())]
+    sources = ", ".join(str(s) for s in ACTIVE_SOURCES)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT o.id, o.status_id, o.source_id, o.manager_id, o.buyer_id,
+                   o.grand_total::double precision,
+                   (o.ordered_at AT TIME ZONE 'Europe/Kyiv')::date,
+                   COALESCE(li.n, 0), COALESCE(li.qty, 0),
+                   COALESCE(li.amount, 0)::double precision
+            FROM bronze.orders o
+            LEFT JOIN (
+                SELECT order_id, COUNT(*) AS n, SUM(quantity) AS qty,
+                       ROUND(SUM(price_sold * quantity), 2) AS amount
+                FROM bronze.order_products GROUP BY order_id
+            ) li ON li.order_id = o.id
+            WHERE (o.ordered_at AT TIME ZONE 'Europe/Kyiv')::date
+                      BETWEEN $1::date AND $2::date
+              AND o.source_id IN ({sources})
+              AND (o.updated_at IS NULL OR o.updated_at < $3::timestamptz)
+              AND NOT (o.id = ANY($4::bigint[]))
+            """,
+            window_start, window_end,
+            watermark.astimezone(timezone.utc), excluded,
+        )
+    return {
+        int(r[0]): {
+            "status_id": r[1], "source_id": r[2],
+            "manager_id": r[3], "buyer_id": r[4],
+            "grand_total": float(r[5] or 0), "order_date": r[6],
+            "n_lines": int(r[7]), "qty": int(r[8]), "line_amount": float(r[9] or 0),
+        }
+        for r in rows
+    }
+
+
 # ─── DuckDB rollup ────────────────────────────────────────────────────────────
 
 

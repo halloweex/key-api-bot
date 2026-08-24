@@ -1608,7 +1608,9 @@ def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, An
 # would page during the first deploy window — the canary's first probe is 90 s
 # after the bot starts, before the catch-up run has finished. The digest already
 # says a layer went silent, every morning it stays silent.
-WATCHED_LAYERS: Tuple[str, ...] = ("integrity", "reconciliation", "mirror_landing")
+WATCHED_LAYERS: Tuple[str, ...] = (
+    "integrity", "reconciliation", "mirror_landing", "reconciliation_pg",
+)
 
 
 def alert_fingerprint(
@@ -1689,6 +1691,11 @@ DIGEST_MAX_AGE_HOURS = {
     # Daily at 07:30, so 30h is one cycle plus six hours of grace — the
     # same arithmetic as the reconciliation above it.
     "mirror_landing": 30,
+    # Rides inside `dq_reconciliation`, so it shares that job's 05:30 cadence
+    # and therefore its limit. A `reconciliation_pg` older than the
+    # `reconciliation` beside it means the Postgres half stopped while the
+    # DuckDB half kept going — which is precisely why it is a layer of its own.
+    "reconciliation_pg": 30,
 }
 
 # How long a standing finding may go unmentioned before the digest says it
