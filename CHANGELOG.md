@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.114
+
+- Compare orders between the two stores, at a size that forbids the obvious method (#135)
+
+
 ## 3.0.113
 
 - Mirror orders and their line items into Postgres (#134)
