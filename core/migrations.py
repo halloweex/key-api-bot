@@ -553,7 +553,7 @@ def _m0023_data_quality_tables(self) -> None:
             as_of TIMESTAMP WITH TIME ZONE NOT NULL,
             window_start DATE NOT NULL,
             window_end DATE NOT NULL,
-            layer VARCHAR NOT NULL,          -- 'integrity' | 'reconciliation' | 'combined'
+            layer VARCHAR NOT NULL,          -- 'integrity' | 'reconciliation' | 'mirror_landing' | 'combined'
             status VARCHAR NOT NULL,          -- 'PASS' | 'WARN' | 'CRITICAL' | 'FAILED'
             integrity_issues_count INTEGER DEFAULT 0,
             discrepancies_count INTEGER DEFAULT 0,

@@ -1595,7 +1595,20 @@ def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, An
 
 # Layers a run-age watchdog is expected to see. A layer that never appears
 # here would be watched by nobody.
-WATCHED_LAYERS: Tuple[str, ...] = ("integrity", "reconciliation")
+# The layers with a cadence, a digest section and an age. `mirror_landing` is
+# step 05's Reconciliation A — landing in Postgres against landing in DuckDB,
+# daily at 07:30 — and it belongs here for three separate reasons: the digest
+# renders one section per layer, `fetch_last_success_ages` reports one age per
+# layer, and the scheduler's catch-up reads those ages to decide what it missed.
+# A layer absent from this tuple has a null age forever, which the catch-up
+# reads as "never succeeded" and re-queues on every single restart.
+#
+# It is deliberately NOT in `bot/canary.py`'s `DQ_MAX_AGE_S` yet: that dict is
+# the paging path, it is opted into by name, and a layer with no track record
+# would page during the first deploy window — the canary's first probe is 90 s
+# after the bot starts, before the catch-up run has finished. The digest already
+# says a layer went silent, every morning it stays silent.
+WATCHED_LAYERS: Tuple[str, ...] = ("integrity", "reconciliation", "mirror_landing")
 
 
 def alert_fingerprint(
@@ -1671,7 +1684,12 @@ def fetch_latest_run_by_id(conn, run_id: int) -> Optional[Dict[str, Any]]:
 
 # How stale a layer's newest verdict may be before the digest calls it out.
 # One cycle plus grace, same reasoning as the canary's thresholds.
-DIGEST_MAX_AGE_HOURS = {"reconciliation": 30, "integrity": 12}
+DIGEST_MAX_AGE_HOURS = {
+    "reconciliation": 30, "integrity": 12,
+    # Daily at 07:30, so 30h is one cycle plus six hours of grace — the
+    # same arithmetic as the reconciliation above it.
+    "mirror_landing": 30,
+}
 
 # How long a standing finding may go unmentioned before the digest says it
 # again. Long enough that a known problem stops being daily wallpaper, short

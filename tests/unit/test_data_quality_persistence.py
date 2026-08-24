@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from core.data_quality import (
+    WATCHED_LAYERS,
     Discrepancy,
     DiscrepancyClass,
     IntegrityIssue,
@@ -288,7 +289,8 @@ class TestFetchLastSuccessAges:
                 )
                 ages = fetch_last_success_ages(conn)
 
-            assert set(ages) == {"integrity", "reconciliation"}
+            # Every watched layer gets a key, including ones added later.
+            assert set(ages) == set(WATCHED_LAYERS)
             assert ages["integrity"]["age_seconds"] is not None
             assert ages["integrity"]["age_seconds"] < 60
             assert ages["reconciliation"] == {

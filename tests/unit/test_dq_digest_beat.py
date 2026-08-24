@@ -20,7 +20,12 @@ from pathlib import Path
 
 import pytest
 
-from core.data_quality import IntegrityIssue, Severity, persist_run
+from core.data_quality import (
+    WATCHED_LAYERS,
+    IntegrityIssue,
+    Severity,
+    persist_run,
+)
 from core.duckdb_store import DuckDBStore
 from core.scheduler import DQ_DIGEST_LAST_SENT_KEY, BackgroundScheduler
 
@@ -72,8 +77,11 @@ async def _seed_two_runs(store: DuckDBStore, first: int, second: int) -> None:
 
     Both dated within the hour: a stale layer is news in its own right and
     would send the digest for a reason these tests are not about. The clean
-    reconciliation run is there for the same reason — a layer that never ran
-    is news, and every digest here would go out on that alone.
+    run seeded for every *other* watched layer is there for the same reason —
+    a layer that never ran is news, and every digest here would go out on that
+    alone. Driven off WATCHED_LAYERS rather than a hand-written list, so
+    adding a layer does not silently turn these tests into assertions about
+    that layer instead of about the beat.
     """
     now = datetime.now(timezone.utc)
     async with store.connection() as conn:
@@ -85,11 +93,14 @@ async def _seed_two_runs(store: DuckDBStore, first: int, second: int) -> None:
                 layer="integrity", issues=[_issue(count)], discrepancies=[],
             )
         at = now - timedelta(minutes=30)
-        persist_run(
-            conn, started_at=at, ended_at=at, as_of=at,
-            window_start=date(2026, 1, 1), window_end=date(2026, 8, 15),
-            layer="reconciliation", issues=[], discrepancies=[],
-        )
+        for layer in WATCHED_LAYERS:
+            if layer == "integrity":
+                continue
+            persist_run(
+                conn, started_at=at, ended_at=at, as_of=at,
+                window_start=date(2026, 1, 1), window_end=date(2026, 8, 15),
+                layer=layer, issues=[], discrepancies=[],
+            )
 
 
 async def _set_marker(store: DuckDBStore, value: str) -> None:
