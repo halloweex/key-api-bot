@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.113
+
+- Mirror orders and their line items into Postgres (#134)
+
+
 ## 3.0.112
 
 - Check that Postgres holds what DuckDB holds (#133)
