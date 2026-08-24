@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.110
+
+- Write the catalogue to Postgres as well (#132)
+
+
 ## 3.0.109
 
 - Give the catalogue a home in Postgres (#131)
