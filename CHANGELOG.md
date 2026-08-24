@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.108
+
+- Read a KeyCRM payload once, for however many stores want it (#130)
+
+
 ## 3.0.107
 
 - Write down the two preflight steps that only the host can do (#129)
