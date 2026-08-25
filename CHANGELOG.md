@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.118
+
+- Make the suite run in a clean checkout (#139)
+
+
 ## 3.0.117
 
 - Run the suite on every pull request (#138)
