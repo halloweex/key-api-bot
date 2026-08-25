@@ -121,3 +121,45 @@ class TestTheChainIsIntact:
 
     def test_it_can_be_undone_children_first(self):
         assert DOWN.index("bronze.order_products") < DOWN.index("bronze.orders")
+
+
+class TestTheClassificationRevision:
+    """0005 — the one pair that is replicated rather than mirrored."""
+
+    def _rev(self):
+        import importlib.util
+        import inspect
+        from pathlib import Path as _Path
+
+        repo = _Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location(
+            "_rev0005",
+            repo / "migrations" / "versions" / "0005_manager_classification.py",
+        )
+        rev = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rev)
+        return rev, inspect.getsource(rev.upgrade)
+
+    def test_the_intervals_go_in_app_and_the_managers_in_bronze(self):
+        """`app` is for what nothing can decide again. An effective-dated
+        classification is exactly that; a manager's name is not."""
+        _, up = self._rev()
+        assert "CREATE TABLE app.manager_classifications" in up
+        assert "CREATE TABLE bronze.managers" in up
+
+    def test_the_key_is_the_interval(self):
+        _, up = self._rev()
+        assert "PRIMARY KEY (manager_id, valid_from)" in up
+
+    def test_no_exclusion_constraint_on_the_interval(self):
+        """DuckDB enforces none, so one here could reject a row the other
+        store accepted — a filter, not a mirror.
+
+        Matched on the syntax, not the word: the DDL's own comment explains
+        why the constraint is absent and contains the word 'EXCLUDE'."""
+        _, up = self._rev()
+        assert "EXCLUDE USING" not in up
+
+    def test_it_follows_the_backfill_gate(self):
+        rev, _ = self._rev()
+        assert rev.down_revision == "0004_backfilled_at"

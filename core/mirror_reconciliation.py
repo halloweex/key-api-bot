@@ -84,6 +84,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from core.data_quality import IntegrityIssue, Severity
 from core.landing_rows import CATEGORY_COLUMNS, PRODUCT_COLUMNS
+from core.pg_replication import CLASSIFICATION_COLUMNS, MANAGER_COLUMNS
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,31 @@ class MirroredTable:
     dk_table: str                      # products
     columns: Tuple[str, ...]           # the shared contract, from landing_rows
     numeric: Tuple[str, ...] = ()      # compared as Decimal, not as text
+    # What identifies a row. `manager_classifications` is effective-dated and
+    # keyed `(manager_id, valid_from)`; everything else has an `id`.
+    key_columns: Tuple[str, ...] = ("id",)
+    # Where the grace window reads "when did this store last write the row".
+    # None means the table has no such column and nothing is ever in flight.
+    synced_column: Optional[str] = "synced_at"
+    # True when the writer replaces the whole table rather than upserting.
+    #
+    # This decides what a row present in DuckDB and absent from Postgres
+    # *means*, and the two answers are opposites. For an upserting mirror fed
+    # by KeyCRM payloads, a row written before the last successful ship and
+    # still absent is one KeyCRM has retired — INFO, not a defect. For a full
+    # replace there is no such category: the writer wrote every row it holds,
+    # so anything missing was lost.
+    full_replace: bool = False
+
+    @property
+    def sample_index(self) -> int:
+        """Which column supplies `IntegrityIssue.sample_ids`.
+
+        Always the first key column: sample ids are integers, and a composite
+        key cannot be one. For `manager_classifications` that is the manager,
+        which is what a human would go looking for anyway.
+        """
+        return self.columns.index(self.key_columns[0])
 
 
 # Order matters only for reporting. Products first: it is the table that moves.
@@ -121,6 +147,28 @@ MIRRORED_TABLES: Tuple[MirroredTable, ...] = (
         pg_table="bronze.categories",
         dk_table="categories",
         columns=tuple(CATEGORY_COLUMNS),
+    ),
+    # Not a mirror — a replica. `is_retail` and the effective-dated intervals
+    # are decisions KeyCRM cannot supply, so `core/pg_replication.py` copies
+    # what DuckDB holds rather than re-deriving them. `full_replace` because
+    # that writer rewrites both tables whole, which is also what makes a
+    # missing row here unambiguous: there is no "KeyCRM retired it" to mean.
+    MirroredTable(
+        pg_table="bronze.managers",
+        dk_table="managers",
+        columns=MANAGER_COLUMNS,
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.manager_classifications",
+        dk_table="manager_classifications",
+        columns=CLASSIFICATION_COLUMNS,
+        key_columns=("manager_id", "valid_from"),
+        # `set_at` is when a human decided, which is exactly the right clock:
+        # the endpoint replicates immediately, so a classification decided
+        # seconds ago may legitimately still be in flight.
+        synced_column="set_at",
+        full_replace=True,
     ),
 )
 
@@ -167,47 +215,56 @@ def _normalise_row(
 # ─── Reads ────────────────────────────────────────────────────────────────────
 
 
+def _row_key(spec: MirroredTable, row: Sequence[Any]) -> Any:
+    """The identity of a row: an int for a simple key, a tuple otherwise."""
+    values = tuple(row[spec.columns.index(c)] for c in spec.key_columns)
+    if len(values) == 1:
+        return int(values[0])
+    return values
+
+
 def fetch_duckdb_rows(
     conn, spec: MirroredTable,
-) -> Tuple[Dict[int, Tuple[Any, ...]], Dict[int, Optional[datetime]]]:
+) -> Tuple[Dict[Any, Tuple[Any, ...]], Dict[Any, Optional[datetime]]]:
     """Every row of one landing table, plus when this store last wrote it.
 
-    `synced_at` is read alongside but never compared: it is DuckDB's own
+    The timestamp is read alongside but never compared: it is DuckDB's own
     bookkeeping and Postgres keeps `mirrored_at` for the same purpose, so two
     correct copies disagree on it by construction. It is here because it is
-    what tells a retired row from a lost one.
+    what tells a row still in flight from one that was lost.
     """
     cols = ", ".join(spec.columns)
+    stamp = spec.synced_column
     rows = conn.execute(
-        f"SELECT {cols}, synced_at FROM {spec.dk_table}"
+        f"SELECT {cols}" + (f", {stamp}" if stamp else "") + f" FROM {spec.dk_table}"
     ).fetchall()
 
-    values: Dict[int, Tuple[Any, ...]] = {}
-    synced: Dict[int, Optional[datetime]] = {}
+    values: Dict[Any, Tuple[Any, ...]] = {}
+    synced: Dict[Any, Optional[datetime]] = {}
     width = len(spec.columns)
     for row in rows:
-        row_id = row[0]
-        if row_id is None:
+        if any(row[spec.columns.index(c)] is None for c in spec.key_columns):
             continue
-        values[int(row_id)] = _normalise_row(
-            row[:width], spec.columns, spec.numeric,
-        )
-        synced[int(row_id)] = row[width]
+        key = _row_key(spec, row)
+        values[key] = _normalise_row(row[:width], spec.columns, spec.numeric)
+        synced[key] = row[width] if stamp else None
     return values, synced
 
 
-async def fetch_pg_rows(pool, spec: MirroredTable) -> Dict[int, Tuple[Any, ...]]:
+async def fetch_pg_rows(pool, spec: MirroredTable) -> Dict[Any, Tuple[Any, ...]]:
     """Every row of the mirrored table, in the same shape as the DuckDB side."""
     cols = ", ".join(spec.columns)
     async with pool.acquire() as conn:
         records = await conn.fetch(f"SELECT {cols} FROM {spec.pg_table}")
-    return {
-        int(r[0]): _normalise_row(
-            [r[c] for c in spec.columns], spec.columns, spec.numeric,
+    out: Dict[Any, Tuple[Any, ...]] = {}
+    for record in records:
+        row = [record[c] for c in spec.columns]
+        if any(record[c] is None for c in spec.key_columns):
+            continue
+        out[_row_key(spec, row)] = _normalise_row(
+            row, spec.columns, spec.numeric,
         )
-        for r in records
-        if r[0] is not None
-    }
+    return out
 
 
 async def fetch_watermarks(pool) -> Dict[str, Dict[str, Any]]:
@@ -224,6 +281,19 @@ async def fetch_watermarks(pool) -> Dict[str, Dict[str, Any]]:
 
 
 # ─── The comparison (pure) ────────────────────────────────────────────────────
+
+
+def _sample(spec: MirroredTable, keys, limit: int) -> Tuple[int, ...]:
+    """Up to `limit` sample ids, from the first key column.
+
+    `IntegrityIssue.sample_ids` is a tuple of ints and an effective-dated key
+    is a tuple of (manager, date). The manager is what a human goes looking
+    for, so that is what is reported.
+    """
+    out = []
+    for key in sorted(keys)[:limit]:
+        out.append(int(key[0]) if isinstance(key, tuple) else int(key))
+    return tuple(out)
 
 
 def _watermark_findings(
@@ -310,6 +380,13 @@ def compare_table(
         synced = dk_synced.get(row_id)
         if synced is not None and synced.tzinfo is None:
             synced = synced.replace(tzinfo=timezone.utc)
+        if spec.full_replace:
+            # No retired category exists here: the writer replaces the whole
+            # table on every run, so it wrote every row it holds. Anything
+            # absent past the grace window was lost, not retired.
+            if synced is None or synced <= cutoff:
+                lost.append(row_id)
+            continue
         if synced is None or synced <= last_ok_at:
             # The mirror shipped the whole catalogue after this row was last
             # written and Postgres still does not have it: KeyCRM is no longer
@@ -326,7 +403,7 @@ def compare_table(
             table_name=table,
             severity=Severity.CRITICAL,
             count=len(lost),
-            sample_ids=tuple(sorted(lost)[:max_samples]),
+            sample_ids=_sample(spec, lost, max_samples),
             description=(
                 f"{len(lost)} row(s) written to DuckDB after the mirror's last "
                 f"success at {last_ok_at.isoformat()} are absent from {table}, "
@@ -343,7 +420,7 @@ def compare_table(
             table_name=table,
             severity=Severity.INFO,
             count=len(retired),
-            sample_ids=tuple(sorted(retired)[:max_samples]),
+            sample_ids=_sample(spec, retired, max_samples),
             description=(
                 f"{len(retired)} row(s) exist in DuckDB and cannot exist in "
                 f"{table}: KeyCRM has stopped serving them, and a mirror fed by "
@@ -362,7 +439,7 @@ def compare_table(
             table_name=table,
             severity=Severity.WARN,
             count=len(orphans),
-            sample_ids=tuple(orphans[:max_samples]),
+            sample_ids=_sample(spec, orphans, max_samples),
             description=(
                 f"{len(orphans)} row(s) in {table} have nothing behind them in "
                 "DuckDB. Nothing writes this table except the mirror, and the "
@@ -394,7 +471,7 @@ def compare_table(
             table_name=table,
             severity=Severity.CRITICAL,
             count=len(differing),
-            sample_ids=tuple(sorted(differing)[:max_samples]),
+            sample_ids=_sample(spec, differing, max_samples),
             description=(
                 f"{len(differing)} row(s) are present in both stores and "
                 f"disagree. Columns: {worst}. Both sides are written from the "

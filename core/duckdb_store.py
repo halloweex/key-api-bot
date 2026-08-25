@@ -3570,7 +3570,7 @@ class DuckDBStore(
 
                 conn.execute("COMMIT")
                 logger.info(f"Upserted {count} managers to DuckDB")
-                return count
+                written = count
 
             except Exception:
                 try:
@@ -3578,6 +3578,16 @@ class DuckDBStore(
                 except Exception:
                     pass
                 raise
+
+        # Step 05. Not a mirror: `is_retail` and the effective-dated
+        # classifications are decisions KeyCRM cannot supply, so Postgres gets
+        # a copy of what this store now holds rather than a re-seed from
+        # RETAIL_MANAGER_IDS. Outside the connection block — `asyncio.Lock` is
+        # not reentrant and `replicate_managers` opens its own. Never raises.
+        from core.pg_replication import replicate_managers
+
+        await replicate_managers(self)
+        return written
 
     async def upsert_buyers(self, buyers: List["Buyer"]) -> int:
         """Insert or update buyers from KeyCRM API.
