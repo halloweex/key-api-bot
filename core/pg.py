@@ -41,7 +41,7 @@ VERSION_TABLE = "alembic_version"
 # The revision this code requires. Bumped in the same commit as the migration
 # that introduces it, so a deploy carrying new reads and an un-migrated database
 # is a startup failure rather than a runtime surprise.
-REQUIRED_REVISION = "0005_manager_classification"
+REQUIRED_REVISION = "0006_silver_orders"
 
 _pool: Optional[Any] = None
 _pool_lock = asyncio.Lock()
