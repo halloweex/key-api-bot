@@ -55,10 +55,10 @@ def _all_dep_calls(dependant) -> set:
 
 
 def _route(path: str, method: str = "GET"):
-    for r in app.routes:
-        if getattr(r, "path", None) == path and method in getattr(r, "methods", set()):
-            return r
-    return None
+    # `app.routes` is no longer flat — see tests/routes_helper.
+    from tests.routes_helper import find_route
+
+    return find_route(app, path, method)
 
 
 class _FakeConn:

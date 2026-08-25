@@ -71,10 +71,10 @@ def _all_dep_calls(dependant) -> set:
 
 
 def _route(path: str, method: str = "GET"):
-    for r in app.routes:
-        if getattr(r, "path", None) == path and method in getattr(r, "methods", set()):
-            return r
-    return None
+    # `app.routes` is no longer flat — see tests/routes_helper.
+    from tests.routes_helper import find_route
+
+    return find_route(app, path, method)
 
 
 @pytest.fixture
@@ -155,10 +155,13 @@ class TestAuthorizationStructure:
         live route table — every /api/* route must have api_gate in its
         resolved dependency tree, period.
         """
-        from starlette.routing import Route as _Route
+        from tests.routes_helper import iter_routes
+
         leaked = []
-        for r in app.routes:
-            if not isinstance(r, _Route):
+        for r in iter_routes(app):
+            # Anything without a resolved dependant is a mount or a static
+            # file handler, not an endpoint this invariant is about.
+            if getattr(r, "dependant", None) is None:
                 continue
             path = getattr(r, "path", "")
             if not path.startswith("/api/"):

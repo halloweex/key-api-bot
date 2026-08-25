@@ -224,19 +224,11 @@ class TestReconciliationWindowIsAParameter:
         from web.main import app
         from web.routes.auth import require_admin
 
-        route = next(
-            r for r in app.routes
-            if getattr(r, "path", None) == "/api/reconcile" and "POST" in getattr(r, "methods", set())
-        )
-        calls = set()
-        stack = [route.dependant]
-        while stack:
-            d = stack.pop()
-            for dep in d.dependencies:
-                if dep.call is not None:
-                    calls.add(dep.call)
-                stack.append(dep)
-        assert require_admin in calls
+        from tests.routes_helper import find_route, route_dependencies
+
+        route = find_route(app, "/api/reconcile", "POST")
+        assert route is not None, "POST /api/reconcile is not registered"
+        assert require_admin in route_dependencies(route)
 
 
 class TestReconcileEndpointDoesNotHoldTheRequestOpen:
