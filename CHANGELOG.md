@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.120
+
+
+
 ## 3.0.119
 
 - Replicate the classification at startup, not only once a day (#140)
