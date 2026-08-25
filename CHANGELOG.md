@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.117
+
+- Run the suite on every pull request (#138)
+
+
 ## 3.0.116
 
 - Replicate the manager classification into Postgres (#137)
