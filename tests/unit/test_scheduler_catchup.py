@@ -226,9 +226,9 @@ class TestReconciliationWindowIsAParameter:
 
         from tests.routes_helper import find_route, route_dependencies
 
-        route = find_route(app, "/api/reconcile", "POST")
-        assert route is not None, "POST /api/reconcile is not registered"
-        assert require_admin in route_dependencies(route)
+        assert find_route(app, "/api/reconcile", "POST") is not None, \
+            "POST /api/reconcile is not registered"
+        assert require_admin in route_dependencies(app, "/api/reconcile", "POST")
 
 
 class TestReconcileEndpointDoesNotHoldTheRequestOpen:

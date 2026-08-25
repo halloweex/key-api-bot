@@ -77,6 +77,19 @@ def _route(path: str, method: str = "GET"):
     return find_route(app, path, method)
 
 
+def _deps(path: str, method: str = "GET") -> set:
+    """Every dependency callable applying to an endpoint.
+
+    Takes the path rather than a route object: on the fastapi production runs,
+    `require_admin` is attached at `include_router(...)` and lives in the
+    include context, not on the route's own `dependant`. Reading only the
+    dependant would report every admin endpoint as unprotected.
+    """
+    from tests.routes_helper import route_dependencies
+
+    return set(route_dependencies(app, path, method))
+
+
 @pytest.fixture
 def client():
     """TestClient without startup events (no DuckDB / scheduler)."""
@@ -155,20 +168,17 @@ class TestAuthorizationStructure:
         live route table — every /api/* route must have api_gate in its
         resolved dependency tree, period.
         """
-        from tests.routes_helper import iter_routes
+        from tests.routes_helper import iter_endpoints
 
         leaked = []
-        for r in iter_routes(app):
-            # Anything without a resolved dependant is a mount or a static
-            # file handler, not an endpoint this invariant is about.
-            if getattr(r, "dependant", None) is None:
+        for endpoint in iter_endpoints(app):
+            if not endpoint.path.startswith("/api/"):
                 continue
-            path = getattr(r, "path", "")
-            if not path.startswith("/api/"):
-                continue
-            if api_gate not in _all_dep_calls(r.dependant):
-                methods = ",".join(sorted(getattr(r, "methods", set()) or {"?"}))
-                leaked.append(f"{methods} {path}")
+            # `api_gate` is applied at the `/api` include, so it is inherited
+            # rather than present on the route's own dependant.
+            if api_gate not in endpoint.dependencies:
+                methods = ",".join(sorted(endpoint.methods or {"?"}))
+                leaked.append(f"{methods} {endpoint.path}")
         assert not leaked, \
             "audit-invariant drift — /api/* routes outside api_gate:\n  " + "\n  ".join(leaked)
 
@@ -176,7 +186,7 @@ class TestAuthorizationStructure:
     def test_admin_ops_endpoints_require_admin(self, path):
         route = _route(path)
         assert route is not None
-        assert require_admin in _all_dep_calls(route.dependant), \
+        assert require_admin in _deps(path), \
             f"{path} dropped require_admin — admin→user downgrade regression"
 
     def test_admin_endpoint_403_for_non_admin(self, client, monkeypatch):
