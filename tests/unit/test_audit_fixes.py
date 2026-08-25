@@ -77,9 +77,17 @@ class TestRefreshSelfHeal:
             alerts.append((msg, key))
 
         monkeypatch.setattr(store, "_send_warehouse_alert", fake_alert)
-        # Poison the date helper so the Silver INSERT SELECT throws inside the
+        # Poison the Silver projection so the INSERT SELECT throws inside the
         # pipeline → exercises the outer except (self-heal) path.
-        monkeypatch.setattr("core.duckdb_store._date_in_kyiv", lambda col: "not valid sql (")
+        #
+        # The projection, not `_date_in_kyiv`: since the dialect split it reads
+        # its date expression from `core.sql_dialect.DUCKDB`, so poisoning the
+        # old helper stopped reaching the pipeline and both of these tests
+        # passed while exercising nothing. This seam is the one the pipeline
+        # actually calls.
+        monkeypatch.setattr(
+            "core.duckdb_store.silver_select_sql", lambda *a, **k: "not valid sql ("
+        )
 
         res = await store.refresh_warehouse_layers(trigger="manual", changed_order_ids=None)
 
@@ -112,7 +120,9 @@ class TestRefreshSelfHeal:
             alerts.append((msg, key))
 
         monkeypatch.setattr(store, "_send_warehouse_alert", fake_alert)
-        monkeypatch.setattr("core.duckdb_store._date_in_kyiv", lambda col: "not valid sql (")
+        monkeypatch.setattr(
+            "core.duckdb_store.silver_select_sql", lambda *a, **k: "not valid sql ("
+        )
 
         await store.refresh_warehouse_layers(trigger="manual", changed_order_ids=None)
 
