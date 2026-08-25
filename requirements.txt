@@ -1,3 +1,10 @@
+# What this application depends on, and roughly which versions. **Intent, not
+# fact** — the images and CI install `requirements.lock`, which records the
+# exact set, transitive packages included.
+#
+# Edit here, regenerate the two lock files (their headers carry the command),
+# read the diff, run the suite. A floor without a ceiling is fine in this file
+# precisely because it does not decide what ships.
 # requests <2.33.0 / python-dotenv <1.2.2 carry known CVEs — the `~=` pins
 # previously blocked the fixed releases. Floors raised to the patched versions.
 requests>=2.33.0

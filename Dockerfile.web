@@ -30,8 +30,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# The lock, not the intent file: `requirements.txt` has floors and no
+# ceilings, so building from it lets pip decide what production runs.
+# It crossed a major starlette boundary that way. See requirements.lock.
+COPY requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
 
 # Copy version file
 COPY VERSION ./

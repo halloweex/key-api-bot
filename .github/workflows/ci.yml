@@ -54,14 +54,16 @@ jobs:
           python-version: '3.14'
           cache: pip
           cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
+            requirements.lock
+            requirements-dev.lock
 
+      # The lock, so this job holds the versions production holds. Installing
+      # `requirements-dev.txt` would re-resolve, and a check that runs against
+      # a different set from the one being deployed is a check about nothing.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # requirements-dev.txt includes requirements.txt via `-r`.
-          pip install -r requirements-dev.txt
+          pip install -r requirements-dev.lock
 
       # No paths, no markers, no flags. `pytest.ini` owns `testpaths`,
       # `asyncio_mode` and the deselections, so what runs here is exactly what
