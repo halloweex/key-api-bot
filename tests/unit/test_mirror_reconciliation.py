@@ -292,7 +292,7 @@ class TestAgainstARealDuckDB:
 
         assert rows == {7: (7, "Тонер", 11, "Wellage", "1678", Decimal("700.00"))}
         assert synced[7] is not None
-        assert set(side) == {"bronze.products", "bronze.categories"}
+        assert {"bronze.products", "bronze.categories"} <= set(side)
         assert side["bronze.categories"][0] == {11: (11, "Face", None)}
 
     @pytest.mark.asyncio
@@ -322,10 +322,30 @@ class TestWiring:
 
         assert CATCHUP_CHECKS["dq_mirror_landing"][0] == MIRROR_LAYER
 
-    def test_both_landing_tables_are_covered(self):
+    def test_every_pulled_whole_table_is_covered(self):
         assert {s.pg_table for s in MIRRORED_TABLES} == {
             "bronze.products", "bronze.categories",
+            "bronze.managers", "app.manager_classifications",
         }
         for spec in MIRRORED_TABLES:
             assert isinstance(spec, MirroredTable)
-            assert spec.columns[0] == "id"
+            # Every key column is a real column, or `_row_key` indexes into
+            # nothing and the comparison keys on garbage.
+            for column in spec.key_columns:
+                assert column in spec.columns
+
+    def test_the_replicated_tables_have_no_retired_category(self):
+        """A full replace writes every row it holds, so a row missing from
+        Postgres cannot mean 'KeyCRM retired it' — that reading belongs to the
+        payload-fed mirrors and would excuse a real loss here."""
+        replicated = {"bronze.managers", "app.manager_classifications"}
+        for spec in MIRRORED_TABLES:
+            assert spec.full_replace is (spec.pg_table in replicated)
+
+    def test_the_effective_dated_table_is_keyed_on_its_interval(self):
+        spec = next(
+            s for s in MIRRORED_TABLES
+            if s.pg_table == "app.manager_classifications"
+        )
+        assert spec.key_columns == ("manager_id", "valid_from")
+        assert spec.synced_column == "set_at"

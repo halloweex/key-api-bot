@@ -550,6 +550,14 @@ async def set_manager_retail_status(
         set_by=admin.get("user_id"),
         note=note,
     )
+    # Step 05. This endpoint is the whole reason the classification cannot be
+    # re-derived on the other side, so Postgres is updated here rather than
+    # waiting for the daily manager sync — otherwise Silver computed in
+    # Postgres would carry yesterday's answer for up to a day.
+    from core.pg_replication import replicate_managers
+
+    await replicate_managers(store)
+
     logger.info(
         "Manager %s retail status set to %s from %s by admin %s",
         manager_id, is_retail, effective_from or "today", admin.get("user_id"),

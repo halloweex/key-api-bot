@@ -568,6 +568,37 @@ production backup on a throwaway Postgres 17.2: 46 446 orders and 147 508 line
 items in **13.2 s**, then compared column by column — **0 differing rows on
 both tables**.
 
+### Replicated, not mirrored: the manager classification
+`bronze.managers` and `app.manager_classifications` are the one pair that does
+**not** come from a KeyCRM payload. `sales_type` is decided by
+`silver_sales_type_case()`, four of whose six branches read these tables, and
+KeyCRM has no idea whether a manager sells retail, wholesale, internally, or
+ships to bloggers — **only a human does**. `upsert_managers` seeds `is_retail`
+from `RETAIL_MANAGER_IDS` for managers it has never seen and never touches it
+again, because recomputing it every sync made the column unfixable.
+
+So `core/pg_replication.py` copies what DuckDB holds. A payload-fed mirror would
+re-seed from the same constant, the two stores would classify differently, and
+the Gold reconciliation would then be measuring the classification instead of
+the migration.
+
+**Full replace, both tables, one transaction.** An interval can be *deleted* — a
+correction removes one — and an upsert would leave a ghost that silently
+reclassifies past orders. It refuses an empty manager list: replacing a
+populated table with nothing sends every affected order to `internal`, which is
+admin-only, and empties the dashboard for everyone else.
+
+Written on every manager sync **and** in `POST /api/managers/{id}/retail-status`,
+because that endpoint is the reason the value cannot be re-derived and waiting
+for the daily sync would leave Postgres a day behind.
+
+In Reconciliation A the two carry `full_replace=True`, which removes the retired
+category: a full replace writes every row it holds, so a missing row was lost,
+not retired. Proven on the production classification — deleting one interval in
+Postgres is reported CRITICAL with the manager id as the sample, where the
+catalogue rule would have excused it as retired (seeded baselines carry
+`valid_from = 1970-01-01`, so their `set_at` always predates the watermark).
+
 ### Postgres against KeyCRM — the other half of the criterion
 Reconciliation A proves the two stores agree with each other. That is not the
 same as being right: two copies can agree perfectly and both disagree with the
