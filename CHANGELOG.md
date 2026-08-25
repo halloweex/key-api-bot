@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.122
+
+- silver.orders — the first table Postgres computes rather than receives (#143)
+
+
 ## 3.0.121
 
 - One Silver projection, rendered for two engines (#142)
