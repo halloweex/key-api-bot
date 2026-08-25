@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.116
+
+- Replicate the manager classification into Postgres (#137)
+
+
 ## 3.0.115
 
 - Reconcile Postgres against KeyCRM, on the fetch we already paid for (#136)
