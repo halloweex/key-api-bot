@@ -197,6 +197,42 @@ class BackgroundScheduler:
         logger.info("Background scheduler started")
 
         await self._schedule_catchup_runs()
+        await self._replicate_classification_once()
+
+    async def _replicate_classification_once(self) -> None:
+        """Copy the manager classification to Postgres, once, at startup.
+
+        `replicate_managers` is called from two places that are both correct
+        and both too rare: `upsert_managers`, which the sync reaches **once a
+        day**, and the retail-status endpoint, which a human reaches almost
+        never. Between a deploy and the next daily sync — up to 24 hours —
+        Postgres holds no classification at all.
+
+        That was not hypothetical. Revision 0005 shipped, the deploy succeeded,
+        and `bronze.managers` sat at 0 rows because the daily sync had already
+        run that morning. Every one of the four `sales_type` branches that
+        reads these tables would have resolved against nothing.
+
+        Once, not on a schedule: it is thirty-nine managers and thirty-nine
+        intervals, the two writers above keep it current afterwards, and a job
+        that rewrites two tables on a timer is a job that can rewrite them
+        wrongly on a timer. Best effort throughout — `replicate_managers` does
+        not raise, and a scheduler that cannot start because Postgres is down
+        is a worse outcome than a stale copy.
+        """
+        try:
+            from core.mirror_reconciliation import configured
+
+            if not configured():
+                return
+
+            from core.duckdb_store import get_store
+            from core.pg_replication import replicate_managers
+
+            result = await replicate_managers(await get_store())
+            logger.info("Classification replicated at startup: %s", result)
+        except Exception as e:
+            logger.warning(f"Startup classification replication skipped: {e}")
 
     async def _schedule_catchup_runs(self) -> None:
         """Queue a one-off run for any check whose due instant we missed.

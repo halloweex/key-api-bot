@@ -191,3 +191,54 @@ class TestTheSyncAndTheEndpointBothCarryIt:
         assert source.index("set_manager_retail_status(") < source.index(
             "replicate_managers(store)"
         )
+
+
+class TestItHappensAtStartup:
+    """The gap that made this necessary was measured, not imagined.
+
+    Revision 0005 shipped, the deploy succeeded, and `bronze.managers` sat at
+    **0 rows**: the only writer the sync reaches runs once a day and had
+    already run that morning. Between a deploy and the next daily sync,
+    Postgres held no classification at all — and four of the six branches of
+    `silver_sales_type_case()` read it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_scheduler_replicates_on_start(self, tmp_path):
+        from core.scheduler import BackgroundScheduler
+
+        store = await _store(tmp_path)
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
+             patch("core.pg_replication.replicate_managers",
+                   new=AsyncMock(return_value={"ok": True})) as rep:
+            await BackgroundScheduler()._replicate_classification_once()
+        rep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_postgres_configured_does_nothing(self, tmp_path):
+        from core.scheduler import BackgroundScheduler
+
+        with patch("core.mirror_reconciliation.configured", return_value=False), \
+             patch("core.pg_replication.replicate_managers", new=AsyncMock()) as rep:
+            await BackgroundScheduler()._replicate_classification_once()
+        rep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_failure_cannot_stop_the_scheduler(self):
+        """A scheduler that will not start because Postgres is down is a worse
+        outcome than a stale copy."""
+        from core.scheduler import BackgroundScheduler
+
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.duckdb_store.get_store",
+                   side_effect=RuntimeError("duckdb is locked")):
+            await BackgroundScheduler()._replicate_classification_once()
+
+    def test_start_calls_it(self):
+        import inspect
+
+        from core.scheduler import BackgroundScheduler
+
+        source = inspect.getsource(BackgroundScheduler.start)
+        assert "_replicate_classification_once" in source
