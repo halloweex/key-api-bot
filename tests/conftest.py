@@ -1,10 +1,46 @@
-"""Shared fixtures.
+"""Shared fixtures, and the environment the suite is entitled to assume.
 
-Both of the fixtures here are autouse guards rather than conveniences: they
-stop the suite from reaching something real — the Telegram Bot API and the
-production database. Markers and collection settings live in pytest.ini.
+Both fixtures here are autouse guards rather than conveniences: they stop the
+suite from reaching something real — the Telegram Bot API and the production
+database. Markers and collection settings live in pytest.ini.
+
+THE ENVIRONMENT BLOCK BELOW RUNS BEFORE ANY TEST MODULE IS IMPORTED
+
+`core/config.py` calls `load_dotenv()` at import and reads every setting from
+the environment, and `web/routes/auth.py` **raises at import time** when no
+session signing key is present. On a developer's machine `.env` supplies one,
+so the suite passed for as long as anyone had checked. In a clean checkout —
+which is what CI has, because `.env` is gitignored — five integration modules
+died during collection and the whole run exited 2.
+
+That was found by the first CI run ever executed on this repository, on the
+pull request that added CI. It is worth recording because the pre-flight that
+missed it looked convincing: running the suite under `env -i` proved nothing,
+since the values come from a *file*, not from the environment.
+
+Set here rather than in the workflow for two reasons. A `BOT_TOKEN:` line in
+`ci.yml` is a fake secret in a public repository, and it would fix CI while
+leaving `git clone && pytest` broken for the next person. This makes the suite
+self-sufficient wherever it runs.
+
+`os.environ` is assigned, not `setdefault`-ed, and that is deliberate:
+`load_dotenv()` does not override variables already present, so these win over
+`.env` even on a machine that has one. A test must never sign a session with
+the production key or hold the real bot token — the autouse guard below stops
+the requests, and this stops the credentials from being there at all.
 """
-import pytest
+import os
+
+# Credentials of exactly the shape the real ones have, and unmistakably not
+# them. Every one of these is required by something that raises on absence:
+# `web/routes/auth.py` at import, and `core/keycrm.py:119` in the constructor —
+# sixteen tests build a real client with mocked transport and died on the key
+# they never use.
+os.environ["DASHBOARD_SECRET_KEY"] = "test-signing-key-not-a-real-secret"
+os.environ["BOT_TOKEN"] = "123456:test-bot-token-not-a-real-secret"
+os.environ["KEYCRM_API_KEY"] = "test-keycrm-key-not-a-real-secret"
+
+import pytest  # noqa: E402  — must follow the environment block above
 
 
 @pytest.fixture(autouse=True)

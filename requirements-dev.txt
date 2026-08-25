@@ -1,5 +1,9 @@
 # Development & test dependencies — NOT installed into production images.
-# Install locally with:  pip install -r requirements.txt -r requirements-dev.txt
+# **Intent, not fact**: CI installs `requirements-dev.lock`.
+#
+# Install locally with:  pip install -r requirements-dev.lock
+# (or -r requirements.txt -r requirements-dev.txt to resolve fresh, which
+# is how you find out that a floor needs raising)
 -r requirements.txt
 
 pytest>=8.0.0

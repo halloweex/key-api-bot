@@ -1,0 +1,98 @@
+# GENERATED — do not hand-edit. The exact set production runs.
+#
+# `requirements.txt` states intent ("fastapi, recent enough"); this states fact
+# ("fastapi 0.141.1, and the forty-odd packages that came with it"). Both
+# images and CI install from here, so all three environments hold the same
+# bytes.
+#
+# WHY THIS FILE EXISTS
+#
+# Nothing was pinned above a floor and nothing pinned transitives at all —
+# `starlette` is pulled in by `fastapi` and appeared in no requirements file.
+# Every deploy rebuilds the image with `pip install -r requirements.txt`, so
+# what production ran was decided by whatever pip resolved that minute, on a
+# machine nobody was watching. It crossed a **major** boundary that way,
+# starlette 0.50 → 1.6, and the first anyone knew was CI failing on tests that
+# reach into starlette's route tree. That time it was only test introspection.
+#
+# HOW TO REGENERATE
+#
+# Never with `pip freeze` on a laptop: wheels are chosen per platform and per
+# Python, and production is linux/amd64 on CPython 3.14. Do it in the image's
+# own base:
+#
+#   docker run --rm -v "$PWD:/w" -w /w python:3.14-slim sh -c \
+#     'pip install -q -r requirements.txt && pip freeze --exclude-editable' \
+#     | grep -viE "^(pip|setuptools|wheel)==" | sort > requirements.lock
+#
+# Then regenerate requirements-dev.lock the same way (see its header), run the
+# suite, and read the diff before committing it — an unexplained line in that
+# diff is a dependency change nobody asked for.
+#
+# This particular file was not resolved fresh. It is `pip freeze` taken from
+# the running production container on 2026-08-25, so it records a set that is
+# known to work rather than one that merely resolves.
+APScheduler==3.11.3
+Deprecated==1.3.1
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+PyYAML==6.0.3
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anthropic==1.0.0
+anyio==4.14.2
+asyncpg==0.31.0
+camel-converter==5.1.1
+certifi==2026.7.22
+charset-normalizer==3.5.1
+click==8.4.2
+docstring_parser==0.18.0
+duckdb==1.5.5
+et_xmlfile==2.0.0
+fastapi==0.141.1
+h11==0.16.0
+httpcore2==2.12.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx2==2.12.0
+httpx==0.28.1
+idna==3.19
+itsdangerous==2.2.0
+jiter==0.16.0
+joblib==1.5.3
+lightgbm==4.7.0
+limits==5.8.0
+meilisearch==0.43.0
+narwhals==2.25.0
+nest-asyncio==1.6.0
+numpy==2.5.2
+openpyxl==3.1.5
+orjson==3.12.0
+packaging==26.3
+pandas==3.0.5
+pillow==12.3.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+python-telegram-bot==22.8
+pytz==2024.2
+requests==2.34.2
+scikit-learn==1.9.0
+scipy==1.18.1
+six==1.17.0
+slowapi==0.1.10
+sniffio==1.3.1
+sse-starlette==3.4.8
+starlette==1.6.0
+threadpoolctl==3.6.0
+truststore==0.10.4
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzlocal==5.4.4
+urllib3==2.7.0
+uvicorn==0.52.4
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==17.0.1
+wrapt==2.3.0

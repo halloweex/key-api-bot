@@ -17,7 +17,9 @@ would be a poor trade on any job and a very poor one on this one, which spent
 """
 from __future__ import annotations
 
+import ast
 import inspect
+import textwrap
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -38,11 +40,26 @@ def _body(fn):
     """A function's source with its docstring removed.
 
     These tests compare the two extractors' SQL, and prose that *explains* an
-    expression contains the same words as the expression. The mirror schema
-    test learned this the same way."""
-    source = inspect.getsource(fn)
-    doc = fn.__doc__
-    return source.replace(doc, "") if doc else source
+    expression contains the same words as the expression.
+
+    Sliced by line number from the AST, not by `source.replace(fn.__doc__, "")`
+    — **that trick is version-dependent and fails silently.** Python 3.13
+    started dedenting `__doc__`, so from 3.13 on the string no longer matches
+    the indented literal in the source, `replace` finds nothing, and the test
+    compares prose it meant to exclude. It passed on 3.12 here and failed on
+    the 3.14.7 production runs, which is the only reason anyone found out."""
+    source = textwrap.dedent(inspect.getsource(fn))
+    node = ast.parse(source).body[0]
+    first = node.body[0] if node.body else None
+    is_doc = (
+        isinstance(first, ast.Expr)
+        and isinstance(getattr(first, "value", None), ast.Constant)
+        and isinstance(first.value.value, str)
+    )
+    if not is_doc:
+        return source
+    lines = source.splitlines(keepends=True)
+    return "".join(lines[: first.lineno - 1] + lines[first.end_lineno :])
 
 
 DK_SQL = _body(duckdb_orders_in_window)

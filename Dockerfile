@@ -4,8 +4,11 @@ FROM python:3.14-slim
 WORKDIR /app
 
 # Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# The lock, not the intent file: `requirements.txt` has floors and no
+# ceilings, so building from it lets pip decide what production runs.
+# It crossed a major starlette boundary that way. See requirements.lock.
+COPY requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
 
 # Copy version file and application code
 COPY VERSION ./

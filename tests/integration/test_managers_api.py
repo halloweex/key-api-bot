@@ -55,10 +55,23 @@ def _all_dep_calls(dependant) -> set:
 
 
 def _route(path: str, method: str = "GET"):
-    for r in app.routes:
-        if getattr(r, "path", None) == path and method in getattr(r, "methods", set()):
-            return r
-    return None
+    # `app.routes` is no longer flat — see tests/routes_helper.
+    from tests.routes_helper import find_route
+
+    return find_route(app, path, method)
+
+
+def _deps(path: str, method: str = "GET") -> set:
+    """Every dependency callable applying to an endpoint.
+
+    Takes the path rather than a route object: on the fastapi production runs,
+    `require_admin` is attached at `include_router(...)` and lives in the
+    include context, not on the route's own `dependant`. Reading only the
+    dependant would report every admin endpoint as unprotected.
+    """
+    from tests.routes_helper import route_dependencies
+
+    return set(route_dependencies(app, path, method))
 
 
 class _FakeConn:
@@ -148,9 +161,9 @@ class TestAuthorization:
 
     @pytest.mark.parametrize("path,method", [(LIST_PATH, "GET"), (SET_ROUTE, "POST")])
     def test_admin_dependency_is_present(self, path, method):
-        route = _route(path, method)
-        assert route is not None, f"{method} {path} is not registered"
-        assert require_admin in _all_dep_calls(route.dependant)
+        assert _route(path, method) is not None, \
+            f"{method} {path} is not registered"
+        assert require_admin in _deps(path, method)
 
     def test_viewer_cannot_reclassify(self, client, monkeypatch, store):
         viewer_id = 555_000_333

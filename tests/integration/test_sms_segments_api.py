@@ -58,10 +58,23 @@ def _all_dep_calls(dependant) -> set:
 
 
 def _route(path: str, method: str = "GET"):
-    for r in app.routes:
-        if getattr(r, "path", None) == path and method in getattr(r, "methods", set()):
-            return r
-    return None
+    # `app.routes` is no longer flat — see tests/routes_helper.
+    from tests.routes_helper import find_route
+
+    return find_route(app, path, method)
+
+
+def _deps(path: str, method: str = "GET") -> set:
+    """Every dependency callable applying to an endpoint.
+
+    Takes the path rather than a route object: on the fastapi production runs,
+    `require_admin` is attached at `include_router(...)` and lives in the
+    include context, not on the route's own `dependant`. Reading only the
+    dependant would report every admin endpoint as unprotected.
+    """
+    from tests.routes_helper import route_dependencies
+
+    return set(route_dependencies(app, path, method))
 
 
 def _customer(buyer_id: int, tier: str, assignment: str) -> dict:
@@ -191,7 +204,7 @@ class TestSmsSegmentsAuth:
     def test_requires_admin_dependency(self, path):
         route = _route(path)
         assert route is not None, f"{path} is not registered"
-        assert require_admin in _all_dep_calls(route.dependant), \
+        assert require_admin in _deps(path), \
             f"{path} exports phone numbers and must keep require_admin"
 
     @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH])
@@ -516,9 +529,9 @@ class TestTestSend:
     """A rehearsal must reach the gateway and touch nothing else."""
 
     def test_requires_admin_dependency(self):
-        route = _route(TEST_SEND_PATH, "POST")
-        assert route is not None, "test-send is not registered"
-        assert require_admin in _all_dep_calls(route.dependant)
+        assert _route(TEST_SEND_PATH, "POST") is not None, \
+            "test-send is not registered"
+        assert require_admin in _deps(TEST_SEND_PATH, "POST")
 
     def test_requires_session(self, client):
         assert client.post(
@@ -601,9 +614,8 @@ class TestChannelSelection:
         assert body["viber"] is False
 
     def test_channels_endpoint_is_admin_only(self):
-        route = _route(CHANNELS_PATH)
-        assert route is not None
-        assert require_admin in _all_dep_calls(route.dependant)
+        assert _route(CHANNELS_PATH) is not None
+        assert require_admin in _deps(CHANNELS_PATH)
 
     def test_hybrid_send_passes_a_viber_message(self, client, gateway):
         client.post(

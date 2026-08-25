@@ -96,8 +96,10 @@ class TestItRunsTheRuntimesPython:
         assert match, "Dockerfile.web no longer pins a python:X.Y-slim base"
         assert declared == match.group(1)
 
-    def test_it_installs_the_dev_requirements(self):
-        """`requirements-dev.txt` pulls in `requirements.txt` through `-r`, and
-        carries alembic and PyYAML — which two test modules read as data."""
+    def test_it_installs_the_locked_set(self):
+        """Not `requirements-dev.txt`, which would re-resolve: a check running
+        against a different version set from the one being deployed is a check
+        about nothing. See tests/unit/test_dependency_locks.py."""
         install = next(s for s in STEPS if s.get("name") == "Install dependencies")
-        assert "requirements-dev.txt" in install["run"]
+        assert "requirements-dev.lock" in install["run"]
+        assert "requirements-dev.txt" not in install["run"]
