@@ -1,0 +1,70 @@
+# The suite, on every pull request.
+#
+# Until this existed, `.github/workflows/deploy.yml` was the only workflow in
+# the repository and it triggers on push to `main`. A pull request was verified
+# by nothing at all: 1,639 tests ran only on the author's machine, and a
+# forgotten `pytest` reached production with production as the first thing to
+# notice.
+#
+# WHY THERE IS NO `paths-ignore` HERE
+#
+# The deploy has one, and it is right to: a merged README cannot change what
+# runs in a container, and rebuilding two images for a paragraph was three
+# minutes of risk for nothing. The opposite holds for this workflow. A
+# tests-only change is *exactly* the change that must run the tests, and
+# `tests/**` is in the deploy's ignore list — so a paths filter copied from
+# there would skip the suite on the pull requests that are nothing but suite.
+# Running it on a documentation PR costs about a minute and buys the property
+# that a green check means the same thing on every PR.
+#
+# WHAT THIS DOES NOT DO
+#
+# It does not touch Postgres, ClickHouse, KeyCRM or the production DuckDB file.
+# `pytest.ini` deselects the `external` marker by default, which is what makes
+# a bare `pytest` safe to run anywhere, and this deliberately does not override
+# it. The external suite reaches the live API and the production database; it
+# stays a thing a person runs on purpose.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A second push supersedes the first. `main` is exempt: cancelling a run there
+# would leave the branch that deploys with no verdict at all.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  tests:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Matches `Dockerfile.web`'s `python:3.14-slim`. Pinned to the minor
+      # version on purpose: the runtime image is, and a suite passing on a
+      # Python production does not run is a green check that means nothing.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # requirements-dev.txt includes requirements.txt via `-r`.
+          pip install -r requirements-dev.txt
+
+      # No paths, no markers, no flags. `pytest.ini` owns `testpaths`,
+      # `asyncio_mode` and the deselections, so what runs here is exactly what
+      # runs on a laptop — which is the point of a check.
+      - name: Run the suite
+        run: pytest -q
