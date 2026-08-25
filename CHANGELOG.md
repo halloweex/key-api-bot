@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.119
+
+- Replicate the classification at startup, not only once a day (#140)
+- Pin the build-time base images by digest (#141)
+
+
 ## 3.0.118
 
 - Make the suite run in a clean checkout (#139)
