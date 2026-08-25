@@ -106,3 +106,51 @@ class TestNothingBuildsFromTheIntentFile:
         text = (REPO / ".github" / "workflows" / "ci.yml").read_text()
         assert "-r requirements-dev.lock" in text
         assert "pip install -r requirements-dev.txt" not in text
+
+
+class TestTheBaseImagesArePinnedToo:
+    """One layer up from the lock, and the same failure.
+
+    `python:3.14-slim` is rebuilt on every CPython patch and every base-OS
+    update, so building the same commit twice could produce two different
+    runtimes. `requirements.lock` stopped pip deciding what ships; this stops
+    Docker Hub deciding.
+    """
+
+    def _from_lines(self, name: str) -> list[str]:
+        return [
+            line for line in (REPO / name).read_text().splitlines()
+            if line.startswith("FROM ")
+        ]
+
+    def test_every_build_stage_names_a_digest(self):
+        for name in ("Dockerfile", "Dockerfile.web"):
+            lines = self._from_lines(name)
+            assert lines, f"{name} declares no FROM"
+            for line in lines:
+                assert "@sha256:" in line, f"{name}: unpinned base — {line}"
+
+    def test_the_tag_is_kept_beside_the_digest(self):
+        """A bare sha256 tells a reader nothing about what they are running."""
+        for name in ("Dockerfile", "Dockerfile.web"):
+            for line in self._from_lines(name):
+                image = line.split()[1]
+                assert ":" in image.split("@")[0], f"{name}: digest with no tag — {line}"
+
+    def test_both_python_stages_use_the_same_base(self):
+        """The bot and the web runtime must not drift apart by a patch."""
+        digests = {
+            line.split("@")[1].split()[0]
+            for name in ("Dockerfile", "Dockerfile.web")
+            for line in self._from_lines(name)
+            if "python:" in line
+        }
+        assert len(digests) == 1, f"python stages disagree: {digests}"
+
+    def test_the_service_images_are_deliberately_not_pinned(self):
+        """Pinning those by digest makes the next `up -d` recreate the
+        containers, and one of them is now the system of record for the mirror.
+        Left on tags on purpose — this test says so out loud so that nobody
+        'finishes the job' without meaning to."""
+        compose = (REPO / "docker-compose.yml").read_text()
+        assert "postgres:17.2-alpine@sha256" not in compose
