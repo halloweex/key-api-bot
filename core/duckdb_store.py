@@ -218,7 +218,7 @@ SILVER_ORDER_LINES_VIEW_SQL = """CREATE OR REPLACE VIEW silver_order_lines AS
 # copy appears.
 
 
-def silver_sales_type_case() -> str:
+def silver_sales_type_case(dialect: "Dialect" = None) -> str:
     """`sales_type`, the one place it is decided.
 
     The exhibition branch is first on purpose: that fair was staffed by a
@@ -233,31 +233,45 @@ def silver_sales_type_case() -> str:
     first for a manager with no interval, the second for a database whose
     `managers` table has not synced yet.
     """
+    from core.sql_dialect import DUCKDB
+
+    dialect = dialect or DUCKDB
+    classifications = dialect.classifications
+    managers = dialect.managers
     manager_list = ",".join(str(m) for m in RETAIL_MANAGER_IDS)
-    order_date = _date_in_kyiv("o.ordered_at")
+    order_date = dialect.kyiv_date("o.ordered_at")
     return f"""CASE
             WHEN o.source_id = {EXHIBITION_SOURCE_ID} THEN 'exhibition'
             WHEN o.manager_id IS NULL THEN 'retail'
             WHEN o.manager_id = {B2B_MANAGER_ID} THEN 'b2b'
             WHEN EXISTS (
-                     SELECT 1 FROM manager_classifications mc
+                     SELECT 1 FROM {classifications} mc
                      WHERE mc.manager_id = o.manager_id
                        AND mc.is_retail
                        AND {order_date} >= mc.valid_from
                        AND (mc.valid_to IS NULL OR {order_date} < mc.valid_to)
                  ) THEN 'retail'
-            WHEN NOT EXISTS (SELECT 1 FROM manager_classifications mc
+            WHEN NOT EXISTS (SELECT 1 FROM {classifications} mc
                              WHERE mc.manager_id = o.manager_id)
-                 AND o.manager_id IN (SELECT id FROM managers WHERE is_retail = TRUE) THEN 'retail'
-            WHEN NOT EXISTS (SELECT 1 FROM manager_classifications)
-                 AND NOT EXISTS (SELECT 1 FROM managers WHERE is_retail = TRUE)
+                 AND o.manager_id IN (SELECT id FROM {managers} WHERE is_retail = TRUE) THEN 'retail'
+            WHEN NOT EXISTS (SELECT 1 FROM {classifications})
+                 AND NOT EXISTS (SELECT 1 FROM {managers} WHERE is_retail = TRUE)
                  AND o.manager_id IN ({manager_list}) THEN 'retail'
             ELSE 'internal'
         END"""
 
 
-def silver_select_sql() -> str:
-    """Every column of a Silver row, selected `FROM orders o`."""
+def silver_select_sql(dialect: "Dialect" = None) -> str:
+    """Every column of a Silver row, selected `FROM <dialect.orders> o`.
+
+    One text, two engines. The default is DuckDB, so every existing caller is
+    unchanged; `core.sql_dialect.POSTGRES` renders the same rule against
+    `bronze.orders`. See that module for the two — and only two — places the
+    dialects differ.
+    """
+    from core.sql_dialect import DUCKDB
+
+    dialect = dialect or DUCKDB
     # KeyCRM's own grouping decides when we have it; the id list covers rows
     # synced before the column existed. Verified equal for every status the
     # warehouse holds — see core/models.py.
@@ -266,13 +280,13 @@ def silver_select_sql() -> str:
     return f"""
             o.id, o.source_id, o.status_id, o.grand_total,
             o.ordered_at, o.buyer_id, o.manager_id,
-            {_date_in_kyiv('o.ordered_at')} AS order_date,
+            {dialect.kyiv_date('o.ordered_at')} AS order_date,
             CASE
                 WHEN o.status_group_id IS NOT NULL
                     THEN o.status_group_id = {LOST_STATUS_GROUP_ID}
                 ELSE o.status_id IN {return_statuses}
             END AS is_return,
-            {silver_sales_type_case()} AS sales_type,
+            {silver_sales_type_case(dialect)} AS sales_type,
             o.source_id IN ({revenue_sources}) AS is_active_source,
             CASE o.source_id
                 WHEN 1 THEN 'Instagram'
