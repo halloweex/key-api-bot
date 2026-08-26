@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.123
+
+- Compute Silver inside Postgres (#144)
+
+
 ## 3.0.122
 
 - silver.orders — the first table Postgres computes rather than receives (#143)
