@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.124
+
+- Rebuild Postgres Silver after the warehouse refresh (#145)
+
+
 ## 3.0.123
 
 - Compute Silver inside Postgres (#144)
