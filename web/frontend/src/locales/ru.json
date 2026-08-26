@@ -979,5 +979,8 @@
   "sms.summaryHoldout": "контроль {{pct}}%",
   "sms.summaryWindow": "окно {{days}} дн",
   "sms.summaryFilters": "фильтров: {{count}}",
-  "sms.summaryNoFilters": "без фильтров"
+  "sms.summaryNoFilters": "без фильтров",
+  "sms.splitTitle": "Как делим аудиторию",
+  "sms.tiersNotApplicable": "Одна группа — тиров нет. Переключите на тиры по ценности, чтобы выбирать.",
+  "sms.tierExcluded": "не в кампании"
 }

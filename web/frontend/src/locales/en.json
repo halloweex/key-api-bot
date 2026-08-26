@@ -979,5 +979,8 @@
   "sms.summaryHoldout": "control {{pct}}%",
   "sms.summaryWindow": "window {{days}} days",
   "sms.summaryFilters": "filters: {{count}}",
-  "sms.summaryNoFilters": "no filters"
+  "sms.summaryNoFilters": "no filters",
+  "sms.splitTitle": "How the audience is split",
+  "sms.tiersNotApplicable": "One group — there are no tiers to choose. Switch to value tiers to pick them.",
+  "sms.tierExcluded": "not in campaign"
 }

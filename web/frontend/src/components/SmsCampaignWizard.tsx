@@ -138,19 +138,33 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   const deletePreset = useDeleteSmsAudiencePreset()
   const create = useCreateSmsCampaign()
 
-  // The preview and the freeze are built from the same parameters, so the
-  // roster that gets recorded is the one on screen. `campaign` is left out of
-  // the preview: it only labels the holdout split, and putting a half-typed
-  // name in the query key would refetch on every keystroke.
-  const previewParams = useMemo(() => audienceToParams(audience), [audience])
+  // The preview asks for every arm, whatever the tier picker says: the sizes
+  // on the chips are how anyone decides which arms to include, and a preview
+  // that only returned the picked ones would blank the very numbers the
+  // decision needs. Which arms the campaign goes to is applied on top, here
+  // and — authoritatively — when the roster is frozen.
+  //
+  // `campaign` is left out too: it only seeds the holdout split, and a
+  // half-typed name in the query key would refetch on every keystroke.
+  const previewParams = useMemo(
+    () => audienceToParams({ ...audience, tiers: [] }), [audience],
+  )
   const { data, isLoading, error, refetch } = useSmsSegments(previewParams)
+
+  // The arms this campaign actually goes to. No pick means all of them.
+  const includedArms = useMemo(() => {
+    const arms = data?.segments ?? []
+    if (audience.grouping !== 'rfm' || audience.tiers.length === 0) return arms
+    return arms.filter((s) => audience.tiers.includes(s.tier))
+  }, [data, audience.grouping, audience.tiers])
 
   const selectedSaved = (presetData?.presets ?? []).some(
     (p) => p.name === selectedPreset && !p.builtin,
   )
 
   const campaignValid = CAMPAIGN_PATTERN.test(campaign)
-  const target = data?.totals.target ?? 0
+  const target = includedArms.reduce((n, s) => n + s.target, 0)
+  const holdout = includedArms.reduce((n, s) => n + s.holdout, 0)
   const cost = useMemo(() => smsCost(text.trim()), [text])
 
   function handlePickPreset(picked: string | null) {
@@ -351,10 +365,16 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                   )}
                 </div>
 
-                <SmsAudienceForm audience={audience} onChange={editAudience} />
+                <SmsAudienceForm
+                  audience={audience}
+                  onChange={editAudience}
+                  segments={data?.segments}
+                />
 
                 <div className="pt-3 border-t border-slate-100">
-                  <SmsAudiencePreview data={data} isLoading={isLoading} />
+                  <SmsAudiencePreview
+                    data={data} isLoading={isLoading} includedTiers={audience.tiers}
+                  />
                 </div>
 
                 <StepActions
@@ -398,7 +418,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                 <p className="text-[11px] text-slate-500 tabular-nums">
                   {t('sms.holdoutHint', {
                     target: formatNumber(target),
-                    holdout: formatNumber(data?.totals.holdout ?? 0),
+                    holdout: formatNumber(holdout),
                   })}
                 </p>
                 <StepActions
@@ -474,7 +494,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                   <div>
                     <dt className="text-slate-500">{t('sms.control')}</dt>
                     <dd className="text-slate-800 font-medium tabular-nums">
-                      {formatNumber(created?.holdout ?? data?.totals.holdout ?? 0)}
+                      {formatNumber(created?.holdout ?? holdout)}
                     </dd>
                   </div>
                 </dl>

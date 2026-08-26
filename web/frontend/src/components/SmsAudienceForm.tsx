@@ -8,8 +8,10 @@ import { useBrands, useCategories } from '../hooks/useApi'
 import {
   countFilters, DEFAULT_WINDOW_DAYS, MAX_WINDOW_DAYS, MIN_WINDOW_DAYS,
 } from '../utils/smsAudience'
+import { formatNumber } from '../utils/formatters'
 import type {
-  SmsAudienceCriteria, SmsAudienceFilters, SmsGrouping, SmsLtvBasis, SmsTier,
+  SmsAudienceCriteria, SmsAudienceFilters, SmsGrouping, SmsLtvBasis, SmsSegment,
+  SmsTier,
 } from '../types/api'
 
 // ─── SmsAudienceForm ─────────────────────────────────────────────────────────
@@ -170,9 +172,12 @@ function Group({
 export const SmsAudienceForm = memo(function SmsAudienceForm({
   audience,
   onChange,
+  segments,
 }: {
   audience: SmsAudienceCriteria
   onChange: (next: SmsAudienceCriteria) => void
+  /** The arms of the audience as it currently stands, for the tier sizes. */
+  segments?: SmsSegment[]
 }) {
   const { t } = useTranslation()
   // Open. The filters are the reason this page was rebuilt; behind a chevron
@@ -212,75 +217,8 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
 
   return (
     <div className="space-y-3">
-      {/* ── How the audience is split ────────────────────────────────── */}
-      <div className="flex flex-wrap items-end gap-4">
-        <div>
-          <span className="text-xs text-slate-600">{t('sms.groupingLabel')}</span>
-          <div className="mt-1 flex gap-2" role="group" aria-label={t('sms.groupingLabel')}>
-            {(['rfm', 'single'] as SmsGrouping[]).map((g) => (
-              <Chip
-                key={g}
-                active={audience.grouping === g}
-                onClick={() => onChange({ ...audience, grouping: g })}
-              >
-                {t(`sms.grouping.${g}`)}
-              </Chip>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <span className="text-xs text-slate-600">{t('sms.basisLabel')}</span>
-          <div className="mt-1">
-            <Select
-              options={[
-                { value: 'margin', label: t('sms.basisMargin') },
-                { value: 'revenue', label: t('sms.basisRevenue') },
-              ]}
-              value={audience.ltvBasis}
-              onChange={(v) =>
-                onChange({ ...audience, ltvBasis: (v as SmsLtvBasis) || 'margin' })}
-              allowEmpty={false}
-              variant="compact"
-              aria-label={t('sms.basisLabel')}
-            />
-          </div>
-        </div>
-      </div>
-
-      <p className="text-[11px] text-slate-500 leading-snug">
-        {t(`sms.groupingHint.${audience.grouping}`)}
-      </p>
-
-      {/* ── Which tiers, when there are tiers ────────────────────────── */}
-      {audience.grouping === 'rfm' && (
-        <div>
-          <span className="text-xs text-slate-600">{t('sms.exportTiers')}</span>
-          <div className="mt-1 flex flex-wrap gap-2" role="group" aria-label={t('sms.exportTiers')}>
-            {TIERS.map((tier) => (
-              <Chip
-                key={tier}
-                active={audience.tiers.includes(tier)}
-                onClick={() =>
-                  onChange({
-                    ...audience,
-                    tiers: audience.tiers.includes(tier)
-                      ? audience.tiers.filter((x) => x !== tier)
-                      : [...audience.tiers, tier],
-                  })}
-              >
-                {t(`sms.tier.${tier}`)}
-              </Chip>
-            ))}
-          </div>
-          {audience.tiers.length === 0 && (
-            <p className="mt-1 text-[11px] text-slate-500">{t('sms.allTiersHint')}</p>
-          )}
-        </div>
-      )}
-
       {/* ── The filters themselves ───────────────────────────────────── */}
-      <div className="pt-2 border-t border-slate-100">
+      <div>
         <button
           type="button"
           onClick={() => setOpen(!open)}
@@ -482,6 +420,88 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
             )}
           </div>
         )}
+      {/* ── How the audience is split ────────────────────────────────── */}
+      {/* Splitting and tier choice are one decision, so they sit in one box.
+          As loose rows the tier chips were hard to find — and under "one
+          group" they vanish entirely, with nothing saying why. */}
+      <Group title={t('sms.splitTitle')} hint={t(`sms.groupingHint.${audience.grouping}`)}>
+        <div>
+          <span className="text-xs text-slate-600">{t('sms.groupingLabel')}</span>
+          <div className="mt-1 flex gap-2" role="group" aria-label={t('sms.groupingLabel')}>
+            {(['rfm', 'single'] as SmsGrouping[]).map((g) => (
+              <Chip
+                key={g}
+                active={audience.grouping === g}
+                onClick={() => onChange({ ...audience, grouping: g })}
+              >
+                {t(`sms.grouping.${g}`)}
+              </Chip>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <span className="text-xs text-slate-600">{t('sms.basisLabel')}</span>
+          <div className="mt-1">
+            <Select
+              options={[
+                { value: 'margin', label: t('sms.basisMargin') },
+                { value: 'revenue', label: t('sms.basisRevenue') },
+              ]}
+              value={audience.ltvBasis}
+              onChange={(v) =>
+                onChange({ ...audience, ltvBasis: (v as SmsLtvBasis) || 'margin' })}
+              allowEmpty={false}
+              variant="compact"
+              aria-label={t('sms.basisLabel')}
+            />
+          </div>
+        </div>
+
+        <div>
+          <span className="text-xs text-slate-600">{t('sms.exportTiers')}</span>
+          {audience.grouping === 'rfm' ? (
+            <>
+              <div
+                className="mt-1 flex flex-wrap gap-2"
+                role="group"
+                aria-label={t('sms.exportTiers')}
+              >
+                {TIERS.map((tier) => {
+                  const size = segments?.find((s) => s.tier === tier)?.target
+                  return (
+                  <Chip
+                    key={tier}
+                    active={audience.tiers.includes(tier)}
+                    onClick={() =>
+                      onChange({
+                        ...audience,
+                        tiers: audience.tiers.includes(tier)
+                          ? audience.tiers.filter((x) => x !== tier)
+                          : [...audience.tiers, tier],
+                      })}
+                  >
+                    {t(`sms.tier.${tier}`)}
+                    {size != null && ` · ${formatNumber(size)}`}
+                  </Chip>
+                  )
+                })}
+              </div>
+              {audience.tiers.length === 0 && (
+                <p className="mt-1 text-[11px] text-slate-500">{t('sms.allTiersHint')}</p>
+              )}
+            </>
+          ) : (
+            // Saying so beats an empty space: "where is the tier picker" is
+            // otherwise a reasonable thing to wonder.
+            <p className="mt-1 text-[11px] text-slate-500 leading-snug">
+              {t('sms.tiersNotApplicable')}
+            </p>
+          )}
+        </div>
+      </Group>
+
+
       </div>
     </div>
   )

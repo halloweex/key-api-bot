@@ -44,10 +44,17 @@ const data: SmsSegmentsResponse = {
     { stage: 'subscribed', remaining: 8500 },
     { stage: 'uniquePhone', remaining: 8400 },
   ],
+  // Three arms, because the tier picker is what most of these tests exercise.
   segments: [
-    { tier: 'ALL', total: 8400, target: 7560, holdout: 840, totalLtv: 0,
+    { tier: 'VIP', total: 1000, target: 900, holdout: 100, totalLtv: 0,
+      avgLtv: 12000, totalRevenue: 0, totalMargin: 0, marginPct: 55,
+      avgOrders: 7.9, avgRecencyDays: 93 },
+    { tier: 'CORE', total: 3000, target: 2700, holdout: 300, totalLtv: 0,
       avgLtv: 3900, totalRevenue: 0, totalMargin: 0, marginPct: 55,
-      avgOrders: 2.3, avgRecencyDays: 98 },
+      avgOrders: 2.3, avgRecencyDays: 122 },
+    { tier: 'REACTIVATION', total: 4400, target: 3960, holdout: 440, totalLtv: 0,
+      avgLtv: 1300, totalRevenue: 0, totalMargin: 0, marginPct: 55,
+      avgOrders: 1, avgRecencyDays: 69 },
   ],
   totals: { customers: 8400, target: 7560, holdout: 840 },
   truncated: false,
@@ -99,6 +106,13 @@ function lastPreview(): URLSearchParams {
 
 async function step(name: string) {
   await userEvent.click(screen.getByRole('button', { name }))
+}
+
+/** Click a tier chip. Chips carry their size, so match on the name only. */
+async function pickTier(tier: string) {
+  await userEvent.click(
+    screen.getByRole('button', { name: new RegExp(`sms\\.tier\\.${tier}`) }),
+  )
 }
 
 /** Load a saved audience from the list. */
@@ -321,5 +335,63 @@ describe('the saved-audience list', () => {
 
     await pickAudience('Anua buyers')
     expect(screen.getByRole('button', { name: 'sms.presetDeleteSelected' })).toBeTruthy()
+  })
+})
+
+describe('choosing tiers', () => {
+  it('offers the three tiers, and says so when there are none to offer', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    // Default split is the value tiers, so all three are on offer.
+    expect(screen.getByRole('button', { name: /sms\.tier\.VIP/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /sms\.tier\.CORE/ })).toBeTruthy()
+
+    await step('sms.grouping.single')
+
+    // Under one group they are gone — with a line saying why, rather than a
+    // gap that reads as a missing control.
+    expect(screen.queryByRole('button', { name: /sms\.tier\.VIP/ })).toBeNull()
+    expect(screen.getByText('sms.tiersNotApplicable')).toBeTruthy()
+  })
+
+  it('previews every arm, and sends only the picked ones', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    // The preview never carries the tier subset: the chip sizes are how the
+    // choice gets made, and asking only for the picked arms would blank them.
+    await pickTier('VIP')
+    await pickTier('CORE')
+    expect(lastPreview().has('tier')).toBe(false)
+
+    await nameCampaign()
+    await step('sms.wizardNext')
+    await step('sms.wizardNext')
+    await userEvent.type(screen.getByRole('textbox', { name: /sms\.messageText/ }), 'Знижка')
+    await step('sms.wizardNext')
+    await step('sms.createCampaign')
+
+    // The freeze is where the subset binds.
+    expect(new URLSearchParams(createMutate.mock.calls[0][0]).get('tier'))
+      .toBe('VIP,CORE')
+  })
+
+  it('counts only the picked arms towards the campaign', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await pickTier('VIP')
+    await nameCampaign()
+    await step('sms.wizardNext')
+
+    // VIP alone: 900 to send and 100 withheld, not the 7,560 of all three.
+    expect(screen.getByText(/sms\.holdoutHint.*"target":"900".*"holdout":"100"/))
+      .toBeTruthy()
+  })
+
+  it('shows each arm its own size on the chip', () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    // The sizes are the whole basis for deciding which arms to include.
+    expect(screen.getByRole('button', { name: /sms\.tier\.VIP · 900/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /sms\.tier\.CORE · 2,700/ })).toBeTruthy()
   })
 })
