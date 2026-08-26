@@ -17,7 +17,7 @@ from core.turbosms import (
     PartialSendError, TurboSmsClient, TurboSmsConfig, TurboSmsError,
     ViberMessage, count_segments,
 )
-from web.routes.auth import require_admin
+from web.routes.auth import require_admin, require_permission
 from web.services import dashboard_service
 from ._deps import (
     limiter, get_store,
@@ -508,7 +508,7 @@ _PRESET_CRITERIA_MAX = 8_000
 @limiter.limit("30/minute")
 async def list_sms_audience_presets(
     request: Request,
-    user: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "view")),
 ):
     """Saved audiences, built-ins first."""
     store = await get_store()
@@ -520,7 +520,7 @@ async def list_sms_audience_presets(
 async def save_sms_audience_preset(
     request: Request,
     name: str,
-    user: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """Store or replace a saved audience under `name`.
 
@@ -562,7 +562,7 @@ async def save_sms_audience_preset(
 async def delete_sms_audience_preset(
     request: Request,
     name: str,
-    user: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """Remove a saved audience. Built-ins refuse."""
     store = await get_store()
@@ -586,7 +586,7 @@ async def create_sms_campaign(
         None, max_length=40,
         description="Code carried by this campaign, for direct attribution",
     ),
-    user: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """Freeze this audience as a campaign, without downloading anything.
 

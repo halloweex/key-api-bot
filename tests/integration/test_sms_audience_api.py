@@ -218,6 +218,35 @@ class TestPresets:
         assert client.get(PRESETS).status_code == 401
         assert client.put(f"{PRESETS}/x", json={}).status_code == 401
 
+    def test_presets_carry_the_sms_permission(self):
+        """These endpoints travel with the other nine, not behind require_admin.
+
+        A manager who can see the wizard and cannot save an audience or freeze
+        a campaign has a page that does nothing — which is what leaving these
+        four on the admin gate would have produced.
+        """
+        from tests.routes_helper import route_dependencies
+
+        def gates(path, method):
+            found = set()
+            for dep in route_dependencies(app, path, method):
+                code = getattr(dep, "__code__", None)
+                closure = getattr(dep, "__closure__", None)
+                if code is None or not closure:
+                    continue
+                cells = dict(zip(code.co_freevars, closure))
+                if "feature" in cells and "action" in cells:
+                    found.add((cells["feature"].cell_contents,
+                               cells["action"].cell_contents))
+            return found
+
+        assert ("sms", "view") in gates(PRESETS, "GET")
+        assert ("sms", "edit") in gates(
+            "/api/customers/sms-audience-presets/{name}", "PUT")
+        assert ("sms", "edit") in gates(
+            "/api/customers/sms-audience-presets/{name}", "DELETE")
+        assert ("sms", "edit") in gates(CAMPAIGNS, "POST")
+
 
 # ─── Creating a campaign without a CSV ────────────────────────────────────
 
