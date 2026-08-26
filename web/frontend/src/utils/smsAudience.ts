@@ -275,3 +275,41 @@ export function invertedRanges(filters: SmsAudienceFilters): string[] {
       lo != null && hi != null && lo !== '' && hi !== '' && (lo as never) > (hi as never))
     .map(([name]) => name)
 }
+
+/**
+ * The recency window, said in dates instead of days.
+ *
+ * A manager plans a campaign in dates — "bought this year, quiet since May" —
+ * and had to convert that into "90 to 237 days", where 237 is the number of
+ * days since 1 January and is wrong again tomorrow.
+ *
+ * Days stay the stored form on purpose: a saved audience of "quiet 90+ days"
+ * still means that next month, while a saved date freezes into an ever
+ * narrower group. So the dates are a view over the days, not a second filter.
+ *
+ * Recency runs backwards — the *earliest* last order is the *largest* number
+ * of days — so `lastOrderFrom` pairs with `recencyMax` and `lastOrderTo` with
+ * `recencyMin`.
+ */
+function startOfDay(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+}
+
+export function daysAgoToDate(days: number | null | undefined): string {
+  if (typeof days !== 'number' || !Number.isFinite(days)) return ''
+  const d = new Date()
+  d.setDate(d.getDate() - Math.round(days))
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+export function dateToDaysAgo(iso: string): number | undefined {
+  if (!iso) return undefined
+  const [y, m, d] = iso.split('-').map(Number)
+  if (!y || !m || !d) return undefined
+  const days = Math.round(
+    (startOfDay(new Date()) - startOfDay(new Date(y, m - 1, d))) / 86_400_000,
+  )
+  // A date in the future is not a recency; treat it as today.
+  return Math.max(0, days)
+}

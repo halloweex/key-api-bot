@@ -930,8 +930,8 @@
   "sms.groupingHint.single": "Все, кого оставили фильтры, меряются вместе. Самый точный замер, который даёт аудитория такого размера.",
   "sms.allTiersHint": "Ничего не выбрано — все три.",
   "sms.filtersTitle": "Фильтры",
-  "sms.filterRecency": "Дней с последнего заказа",
-  "sms.filterRecencyHint": "90 — молчат три месяца. Второе поле пустым — «и дольше».",
+  "sms.filterRecency": "…или в днях от",
+  "sms.filterRecencyHint": "То же окно, отсчёт от сегодня. 90 — три месяца молчания.",
   "sms.filterOrders": "Заказов",
   "sms.filterLtv": "Ценность за всё время",
   "sms.filterLtvHint": "По выбранной выше базе.",
@@ -1025,5 +1025,10 @@
   "sms.range.orders": "заказов",
   "sms.range.ltv": "ценность за всё время",
   "sms.range.aov": "средний чек",
-  "sms.range.firstOrder": "первый заказ"
+  "sms.range.firstOrder": "первый заказ",
+  "sms.filterLastOrder": "Последний заказ между",
+  "sms.filterLastOrderFrom": "Последний заказ с",
+  "sms.filterLastOrderTo": "Последний заказ по",
+  "sms.filterLastOrderHint": "01.01.2026 — 28.05.2026: покупали в этом году, молчат с мая.",
+  "sms.filterLastOrderAsDays": "То же в днях: от {{from}} до {{to}}. Сохранённая аудитория хранит дни — они останутся верны и через месяц, даты нет."
 }

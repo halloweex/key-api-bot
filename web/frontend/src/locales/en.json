@@ -930,8 +930,8 @@
   "sms.groupingHint.single": "Everyone the filters kept, measured together. The sharpest measurement an audience of this size can give.",
   "sms.allTiersHint": "Nothing picked means all three.",
   "sms.filtersTitle": "Filters",
-  "sms.filterRecency": "Days since last order",
-  "sms.filterRecencyHint": "90 — quiet for three months. Leave the second box empty for “and longer”.",
+  "sms.filterRecency": "…or in days since",
+  "sms.filterRecencyHint": "The same window, counted back from today. 90 is three months of silence.",
   "sms.filterOrders": "Orders",
   "sms.filterLtv": "Lifetime value",
   "sms.filterLtvHint": "On the basis chosen above.",
@@ -1025,5 +1025,10 @@
   "sms.range.orders": "orders",
   "sms.range.ltv": "lifetime value",
   "sms.range.aov": "average order",
-  "sms.range.firstOrder": "first order"
+  "sms.range.firstOrder": "first order",
+  "sms.filterLastOrder": "Last order between",
+  "sms.filterLastOrderFrom": "Last order from",
+  "sms.filterLastOrderTo": "Last order until",
+  "sms.filterLastOrderHint": "01.01.2026 — 28.05.2026: bought this year, quiet since May.",
+  "sms.filterLastOrderAsDays": "Same thing in days: {{from}} to {{to}}. A saved audience keeps the days, which stay true next month; the dates do not."
 }

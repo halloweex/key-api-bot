@@ -10,7 +10,8 @@ import { Button } from './Button'
 import { Select } from './Select'
 import { useBrands, useCategories } from '../hooks/useApi'
 import {
-  countFilters, DEFAULT_WINDOW_DAYS, MAX_WINDOW_DAYS, MIN_WINDOW_DAYS,
+  countFilters, dateToDaysAgo, daysAgoToDate,
+  DEFAULT_WINDOW_DAYS, MAX_WINDOW_DAYS, MIN_WINDOW_DAYS,
 } from '../utils/smsAudience'
 import { alphaFor, mdePercentagePoints, verdictFor, type MdeVerdict } from '../utils/mde'
 import { formatNumber } from '../utils/formatters'
@@ -334,6 +335,35 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
                     }}
                   />
                   <span className="text-xs text-slate-500">{t('sms.unitDays')}</span>
+                </div>
+              </Field>
+
+              <Field
+                icon={<CalendarClock className={icon} />}
+                label={t('sms.filterLastOrder')}
+                example={
+                  filters.recencyMin != null || filters.recencyMax != null
+                    ? t('sms.filterLastOrderAsDays', {
+                        from: filters.recencyMin ?? 0,
+                        to: filters.recencyMax ?? '∞',
+                      })
+                    : t('sms.filterLastOrderHint')
+                }
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date" className={`${INPUT} w-full`}
+                    aria-label={t('sms.filterLastOrderFrom')}
+                    value={daysAgoToDate(filters.recencyMax)}
+                    onChange={(e) => setFilter('recencyMax', dateToDaysAgo(e.target.value))}
+                  />
+                  <span className="text-slate-400 text-sm">—</span>
+                  <input
+                    type="date" className={`${INPUT} w-full`}
+                    aria-label={t('sms.filterLastOrderTo')}
+                    value={daysAgoToDate(filters.recencyMin)}
+                    onChange={(e) => setFilter('recencyMin', dateToDaysAgo(e.target.value))}
+                  />
                 </div>
               </Field>
 

@@ -3,6 +3,8 @@ import {
   audienceFromPreset,
   audienceToParams,
   countFilters,
+  dateToDaysAgo,
+  daysAgoToDate,
   describeAudience,
   emptyAudience,
   hasFilters,
@@ -224,5 +226,34 @@ describe('invertedRanges', () => {
     expect(invertedRanges({ recencyMin: 90 })).toEqual([])
     expect(invertedRanges({ recencyMin: 90, recencyMax: 237 })).toEqual([])
     expect(invertedRanges({})).toEqual([])
+  })
+})
+
+describe('the recency window said in dates', () => {
+  function isoDaysAgo(days: number): string {
+    const d = new Date()
+    d.setDate(d.getDate() - days)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  }
+
+  it('round-trips a date through days and back', () => {
+    // The pairing runs backwards: an earlier last order is a larger number of
+    // days, which is the thing nobody should have to hold in their head.
+    expect(dateToDaysAgo(isoDaysAgo(90))).toBe(90)
+    expect(dateToDaysAgo(isoDaysAgo(237))).toBe(237)
+    expect(daysAgoToDate(90)).toBe(isoDaysAgo(90))
+  })
+
+  it('treats today as zero and refuses to go negative', () => {
+    expect(dateToDaysAgo(isoDaysAgo(0))).toBe(0)
+    expect(dateToDaysAgo(isoDaysAgo(-5))).toBe(0)
+  })
+
+  it('says nothing for an empty or malformed date', () => {
+    expect(dateToDaysAgo('')).toBeUndefined()
+    expect(dateToDaysAgo('not-a-date')).toBeUndefined()
+    expect(daysAgoToDate(null)).toBe('')
+    expect(daysAgoToDate(undefined)).toBe('')
   })
 })

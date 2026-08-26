@@ -930,8 +930,8 @@
   "sms.groupingHint.single": "Усі, кого лишили фільтри, міряються разом. Найточніший замір, який дає аудиторія такого розміру.",
   "sms.allTiersHint": "Нічого не вибрано — усі три.",
   "sms.filtersTitle": "Фільтри",
-  "sms.filterRecency": "Днів від останнього замовлення",
-  "sms.filterRecencyHint": "90 — мовчать три місяці. Друге поле порожнє — «і довше».",
+  "sms.filterRecency": "…або в днях від",
+  "sms.filterRecencyHint": "Те саме вікно, відлік від сьогодні. 90 — три місяці мовчання.",
   "sms.filterOrders": "Замовлень",
   "sms.filterLtv": "Цінність за весь час",
   "sms.filterLtvHint": "За обраною вище базою.",
@@ -1025,5 +1025,10 @@
   "sms.range.orders": "замовлень",
   "sms.range.ltv": "цінність за весь час",
   "sms.range.aov": "середній чек",
-  "sms.range.firstOrder": "перше замовлення"
+  "sms.range.firstOrder": "перше замовлення",
+  "sms.filterLastOrder": "Останнє замовлення між",
+  "sms.filterLastOrderFrom": "Останнє замовлення з",
+  "sms.filterLastOrderTo": "Останнє замовлення по",
+  "sms.filterLastOrderHint": "01.01.2026 — 28.05.2026: купували цього року, мовчать із травня.",
+  "sms.filterLastOrderAsDays": "Те саме в днях: від {{from}} до {{to}}. Збережена аудиторія тримає дні — вони лишаться правдою й наступного місяця, дати ні."
 }
