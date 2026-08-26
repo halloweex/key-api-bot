@@ -156,7 +156,10 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
   onChange: (next: SmsAudienceCriteria) => void
 }) {
   const { t } = useTranslation()
-  const [open, setOpen] = useState(false)
+  // Open. The filters are the reason this page was rebuilt; behind a chevron
+  // they read as an advanced corner, and the first person to use the wizard
+  // reported there were no date filters at all.
+  const [open, setOpen] = useState(true)
   const { data: brands } = useBrands()
   const { data: categories } = useCategories()
 

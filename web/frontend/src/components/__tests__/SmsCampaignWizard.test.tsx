@@ -172,3 +172,15 @@ describe('SmsCampaignWizard', () => {
     expect(createMutate).not.toHaveBeenCalled()
   })
 })
+
+describe('the filters are visible without hunting for them', () => {
+  it('shows the date fields as soon as the wizard opens', () => {
+    // Reported the first time somebody used it: "there are no date filters".
+    // They were behind a collapsed disclosure.
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    expect(screen.getByLabelText('sms.filterFirstOrderFrom')).toBeTruthy()
+    expect(screen.getByLabelText('sms.filterFirstOrderTo')).toBeTruthy()
+    expect(screen.getByLabelText('sms.filterRecency min')).toBeTruthy()
+  })
+})
