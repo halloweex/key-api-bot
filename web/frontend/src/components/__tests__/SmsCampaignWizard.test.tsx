@@ -80,7 +80,34 @@ const savePresetMutate = vi.fn()
 vi.mock('../../hooks/useApi', () => ({
   useSmsSegments: (params: string) => {
     segmentParams.push(params)
-    return { data, isLoading: false, error: null, refetch: vi.fn() }
+    // The server applies the level filter and the split, so the fake does too
+    // — a stub that ignores them would let the page display numbers the API
+    // would never have returned.
+    const q = new URLSearchParams(params)
+    const levels = (q.get('tier') ?? '').split(',').filter(Boolean)
+    const arms = levels.length
+      ? data.segments.filter((s) => levels.includes(s.tier))
+      : data.segments
+    const merged = q.get('grouping') === 'single'
+      ? [{
+          ...arms[0], tier: 'ALL' as const,
+          total: arms.reduce((n, s) => n + s.total, 0),
+          target: arms.reduce((n, s) => n + s.target, 0),
+          holdout: arms.reduce((n, s) => n + s.holdout, 0),
+        }]
+      : arms
+    return {
+      data: {
+        ...data,
+        segments: merged,
+        totals: {
+          customers: merged.reduce((n, s) => n + s.total, 0),
+          target: merged.reduce((n, s) => n + s.target, 0),
+          holdout: merged.reduce((n, s) => n + s.holdout, 0),
+        },
+      },
+      isLoading: false, error: null, refetch: vi.fn(),
+    }
   },
   useSmsAudiencePresets: () => ({
     data: {
@@ -364,29 +391,27 @@ describe('the saved-audience list', () => {
 })
 
 describe('choosing tiers', () => {
-  it('offers the three tiers only once the split calls for them', async () => {
+  it('offers the value levels as a filter, whatever the measurement', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
-    // Default is one arm: no tiers, and a line saying why rather than a gap
-    // that reads as a missing control.
-    expect(screen.queryByRole('button', { name: /sms\.tier\.VIP/ })).toBeNull()
-    expect(screen.getByText('sms.tiersNotApplicable')).toBeTruthy()
+    // Choosing a level is "who gets this", and it stands on its own: the
+    // default measurement is one arm, and the levels are still on offer.
+    expect(lastPreview().get('grouping')).toBe('single')
+    await pickTier('VIP')
+    expect(lastPreview().get('tier')).toBe('VIP')
 
+    // Switching to a per-level measurement does not change who was picked.
     await useValueTiers()
-
-    expect(screen.getByRole('button', { name: /sms\.tier\.VIP/ })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /sms\.tier\.CORE/ })).toBeTruthy()
+    expect(lastPreview().get('tier')).toBe('VIP')
+    expect(lastPreview().get('grouping')).toBe('rfm')
   })
 
-  it('previews every arm, and sends only the picked ones', async () => {
+  it('freezes the levels that were picked', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
-    // The preview never carries the tier subset: the chip sizes are how the
-    // choice gets made, and asking only for the picked arms would blank them.
     await useValueTiers()
     await pickTier('VIP')
     await pickTier('CORE')
-    expect(lastPreview().has('tier')).toBe(false)
 
     await nameCampaign()
     await step('sms.wizardNext')
@@ -476,5 +501,33 @@ describe('the cost estimate', () => {
 
     // 7,560 recipients × 1 part × 1.28 ₴.
     expect(screen.getByText(/sms\.summaryCost\(/)).toBeTruthy()
+  })
+})
+
+describe('what the campaign will be able to prove', () => {
+  it('states the threshold per arm, and calls a hopeless split hopeless', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    // One arm of 7,560 against 840 sees a lift from 1.60 pp — close to the
+    // ~2 pp the only campaign there has been produced, so: tight, not
+    // comfortable. That is what a 10% control buys even on the whole base.
+    expect(screen.getByText('sms.mdeTight')).toBeTruthy()
+
+    await useValueTiers()
+
+    // Split three ways, the smallest arm is 900 against 100 — nothing a real
+    // offer produces would clear that.
+    expect(screen.getByText('sms.mdeHopeless')).toBeTruthy()
+  })
+
+  it('sharpens as the control share grows', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+    await nameCampaign()
+    await step('sms.wizardNext')
+
+    // Precision is bought by withholding more, not by sending more — the one
+    // fact the control step exists to make obvious.
+    await step('40%')
+    expect(lastPreview().get('holdout_pct')).toBe('40')
   })
 })

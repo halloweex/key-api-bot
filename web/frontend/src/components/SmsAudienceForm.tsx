@@ -2,7 +2,7 @@ import { memo, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   Banknote, CalendarClock, CalendarRange, ChevronDown, ChevronUp, Clock,
-  Layers, MapPin, Receipt, ShoppingBag, Sparkles, Store, Tag, Ticket, UserPlus,
+  Layers, MapPin, Receipt, Ruler, ShoppingBag, Sparkles, Store, Tag, Ticket, UserPlus,
   Users, X,
 } from 'lucide-react'
 import { Badge } from './Badge'
@@ -12,6 +12,7 @@ import { useBrands, useCategories } from '../hooks/useApi'
 import {
   countFilters, DEFAULT_WINDOW_DAYS, MAX_WINDOW_DAYS, MIN_WINDOW_DAYS,
 } from '../utils/smsAudience'
+import { alphaFor, mdePercentagePoints, verdictFor, type MdeVerdict } from '../utils/mde'
 import { formatNumber } from '../utils/formatters'
 import type {
   SmsAudienceCriteria, SmsAudienceFilters, SmsGrouping, SmsLtvBasis, SmsSegment,
@@ -251,6 +252,27 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
     onChange({ ...audience, tierRules: next })
   }
 
+  // What this split can prove. Precision comes from the smaller arm, so a
+  // three-way split of a small audience measures nothing — and the only place
+  // to say that is where the split is chosen.
+  const sensitivity = useMemo(() => {
+    const arms = (segments ?? []).filter(
+      (s) => audience.grouping !== 'rfm' || audience.tiers.length === 0
+        || audience.tiers.includes(s.tier),
+    )
+    const alpha = alphaFor(arms.length)
+    return arms
+      .map((arm) => {
+        const mde = mdePercentagePoints(arm.target, arm.holdout, { alpha })
+        return mde == null ? null : { tier: arm.tier, mde, verdict: verdictFor(mde)! }
+      })
+      .filter((x): x is { tier: SmsTier; mde: number; verdict: MdeVerdict } => x !== null)
+  }, [segments, audience.grouping, audience.tiers])
+
+  const worst: MdeVerdict = sensitivity.some((a) => a.verdict === 'hopeless')
+    ? 'hopeless'
+    : sensitivity.some((a) => a.verdict === 'tight') ? 'tight' : 'good'
+
   const brandOptions = useMemo(
     () => (brands ?? []).map((b) => ({ value: b.name, label: b.name })),
     [brands],
@@ -416,6 +438,109 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
                   step={100}
                 />
               </Field>
+
+              <Field
+                icon={<Sparkles className={icon} />}
+                label={t('sms.levelLabel')}
+                example={
+                  audience.tiers.length === 0 ? t('sms.levelAllHint') : undefined
+                }
+              >
+                <div className="flex flex-wrap gap-2" role="group" aria-label={t('sms.levelLabel')}>
+                  {TIERS.map((tier) => {
+                    const size = segments?.find((s) => s.tier === tier)?.target
+                    return (
+                      <Chip
+                        key={tier}
+                        active={audience.tiers.includes(tier)}
+                        onClick={() =>
+                          onChange({
+                            ...audience,
+                            tiers: audience.tiers.includes(tier)
+                              ? audience.tiers.filter((x) => x !== tier)
+                              : [...audience.tiers, tier],
+                          })}
+                      >
+                        {t(`sms.tier.${tier}`)}
+                        {size != null && ` · ${formatNumber(size)}`}
+                      </Chip>
+                    )
+                  })}
+                </div>
+              </Field>
+
+              <Field
+                icon={<Banknote className={icon} />}
+                label={t('sms.basisLabel')}
+                example={t('sms.basisHint')}
+              >
+                <Select
+                  options={[
+                    { value: 'margin', label: t('sms.basisMargin') },
+                    { value: 'revenue', label: t('sms.basisRevenue') },
+                  ]}
+                  value={audience.ltvBasis}
+                  onChange={(v) =>
+                    onChange({ ...audience, ltvBasis: (v as SmsLtvBasis) || 'margin' })}
+                  allowEmpty={false}
+                  aria-label={t('sms.basisLabel')}
+                />
+              </Field>
+
+              <Field
+                icon={<Banknote className={icon} />}
+                label={t('sms.tierRulesLabel')}
+                example={t('sms.tierRulesHint')}
+              >
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-600 w-24">{t('sms.tier.VIP')}</span>
+                    <span className="text-xs text-slate-400">≥</span>
+                    <input
+                      type="number" step={100} className={`${INPUT} w-28 tabular-nums`}
+                      aria-label={`${t('sms.tier.VIP')} ${t('sms.filterLtv')}`}
+                      placeholder={String(defaults.vip)}
+                      value={rules.vipLtv ?? ''}
+                      onChange={(e) => setRule('vipLtv', e.target.value)}
+                    />
+                    <span className="text-xs text-slate-500">₴</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-600 w-24">{t('sms.tier.CORE')}</span>
+                    <span className="text-xs text-slate-400">≥</span>
+                    <input
+                      type="number" className={`${INPUT} w-16 tabular-nums`}
+                      aria-label={`${t('sms.tier.CORE')} ${t('sms.filterOrders')}`}
+                      placeholder="2"
+                      value={rules.coreMinOrders ?? ''}
+                      onChange={(e) => setRule('coreMinOrders', e.target.value)}
+                    />
+                    <span className="text-xs text-slate-500">{t('sms.orRule')}</span>
+                    <input
+                      type="number" step={100} className={`${INPUT} w-24 tabular-nums`}
+                      aria-label={`${t('sms.tier.CORE')} ${t('sms.filterLtv')}`}
+                      placeholder={String(defaults.core)}
+                      value={rules.coreLtv ?? ''}
+                      onChange={(e) => setRule('coreLtv', e.target.value)}
+                    />
+                    <span className="text-xs text-slate-500">₴</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-600 w-24">
+                      {t('sms.tier.REACTIVATION')}
+                    </span>
+                    <span className="text-xs text-slate-400">≤</span>
+                    <input
+                      type="number" className={`${INPUT} w-20 tabular-nums`}
+                      aria-label={`${t('sms.tier.REACTIVATION')} ${t('sms.filterRecency')}`}
+                      placeholder="120"
+                      value={rules.reactivationMaxRecency ?? ''}
+                      onChange={(e) => setRule('reactivationMaxRecency', e.target.value)}
+                    />
+                    <span className="text-xs text-slate-500">{t('sms.unitDays')}</span>
+                  </div>
+                </div>
+              </Field>
             </Group>
 
             {/* ── What they bought ─────────────────────────────────── */}
@@ -557,18 +682,23 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
         )}
       </div>
 
-      {/* ── How the audience is split ────────────────────────────────── */}
-      {/* Splitting and tier choice are one decision, so they sit in one box,
-          under the filters that decide who is being split at all. */}
+      {/* ── How the result is measured ──────────────────────────────── */}
+      {/* Only the measurement question is left here. Choosing a value level is
+          a filter — "send to VIP only" — and it moved up with the other money
+          questions; splitting the result by level is a different decision with
+          a price, stated below in the only currency that matters for it. */}
       <Group
         icon={<Sparkles className={icon} />}
         title={t('sms.splitTitle')}
         hint={t('sms.splitHint')}
       >
-        <Field icon={<Layers className={icon} />} label={t('sms.groupingLabel')}
-               example={t(`sms.groupingHint.${audience.grouping}`)}>
+        <Field
+          icon={<Layers className={icon} />}
+          label={t('sms.groupingLabel')}
+          example={t(`sms.groupingHint.${audience.grouping}`)}
+        >
           <div className="flex gap-2" role="group" aria-label={t('sms.groupingLabel')}>
-            {(['rfm', 'single'] as SmsGrouping[]).map((g) => (
+            {(['single', 'rfm'] as SmsGrouping[]).map((g) => (
               <Chip
                 key={g}
                 active={audience.grouping === g}
@@ -580,111 +710,38 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
           </div>
         </Field>
 
-        <Field icon={<Banknote className={icon} />} label={t('sms.basisLabel')}
-               example={t('sms.basisHint')}>
-          <Select
-            options={[
-              { value: 'margin', label: t('sms.basisMargin') },
-              { value: 'revenue', label: t('sms.basisRevenue') },
-            ]}
-            value={audience.ltvBasis}
-            onChange={(v) =>
-              onChange({ ...audience, ltvBasis: (v as SmsLtvBasis) || 'margin' })}
-            allowEmpty={false}
-            aria-label={t('sms.basisLabel')}
-          />
-        </Field>
-
-        {audience.grouping === 'rfm' && (
-          <Field
-            icon={<Banknote className={icon} />}
-            label={t('sms.tierRulesLabel')}
-            example={t('sms.tierRulesHint')}
-          >
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-600 w-24">{t('sms.tier.VIP')}</span>
-                <span className="text-xs text-slate-400">≥</span>
-                <input
-                  type="number" step={100} className={`${INPUT} w-28 tabular-nums`}
-                  aria-label={`${t('sms.tier.VIP')} ${t('sms.filterLtv')}`}
-                  placeholder={String(defaults.vip)}
-                  value={rules.vipLtv ?? ''}
-                  onChange={(e) => setRule('vipLtv', e.target.value)}
-                />
-                <span className="text-xs text-slate-500">₴</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-600 w-24">{t('sms.tier.CORE')}</span>
-                <span className="text-xs text-slate-400">≥</span>
-                <input
-                  type="number" className={`${INPUT} w-16 tabular-nums`}
-                  aria-label={`${t('sms.tier.CORE')} ${t('sms.filterOrders')}`}
-                  placeholder="2"
-                  value={rules.coreMinOrders ?? ''}
-                  onChange={(e) => setRule('coreMinOrders', e.target.value)}
-                />
-                <span className="text-xs text-slate-500">{t('sms.orRule')}</span>
-                <input
-                  type="number" step={100} className={`${INPUT} w-24 tabular-nums`}
-                  aria-label={`${t('sms.tier.CORE')} ${t('sms.filterLtv')}`}
-                  placeholder={String(defaults.core)}
-                  value={rules.coreLtv ?? ''}
-                  onChange={(e) => setRule('coreLtv', e.target.value)}
-                />
-                <span className="text-xs text-slate-500">₴</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-600 w-24">
-                  {t('sms.tier.REACTIVATION')}
-                </span>
-                <span className="text-xs text-slate-400">≤</span>
-                <input
-                  type="number" className={`${INPUT} w-20 tabular-nums`}
-                  aria-label={`${t('sms.tier.REACTIVATION')} ${t('sms.filterRecency')}`}
-                  placeholder="120"
-                  value={rules.reactivationMaxRecency ?? ''}
-                  onChange={(e) => setRule('reactivationMaxRecency', e.target.value)}
-                />
-                <span className="text-xs text-slate-500">{t('sms.unitDays')}</span>
-              </div>
+        {sensitivity.length > 0 && (
+          <div className="sm:col-span-2">
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <span className="text-slate-400"><Ruler className={icon} /></span>
+              <span className="text-sm font-medium text-slate-700">
+                {t('sms.mdeLabel')}
+              </span>
             </div>
-          </Field>
-        )}
-
-        <Field
-          icon={<Users className={icon} />}
-          label={t('sms.exportTiers')}
-          example={
-            audience.grouping !== 'rfm'
-              ? t('sms.tiersNotApplicable')
-              : audience.tiers.length === 0 ? t('sms.allTiersHint') : undefined
-          }
-        >
-          {audience.grouping === 'rfm' && (
-            <div className="flex flex-wrap gap-2" role="group" aria-label={t('sms.exportTiers')}>
-              {TIERS.map((tier) => {
-                const size = segments?.find((s) => s.tier === tier)?.target
-                return (
-                  <Chip
-                    key={tier}
-                    active={audience.tiers.includes(tier)}
-                    onClick={() =>
-                      onChange({
-                        ...audience,
-                        tiers: audience.tiers.includes(tier)
-                          ? audience.tiers.filter((x) => x !== tier)
-                          : [...audience.tiers, tier],
-                      })}
+            <ul className="space-y-1">
+              {sensitivity.map((arm) => (
+                <li key={arm.tier} className="flex items-baseline gap-2 text-sm">
+                  <span className="text-slate-600 w-28">
+                    {t(`sms.tier.${arm.tier}`)}
+                  </span>
+                  <span
+                    className={`tabular-nums font-medium ${
+                      arm.verdict === 'good'
+                        ? 'text-green-700'
+                        : arm.verdict === 'tight' ? 'text-amber-700' : 'text-red-700'
+                    }`}
                   >
-                    {t(`sms.tier.${tier}`)}
-                    {size != null && ` · ${formatNumber(size)}`}
-                  </Chip>
-                )
-              })}
-            </div>
-          )}
-        </Field>
+                    {t('sms.mdeValue', { pp: arm.mde.toFixed(2) })}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1.5 text-xs text-slate-500 leading-snug">
+              {t(worst === 'hopeless' ? 'sms.mdeHopeless'
+                 : worst === 'tight' ? 'sms.mdeTight' : 'sms.mdeGood')}
+            </p>
+          </div>
+        )}
       </Group>
     </div>
   )

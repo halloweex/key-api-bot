@@ -102,11 +102,11 @@ export function audienceToParams(
     max_recency_days: String(audience.maxRecencyDays),
   })
 
-  // Tier subsets and cut-offs only mean something when there are tiers.
-  // Sending them with grouping=single would read as rules that silently do
-  // nothing.
-  if (audience.grouping === 'rfm') {
-    if (audience.tiers.length > 0) p.set('tier', audience.tiers.join(','))
+  // The value level is a filter — "send to VIP only" — and it applies whether
+  // or not the result is measured in arms. Its cut-offs travel with it, since
+  // they are what defines the levels being filtered on.
+  if (audience.tiers.length > 0) p.set('tier', audience.tiers.join(','))
+  {
     const rules: Array<[keyof SmsTierRules, string]> = [
       ['vipLtv', 'vip_ltv'],
       ['coreLtv', 'core_ltv'],

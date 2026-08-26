@@ -354,3 +354,65 @@ async def test_deleting_reports_whether_anything_went(tmp_path):
         assert await store.delete_sms_audience_preset("temp") is False
     finally:
         await store.close()
+
+
+# ─── The value level filters, whether or not it splits ────────────────────
+
+@pytest.mark.asyncio
+async def test_level_filters_under_one_arm(tmp_path):
+    """"Send to VIP only" is a filter, not a way of splitting the result.
+
+    Tying the two together is what made three tier cards read as three
+    audiences: the level says who is messaged, the grouping says what the
+    result is measured on, and they are separate decisions.
+    """
+    store = await _store(tmp_path)
+    try:
+        async with store.connection() as conn:
+            _catalogue(conn)
+            # One valuable repeat buyer, one modest single-order buyer.
+            _buyer(conn, 1, "380961111111")
+            for oid in (11, 12):
+                _order(conn, oid=oid, buyer_id=1, days_ago=20, total="9000.00")
+            _buyer(conn, 2, "380962222222")
+            _order(conn, oid=21, buyer_id=2, days_ago=20, total="500.00")
+
+        both = await store.get_sms_segments(
+            grouping="single", ltv_basis="revenue", include_customers=True,
+        )
+        assert {c["buyerId"] for c in both["customers"]} == {1, 2}
+        assert {s["tier"] for s in both["segments"]} == {SINGLE_GROUP_NAME}
+
+        # Same single arm, but only the VIPs are in it.
+        vip_only = await store.get_sms_segments(
+            grouping="single", ltv_basis="revenue", tier=["VIP"],
+            include_customers=True,
+        )
+        assert {c["buyerId"] for c in vip_only["customers"]} == {1}
+        assert {s["tier"] for s in vip_only["segments"]} == {SINGLE_GROUP_NAME}
+
+        # And under three arms the level is both filter and arm.
+        split = await store.get_sms_segments(
+            grouping="rfm", ltv_basis="revenue", tier=["VIP"],
+            include_customers=True,
+        )
+        assert {s["tier"] for s in split["segments"]} == {"VIP"}
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_one_arm_still_keeps_buyers_of_no_level(tmp_path):
+    """Without a level filter, "one arm" must not drop the levelless."""
+    store = await _store(tmp_path)
+    try:
+        await _seed(store)
+
+        single = await store.get_sms_segments(grouping="single", include_customers=True)
+        rfm = await store.get_sms_segments(grouping="rfm", include_customers=True)
+
+        # Buyer 3 last ordered 200 days ago with one order: no level holds it.
+        assert 3 in {c["buyerId"] for c in single["customers"]}
+        assert 3 not in {c["buyerId"] for c in rfm["customers"]}
+    finally:
+        await store.close()

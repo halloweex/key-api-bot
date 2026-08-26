@@ -2137,9 +2137,9 @@ class CustomersMixin:
             ltv_basis: revenue or margin — which LTV drives tier assignment.
             holdout_pct: Percent of each tier withheld as control (0 disables).
             campaign: Campaign label; also seeds the holdout split.
-            tier: Restrict to these tiers (VIP / CORE / REACTIVATION). A
-                single name or a sequence; None keeps all three. Meaningless
-                under grouping="single", where there is one arm.
+            tier: Restrict the audience to these value levels (VIP / CORE /
+                REACTIVATION). A filter on who is messaged, independent of how
+                the result is measured — it applies under either grouping.
             filters: Extra audience predicates (recency, order count, LTV,
                 average order, first purchase, city, brand, category, source,
                 promocode). None or an empty set selects what the tier rules
@@ -2192,17 +2192,26 @@ class CustomersMixin:
             # Which lifetime value drives tiering. Both are always computed.
             ltv_column = "revenue_ltv" if ltv_basis == "revenue" else "margin_ltv"
 
-            # One arm or three. Under "single" nobody can fail the tier rule,
-            # which is the whole point: the audience is the filters, and the
-            # value tiers are not a second, invisible filter on top of them.
-            if grouping == "single":
-                tier_case = f"'{SINGLE_GROUP_NAME}'"
-            else:
-                tier_case = f"""CASE
+            # The value level is always computed, because it does two separate
+            # jobs and only one of them is splitting. As a *filter* — "send to
+            # VIP only" — it applies whether or not the campaign is measured in
+            # arms; tying it to the split is what made three tier cards read as
+            # three audiences.
+            tier_case = f"""CASE
                         WHEN c.{ltv_column} >= ? THEN 'VIP'
                         WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
                         WHEN c.recency <= ? THEN 'REACTIVATION'
                     END"""
+
+            # The arm is what the result is measured on. Under "single" there
+            # is one, and nobody is dropped for belonging to no level; under
+            # "rfm" the arm is the level, and whoever has none falls out.
+            if grouping == "single":
+                arm_expr = f"'{SINGLE_GROUP_NAME}'"
+                ok_tier_expr = "TRUE"
+            else:
+                arm_expr = "tier_level"
+                ok_tier_expr = "tier_level IS NOT NULL"
 
             filter_sql, filter_params = filters.predicate(ltv_column, sales_type)
 
@@ -2301,7 +2310,7 @@ class CustomersMixin:
                     b.full_name,
                     b.city,
                     regexp_replace(COALESCE(b.phone, ''), '[^0-9]', '', 'g') AS phone,
-                    {tier_case} AS tier
+                    {tier_case} AS tier_level
                 FROM cust c
                 JOIN buyers b ON b.id = c.buyer_id
                 LEFT JOIN last_order_items lo ON lo.buyer_id = c.buyer_id
@@ -2313,7 +2322,8 @@ class CustomersMixin:
                 -- customers each rule removed.
                 SELECT
                     *,
-                    tier IS NOT NULL AS ok_tier,
+                    {arm_expr} AS tier,
+                    {ok_tier_expr} AS ok_tier,
                     {filter_sql} AS ok_filters,
                     length(phone) = 12 AND phone LIKE '380%' AS ok_phone,
                     -- Opted out stays out. Matched on buyer AND on phone, because
@@ -2339,7 +2349,7 @@ class CustomersMixin:
                 -- Tier filter applies after de-duplication so asking for a
                 -- subset cannot change which buyer wins a shared phone number.
                 SELECT * FROM eligible
-                {f"WHERE tier IN ({', '.join('?' * len(tiers))})" if tiers else ""}
+                {f"WHERE tier_level IN ({', '.join('?' * len(tiers))})" if tiers else ""}
             ),
             funnel AS (
                 -- The selection, stage by stage. Counted in the order the rules
@@ -2383,13 +2393,12 @@ class CustomersMixin:
 
             # Bound in textual order of the `?` placeholders above.
             # Bound in textual order of the `?` placeholders above: the line
-            # items filter, the tier CASE (absent under "single"), the recency
-            # window, the audience predicate, the tier subset, then the split.
+            # items filter, the level CASE, the recency window, the audience
+            # predicate, the level subset, then the holdout split.
             params: list = []
             if sales_type != "all":
                 params.append(sales_type)
-            if grouping != "single":
-                params += [vip_ltv, core_min_orders, core_ltv, reactivation_max_recency]
+            params += [vip_ltv, core_min_orders, core_ltv, reactivation_max_recency]
             params.append(max_recency_days)
             params += filter_params
             if tiers:

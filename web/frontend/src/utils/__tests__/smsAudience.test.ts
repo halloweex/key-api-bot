@@ -73,33 +73,33 @@ describe('audienceToParams', () => {
     ).toBe('CORE,REACTIVATION')
   })
 
-  it('carries the tier cut-offs, but only where tiers exist', () => {
+  it('carries the level cut-offs under either way of measuring', () => {
+    // The levels do two jobs: they filter ("send to VIP only") and they can
+    // split the measurement. The cut-offs define them either way.
     const rules = { vipLtv: 8000, coreLtv: 3000, coreMinOrders: 3,
                     reactivationMaxRecency: 90 }
 
-    const withTiers = new URLSearchParams(audienceToParams({
-      ...emptyAudience(), grouping: 'rfm', tierRules: rules,
-    }))
-    expect(withTiers.get('vip_ltv')).toBe('8000')
-    expect(withTiers.get('core_ltv')).toBe('3000')
-    expect(withTiers.get('core_min_orders')).toBe('3')
-    expect(withTiers.get('reactivation_max_recency')).toBe('90')
-
-    // Under one arm they would be rules that silently do nothing.
-    const single = new URLSearchParams(audienceToParams({
-      ...emptyAudience(), grouping: 'single', tierRules: rules,
-    }))
-    expect(single.has('vip_ltv')).toBe(false)
+    for (const grouping of ['rfm', 'single'] as const) {
+      const p = new URLSearchParams(audienceToParams({
+        ...emptyAudience(), grouping, tierRules: rules,
+      }))
+      expect(p.get('vip_ltv')).toBe('8000')
+      expect(p.get('core_ltv')).toBe('3000')
+      expect(p.get('core_min_orders')).toBe('3')
+      expect(p.get('reactivation_max_recency')).toBe('90')
+    }
   })
 
-  it('drops the tier subset under a single-group audience', () => {
-    // One arm and a tier filter together would read as a narrowing that
-    // silently does nothing.
+  it('keeps the level filter under a single-arm measurement', () => {
+    // "Send to VIP only, measured as one group" is a legitimate campaign, and
+    // the commonest one: splitting costs sensitivity that these audiences do
+    // not have to spare.
     const p = new URLSearchParams(audienceToParams({
       ...emptyAudience(), grouping: 'single', tiers: ['VIP'],
     }))
 
-    expect(p.has('tier')).toBe(false)
+    expect(p.get('tier')).toBe('VIP')
+    expect(p.get('grouping')).toBe('single')
   })
 
   it('appends the campaign name and promocode when given', () => {

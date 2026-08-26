@@ -123,12 +123,9 @@ function TierCard({
 export const SmsAudiencePreview = memo(function SmsAudiencePreview({
   data,
   isLoading,
-  includedTiers,
 }: {
   data?: SmsSegmentsResponse
   isLoading?: boolean
-  /** Which arms the campaign goes to. Empty or absent means all of them. */
-  includedTiers?: SmsTier[]
 }) {
   const { t } = useTranslation()
 
@@ -152,17 +149,7 @@ export const SmsAudiencePreview = memo(function SmsAudiencePreview({
 
   if (!data) return null
 
-  // Arms are always previewed whole — seeing what a tier is worth is how
-  // anyone decides whether to include it. The totals underneath count only the
-  // arms the campaign actually goes to.
-  const isIncluded = (tier: SmsTier) =>
-    !includedTiers || includedTiers.length === 0 || includedTiers.includes(tier)
-  const included = segments.filter((s) => isIncluded(s.tier))
-  const totals = {
-    customers: included.reduce((n, s) => n + s.total, 0),
-    target: included.reduce((n, s) => n + s.target, 0),
-    holdout: included.reduce((n, s) => n + s.holdout, 0),
-  }
+  const totals = data.totals
 
   // An audience nobody can be sent to is the one case where the numbers say
   // nothing and the funnel says everything, so lead with the funnel.
@@ -188,10 +175,7 @@ export const SmsAudiencePreview = memo(function SmsAudiencePreview({
           className={`grid gap-3 ${segments.length > 1 ? 'sm:grid-cols-3' : 'sm:grid-cols-1'}`}
         >
           {segments.map((s) => (
-            <TierCard
-              key={s.tier} segment={s} criteria={data.criteria}
-              included={isIncluded(s.tier)}
-            />
+            <TierCard key={s.tier} segment={s} criteria={data.criteria} />
           ))}
         </div>
       )}

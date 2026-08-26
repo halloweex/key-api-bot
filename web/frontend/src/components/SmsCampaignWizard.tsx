@@ -150,33 +150,23 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   const deletePreset = useDeleteSmsAudiencePreset()
   const create = useCreateSmsCampaign()
 
-  // The preview asks for every arm, whatever the tier picker says: the sizes
-  // on the chips are how anyone decides which arms to include, and a preview
-  // that only returned the picked ones would blank the very numbers the
-  // decision needs. Which arms the campaign goes to is applied on top, here
-  // and — authoritatively — when the roster is frozen.
+  // One query, and it carries everything the campaign carries — including the
+  // value level, which is a filter and so decides who is in the audience at
+  // all. The preview and the freeze are built from the same parameters, so the
+  // roster recorded is the one that was on screen.
   //
-  // `campaign` is left out too: it only seeds the holdout split, and a
-  // half-typed name in the query key would refetch on every keystroke.
-  const previewParams = useMemo(
-    () => audienceToParams({ ...audience, tiers: [] }), [audience],
-  )
+  // `campaign` is left out: it only seeds the holdout split, and a half-typed
+  // name in the query key would refetch on every keystroke.
+  const previewParams = useMemo(() => audienceToParams(audience), [audience])
   const { data, isLoading, error, refetch } = useSmsSegments(previewParams)
-
-  // The arms this campaign actually goes to. No pick means all of them.
-  const includedArms = useMemo(() => {
-    const arms = data?.segments ?? []
-    if (audience.grouping !== 'rfm' || audience.tiers.length === 0) return arms
-    return arms.filter((s) => audience.tiers.includes(s.tier))
-  }, [data, audience.grouping, audience.tiers])
 
   const selectedSaved = (presetData?.presets ?? []).some(
     (p) => p.name === selectedPreset && !p.builtin,
   )
 
   const campaignValid = CAMPAIGN_PATTERN.test(campaign)
-  const target = includedArms.reduce((n, s) => n + s.target, 0)
-  const holdout = includedArms.reduce((n, s) => n + s.holdout, 0)
+  const target = data?.totals.target ?? 0
+  const holdout = data?.totals.holdout ?? 0
   const cost = useMemo(() => smsCost(text.trim()), [text])
 
   // What the gateway will bill: parts × recipients × the tariff it quotes.
@@ -431,9 +421,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                 />
 
                 <div className="pt-3 border-t border-slate-100">
-                  <SmsAudiencePreview
-                    data={data} isLoading={isLoading} includedTiers={audience.tiers}
-                  />
+                  <SmsAudiencePreview data={data} isLoading={isLoading} />
                 </div>
 
                 <StepActions
