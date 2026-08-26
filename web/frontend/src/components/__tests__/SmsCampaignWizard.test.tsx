@@ -208,3 +208,22 @@ describe('the base window', () => {
     expect(screen.getByText(/sms\.windowConflict/)).toBeTruthy()
   })
 })
+
+describe('the rehearsal', () => {
+  it('opens with the text that is about to be sent', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await step('sms.wizardNext')
+    await step('sms.wizardNext')
+    await userEvent.type(
+      screen.getByRole('textbox', { name: /sms\.messageText/ }), 'Знижка 30%',
+    )
+    await step('sms.testSend')
+
+    // The dialog's own textarea, prefilled — testing an empty box, or a
+    // different message, is not a rehearsal of this campaign.
+    const boxes = screen.getAllByRole('textbox')
+      .filter((el) => (el as HTMLTextAreaElement).value === 'Знижка 30%')
+    expect(boxes.length).toBeGreaterThan(1)
+  })
+})

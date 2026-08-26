@@ -429,7 +429,11 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
         )}
       </CardContent>
 
-      {testing && <SmsTestSendDialog onClose={() => setTesting(false)} />}
+      {/* The rehearsal starts from the text just written, not from an empty
+          box: a test of a different message is not a test. */}
+      {testing && (
+        <SmsTestSendDialog initialText={text} onClose={() => setTesting(false)} />
+      )}
       {sending && created && (
         <SmsSendDialog campaign={created} onClose={() => setSending(false)} />
       )}
