@@ -301,22 +301,30 @@ def silver_select_sql(dialect: "Dialect" = None) -> str:
     """
 
 
-def silver_pass2_sql(buyer_filter: str = "") -> str:
+def silver_pass2_sql(buyer_filter: str = "", dialect: "Dialect" = None) -> str:
     """Recompute `is_new_customer` from each buyer's MIN(order_date).
 
     Empty `buyer_filter` runs on every Silver row (full mode); otherwise it is
     scoped to the affected buyers, keeping the write set bounded.
     """
+    from core.sql_dialect import DUCKDB
+
+    dialect = dialect or DUCKDB
+    # Aliased on purpose. PostgreSQL cannot qualify the UPDATE target by its
+    # schema in SET/WHERE — `silver.orders.buyer_id` is read as a column of a
+    # column — so both dialects address the target through one short alias and
+    # the text stays identical apart from the table name.
+    target = dialect.silver_orders
     inner_filter = "buyer_id IS NOT NULL" if not buyer_filter else f"buyer_id IN ({buyer_filter})"
-    outer_filter = "" if not buyer_filter else f"AND silver_orders.buyer_id IN ({buyer_filter})"
+    outer_filter = "" if not buyer_filter else f"AND s.buyer_id IN ({buyer_filter})"
     return f"""
-                UPDATE silver_orders SET
+                UPDATE {target} AS s SET
                     buyer_first_order_date = fo.first_order_date,
                     is_new_customer = CASE
-                        WHEN silver_orders.buyer_id IS NOT NULL
-                             AND NOT silver_orders.is_return
-                             AND silver_orders.is_active_source
-                             AND silver_orders.order_date = fo.first_order_date
+                        WHEN s.buyer_id IS NOT NULL
+                             AND NOT s.is_return
+                             AND s.is_active_source
+                             AND s.order_date = fo.first_order_date
                         THEN TRUE ELSE FALSE
                     END
                 FROM (
@@ -330,12 +338,12 @@ def silver_pass2_sql(buyer_filter: str = "") -> str:
                     -- Returns stay excluded: a cancelled first order is not a
                     -- purchase, so the next one genuinely is their first.
                     SELECT buyer_id, MIN(order_date) AS first_order_date
-                    FROM silver_orders
+                    FROM {target}
                     WHERE {inner_filter}
                       AND NOT is_return
                     GROUP BY buyer_id
                 ) fo
-                WHERE silver_orders.buyer_id = fo.buyer_id
+                WHERE s.buyer_id = fo.buyer_id
                   {outer_filter}
     """
 

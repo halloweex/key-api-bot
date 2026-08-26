@@ -49,6 +49,7 @@ class Dialect:
     orders: str
     managers: str
     classifications: str
+    silver_orders: str
     # A format template with one `{column}` hole. Not a function, so the whole
     # dialect stays comparable, printable and trivially frozen.
     date_template: str
@@ -63,6 +64,7 @@ DUCKDB = Dialect(
     orders="orders",
     managers="managers",
     classifications="manager_classifications",
+    silver_orders="silver_orders",
     # Byte-for-byte what `core.duckdb_constants._date_in_kyiv` has always
     # emitted. Changing it here changes stored Silver on the next rebuild.
     date_template="DATE(timezone('{zone}', {column}))",
@@ -76,6 +78,7 @@ POSTGRES = Dialect(
     orders="bronze.orders",
     managers="bronze.managers",
     classifications="app.manager_classifications",
+    silver_orders="silver.orders",
     # `DATE(x)` also exists in PostgreSQL, but the cast is what the rest of
     # this repository's Postgres SQL uses, so it reads the same as its
     # neighbours in `core/reconciliation_io.py`.
