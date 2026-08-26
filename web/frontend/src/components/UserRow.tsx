@@ -9,6 +9,7 @@ type Tone = 'purple' | 'blue' | 'slate' | 'green' | 'yellow' | 'red'
 const roleTone: Record<UserRole, Tone> = {
   admin: 'purple',
   editor: 'blue',
+  marketer: 'green',
   viewer: 'slate',
 }
 
@@ -22,6 +23,9 @@ const statusTone: Record<UserStatus, Tone> = {
 export const roleOptions = [
   { value: 'admin', label: 'Admin' },
   { value: 'editor', label: 'Editor' },
+  // Viewer access plus SMS campaigns — the grant that used to require making
+  // somebody an admin.
+  { value: 'marketer', label: 'Marketer' },
   { value: 'viewer', label: 'Viewer' },
 ]
 

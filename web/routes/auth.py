@@ -388,6 +388,25 @@ async def require_admin(request: Request) -> dict:
     return user
 
 
+async def has_permission(user: dict, feature: str, action: str = "view") -> bool:
+    """Does this user hold `action` on `feature`? Never raises.
+
+    The counterpart to ``require_permission`` for the cases a dependency
+    cannot express — one endpoint whose *arguments* decide how much access it
+    needs, such as an SMS roster that returns sizes to a viewer and names and
+    phone numbers to whoever may send.
+    """
+    from core.permissions import get_permissions_for_role_async
+
+    if is_hardcoded_admin(user.get("user_id")):
+        return True
+    try:
+        permissions = await get_permissions_for_role_async(user.get("role", "viewer"))
+    except Exception:  # noqa: BLE001 — an unreadable matrix must deny, not crash
+        return False
+    return bool(permissions.get(feature, {}).get(action, False))
+
+
 def require_permission(feature: str, action: str = "view"):
     """
     FastAPI dependency factory for permission-based access control.

@@ -3,7 +3,8 @@ import { Header } from './components/Header'
 import { Dashboard } from './components/Dashboard'
 import { ChatSidebar } from './components/ChatSidebar'
 import { SidebarRail } from './components/SidebarRail'
-import { useAuth } from './hooks/useAuth'
+import { useAuth, usePermission } from './hooks/useAuth'
+import type { Permissions } from './types/api'
 import { useToast } from './components/Toast'
 import { useRouter, navigate } from './hooks/useRouter'
 import { useNavStore } from './store/navStore'
@@ -140,6 +141,42 @@ const AdminGuard = memo(function AdminGuard({ children }: { children: ReactNode 
   )
 })
 
+// ─── Permission Guard ─────────────────────────────────────────────────────────
+//
+// Same shape as AdminGuard, but keyed on a feature rather than the admin role.
+// SMS campaigns are grantable on their own (the `marketer` role), so the page
+// must not ask "are you an admin" — the server does not either.
+
+const PermissionGuard = memo(function PermissionGuard({
+  feature,
+  children,
+}: {
+  feature: keyof Permissions
+  children: ReactNode
+}) {
+  const { canView, isLoading } = usePermission(feature)
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  if (!canView) {
+    navigate('/')
+    return null
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50">
+      {children}
+    </div>
+  )
+})
+
+
 // ─── App Component ───────────────────────────────────────────────────────────
 
 function App() {
@@ -223,15 +260,16 @@ function App() {
     )
   }
 
-  // SMS campaigns (admin only — the roster carries names and phone numbers)
+  // SMS campaigns (the roster carries names and phone numbers, so it is gated
+  // on the `sms` permission — admins and marketers, nobody else)
   if (path === '/v2/sms' || path === '/sms') {
     return (
       <AppShell>
-        <AdminGuard>
+        <PermissionGuard feature="sms">
           <Suspense fallback={<PageSpinner />}>
             <SmsCampaignsPage />
           </Suspense>
-        </AdminGuard>
+        </PermissionGuard>
       </AppShell>
     )
   }

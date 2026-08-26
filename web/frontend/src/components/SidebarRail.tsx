@@ -6,7 +6,7 @@ import {
   CircleDollarSign, Users, ShieldCheck, PanelLeft, User, MessageSquare,
 } from 'lucide-react'
 import { useNavStore } from '../store/navStore'
-import { useAuth, useUserDisplayName } from '../hooks/useAuth'
+import { useAuth, usePermission, useUserDisplayName } from '../hooks/useAuth'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { api } from '../api/client'
 import { navigate, useRouter } from '../hooks/useRouter'
@@ -72,6 +72,8 @@ export const SidebarRail = memo(function SidebarRail() {
   const { user, isAuthenticated } = useAuth()
   const displayName = useUserDisplayName()
   const isAdmin = user?.role === 'admin'
+  // SMS is a permission of its own: a marketer sees the page without being an admin.
+  const { canView: canSms } = usePermission('sms')
 
   // Health check for version
   const { data: health } = useQuery<HealthResponse>({
@@ -198,7 +200,7 @@ export const SidebarRail = memo(function SidebarRail() {
         <CollapsedNavIcon href="/inventory" icon={<Box className="w-5 h-5" />} label={t('nav.inventory')} />
         <CollapsedNavIcon href="/reports" icon={<ClipboardList className="w-5 h-5" />} label={t('nav.reports')} />
         <CollapsedNavIcon href="/marketing" icon={<Rocket className="w-5 h-5" />} label={t('nav.marketing')} />
-        {isAdmin && (
+        {canSms && (
           <CollapsedNavIcon href="/sms" icon={<MessageSquare className="w-5 h-5" />} label={t('nav.smsCampaigns')} />
         )}
       </div>
@@ -228,7 +230,7 @@ export const SidebarRail = memo(function SidebarRail() {
           <NavLink href="/marketing" icon={<Rocket className="w-5 h-5" />}>
             {t('nav.marketing')}
           </NavLink>
-          {isAdmin && (
+          {canSms && (
             <NavLink href="/sms" icon={<MessageSquare className="w-5 h-5" />}>
               {t('nav.smsCampaigns')}
             </NavLink>
