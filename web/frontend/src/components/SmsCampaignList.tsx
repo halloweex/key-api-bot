@@ -176,6 +176,11 @@ export const SmsCampaignList = memo(function SmsCampaignList() {
                                 {t('sms.detailsNoMessage')}
                               </p>
                             )}
+                            {c.notes && (
+                              <p className="mt-1.5 text-[11px] text-amber-700 leading-snug">
+                                {c.notes}
+                              </p>
+                            )}
                             {(c.delivered != null && c.delivered > 0) && (
                               <p className="mt-2 text-xs text-slate-600 tabular-nums">
                                 {t('sms.detailsDelivery', {

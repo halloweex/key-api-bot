@@ -175,6 +175,40 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"User migration from SQLite skipped: {e}")
 
+    # ── One historical campaign, restored by hand ────────────────────────
+    # `aug-promo-birthday-website` was sent on 2026-08-05, before the columns
+    # recording the text and the bill existed, so its card had nothing to show.
+    # The figures below are the ones established when that campaign was
+    # audited: 5 550 recipients, but 8 375 messages billed at 1.2744 ₴ — a
+    # second press resent 2 825 of them, which is the defect PR #23 closed.
+    # Restoring the count instead of the bill would show a campaign that cost
+    # 7 104 ₴, and it did not.
+    #
+    # The write fills NULLs only, so this is a no-op on every boot after the
+    # first, and it can never overwrite a campaign the app recorded itself.
+    try:
+        restored = await store.backfill_sms_campaign_record(
+            campaign="aug-promo-birthday-website",
+            message_text=(
+                "Красуне, нашому сайту 2 роки \u2665 -30%, лише 2 дні: "
+                "koreanstory.com.ua"
+            ),
+            message_parts=1,
+            recipients_sent=8375,
+            price_per_part=1.2744,
+            cost_total=10673.00,
+            notes=(
+                "Текст и стоимость восстановлены вручную: кампания отправлена "
+                "до того, как приложение стало их записывать. 5 550 получателей, "
+                "8 375 сообщений — 2 825 из них дубль от повторной отправки."
+            ),
+        )
+        if restored:
+            logger.info("Restored the August campaign's message and cost")
+    except Exception as e:
+        # A campaign card missing one line must never cost a startup.
+        logger.warning(f"Campaign record restore skipped: {e}")
+
     # Start background job scheduler (replaces old asyncio background sync)
     try:
         await start_scheduler()

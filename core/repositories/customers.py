@@ -2052,6 +2052,37 @@ class CustomersMixin:
             },
         }
 
+    async def backfill_sms_campaign_record(
+        self,
+        campaign: str,
+        message_text: str,
+        message_parts: int,
+        recipients_sent: int,
+        price_per_part: float,
+        cost_total: float,
+        notes: str,
+    ) -> bool:
+        """Fill in what a campaign sent, for one that predates the recording.
+
+        Writes **only columns that are still NULL**, and returns False if the
+        campaign already carries a record. The text of a sent campaign is
+        evidence of what reached people's phones; a path that can overwrite it
+        is a path by which every card stops being trustworthy.
+
+        `notes` is where the provenance goes — restored by hand is not the same
+        fact as recorded at send, and the page says which one it is looking at.
+        """
+        async with self.connection() as conn:
+            row = conn.execute("""
+                UPDATE sms_campaigns
+                SET message_text = ?, message_parts = ?, recipients_sent = ?,
+                    price_per_part = ?, cost_total = ?, notes = ?
+                WHERE campaign = ? AND message_text IS NULL
+                RETURNING campaign
+            """, [message_text, message_parts, recipients_sent, price_per_part,
+                  cost_total, notes, campaign]).fetchone()
+        return row is not None
+
     async def list_sms_campaigns(self) -> List[Dict[str, Any]]:
         """List frozen campaigns, newest export first.
 
