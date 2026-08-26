@@ -21,6 +21,9 @@ from __future__ import annotations
 import inspect
 import re
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from core.duckdb_store import silver_select_sql
 from core.pg_silver import SILVER_COLUMNS, SILVER_TABLE, pass1_sql, pass2_sql, rebuild_silver
@@ -93,3 +96,79 @@ class TestTheRebuildIsOneTransaction:
         there is no working system to protect by staying quiet."""
         source = inspect.getsource(rebuild_silver)
         assert "except" not in source
+
+
+class TestTheRefreshHook:
+    """Postgres Silver is recomputed after the DuckDB warehouse refresh.
+
+    Three properties, each of which is silent when wrong: it cannot break the
+    refresh, it does not run 720 times a day, and it does not report a fresh
+    Postgres Silver beside a failed DuckDB one.
+    """
+
+    def _scheduler(self):
+        from core.scheduler import BackgroundScheduler
+
+        BackgroundScheduler._pg_silver_last_at = 0.0
+        return BackgroundScheduler()
+
+    @pytest.mark.asyncio
+    async def test_it_rebuilds_after_a_successful_refresh(self, monkeypatch):
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_silver.rebuild_silver",
+                   new=AsyncMock(return_value={"rows": 1})) as rebuild:
+            await self._scheduler()._rebuild_postgres_silver({"status": "success"})
+        rebuild.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_refresh_is_not_followed_by_a_rebuild(self, monkeypatch):
+        """A fresh Postgres Silver beside a failed DuckDB one invites reading
+        the two as comparable when they are not."""
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_silver.rebuild_silver", new=AsyncMock()) as rebuild:
+            await self._scheduler()._rebuild_postgres_silver({"status": "error"})
+        rebuild.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_floor_stops_it_running_every_two_minutes(self, monkeypatch):
+        """46,446 rows and 2.19 s every time, however small the change was."""
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "600")
+        scheduler = self._scheduler()
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_silver.rebuild_silver",
+                   new=AsyncMock(return_value={"rows": 1})) as rebuild:
+            await scheduler._rebuild_postgres_silver({"status": "success"})
+            await scheduler._rebuild_postgres_silver({"status": "success"})
+        assert rebuild.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_postgres_fault_cannot_break_the_refresh(self, monkeypatch):
+        """Rule 8: DuckDB is what the business looks at."""
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_silver.rebuild_silver",
+                   side_effect=RuntimeError("postgres is down")):
+            await self._scheduler()._rebuild_postgres_silver({"status": "success"})
+
+    @pytest.mark.asyncio
+    async def test_no_postgres_configured_does_nothing(self, monkeypatch):
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
+        with patch("core.mirror_reconciliation.configured", return_value=False), \
+             patch("core.pg_silver.rebuild_silver", new=AsyncMock()) as rebuild:
+            await self._scheduler()._rebuild_postgres_silver({"status": "success"})
+        rebuild.assert_not_called()
+
+    def test_the_refresh_job_calls_it_outside_the_store_lock(self):
+        """Awaiting a network round-trip under the DuckDB lock is how a sync
+        becomes a stall."""
+        from core.scheduler import BackgroundScheduler
+
+        source = inspect.getsource(BackgroundScheduler._run_warehouse_refresh)
+        # Position, not presence: the call's own comment names
+        # `store.connection()` as the thing it stays outside of, so a grep for
+        # that string matches the explanation. Sixth time in two days.
+        assert source.index("refresh_warehouse_layers") < source.index(
+            "await self._rebuild_postgres_silver"
+        )

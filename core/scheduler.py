@@ -945,7 +945,63 @@ class BackgroundScheduler:
                     changed_order_ids=changed_ids,
                 )
                 logger.info("Warehouse refresh complete")
+                # Step 05. Postgres computes the same Silver from its own
+                # landing. Outside every `store.connection()` block — the
+                # refresh has released the DuckDB lock by now, and holding it
+                # across a network round-trip is how a sync becomes a stall.
+                await self._rebuild_postgres_silver(result)
                 return result
+
+    # Postgres Silver is rebuilt whole, so its cost does not shrink with the
+    # size of the change: 46,446 rows, 2.19 s, every time. The warehouse
+    # refresh fires as often as orders move, which on a busy afternoon is
+    # every two minutes — 720 rebuilds a day for a table nothing reads yet.
+    #
+    # A floor instead. Ten minutes keeps Postgres far closer to DuckDB than
+    # the daily reconciliation that compares them needs, at roughly a tenth of
+    # the work. Lower it with KS_PG_SILVER_INTERVAL_S when the read switch
+    # makes freshness matter.
+    _pg_silver_last_at: float = 0.0
+
+    async def _rebuild_postgres_silver(self, refresh_result) -> None:
+        """Recompute `silver.orders` from `bronze.orders`. Never raises.
+
+        Same failure policy as the mirror, and the same reason: DuckDB is what
+        the business looks at, and a Postgres fault must not be able to break
+        the job that keeps it current. Rule 8 — the step leaves the system
+        working.
+
+        Skipped when the DuckDB refresh itself did not succeed. Rebuilding from
+        landing would still work, but reporting a fresh Postgres Silver beside
+        a failed DuckDB one invites reading the two as comparable when they are
+        not.
+        """
+        import os
+        import time
+
+        if (refresh_result or {}).get("status") == "error":
+            return
+
+        try:
+            from core.mirror_reconciliation import configured
+
+            if not configured():
+                return
+
+            floor = int(os.getenv("KS_PG_SILVER_INTERVAL_S", "600"))
+            now = time.monotonic()
+            if now - BackgroundScheduler._pg_silver_last_at < floor:
+                return
+            BackgroundScheduler._pg_silver_last_at = now
+
+            from core.pg_silver import rebuild_silver
+
+            logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
+        except Exception as e:
+            # ERROR, not DEBUG. A mirror that fails quietly is the 2026-08-09
+            # shape, and the watermark it did not move is what Reconciliation A
+            # reads as "not rebuilt yet".
+            logger.error("Postgres Silver rebuild failed: %s", e, exc_info=True)
 
     async def _run_backup(self) -> Dict[str, Any]:
         """Daily consistent backup of the DuckDB warehouse (A9-1)."""
