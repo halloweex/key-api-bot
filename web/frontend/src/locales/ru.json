@@ -917,7 +917,7 @@
   "sms.presetsLabel": "Сохранённые аудитории",
   "sms.presetBuiltin": "встроенная",
   "sms.presetDelete": "Удалить аудиторию {{name}}",
-  "sms.presetApplied": "Аудитория «{{name}}» загружена — фильтры подставлены",
+  "sms.presetApplied": "Аудитория «{{name}}» загружена",
   "sms.presetSaved": "Сохранено как «{{name}}»",
   "sms.presetSaveFailed": "Не удалось сохранить аудиторию",
   "sms.presetSaveAs": "Название для этой аудитории",
@@ -975,5 +975,9 @@
   "sms.presetsHint": "Выбор подставляет все контролы, из которых она собрана. Как только что-то измените — это уже новая аудитория.",
   "sms.presetSaveToggle": "сохранить нынешнюю",
   "sms.presetsPlaceholder": "Выберите сохранённую аудиторию",
-  "sms.presetDeleteSelected": "Удалить"
+  "sms.presetDeleteSelected": "Удалить",
+  "sms.summaryHoldout": "контроль {{pct}}%",
+  "sms.summaryWindow": "окно {{days}} дн",
+  "sms.summaryFilters": "фильтров: {{count}}",
+  "sms.summaryNoFilters": "без фильтров"
 }

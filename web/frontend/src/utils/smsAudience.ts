@@ -199,3 +199,26 @@ export function audienceFromPreset(raw: unknown): SmsAudienceCriteria {
     filters,
   }
 }
+
+/**
+ * The audience in one line: how it is split, how it ranks, what is withheld,
+ * how far back it looks, and how many filters narrow it.
+ *
+ * It exists because picking a saved audience with no filters changes nothing
+ * visible, which reads as a broken control rather than as an audience that
+ * genuinely has no filters. Two of the audiences that ship with the page are
+ * exactly that.
+ */
+export function describeAudience(
+  audience: SmsAudienceCriteria,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): string {
+  const n = countFilters(audience.filters)
+  return [
+    t(`sms.grouping.${audience.grouping}`),
+    t(audience.ltvBasis === 'margin' ? 'sms.basisMargin' : 'sms.basisRevenue'),
+    t('sms.summaryHoldout', { pct: audience.holdoutPct }),
+    t('sms.summaryWindow', { days: audience.maxRecencyDays }),
+    n === 0 ? t('sms.summaryNoFilters') : t('sms.summaryFilters', { count: n }),
+  ].join(' · ')
+}

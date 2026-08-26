@@ -3,6 +3,7 @@ import {
   audienceFromPreset,
   audienceToParams,
   countFilters,
+  describeAudience,
   emptyAudience,
   hasFilters,
 } from '../smsAudience'
@@ -153,5 +154,36 @@ describe('the base window', () => {
   it('comes back from a preset, and falls back when one predates it', () => {
     expect(audienceFromPreset({ maxRecencyDays: 540 }).maxRecencyDays).toBe(540)
     expect(audienceFromPreset({ grouping: 'single' }).maxRecencyDays).toBe(270)
+  })
+})
+
+describe('describeAudience', () => {
+  const t = (key: string, opts?: Record<string, unknown>) =>
+    opts ? `${key}(${JSON.stringify(opts)})` : key
+
+  it('says outright when an audience has no filters', () => {
+    // Two of the audiences that ship with the page are exactly this, and
+    // picking one changes nothing on screen.
+    expect(describeAudience(emptyAudience(), t)).toContain('sms.summaryNoFilters')
+  })
+
+  it('counts the filters that are set', () => {
+    const described = describeAudience({
+      ...emptyAudience(),
+      filters: { brands: ['Anua'], recencyMin: 90, firstOrderFrom: '2026-01-01' },
+    }, t)
+
+    expect(described).toContain('sms.summaryFilters({"count":3})')
+  })
+
+  it('states the split, the basis, the holdout and the window', () => {
+    const described = describeAudience({
+      ...emptyAudience(), grouping: 'single', holdoutPct: 30, maxRecencyDays: 540,
+    }, t)
+
+    expect(described).toContain('sms.grouping.single')
+    expect(described).toContain('sms.basisMargin')
+    expect(described).toContain('sms.summaryHoldout({"pct":30})')
+    expect(described).toContain('sms.summaryWindow({"days":540})')
   })
 })

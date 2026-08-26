@@ -18,7 +18,9 @@ import {
   useSmsAudiencePresets,
   useSmsSegments,
 } from '../hooks/useApi'
-import { audienceFromPreset, audienceToParams, emptyAudience } from '../utils/smsAudience'
+import {
+  audienceFromPreset, audienceToParams, describeAudience, emptyAudience,
+} from '../utils/smsAudience'
 import { smsCost } from '../utils/smsCost'
 import { formatNumber } from '../utils/formatters'
 import type { SmsAudienceCriteria, SmsCampaignSummary } from '../types/api'
@@ -160,8 +162,16 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
     // Picking an audience fills in every control it was built from — grouping,
     // basis, holdout, window and each filter — so the next campaign to the same
     // people is the same campaign, not one assembled from memory.
-    setAudience(audienceFromPreset(preset.criteria))
-    addToast({ type: 'success', title: t('sms.presetApplied', { name }) })
+    const loaded = audienceFromPreset(preset.criteria)
+    setAudience(loaded)
+    // Says how many filters arrived, including none: two of the audiences that
+    // ship with the page carry no filters at all, and a message claiming they
+    // were "filled in" is how a working control gets reported as broken.
+    addToast({
+      type: 'success',
+      title: t('sms.presetApplied', { name }),
+      message: describeAudience(loaded, t),
+    })
   }
 
   /** Editing the form means the list no longer describes what is on screen. */
@@ -316,6 +326,10 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                       {t('sms.presetSaveToggle')}
                     </button>
                   </div>
+                  <p className="mt-1.5 text-[11px] text-slate-600 tabular-nums">
+                    {describeAudience(audience, t)}
+                  </p>
+
                   {savingPreset && (
                     <div className="mt-2 flex flex-wrap items-end gap-2">
                       <label className="text-xs text-slate-600">

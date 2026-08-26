@@ -917,7 +917,7 @@
   "sms.presetsLabel": "Збережені аудиторії",
   "sms.presetBuiltin": "вбудована",
   "sms.presetDelete": "Видалити аудиторію {{name}}",
-  "sms.presetApplied": "Аудиторію «{{name}}» завантажено — фільтри підставлено",
+  "sms.presetApplied": "Аудиторію «{{name}}» завантажено",
   "sms.presetSaved": "Збережено як «{{name}}»",
   "sms.presetSaveFailed": "Не вдалося зберегти аудиторію",
   "sms.presetSaveAs": "Назва для цієї аудиторії",
@@ -975,5 +975,9 @@
   "sms.presetsHint": "Вибір підставляє всі контроли, з яких її зібрано. Щойно щось зміните — це вже нова аудиторія.",
   "sms.presetSaveToggle": "зберегти нинішню",
   "sms.presetsPlaceholder": "Оберіть збережену аудиторію",
-  "sms.presetDeleteSelected": "Видалити"
+  "sms.presetDeleteSelected": "Видалити",
+  "sms.summaryHoldout": "контроль {{pct}}%",
+  "sms.summaryWindow": "вікно {{days}} днів",
+  "sms.summaryFilters": "фільтрів: {{count}}",
+  "sms.summaryNoFilters": "без фільтрів"
 }
