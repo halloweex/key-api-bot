@@ -82,6 +82,35 @@ function StepHeader({
   )
 }
 
+/** Every step ends the same way: back on the left, this step's action on the
+ *  right, anything optional between them.
+ *
+ *  It was not always so, and the buttons moved from step to step — the one
+ *  control a person aims for without reading has to be in the same place every
+ *  time. */
+function StepActions({
+  onBack, secondary, primary,
+}: {
+  onBack?: () => void
+  secondary?: React.ReactNode
+  primary?: React.ReactNode
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <div className="mt-4 pt-3 border-t border-slate-100 flex flex-wrap items-center gap-2">
+      {onBack && (
+        <Button variant="secondary" size="sm" onClick={onBack}>
+          {t('sms.wizardBack')}
+        </Button>
+      )}
+      {secondary}
+      <div className="flex-1" />
+      {primary}
+    </div>
+  )
+}
+
 export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   onClose,
 }: {
@@ -263,11 +292,15 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                   >
                     {t('sms.presetSave')}
                   </Button>
-                  <div className="flex-1" />
-                  <Button size="sm" onClick={() => setStep('control')} disabled={target === 0}>
-                    {t('sms.wizardNext')}
-                  </Button>
                 </div>
+
+                <StepActions
+                  primary={
+                    <Button size="sm" onClick={() => setStep('control')} disabled={target === 0}>
+                      {t('sms.wizardNext')}
+                    </Button>
+                  }
+                />
               </div>
             )}
 
@@ -301,14 +334,14 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                     holdout: formatNumber(data?.totals.holdout ?? 0),
                   })}
                 </p>
-                <div className="flex gap-2">
-                  <Button variant="secondary" size="sm" onClick={() => setStep('audience')}>
-                    {t('sms.wizardBack')}
-                  </Button>
-                  <Button size="sm" onClick={() => setStep('message')}>
-                    {t('sms.wizardNext')}
-                  </Button>
-                </div>
+                <StepActions
+                  onBack={() => setStep('audience')}
+                  primary={
+                    <Button size="sm" onClick={() => setStep('message')}>
+                      {t('sms.wizardNext')}
+                    </Button>
+                  }
+                />
               </div>
             )}
 
@@ -350,21 +383,23 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                 </label>
                 <SmsCostLine cost={cost} limit={SMS_LIMIT} recipients={target} />
 
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="secondary" size="sm" onClick={() => setStep('control')}>
-                    {t('sms.wizardBack')}
-                  </Button>
-                  <Button variant="secondary" size="sm" onClick={() => setTesting(true)}>
-                    {t('sms.testSend')}
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={() => setStep('launch')}
-                    disabled={!campaignValid || text.trim().length === 0}
-                  >
-                    {t('sms.wizardNext')}
-                  </Button>
-                </div>
+                <StepActions
+                  onBack={() => setStep('control')}
+                  secondary={
+                    <Button variant="secondary" size="sm" onClick={() => setTesting(true)}>
+                      {t('sms.testSend')}
+                    </Button>
+                  }
+                  primary={
+                    <Button
+                      size="sm"
+                      onClick={() => setStep('launch')}
+                      disabled={!campaignValid || text.trim().length === 0}
+                    >
+                      {t('sms.wizardNext')}
+                    </Button>
+                  }
+                />
               </div>
             )}
 
@@ -394,12 +429,28 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                   {created ? t('sms.rosterFrozen') : t('sms.rosterWillFreeze')}
                 </p>
 
-                <div className="flex flex-wrap gap-2">
-                  {!created && (
-                    <>
-                      <Button variant="secondary" size="sm" onClick={() => setStep('message')}>
-                        {t('sms.wizardBack')}
+                {created ? (
+                  <StepActions
+                    secondary={
+                      <>
+                        <Button variant="secondary" size="sm" onClick={handleCsv}>
+                          {t('sms.downloadCsv')}
+                        </Button>
+                        <Button variant="secondary" size="sm" onClick={onClose}>
+                          {t('sms.wizardDone')}
+                        </Button>
+                      </>
+                    }
+                    primary={
+                      <Button size="sm" onClick={() => setSending(true)}>
+                        {t('sms.sendNow')}
                       </Button>
+                    }
+                  />
+                ) : (
+                  <StepActions
+                    onBack={() => setStep('message')}
+                    primary={
                       <Button
                         size="sm"
                         onClick={handleCreate}
@@ -407,22 +458,9 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                       >
                         {create.isPending ? t('sms.creating') : t('sms.createCampaign')}
                       </Button>
-                    </>
-                  )}
-                  {created && (
-                    <>
-                      <Button size="sm" onClick={() => setSending(true)}>
-                        {t('sms.sendNow')}
-                      </Button>
-                      <Button variant="secondary" size="sm" onClick={handleCsv}>
-                        {t('sms.downloadCsv')}
-                      </Button>
-                      <Button variant="secondary" size="sm" onClick={onClose}>
-                        {t('sms.wizardDone')}
-                      </Button>
-                    </>
-                  )}
-                </div>
+                    }
+                  />
+                )}
               </div>
             )}
           </>

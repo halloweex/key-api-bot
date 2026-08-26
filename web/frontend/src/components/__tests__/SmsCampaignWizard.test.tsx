@@ -227,3 +227,31 @@ describe('the rehearsal', () => {
     expect(boxes.length).toBeGreaterThan(1)
   })
 })
+
+describe('the step footer', () => {
+  it('puts the step action last on every step, and back first', async () => {
+    // The one control a person aims for without reading has to be in the same
+    // place every time; it used to be right on step 1 and left on the rest.
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    function footerOrder(): string[] {
+      const next = screen.getByRole('button', { name: /sms\.(wizardNext|createCampaign)/ })
+      const footer = next.closest('div')!
+      return Array.from(footer.querySelectorAll('button')).map((b) => b.textContent ?? '')
+    }
+
+    // Step 1: nothing but the action.
+    expect(footerOrder().at(-1)).toBe('sms.wizardNext')
+
+    await step('sms.wizardNext')
+    // Step 2: back first, action last.
+    expect(footerOrder()[0]).toBe('sms.wizardBack')
+    expect(footerOrder().at(-1)).toBe('sms.wizardNext')
+
+    await step('sms.wizardNext')
+    // Step 3: back first, the rehearsal between, action last.
+    expect(footerOrder()[0]).toBe('sms.wizardBack')
+    expect(footerOrder()).toContain('sms.testSend')
+    expect(footerOrder().at(-1)).toBe('sms.wizardNext')
+  })
+})
