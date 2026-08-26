@@ -204,3 +204,32 @@ async def test_campaigns_listed_newest_first(tmp_path):
     assert campaigns["aug-promo"]["holdout"] == 1
 
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_list_carries_what_the_campaign_was(tmp_path):
+    """Not only how big it was.
+
+    The audience, the text and the bill were all recorded from the start and
+    none of them were readable anywhere — "which text went out, and to whom"
+    had no answer short of a SQL prompt.
+    """
+    store = await _make_store(tmp_path)
+    criteria = {"maxRecencyDays": 270, "holdoutPct": 10, "grouping": "single",
+                "filters": {"recencyMin": 90, "recencyMax": 237}}
+    await store.freeze_sms_campaign(
+        campaign="sep-brand", customers=ROSTER, criteria=criteria,
+        ltv_basis="margin", sales_type="retail", holdout_pct=10,
+        promocode="KS-SEP",
+    )
+
+    [row] = await store.list_sms_campaigns()
+
+    assert row["criteria"] == criteria
+    assert row["promocode"] == "KS-SEP"
+    # Nothing has been sent yet, so the text and the bill are honestly absent
+    # rather than zero.
+    assert row["messageText"] is None
+    assert row["costTotal"] is None
+
+    await store.close()

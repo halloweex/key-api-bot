@@ -333,6 +333,17 @@ class SmsAudienceFilters:
         return "(" + " AND ".join(parts) + ")", params
 
 
+def _load_json(raw: Any) -> Dict[str, Any]:
+    """A stored JSON snapshot, or nothing. Never raises on a bad row."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 class CustomersMixin:
 
     async def get_customer_insights(
@@ -2042,7 +2053,14 @@ class CustomersMixin:
         }
 
     async def list_sms_campaigns(self) -> List[Dict[str, Any]]:
-        """List frozen campaigns, newest export first."""
+        """List frozen campaigns, newest export first.
+
+        Carries what a campaign *was*, not only how big it was: the audience as
+        it was frozen, the text as it went out, and what the gateway billed.
+        All three were recorded from the start and none were readable anywhere
+        — "which text went out in August, and to whom" had no answer short of a
+        SQL prompt.
+        """
         async with self.connection() as conn:
             rows = conn.execute(
                 """
@@ -2050,7 +2068,12 @@ class CustomersMixin:
                        c.promocode, c.exported_at, c.sent_at, c.notes,
                        COUNT(m.buyer_id) AS members,
                        COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'target') AS target,
-                       COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'holdout') AS holdout
+                       COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'holdout') AS holdout,
+                       c.criteria, c.message_text, c.message_parts,
+                       c.recipients_sent, c.price_per_part, c.cost_total,
+                       COUNT(m.buyer_id) FILTER (WHERE m.delivered) AS delivered,
+                       COUNT(m.buyer_id) FILTER (WHERE m.delivered IS FALSE)
+                           AS undelivered
                 FROM sms_campaigns c
                 LEFT JOIN sms_campaign_members m ON m.campaign = c.campaign
                 GROUP BY ALL
@@ -2071,6 +2094,17 @@ class CustomersMixin:
                 "members": r[8],
                 "target": r[9],
                 "holdout": r[10],
+                # The audience as frozen. Stored as JSON because it snapshots a
+                # form, not a schema; handed back as an object so the page can
+                # say it in words.
+                "criteria": _load_json(r[11]),
+                "messageText": r[12],
+                "messageParts": r[13],
+                "recipientsSent": r[14],
+                "pricePerPart": float(r[15]) if r[15] is not None else None,
+                "costTotal": float(r[16]) if r[16] is not None else None,
+                "delivered": r[17],
+                "undelivered": r[18],
             }
             for r in rows
         ]

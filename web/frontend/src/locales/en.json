@@ -1030,5 +1030,10 @@
   "sms.filterLastOrderFrom": "Last order from",
   "sms.filterLastOrderTo": "Last order until",
   "sms.filterLastOrderHint": "01.01.2026 — 28.05.2026: bought this year, quiet since May.",
-  "sms.filterLastOrderAsDays": "Same thing in days: {{from}} to {{to}}. A saved audience keeps the days, which stay true next month; the dates do not."
+  "sms.filterLastOrderAsDays": "Same thing in days: {{from}} to {{to}}. A saved audience keeps the days, which stay true next month; the dates do not.",
+  "sms.detailsMessage": "Message sent",
+  "sms.detailsNoMessage": "Not recorded — this campaign went out before the text was stored.",
+  "sms.detailsCost": "{{recipients}} × {{parts}} part(s) × ₴{{price}} = {{total}}",
+  "sms.detailsDelivery": "Delivered {{delivered}}, failed {{undelivered}}",
+  "sms.detailsAudience": "Audience as frozen"
 }

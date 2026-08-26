@@ -313,3 +313,61 @@ export function dateToDaysAgo(iso: string): number | undefined {
   // A date in the future is not a recency; treat it as today.
   return Math.max(0, days)
 }
+
+/**
+ * The frozen audience, said in phrases.
+ *
+ * The stored snapshot uses the store's own field names, not the form's, and it
+ * is deliberately read loosely: a campaign frozen by an older version of the
+ * page must still describe itself rather than render blank.
+ */
+export function describeFrozenCriteria(
+  criteria: Record<string, unknown> | undefined,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): string[] {
+  if (!criteria) return []
+  const out: string[] = []
+  const f = (criteria.filters ?? {}) as Record<string, unknown>
+  const val = (k: string) => f[k]
+  const has = (k: string) => val(k) !== undefined && val(k) !== null && val(k) !== ''
+
+  const grouping = criteria.grouping === 'rfm' ? 'rfm' : 'single'
+  out.push(t(`sms.grouping.${grouping}`))
+  if (criteria.ltvBasis) {
+    out.push(t(criteria.ltvBasis === 'margin' ? 'sms.basisMargin' : 'sms.basisRevenue'))
+  }
+  if (typeof criteria.holdoutPct === 'number') {
+    out.push(t('sms.summaryHoldout', { pct: criteria.holdoutPct }))
+  }
+  if (typeof criteria.maxRecencyDays === 'number') {
+    out.push(t('sms.summaryWindow', { days: criteria.maxRecencyDays }))
+  }
+
+  const pairs: Array<[string, string, string]> = [
+    ['recency_min_days', 'recency_max_days', 'sms.filterRecency'],
+    ['orders_min', 'orders_max', 'sms.filterOrders'],
+    ['ltv_min', 'ltv_max', 'sms.filterLtv'],
+    ['aov_min', 'aov_max', 'sms.filterAov'],
+    ['first_order_from', 'first_order_to', 'sms.filterFirstOrder'],
+  ]
+  for (const [lo, hi, label] of pairs) {
+    if (!has(lo) && !has(hi)) continue
+    out.push(`${t(label)}: ${has(lo) ? val(lo) : '…'} — ${has(hi) ? val(hi) : '…'}`)
+  }
+
+  const lists: Array<[string, string]> = [
+    ['brands', 'sms.filterBrand'],
+    ['cities', 'sms.filterCity'],
+    ['category_ids', 'sms.filterCategory'],
+    ['source_ids', 'sms.filterSource'],
+  ]
+  for (const [key, label] of lists) {
+    const v = val(key)
+    if (Array.isArray(v) && v.length) out.push(`${t(label)}: ${v.join(', ')}`)
+  }
+  if (has('promocode')) out.push(`${t('sms.filterPromocode')}: ${val('promocode')}`)
+  if (has('bought_within_days')) {
+    out.push(`${t('sms.filterBoughtWithin')}: ${val('bought_within_days')}`)
+  }
+  return out
+}

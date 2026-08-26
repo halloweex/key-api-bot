@@ -1030,5 +1030,10 @@
   "sms.filterLastOrderFrom": "Останнє замовлення з",
   "sms.filterLastOrderTo": "Останнє замовлення по",
   "sms.filterLastOrderHint": "01.01.2026 — 28.05.2026: купували цього року, мовчать із травня.",
-  "sms.filterLastOrderAsDays": "Те саме в днях: від {{from}} до {{to}}. Збережена аудиторія тримає дні — вони лишаться правдою й наступного місяця, дати ні."
+  "sms.filterLastOrderAsDays": "Те саме в днях: від {{from}} до {{to}}. Збережена аудиторія тримає дні — вони лишаться правдою й наступного місяця, дати ні.",
+  "sms.detailsMessage": "Надіслане повідомлення",
+  "sms.detailsNoMessage": "Не записано — кампанія пішла до того, як текст почали зберігати.",
+  "sms.detailsCost": "{{recipients}} × {{parts}} частин × ₴{{price}} = {{total}}",
+  "sms.detailsDelivery": "Доставлено {{delivered}}, не дійшло {{undelivered}}",
+  "sms.detailsAudience": "Аудиторія на момент фіксації"
 }

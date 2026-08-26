@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { Fragment, memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { Button } from './Button'
@@ -8,7 +8,9 @@ import { SkeletonTable } from './Skeleton'
 import { useSmsCampaigns, useMarkSmsCampaignSent } from '../hooks/useApi'
 import { useToast } from './Toast'
 import { SmsSendDialog } from './SmsSendDialog'
-import { formatNumber } from '../utils/formatters'
+import { ChevronDown, ChevronRight } from 'lucide-react'
+import { formatCurrency, formatNumber } from '../utils/formatters'
+import { describeFrozenCriteria } from '../utils/smsAudience'
 import type { SmsCampaignSummary } from '../types/api'
 
 // ─── SmsCampaignList ─────────────────────────────────────────────────────────
@@ -35,6 +37,7 @@ export const SmsCampaignList = memo(function SmsCampaignList() {
   const markSent = useMarkSmsCampaignSent()
   const { addToast } = useToast()
   const [sending, setSending] = useState<SmsCampaignSummary | null>(null)
+  const [open, setOpen] = useState<string | null>(null)
 
   const campaigns = data?.campaigns ?? []
 
@@ -83,9 +86,24 @@ export const SmsCampaignList = memo(function SmsCampaignList() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {campaigns.map((c) => (
-                  <tr key={c.campaign}>
+                  <Fragment key={c.campaign}>
+                  <tr>
                     <td className="py-2.5 pr-3">
-                      <div className="font-medium text-slate-800">{c.campaign}</div>
+                      {/* The name opens the campaign. Everything a campaign was
+                          — the audience, the text, the bill — was recorded from
+                          the start and readable nowhere. */}
+                      <button
+                        type="button"
+                        onClick={() => setOpen(open === c.campaign ? null : c.campaign)}
+                        aria-expanded={open === c.campaign}
+                        className="flex items-center gap-1 font-medium text-slate-800
+                                   hover:text-purple-800"
+                      >
+                        {open === c.campaign
+                          ? <ChevronDown className="w-3.5 h-3.5" />
+                          : <ChevronRight className="w-3.5 h-3.5" />}
+                        {c.campaign}
+                      </button>
                       <div className="text-[11px] text-slate-500">
                         {t(`sms.basis${c.ltvBasis === 'margin' ? 'Margin' : 'Revenue'}`)}
                         {c.promocode ? ` · ${c.promocode}` : ''}
@@ -128,6 +146,60 @@ export const SmsCampaignList = memo(function SmsCampaignList() {
                       )}
                     </td>
                   </tr>
+
+                  {open === c.campaign && (
+                    <tr>
+                      <td colSpan={6} className="bg-slate-50/70 px-3 py-3">
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <div>
+                            <p className="text-[11px] uppercase tracking-wide text-slate-500">
+                              {t('sms.detailsMessage')}
+                            </p>
+                            {c.messageText ? (
+                              <>
+                                <pre className="mt-1 whitespace-pre-wrap text-sm
+                                                text-slate-800 font-sans">
+                                  {c.messageText}
+                                </pre>
+                                <p className="mt-1 text-xs text-slate-500 tabular-nums">
+                                  {t('sms.detailsCost', {
+                                    recipients: formatNumber(c.recipientsSent ?? c.target),
+                                    parts: c.messageParts ?? 1,
+                                    price: c.pricePerPart ?? 0,
+                                    total: c.costTotal == null
+                                      ? '—' : formatCurrency(c.costTotal),
+                                  })}
+                                </p>
+                              </>
+                            ) : (
+                              <p className="mt-1 text-sm text-slate-500">
+                                {t('sms.detailsNoMessage')}
+                              </p>
+                            )}
+                            {(c.delivered != null && c.delivered > 0) && (
+                              <p className="mt-2 text-xs text-slate-600 tabular-nums">
+                                {t('sms.detailsDelivery', {
+                                  delivered: formatNumber(c.delivered),
+                                  undelivered: formatNumber(c.undelivered ?? 0),
+                                })}
+                              </p>
+                            )}
+                          </div>
+                          <div>
+                            <p className="text-[11px] uppercase tracking-wide text-slate-500">
+                              {t('sms.detailsAudience')}
+                            </p>
+                            <ul className="mt-1 space-y-0.5 text-sm text-slate-700">
+                              {describeFrozenCriteria(c.criteria, t).map((line) => (
+                                <li key={line}>{line}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

@@ -1441,6 +1441,17 @@ export interface SmsCampaignSummary {
   members: number
   target: number
   holdout: number
+  /** The audience as frozen, in the shape the store recorded it. */
+  criteria?: Record<string, unknown>
+  /** What went out, and what it cost. Null on campaigns sent before these
+   *  were recorded — the page must then say nothing rather than guess. */
+  messageText?: string | null
+  messageParts?: number | null
+  recipientsSent?: number | null
+  pricePerPart?: number | null
+  costTotal?: number | null
+  delivered?: number | null
+  undelivered?: number | null
 }
 
 export interface SmsCampaignsResponse {
