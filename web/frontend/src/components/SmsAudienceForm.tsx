@@ -424,7 +424,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
       {/* Splitting and tier choice are one decision, so they sit in one box.
           As loose rows the tier chips were hard to find — and under "one
           group" they vanish entirely, with nothing saying why. */}
-      <Group title={t('sms.splitTitle')} hint={t(`sms.groupingHint.${audience.grouping}`)}>
+      <Group title={t('sms.splitTitle')} hint={t('sms.splitHint')}>
         <div>
           <span className="text-xs text-slate-600">{t('sms.groupingLabel')}</span>
           <div className="mt-1 flex gap-2" role="group" aria-label={t('sms.groupingLabel')}>
@@ -438,6 +438,11 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Chip>
             ))}
           </div>
+          {/* Under the control it describes. Above it — which is where it was —
+              it explained a choice the reader had not seen yet. */}
+          <p className="mt-1 text-[11px] text-slate-500 leading-snug">
+            {t(`sms.groupingHint.${audience.grouping}`)}
+          </p>
         </div>
 
         <div>
@@ -456,6 +461,9 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               aria-label={t('sms.basisLabel')}
             />
           </div>
+          <p className="mt-1 text-[11px] text-slate-500 leading-snug">
+            {t('sms.basisHint')}
+          </p>
         </div>
 
         <div>

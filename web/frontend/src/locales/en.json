@@ -926,8 +926,8 @@
   "sms.groupingLabel": "Split into",
   "sms.grouping.rfm": "Value tiers",
   "sms.grouping.single": "One group",
-  "sms.groupingHint.rfm": "Three arms by lifetime value. Anyone in none of them is dropped — that removes most one-order buyers.",
-  "sms.groupingHint.single": "One arm holding everyone the filters kept. Use this for a filtered audience — the value tiers would filter it again, silently.",
+  "sms.groupingHint.rfm": "Three arms by lifetime value. Anyone in none of them drops out — that is most one-order buyers.",
+  "sms.groupingHint.single": "One arm of everyone the filters kept. Use it for a filtered audience — tiers would narrow it again.",
   "sms.allTiersHint": "Nothing picked means all three.",
   "sms.filtersTitle": "Filters",
   "sms.filterRecency": "Days since last order",
@@ -980,7 +980,9 @@
   "sms.summaryWindow": "window {{days}} days",
   "sms.summaryFilters": "filters: {{count}}",
   "sms.summaryNoFilters": "no filters",
-  "sms.splitTitle": "How the audience is split",
-  "sms.tiersNotApplicable": "One group — there are no tiers to choose. Switch to value tiers to pick them.",
-  "sms.tierExcluded": "not in campaign"
+  "sms.splitTitle": "Arms of the campaign",
+  "sms.tiersNotApplicable": "One arm — nothing to pick.",
+  "sms.tierExcluded": "not in campaign",
+  "sms.splitHint": "An arm is what the result is measured on: each one is compared against its own control group.",
+  "sms.basisHint": "Sets the tier cut-offs and what “lifetime value” means in the filters above."
 }
