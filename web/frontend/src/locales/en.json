@@ -1019,5 +1019,11 @@
   "sms.measureTitle": "Measurement settings",
   "sms.measureOn": "split",
   "sms.measureSplit": "Compare response by value level",
-  "sms.measureSplitHint": "Answers which levels respond better, at the cost of a blunter measurement of each — every level gets its own control group."
+  "sms.measureSplitHint": "Answers which levels respond better, at the cost of a blunter measurement of each — every level gets its own control group.",
+  "sms.rangeInverted": "The “{{fields}}” range runs backwards — the first box must not exceed the second. Nothing is being counted until it does.",
+  "sms.range.recency": "days since last order",
+  "sms.range.orders": "orders",
+  "sms.range.ltv": "lifetime value",
+  "sms.range.aov": "average order",
+  "sms.range.firstOrder": "first order"
 }

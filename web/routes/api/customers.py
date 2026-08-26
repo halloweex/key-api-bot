@@ -357,7 +357,11 @@ def _sms_segment_params(
 
 
 @router.get("/customers/sms-segments")
-@limiter.limit("20/minute")
+# The wizard previews the audience live, so a manager adjusting filters spends
+# these quickly even with the typing debounced. It is an admin-only read of
+# aggregates, and the cost of refusing one is a page that stops counting
+# mid-campaign.
+@limiter.limit("60/minute")
 async def get_sms_segments(
     request: Request,
     criteria: dict = Depends(_sms_segment_params),

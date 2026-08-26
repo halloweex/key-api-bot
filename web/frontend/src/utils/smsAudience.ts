@@ -252,3 +252,26 @@ export function describeAudience(
     n === 0 ? t('sms.summaryNoFilters') : t('sms.summaryFilters', { count: n }),
   ].join(' · ')
 }
+
+/**
+ * Ranges whose edges are the wrong way round.
+ *
+ * Typing "90" into the lower box and starting on the upper one puts the filter
+ * through `90..2` on the way to `90..237`. The server refuses that — rightly,
+ * it selects nobody — but refusing it mid-keystroke turns typing a number into
+ * an error message. So the page holds the request instead, and says which pair
+ * is inverted.
+ */
+export function invertedRanges(filters: SmsAudienceFilters): string[] {
+  const pairs: Array<[string, unknown, unknown]> = [
+    ['recency', filters.recencyMin, filters.recencyMax],
+    ['orders', filters.ordersMin, filters.ordersMax],
+    ['ltv', filters.ltvMin, filters.ltvMax],
+    ['aov', filters.aovMin, filters.aovMax],
+    ['firstOrder', filters.firstOrderFrom, filters.firstOrderTo],
+  ]
+  return pairs
+    .filter(([, lo, hi]) =>
+      lo != null && hi != null && lo !== '' && hi !== '' && (lo as never) > (hi as never))
+    .map(([name]) => name)
+}

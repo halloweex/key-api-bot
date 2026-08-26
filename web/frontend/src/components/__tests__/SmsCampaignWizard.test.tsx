@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SmsCampaignWizard } from '../SmsCampaignWizard'
 import type { SmsSegmentsResponse } from '../../types/api'
@@ -182,13 +182,13 @@ async function nameCampaign(name = 'sep-brand') {
 }
 
 describe('SmsCampaignWizard', () => {
-  it('previews one arm of everybody before anything is touched', () => {
+  it('previews one arm of everybody before anything is touched', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
     // Not the tier cascade: it would drop whoever matches none of its three
     // conditions, which no default should do.
-    expect(lastPreview().get('grouping')).toBe('single')
-    expect(lastPreview().has('brand')).toBe(false)
+    await waitFor(() => expect(lastPreview().get('grouping')).toBe('single'), { timeout: 2000 })
+    await waitFor(() => expect(lastPreview().has('brand')).toBe(false), { timeout: 2000 })
   })
 
   it('applies a saved audience to the live preview', async () => {
@@ -196,6 +196,7 @@ describe('SmsCampaignWizard', () => {
 
     await pickAudience('Anua buyers')
 
+    await waitFor(() => expect(lastPreview().get('brand')).toBe('Anua'), { timeout: 2000 })
     const p = lastPreview()
     expect(p.get('grouping')).toBe('single')
     expect(p.get('brand')).toBe('Anua')
@@ -239,6 +240,7 @@ describe('SmsCampaignWizard', () => {
     expect(sent.get('grouping')).toBe('single')
     expect(sent.get('holdout_pct')).toBe('30')
     // The preview and the freeze must not diverge: same audience, same query.
+    await waitFor(() => expect(lastPreview().get('brand')).toBe('Anua'), { timeout: 2000 })
     const preview = lastPreview()
     for (const key of ['grouping', 'brand', 'holdout_pct', 'ltv_basis']) {
       expect(sent.get(key)).toBe(preview.get(key))
@@ -292,7 +294,7 @@ describe('the base window', () => {
     await userEvent.clear(field)
     await userEvent.type(field, '730')
 
-    expect(lastPreview().get('max_recency_days')).toBe('730')
+    await waitFor(() => expect(lastPreview().get('max_recency_days')).toBe('730'), { timeout: 2000 })
   })
 
   it('warns when the silence asked for is longer than the window', async () => {
@@ -362,6 +364,7 @@ describe('the saved-audience list', () => {
     await pickAudience('Anua buyers')
 
     // Grouping, holdout and the filters, all from one choice.
+    await waitFor(() => expect(lastPreview().get('brand')).toBe('Anua'), { timeout: 2000 })
     const p = lastPreview()
     expect(p.get('grouping')).toBe('single')
     expect(p.get('holdout_pct')).toBe('30')
@@ -398,14 +401,14 @@ describe('choosing tiers', () => {
 
     // Choosing a level is "who gets this", and it stands on its own: the
     // default measurement is one arm, and the levels are still on offer.
-    expect(lastPreview().get('grouping')).toBe('single')
+    await waitFor(() => expect(lastPreview().get('grouping')).toBe('single'), { timeout: 2000 })
     await pickTier('VIP')
-    expect(lastPreview().get('tier')).toBe('VIP')
+    await waitFor(() => expect(lastPreview().get('tier')).toBe('VIP'), { timeout: 2000 })
 
     // Switching to a per-level measurement does not change who was picked.
     await useValueTiers()
-    expect(lastPreview().get('tier')).toBe('VIP')
-    expect(lastPreview().get('grouping')).toBe('rfm')
+    await waitFor(() => expect(lastPreview().get('tier')).toBe('VIP'), { timeout: 2000 })
+    await waitFor(() => expect(lastPreview().get('grouping')).toBe('rfm'), { timeout: 2000 })
   })
 
   it('freezes the levels that were picked', async () => {
@@ -436,8 +439,9 @@ describe('choosing tiers', () => {
     await step('sms.wizardNext')
 
     // VIP alone: 900 to send and 100 withheld, not the 7,560 of all three.
-    expect(screen.getByText(/sms\.holdoutHint.*"target":"900".*"holdout":"100"/))
-      .toBeTruthy()
+    await waitFor(() => expect(
+      screen.getByText(/sms\.holdoutHint.*"target":"900".*"holdout":"100"/),
+    ).toBeTruthy(), { timeout: 2000 })
   })
 
   it('shows each arm its own size on the chip', async () => {
@@ -445,7 +449,9 @@ describe('choosing tiers', () => {
     await useValueTiers()
 
     // The sizes are the whole basis for deciding which arms to include.
-    expect(screen.getByRole('button', { name: /sms\.tier\.VIP · 900/ })).toBeTruthy()
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: /sms\.tier\.VIP · 900/ }),
+    ).toBeTruthy(), { timeout: 2000 })
     expect(screen.getByRole('button', { name: /sms\.tier\.CORE · 2,700/ })).toBeTruthy()
   })
 })
@@ -518,13 +524,15 @@ describe('what the campaign will be able to prove', () => {
     // One arm of 7,560 against 840 sees a lift from 1.60 pp — close to the
     // ~2 pp the only campaign there has been produced, so: tight, not
     // comfortable. That is what a 10% control buys even on the whole base.
-    expect(screen.getByText('sms.mdeTight')).toBeTruthy()
+    await waitFor(() => expect(screen.getByText('sms.mdeTight')).toBeTruthy(),
+                  { timeout: 2000 })
 
     await useValueTiers()
 
     // Split three ways, the smallest arm is 900 against 100 — nothing a real
     // offer produces would clear that.
-    expect(screen.getByText('sms.mdeHopeless')).toBeTruthy()
+    await waitFor(() => expect(screen.getByText('sms.mdeHopeless')).toBeTruthy(),
+                  { timeout: 2000 })
   })
 
   it('sharpens as the control share grows', async () => {
@@ -535,6 +543,6 @@ describe('what the campaign will be able to prove', () => {
     // Precision is bought by withholding more, not by sending more — the one
     // fact the control step exists to make obvious.
     await step('40%')
-    expect(lastPreview().get('holdout_pct')).toBe('40')
+    await waitFor(() => expect(lastPreview().get('holdout_pct')).toBe('40'), { timeout: 2000 })
   })
 })

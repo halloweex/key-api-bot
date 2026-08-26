@@ -6,6 +6,7 @@ import {
   describeAudience,
   emptyAudience,
   hasFilters,
+  invertedRanges,
 } from '../smsAudience'
 
 describe('audienceToParams', () => {
@@ -207,5 +208,21 @@ describe('describeAudience', () => {
     expect(described).toContain('sms.basisMargin')
     expect(described).toContain('sms.summaryHoldout({"pct":30})')
     expect(described).toContain('sms.summaryWindow({"days":540})')
+  })
+})
+
+describe('invertedRanges', () => {
+  it('names the pair being typed backwards', () => {
+    // "from 90" typed, "to 2" half-typed on the way to 237 — the state every
+    // range passes through, and it used to earn a 400 from the server.
+    expect(invertedRanges({ recencyMin: 90, recencyMax: 2 })).toEqual(['recency'])
+    expect(invertedRanges({ firstOrderFrom: '2026-06-01', firstOrderTo: '2026-01-01' }))
+      .toEqual(['firstOrder'])
+  })
+
+  it('says nothing about a range with one edge, or a sane one', () => {
+    expect(invertedRanges({ recencyMin: 90 })).toEqual([])
+    expect(invertedRanges({ recencyMin: 90, recencyMax: 237 })).toEqual([])
+    expect(invertedRanges({})).toEqual([])
   })
 })

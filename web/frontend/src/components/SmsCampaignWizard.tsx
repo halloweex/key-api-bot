@@ -20,7 +20,7 @@ import {
   useSmsSegments,
 } from '../hooks/useApi'
 import {
-  audienceFromPreset, audienceToParams, describeAudience,
+  audienceFromPreset, audienceToParams, describeAudience, invertedRanges,
 } from '../utils/smsAudience'
 import { clearDraft, loadDraft, saveDraft } from '../utils/smsDraft'
 import { smsCost } from '../utils/smsCost'
@@ -158,7 +158,24 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   // `campaign` is left out: it only seeds the holdout split, and a half-typed
   // name in the query key would refetch on every keystroke.
   const previewParams = useMemo(() => audienceToParams(audience), [audience])
-  const { data, isLoading, error, refetch } = useSmsSegments(previewParams)
+
+  // Typing "237" is three renders, and the segmentation is capped per minute:
+  // firing a request per keystroke spends the whole allowance on a number
+  // nobody has finished writing, and the page answers "too many requests".
+  // One request, once the typing stops.
+  const [settledParams, setSettledParams] = useState(previewParams)
+  useEffect(() => {
+    const id = setTimeout(() => setSettledParams(previewParams), 500)
+    return () => clearTimeout(id)
+  }, [previewParams])
+
+  // A half-typed range selects nobody, and asking anyway earns a 400 in the
+  // middle of writing a number.
+  const inverted = useMemo(() => invertedRanges(audience.filters), [audience.filters])
+
+  const { data, isLoading, error, refetch } = useSmsSegments(
+    settledParams, inverted.length === 0,
+  )
 
   const selectedSaved = (presetData?.presets ?? []).some(
     (p) => p.name === selectedPreset && !p.builtin,
@@ -361,7 +378,16 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                 />
 
                 <div className="pt-3 border-t border-slate-100">
-                  <SmsAudiencePreview data={data} isLoading={isLoading} />
+                  {inverted.length > 0 ? (
+                    <p className="text-sm text-amber-800 bg-amber-50 border border-amber-100
+                                  rounded-lg px-3 py-2">
+                      {t('sms.rangeInverted', {
+                        fields: inverted.map((f) => t(`sms.range.${f}`)).join(', '),
+                      })}
+                    </p>
+                  ) : (
+                    <SmsAudiencePreview data={data} isLoading={isLoading} />
+                  )}
                 </div>
 
                 <div>
