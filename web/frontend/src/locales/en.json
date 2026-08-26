@@ -846,7 +846,7 @@
   "sms.funnelNote": "The right column is how many that rule removed. Numbers shared across customer records collapse into one — the SMS goes out once.",
   "sms.exportTitle": "Export the list",
   "sms.exportDesc": "A campaign name is what lets the roster be frozen — without it the campaign never reaches step 2 and there is nothing to measure.",
-  "sms.testSend": "Test send",
+  "sms.testSend": "Test send…",
   "sms.testTitle": "Test send to one number",
   "sms.testDesc": "Check the text before a campaign. Nothing is recorded: no campaign, no roster, no opt-outs.",
   "sms.testPhone": "Recipient number",
@@ -920,9 +920,9 @@
   "sms.presetApplied": "Audience loaded",
   "sms.presetSaved": "Saved as “{{name}}”",
   "sms.presetSaveFailed": "Could not save the audience",
-  "sms.presetSaveAs": "Save this audience as",
+  "sms.presetSaveAs": "Name for this audience",
   "sms.presetSave": "Save",
-  "sms.presetNamePlaceholder": "Medi-Peel buyers",
+  "sms.presetNamePlaceholder": "VIP, quiet for 3 months",
   "sms.groupingLabel": "Split into",
   "sms.grouping.rfm": "Value tiers",
   "sms.grouping.single": "One group",
@@ -971,5 +971,7 @@
   "sms.filterGroupWhoHint": "From the customer card, not from the orders.",
   "sms.filterWindow": "Base window, days",
   "sms.filterWindowHint": "Nobody whose last order is older than this is considered at all. 30–730.",
-  "sms.windowConflict": "The base window is {{window}} days, so asking for people quiet for {{min}}+ days leaves nobody. Widen the window."
+  "sms.windowConflict": "The base window is {{window}} days, so asking for people quiet for {{min}}+ days leaves nobody. Widen the window.",
+  "sms.presetsHint": "Load a saved audience, or save the one below to reuse next time.",
+  "sms.presetSaveToggle": "save the current one"
 }

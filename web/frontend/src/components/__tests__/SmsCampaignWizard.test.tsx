@@ -101,6 +101,13 @@ async function step(name: string) {
   await userEvent.click(screen.getByRole('button', { name }))
 }
 
+/** The campaign name lives at the top of step one and gates leaving it. */
+async function nameCampaign(name = 'sep-brand') {
+  await userEvent.type(
+    screen.getByRole('textbox', { name: /sms\.campaignName/ }), name,
+  )
+}
+
 describe('SmsCampaignWizard', () => {
   it('previews the plain cohort before anything is touched', () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
@@ -124,6 +131,10 @@ describe('SmsCampaignWizard', () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
     await step('Anua buyers')
+    // The name field is behind the "save the current one" link, next to the
+    // presets it saves among — it used to be a stray field at the foot of the
+    // step, where it read as the campaign's name.
+    await step('sms.presetSaveToggle')
     await userEvent.type(
       screen.getByRole('textbox', { name: /sms\.presetSaveAs/ }), 'My list',
     )
@@ -139,12 +150,10 @@ describe('SmsCampaignWizard', () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
     await step('Anua buyers')
+    await nameCampaign()
     await step('sms.wizardNext')          // → control
     await step('30%')
     await step('sms.wizardNext')          // → message
-    await userEvent.type(
-      screen.getByRole('textbox', { name: /sms\.campaignName/ }), 'sep-brand',
-    )
     await userEvent.type(screen.getByRole('textbox', { name: /sms\.messageText/ }), 'Знижка')
     await step('sms.wizardNext')          // → launch
     await step('sms.createCampaign')
@@ -161,14 +170,27 @@ describe('SmsCampaignWizard', () => {
     }
   })
 
-  it('will not freeze a campaign without a name', async () => {
+  it('will not leave the first step without a usable name', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
-    await step('sms.wizardNext')
-    await step('sms.wizardNext')
-    // The step guard itself refuses to advance without a valid name.
-    const next = screen.getByRole('button', { name: 'sms.wizardNext' })
-    expect(next.hasAttribute('disabled')).toBe(true)
+    expect(
+      screen.getByRole('button', { name: 'sms.wizardNext' }).hasAttribute('disabled'),
+    ).toBe(true)
+
+    // A name the API would reject is no better than none.
+    await userEvent.type(
+      screen.getByRole('textbox', { name: /sms\.campaignName/ }), 'sep brand!',
+    )
+    expect(
+      screen.getByRole('button', { name: 'sms.wizardNext' }).hasAttribute('disabled'),
+    ).toBe(true)
+    expect(screen.getByText('sms.campaignRequired')).toBeTruthy()
+
+    await userEvent.clear(screen.getByRole('textbox', { name: /sms\.campaignName/ }))
+    await nameCampaign()
+    expect(
+      screen.getByRole('button', { name: 'sms.wizardNext' }).hasAttribute('disabled'),
+    ).toBe(false)
     expect(createMutate).not.toHaveBeenCalled()
   })
 })
@@ -213,6 +235,7 @@ describe('the rehearsal', () => {
   it('opens with the text that is about to be sent', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
+    await nameCampaign()
     await step('sms.wizardNext')
     await step('sms.wizardNext')
     await userEvent.type(
@@ -243,6 +266,7 @@ describe('the step footer', () => {
     // Step 1: nothing but the action.
     expect(footerOrder().at(-1)).toBe('sms.wizardNext')
 
+    await nameCampaign()
     await step('sms.wizardNext')
     // Step 2: back first, action last.
     expect(footerOrder()[0]).toBe('sms.wizardBack')

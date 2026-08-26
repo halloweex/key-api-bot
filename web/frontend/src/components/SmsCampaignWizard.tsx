@@ -125,6 +125,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   const [promocode, setPromocode] = useState('')
   const [text, setText] = useState('')
   const [presetName, setPresetName] = useState('')
+  const [savingPreset, setSavingPreset] = useState(false)
   const [testing, setTesting] = useState(false)
   const [created, setCreated] = useState<SmsCampaignSummary | null>(null)
   const [sending, setSending] = useState(false)
@@ -158,6 +159,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
       {
         onSuccess: () => {
           setPresetName('')
+          setSavingPreset(false)
           addToast({ type: 'success', title: t('sms.presetSaved', { name }) })
         },
         onError: (e: Error) =>
@@ -239,8 +241,58 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
             {/* ── 1. Audience ──────────────────────────────────────── */}
             {step === 'audience' && (
               <div className="space-y-4">
+                {/* The name comes first because it is what everything after it
+                    belongs to — and because a field at the foot of this step
+                    was being read as the campaign's name anyway. */}
                 <div>
-                  <span className="text-xs text-slate-600">{t('sms.presetsLabel')}</span>
+                  <label className="text-xs text-slate-600">
+                    <span className="block mb-1">{t('sms.campaignName')}</span>
+                    <input
+                      type="text" className={input} value={campaign}
+                      placeholder="sep-brand" maxLength={40}
+                      onChange={(e) => setCampaign(e.target.value)}
+                    />
+                  </label>
+                  {campaign.length > 0 && !campaignValid && (
+                    <p className="mt-1 text-xs text-amber-700 bg-amber-50 rounded-md px-2 py-1.5">
+                      {t('sms.campaignRequired')}
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-slate-600">{t('sms.presetsLabel')}</span>
+                    <button
+                      type="button"
+                      onClick={() => setSavingPreset(!savingPreset)}
+                      className="text-[11px] text-purple-700 hover:text-purple-900 underline"
+                    >
+                      {t('sms.presetSaveToggle')}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-0.5 mb-1">
+                    {t('sms.presetsHint')}
+                  </p>
+                  {savingPreset && (
+                    <div className="mb-2 flex flex-wrap items-end gap-2">
+                      <label className="text-xs text-slate-600">
+                        <span className="block mb-1">{t('sms.presetSaveAs')}</span>
+                        <input
+                          type="text" className={input} maxLength={60}
+                          value={presetName} placeholder={t('sms.presetNamePlaceholder')}
+                          onChange={(e) => setPresetName(e.target.value)}
+                        />
+                      </label>
+                      <Button
+                        variant="secondary" size="sm"
+                        onClick={handleSavePreset}
+                        disabled={!presetName.trim() || savePreset.isPending}
+                      >
+                        {t('sms.presetSave')}
+                      </Button>
+                    </div>
+                  )}
                   <div className="mt-1 flex flex-wrap gap-2">
                     {(presetData?.presets ?? []).map((p) => (
                       <span key={p.name} className="inline-flex items-center">
@@ -276,27 +328,13 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                   <SmsAudiencePreview data={data} isLoading={isLoading} />
                 </div>
 
-                <div className="flex flex-wrap items-end gap-2">
-                  <label className="text-xs text-slate-600">
-                    <span className="block mb-1">{t('sms.presetSaveAs')}</span>
-                    <input
-                      type="text" className={input} maxLength={60}
-                      value={presetName} placeholder={t('sms.presetNamePlaceholder')}
-                      onChange={(e) => setPresetName(e.target.value)}
-                    />
-                  </label>
-                  <Button
-                    variant="secondary" size="sm"
-                    onClick={handleSavePreset}
-                    disabled={!presetName.trim() || savePreset.isPending}
-                  >
-                    {t('sms.presetSave')}
-                  </Button>
-                </div>
-
                 <StepActions
                   primary={
-                    <Button size="sm" onClick={() => setStep('control')} disabled={target === 0}>
+                    <Button
+                      size="sm"
+                      onClick={() => setStep('control')}
+                      disabled={target === 0 || !campaignValid}
+                    >
                       {t('sms.wizardNext')}
                     </Button>
                   }
@@ -350,14 +388,6 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
               <div className="space-y-3">
                 <div className="flex flex-wrap gap-3">
                   <label className="text-xs text-slate-600">
-                    <span className="block mb-1">{t('sms.campaignName')}</span>
-                    <input
-                      type="text" className={input} value={campaign}
-                      placeholder="sep-brand" maxLength={40}
-                      onChange={(e) => setCampaign(e.target.value)}
-                    />
-                  </label>
-                  <label className="text-xs text-slate-600">
                     <span className="block mb-1">{t('sms.promocodeOptional')}</span>
                     <input
                       type="text" className={input} value={promocode}
@@ -366,11 +396,6 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                     />
                   </label>
                 </div>
-                {campaign.length > 0 && !campaignValid && (
-                  <p className="text-xs text-amber-700 bg-amber-50 rounded-md px-2 py-1.5">
-                    {t('sms.campaignRequired')}
-                  </p>
-                )}
 
                 <label className="block text-xs text-slate-600">
                   <span className="block mb-1">{t('sms.messageText')}</span>
