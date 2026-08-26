@@ -546,3 +546,25 @@ describe('what the campaign will be able to prove', () => {
     await waitFor(() => expect(lastPreview().get('holdout_pct')).toBe('40'), { timeout: 2000 })
   })
 })
+
+describe('the send dialog', () => {
+  it('opens with the text the campaign was written and priced with', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await nameCampaign()
+    await step('sms.wizardNext')
+    await step('sms.wizardNext')
+    await userEvent.type(
+      screen.getByRole('textbox', { name: /sms\.messageText/ }), 'Знижка 30%',
+    )
+    await step('sms.wizardNext')
+    await step('sms.createCampaign')
+    await step('sms.sendNow')
+
+    // Retyping it here would send something other than what was counted,
+    // priced and rehearsed one step earlier.
+    const filled = screen.getAllByRole('textbox')
+      .filter((el) => (el as HTMLTextAreaElement).value === 'Знижка 30%')
+    expect(filled.length).toBeGreaterThan(0)
+  })
+})

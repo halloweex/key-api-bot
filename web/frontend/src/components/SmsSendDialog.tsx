@@ -24,15 +24,21 @@ const SMS_LIMIT = 600
 
 interface SmsSendDialogProps {
   campaign: SmsCampaignSummary
+  /** The text the campaign was written, priced and rehearsed with. */
+  initialText?: string
   onClose: () => void
 }
 
 export const SmsSendDialog = memo(function SmsSendDialog({
   campaign,
+  initialText = '',
   onClose,
 }: SmsSendDialogProps) {
   const { t } = useTranslation()
-  const [text, setText] = useState('')
+  // Carried in from the step that wrote it. Opening empty here made the
+  // manager retype a text that had already been counted, priced and rehearsed
+  // — and what went out could then differ from what was tested.
+  const [text, setText] = useState(initialText)
   const [channel, setChannel] = useState<SmsChannel>('sms')
   const [buttonCaption, setButtonCaption] = useState('')
   const [buttonUrl, setButtonUrl] = useState('')

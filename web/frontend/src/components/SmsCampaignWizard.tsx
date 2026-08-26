@@ -621,7 +621,9 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
         <SmsTestSendDialog initialText={text} onClose={() => setTesting(false)} />
       )}
       {sending && created && (
-        <SmsSendDialog campaign={created} onClose={() => setSending(false)} />
+        <SmsSendDialog
+          campaign={created} initialText={text} onClose={() => setSending(false)}
+        />
       )}
     </Card>
   )
