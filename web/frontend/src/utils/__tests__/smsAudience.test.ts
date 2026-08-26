@@ -136,3 +136,22 @@ describe('audienceFromPreset', () => {
     expect(audienceFromPreset('rfm')).toEqual(emptyAudience())
   })
 })
+
+describe('the base window', () => {
+  it('always travels, because the server applies it whether or not it is sent', () => {
+    const p = new URLSearchParams(audienceToParams(emptyAudience()))
+    expect(p.get('max_recency_days')).toBe('270')
+  })
+
+  it('carries a widened window', () => {
+    const p = new URLSearchParams(audienceToParams({
+      ...emptyAudience(), maxRecencyDays: 730,
+    }))
+    expect(p.get('max_recency_days')).toBe('730')
+  })
+
+  it('comes back from a preset, and falls back when one predates it', () => {
+    expect(audienceFromPreset({ maxRecencyDays: 540 }).maxRecencyDays).toBe(540)
+    expect(audienceFromPreset({ grouping: 'single' }).maxRecencyDays).toBe(270)
+  })
+})

@@ -184,3 +184,27 @@ describe('the filters are visible without hunting for them', () => {
     expect(screen.getByLabelText('sms.filterRecency min')).toBeTruthy()
   })
 })
+
+describe('the base window', () => {
+  it('widens the audience beyond the default 270 days', async () => {
+    // "Came in 2024 and has been quiet since" was unreachable while this was
+    // hardcoded: the outer window cut it before any filter ran.
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    const field = screen.getByLabelText('sms.filterWindow')
+    await userEvent.clear(field)
+    await userEvent.type(field, '730')
+
+    expect(lastPreview().get('max_recency_days')).toBe('730')
+  })
+
+  it('warns when the silence asked for is longer than the window', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await userEvent.type(screen.getByLabelText('sms.filterRecency min'), '400')
+
+    // 400 days of silence inside a 270-day window is nobody, and the funnel
+    // alone would not say why.
+    expect(screen.getByText(/sms\.windowConflict/)).toBeTruthy()
+  })
+})

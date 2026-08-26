@@ -948,7 +948,7 @@
   "sms.filterSource": "Ordered through",
   "sms.filterPromocode": "Used promocode",
   "sms.filterBoughtWithin": "…within the last N days",
-  "sms.filterBoughtWithinHint": "Applies to brand, category, source and promocode.",
+  "sms.filterBoughtWithinHint": "Narrows the rules in this group to a recent window. Leave empty for ever.",
   "sms.clearFilters": "Clear filters",
   "sms.audienceEmpty": "Nobody matches these filters. The breakdown below says which rule emptied the list.",
   "sms.ruleSingleGroup": "Everyone the filters kept, last order within {{days}} days",
@@ -960,5 +960,16 @@
   "sms.createCampaign": "Create campaign",
   "sms.creating": "Recording the roster…",
   "sms.campaignCreated": "Campaign “{{campaign}}” created",
-  "sms.campaignCreateFailed": "Could not create the campaign"
+  "sms.campaignCreateFailed": "Could not create the campaign",
+  "sms.filterGroupWhen": "When they bought",
+  "sms.filterGroupWhenHint": "The base window is applied first, before every other rule.",
+  "sms.filterGroupHowMuch": "How much they bought",
+  "sms.filterGroupHowMuchHint": "Counted over their whole history, not over the filtered part of it.",
+  "sms.filterGroupWhat": "What they bought",
+  "sms.filterGroupWhatHint": "Did they ever buy this. Several rules here mean all of them at once.",
+  "sms.filterGroupWho": "Who they are",
+  "sms.filterGroupWhoHint": "From the customer card, not from the orders.",
+  "sms.filterWindow": "Base window, days",
+  "sms.filterWindowHint": "Nobody whose last order is older than this is considered at all. 30–730.",
+  "sms.windowConflict": "The base window is {{window}} days, so asking for people quiet for {{min}}+ days leaves nobody. Widen the window."
 }

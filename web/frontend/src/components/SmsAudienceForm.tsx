@@ -5,7 +5,9 @@ import { Badge } from './Badge'
 import { Button } from './Button'
 import { Select } from './Select'
 import { useBrands, useCategories } from '../hooks/useApi'
-import { countFilters } from '../utils/smsAudience'
+import {
+  countFilters, DEFAULT_WINDOW_DAYS, MAX_WINDOW_DAYS, MIN_WINDOW_DAYS,
+} from '../utils/smsAudience'
 import type {
   SmsAudienceCriteria, SmsAudienceFilters, SmsGrouping, SmsLtvBasis, SmsTier,
 } from '../types/api'
@@ -148,6 +150,23 @@ function MultiPicker({
   )
 }
 
+/** One family of filters, with the sentence that says what the family means. */
+function Group({
+  title, hint, children,
+}: {
+  title: string
+  hint: string
+  children: React.ReactNode
+}) {
+  return (
+    <section className="rounded-md border border-slate-100 p-3">
+      <h4 className="text-xs font-medium text-slate-700">{title}</h4>
+      <p className="text-[11px] text-slate-500 mt-0.5 mb-2 leading-snug">{hint}</p>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{children}</div>
+    </section>
+  )
+}
+
 export const SmsAudienceForm = memo(function SmsAudienceForm({
   audience,
   onChange,
@@ -274,148 +293,192 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
         </button>
 
         {open && (
-          <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <NumberPair
-              label={t('sms.filterRecency')}
-              hint={t('sms.filterRecencyHint')}
-              from={filters.recencyMin} to={filters.recencyMax}
-              onFrom={(v) => setFilter('recencyMin', v)}
-              onTo={(v) => setFilter('recencyMax', v)}
-            />
-            <NumberPair
-              label={t('sms.filterOrders')}
-              from={filters.ordersMin} to={filters.ordersMax}
-              onFrom={(v) => setFilter('ordersMin', v)}
-              onTo={(v) => setFilter('ordersMax', v)}
-            />
-            <NumberPair
-              label={t('sms.filterLtv')}
-              hint={t('sms.filterLtvHint')}
-              from={filters.ltvMin} to={filters.ltvMax}
-              onFrom={(v) => setFilter('ltvMin', v)}
-              onTo={(v) => setFilter('ltvMax', v)}
-              step={100}
-            />
-            <NumberPair
-              label={t('sms.filterAov')}
-              from={filters.aovMin} to={filters.aovMax}
-              onFrom={(v) => setFilter('aovMin', v)}
-              onTo={(v) => setFilter('aovMax', v)}
-              step={100}
-            />
-
-            <div>
-              <span className="text-xs text-slate-600">{t('sms.filterFirstOrder')}</span>
-              <div className="mt-1 flex items-center gap-2">
+          <div className="mt-3 space-y-4">
+            {/* ── When they bought ─────────────────────────────────── */}
+            <Group title={t('sms.filterGroupWhen')} hint={t('sms.filterGroupWhenHint')}>
+              <div>
+                <span className="text-xs text-slate-600">{t('sms.filterWindow')}</span>
                 <input
-                  type="date" className={text} aria-label={t('sms.filterFirstOrderFrom')}
-                  value={filters.firstOrderFrom ?? ''}
-                  onChange={(e) => setFilter('firstOrderFrom', e.target.value)}
+                  type="number"
+                  min={MIN_WINDOW_DAYS}
+                  max={MAX_WINDOW_DAYS}
+                  className={`${text} mt-1 w-24 tabular-nums`}
+                  aria-label={t('sms.filterWindow')}
+                  value={audience.maxRecencyDays}
+                  onChange={(e) => {
+                    const raw = Number(e.target.value)
+                    // Clamped rather than validated: an out-of-range window is
+                    // a 422 from the server and an empty screen here.
+                    const days = Number.isFinite(raw)
+                      ? Math.min(MAX_WINDOW_DAYS, Math.max(MIN_WINDOW_DAYS, raw))
+                      : DEFAULT_WINDOW_DAYS
+                    onChange({ ...audience, maxRecencyDays: days })
+                  }}
                 />
-                <span className="text-slate-400 text-xs">—</span>
-                <input
-                  type="date" className={text} aria-label={t('sms.filterFirstOrderTo')}
-                  value={filters.firstOrderTo ?? ''}
-                  onChange={(e) => setFilter('firstOrderTo', e.target.value)}
-                />
+                <p className="mt-1 text-[11px] text-slate-500 leading-snug">
+                  {t('sms.filterWindowHint')}
+                </p>
               </div>
-            </div>
 
-            <div>
-              <span className="text-xs text-slate-600">{t('sms.filterCity')}</span>
-              <input
-                type="text"
-                className={`${text} mt-1 w-full`}
-                placeholder={t('sms.filterCityPlaceholder')}
-                aria-label={t('sms.filterCity')}
-                value={(filters.cities ?? []).join(', ')}
-                onChange={(e) =>
-                  setFilter(
-                    'cities',
-                    e.target.value.split(',').map((c) => c.trim()).filter(Boolean),
-                  )}
+              <NumberPair
+                label={t('sms.filterRecency')}
+                hint={t('sms.filterRecencyHint')}
+                from={filters.recencyMin} to={filters.recencyMax}
+                onFrom={(v) => setFilter('recencyMin', v)}
+                onTo={(v) => setFilter('recencyMax', v)}
               />
-            </div>
 
-            <MultiPicker
-              label={t('sms.filterBrand')}
-              options={brandOptions}
-              values={filters.brands ?? []}
-              onChange={(v) => setFilter('brands', v)}
-              placeholder={t('sms.filterBrandPlaceholder')}
-            />
-
-            <MultiPicker
-              label={t('sms.filterCategory')}
-              options={categoryOptions}
-              values={(filters.categoryIds ?? []).map(String)}
-              onChange={(v) => setFilter('categoryIds', v.map(Number))}
-              placeholder={t('sms.filterCategoryPlaceholder')}
-            />
-
-            <div>
-              <span className="text-xs text-slate-600">{t('sms.filterSource')}</span>
-              <div className="mt-1 flex flex-wrap gap-2">
-                {SOURCES.map((s) => (
-                  <Chip
-                    key={s.id}
-                    active={(filters.sourceIds ?? []).includes(s.id)}
-                    onClick={() => {
-                      const current = filters.sourceIds ?? []
-                      setFilter(
-                        'sourceIds',
-                        current.includes(s.id)
-                          ? current.filter((x) => x !== s.id)
-                          : [...current, s.id],
-                      )
-                    }}
-                  >
-                    {s.label}
-                  </Chip>
-                ))}
+              <div>
+                <span className="text-xs text-slate-600">{t('sms.filterFirstOrder')}</span>
+                <div className="mt-1 flex items-center gap-2">
+                  <input
+                    type="date" className={text} aria-label={t('sms.filterFirstOrderFrom')}
+                    value={filters.firstOrderFrom ?? ''}
+                    onChange={(e) => setFilter('firstOrderFrom', e.target.value)}
+                  />
+                  <span className="text-slate-400 text-xs">—</span>
+                  <input
+                    type="date" className={text} aria-label={t('sms.filterFirstOrderTo')}
+                    value={filters.firstOrderTo ?? ''}
+                    onChange={(e) => setFilter('firstOrderTo', e.target.value)}
+                  />
+                </div>
               </div>
-            </div>
+            </Group>
 
-            <div>
-              <span className="text-xs text-slate-600">{t('sms.filterPromocode')}</span>
-              <input
-                type="text"
-                className={`${text} mt-1 w-full`}
-                placeholder="KS-AUG"
-                maxLength={40}
-                aria-label={t('sms.filterPromocode')}
-                value={filters.promocodeUsed ?? ''}
-                onChange={(e) => setFilter('promocodeUsed', e.target.value)}
-              />
-            </div>
-
-            <div>
-              <span className="text-xs text-slate-600">{t('sms.filterBoughtWithin')}</span>
-              <input
-                type="number"
-                className={`${text} mt-1 w-24 tabular-nums`}
-                aria-label={t('sms.filterBoughtWithin')}
-                value={filters.boughtWithinDays ?? ''}
-                onChange={(e) =>
-                  setFilter(
-                    'boughtWithinDays',
-                    e.target.value === '' ? undefined : Number(e.target.value),
-                  )}
-              />
-              <p className="mt-1 text-[11px] text-slate-500">
-                {t('sms.filterBoughtWithinHint')}
+            {/* The one contradiction the two time rules can produce: asking for
+                people quieter than the window itself returns nobody, and the
+                funnel alone would not say why. */}
+            {filters.recencyMin != null && filters.recencyMin >= audience.maxRecencyDays && (
+              <p className="text-xs text-amber-700 bg-amber-50 rounded-md px-2 py-1.5">
+                {t('sms.windowConflict', {
+                  window: audience.maxRecencyDays, min: filters.recencyMin,
+                })}
               </p>
-            </div>
+            )}
+
+            {/* ── How much they bought ─────────────────────────────── */}
+            <Group title={t('sms.filterGroupHowMuch')} hint={t('sms.filterGroupHowMuchHint')}>
+              <NumberPair
+                label={t('sms.filterOrders')}
+                from={filters.ordersMin} to={filters.ordersMax}
+                onFrom={(v) => setFilter('ordersMin', v)}
+                onTo={(v) => setFilter('ordersMax', v)}
+              />
+              <NumberPair
+                label={t('sms.filterLtv')}
+                hint={t('sms.filterLtvHint')}
+                from={filters.ltvMin} to={filters.ltvMax}
+                onFrom={(v) => setFilter('ltvMin', v)}
+                onTo={(v) => setFilter('ltvMax', v)}
+                step={100}
+              />
+              <NumberPair
+                label={t('sms.filterAov')}
+                from={filters.aovMin} to={filters.aovMax}
+                onFrom={(v) => setFilter('aovMin', v)}
+                onTo={(v) => setFilter('aovMax', v)}
+                step={100}
+              />
+            </Group>
+
+            {/* ── What they bought ─────────────────────────────────── */}
+            <Group title={t('sms.filterGroupWhat')} hint={t('sms.filterGroupWhatHint')}>
+              <MultiPicker
+                label={t('sms.filterBrand')}
+                options={brandOptions}
+                values={filters.brands ?? []}
+                onChange={(v) => setFilter('brands', v)}
+                placeholder={t('sms.filterBrandPlaceholder')}
+              />
+              <MultiPicker
+                label={t('sms.filterCategory')}
+                options={categoryOptions}
+                values={(filters.categoryIds ?? []).map(String)}
+                onChange={(v) => setFilter('categoryIds', v.map(Number))}
+                placeholder={t('sms.filterCategoryPlaceholder')}
+              />
+              <div>
+                <span className="text-xs text-slate-600">{t('sms.filterSource')}</span>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {SOURCES.map((s) => (
+                    <Chip
+                      key={s.id}
+                      active={(filters.sourceIds ?? []).includes(s.id)}
+                      onClick={() => {
+                        const current = filters.sourceIds ?? []
+                        setFilter(
+                          'sourceIds',
+                          current.includes(s.id)
+                            ? current.filter((x) => x !== s.id)
+                            : [...current, s.id],
+                        )
+                      }}
+                    >
+                      {s.label}
+                    </Chip>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <span className="text-xs text-slate-600">{t('sms.filterPromocode')}</span>
+                <input
+                  type="text"
+                  className={`${text} mt-1 w-full`}
+                  placeholder="KS-AUG"
+                  maxLength={40}
+                  aria-label={t('sms.filterPromocode')}
+                  value={filters.promocodeUsed ?? ''}
+                  onChange={(e) => setFilter('promocodeUsed', e.target.value)}
+                />
+              </div>
+              {/* Sits inside this group because it qualifies only this group:
+                  it is "bought that, recently", not a rule of its own. */}
+              <div>
+                <span className="text-xs text-slate-600">{t('sms.filterBoughtWithin')}</span>
+                <input
+                  type="number"
+                  className={`${text} mt-1 w-24 tabular-nums`}
+                  aria-label={t('sms.filterBoughtWithin')}
+                  value={filters.boughtWithinDays ?? ''}
+                  onChange={(e) =>
+                    setFilter(
+                      'boughtWithinDays',
+                      e.target.value === '' ? undefined : Number(e.target.value),
+                    )}
+                />
+                <p className="mt-1 text-[11px] text-slate-500 leading-snug">
+                  {t('sms.filterBoughtWithinHint')}
+                </p>
+              </div>
+            </Group>
+
+            {/* ── Who they are ─────────────────────────────────────── */}
+            <Group title={t('sms.filterGroupWho')} hint={t('sms.filterGroupWhoHint')}>
+              <div>
+                <span className="text-xs text-slate-600">{t('sms.filterCity')}</span>
+                <input
+                  type="text"
+                  className={`${text} mt-1 w-full`}
+                  placeholder={t('sms.filterCityPlaceholder')}
+                  aria-label={t('sms.filterCity')}
+                  value={(filters.cities ?? []).join(', ')}
+                  onChange={(e) =>
+                    setFilter(
+                      'cities',
+                      e.target.value.split(',').map((c) => c.trim()).filter(Boolean),
+                    )}
+                />
+              </div>
+            </Group>
 
             {active > 0 && (
-              <div className="sm:col-span-2 lg:col-span-3">
-                <Button
-                  variant="secondary" size="sm"
-                  onClick={() => onChange({ ...audience, filters: {} })}
-                >
-                  {t('sms.clearFilters')}
-                </Button>
-              </div>
+              <Button
+                variant="secondary" size="sm"
+                onClick={() => onChange({ ...audience, filters: {} })}
+              >
+                {t('sms.clearFilters')}
+              </Button>
             )}
           </div>
         )}

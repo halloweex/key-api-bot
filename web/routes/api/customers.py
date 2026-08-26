@@ -203,7 +203,9 @@ def _sms_segment_params(
         description="CORE cut-off; defaults to 5000 (revenue) / 2750 (margin)",
     ),
     core_min_orders: int = Query(2, ge=2, le=50),
-    reactivation_max_recency: int = Query(120, ge=7, le=730),
+    # Optional so a window narrower than the default does not become an error:
+    # only a value somebody actually typed can contradict the window.
+    reactivation_max_recency: Optional[int] = Query(None, ge=7, le=730),
     sales_type: Optional[str] = Query("retail"),
     holdout_pct: int = Query(10, ge=0, le=50),
     campaign: str = Query("default", pattern=_CAMPAIGN_PATTERN),
@@ -277,6 +279,12 @@ def _sms_segment_params(
         raise HTTPException(
             status_code=400, detail="core_ltv must not exceed vip_ltv",
         )
+    if reactivation_max_recency is None:
+        # The reactivation window cannot outlast the base window it lives in.
+        # Pinning it at 120 made "last 60 days" a 400 rather than a narrower
+        # audience, which is the opposite of what the control is for.
+        reactivation_max_recency = min(120, max_recency_days)
+
     if reactivation_max_recency > max_recency_days:
         raise HTTPException(
             status_code=400,

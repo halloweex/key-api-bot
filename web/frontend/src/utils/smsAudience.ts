@@ -21,11 +21,19 @@ import type {
 
 export const DEFAULT_HOLDOUT_PCT = 10
 
+// The base window, in days: the outermost rule, applied before every filter.
+// It has a floor and a ceiling on the server (30..730); the form clamps to the
+// same range so a typo is a narrower audience rather than a 422.
+export const DEFAULT_WINDOW_DAYS = 270
+export const MIN_WINDOW_DAYS = 30
+export const MAX_WINDOW_DAYS = 730
+
 export function emptyAudience(): SmsAudienceCriteria {
   return {
     grouping: 'rfm',
     ltvBasis: 'margin',
     holdoutPct: DEFAULT_HOLDOUT_PCT,
+    maxRecencyDays: DEFAULT_WINDOW_DAYS,
     tiers: [],
     filters: {},
   }
@@ -85,6 +93,7 @@ export function audienceToParams(
     ltv_basis: audience.ltvBasis,
     holdout_pct: String(audience.holdoutPct),
     grouping: audience.grouping,
+    max_recency_days: String(audience.maxRecencyDays),
   })
 
   // Tier subsets only mean something when there are tiers. Sending them with
@@ -185,6 +194,7 @@ export function audienceFromPreset(raw: unknown): SmsAudienceCriteria {
       ? (src.ltvBasis as SmsLtvBasis)
       : base.ltvBasis,
     holdoutPct: num(src.holdoutPct) ?? base.holdoutPct,
+    maxRecencyDays: num(src.maxRecencyDays) ?? base.maxRecencyDays,
     tiers,
     filters,
   }

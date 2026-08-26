@@ -948,7 +948,7 @@
   "sms.filterSource": "Замовляли через",
   "sms.filterPromocode": "Використали промокод",
   "sms.filterBoughtWithin": "…за останні N днів",
-  "sms.filterBoughtWithinHint": "Стосується бренду, категорії, джерела та промокоду.",
+  "sms.filterBoughtWithinHint": "Звужує правила цієї групи до недавнього вікна. Порожньо — за весь час.",
   "sms.clearFilters": "Скинути фільтри",
   "sms.audienceEmpty": "Під ці фільтри не підпадає ніхто. Розклад нижче показує, яке правило спорожнило список.",
   "sms.ruleSingleGroup": "Усі, кого лишили фільтри, останнє замовлення в межах {{days}} днів",
@@ -960,5 +960,16 @@
   "sms.createCampaign": "Створити кампанію",
   "sms.creating": "Фіксуємо ростер…",
   "sms.campaignCreated": "Кампанію «{{campaign}}» створено",
-  "sms.campaignCreateFailed": "Не вдалося створити кампанію"
+  "sms.campaignCreateFailed": "Не вдалося створити кампанію",
+  "sms.filterGroupWhen": "Коли купували",
+  "sms.filterGroupWhenHint": "Вікно бази застосовується першим, перед усіма іншими правилами.",
+  "sms.filterGroupHowMuch": "Скільки купували",
+  "sms.filterGroupHowMuchHint": "Рахується за всю історію, а не за відфільтровану її частину.",
+  "sms.filterGroupWhat": "Що купували",
+  "sms.filterGroupWhatHint": "Чи купували вони це взагалі. Кілька правил тут означають усі разом.",
+  "sms.filterGroupWho": "Хто вони",
+  "sms.filterGroupWhoHint": "З картки покупця, не із замовлень.",
+  "sms.filterWindow": "Вікно бази, днів",
+  "sms.filterWindowHint": "Той, чиє останнє замовлення старше за це, не розглядається взагалі. 30–730.",
+  "sms.windowConflict": "Вікно бази — {{window}} днів, тож запит на тих, хто мовчить {{min}}+ днів, не лишає нікого. Розширте вікно."
 }

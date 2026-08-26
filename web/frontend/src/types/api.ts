@@ -1340,6 +1340,8 @@ export interface SmsAudienceCriteria {
   grouping: SmsGrouping
   ltvBasis: SmsLtvBasis
   holdoutPct: number
+  /** The base window: nobody whose last order is older than this is considered. */
+  maxRecencyDays: number
   tiers: SmsTier[]
   filters: SmsAudienceFilters
 }

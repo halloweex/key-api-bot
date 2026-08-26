@@ -293,3 +293,37 @@ class TestCreateCampaign:
 
     def test_creating_needs_a_session(self, client):
         assert client.post(CAMPAIGNS, params={"campaign": "x"}).status_code == 401
+
+
+class TestBaseWindow:
+    """The outermost rule: it runs before every filter."""
+
+    def test_the_window_reaches_the_store(self, client, store):
+        client.get(SEGMENTS, params={"max_recency_days": 730}, headers=_headers())
+        assert store.calls[-1]["max_recency_days"] == 730
+
+    def test_a_narrow_window_narrows_reactivation_instead_of_failing(self, client, store):
+        """A 60-day window used to be a 400.
+
+        `reactivation_max_recency` defaulted to 120 and the validator refused a
+        window smaller than it — so asking for a recent audience produced an
+        error rather than a smaller one.
+        """
+        r = client.get(SEGMENTS, params={"max_recency_days": 60}, headers=_headers())
+
+        assert r.status_code == 200, r.text
+        assert store.calls[-1]["reactivation_max_recency"] == 60
+
+    def test_an_explicit_contradiction_is_still_refused(self, client, store):
+        r = client.get(
+            SEGMENTS,
+            params={"max_recency_days": 60, "reactivation_max_recency": 120},
+            headers=_headers(),
+        )
+        assert r.status_code == 400
+        assert "reactivation_max_recency" in r.json()["detail"]
+
+    def test_the_default_window_keeps_the_historical_reactivation_rule(self, client, store):
+        client.get(SEGMENTS, headers=_headers())
+        assert store.calls[-1]["max_recency_days"] == 270
+        assert store.calls[-1]["reactivation_max_recency"] == 120
