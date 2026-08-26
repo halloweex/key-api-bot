@@ -917,7 +917,7 @@
   "sms.presetsLabel": "Збережені аудиторії",
   "sms.presetBuiltin": "вбудована",
   "sms.presetDelete": "Видалити аудиторію {{name}}",
-  "sms.presetApplied": "Аудиторію завантажено",
+  "sms.presetApplied": "Аудиторію «{{name}}» завантажено — фільтри підставлено",
   "sms.presetSaved": "Збережено як «{{name}}»",
   "sms.presetSaveFailed": "Не вдалося зберегти аудиторію",
   "sms.presetSaveAs": "Назва для цієї аудиторії",
@@ -972,6 +972,8 @@
   "sms.filterWindow": "Вікно бази, днів",
   "sms.filterWindowHint": "Той, чиє останнє замовлення старше за це, не розглядається взагалі. 30–730.",
   "sms.windowConflict": "Вікно бази — {{window}} днів, тож запит на тих, хто мовчить {{min}}+ днів, не лишає нікого. Розширте вікно.",
-  "sms.presetsHint": "Завантажте збережену аудиторію або збережіть нинішню, щоб повторити її наступного разу.",
-  "sms.presetSaveToggle": "зберегти нинішню"
+  "sms.presetsHint": "Вибір підставляє всі контроли, з яких її зібрано. Щойно щось зміните — це вже нова аудиторія.",
+  "sms.presetSaveToggle": "зберегти нинішню",
+  "sms.presetsPlaceholder": "Оберіть збережену аудиторію",
+  "sms.presetDeleteSelected": "Видалити"
 }

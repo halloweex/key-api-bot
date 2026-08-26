@@ -917,7 +917,7 @@
   "sms.presetsLabel": "Saved audiences",
   "sms.presetBuiltin": "built-in",
   "sms.presetDelete": "Delete audience {{name}}",
-  "sms.presetApplied": "Audience loaded",
+  "sms.presetApplied": "Audience “{{name}}” loaded — filters filled in",
   "sms.presetSaved": "Saved as “{{name}}”",
   "sms.presetSaveFailed": "Could not save the audience",
   "sms.presetSaveAs": "Name for this audience",
@@ -972,6 +972,8 @@
   "sms.filterWindow": "Base window, days",
   "sms.filterWindowHint": "Nobody whose last order is older than this is considered at all. 30–730.",
   "sms.windowConflict": "The base window is {{window}} days, so asking for people quiet for {{min}}+ days leaves nobody. Widen the window.",
-  "sms.presetsHint": "Load a saved audience, or save the one below to reuse next time.",
-  "sms.presetSaveToggle": "save the current one"
+  "sms.presetsHint": "Choosing one fills in every control it was built from. Edit anything and it becomes a new audience.",
+  "sms.presetSaveToggle": "save the current one",
+  "sms.presetsPlaceholder": "Choose a saved audience",
+  "sms.presetDeleteSelected": "Delete"
 }

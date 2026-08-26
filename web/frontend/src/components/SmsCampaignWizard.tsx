@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Check, X } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { Button } from './Button'
-import { Badge } from './Badge'
+import { Select } from './Select'
 import { ApiErrorState } from './ApiErrorState'
 import { SmsAudienceForm } from './SmsAudienceForm'
 import { SmsAudiencePreview } from './SmsAudiencePreview'
@@ -126,6 +126,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   const [text, setText] = useState('')
   const [presetName, setPresetName] = useState('')
   const [savingPreset, setSavingPreset] = useState(false)
+  const [selectedPreset, setSelectedPreset] = useState('')
   const [testing, setTesting] = useState(false)
   const [created, setCreated] = useState<SmsCampaignSummary | null>(null)
   const [sending, setSending] = useState(false)
@@ -142,13 +143,31 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   const previewParams = useMemo(() => audienceToParams(audience), [audience])
   const { data, isLoading, error, refetch } = useSmsSegments(previewParams)
 
+  const selectedSaved = (presetData?.presets ?? []).some(
+    (p) => p.name === selectedPreset && !p.builtin,
+  )
+
   const campaignValid = CAMPAIGN_PATTERN.test(campaign)
   const target = data?.totals.target ?? 0
   const cost = useMemo(() => smsCost(text.trim()), [text])
 
-  function applyPreset(criteria: unknown) {
-    setAudience(audienceFromPreset(criteria))
-    addToast({ type: 'success', title: t('sms.presetApplied') })
+  function handlePickPreset(picked: string | null) {
+    const name = picked ?? ''
+    setSelectedPreset(name)
+    if (!name) return
+    const preset = (presetData?.presets ?? []).find((p) => p.name === name)
+    if (!preset) return
+    // Picking an audience fills in every control it was built from — grouping,
+    // basis, holdout, window and each filter — so the next campaign to the same
+    // people is the same campaign, not one assembled from memory.
+    setAudience(audienceFromPreset(preset.criteria))
+    addToast({ type: 'success', title: t('sms.presetApplied', { name }) })
+  }
+
+  /** Editing the form means the list no longer describes what is on screen. */
+  function editAudience(next: SmsAudienceCriteria) {
+    setAudience(next)
+    setSelectedPreset('')
   }
 
   function handleSavePreset() {
@@ -160,6 +179,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
         onSuccess: () => {
           setPresetName('')
           setSavingPreset(false)
+          setSelectedPreset(name)
           addToast({ type: 'success', title: t('sms.presetSaved', { name }) })
         },
         onError: (e: Error) =>
@@ -261,8 +281,33 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                 </div>
 
                 <div>
+                  <span className="text-xs text-slate-600">{t('sms.presetsLabel')}</span>
+                  <p className="text-[11px] text-slate-500 mt-0.5 mb-1">
+                    {t('sms.presetsHint')}
+                  </p>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs text-slate-600">{t('sms.presetsLabel')}</span>
+                    <Select
+                      options={(presetData?.presets ?? []).map((p) => ({
+                        value: p.name,
+                        label: p.builtin ? `${p.name} · ${t('sms.presetBuiltin')}` : p.name,
+                      }))}
+                      value={selectedPreset}
+                      onChange={handlePickPreset}
+                      placeholder={t('sms.presetsPlaceholder')}
+                      variant="compact"
+                      aria-label={t('sms.presetsLabel')}
+                    />
+                    {selectedSaved && (
+                      <Button
+                        variant="secondary" size="sm"
+                        onClick={() => {
+                          deletePreset.mutate(selectedPreset)
+                          setSelectedPreset('')
+                        }}
+                      >
+                        {t('sms.presetDeleteSelected')}
+                      </Button>
+                    )}
                     <button
                       type="button"
                       onClick={() => setSavingPreset(!savingPreset)}
@@ -271,11 +316,8 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                       {t('sms.presetSaveToggle')}
                     </button>
                   </div>
-                  <p className="text-[11px] text-slate-500 mt-0.5 mb-1">
-                    {t('sms.presetsHint')}
-                  </p>
                   {savingPreset && (
-                    <div className="mb-2 flex flex-wrap items-end gap-2">
+                    <div className="mt-2 flex flex-wrap items-end gap-2">
                       <label className="text-xs text-slate-600">
                         <span className="block mb-1">{t('sms.presetSaveAs')}</span>
                         <input
@@ -293,36 +335,9 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                       </Button>
                     </div>
                   )}
-                  <div className="mt-1 flex flex-wrap gap-2">
-                    {(presetData?.presets ?? []).map((p) => (
-                      <span key={p.name} className="inline-flex items-center">
-                        <button
-                          type="button"
-                          onClick={() => applyPreset(p.criteria)}
-                          className="px-3 py-1.5 text-xs rounded-md border border-slate-200
-                                     text-slate-600 hover:border-purple-300 hover:text-purple-800"
-                        >
-                          {p.name}
-                          {p.builtin && (
-                            <Badge tone="slate">{t('sms.presetBuiltin')}</Badge>
-                          )}
-                        </button>
-                        {!p.builtin && (
-                          <button
-                            type="button"
-                            aria-label={t('sms.presetDelete', { name: p.name })}
-                            onClick={() => deletePreset.mutate(p.name)}
-                            className="ml-1 text-slate-300 hover:text-red-600"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-                      </span>
-                    ))}
-                  </div>
                 </div>
 
-                <SmsAudienceForm audience={audience} onChange={setAudience} />
+                <SmsAudienceForm audience={audience} onChange={editAudience} />
 
                 <div className="pt-3 border-t border-slate-100">
                   <SmsAudiencePreview data={data} isLoading={isLoading} />
@@ -354,7 +369,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                       key={pct}
                       type="button"
                       aria-pressed={audience.holdoutPct === pct}
-                      onClick={() => setAudience({ ...audience, holdoutPct: pct })}
+                      onClick={() => editAudience({ ...audience, holdoutPct: pct })}
                       className={`px-3 py-1.5 text-xs rounded-md border transition-colors
                                   tabular-nums ${
                         audience.holdoutPct === pct

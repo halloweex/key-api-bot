@@ -101,6 +101,13 @@ async function step(name: string) {
   await userEvent.click(screen.getByRole('button', { name }))
 }
 
+/** Load a saved audience from the list. */
+async function pickAudience(name: string) {
+  await userEvent.selectOptions(
+    screen.getByRole('combobox', { name: /sms\.presetsLabel/ }), name,
+  )
+}
+
 /** The campaign name lives at the top of step one and gates leaving it. */
 async function nameCampaign(name = 'sep-brand') {
   await userEvent.type(
@@ -119,7 +126,7 @@ describe('SmsCampaignWizard', () => {
   it('applies a saved audience to the live preview', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
-    await step('Anua buyers')
+    await pickAudience('Anua buyers')
 
     const p = lastPreview()
     expect(p.get('grouping')).toBe('single')
@@ -130,7 +137,7 @@ describe('SmsCampaignWizard', () => {
   it('saves the audience currently on screen under a name', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
-    await step('Anua buyers')
+    await pickAudience('Anua buyers')
     // The name field is behind the "save the current one" link, next to the
     // presets it saves among — it used to be a stray field at the foot of the
     // step, where it read as the campaign's name.
@@ -149,7 +156,7 @@ describe('SmsCampaignWizard', () => {
   it('freezes exactly the audience that was previewed', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
-    await step('Anua buyers')
+    await pickAudience('Anua buyers')
     await nameCampaign()
     await step('sms.wizardNext')          // → control
     await step('30%')
@@ -277,5 +284,42 @@ describe('the step footer', () => {
     expect(footerOrder()[0]).toBe('sms.wizardBack')
     expect(footerOrder()).toContain('sms.testSend')
     expect(footerOrder().at(-1)).toBe('sms.wizardNext')
+  })
+})
+
+describe('the saved-audience list', () => {
+  it('fills in every control the audience was built from', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await pickAudience('Anua buyers')
+
+    // Grouping, holdout and the filters, all from one choice.
+    const p = lastPreview()
+    expect(p.get('grouping')).toBe('single')
+    expect(p.get('holdout_pct')).toBe('30')
+    expect(p.get('brand')).toBe('Anua')
+  })
+
+  it('stops claiming to describe the audience once it is edited', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await pickAudience('Anua buyers')
+    const list = screen.getByRole('combobox', { name: /sms\.presetsLabel/ })
+    expect((list as HTMLSelectElement).value).toBe('Anua buyers')
+
+    // Any change to the form makes this a different audience from the saved one.
+    await userEvent.type(screen.getByLabelText('sms.filterRecency min'), '30')
+
+    expect((list as HTMLSelectElement).value).toBe('')
+  })
+
+  it('offers deletion only for a saved audience, never a built-in', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await pickAudience('RFM tiers')
+    expect(screen.queryByRole('button', { name: 'sms.presetDeleteSelected' })).toBeNull()
+
+    await pickAudience('Anua buyers')
+    expect(screen.getByRole('button', { name: 'sms.presetDeleteSelected' })).toBeTruthy()
   })
 })
