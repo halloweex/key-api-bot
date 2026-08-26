@@ -1006,5 +1006,7 @@
   "sms.summaryNoPrice": "price appears once there is an audience",
   "sms.tierRulesLabel": "Tier cut-offs",
   "sms.tierRulesHint": "The cascade runs top down; whoever matches none of the three is dropped from the audience. Blank uses the standing thresholds.",
-  "sms.orRule": "or"
+  "sms.orRule": "or",
+  "sms.armsShareFilters": "One audience, cut into arms in order: the first rule a customer matches wins, and whoever matches none drops out. The filters above apply to all of them equally.",
+  "sms.armRule": "filters + {{rule}}"
 }

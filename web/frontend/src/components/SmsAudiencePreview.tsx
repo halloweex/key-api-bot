@@ -92,7 +92,9 @@ function TierCard({
         </div>
 
         <p className="mt-2 text-[11px] text-slate-500 leading-snug">
-          {tierRule(segment.tier, criteria, t)}
+          {segment.tier === 'ALL'
+            ? tierRule(segment.tier, criteria, t)
+            : t('sms.armRule', { rule: tierRule(segment.tier, criteria, t) })}
         </p>
 
         <dl className="mt-3 pt-3 border-t border-slate-100 grid grid-cols-3 gap-2 text-xs">
@@ -168,6 +170,15 @@ export const SmsAudiencePreview = memo(function SmsAudiencePreview({
 
   return (
     <>
+      {/* The arms are one audience cut up, not three audiences. Without saying
+          so, three cards each stating a different condition read as three
+          separate selections with separate filters. */}
+      {!empty && segments.length > 1 && (
+        <p className="mb-2 text-xs text-slate-500 leading-snug">
+          {t('sms.armsShareFilters')}
+        </p>
+      )}
+
       {empty ? (
         <div className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">
           {t('sms.audienceEmpty')}
