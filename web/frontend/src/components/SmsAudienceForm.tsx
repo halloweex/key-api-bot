@@ -236,6 +236,21 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
     onChange({ ...audience, filters: next })
   }
 
+  const rules = audience.tierRules
+  // The thresholds the server would apply if these are left blank. They differ
+  // by basis, so the placeholders have to follow the basis rather than state a
+  // constant that is wrong half the time.
+  const defaults = audience.ltvBasis === 'margin'
+    ? { vip: 5500, core: 2750 }
+    : { vip: 10000, core: 5000 }
+
+  function setRule(key: keyof typeof rules, raw: string) {
+    const next = { ...rules }
+    if (raw === '') delete next[key]
+    else next[key] = Number(raw)
+    onChange({ ...audience, tierRules: next })
+  }
+
   const brandOptions = useMemo(
     () => (brands ?? []).map((b) => ({ value: b.name, label: b.name })),
     [brands],
@@ -579,6 +594,63 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
             aria-label={t('sms.basisLabel')}
           />
         </Field>
+
+        {audience.grouping === 'rfm' && (
+          <Field
+            icon={<Banknote className={icon} />}
+            label={t('sms.tierRulesLabel')}
+            example={t('sms.tierRulesHint')}
+          >
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-600 w-24">{t('sms.tier.VIP')}</span>
+                <span className="text-xs text-slate-400">≥</span>
+                <input
+                  type="number" step={100} className={`${INPUT} w-28 tabular-nums`}
+                  aria-label={`${t('sms.tier.VIP')} ${t('sms.filterLtv')}`}
+                  placeholder={String(defaults.vip)}
+                  value={rules.vipLtv ?? ''}
+                  onChange={(e) => setRule('vipLtv', e.target.value)}
+                />
+                <span className="text-xs text-slate-500">₴</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-600 w-24">{t('sms.tier.CORE')}</span>
+                <span className="text-xs text-slate-400">≥</span>
+                <input
+                  type="number" className={`${INPUT} w-16 tabular-nums`}
+                  aria-label={`${t('sms.tier.CORE')} ${t('sms.filterOrders')}`}
+                  placeholder="2"
+                  value={rules.coreMinOrders ?? ''}
+                  onChange={(e) => setRule('coreMinOrders', e.target.value)}
+                />
+                <span className="text-xs text-slate-500">{t('sms.orRule')}</span>
+                <input
+                  type="number" step={100} className={`${INPUT} w-24 tabular-nums`}
+                  aria-label={`${t('sms.tier.CORE')} ${t('sms.filterLtv')}`}
+                  placeholder={String(defaults.core)}
+                  value={rules.coreLtv ?? ''}
+                  onChange={(e) => setRule('coreLtv', e.target.value)}
+                />
+                <span className="text-xs text-slate-500">₴</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-600 w-24">
+                  {t('sms.tier.REACTIVATION')}
+                </span>
+                <span className="text-xs text-slate-400">≤</span>
+                <input
+                  type="number" className={`${INPUT} w-20 tabular-nums`}
+                  aria-label={`${t('sms.tier.REACTIVATION')} ${t('sms.filterRecency')}`}
+                  placeholder="120"
+                  value={rules.reactivationMaxRecency ?? ''}
+                  onChange={(e) => setRule('reactivationMaxRecency', e.target.value)}
+                />
+                <span className="text-xs text-slate-500">{t('sms.unitDays')}</span>
+              </div>
+            </div>
+          </Field>
+        )}
 
         <Field
           icon={<Users className={icon} />}

@@ -126,6 +126,11 @@ async function step(name: string) {
   await userEvent.click(screen.getByRole('button', { name }))
 }
 
+/** Switch to the three value tiers, which are no longer the default split. */
+async function useValueTiers() {
+  await userEvent.click(screen.getByRole('button', { name: 'sms.grouping.rfm' }))
+}
+
 /** Click a tier chip. Chips carry their size, so match on the name only. */
 async function pickTier(tier: string) {
   await userEvent.click(
@@ -148,10 +153,12 @@ async function nameCampaign(name = 'sep-brand') {
 }
 
 describe('SmsCampaignWizard', () => {
-  it('previews the plain cohort before anything is touched', () => {
+  it('previews one arm of everybody before anything is touched', () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
-    expect(lastPreview().get('grouping')).toBe('rfm')
+    // Not the tier cascade: it would drop whoever matches none of its three
+    // conditions, which no default should do.
+    expect(lastPreview().get('grouping')).toBe('single')
     expect(lastPreview().has('brand')).toBe(false)
   })
 
@@ -357,19 +364,18 @@ describe('the saved-audience list', () => {
 })
 
 describe('choosing tiers', () => {
-  it('offers the three tiers, and says so when there are none to offer', async () => {
+  it('offers the three tiers only once the split calls for them', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
-    // Default split is the value tiers, so all three are on offer.
-    expect(screen.getByRole('button', { name: /sms\.tier\.VIP/ })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /sms\.tier\.CORE/ })).toBeTruthy()
-
-    await step('sms.grouping.single')
-
-    // Under one group they are gone — with a line saying why, rather than a
-    // gap that reads as a missing control.
+    // Default is one arm: no tiers, and a line saying why rather than a gap
+    // that reads as a missing control.
     expect(screen.queryByRole('button', { name: /sms\.tier\.VIP/ })).toBeNull()
     expect(screen.getByText('sms.tiersNotApplicable')).toBeTruthy()
+
+    await useValueTiers()
+
+    expect(screen.getByRole('button', { name: /sms\.tier\.VIP/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /sms\.tier\.CORE/ })).toBeTruthy()
   })
 
   it('previews every arm, and sends only the picked ones', async () => {
@@ -377,6 +383,7 @@ describe('choosing tiers', () => {
 
     // The preview never carries the tier subset: the chip sizes are how the
     // choice gets made, and asking only for the picked arms would blank them.
+    await useValueTiers()
     await pickTier('VIP')
     await pickTier('CORE')
     expect(lastPreview().has('tier')).toBe(false)
@@ -396,6 +403,7 @@ describe('choosing tiers', () => {
   it('counts only the picked arms towards the campaign', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
+    await useValueTiers()
     await pickTier('VIP')
     await nameCampaign()
     await step('sms.wizardNext')
@@ -405,8 +413,9 @@ describe('choosing tiers', () => {
       .toBeTruthy()
   })
 
-  it('shows each arm its own size on the chip', () => {
+  it('shows each arm its own size on the chip', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
+    await useValueTiers()
 
     // The sizes are the whole basis for deciding which arms to include.
     expect(screen.getByRole('button', { name: /sms\.tier\.VIP · 900/ })).toBeTruthy()
@@ -420,6 +429,7 @@ describe('the draft', () => {
     const { unmount } = render(<SmsCampaignWizard onClose={vi.fn()} />)
 
     await nameCampaign('sep-brand')
+    await useValueTiers()
     await pickTier('VIP')
     unmount()
 

@@ -9,10 +9,12 @@ import {
 } from '../smsAudience'
 
 describe('audienceToParams', () => {
-  it('sends the plain cohort when nothing is filtered', () => {
+  it('sends one arm and no rules when nothing is chosen', () => {
     const p = new URLSearchParams(audienceToParams(emptyAudience()))
 
-    expect(p.get('grouping')).toBe('rfm')
+    // One arm by default: the tier cascade drops whoever matches none of its
+    // three conditions, and a default must not remove people unasked.
+    expect(p.get('grouping')).toBe('single')
     expect(p.get('ltv_basis')).toBe('margin')
     expect(p.get('holdout_pct')).toBe('10')
     // An unset filter is not a parameter: the API's defaults are the cohort
@@ -63,12 +65,31 @@ describe('audienceToParams', () => {
   })
 
   it('sends picked tiers, and none when all are wanted', () => {
-    const base = emptyAudience()
+    const base = { ...emptyAudience(), grouping: 'rfm' as const }
     expect(new URLSearchParams(audienceToParams(base)).has('tier')).toBe(false)
     expect(
       new URLSearchParams(audienceToParams({ ...base, tiers: ['CORE', 'REACTIVATION'] }))
         .get('tier'),
     ).toBe('CORE,REACTIVATION')
+  })
+
+  it('carries the tier cut-offs, but only where tiers exist', () => {
+    const rules = { vipLtv: 8000, coreLtv: 3000, coreMinOrders: 3,
+                    reactivationMaxRecency: 90 }
+
+    const withTiers = new URLSearchParams(audienceToParams({
+      ...emptyAudience(), grouping: 'rfm', tierRules: rules,
+    }))
+    expect(withTiers.get('vip_ltv')).toBe('8000')
+    expect(withTiers.get('core_ltv')).toBe('3000')
+    expect(withTiers.get('core_min_orders')).toBe('3')
+    expect(withTiers.get('reactivation_max_recency')).toBe('90')
+
+    // Under one arm they would be rules that silently do nothing.
+    const single = new URLSearchParams(audienceToParams({
+      ...emptyAudience(), grouping: 'single', tierRules: rules,
+    }))
+    expect(single.has('vip_ltv')).toBe(false)
   })
 
   it('drops the tier subset under a single-group audience', () => {
@@ -126,7 +147,8 @@ describe('audienceFromPreset', () => {
       somethingElse: true,
     })
 
-    expect(loaded.grouping).toBe('rfm')
+    // An unrecognised split falls back to the default one.
+    expect(loaded.grouping).toBe('single')
     expect(loaded.holdoutPct).toBe(10)
     expect(loaded.tiers).toEqual(['VIP'])
     expect(loaded.filters).toEqual({ brands: ['Anua'] })

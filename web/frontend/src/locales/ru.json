@@ -1003,5 +1003,8 @@
   "sms.summaryContacts": "{{target}} отправить · {{holdout}} контроль",
   "sms.summaryCost": "≈ {{cost}} по {{parts}} части(ей) каждое",
   "sms.summaryCostFrom": "от {{cost}} — по одной части, пока нет текста",
-  "sms.summaryNoPrice": "цена появится, как только будет аудитория"
+  "sms.summaryNoPrice": "цена появится, как только будет аудитория",
+  "sms.tierRulesLabel": "Пороги тиров",
+  "sms.tierRulesHint": "Каскад идёт сверху вниз; кто не подошёл ни под одно из трёх — выпадает из аудитории. Пусто — действующие пороги.",
+  "sms.orRule": "или"
 }

@@ -1335,6 +1335,21 @@ export interface SmsAudienceFilters {
   boughtWithinDays?: number | null
 }
 
+/**
+ * The cut-offs that assign a customer to a value tier.
+ *
+ * They are conditions in their own right, not decoration: the cascade runs
+ * VIP → Core → Reactivation and whoever matches none of them is dropped from
+ * the audience entirely. Unset means the server's defaults for the chosen
+ * basis (margin 5 500 / 2 750, revenue 10 000 / 5 000).
+ */
+export interface SmsTierRules {
+  vipLtv?: number | null
+  coreLtv?: number | null
+  coreMinOrders?: number | null
+  reactivationMaxRecency?: number | null
+}
+
 /** The whole audience definition: how it is split, ranked, and narrowed. */
 export interface SmsAudienceCriteria {
   grouping: SmsGrouping
@@ -1343,6 +1358,7 @@ export interface SmsAudienceCriteria {
   /** The base window: nobody whose last order is older than this is considered. */
   maxRecencyDays: number
   tiers: SmsTier[]
+  tierRules: SmsTierRules
   filters: SmsAudienceFilters
 }
 

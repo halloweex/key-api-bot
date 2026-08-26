@@ -17,6 +17,7 @@ import type {
   SmsGrouping,
   SmsLtvBasis,
   SmsTier,
+  SmsTierRules,
 } from '../types/api'
 
 export const DEFAULT_HOLDOUT_PCT = 10
@@ -30,11 +31,16 @@ export const MAX_WINDOW_DAYS = 730
 
 export function emptyAudience(): SmsAudienceCriteria {
   return {
-    grouping: 'rfm',
+    // One arm by default. The tier cascade is not only a way of splitting an
+    // audience — it drops anyone matching none of its three conditions, which
+    // is most one-order buyers — and a default must not quietly remove people
+    // nobody asked to remove.
+    grouping: 'single',
     ltvBasis: 'margin',
     holdoutPct: DEFAULT_HOLDOUT_PCT,
     maxRecencyDays: DEFAULT_WINDOW_DAYS,
     tiers: [],
+    tierRules: {},
     filters: {},
   }
 }
@@ -96,10 +102,23 @@ export function audienceToParams(
     max_recency_days: String(audience.maxRecencyDays),
   })
 
-  // Tier subsets only mean something when there are tiers. Sending them with
-  // grouping=single would read as a filter that silently does nothing.
-  if (audience.grouping === 'rfm' && audience.tiers.length > 0) {
-    p.set('tier', audience.tiers.join(','))
+  // Tier subsets and cut-offs only mean something when there are tiers.
+  // Sending them with grouping=single would read as rules that silently do
+  // nothing.
+  if (audience.grouping === 'rfm') {
+    if (audience.tiers.length > 0) p.set('tier', audience.tiers.join(','))
+    const rules: Array<[keyof SmsTierRules, string]> = [
+      ['vipLtv', 'vip_ltv'],
+      ['coreLtv', 'core_ltv'],
+      ['coreMinOrders', 'core_min_orders'],
+      ['reactivationMaxRecency', 'reactivation_max_recency'],
+    ]
+    for (const [key, param] of rules) {
+      const value = audience.tierRules[key]
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        p.set(param, String(value))
+      }
+    }
   }
 
   const f = audience.filters
@@ -186,6 +205,16 @@ export function audienceFromPreset(raw: unknown): SmsAudienceCriteria {
   const tiers = strings(src.tiers)?.filter((t): t is SmsTier =>
     (TIERS as string[]).includes(t)) ?? []
 
+  const rulesSrc = (src.tierRules && typeof src.tierRules === 'object'
+    ? src.tierRules
+    : {}) as Record<string, unknown>
+  const tierRules: SmsTierRules = {}
+  for (const key of
+    ['vipLtv', 'coreLtv', 'coreMinOrders', 'reactivationMaxRecency'] as const) {
+    const v = num(rulesSrc[key])
+    if (v !== undefined) tierRules[key] = v
+  }
+
   return {
     grouping: GROUPINGS.includes(src.grouping as SmsGrouping)
       ? (src.grouping as SmsGrouping)
@@ -196,6 +225,7 @@ export function audienceFromPreset(raw: unknown): SmsAudienceCriteria {
     holdoutPct: num(src.holdoutPct) ?? base.holdoutPct,
     maxRecencyDays: num(src.maxRecencyDays) ?? base.maxRecencyDays,
     tiers,
+    tierRules,
     filters,
   }
 }

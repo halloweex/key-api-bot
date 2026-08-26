@@ -1003,5 +1003,8 @@
   "sms.summaryContacts": "{{target}} надіслати · {{holdout}} контроль",
   "sms.summaryCost": "≈ {{cost}} по {{parts}} частин(и) кожне",
   "sms.summaryCostFrom": "від {{cost}} — по одній частині, поки немає тексту",
-  "sms.summaryNoPrice": "ціна з'явиться, щойно буде аудиторія"
+  "sms.summaryNoPrice": "ціна з'явиться, щойно буде аудиторія",
+  "sms.tierRulesLabel": "Пороги тирів",
+  "sms.tierRulesHint": "Каскад іде згори вниз; хто не підійшов під жодне з трьох — випадає з аудиторії. Порожньо — чинні пороги.",
+  "sms.orRule": "або"
 }

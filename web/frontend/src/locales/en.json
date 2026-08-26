@@ -1003,5 +1003,8 @@
   "sms.summaryContacts": "{{target}} to send · {{holdout}} control",
   "sms.summaryCost": "≈ {{cost}} at {{parts}} part(s) each",
   "sms.summaryCostFrom": "from {{cost}} — one part each, until there is a text",
-  "sms.summaryNoPrice": "price appears once there is an audience"
+  "sms.summaryNoPrice": "price appears once there is an audience",
+  "sms.tierRulesLabel": "Tier cut-offs",
+  "sms.tierRulesHint": "The cascade runs top down; whoever matches none of the three is dropped from the audience. Blank uses the standing thresholds.",
+  "sms.orRule": "or"
 }
