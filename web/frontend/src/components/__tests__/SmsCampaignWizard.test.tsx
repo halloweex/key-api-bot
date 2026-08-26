@@ -153,9 +153,11 @@ async function step(name: string) {
   await userEvent.click(screen.getByRole('button', { name }))
 }
 
-/** Switch to the three value tiers, which are no longer the default split. */
+/** Turn on the per-level measurement, which lives behind the folded settings. */
 async function useValueTiers() {
-  await userEvent.click(screen.getByRole('button', { name: 'sms.grouping.rfm' }))
+  const fold = screen.getByRole('button', { name: /sms\.measureTitle/ })
+  if (fold.getAttribute('aria-expanded') === 'false') await userEvent.click(fold)
+  await userEvent.click(screen.getByRole('checkbox'))
 }
 
 /** Click a tier chip. Chips carry their size, so match on the name only. */
@@ -507,6 +509,11 @@ describe('the cost estimate', () => {
 describe('what the campaign will be able to prove', () => {
   it('states the threshold per arm, and calls a hopeless split hopeless', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    // None of this is on the manager's path: it lives behind the measurement
+    // fold, closed by default.
+    expect(screen.queryByText('sms.mdeTight')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: /sms\.measureTitle/ }))
 
     // One arm of 7,560 against 840 sees a lift from 1.60 pp — close to the
     // ~2 pp the only campaign there has been produced, so: tight, not

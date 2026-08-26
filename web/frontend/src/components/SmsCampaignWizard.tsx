@@ -354,6 +354,16 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                   )}
                 </div>
 
+                <SmsAudienceForm
+                  audience={audience}
+                  onChange={editAudience}
+                  segments={data?.segments}
+                />
+
+                <div className="pt-3 border-t border-slate-100">
+                  <SmsAudiencePreview data={data} isLoading={isLoading} />
+                </div>
+
                 <div>
                   <span className="text-xs text-slate-600">{t('sms.presetsLabel')}</span>
                   <p className="text-[11px] text-slate-500 mt-0.5 mb-1">
@@ -414,15 +424,6 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                   )}
                 </div>
 
-                <SmsAudienceForm
-                  audience={audience}
-                  onChange={editAudience}
-                  segments={data?.segments}
-                />
-
-                <div className="pt-3 border-t border-slate-100">
-                  <SmsAudiencePreview data={data} isLoading={isLoading} />
-                </div>
 
                 <StepActions
                   primary={

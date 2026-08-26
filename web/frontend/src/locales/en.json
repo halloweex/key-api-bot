@@ -972,7 +972,7 @@
   "sms.filterWindow": "Base window, days",
   "sms.filterWindowHint": "Older than this and the customer is not considered at all. 270 by default, 730 max.",
   "sms.windowConflict": "The base window is {{window}} days, so asking for people quiet for {{min}}+ days leaves nobody. Widen the window.",
-  "sms.presetsHint": "Choosing one fills in every control it was built from. Edit anything and it becomes a new audience.",
+  "sms.presetsHint": "Save this set of filters to send to the same people again later.",
   "sms.presetSaveToggle": "Save audience",
   "sms.presetsPlaceholder": "Choose a saved audience",
   "sms.presetDeleteSelected": "Delete",
@@ -1015,5 +1015,9 @@
   "sms.mdeValue": "sees a lift from {{pp}} pp",
   "sms.mdeGood": "Comfortable: the last campaign moved conversion by about 2 pp, and this would see it.",
   "sms.mdeTight": "Tight: the last campaign moved conversion by about 2 pp, so a weaker offer would come back unproven.",
-  "sms.mdeHopeless": "This will send and prove nothing: no realistic offer moves conversion that far. Raise the control share, or measure with one arm."
+  "sms.mdeHopeless": "This will send and prove nothing: no realistic offer moves conversion that far. Raise the control share, or measure with one arm.",
+  "sms.measureTitle": "Measurement settings",
+  "sms.measureOn": "split",
+  "sms.measureSplit": "Compare response by value level",
+  "sms.measureSplitHint": "Answers which levels respond better, at the cost of a blunter measurement of each — every level gets its own control group."
 }
