@@ -128,8 +128,10 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/brands` | All brands list |
 | `/api/brands/analytics` | Top brands by revenue and quantity |
 | `/api/customers/insights` | New vs returning, AOV trend, repeat rate |
-| `/api/customers/sms-segments` | RFM segments for SMS campaigns, `ltv_basis=revenue\|margin` (admin only) |
+| `/api/customers/sms-segments` | Campaign audience — tiers or one filtered group, `ltv_basis=revenue\|margin` (admin only) |
 | `/api/customers/sms-segments/export/csv` | Campaign list as CSV, holdout excluded (admin only) |
+| `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, admin) |
+| `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (admin only) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
 | `/api/managers/{id}/retail-status` | Classify a manager, marks warehouse dirty (POST, admin) |
 | `/api/health/data-quality` | Latest integrity + reconciliation run, with issues/diffs |
@@ -395,6 +397,53 @@ warehouse has never seen and **never overwritten afterwards** — it used to be
 recomputed on every sync, which made a human's classification impossible to
 keep. Set it via `POST /api/managers/{id}/retail-status`, which also marks the
 warehouse dirty, because `sales_type` only changes on a rebuild.
+
+### The audience of an SMS campaign
+Until 2026-08-26 the page had exactly one cohort: three value tiers over a
+270-day window, from six thresholds hardcoded in the API. Two knobs were on
+screen (LTV basis, holdout), the rest were invisible, and creating a campaign
+meant downloading a CSV — `freeze_sms_campaign` was only reachable from the
+export route.
+
+An audience is now **grouping + filters**, and both travel as flat query
+parameters — not a JSON body — because the CSV download is a link the browser
+follows and `api_gate` reads `sales_type` from the query string.
+
+**Grouping** (`grouping=rfm|single`) decides the arms. `rfm` is the three value
+tiers, and anyone in none of them is dropped — which removes most one-order
+buyers. `single` puts everyone the filters kept into one arm named `ALL`. A
+filtered audience almost always wants `single`: under `rfm` the tier rules
+filter it a second time, silently.
+
+**Filters** are two families and they read the customer differently:
+
+- *aggregate* — recency window, order count, LTV, average order, first-order
+  date, city. Predicates over the customer's own history.
+- *content* — brand, category, source, promocode, optionally within
+  `bought_within_days`. An `EXISTS` over the customer's order lines, **never a
+  join**: filtering the line items would recompute LTV from the matching lines
+  alone, and a customer's value is not "what they spent on this brand".
+
+A category filter matches the branch (`category_id` *or* `parent_category_id`);
+picking a parent and getting nothing because every product hangs off a child is
+the kind of empty result nobody debugs.
+
+The filters live in one `ok_filters` column in the same pass that flags every
+other eligibility rule, so the funnel gains a `filtered` stage and an empty
+audience can say which rule emptied it. An empty filter set is not a predicate:
+it selects exactly what the tier rules alone selected, so campaigns built the
+old way stay reproducible.
+
+**Presets** (`sms_audience_presets`) are the wizard's form state under a name,
+and are **never executed** — the page reads one, fills its controls, and sends
+the values back through the same validated parameters. The built-ins live in
+code (`BUILTIN_AUDIENCE_PRESETS`), so "RFM tiers" cannot be edited into
+something that no longer means what past campaigns meant.
+
+`POST /api/customers/sms-campaigns` freezes the roster without a CSV. It
+refuses the placeholder name `default`, an empty audience, and a truncated one.
+The wizard builds the preview and the freeze from the same query string, so
+what is recorded is what was on screen.
 
 ### Order statuses
 Revenue excludes KeyCRM's lost/cancel group (`status_group_id = 6`), verified

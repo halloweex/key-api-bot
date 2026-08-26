@@ -915,6 +915,30 @@ class DuckDBStore(
 
         CREATE INDEX IF NOT EXISTS idx_optouts_phone ON marketing_optouts(phone);
 
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- Saved audiences.
+        --
+        -- A campaign's audience is a set of filters, and the useful ones get
+        -- reused: "everyone who bought this brand in the last quarter" is a
+        -- question asked every time that brand runs a promotion. Without
+        -- somewhere to keep it, the manager rebuilds it from memory each time
+        -- and the second campaign is measured against a slightly different
+        -- population than the first.
+        --
+        -- `criteria` is the wizard's own form state as JSON, and it is never
+        -- executed: the page fills its controls from it and sends the values
+        -- back through the same validated query parameters as a hand-built
+        -- audience. A preset is therefore a saved answer, not a stored query,
+        -- and cannot widen what the endpoints accept.
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS sms_audience_presets (
+            name VARCHAR PRIMARY KEY,
+            criteria VARCHAR NOT NULL,
+            created_by BIGINT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_sms_members_campaign
             ON sms_campaign_members(campaign, assignment);
         CREATE INDEX IF NOT EXISTS idx_sms_members_buyer

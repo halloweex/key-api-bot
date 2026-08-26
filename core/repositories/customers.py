@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import date, datetime, timedelta
+from dataclasses import asdict, dataclass
 from typing import Optional, Dict, Any, List, Sequence, Union
 
 
@@ -123,6 +124,213 @@ SMS_TIER_DEFAULTS = {
     "revenue": {"vip": 10000.0, "core": 5000.0},
     "margin": {"vip": 5500.0, "core": 2750.0},
 }
+
+
+# How a campaign's audience is split into arms.
+#
+# `rfm` is the historical behaviour: three tiers by lifetime value and order
+# count, and anyone who falls in none of them is dropped. It answers "who is
+# worth what", which is the right question for a blanket offer and the wrong
+# one for "everybody who bought this brand" — under `rfm` half of that audience
+# would silently fall out for being a one-order buyer past the reactivation
+# window.
+#
+# `single` puts everyone the filters kept into one arm named ALL. One arm is
+# also the only honest split for a small cohort: three arms of 200 measure
+# nothing at all.
+SMS_GROUPINGS = ("rfm", "single")
+
+# Audiences that ship with the page.
+#
+# The first one is the cohort every campaign before 2026-08 was sent to,
+# written down: a 270-day window, three value tiers, 10% withheld. It was a
+# set of defaults nobody could see or name, which made "the usual list" a
+# thing only the code knew. Naming it costs nothing and makes the alternative
+# — a filtered audience — an obvious choice rather than an unknown one.
+BUILTIN_AUDIENCE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "RFM tiers": {
+        "grouping": "rfm",
+        "ltvBasis": "margin",
+        "maxRecencyDays": 270,
+        "coreMinOrders": 2,
+        "reactivationMaxRecency": 120,
+        "salesType": "retail",
+        "holdoutPct": 10,
+        "filters": {},
+    },
+    "Everyone reachable": {
+        "grouping": "single",
+        "ltvBasis": "margin",
+        "maxRecencyDays": 270,
+        "salesType": "retail",
+        "holdoutPct": 20,
+        "filters": {},
+    },
+}
+
+SINGLE_GROUP_NAME = "ALL"
+
+
+@dataclass(frozen=True)
+class SmsAudienceFilters:
+    """Who the campaign is for, beyond the tier rules.
+
+    Every field is optional and an unset field is not a predicate — an empty
+    filter set has to select exactly what the page selected before this
+    existed, or every past campaign becomes unreproducible.
+
+    Two families, and they read the customer differently:
+
+    * aggregate — recency, order count, lifetime value, average order, when
+      they first bought. Computed over the customer's whole history, so they
+      narrow *who* is in the audience without changing what anyone is worth.
+    * content — brand, category, source, promocode, optionally inside a
+      window. These ask whether the customer ever bought a particular thing,
+      as an EXISTS over their orders. Deliberately not a join: filtering the
+      line items would recompute LTV from the matching lines alone, and a
+      customer's value is not "what they spent on this brand".
+    """
+
+    recency_min_days: Optional[int] = None
+    recency_max_days: Optional[int] = None
+    orders_min: Optional[int] = None
+    orders_max: Optional[int] = None
+    ltv_min: Optional[float] = None
+    ltv_max: Optional[float] = None
+    aov_min: Optional[float] = None
+    aov_max: Optional[float] = None
+    first_order_from: Optional[date] = None
+    first_order_to: Optional[date] = None
+    cities: Sequence[str] = ()
+    brands: Sequence[str] = ()
+    category_ids: Sequence[int] = ()
+    source_ids: Sequence[int] = ()
+    promocode: Optional[str] = None
+    bought_within_days: Optional[int] = None
+
+    @property
+    def content_only(self) -> tuple:
+        """The content predicates, if any — the ones needing an EXISTS."""
+        return (self.brands, self.category_ids, self.source_ids, self.promocode)
+
+    def is_empty(self) -> bool:
+        """No predicate at all, so no filtering stage to speak of."""
+        return not any(
+            v not in (None, (), [], "") for v in (
+                self.recency_min_days, self.recency_max_days,
+                self.orders_min, self.orders_max,
+                self.ltv_min, self.ltv_max, self.aov_min, self.aov_max,
+                self.first_order_from, self.first_order_to,
+                tuple(self.cities), tuple(self.brands), tuple(self.category_ids),
+                tuple(self.source_ids), self.promocode,
+            )
+        )
+
+    def as_dict(self) -> Dict[str, Any]:
+        """JSON-safe echo, unset fields dropped.
+
+        Frozen with the campaign, so it has to survive a round trip: this is
+        what tells a reader six months later which audience was messaged.
+        """
+        out: Dict[str, Any] = {}
+        for key, value in asdict(self).items():
+            if value in (None, (), [], ""):
+                continue
+            if isinstance(value, (list, tuple)):
+                out[key] = list(value)
+            elif isinstance(value, date):
+                out[key] = value.isoformat()
+            else:
+                out[key] = value
+        return out
+
+    def predicate(self, ltv_column: str, sales_type: str) -> tuple:
+        """SQL boolean over one row of `scored`, plus its bound parameters.
+
+        Returns ``("TRUE", [])`` when nothing is set, which keeps the funnel
+        stage present and equal to the stage before it rather than making the
+        whole query shape conditional.
+        """
+        parts: List[str] = []
+        params: List[Any] = []
+
+        def between(column: str, lo, hi):
+            if lo is not None:
+                parts.append(f"{column} >= ?")
+                params.append(lo)
+            if hi is not None:
+                parts.append(f"{column} <= ?")
+                params.append(hi)
+
+        # Recency runs backwards: "at least 30 days ago" is a *minimum* on the
+        # number of days, and reads as the older edge of the window.
+        between("recency", self.recency_min_days, self.recency_max_days)
+        between("orders", self.orders_min, self.orders_max)
+        between(ltv_column, self.ltv_min, self.ltv_max)
+        # AOV is derived, not stored; orders is never zero here (a customer
+        # exists because they ordered), but NULLIF keeps that honest.
+        between(f"({ltv_column} / NULLIF(orders, 0))", self.aov_min, self.aov_max)
+        between("first_order_date", self.first_order_from, self.first_order_to)
+
+        if self.cities:
+            placeholders = ", ".join("?" * len(self.cities))
+            # Cities are free text from KeyCRM: "Київ" and "київ" are the same
+            # city and neither spelling is canonical.
+            parts.append(f"lower(city) IN ({placeholders})")
+            params += [c.strip().lower() for c in self.cities]
+
+        content: List[str] = []
+        content_params: List[Any] = []
+        if self.brands:
+            placeholders = ", ".join("?" * len(self.brands))
+            content.append(f"cl.brand IN ({placeholders})")
+            content_params += list(self.brands)
+        if self.category_ids:
+            placeholders = ", ".join("?" * len(self.category_ids))
+            # A parent category means the whole branch: picking "Face care"
+            # and getting nothing because every product hangs off a child of
+            # it is the kind of empty result nobody debugs, they just stop
+            # trusting the filter.
+            content.append(
+                f"(cl.category_id IN ({placeholders}) "
+                f"OR cl.parent_category_id IN ({placeholders}))"
+            )
+            content_params += list(self.category_ids) + list(self.category_ids)
+        if self.source_ids:
+            placeholders = ", ".join("?" * len(self.source_ids))
+            content.append(f"cl.source_id IN ({placeholders})")
+            content_params += list(self.source_ids)
+        if self.promocode:
+            content.append("upper(cl.promocode) = upper(?)")
+            content_params.append(self.promocode.strip())
+
+        if content:
+            window = ""
+            if self.bought_within_days is not None:
+                # Interval cannot be parameterised in DuckDB; the value is an
+                # int by construction, never user text.
+                window = (
+                    f" AND cl.order_date >= CURRENT_DATE "
+                    f"- INTERVAL '{int(self.bought_within_days)} days'"
+                )
+            sales_clause = "" if sales_type == "all" else "AND cl.sales_type = ?"
+            exists_params: List[Any] = []
+            if sales_type != "all":
+                exists_params.append(sales_type)
+            parts.append(f"""EXISTS (
+                    SELECT 1 FROM silver_order_lines cl
+                    WHERE cl.buyer_id = scored.buyer_id
+                      AND NOT cl.is_return
+                      AND cl.is_active_source
+                      {sales_clause}
+                      AND {' AND '.join(content)}
+                      {window}
+                )""")
+            params += exists_params + content_params
+
+        if not parts:
+            return "TRUE", []
+        return "(" + " AND ".join(parts) + ")", params
 
 
 class CustomersMixin:
@@ -1113,6 +1321,83 @@ class CustomersMixin:
                 }
             }
 
+    # ─── Saved audiences ─────────────────────────────────────────────────
+
+    async def list_sms_audience_presets(self) -> List[Dict[str, Any]]:
+        """Saved audiences, built-in ones first.
+
+        The built-ins live in code rather than in the table so they cannot be
+        deleted or edited into something that no longer matches what the page
+        describes — the classic RFM cohort is the reference every past campaign
+        was built from, and it has to keep meaning the same thing.
+        """
+        rows = []
+        async with self.connection() as conn:
+            rows = conn.execute("""
+                SELECT name, criteria, created_by, created_at, updated_at
+                FROM sms_audience_presets
+                ORDER BY name
+            """).fetchall()
+
+        saved = [
+            {
+                "name": name,
+                "criteria": json.loads(criteria) if criteria else {},
+                "createdBy": created_by,
+                "createdAt": created_at.isoformat() if created_at else None,
+                "updatedAt": updated_at.isoformat() if updated_at else None,
+                "builtin": False,
+            }
+            for name, criteria, created_by, created_at, updated_at in rows
+        ]
+        builtin = [
+            {
+                "name": name,
+                "criteria": dict(criteria),
+                "createdBy": None,
+                "createdAt": None,
+                "updatedAt": None,
+                "builtin": True,
+            }
+            for name, criteria in BUILTIN_AUDIENCE_PRESETS.items()
+        ]
+        return builtin + saved
+
+    async def save_sms_audience_preset(
+        self, name: str, criteria: Dict[str, Any], created_by: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Store or replace a saved audience.
+
+        Raises ValueError on a built-in name: shadowing "RFM tiers" with
+        something else would make every conversation about it ambiguous.
+        """
+        if name in BUILTIN_AUDIENCE_PRESETS:
+            raise ValueError(f"{name!r} is a built-in audience and cannot be replaced")
+
+        payload = json.dumps(criteria, ensure_ascii=False, default=str)
+        async with self.connection() as conn:
+            conn.execute("""
+                -- now(), not CURRENT_TIMESTAMP: inside an upsert DuckDB reads
+                -- the bare keyword as a column reference and fails to bind it.
+                INSERT INTO sms_audience_presets (name, criteria, created_by, updated_at)
+                VALUES (?, ?, ?, now())
+                ON CONFLICT (name) DO UPDATE SET
+                    criteria = excluded.criteria,
+                    updated_at = now()
+            """, [name, payload, created_by])
+        return {"name": name, "criteria": criteria, "builtin": False}
+
+    async def delete_sms_audience_preset(self, name: str) -> bool:
+        """Remove a saved audience. Returns False if there was none."""
+        if name in BUILTIN_AUDIENCE_PRESETS:
+            raise ValueError(f"{name!r} is a built-in audience and cannot be deleted")
+
+        async with self.connection() as conn:
+            row = conn.execute(
+                "DELETE FROM sms_audience_presets WHERE name = ? RETURNING name", [name],
+            ).fetchone()
+        return row is not None
+
     async def freeze_sms_campaign(
         self,
         campaign: str,
@@ -1216,7 +1501,7 @@ class CustomersMixin:
                 [campaign],
             ).fetchall()
 
-        tier_order = {"VIP": 0, "CORE": 1, "REACTIVATION": 2}
+        tier_order = {SINGLE_GROUP_NAME: 0, "VIP": 0, "CORE": 1, "REACTIVATION": 2}
         segments = [
             {"tier": t, "total": total, "target": target, "holdout": holdout}
             for t, total, target, holdout in
@@ -1718,7 +2003,7 @@ class CustomersMixin:
         def _blank() -> Dict[str, Any]:
             return dict(empty)
 
-        tier_order = {"VIP": 0, "CORE": 1, "REACTIVATION": 2}
+        tier_order = {SINGLE_GROUP_NAME: 0, "VIP": 0, "CORE": 1, "REACTIVATION": 2}
         segments = []
         overall_t, overall_h = _blank(), _blank()
 
@@ -1802,6 +2087,8 @@ class CustomersMixin:
         holdout_pct: int = 10,
         campaign: str = "default",
         tier: Optional[Union[str, Sequence[str]]] = None,
+        filters: Optional["SmsAudienceFilters"] = None,
+        grouping: str = "rfm",
         include_customers: bool = False,
         limit: int = 20000,
     ) -> Dict[str, Any]:
@@ -1851,7 +2138,16 @@ class CustomersMixin:
             holdout_pct: Percent of each tier withheld as control (0 disables).
             campaign: Campaign label; also seeds the holdout split.
             tier: Restrict to these tiers (VIP / CORE / REACTIVATION). A
-                single name or a sequence; None keeps all three.
+                single name or a sequence; None keeps all three. Meaningless
+                under grouping="single", where there is one arm.
+            filters: Extra audience predicates (recency, order count, LTV,
+                average order, first purchase, city, brand, category, source,
+                promocode). None or an empty set selects what the tier rules
+                alone select.
+            grouping: "rfm" for the three value tiers, "single" for one arm
+                holding everyone the filters kept. A filtered audience usually
+                wants "single": under "rfm" anyone outside all three tiers is
+                dropped, which quietly removes most one-order buyers.
             include_customers: Include the customer rows, not just the summary.
             limit: Max customer rows returned when include_customers is set.
 
@@ -1866,6 +2162,11 @@ class CustomersMixin:
             raise ValueError(
                 f"ltv_basis must be one of {', '.join(SMS_LTV_BASES)}, got {ltv_basis!r}"
             )
+        if grouping not in SMS_GROUPINGS:
+            raise ValueError(
+                f"grouping must be one of {', '.join(SMS_GROUPINGS)}, got {grouping!r}"
+            )
+        filters = filters or SmsAudienceFilters()
 
         defaults = SMS_TIER_DEFAULTS[ltv_basis]
         if vip_ltv is None:
@@ -1890,6 +2191,20 @@ class CustomersMixin:
             # partial record that no SMS gateway will accept.
             # Which lifetime value drives tiering. Both are always computed.
             ltv_column = "revenue_ltv" if ltv_basis == "revenue" else "margin_ltv"
+
+            # One arm or three. Under "single" nobody can fail the tier rule,
+            # which is the whole point: the audience is the filters, and the
+            # value tiers are not a second, invisible filter on top of them.
+            if grouping == "single":
+                tier_case = f"'{SINGLE_GROUP_NAME}'"
+            else:
+                tier_case = f"""CASE
+                        WHEN c.{ltv_column} >= ? THEN 'VIP'
+                        WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
+                        WHEN c.recency <= ? THEN 'REACTIVATION'
+                    END"""
+
+            filter_sql, filter_params = filters.predicate(ltv_column, sales_type)
 
             query = f"""
             WITH line_items AS (
@@ -1986,11 +2301,7 @@ class CustomersMixin:
                     b.full_name,
                     b.city,
                     regexp_replace(COALESCE(b.phone, ''), '[^0-9]', '', 'g') AS phone,
-                    CASE
-                        WHEN c.{ltv_column} >= ? THEN 'VIP'
-                        WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
-                        WHEN c.recency <= ? THEN 'REACTIVATION'
-                    END AS tier
+                    {tier_case} AS tier
                 FROM cust c
                 JOIN buyers b ON b.id = c.buyer_id
                 LEFT JOIN last_order_items lo ON lo.buyer_id = c.buyer_id
@@ -2003,6 +2314,7 @@ class CustomersMixin:
                 SELECT
                     *,
                     tier IS NOT NULL AS ok_tier,
+                    {filter_sql} AS ok_filters,
                     length(phone) = 12 AND phone LIKE '380%' AS ok_phone,
                     -- Opted out stays out. Matched on buyer AND on phone, because
                     -- the same number can reach us under a second buyer record.
@@ -2016,7 +2328,7 @@ class CustomersMixin:
             eligible AS (
                 SELECT *
                 FROM flagged
-                WHERE ok_tier AND ok_phone AND ok_subscribed
+                WHERE ok_filters AND ok_tier AND ok_phone AND ok_subscribed
                 -- One SMS per phone number: shared numbers across buyer records
                 -- would otherwise be messaged twice.
                 QUALIFY ROW_NUMBER() OVER (
@@ -2035,9 +2347,11 @@ class CustomersMixin:
                 SELECT
                     (SELECT COUNT(*) FROM cust) AS f_customers,
                     COUNT(*) AS f_in_window,
-                    COUNT(*) FILTER (ok_tier) AS f_tiered,
-                    COUNT(*) FILTER (ok_tier AND ok_phone) AS f_phone,
-                    COUNT(*) FILTER (ok_tier AND ok_phone AND ok_subscribed) AS f_subscribed,
+                    COUNT(*) FILTER (ok_filters) AS f_filtered,
+                    COUNT(*) FILTER (ok_filters AND ok_tier) AS f_tiered,
+                    COUNT(*) FILTER (ok_filters AND ok_tier AND ok_phone) AS f_phone,
+                    COUNT(*) FILTER (ok_filters AND ok_tier AND ok_phone AND ok_subscribed)
+                        AS f_subscribed,
                     (SELECT COUNT(*) FROM eligible) AS f_eligible
                 FROM flagged
             )
@@ -2058,7 +2372,8 @@ class CustomersMixin:
                      ELSE last_order_items END AS last_order_items,
                 CASE WHEN hash(buyer_id::VARCHAR || '|' || ?) % 100 < ?
                      THEN 'holdout' ELSE 'target' END AS assignment,
-                f_customers, f_in_window, f_tiered, f_phone, f_subscribed, f_eligible
+                f_customers, f_in_window, f_filtered, f_tiered, f_phone,
+                f_subscribed, f_eligible
             -- RIGHT JOIN, not CROSS: when nothing survives the filters the
             -- funnel is the only thing left to explain why, so its single row
             -- has to come back regardless.
@@ -2067,13 +2382,16 @@ class CustomersMixin:
             """
 
             # Bound in textual order of the `?` placeholders above.
+            # Bound in textual order of the `?` placeholders above: the line
+            # items filter, the tier CASE (absent under "single"), the recency
+            # window, the audience predicate, the tier subset, then the split.
             params: list = []
             if sales_type != "all":
                 params.append(sales_type)
-            params += [
-                vip_ltv, core_min_orders, core_ltv, reactivation_max_recency,
-                max_recency_days,
-            ]
+            if grouping != "single":
+                params += [vip_ltv, core_min_orders, core_ltv, reactivation_max_recency]
+            params.append(max_recency_days)
+            params += filter_params
             if tiers:
                 params += tiers
             params += [campaign, holdout_pct]
@@ -2082,16 +2400,16 @@ class CustomersMixin:
 
         tiers: Dict[str, Dict[str, Any]] = {}
         customers = []
-        funnel_counts = (0, 0, 0, 0, 0, 0)
+        funnel_counts = (0, 0, 0, 0, 0, 0, 0)
         for (buyer_id, full_name, phone, city, row_tier, orders, ltv, aov,
              revenue_ltv, margin_ltv, margin_pct, cost_coverage,
              recency, last_order, first_order,
              last_order_id, last_order_total, last_order_item_count, last_order_items,
              assignment,
-             f_customers, f_in_window, f_tiered, f_phone, f_subscribed,
+             f_customers, f_in_window, f_filtered, f_tiered, f_phone, f_subscribed,
              f_eligible) in rows:
-            funnel_counts = (f_customers, f_in_window, f_tiered, f_phone,
-                             f_subscribed, f_eligible)
+            funnel_counts = (f_customers, f_in_window, f_filtered, f_tiered,
+                             f_phone, f_subscribed, f_eligible)
             # The funnel row survives the RIGHT JOIN even when no customer does.
             if buyer_id is None:
                 continue
@@ -2133,7 +2451,7 @@ class CustomersMixin:
                     "assignment": assignment,
                 })
 
-        tier_order = {"VIP": 0, "CORE": 1, "REACTIVATION": 2}
+        tier_order = {SINGLE_GROUP_NAME: 0, "VIP": 0, "CORE": 1, "REACTIVATION": 2}
         summary = []
         for stats in sorted(tiers.values(), key=lambda s: tier_order.get(s["tier"], 9)):
             total = stats["total"]
@@ -2153,11 +2471,13 @@ class CustomersMixin:
             })
 
         total_customers = sum(s["total"] for s in summary)
-        f_customers, f_in_window, f_tiered, f_phone, f_subscribed, f_eligible = funnel_counts
+        (f_customers, f_in_window, f_filtered, f_tiered, f_phone, f_subscribed,
+         f_eligible) = funnel_counts
         return {
             "campaign": campaign,
             "salesType": sales_type,
             "ltvBasis": ltv_basis,
+            "grouping": grouping,
             "criteria": {
                 "maxRecencyDays": max_recency_days,
                 "ltvBasis": ltv_basis,
@@ -2166,6 +2486,10 @@ class CustomersMixin:
                 "coreMinOrders": core_min_orders,
                 "reactivationMaxRecency": reactivation_max_recency,
                 "holdoutPct": holdout_pct,
+                "grouping": grouping,
+                # Frozen with the campaign. Without it a filtered roster is a
+                # list of phone numbers nobody can explain a month later.
+                "filters": filters.as_dict(),
             },
             # How the base narrowed, rule by rule, in the order the query
             # applies them. Published because the tier sizes on their own look
@@ -2174,6 +2498,7 @@ class CustomersMixin:
             "funnel": [
                 {"stage": "customers", "remaining": int(f_customers or 0)},
                 {"stage": "inWindow", "remaining": int(f_in_window or 0)},
+                {"stage": "filtered", "remaining": int(f_filtered or 0)},
                 {"stage": "tiered", "remaining": int(f_tiered or 0)},
                 {"stage": "phone", "remaining": int(f_phone or 0)},
                 {"stage": "subscribed", "remaining": int(f_subscribed or 0)},

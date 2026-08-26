@@ -1,5 +1,6 @@
 """Customer insights, cohort retention, purchase timing, LTV, at-risk endpoints."""
 import csv
+import json
 import io
 import logging
 from datetime import date as _date, datetime as _datetime
@@ -8,7 +9,10 @@ from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from typing import Optional
 
-from core.repositories.customers import SMS_LTV_BASES, SMS_TIER_DEFAULTS
+from core.repositories.customers import (
+    BUILTIN_AUDIENCE_PRESETS, SMS_GROUPINGS, SMS_LTV_BASES, SMS_TIER_DEFAULTS,
+    SmsAudienceFilters,
+)
 from core.turbosms import (
     PartialSendError, TurboSmsClient, TurboSmsConfig, TurboSmsError,
     ViberMessage, count_segments,
@@ -153,6 +157,37 @@ _SMS_TIERS = ("VIP", "CORE", "REACTIVATION")
 _CAMPAIGN_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$"
 
 
+def _int_list(raw: Optional[str], label: str) -> list:
+    """Parse a comma-separated list of ids from a query parameter."""
+    if not raw:
+        return []
+    out = []
+    for piece in raw.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        try:
+            out.append(int(piece))
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail=f"{label} must be a comma-separated list of ids",
+            )
+    return out
+
+
+def _text_list(raw: Optional[str]) -> list:
+    """Parse a comma-separated list of names, dropping blanks and duplicates."""
+    if not raw:
+        return []
+    seen, out = set(), []
+    for piece in raw.split(","):
+        piece = piece.strip()
+        if piece and piece.lower() not in seen:
+            seen.add(piece.lower())
+            out.append(piece)
+    return out
+
+
 def _sms_segment_params(
     max_recency_days: int = Query(270, ge=30, le=730),
     ltv_basis: str = Query(
@@ -173,6 +208,31 @@ def _sms_segment_params(
     holdout_pct: int = Query(10, ge=0, le=50),
     campaign: str = Query("default", pattern=_CAMPAIGN_PATTERN),
     tier: Optional[str] = Query(None),
+    # ─── Audience filters ────────────────────────────────────────────────
+    # Flat query parameters rather than a JSON body, and deliberately so: the
+    # CSV download is a plain link the browser follows, and `api_gate` reads
+    # `sales_type` from the query string. A body would have broken both.
+    grouping: str = Query(
+        "rfm",
+        description="rfm — three value tiers; single — one arm of everyone the "
+                    "filters kept",
+    ),
+    recency_min: Optional[int] = Query(None, ge=0, le=3650),
+    recency_max: Optional[int] = Query(None, ge=0, le=3650),
+    orders_min: Optional[int] = Query(None, ge=0, le=1000),
+    orders_max: Optional[int] = Query(None, ge=0, le=1000),
+    ltv_min: Optional[float] = Query(None, ge=-1_000_000, le=100_000_000),
+    ltv_max: Optional[float] = Query(None, ge=-1_000_000, le=100_000_000),
+    aov_min: Optional[float] = Query(None, ge=0, le=100_000_000),
+    aov_max: Optional[float] = Query(None, ge=0, le=100_000_000),
+    first_order_from: Optional[_date] = Query(None),
+    first_order_to: Optional[_date] = Query(None),
+    city: Optional[str] = Query(None, max_length=500),
+    brand: Optional[str] = Query(None, max_length=500),
+    category_id: Optional[str] = Query(None, max_length=500),
+    source_id: Optional[str] = Query(None, max_length=200),
+    promocode_used: Optional[str] = Query(None, max_length=40),
+    bought_within_days: Optional[int] = Query(None, ge=1, le=3650),
 ) -> dict:
     """Validate and normalise the segmentation criteria shared by both endpoints."""
     try:
@@ -223,6 +283,45 @@ def _sms_segment_params(
             detail="reactivation_max_recency must not exceed max_recency_days",
         )
 
+    if grouping not in SMS_GROUPINGS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"grouping must be one of {', '.join(SMS_GROUPINGS)}",
+        )
+
+    # A window whose edges are the wrong way round returns nothing and looks
+    # like a data problem, so it is refused with the reason instead.
+    for lo, hi, label in (
+        (recency_min, recency_max, "recency"),
+        (orders_min, orders_max, "orders"),
+        (ltv_min, ltv_max, "ltv"),
+        (aov_min, aov_max, "aov"),
+        (first_order_from, first_order_to, "first_order"),
+    ):
+        if lo is not None and hi is not None and lo > hi:
+            raise HTTPException(
+                status_code=400, detail=f"{label}_min must not exceed {label}_max",
+            )
+
+    filters = SmsAudienceFilters(
+        recency_min_days=recency_min,
+        recency_max_days=recency_max,
+        orders_min=orders_min,
+        orders_max=orders_max,
+        ltv_min=ltv_min,
+        ltv_max=ltv_max,
+        aov_min=aov_min,
+        aov_max=aov_max,
+        first_order_from=first_order_from,
+        first_order_to=first_order_to,
+        cities=tuple(_text_list(city)),
+        brands=tuple(_text_list(brand)),
+        category_ids=tuple(_int_list(category_id, "category_id")),
+        source_ids=tuple(_int_list(source_id, "source_id")),
+        promocode=(promocode_used or "").strip() or None,
+        bought_within_days=bought_within_days,
+    )
+
     return {
         "max_recency_days": max_recency_days,
         "ltv_basis": ltv_basis,
@@ -234,6 +333,8 @@ def _sms_segment_params(
         "holdout_pct": holdout_pct,
         "campaign": campaign,
         "tier": tiers,
+        "grouping": grouping,
+        "filters": filters,
     }
 
 
@@ -391,6 +492,158 @@ async def export_sms_segments_csv(
             "X-Campaign-Holdout": str(frozen["totals"]["holdout"]) if frozen else "0",
         },
     )
+
+
+# ─── Saved audiences ──────────────────────────────────────────────────────
+# A preset is the wizard's form state under a name. It is never executed: the
+# page reads it, fills its controls, and sends the values back through
+# `_sms_segment_params` like any hand-built audience. So a preset cannot widen
+# what the segmentation accepts, however it was stored.
+
+_PRESET_NAME_MAX = 60
+_PRESET_CRITERIA_MAX = 8_000
+
+
+@router.get("/customers/sms-audience-presets")
+@limiter.limit("30/minute")
+async def list_sms_audience_presets(
+    request: Request,
+    user: dict = Depends(require_admin),
+):
+    """Saved audiences, built-ins first."""
+    store = await get_store()
+    return {"presets": await store.list_sms_audience_presets()}
+
+
+@router.put("/customers/sms-audience-presets/{name}")
+@limiter.limit("20/minute")
+async def save_sms_audience_preset(
+    request: Request,
+    name: str,
+    user: dict = Depends(require_admin),
+):
+    """Store or replace a saved audience under `name`.
+
+    The body is the form state as JSON. It is stored verbatim and handed back
+    to the page, which is why the only checks here are on size and shape: this
+    endpoint decides what a manager can save, not what the segmentation runs.
+    """
+    name = name.strip()
+    if not name or len(name) > _PRESET_NAME_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"name must be 1..{_PRESET_NAME_MAX} characters",
+        )
+
+    try:
+        criteria = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="expected a JSON body")
+    if not isinstance(criteria, dict):
+        raise HTTPException(status_code=400, detail="criteria must be a JSON object")
+    if len(json.dumps(criteria, ensure_ascii=False, default=str)) > _PRESET_CRITERIA_MAX:
+        raise HTTPException(status_code=400, detail="criteria is too large")
+
+    store = await get_store()
+    try:
+        saved = await store.save_sms_audience_preset(
+            name, criteria, created_by=user.get("user_id"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    logger.info("SMS audience preset saved: user=%s name=%s",
+                user.get("user_id"), name)
+    return saved
+
+
+@router.delete("/customers/sms-audience-presets/{name}")
+@limiter.limit("20/minute")
+async def delete_sms_audience_preset(
+    request: Request,
+    name: str,
+    user: dict = Depends(require_admin),
+):
+    """Remove a saved audience. Built-ins refuse."""
+    store = await get_store()
+    try:
+        removed = await store.delete_sms_audience_preset(name.strip())
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"no audience named {name!r}")
+    return {"deleted": name}
+
+
+@router.post("/customers/sms-campaigns")
+@limiter.limit("10/minute")
+async def create_sms_campaign(
+    request: Request,
+    criteria: dict = Depends(_sms_segment_params),
+    limit: int = Query(50000, ge=1, le=100000),
+    overwrite: bool = Query(False, description="Replace an existing frozen roster"),
+    promocode: Optional[str] = Query(
+        None, max_length=40,
+        description="Code carried by this campaign, for direct attribution",
+    ),
+    user: dict = Depends(require_admin),
+):
+    """Freeze this audience as a campaign, without downloading anything.
+
+    Freezing used to be a side effect of the CSV export, so creating a campaign
+    meant taking a file of phone numbers whether or not anybody wanted one —
+    the send goes through the gateway, and the file was pure ceremony. The
+    roster still has to be recorded at this instant for the campaign to be
+    measurable at all; that is what this endpoint is for.
+    """
+    if criteria["campaign"] == "default":
+        raise HTTPException(
+            status_code=400,
+            detail="name the campaign — 'default' is the placeholder the preview uses",
+        )
+
+    store = await get_store()
+    data = await store.get_sms_segments(include_customers=True, limit=limit, **criteria)
+
+    if data["truncated"]:
+        raise HTTPException(
+            status_code=400,
+            detail="refusing to freeze a truncated roster — raise `limit` so the "
+                   "whole audience is recorded",
+        )
+    if not data["customers"]:
+        raise HTTPException(
+            status_code=400,
+            detail="this audience is empty — nothing to freeze",
+        )
+
+    try:
+        frozen = await store.freeze_sms_campaign(
+            campaign=criteria["campaign"],
+            customers=data["customers"],
+            criteria=data["criteria"],
+            ltv_basis=criteria["ltv_basis"],
+            sales_type=criteria["sales_type"],
+            holdout_pct=criteria["holdout_pct"],
+            promocode=promocode,
+            overwrite=overwrite,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    logger.info(
+        "SMS campaign created: user=%s campaign=%s grouping=%s target=%d holdout=%d",
+        user.get("user_id"), criteria["campaign"], criteria["grouping"],
+        data["totals"]["target"], data["totals"]["holdout"],
+    )
+    return {
+        "campaign": criteria["campaign"],
+        "frozen": frozen,
+        "segments": data["segments"],
+        "totals": data["totals"],
+        "funnel": data["funnel"],
+        "criteria": data["criteria"],
+    }
 
 
 @router.post("/customers/sms-campaigns/{campaign}/sent")

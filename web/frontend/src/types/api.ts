@@ -1304,7 +1304,59 @@ export interface MarketingReportResponse {
 // ─── SMS Campaigns ───────────────────────────────────────────────────────────
 
 export type SmsLtvBasis = 'revenue' | 'margin'
-export type SmsTier = 'VIP' | 'CORE' | 'REACTIVATION'
+/** 'ALL' is the single arm a filtered audience produces. */
+export type SmsTier = 'VIP' | 'CORE' | 'REACTIVATION' | 'ALL'
+/** How the audience is split into arms: three value tiers, or one group. */
+export type SmsGrouping = 'rfm' | 'single'
+
+/**
+ * The audience, as the wizard holds it.
+ *
+ * Everything is optional and an unset field is not a filter — an empty object
+ * selects what the tier rules alone selected before filters existed. Sent as
+ * flat query parameters, and saved verbatim as a preset.
+ */
+export interface SmsAudienceFilters {
+  recencyMin?: number | null
+  recencyMax?: number | null
+  ordersMin?: number | null
+  ordersMax?: number | null
+  ltvMin?: number | null
+  ltvMax?: number | null
+  aovMin?: number | null
+  aovMax?: number | null
+  firstOrderFrom?: string | null
+  firstOrderTo?: string | null
+  cities?: string[]
+  brands?: string[]
+  categoryIds?: number[]
+  sourceIds?: number[]
+  promocodeUsed?: string | null
+  boughtWithinDays?: number | null
+}
+
+/** The whole audience definition: how it is split, ranked, and narrowed. */
+export interface SmsAudienceCriteria {
+  grouping: SmsGrouping
+  ltvBasis: SmsLtvBasis
+  holdoutPct: number
+  tiers: SmsTier[]
+  filters: SmsAudienceFilters
+}
+
+/** A saved audience. Built-ins ship with the page and cannot be edited. */
+export interface SmsAudiencePreset {
+  name: string
+  criteria: Partial<SmsAudienceCriteria> & Record<string, unknown>
+  createdBy: number | null
+  createdAt: string | null
+  updatedAt: string | null
+  builtin: boolean
+}
+
+export interface SmsAudiencePresetsResponse {
+  presets: SmsAudiencePreset[]
+}
 
 export interface SmsSegment {
   tier: SmsTier
@@ -1324,6 +1376,7 @@ export interface SmsSegment {
 export type SmsFunnelStage =
   | 'customers'
   | 'inWindow'
+  | 'filtered'
   | 'tiered'
   | 'phone'
   | 'subscribed'
@@ -1346,7 +1399,11 @@ export interface SmsSegmentsResponse {
     coreMinOrders: number
     reactivationMaxRecency: number
     holdoutPct: number
+    /** Absent on responses from before audience filters shipped. */
+    grouping?: SmsGrouping
+    filters?: Record<string, unknown>
   }
+  grouping?: SmsGrouping
   funnel: SmsFunnelStep[]
   segments: SmsSegment[]
   totals: { customers: number; target: number; holdout: number }
@@ -1369,6 +1426,15 @@ export interface SmsCampaignSummary {
 
 export interface SmsCampaignsResponse {
   campaigns: SmsCampaignSummary[]
+}
+
+/** What creating a campaign returns: the roster is frozen at this moment. */
+export interface SmsCreateCampaignResponse {
+  campaign: string
+  frozen: { campaign: string; frozen: boolean }
+  segments: SmsSegment[]
+  totals: { customers: number; target: number; holdout: number }
+  funnel: SmsFunnelStep[]
 }
 
 export interface SmsGroupStats {
