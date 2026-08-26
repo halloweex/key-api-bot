@@ -36,9 +36,17 @@ def _parse_dlr_time(value: Any) -> datetime | None:
 # the same minute. At 120/minute the gateway's own retry schedule (1, 3, 5, 10,
 # 15, 20, 30, 60, 120 min) was the only thing delivering receipts at all, and on
 # 2026-08-05 it delivered none: 13 211 × 429 against 3 655 × 401, zero 200s.
-# 600/minute absorbs a 5 000-recipient send inside the retry window while still
-# capping what an unauthenticated caller can cost us.
-_DLR_RATE_LIMIT = "600/minute"
+# 600/minute was still three times too small, measured on the 2026-08-26 send:
+# 4 199 recipients produced 2 028 × 429 and 1 130 × 499 (the gateway giving up
+# mid-request) inside fifteen minutes. A delivery report refused is a result
+# nobody can recover — the gateway stops trying after 4.5 hours and offers no
+# replay — so the ceiling has to clear a whole send arriving at once, with the
+# gateway's nine retries stacked on top of it.
+#
+# The endpoint is not free to abuse at this rate: every request must carry a
+# SHA1 over a shared secret, and an unsigned one is refused before the payload
+# is read.
+_DLR_RATE_LIMIT = "12000/minute"
 
 # Rejections are counted per condition so a wrong secret cannot be silent again.
 # The gateway retries each event nine times over 4.5 hours, so a handful of
