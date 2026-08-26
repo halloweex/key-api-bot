@@ -612,6 +612,7 @@ BUCKET_SIZE = 1000
 
 # One SUM per column, and the column's kind decides which SUM.
 _INT, _NUMERIC, _TS, _TEXT = "int", "numeric", "ts", "text"
+_BOOL, _DATE = "bool", "date"
 
 
 @dataclass(frozen=True)
@@ -684,7 +685,72 @@ ORDER_TABLES: Tuple[BucketedTable, ...] = (
 )
 
 
+# ─── Silver: computed on both sides, compared the same way ───────────────────
+#
+# Not landing. `silver.orders` is the output of `silver_select_sql(POSTGRES)`
+# over `bronze.orders`, and DuckDB's `silver_orders` is the same projection
+# over its own copy. So this compares two *computations* of one rule, which is
+# the thing the parallel period exists to prove.
+#
+# `full_replace` in spirit: `rebuild_silver` writes every row it holds, so a
+# row present in DuckDB and absent here was lost, never "retired".
+#
+# THE GRACE WINDOW IS WIDER, AND HAS TO BE
+#
+# DuckDB rebuilds Silver whenever the warehouse goes dirty. Postgres rebuilds
+# on a floor — `KS_PG_SILVER_INTERVAL_S`, ten minutes by default — because a
+# full 46,000-row rebuild costs the same whatever moved. So Postgres is
+# *legitimately* behind by up to that floor, and a fifteen-minute grace would
+# report every order touched in the last ten minutes as a defect.
+#
+# Twenty minutes: the floor plus half of it again. Raise both together or this
+# starts reporting the schedule.
+SILVER_GRACE_MINUTES = 20
+
+_SILVER_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("id", _INT), ("source_id", _INT), ("status_id", _INT),
+    ("grand_total", _NUMERIC), ("ordered_at", _TS),
+    ("buyer_id", _INT), ("manager_id", _INT), ("order_date", _DATE),
+    ("is_return", _BOOL), ("sales_type", _TEXT),
+    ("is_active_source", _BOOL), ("source_name", _TEXT),
+    ("is_new_customer", _BOOL), ("buyer_first_order_date", _DATE),
+    ("promocode", _TEXT),
+)
+_SILVER_COLS = tuple(c for c, _ in _SILVER_FIELDS)
+
+SILVER_TABLES: Tuple[BucketedTable, ...] = (
+    BucketedTable(
+        pg_table="silver.orders",
+        dk_table="silver_orders",
+        columns=_SILVER_COLS,
+        fields=_SILVER_FIELDS,
+        bucket_column="id",
+        numeric=("grand_total",),
+        # Silver carries no timestamp of its own on either side. The grace
+        # window therefore reads the *order's* — a Silver row is only ever as
+        # fresh as the landing row it was projected from, and that is what
+        # decides whether Postgres has had a chance to catch up.
+        dk_rows_sql=(
+            "SELECT " + ", ".join(f"s.{c}" for c in _SILVER_COLS)
+            + ", o.synced_at FROM silver_orders s "
+            "LEFT JOIN orders o ON o.id = s.id "
+            f"WHERE (s.id // {BUCKET_SIZE}) = ?"
+        ),
+        pg_rows_sql=(
+            f"SELECT {', '.join(_SILVER_COLS)} FROM silver.orders "
+            f"WHERE (id / {BUCKET_SIZE}) = $1"
+        ),
+    ),
+)
+
+
 def _dk_term(column: str, kind: str) -> str:
+    if kind == _BOOL:
+        # Counted, not summed as text: DuckDB and Postgres render booleans
+        # differently and `SUM(LENGTH(...))` would compare 'true' against 't'.
+        return f"SUM(CASE WHEN {column} THEN 1 ELSE 0 END)"
+    if kind == _DATE:
+        return f"SUM(COALESCE(epoch({column})::BIGINT, 0))"
     if kind == _TS:
         # Microseconds as an integer. Not `extract(epoch ...)`, which is a
         # float on one side and a numeric on the other and would compare two
@@ -696,6 +762,10 @@ def _dk_term(column: str, kind: str) -> str:
 
 
 def _pg_term(column: str, kind: str) -> str:
+    if kind == _BOOL:
+        return f"SUM(CASE WHEN {column} THEN 1 ELSE 0 END)"
+    if kind == _DATE:
+        return f"SUM(COALESCE(EXTRACT(EPOCH FROM {column})::bigint, 0))"
     if kind == _TS:
         return (
             f"SUM(COALESCE((EXTRACT(EPOCH FROM {column}) * 1000000)::bigint, 0))"
@@ -1005,6 +1075,97 @@ async def reconcile_orders(
             }
 
     for spec in specs:
+        found = _Divergence()
+        for bucket in suspects.get(spec.pg_table, ()):
+            dk_rows, dk_synced = dk_buckets[spec.pg_table][bucket]
+            pg_rows = await _read_pg_bucket(pool, spec, bucket)
+            compare_bucket(
+                spec, dk_rows, dk_synced, pg_rows, found,
+                now=now, grace_minutes=grace_minutes,
+            )
+        issues += _divergence_findings(spec, found, max_samples=max_samples)
+
+    return issues
+
+
+async def reconcile_silver(
+    store,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = SILVER_GRACE_MINUTES,
+    max_samples: int = 10,
+    max_buckets: int = 20,
+) -> List[IntegrityIssue]:
+    """Compare the two computations of Silver, fingerprint then drill-down.
+
+    The same shape as `reconcile_orders`, with one gate swapped. Orders are
+    gated on `backfilled_at`, because a delta mirror cannot be judged before
+    history has been carried across. Silver has no backfill: `rebuild_silver`
+    writes the table whole every time, so the only question is whether it has
+    ever run — which `last_ok_at` answers, and `_watermark_findings` already
+    reports as `mirror_never_shipped`.
+
+    Reports only. A finding here cannot start a rebuild, on the same grounds as
+    every other check in this module: a comparison that repairs what it finds
+    destroys the evidence that it found anything.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    async with store.connection() as conn:
+        dk_prints = {s.pg_table: fingerprints(conn, s) for s in SILVER_TABLES}
+
+    issues: List[IntegrityIssue] = []
+    suspects: Dict[str, List[int]] = {}
+    for spec in SILVER_TABLES:
+        dk_print = dk_prints[spec.pg_table]
+        dk_count = sum(int(v[0]) for v in dk_print.values())
+        found, last_ok_at = _watermark_findings(
+            spec.pg_table, watermarks.get(spec.pg_table), dk_count,
+        )
+        issues += found
+        if last_ok_at is None:
+            continue
+
+        pg_print = await pg_fingerprints(pool, spec)
+        differing = disagreeing_buckets(dk_print, pg_print)
+        if len(differing) > max_buckets:
+            issues.append(IntegrityIssue(
+                check_name="mirror_buckets_disagree",
+                table_name=spec.pg_table,
+                severity=Severity.CRITICAL,
+                count=len(differing),
+                sample_ids=tuple(differing[:max_samples]),
+                description=(
+                    f"{len(differing)} id buckets disagree between the two "
+                    "computations of Silver — more than this check will open. "
+                    "A whole-table problem: the projection, the classification "
+                    "the two sides read, or a rebuild that did not finish."
+                ),
+            ))
+            differing = differing[:max_buckets]
+        suspects[spec.pg_table] = differing
+
+    if not any(suspects.values()):
+        return issues
+
+    dk_buckets: Dict[str, Dict[int, Any]] = {}
+    async with store.connection() as conn:
+        for spec in SILVER_TABLES:
+            dk_buckets[spec.pg_table] = {
+                bucket: _read_dk_bucket(conn, spec, bucket)
+                for bucket in suspects.get(spec.pg_table, ())
+            }
+
+    for spec in SILVER_TABLES:
         found = _Divergence()
         for bucket in suspects.get(spec.pg_table, ()):
             dk_rows, dk_synced = dk_buckets[spec.pg_table][bucket]

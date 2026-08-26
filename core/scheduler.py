@@ -1168,6 +1168,7 @@ class BackgroundScheduler:
             read_duckdb_side,
             reconcile_mirror,
             reconcile_orders,
+            reconcile_silver,
         )
 
         with correlation_context():
@@ -1192,6 +1193,9 @@ class BackgroundScheduler:
                 # and that interleaves the two stores — so it takes the store
                 # and manages its own short acquisitions.
                 issues += await reconcile_orders(store)
+                # And the two computations of Silver. Same layer: it is the
+                # same question — do the stores agree — asked one level up.
+                issues += await reconcile_silver(store)
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("Mirror reconciliation raised")
