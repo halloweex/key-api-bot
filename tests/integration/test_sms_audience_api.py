@@ -327,3 +327,17 @@ class TestBaseWindow:
         client.get(SEGMENTS, headers=_headers())
         assert store.calls[-1]["max_recency_days"] == 270
         assert store.calls[-1]["reactivation_max_recency"] == 120
+
+
+class TestChannelsCarryTheTariff:
+    """The page prices a campaign before it is sent."""
+
+    def test_price_per_part_is_published(self, client, store, monkeypatch):
+        monkeypatch.setenv("TURBOSMS_PRICE_PER_PART", "1.32")
+
+        body = client.get("/api/customers/sms/channels", headers=_headers()).json()
+
+        # From config, never restated in the frontend: two numbers for one
+        # price is how a page promises one figure and the gateway charges
+        # another.
+        assert body["pricePerPart"] == 1.32

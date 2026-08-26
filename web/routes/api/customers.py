@@ -838,6 +838,11 @@ async def get_sms_channels(request: Request, admin: dict = Depends(require_admin
         "viber": config.viber_configured,
         "smsSender": config.sender or None,
         "viberSender": config.viber_sender or None,
+        # The tariff the send will be billed at, so the page can price a
+        # campaign before it goes out. Read from config rather than restated in
+        # the frontend: the two drifting apart would put one number on screen
+        # and charge another.
+        "pricePerPart": config.price_per_part,
     }
 
 

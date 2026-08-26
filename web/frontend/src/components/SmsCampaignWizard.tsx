@@ -1,6 +1,6 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Check, X } from 'lucide-react'
+import { Bookmark, Check, X } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { Button } from './Button'
 import { Select } from './Select'
@@ -16,13 +16,15 @@ import {
   useDeleteSmsAudiencePreset,
   useSaveSmsAudiencePreset,
   useSmsAudiencePresets,
+  useSmsChannels,
   useSmsSegments,
 } from '../hooks/useApi'
 import {
-  audienceFromPreset, audienceToParams, describeAudience, emptyAudience,
+  audienceFromPreset, audienceToParams, describeAudience,
 } from '../utils/smsAudience'
+import { clearDraft, loadDraft, saveDraft } from '../utils/smsDraft'
 import { smsCost } from '../utils/smsCost'
-import { formatNumber } from '../utils/formatters'
+import { formatCurrency, formatNumber } from '../utils/formatters'
 import type { SmsAudienceCriteria, SmsCampaignSummary } from '../types/api'
 
 // ─── SmsCampaignWizard ───────────────────────────────────────────────────────
@@ -121,19 +123,29 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   const { t } = useTranslation()
   const { addToast } = useToast()
 
+  // Restored from the session, so closing the wizard — or reloading the page —
+  // does not throw away an audience that took ten decisions to build.
+  const restored = useMemo(() => loadDraft(), [])
+
   const [step, setStep] = useState<StepId>('audience')
-  const [audience, setAudience] = useState<SmsAudienceCriteria>(emptyAudience())
-  const [campaign, setCampaign] = useState('')
-  const [promocode, setPromocode] = useState('')
-  const [text, setText] = useState('')
+  const [audience, setAudience] = useState<SmsAudienceCriteria>(restored.audience)
+  const [campaign, setCampaign] = useState(restored.campaign)
+  const [promocode, setPromocode] = useState(restored.promocode)
+  const [text, setText] = useState(restored.text)
   const [presetName, setPresetName] = useState('')
   const [savingPreset, setSavingPreset] = useState(false)
-  const [selectedPreset, setSelectedPreset] = useState('')
+  const [selectedPreset, setSelectedPreset] = useState(restored.presetName)
   const [testing, setTesting] = useState(false)
   const [created, setCreated] = useState<SmsCampaignSummary | null>(null)
   const [sending, setSending] = useState(false)
 
+  // Every keystroke, because the point is surviving the misclick nobody plans.
+  useEffect(() => {
+    saveDraft({ audience, campaign, promocode, text, presetName: selectedPreset })
+  }, [audience, campaign, promocode, text, selectedPreset])
+
   const { data: presetData } = useSmsAudiencePresets()
+  const { data: channels } = useSmsChannels()
   const savePreset = useSaveSmsAudiencePreset()
   const deletePreset = useDeleteSmsAudiencePreset()
   const create = useCreateSmsCampaign()
@@ -166,6 +178,16 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   const target = includedArms.reduce((n, s) => n + s.target, 0)
   const holdout = includedArms.reduce((n, s) => n + s.holdout, 0)
   const cost = useMemo(() => smsCost(text.trim()), [text])
+
+  // What the gateway will bill: parts × recipients × the tariff it quotes.
+  // The tariff comes from the server rather than a constant here — two numbers
+  // for one price is how a page ends up promising one figure and charging
+  // another. Without a text yet, one part is the floor, and the line says so.
+  const estimate = useMemo(() => {
+    const price = channels?.pricePerPart
+    if (price == null || target === 0) return null
+    return (cost.parts || 1) * target * price
+  }, [channels?.pricePerPart, cost.parts, target])
 
   function handlePickPreset(picked: string | null) {
     const name = picked ?? ''
@@ -232,6 +254,9 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
           target: result.totals.target,
           holdout: result.totals.holdout,
         })
+        // From here the campaign exists on the server; a draft of it would be
+        // a stale copy that reopens as a half-built duplicate.
+        clearDraft()
         addToast({ type: 'success', title: t('sms.campaignCreated', { campaign }) })
       },
       onError: (e: Error) =>
@@ -278,6 +303,41 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
       </CardHeader>
 
       <CardContent>
+        {/* Visible on every step, because "who is this going to and what will
+            it cost" is the question being answered by all four of them. */}
+        <div className="mb-4 grid gap-3 sm:grid-cols-3 rounded-lg border border-slate-200
+                        bg-slate-50/60 p-3">
+          <div className="sm:col-span-2">
+            <div className="text-[11px] uppercase tracking-wide text-slate-500">
+              {t('sms.summaryWho')}
+            </div>
+            <div className="text-sm text-slate-800 mt-0.5">
+              {campaign || t('sms.summaryUnnamed')}
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5">
+              {describeAudience(audience, t)}
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-slate-500">
+              {t('sms.summaryHowMany')}
+            </div>
+            <div className="text-sm text-slate-800 mt-0.5 tabular-nums">
+              {t('sms.summaryContacts', {
+                target: formatNumber(target), holdout: formatNumber(holdout),
+              })}
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5 tabular-nums">
+              {estimate == null
+                ? t('sms.summaryNoPrice')
+                : t(text.trim() ? 'sms.summaryCost' : 'sms.summaryCostFrom', {
+                    cost: formatCurrency(estimate),
+                    parts: cost.parts || 1,
+                  })}
+            </div>
+          </div>
+        </div>
+
         {error ? (
           <ApiErrorState error={error} onRetry={() => refetch()} />
         ) : (
@@ -332,13 +392,12 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                         {t('sms.presetDeleteSelected')}
                       </Button>
                     )}
-                    <button
-                      type="button"
+                    <Button
+                      variant="secondary" size="sm"
                       onClick={() => setSavingPreset(!savingPreset)}
-                      className="text-[11px] text-purple-700 hover:text-purple-900 underline"
                     >
-                      {t('sms.presetSaveToggle')}
-                    </button>
+                      <Bookmark className="w-3.5 h-3.5" /> {t('sms.presetSaveToggle')}
+                    </Button>
                   </div>
                   <p className="mt-1.5 text-[11px] text-slate-600 tabular-nums">
                     {describeAudience(audience, t)}

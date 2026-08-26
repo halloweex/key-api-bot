@@ -1517,6 +1517,8 @@ export interface SmsChannelsResponse {
   viber: boolean
   smsSender: string | null
   viberSender: string | null
+  /** Gateway tariff per message part, in ₴. Absent on older deployments. */
+  pricePerPart?: number
 }
 
 export type SmsChannel = 'sms' | 'viber_sms'

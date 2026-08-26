@@ -61,7 +61,20 @@ const data: SmsSegmentsResponse = {
 }
 
 const segmentParams: string[] = []
-const createMutate = vi.fn()
+// Calls back like the real mutation does, so the steps that only happen after
+// a roster is frozen — the draft being cleared, the send button appearing —
+// are actually exercised.
+const createMutate = vi.fn((params: string, opts?: {
+  onSuccess?: (r: unknown) => void
+}) => {
+  opts?.onSuccess?.({
+    campaign: new URLSearchParams(params).get('campaign') ?? 'unnamed',
+    frozen: { campaign: 'x', frozen: true },
+    segments: [],
+    totals: { customers: 1000, target: 900, holdout: 100 },
+    funnel: [],
+  })
+})
 const savePresetMutate = vi.fn()
 
 vi.mock('../../hooks/useApi', () => ({
@@ -86,7 +99,10 @@ vi.mock('../../hooks/useApi', () => ({
   useCreateSmsCampaign: () => ({ mutate: createMutate, isPending: false }),
   useBrands: () => ({ data: [{ name: 'Anua' }, { name: 'Medi-Peel' }] }),
   useCategories: () => ({ data: [{ id: 10, name: 'Face care' }] }),
-  useSmsChannels: () => ({ data: { sms: true, viber: false } }),
+  useSmsChannels: () => ({
+    data: { sms: true, viber: false, smsSender: 'KoreanStory', viberSender: null,
+            pricePerPart: 1.28 },
+  }),
   useSendTestSms: () => ({ mutate: vi.fn(), isPending: false }),
   useSendSmsCampaign: () => ({ mutate: vi.fn(), isPending: false }),
 }))
@@ -97,6 +113,8 @@ beforeEach(() => {
   segmentParams.length = 0
   createMutate.mockClear()
   savePresetMutate.mockClear()
+  // The draft outlives a closed wizard on purpose, so it outlives a test too.
+  sessionStorage.clear()
 })
 
 /** The parameters of the most recent preview query. */
@@ -393,5 +411,60 @@ describe('choosing tiers', () => {
     // The sizes are the whole basis for deciding which arms to include.
     expect(screen.getByRole('button', { name: /sms\.tier\.VIP · 900/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: /sms\.tier\.CORE · 2,700/ })).toBeTruthy()
+  })
+})
+
+
+describe('the draft', () => {
+  it('survives closing the wizard', async () => {
+    const { unmount } = render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await nameCampaign('sep-brand')
+    await pickTier('VIP')
+    unmount()
+
+    // Reopened: the name and the audience are where they were. An audience is
+    // ten decisions; losing it to a misclick is what this prevents.
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+    expect(
+      (screen.getByRole('textbox', { name: /sms\.campaignName/ }) as HTMLInputElement).value,
+    ).toBe('sep-brand')
+    expect(
+      screen.getByRole('button', { name: /sms\.tier\.VIP/ }).getAttribute('aria-pressed'),
+    ).toBe('true')
+  })
+
+  it('is cleared once the roster is frozen', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await nameCampaign()
+    await step('sms.wizardNext')
+    await step('sms.wizardNext')
+    await userEvent.type(screen.getByRole('textbox', { name: /sms\.messageText/ }), 'Знижка')
+    await step('sms.wizardNext')
+    await step('sms.createCampaign')
+
+    // The campaign exists on the server now; a draft of it would reopen as a
+    // half-built duplicate.
+    expect(sessionStorage.getItem('sms.campaignDraft.v1')).toBeNull()
+  })
+})
+
+describe('the cost estimate', () => {
+  it('prices the send at the gateway tariff, once there is a text', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    // No text yet: one part per recipient is the floor, and the line says so.
+    expect(screen.getByText(/sms\.summaryCostFrom/)).toBeTruthy()
+
+    await nameCampaign()
+    await step('sms.wizardNext')
+    await step('sms.wizardNext')
+    await userEvent.type(
+      screen.getByRole('textbox', { name: /sms\.messageText/ }), 'Знижка',
+    )
+
+    // 7,560 recipients × 1 part × 1.28 ₴.
+    expect(screen.getByText(/sms\.summaryCost\(/)).toBeTruthy()
   })
 })
