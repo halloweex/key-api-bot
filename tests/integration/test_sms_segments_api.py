@@ -16,7 +16,6 @@ from web.main import app
 from web.routes.auth import (
     session_serializer,
     create_session_data,
-    require_admin,
     SESSION_COOKIE,
 )
 from core.permissions import ADMIN_USER_IDS
@@ -75,6 +74,45 @@ def _deps(path: str, method: str = "GET") -> set:
     from tests.routes_helper import route_dependencies
 
     return set(route_dependencies(app, path, method))
+
+
+def _permission_gates(path: str, method: str = "GET") -> set:
+    """The (feature, action) pairs a route's permission dependencies demand.
+
+    Read out of the closure `require_permission` builds rather than matched by
+    name: a dependency that stopped checking anything would still be called
+    `check_permission`, and the point of this assertion is that the check is
+    really there.
+    """
+    gates = set()
+    for dep in _deps(path, method):
+        code = getattr(dep, "__code__", None)
+        closure = getattr(dep, "__closure__", None)
+        if code is None or not closure:
+            continue
+        cells = dict(zip(code.co_freevars, closure))
+        if "feature" not in cells or "action" not in cells:
+            continue
+        gates.add((cells["feature"].cell_contents, cells["action"].cell_contents))
+    return gates
+
+
+def _role_store(role: str):
+    """A store stub that reports one role and knows nothing else.
+
+    Having no `seed_default_permissions` is deliberate: the permission lookup
+    falls back to the hardcoded matrix, which is what this file is asserting
+    about.
+    """
+
+    class _Store:
+        async def get_user(self, uid):
+            return {"status": "approved", "role": role}
+
+    async def _fake_get_store():
+        return _Store()
+
+    return _fake_get_store
 
 
 def _customer(buyer_id: int, tier: str, assignment: str) -> dict:
@@ -194,38 +232,75 @@ def store(monkeypatch):
 # ─── Authorization ────────────────────────────────────────────────────────
 
 class TestSmsSegmentsAuth:
-    """PII endpoints must be admin-only, not merely session-gated."""
+    """PII endpoints need the `sms` permission, not merely a session.
+
+    They stopped being admin-only on purpose: running a campaign is grantable
+    without user management, expenses, margin and internal sales attached. What
+    must not slip is the other direction — a plain viewer reaching the roster.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_permission_cache(self):
+        from core.permissions import invalidate_permissions_cache
+
+        invalidate_permissions_cache()
+        yield
+        invalidate_permissions_cache()
 
     @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH, RESULTS_PATH])
     def test_requires_session(self, client, path):
         assert client.get(path).status_code == 401
 
-    @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH])
-    def test_requires_admin_dependency(self, path):
-        route = _route(path)
-        assert route is not None, f"{path} is not registered"
-        assert require_admin in _deps(path), \
-            f"{path} exports phone numbers and must keep require_admin"
+    @pytest.mark.parametrize("path,gate", [
+        (SEGMENTS_PATH, ("sms", "view")),
+        (CSV_PATH, ("sms", "edit")),
+        # The templated form: routes are looked up by declaration, not by a
+        # filled-in campaign name.
+        ("/api/customers/sms-campaigns/{campaign}/results", ("sms", "view")),
+        ("/api/customers/sms-campaigns/{campaign}/send", ("sms", "edit")),
+    ])
+    def test_permission_gate(self, path, gate):
+        method = "POST" if gate[1] == "edit" and "send" in path else "GET"
+        assert _route(path, method) is not None, f"{path} is not registered"
+        assert gate in _permission_gates(path, method), \
+            f"{path} must be gated on {gate}, found {_permission_gates(path, method)}"
 
     @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH])
     def test_viewer_is_forbidden(self, client, monkeypatch, path):
         viewer_id = 555_000_222
         assert viewer_id not in ADMIN_USER_IDS
 
-        class _Store:
-            async def get_user(self, uid):
-                return {"status": "approved", "role": "viewer"}
-
-        async def _fake_get_store():
-            return _Store()
-
-        monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+        monkeypatch.setattr("core.duckdb_store.get_store", _role_store("viewer"))
 
         r = client.get(
             path,
             headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(viewer_id, role='viewer')}"},
         )
         assert r.status_code == 403
+
+    @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH])
+    def test_marketer_is_allowed(self, client, store, monkeypatch, path):
+        marketer_id = 555_000_333
+        assert marketer_id not in ADMIN_USER_IDS
+
+        monkeypatch.setattr("core.duckdb_store.get_store", _role_store("marketer"))
+
+        r = client.get(
+            path,
+            params={"campaign": "aug-promo"},
+            headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(marketer_id, role='marketer')}"},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_viewer_cannot_pull_customer_rows(self, client, store, monkeypatch):
+        """`view` is sizes. The rows themselves are names and phone numbers."""
+        monkeypatch.setattr("core.duckdb_store.get_store", _role_store("viewer"))
+
+        headers = {"Cookie": f"{SESSION_COOKIE}={_make_cookie(555_000_444, role='viewer')}"}
+        assert client.get(SEGMENTS_PATH, headers=headers).status_code == 403
+        assert client.get(
+            SEGMENTS_PATH, params={"include_customers": "true"}, headers=headers,
+        ).status_code == 403
 
 
 # ─── JSON endpoint ────────────────────────────────────────────────────────
@@ -528,10 +603,10 @@ def gateway(monkeypatch):
 class TestTestSend:
     """A rehearsal must reach the gateway and touch nothing else."""
 
-    def test_requires_admin_dependency(self):
+    def test_sending_needs_edit_permission(self):
         assert _route(TEST_SEND_PATH, "POST") is not None, \
             "test-send is not registered"
-        assert require_admin in _deps(TEST_SEND_PATH, "POST")
+        assert ("sms", "edit") in _permission_gates(TEST_SEND_PATH, "POST")
 
     def test_requires_session(self, client):
         assert client.post(
@@ -613,9 +688,9 @@ class TestChannelSelection:
         assert body["sms"] is True
         assert body["viber"] is False
 
-    def test_channels_endpoint_is_admin_only(self):
+    def test_channels_endpoint_needs_sms_permission(self):
         assert _route(CHANNELS_PATH) is not None
-        assert require_admin in _deps(CHANNELS_PATH)
+        assert ("sms", "view") in _permission_gates(CHANNELS_PATH)
 
     def test_hybrid_send_passes_a_viber_message(self, client, gateway):
         client.post(

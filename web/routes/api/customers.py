@@ -17,7 +17,7 @@ from core.turbosms import (
     PartialSendError, TurboSmsClient, TurboSmsConfig, TurboSmsError,
     ViberMessage, count_segments,
 )
-from web.routes.auth import require_admin, require_permission
+from web.routes.auth import has_permission, require_permission
 from web.services import dashboard_service
 from ._deps import (
     limiter, get_store,
@@ -149,8 +149,18 @@ async def get_at_risk_customers(
 
 
 # ─── SMS campaign segments ───────────────────────────────────────────────
-# These expose customer names and phone numbers, so both endpoints stack
-# require_admin on top of the api_gate session check.
+# These expose customer names and phone numbers and spend real money, so every
+# one of them stacks the `sms` permission on top of the api_gate session check.
+# The split between the two actions is deliberate:
+#
+#   view — roster sizes and past results, figures about people;
+#   edit — the CSV of names and phone numbers, and anything that reaches a
+#          customer's handset or the gateway's balance.
+#
+# It used to be require_admin throughout, which meant the only way to let
+# somebody run a campaign was to hand over user management, expenses, margin
+# and the internal sales_type with it. `marketer` is that grant without the
+# rest; admins keep it through the same matrix.
 
 _SMS_TIERS = ("VIP", "CORE", "REACTIVATION")
 
@@ -353,7 +363,7 @@ async def get_sms_segments(
     criteria: dict = Depends(_sms_segment_params),
     include_customers: bool = Query(False),
     limit: int = Query(20000, ge=1, le=100000),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "view")),
 ):
     """
     RFM segments for an SMS campaign, split into VIP / CORE / REACTIVATION.
@@ -366,7 +376,15 @@ async def get_sms_segments(
     Returns per-tier sizes by default. Pass `include_customers=true` for the
     rows themselves (names and phone numbers), or use the `/export/csv`
     variant to download them.
+
+    `view` covers the sizes; the rows themselves need `edit`, the same
+    permission the CSV download needs, because they are the same data.
     """
+    if include_customers and not await has_permission(user, "sms", "edit"):
+        raise HTTPException(
+            status_code=403,
+            detail="Customer rows require edit access to SMS campaigns",
+        )
     store = await get_store()
     return await store.get_sms_segments(
         include_customers=include_customers, limit=limit, **criteria,
@@ -390,7 +408,7 @@ async def export_sms_segments_csv(
         None, max_length=40,
         description="Code carried by this campaign, for direct attribution",
     ),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """
     Export the SMS campaign list as CSV.
@@ -437,7 +455,7 @@ async def export_sms_segments_csv(
     # Exports carry customer PII — record who pulled which list.
     logger.info(
         "SMS segment export: user=%s campaign=%s tier=%s rows=%d holdout=%s",
-        admin.get("user_id"), criteria["campaign"], criteria["tier"] or "all",
+        user.get("user_id"), criteria["campaign"], criteria["tier"] or "all",
         len(rows), include_holdout,
     )
 
@@ -662,7 +680,7 @@ async def mark_sms_campaign_sent(
     sent_at: Optional[str] = Query(
         None, description="ISO timestamp; defaults to now",
     ),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """
     Record when the campaign file actually went to the SMS provider.
@@ -687,7 +705,7 @@ async def mark_sms_campaign_sent(
 
     logger.info(
         "SMS campaign marked sent: user=%s campaign=%s at=%s",
-        admin.get("user_id"), campaign, result["sentAt"],
+        user.get("user_id"), campaign, result["sentAt"],
     )
     return result
 
@@ -702,7 +720,7 @@ async def send_sms_campaign(
     viber_text: Optional[str] = Query(None, max_length=1000),
     button_caption: Optional[str] = Query(None, max_length=30),
     button_url: Optional[str] = Query(None, max_length=300),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """
     Send the campaign's target group through TurboSMS.
@@ -780,7 +798,7 @@ async def send_sms_campaign(
     logger.info(
         "SMS campaign sent: user=%s campaign=%s channel=%s accepted=%d "
         "stoplisted=%d failed=%d unsent=%d",
-        admin.get("user_id"), campaign, channel,
+        user.get("user_id"), campaign, channel,
         summary["accepted"], summary["stoplisted"], summary["failed"],
         partial.unsent if partial else 0,
     )
@@ -824,7 +842,7 @@ def _build_viber(
 
 @router.get("/customers/sms/channels")
 @limiter.limit("30/minute")
-async def get_sms_channels(request: Request, admin: dict = Depends(require_admin)):
+async def get_sms_channels(request: Request, user: dict = Depends(require_permission("sms", "view"))):
     """
     Which channels this deployment can actually send on.
 
@@ -856,7 +874,7 @@ async def send_test_sms(
     viber_text: Optional[str] = Query(None, max_length=1000),
     button_caption: Optional[str] = Query(None, max_length=30),
     button_url: Optional[str] = Query(None, max_length=300),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """
     Send one message to one number, to check the creative before a campaign.
@@ -890,7 +908,7 @@ async def send_test_sms(
         async with TurboSmsClient() as client:
             results = await client.send([digits], text, viber=viber)
     except TurboSmsError as e:
-        logger.error("Test SMS failed: user=%s error=%s", admin.get("user_id"), e)
+        logger.error("Test SMS failed: user=%s error=%s", user.get("user_id"), e)
         raise HTTPException(status_code=502, detail=str(e))
 
     if not results:
@@ -899,7 +917,7 @@ async def send_test_sms(
     result = results[0]
     logger.info(
         "Test SMS: user=%s phone=%s channel=%s accepted=%s code=%s parts=%d",
-        admin.get("user_id"), digits, channel, result.accepted, result.code,
+        user.get("user_id"), digits, channel, result.accepted, result.code,
         cost.parts,
     )
     return {
@@ -925,16 +943,16 @@ async def add_marketing_optout(
     buyer_id: int = Query(..., ge=1),
     phone: Optional[str] = Query(None, max_length=20),
     reason: str = Query("manual", max_length=40),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """Record that a customer asked not to receive marketing SMS."""
     store = await get_store()
     result = await store.add_marketing_optout(
         buyer_id=buyer_id, phone=phone, reason=reason,
-        source=str(admin.get("user_id") or "dashboard"),
+        source=str(user.get("user_id") or "dashboard"),
     )
     logger.info("Marketing opt-out: user=%s buyer=%s reason=%s",
-                admin.get("user_id"), buyer_id, reason)
+                user.get("user_id"), buyer_id, reason)
     return result
 
 
@@ -949,7 +967,7 @@ async def get_sms_campaign_results(
         description="Restrict the target arm to confirmed deliveries. Optimistic "
                     "bound, not a clean randomised comparison — see the docs.",
     ),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "view")),
 ):
     """
     Measure a campaign: the messaged group against the control.
@@ -979,7 +997,7 @@ async def get_sms_campaign_results(
 @limiter.limit("30/minute")
 async def list_sms_campaigns(
     request: Request,
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "view")),
 ):
     """List frozen campaigns with their roster sizes and send dates."""
     store = await get_store()

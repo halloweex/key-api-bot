@@ -15,6 +15,12 @@ class Role(str, Enum):
     """User roles."""
     ADMIN = "admin"
     EDITOR = "editor"
+    # A viewer who also runs SMS campaigns. Sending is the one thing on this
+    # dashboard that spends money and reaches customers directly, so it had to
+    # be grantable without handing over user management, expenses, margin and
+    # the internal sales_type along with it — which is what "make them an
+    # admin" used to mean.
+    MARKETER = "marketer"
     VIEWER = "viewer"
 
 
@@ -27,6 +33,10 @@ class Feature(str, Enum):
     CUSTOMERS = "customers"
     REPORTS = "reports"
     USER_MANAGEMENT = "user_management"
+    # The /sms page and every /api/customers/sms-* endpoint behind it. `view`
+    # is the roster sizes and past results; `edit` is what leaves the building
+    # — the CSV of names and phone numbers, and the send itself.
+    SMS = "sms"
 
 
 class Action(str, Enum):
@@ -49,6 +59,7 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         Feature.CUSTOMERS: {Action.VIEW, Action.EDIT},
         Feature.REPORTS: {Action.VIEW, Action.EDIT},
         Feature.USER_MANAGEMENT: {Action.VIEW, Action.EDIT, Action.DELETE},
+        Feature.SMS: {Action.VIEW, Action.EDIT},
     },
     Role.EDITOR: {
         Feature.DASHBOARD: {Action.VIEW, Action.EDIT},
@@ -58,6 +69,20 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         Feature.CUSTOMERS: {Action.VIEW},
         Feature.REPORTS: {Action.VIEW},
         Feature.USER_MANAGEMENT: set(),
+        Feature.SMS: set(),
+    },
+    # Everything a viewer has, plus SMS campaigns — deliberately spelled out
+    # rather than derived from VIEWER, because a copy that drifts is visible
+    # and an inheritance that silently widens is not.
+    Role.MARKETER: {
+        Feature.DASHBOARD: {Action.VIEW},
+        Feature.EXPENSES: set(),
+        Feature.INVENTORY: {Action.VIEW},
+        Feature.ANALYTICS: {Action.VIEW},
+        Feature.CUSTOMERS: {Action.VIEW},
+        Feature.REPORTS: {Action.VIEW},
+        Feature.USER_MANAGEMENT: set(),
+        Feature.SMS: {Action.VIEW, Action.EDIT},
     },
     Role.VIEWER: {
         Feature.DASHBOARD: {Action.VIEW},
@@ -67,6 +92,7 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         Feature.CUSTOMERS: {Action.VIEW},
         Feature.REPORTS: {Action.VIEW},
         Feature.USER_MANAGEMENT: set(),
+        Feature.SMS: set(),
     },
 }
 
@@ -126,6 +152,7 @@ def get_all_features() -> list:
         {"key": Feature.CUSTOMERS.value, "name": "Customer Insights", "description": "Customer data"},
         {"key": Feature.REPORTS.value, "name": "Reports", "description": "Export reports"},
         {"key": Feature.USER_MANAGEMENT.value, "name": "User Management", "description": "Manage users"},
+        {"key": Feature.SMS.value, "name": "SMS Campaigns", "description": "Segment, export and send SMS campaigns"},
     ]
 
 
@@ -134,6 +161,7 @@ def get_all_roles() -> list:
     return [
         {"key": Role.ADMIN.value, "name": "Admin", "description": "Full access to all features"},
         {"key": Role.EDITOR.value, "name": "Editor", "description": "Can view and edit most features"},
+        {"key": Role.MARKETER.value, "name": "Marketer", "description": "Viewer access plus SMS campaigns"},
         {"key": Role.VIEWER.value, "name": "Viewer", "description": "View-only access"},
     ]
 

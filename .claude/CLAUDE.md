@@ -128,10 +128,10 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/brands` | All brands list |
 | `/api/brands/analytics` | Top brands by revenue and quantity |
 | `/api/customers/insights` | New vs returning, AOV trend, repeat rate |
-| `/api/customers/sms-segments` | Campaign audience — tiers or one filtered group, `ltv_basis=revenue\|margin` (admin only) |
-| `/api/customers/sms-segments/export/csv` | Campaign list as CSV, holdout excluded (admin only) |
-| `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, admin) |
-| `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (admin only) |
+| `/api/customers/sms-segments` | Campaign audience — one arm or one per value level (needs `sms` view; customer rows need `sms` edit) |
+| `/api/customers/sms-segments/export/csv` | Campaign list as CSV, holdout excluded (needs `sms` edit) |
+| `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, needs `sms` edit) |
+| `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (needs `sms` view/edit) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
 | `/api/managers/{id}/retail-status` | Classify a manager, marks warehouse dirty (POST, admin) |
 | `/api/health/data-quality` | Latest integrity + reconciliation run, with issues/diffs |
@@ -409,11 +409,19 @@ An audience is now **grouping + filters**, and both travel as flat query
 parameters — not a JSON body — because the CSV download is a link the browser
 follows and `api_gate` reads `sales_type` from the query string.
 
-**Grouping** (`grouping=rfm|single`) decides the arms. `rfm` is the three value
-tiers, and anyone in none of them is dropped — which removes most one-order
-buyers. `single` puts everyone the filters kept into one arm named `ALL`. A
-filtered audience almost always wants `single`: under `rfm` the tier rules
-filter it a second time, silently.
+**Grouping** (`grouping=rfm|single`) decides the arms, and `single` is the
+default. `rfm` is the three value levels, and anyone in none of them is
+dropped — which removes most one-order buyers, so it must never be a default.
+`single` puts everyone the filters kept into one arm named `ALL`.
+
+**The value level is a filter, not the split.** It is computed for everyone and
+`tier=VIP` narrows the audience under either grouping — "send to VIP only,
+measured as one group" is the commonest campaign there is. Tying the two
+together is what made three tier cards read as three audiences. Splitting also
+costs sensitivity that these audiences do not have to spare: the whole retail
+base measured as one arm sees a lift from 1.07 pp, and as three arms from 1.83,
+2.41 and 2.59 — 2.24 to 3.20 with Holm. The only campaign there has been moved
+conversion by about 2 pp.
 
 **Filters** are two families and they read the customer differently:
 
@@ -444,6 +452,31 @@ something that no longer means what past campaigns meant.
 refuses the placeholder name `default`, an empty audience, and a truncated one.
 The wizard builds the preview and the freeze from the same query string, so
 what is recorded is what was on screen.
+### Who may run an SMS campaign
+Sending is the one thing on this dashboard that spends money and reaches
+customers on their phones, and the roster behind it is 6 000 names and phone
+numbers. It used to be `require_admin` on all nine endpoints, so the only way
+to let somebody run a campaign was to hand over user management, expenses,
+margin and the internal sales_type with it.
+
+It is a permission now — `sms` in `core/permissions.py` — with the split that
+matters:
+
+- **view** — roster sizes, past results, which channels are configured;
+- **edit** — the CSV of names and phone numbers, `include_customers=true`, the
+  test send, the send itself, marking a campaign sent, opt-outs.
+
+`marketer` is the role that carries it: a viewer everywhere else, `sms` view
+and edit. Admins keep it through the same matrix, and hardcoded admins
+short-circuit it entirely. `/sms` in the frontend is gated on the permission,
+not on the role — the sidebar link, the route guard and the API all read the
+same answer.
+
+`seed_default_permissions` fills **missing** (role, feature) rows on every
+call, from `ROLE_PERMISSIONS`. It used to return the moment the table held a
+row, which meant any feature added after the first deploy was denied to every
+DB-backed role. Turning a permission off writes `false` rather than deleting
+the row, so re-seeding cannot resurrect a decision.
 
 ### Order statuses
 Revenue excludes KeyCRM's lost/cancel group (`status_group_id = 6`), verified

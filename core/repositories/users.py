@@ -149,7 +149,9 @@ class UsersMixin:
         changed_by: int
     ) -> bool:
         """Update user role. Returns True if updated."""
-        if role not in ("admin", "editor", "viewer"):
+        from core.permissions import Role
+
+        if role not in {r.value for r in Role}:
             raise ValueError(f"Invalid role: {role}")
 
         async with self.connection() as conn:
@@ -331,48 +333,47 @@ class UsersMixin:
             return True
 
     async def seed_default_permissions(self) -> None:
-        """Seed default permissions if table is empty."""
+        """Insert any (role, feature) pair the table does not carry yet.
+
+        Rows are derived from ``ROLE_PERMISSIONS`` rather than restated here:
+        the copy that used to live in this function drifted the moment a
+        feature was added, and a missing row reads as "denied" — a new feature
+        would have been invisible to every DB-backed role, admins included.
+
+        Missing rows are filled in on every call, not only into an empty
+        table. Turning a permission off stores ``false``; it never deletes the
+        row, so re-seeding cannot resurrect a decision somebody made.
+        """
+        from core.permissions import ROLE_PERMISSIONS, Action
+
         async with self.connection() as conn:
-            count = conn.execute("SELECT COUNT(*) FROM role_permissions").fetchone()[0]
-            if count > 0:
-                return  # Already seeded
+            existing = {
+                (row[0], row[1])
+                for row in conn.execute(
+                    "SELECT role, feature FROM role_permissions"
+                ).fetchall()
+            }
 
-            # Default permissions matrix
-            defaults = [
-                # Admin - full access
-                ("admin", "dashboard", True, True, False),
-                ("admin", "expenses", True, True, True),
-                ("admin", "inventory", True, True, True),
-                ("admin", "analytics", True, True, False),
-                ("admin", "customers", True, True, False),
-                ("admin", "reports", True, True, False),
-                ("admin", "user_management", True, True, True),
-                # Editor - view + edit most things
-                ("editor", "dashboard", True, True, False),
-                ("editor", "expenses", True, True, False),
-                ("editor", "inventory", True, True, False),
-                ("editor", "analytics", True, False, False),
-                ("editor", "customers", True, False, False),
-                ("editor", "reports", True, False, False),
-                ("editor", "user_management", False, False, False),
-                # Viewer - view only, no expenses
-                ("viewer", "dashboard", True, False, False),
-                ("viewer", "expenses", False, False, False),
-                ("viewer", "inventory", True, False, False),
-                ("viewer", "analytics", True, False, False),
-                ("viewer", "customers", True, False, False),
-                ("viewer", "reports", True, False, False),
-                ("viewer", "user_management", False, False, False),
-            ]
+            inserted = 0
+            for role, features in ROLE_PERMISSIONS.items():
+                for feature, actions in features.items():
+                    key = (str(role.value), str(feature.value))
+                    if key in existing:
+                        continue
+                    conn.execute("""
+                        INSERT INTO role_permissions (role, feature, can_view, can_edit, can_delete)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT (role, feature) DO NOTHING
+                    """, [
+                        key[0], key[1],
+                        Action.VIEW in actions,
+                        Action.EDIT in actions,
+                        Action.DELETE in actions,
+                    ])
+                    inserted += 1
 
-            for role, feature, can_view, can_edit, can_delete in defaults:
-                conn.execute("""
-                    INSERT INTO role_permissions (role, feature, can_view, can_edit, can_delete)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT (role, feature) DO NOTHING
-                """, [role, feature, can_view, can_edit, can_delete])
-
-            logger.info("Default permissions seeded")
+            if inserted:
+                logger.info("Seeded %d missing role permissions", inserted)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

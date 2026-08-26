@@ -24,11 +24,12 @@ import { Badge } from './Badge'
 import { DataTable, Tr, Th } from './DataTable'
 import { Wrapper } from './Wrapper'
 
-type RoleTone = 'purple' | 'blue' | 'slate'
+type RoleTone = 'purple' | 'blue' | 'green' | 'slate'
 
 const roleConfig: Record<UserRole, { label: string; tone: RoleTone }> = {
   admin: { label: 'Admin', tone: 'purple' },
   editor: { label: 'Editor', tone: 'blue' },
+  marketer: { label: 'Marketer', tone: 'green' },
   viewer: { label: 'Viewer', tone: 'slate' },
 }
 

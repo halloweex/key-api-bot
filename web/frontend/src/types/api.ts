@@ -876,7 +876,7 @@ export interface AtRiskResponse {
 
 // ─── User & Permissions Types ─────────────────────────────────────────────────
 
-export type UserRole = 'admin' | 'editor' | 'viewer'
+export type UserRole = 'admin' | 'editor' | 'marketer' | 'viewer'
 
 export interface User {
   id: number
@@ -901,6 +901,7 @@ export interface Permissions {
   customers: FeaturePermissions
   reports: FeaturePermissions
   user_management: FeaturePermissions
+  sms: FeaturePermissions
 }
 
 export interface UserPreferences {

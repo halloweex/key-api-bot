@@ -17,9 +17,10 @@ import {
 import type { UserRole } from '../types/api'
 
 // Role tone mapping
-const roleTone: Record<UserRole, 'purple' | 'blue' | 'neutral'> = {
+const roleTone: Record<UserRole, 'purple' | 'blue' | 'green' | 'neutral'> = {
   admin: 'purple',
   editor: 'blue',
+  marketer: 'green',
   viewer: 'neutral',
 }
 

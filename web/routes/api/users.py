@@ -49,11 +49,15 @@ async def get_user(
 async def update_user_role(
     request: Request,
     user_id: int,
-    role: str = Query(..., description="New role: admin, editor, viewer"),
+    role: str = Query(..., description="New role: admin, editor, marketer, viewer"),
     user: dict = Depends(require_admin),
 ):
     """Update user role (admin only)."""
-    if role not in ("admin", "editor", "viewer"):
+    # The list of roles lives in core.permissions; restating it here is how a
+    # role becomes settable everywhere except through the admin page.
+    from core.permissions import Role
+
+    if role not in {r.value for r in Role}:
         raise HTTPException(status_code=400, detail="Invalid role")
 
     store = await get_store()
