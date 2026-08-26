@@ -1,6 +1,10 @@
 import { memo, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ChevronDown, ChevronUp, X } from 'lucide-react'
+import {
+  Banknote, CalendarClock, CalendarRange, ChevronDown, ChevronUp, Clock,
+  Layers, MapPin, Receipt, ShoppingBag, Sparkles, Store, Tag, Ticket, UserPlus,
+  Users, X,
+} from 'lucide-react'
 import { Badge } from './Badge'
 import { Button } from './Button'
 import { Select } from './Select'
@@ -30,6 +34,11 @@ import type {
 // (brand, category, source, promocode) ask whether the customer ever bought a
 // particular thing — optionally within a window, which is what makes "since
 // May" expressible.
+//
+// Every field states its own example under it. The filters are used a few
+// times a month by somebody who does not hold this model in their head, and
+// "Days since last order: 90 — quiet for three months" is the difference
+// between a control that is understood and one that is guessed at.
 
 const SOURCES: Array<{ id: number; label: string }> = [
   // The active sources, as Silver classifies them. Opencart (3) is deprecated
@@ -42,24 +51,27 @@ const SOURCES: Array<{ id: number; label: string }> = [
 
 const TIERS: SmsTier[] = ['VIP', 'CORE', 'REACTIVATION']
 
+const INPUT = `px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg
+               text-slate-800 placeholder:text-slate-300
+               focus:outline-none focus:ring-2 focus:ring-purple-500/30
+               focus:border-purple-400`
+
 function Chip({
-  active, onClick, children, title,
+  active, onClick, children,
 }: {
   active: boolean
   onClick: () => void
   children: React.ReactNode
-  title?: string
 }) {
   return (
     <button
       type="button"
       aria-pressed={active}
-      title={title}
       onClick={onClick}
-      className={`px-3 py-1.5 text-xs rounded-md border transition-colors tabular-nums ${
+      className={`px-3.5 py-2 text-sm rounded-lg border transition-colors tabular-nums ${
         active
           ? 'border-purple-400 bg-purple-50 text-purple-800 font-medium'
-          : 'border-slate-200 text-slate-600 hover:border-slate-300'
+          : 'border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
       }`}
     >
       {children}
@@ -67,11 +79,58 @@ function Chip({
   )
 }
 
+/** One family of filters, under the question it answers. */
+function Group({
+  icon, title, hint, children,
+}: {
+  icon: React.ReactNode
+  title: string
+  hint: string
+  children: React.ReactNode
+}) {
+  return (
+    <section className="rounded-lg border border-slate-200 bg-slate-50/40 p-4">
+      <div className="flex items-center gap-2">
+        <span className="text-slate-400">{icon}</span>
+        <h4 className="text-sm font-semibold text-slate-800">{title}</h4>
+      </div>
+      <p className="text-xs text-slate-500 mt-1 mb-3 leading-snug">{hint}</p>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{children}</div>
+    </section>
+  )
+}
+
+/** One control, its icon, and the example that says what goes in it. */
+function Field({
+  icon, label, example, children,
+}: {
+  icon: React.ReactNode
+  label: string
+  example?: string
+  children: React.ReactNode
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <span className="text-slate-400">{icon}</span>
+        <span className="text-sm font-medium text-slate-700">{label}</span>
+      </div>
+      {children}
+      {example && (
+        <p className="mt-1.5 text-xs text-slate-500 leading-snug">{example}</p>
+      )}
+    </div>
+  )
+}
+
+/** A from–to pair. The unit sits beside the boxes, not inside the label. */
 function NumberPair({
-  label, hint, from, to, onFrom, onTo, step,
+  label, unit, fromPlaceholder, toPlaceholder, from, to, onFrom, onTo, step,
 }: {
   label: string
-  hint?: string
+  unit?: string
+  fromPlaceholder?: string
+  toPlaceholder?: string
   from: number | null | undefined
   to: number | null | undefined
   onFrom: (v: number | undefined) => void
@@ -79,93 +138,68 @@ function NumberPair({
   step?: number
 }) {
   const parse = (raw: string) => (raw === '' ? undefined : Number(raw))
-  const cls = `w-24 px-2 py-1.5 text-sm bg-white border border-slate-200 rounded-md
-               text-slate-700 focus:outline-none focus:ring-2 focus:ring-purple-500/30
-               focus:border-purple-400 tabular-nums`
 
   return (
-    <div>
-      <span className="text-xs text-slate-600">{label}</span>
-      <div className="mt-1 flex items-center gap-2">
-        <input
-          type="number" step={step} className={cls} aria-label={`${label} min`}
-          value={from ?? ''} onChange={(e) => onFrom(parse(e.target.value))}
-        />
-        <span className="text-slate-400 text-xs">—</span>
-        <input
-          type="number" step={step} className={cls} aria-label={`${label} max`}
-          value={to ?? ''} onChange={(e) => onTo(parse(e.target.value))}
-        />
-      </div>
-      {hint && <p className="mt-1 text-[11px] text-slate-500">{hint}</p>}
+    <div className="flex items-center gap-2">
+      <input
+        type="number" step={step} className={`${INPUT} w-24 tabular-nums`}
+        aria-label={`${label} min`} placeholder={fromPlaceholder}
+        value={from ?? ''} onChange={(e) => onFrom(parse(e.target.value))}
+      />
+      <span className="text-slate-400 text-sm">—</span>
+      <input
+        type="number" step={step} className={`${INPUT} w-24 tabular-nums`}
+        aria-label={`${label} max`} placeholder={toPlaceholder}
+        value={to ?? ''} onChange={(e) => onTo(parse(e.target.value))}
+      />
+      {unit && <span className="text-xs text-slate-500">{unit}</span>}
     </div>
   )
 }
 
 /** A picker that turns a list into removable chips. */
 function MultiPicker({
-  label, options, values, onChange, placeholder,
+  options, values, onChange, placeholder, label,
 }: {
-  label: string
   options: Array<{ value: string; label: string }>
   values: string[]
   onChange: (next: string[]) => void
   placeholder: string
+  label: string
 }) {
   const remaining = options.filter((o) => !values.includes(o.value))
 
   return (
-    <div>
-      <span className="text-xs text-slate-600">{label}</span>
-      <div className="mt-1">
-        <Select
-          options={remaining}
-          value=""
-          onChange={(v) => v && onChange([...values, v])}
-          placeholder={placeholder}
-          variant="compact"
-          aria-label={label}
-        />
-      </div>
+    <>
+      <Select
+        options={remaining}
+        value=""
+        onChange={(v) => v && onChange([...values, v])}
+        placeholder={placeholder}
+        aria-label={label}
+      />
       {values.length > 0 && (
-        <div className="mt-1.5 flex flex-wrap gap-1.5">
+        <div className="mt-2 flex flex-wrap gap-1.5">
           {values.map((v) => (
             <span
               key={v}
-              className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded
-                         bg-slate-100 text-slate-700"
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md
+                         bg-purple-50 text-purple-800 border border-purple-100"
             >
               {options.find((o) => o.value === v)?.label ?? v}
               <button
                 type="button"
                 aria-label={`remove ${v}`}
                 onClick={() => onChange(values.filter((x) => x !== v))}
-                className="text-slate-400 hover:text-slate-700"
+                className="text-purple-300 hover:text-purple-800"
               >
-                <X className="w-3 h-3" />
+                <X className="w-3.5 h-3.5" />
               </button>
             </span>
           ))}
         </div>
       )}
-    </div>
-  )
-}
-
-/** One family of filters, with the sentence that says what the family means. */
-function Group({
-  title, hint, children,
-}: {
-  title: string
-  hint: string
-  children: React.ReactNode
-}) {
-  return (
-    <section className="rounded-md border border-slate-100 p-3">
-      <h4 className="text-xs font-medium text-slate-700">{title}</h4>
-      <p className="text-[11px] text-slate-500 mt-0.5 mb-2 leading-snug">{hint}</p>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{children}</div>
-    </section>
+    </>
   )
 }
 
@@ -211,84 +245,104 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
     [categories],
   )
 
-  const text = `px-2 py-1.5 text-sm bg-white border border-slate-200 rounded-md
-                text-slate-700 focus:outline-none focus:ring-2 focus:ring-purple-500/30
-                focus:border-purple-400`
+  const icon = 'w-4 h-4'
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       {/* ── The filters themselves ───────────────────────────────────── */}
       <div>
         <button
           type="button"
           onClick={() => setOpen(!open)}
           aria-expanded={open}
-          className="flex items-center gap-1.5 text-xs text-slate-600 hover:text-slate-800"
+          className="flex items-center gap-1.5 text-sm font-medium text-slate-700
+                     hover:text-slate-900"
         >
-          {open ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+          {open ? <ChevronUp className={icon} /> : <ChevronDown className={icon} />}
           {t('sms.filtersTitle')}
           {active > 0 && <Badge tone="purple">{active}</Badge>}
         </button>
+        <p className="mt-1 text-xs text-slate-500">{t('sms.filtersHint')}</p>
 
         {open && (
-          <div className="mt-3 space-y-4">
+          <div className="mt-3 space-y-3">
             {/* ── When they bought ─────────────────────────────────── */}
-            <Group title={t('sms.filterGroupWhen')} hint={t('sms.filterGroupWhenHint')}>
-              <div>
-                <span className="text-xs text-slate-600">{t('sms.filterWindow')}</span>
-                <input
-                  type="number"
-                  min={MIN_WINDOW_DAYS}
-                  max={MAX_WINDOW_DAYS}
-                  className={`${text} mt-1 w-24 tabular-nums`}
-                  aria-label={t('sms.filterWindow')}
-                  value={audience.maxRecencyDays}
-                  onChange={(e) => {
-                    const raw = Number(e.target.value)
-                    // Clamped rather than validated: an out-of-range window is
-                    // a 422 from the server and an empty screen here.
-                    const days = Number.isFinite(raw)
-                      ? Math.min(MAX_WINDOW_DAYS, Math.max(MIN_WINDOW_DAYS, raw))
-                      : DEFAULT_WINDOW_DAYS
-                    onChange({ ...audience, maxRecencyDays: days })
-                  }}
-                />
-                <p className="mt-1 text-[11px] text-slate-500 leading-snug">
-                  {t('sms.filterWindowHint')}
-                </p>
-              </div>
-
-              <NumberPair
-                label={t('sms.filterRecency')}
-                hint={t('sms.filterRecencyHint')}
-                from={filters.recencyMin} to={filters.recencyMax}
-                onFrom={(v) => setFilter('recencyMin', v)}
-                onTo={(v) => setFilter('recencyMax', v)}
-              />
-
-              <div>
-                <span className="text-xs text-slate-600">{t('sms.filterFirstOrder')}</span>
-                <div className="mt-1 flex items-center gap-2">
+            <Group
+              icon={<Clock className={icon} />}
+              title={t('sms.filterGroupWhen')}
+              hint={t('sms.filterGroupWhenHint')}
+            >
+              <Field
+                icon={<CalendarRange className={icon} />}
+                label={t('sms.filterWindow')}
+                example={t('sms.filterWindowHint')}
+              >
+                <div className="flex items-center gap-2">
                   <input
-                    type="date" className={text} aria-label={t('sms.filterFirstOrderFrom')}
+                    type="number"
+                    min={MIN_WINDOW_DAYS}
+                    max={MAX_WINDOW_DAYS}
+                    className={`${INPUT} w-24 tabular-nums`}
+                    aria-label={t('sms.filterWindow')}
+                    value={audience.maxRecencyDays}
+                    onChange={(e) => {
+                      const raw = Number(e.target.value)
+                      // Clamped rather than validated: an out-of-range window
+                      // is a 422 from the server and an empty screen here.
+                      const days = Number.isFinite(raw)
+                        ? Math.min(MAX_WINDOW_DAYS, Math.max(MIN_WINDOW_DAYS, raw))
+                        : DEFAULT_WINDOW_DAYS
+                      onChange({ ...audience, maxRecencyDays: days })
+                    }}
+                  />
+                  <span className="text-xs text-slate-500">{t('sms.unitDays')}</span>
+                </div>
+              </Field>
+
+              <Field
+                icon={<Clock className={icon} />}
+                label={t('sms.filterRecency')}
+                example={t('sms.filterRecencyHint')}
+              >
+                <NumberPair
+                  label={t('sms.filterRecency')}
+                  unit={t('sms.unitDays')}
+                  fromPlaceholder="90" toPlaceholder="270"
+                  from={filters.recencyMin} to={filters.recencyMax}
+                  onFrom={(v) => setFilter('recencyMin', v)}
+                  onTo={(v) => setFilter('recencyMax', v)}
+                />
+              </Field>
+
+              <Field
+                icon={<UserPlus className={icon} />}
+                label={t('sms.filterFirstOrder')}
+                example={t('sms.exFirstOrder')}
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date" className={`${INPUT} w-full`}
+                    aria-label={t('sms.filterFirstOrderFrom')}
                     value={filters.firstOrderFrom ?? ''}
                     onChange={(e) => setFilter('firstOrderFrom', e.target.value)}
                   />
-                  <span className="text-slate-400 text-xs">—</span>
+                  <span className="text-slate-400 text-sm">—</span>
                   <input
-                    type="date" className={text} aria-label={t('sms.filterFirstOrderTo')}
+                    type="date" className={`${INPUT} w-full`}
+                    aria-label={t('sms.filterFirstOrderTo')}
                     value={filters.firstOrderTo ?? ''}
                     onChange={(e) => setFilter('firstOrderTo', e.target.value)}
                   />
                 </div>
-              </div>
+              </Field>
             </Group>
 
             {/* The one contradiction the two time rules can produce: asking for
                 people quieter than the window itself returns nobody, and the
                 funnel alone would not say why. */}
             {filters.recencyMin != null && filters.recencyMin >= audience.maxRecencyDays && (
-              <p className="text-xs text-amber-700 bg-amber-50 rounded-md px-2 py-1.5">
+              <p className="text-sm text-amber-800 bg-amber-50 border border-amber-100
+                            rounded-lg px-3 py-2">
                 {t('sms.windowConflict', {
                   window: audience.maxRecencyDays, min: filters.recencyMin,
                 })}
@@ -296,49 +350,99 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
             )}
 
             {/* ── How much they bought ─────────────────────────────── */}
-            <Group title={t('sms.filterGroupHowMuch')} hint={t('sms.filterGroupHowMuchHint')}>
-              <NumberPair
+            <Group
+              icon={<Banknote className={icon} />}
+              title={t('sms.filterGroupHowMuch')}
+              hint={t('sms.filterGroupHowMuchHint')}
+            >
+              <Field
+                icon={<ShoppingBag className={icon} />}
                 label={t('sms.filterOrders')}
-                from={filters.ordersMin} to={filters.ordersMax}
-                onFrom={(v) => setFilter('ordersMin', v)}
-                onTo={(v) => setFilter('ordersMax', v)}
-              />
-              <NumberPair
+                example={t('sms.exOrders')}
+              >
+                <NumberPair
+                  label={t('sms.filterOrders')}
+                  unit={t('sms.unitOrders')}
+                  fromPlaceholder="2" toPlaceholder="10"
+                  from={filters.ordersMin} to={filters.ordersMax}
+                  onFrom={(v) => setFilter('ordersMin', v)}
+                  onTo={(v) => setFilter('ordersMax', v)}
+                />
+              </Field>
+
+              <Field
+                icon={<Banknote className={icon} />}
                 label={t('sms.filterLtv')}
-                hint={t('sms.filterLtvHint')}
-                from={filters.ltvMin} to={filters.ltvMax}
-                onFrom={(v) => setFilter('ltvMin', v)}
-                onTo={(v) => setFilter('ltvMax', v)}
-                step={100}
-              />
-              <NumberPair
+                example={t('sms.exLtv')}
+              >
+                <NumberPair
+                  label={t('sms.filterLtv')}
+                  unit="₴"
+                  fromPlaceholder="5000" toPlaceholder="50000"
+                  from={filters.ltvMin} to={filters.ltvMax}
+                  onFrom={(v) => setFilter('ltvMin', v)}
+                  onTo={(v) => setFilter('ltvMax', v)}
+                  step={100}
+                />
+              </Field>
+
+              <Field
+                icon={<Receipt className={icon} />}
                 label={t('sms.filterAov')}
-                from={filters.aovMin} to={filters.aovMax}
-                onFrom={(v) => setFilter('aovMin', v)}
-                onTo={(v) => setFilter('aovMax', v)}
-                step={100}
-              />
+                example={t('sms.exAov')}
+              >
+                <NumberPair
+                  label={t('sms.filterAov')}
+                  unit="₴"
+                  fromPlaceholder="1000" toPlaceholder="5000"
+                  from={filters.aovMin} to={filters.aovMax}
+                  onFrom={(v) => setFilter('aovMin', v)}
+                  onTo={(v) => setFilter('aovMax', v)}
+                  step={100}
+                />
+              </Field>
             </Group>
 
             {/* ── What they bought ─────────────────────────────────── */}
-            <Group title={t('sms.filterGroupWhat')} hint={t('sms.filterGroupWhatHint')}>
-              <MultiPicker
+            <Group
+              icon={<ShoppingBag className={icon} />}
+              title={t('sms.filterGroupWhat')}
+              hint={t('sms.filterGroupWhatHint')}
+            >
+              <Field
+                icon={<Tag className={icon} />}
                 label={t('sms.filterBrand')}
-                options={brandOptions}
-                values={filters.brands ?? []}
-                onChange={(v) => setFilter('brands', v)}
-                placeholder={t('sms.filterBrandPlaceholder')}
-              />
-              <MultiPicker
+                example={t('sms.exBrand')}
+              >
+                <MultiPicker
+                  label={t('sms.filterBrand')}
+                  options={brandOptions}
+                  values={filters.brands ?? []}
+                  onChange={(v) => setFilter('brands', v)}
+                  placeholder={t('sms.filterBrandPlaceholder')}
+                />
+              </Field>
+
+              <Field
+                icon={<Layers className={icon} />}
                 label={t('sms.filterCategory')}
-                options={categoryOptions}
-                values={(filters.categoryIds ?? []).map(String)}
-                onChange={(v) => setFilter('categoryIds', v.map(Number))}
-                placeholder={t('sms.filterCategoryPlaceholder')}
-              />
-              <div>
-                <span className="text-xs text-slate-600">{t('sms.filterSource')}</span>
-                <div className="mt-1 flex flex-wrap gap-2">
+                example={t('sms.exCategory')}
+              >
+                <MultiPicker
+                  label={t('sms.filterCategory')}
+                  options={categoryOptions}
+                  values={(filters.categoryIds ?? []).map(String)}
+                  onChange={(v) => setFilter('categoryIds', v.map(Number))}
+                  placeholder={t('sms.filterCategoryPlaceholder')}
+                />
+              </Field>
+
+              <Field
+                icon={<Store className={icon} />}
+                label={t('sms.filterSource')}
+                example={t('sms.exSource')}
+              >
+                <div className="flex flex-wrap gap-2">
                   {SOURCES.map((s) => (
                     <Chip
                       key={s.id}
@@ -357,47 +461,63 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
                     </Chip>
                   ))}
                 </div>
-              </div>
-              <div>
-                <span className="text-xs text-slate-600">{t('sms.filterPromocode')}</span>
+              </Field>
+
+              <Field
+                icon={<Ticket className={icon} />}
+                label={t('sms.filterPromocode')}
+                example={t('sms.exPromocode')}
+              >
                 <input
                   type="text"
-                  className={`${text} mt-1 w-full`}
+                  className={`${INPUT} w-full`}
                   placeholder="KS-AUG"
                   maxLength={40}
                   aria-label={t('sms.filterPromocode')}
                   value={filters.promocodeUsed ?? ''}
                   onChange={(e) => setFilter('promocodeUsed', e.target.value)}
                 />
-              </div>
+              </Field>
+
               {/* Sits inside this group because it qualifies only this group:
                   it is "bought that, recently", not a rule of its own. */}
-              <div>
-                <span className="text-xs text-slate-600">{t('sms.filterBoughtWithin')}</span>
-                <input
-                  type="number"
-                  className={`${text} mt-1 w-24 tabular-nums`}
-                  aria-label={t('sms.filterBoughtWithin')}
-                  value={filters.boughtWithinDays ?? ''}
-                  onChange={(e) =>
-                    setFilter(
-                      'boughtWithinDays',
-                      e.target.value === '' ? undefined : Number(e.target.value),
-                    )}
-                />
-                <p className="mt-1 text-[11px] text-slate-500 leading-snug">
-                  {t('sms.filterBoughtWithinHint')}
-                </p>
-              </div>
+              <Field
+                icon={<CalendarClock className={icon} />}
+                label={t('sms.filterBoughtWithin')}
+                example={t('sms.filterBoughtWithinHint')}
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    className={`${INPUT} w-24 tabular-nums`}
+                    placeholder="180"
+                    aria-label={t('sms.filterBoughtWithin')}
+                    value={filters.boughtWithinDays ?? ''}
+                    onChange={(e) =>
+                      setFilter(
+                        'boughtWithinDays',
+                        e.target.value === '' ? undefined : Number(e.target.value),
+                      )}
+                  />
+                  <span className="text-xs text-slate-500">{t('sms.unitDays')}</span>
+                </div>
+              </Field>
             </Group>
 
             {/* ── Who they are ─────────────────────────────────────── */}
-            <Group title={t('sms.filterGroupWho')} hint={t('sms.filterGroupWhoHint')}>
-              <div>
-                <span className="text-xs text-slate-600">{t('sms.filterCity')}</span>
+            <Group
+              icon={<Users className={icon} />}
+              title={t('sms.filterGroupWho')}
+              hint={t('sms.filterGroupWhoHint')}
+            >
+              <Field
+                icon={<MapPin className={icon} />}
+                label={t('sms.filterCity')}
+                example={t('sms.exCity')}
+              >
                 <input
                   type="text"
-                  className={`${text} mt-1 w-full`}
+                  className={`${INPUT} w-full`}
                   placeholder={t('sms.filterCityPlaceholder')}
                   aria-label={t('sms.filterCity')}
                   value={(filters.cities ?? []).join(', ')}
@@ -407,7 +527,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
                       e.target.value.split(',').map((c) => c.trim()).filter(Boolean),
                     )}
                 />
-              </div>
+              </Field>
             </Group>
 
             {active > 0 && (
@@ -420,14 +540,19 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
             )}
           </div>
         )}
+      </div>
+
       {/* ── How the audience is split ────────────────────────────────── */}
-      {/* Splitting and tier choice are one decision, so they sit in one box.
-          As loose rows the tier chips were hard to find — and under "one
-          group" they vanish entirely, with nothing saying why. */}
-      <Group title={t('sms.splitTitle')} hint={t('sms.splitHint')}>
-        <div>
-          <span className="text-xs text-slate-600">{t('sms.groupingLabel')}</span>
-          <div className="mt-1 flex gap-2" role="group" aria-label={t('sms.groupingLabel')}>
+      {/* Splitting and tier choice are one decision, so they sit in one box,
+          under the filters that decide who is being split at all. */}
+      <Group
+        icon={<Sparkles className={icon} />}
+        title={t('sms.splitTitle')}
+        hint={t('sms.splitHint')}
+      >
+        <Field icon={<Layers className={icon} />} label={t('sms.groupingLabel')}
+               example={t(`sms.groupingHint.${audience.grouping}`)}>
+          <div className="flex gap-2" role="group" aria-label={t('sms.groupingLabel')}>
             {(['rfm', 'single'] as SmsGrouping[]).map((g) => (
               <Chip
                 key={g}
@@ -438,46 +563,37 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Chip>
             ))}
           </div>
-          {/* Under the control it describes. Above it — which is where it was —
-              it explained a choice the reader had not seen yet. */}
-          <p className="mt-1 text-[11px] text-slate-500 leading-snug">
-            {t(`sms.groupingHint.${audience.grouping}`)}
-          </p>
-        </div>
+        </Field>
 
-        <div>
-          <span className="text-xs text-slate-600">{t('sms.basisLabel')}</span>
-          <div className="mt-1">
-            <Select
-              options={[
-                { value: 'margin', label: t('sms.basisMargin') },
-                { value: 'revenue', label: t('sms.basisRevenue') },
-              ]}
-              value={audience.ltvBasis}
-              onChange={(v) =>
-                onChange({ ...audience, ltvBasis: (v as SmsLtvBasis) || 'margin' })}
-              allowEmpty={false}
-              variant="compact"
-              aria-label={t('sms.basisLabel')}
-            />
-          </div>
-          <p className="mt-1 text-[11px] text-slate-500 leading-snug">
-            {t('sms.basisHint')}
-          </p>
-        </div>
+        <Field icon={<Banknote className={icon} />} label={t('sms.basisLabel')}
+               example={t('sms.basisHint')}>
+          <Select
+            options={[
+              { value: 'margin', label: t('sms.basisMargin') },
+              { value: 'revenue', label: t('sms.basisRevenue') },
+            ]}
+            value={audience.ltvBasis}
+            onChange={(v) =>
+              onChange({ ...audience, ltvBasis: (v as SmsLtvBasis) || 'margin' })}
+            allowEmpty={false}
+            aria-label={t('sms.basisLabel')}
+          />
+        </Field>
 
-        <div>
-          <span className="text-xs text-slate-600">{t('sms.exportTiers')}</span>
-          {audience.grouping === 'rfm' ? (
-            <>
-              <div
-                className="mt-1 flex flex-wrap gap-2"
-                role="group"
-                aria-label={t('sms.exportTiers')}
-              >
-                {TIERS.map((tier) => {
-                  const size = segments?.find((s) => s.tier === tier)?.target
-                  return (
+        <Field
+          icon={<Users className={icon} />}
+          label={t('sms.exportTiers')}
+          example={
+            audience.grouping !== 'rfm'
+              ? t('sms.tiersNotApplicable')
+              : audience.tiers.length === 0 ? t('sms.allTiersHint') : undefined
+          }
+        >
+          {audience.grouping === 'rfm' && (
+            <div className="flex flex-wrap gap-2" role="group" aria-label={t('sms.exportTiers')}>
+              {TIERS.map((tier) => {
+                const size = segments?.find((s) => s.tier === tier)?.target
+                return (
                   <Chip
                     key={tier}
                     active={audience.tiers.includes(tier)}
@@ -492,25 +608,12 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
                     {t(`sms.tier.${tier}`)}
                     {size != null && ` · ${formatNumber(size)}`}
                   </Chip>
-                  )
-                })}
-              </div>
-              {audience.tiers.length === 0 && (
-                <p className="mt-1 text-[11px] text-slate-500">{t('sms.allTiersHint')}</p>
-              )}
-            </>
-          ) : (
-            // Saying so beats an empty space: "where is the tier picker" is
-            // otherwise a reasonable thing to wonder.
-            <p className="mt-1 text-[11px] text-slate-500 leading-snug">
-              {t('sms.tiersNotApplicable')}
-            </p>
+                )
+              })}
+            </div>
           )}
-        </div>
+        </Field>
       </Group>
-
-
-      </div>
     </div>
   )
 })
