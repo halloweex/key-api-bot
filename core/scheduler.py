@@ -961,7 +961,12 @@ class BackgroundScheduler:
     # the daily reconciliation that compares them needs, at roughly a tenth of
     # the work. Lower it with KS_PG_SILVER_INTERVAL_S when the read switch
     # makes freshness matter.
-    _pg_silver_last_at: float = 0.0
+    # None, not 0.0: `time.monotonic()` counts from an arbitrary origin, which
+    # on a freshly booted host is a small number. Seeded with 0.0 the first
+    # rebuild after a restart compared `now - 0.0 < floor` and was skipped for
+    # ten minutes — on this laptop the origin is machine uptime and the bug was
+    # invisible, on a CI runner it fired immediately.
+    _pg_silver_last_at = None
 
     async def _rebuild_postgres_silver(self, refresh_result) -> None:
         """Recompute `silver.orders` from `bronze.orders`. Never raises.
@@ -990,7 +995,8 @@ class BackgroundScheduler:
 
             floor = int(os.getenv("KS_PG_SILVER_INTERVAL_S", "600"))
             now = time.monotonic()
-            if now - BackgroundScheduler._pg_silver_last_at < floor:
+            last = BackgroundScheduler._pg_silver_last_at
+            if last is not None and now - last < floor:
                 return
             BackgroundScheduler._pg_silver_last_at = now
 

@@ -109,7 +109,7 @@ class TestTheRefreshHook:
     def _scheduler(self):
         from core.scheduler import BackgroundScheduler
 
-        BackgroundScheduler._pg_silver_last_at = 0.0
+        BackgroundScheduler._pg_silver_last_at = None
         return BackgroundScheduler()
 
     @pytest.mark.asyncio
@@ -130,6 +130,19 @@ class TestTheRefreshHook:
              patch("core.pg_silver.rebuild_silver", new=AsyncMock()) as rebuild:
             await self._scheduler()._rebuild_postgres_silver({"status": "error"})
         rebuild.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_first_rebuild_after_a_restart_is_not_throttled(self, monkeypatch):
+        """`time.monotonic()` counts from an arbitrary origin. Seeded with 0.0
+        the first call compared `now - 0.0 < floor` and was skipped for ten
+        minutes on any host whose origin is small — invisible on a laptop
+        whose origin is uptime, immediate on a CI runner."""
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "600")
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_silver.rebuild_silver",
+                   new=AsyncMock(return_value={"rows": 1})) as rebuild:
+            await self._scheduler()._rebuild_postgres_silver({"status": "success"})
+        rebuild.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_the_floor_stops_it_running_every_two_minutes(self, monkeypatch):
