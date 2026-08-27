@@ -348,33 +348,110 @@ def silver_pass2_sql(buyer_filter: str = "", dialect: "Dialect" = None) -> str:
     """
 
 
-GOLD_REVENUE_SELECT_SQL = """
-SELECT
-    order_date AS date,
-    sales_type,
-    COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0) AS revenue,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) AS orders_count,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND buyer_id IS NOT NULL THEN buyer_id END) AS unique_customers,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND is_new_customer THEN buyer_id END) AS new_customers,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END) AS returning_customers,
-    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 1 THEN grand_total END), 0) AS instagram_revenue,
-    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 2 THEN grand_total END), 0) AS telegram_revenue,
-    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 4 THEN grand_total END), 0) AS shopify_revenue,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 1 THEN id END) AS instagram_orders,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 2 THEN id END) AS telegram_orders,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 4 THEN id END) AS shopify_orders,
-    COUNT(DISTINCT CASE WHEN is_return AND is_active_source THEN id END) AS returns_count,
-    COALESCE(SUM(CASE WHEN is_return AND is_active_source THEN grand_total END), 0) AS returns_revenue,
-    CASE
-        WHEN COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) > 0
-        THEN COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0)
-             / COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END)
-        ELSE 0
-    END AS avg_order_value
-FROM silver_orders
-WHERE {date_filter}
-GROUP BY order_date, sales_type
-"""
+# ─── The one definition of a Gold revenue row ────────────────────────────────
+#
+# Same treatment as the Silver projection above, and for the same reason:
+# Postgres computes Gold too, from revision 0007 onward, and a measure with two
+# homes is a measure that will differ. #101 took under a day to prove that.
+#
+# What does *not* transfer is the shape. DuckDB's `gold_daily_revenue` splits
+# the channels into columns — `instagram_revenue`, `telegram_revenue`,
+# `shopify_revenue` — and a column per source cannot name a source that did not
+# exist when the column was written. Source 5 (Виставка) arrived with #101, and
+# `SUM(revenue) - SUM(the three columns)` is ₴266,059.00 across 177 orders,
+# measured on production: money that is in the total and in no channel. So
+# Postgres carries `source_id` as a *dimension* instead, and only the measures
+# below are shared.
+
+# The two row sets every measure is built from. Spelled once so a change to
+# what counts as revenue cannot reach five of the eight expressions and miss
+# the rest.
+_GOLD_EARNING_ROWS = "NOT is_return AND is_active_source"
+_GOLD_RETURNED_ROWS = "is_return AND is_active_source"
+
+_GOLD_REVENUE_EXPR = (
+    f"COALESCE(SUM(CASE WHEN {_GOLD_EARNING_ROWS} THEN grand_total END), 0)"
+)
+_GOLD_ORDERS_EXPR = (
+    f"COUNT(DISTINCT CASE WHEN {_GOLD_EARNING_ROWS} THEN id END)"
+)
+
+# Engine-neutral by construction: every expression here is ordinary aggregate
+# SQL that means the same thing in DuckDB and in PostgreSQL. A test asserts
+# each one appears verbatim in both renderings.
+GOLD_MEASURES: "Dict[str, str]" = {
+    "revenue": _GOLD_REVENUE_EXPR,
+    "orders_count": _GOLD_ORDERS_EXPR,
+    "unique_customers":
+        f"COUNT(DISTINCT CASE WHEN {_GOLD_EARNING_ROWS} AND buyer_id IS NOT NULL THEN buyer_id END)",
+    "new_customers":
+        f"COUNT(DISTINCT CASE WHEN {_GOLD_EARNING_ROWS} AND is_new_customer THEN buyer_id END)",
+    "returning_customers":
+        f"COUNT(DISTINCT CASE WHEN {_GOLD_EARNING_ROWS} AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END)",
+    "returns_count":
+        f"COUNT(DISTINCT CASE WHEN {_GOLD_RETURNED_ROWS} THEN id END)",
+    "returns_revenue":
+        f"COALESCE(SUM(CASE WHEN {_GOLD_RETURNED_ROWS} THEN grand_total END), 0)",
+    # Written out rather than `revenue / orders_count` because the guard and
+    # the division must read the same aggregate, and an alias is not available
+    # to a sibling select item in either engine.
+    "avg_order_value":
+        "CASE\n"
+        f"        WHEN {_GOLD_ORDERS_EXPR} > 0\n"
+        f"        THEN {_GOLD_REVENUE_EXPR}\n"
+        f"             / {_GOLD_ORDERS_EXPR}\n"
+        "        ELSE 0\n"
+        "    END",
+}
+
+# DuckDB only. These are what the `source_id` dimension replaces, kept exactly
+# as they were: the parallel period compares the two stores, and rewriting the
+# side being compared against is how a migration stops proving anything.
+#
+# Note they filter on `source_id`, never on `is_active_source` — which is the
+# same set today, since 1, 2 and 4 are all in REVENUE_SOURCE_IDS.
+GOLD_SOURCE_MEASURES: "Dict[str, str]" = {
+    f"{name}_{suffix}": (
+        f"COALESCE(SUM(CASE WHEN NOT is_return AND source_id = {sid} THEN grand_total END), 0)"
+        if suffix == "revenue" else
+        f"COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = {sid} THEN id END)"
+    )
+    for suffix in ("revenue", "orders")
+    for name, sid in (("instagram", 1), ("telegram", 2), ("shopify", 4))
+}
+
+# `gold_daily_revenue` is written by a **positional** INSERT — no column list —
+# so this is the table's DDL order and nothing may reorder it. A test compares
+# it against the columns DuckDB actually reports for the table.
+DUCKDB_GOLD_COLUMNS: "Tuple[str, ...]" = (
+    "date", "sales_type",
+    "revenue", "orders_count", "unique_customers", "new_customers",
+    "returning_customers",
+    "instagram_revenue", "telegram_revenue", "shopify_revenue",
+    "instagram_orders", "telegram_orders", "shopify_orders",
+    "returns_count", "returns_revenue", "avg_order_value",
+)
+
+
+def gold_select_items(columns: "Sequence[str]") -> str:
+    """`<expr> AS <name>` for each measure, in the order given.
+
+    `date` and `sales_type` are dimensions and are emitted by the caller: only
+    Postgres has a third one, and only DuckDB has the six source columns.
+    """
+    both = {**GOLD_MEASURES, **GOLD_SOURCE_MEASURES}
+    return ",\n".join(f"    {both[c]} AS {c}" for c in columns)
+
+
+GOLD_REVENUE_SELECT_SQL = (
+    "\nSELECT\n"
+    "    order_date AS date,\n"
+    "    sales_type,\n"
+    + gold_select_items(DUCKDB_GOLD_COLUMNS[2:])
+    + "\nFROM silver_orders\n"
+    "WHERE {date_filter}\n"
+    "GROUP BY order_date, sales_type\n"
+)
 
 
 class DuckDBStore(
