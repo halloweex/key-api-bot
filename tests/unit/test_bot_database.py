@@ -19,6 +19,7 @@ not endorsed.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -28,50 +29,166 @@ import pytest
 from bot import database, store_sqlite
 from core.bot_store import use_bot_store
 
+# The columns whose values these tests set by hand. SQLite takes the text
+# straight; Postgres needs a moment, and handing it a string is the mistake the
+# adapter exists to make impossible for everybody else.
+_TIMESTAMP_COLUMNS = frozenset({"requested_at", "reviewed_at", "last_activity"})
 
-@pytest.fixture(autouse=True)
-def db(tmp_path, monkeypatch):
-    """A real SQLite file, built by the real `init_database`.
+DSN = os.getenv("KS_PG_DSN", "").strip()
 
-    Not an in-memory database: `get_connection` opens a new connection per
-    call, and `:memory:` would give every call its own empty one — the tests
-    would pass while testing nothing.
 
-    `DB_PATH` moved to `bot/store_sqlite.py` with the SQL. The store itself is
-    reset because it is a process-wide singleton: a store built against an
-    earlier test's `tmp_path` would still be installed.
+class _SqliteHarness:
+    """Reach past the store and look at what SQLite actually holds."""
+
+    engine = "sqlite"
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def row(self, user_id):
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT * FROM authorized_users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def set(self, user_id, **values):
+        conn = sqlite3.connect(self.path)
+        try:
+            assignments = ", ".join(f"{k} = ?" for k in values)
+            conn.execute(
+                f"UPDATE authorized_users SET {assignments} WHERE user_id = ?",
+                (*values.values(), user_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+class _PostgresHarness:
+    """The same two reaches, against `app.authorized_users`.
+
+    `row` returns SQLite's shapes — text timestamps, 1/0 — because the whole
+    claim under test is that a caller cannot tell the two engines apart.
     """
-    path = tmp_path / "bot.db"
-    monkeypatch.setattr(store_sqlite, "DB_PATH", path)
+
+    engine = "postgres"
+
+    def __init__(self, store):
+        self._store = store
+
+    def _run(self, coro):
+        return self._store._loop.run(coro)
+
+    def row(self, user_id):
+        from bot.store_postgres import _row as to_sqlite_shapes
+
+        async def fetch():
+            async with self._store._pool.acquire() as conn:
+                return await conn.fetchrow(
+                    "SELECT * FROM app.authorized_users WHERE user_id = $1",
+                    user_id,
+                )
+
+        return to_sqlite_shapes(self._run(fetch()))
+
+    def set(self, user_id, **values):
+        prepared = {}
+        for key, value in values.items():
+            if key in _TIMESTAMP_COLUMNS and isinstance(value, str):
+                try:
+                    value = datetime.strptime(
+                        value, "%Y-%m-%d %H:%M:%S",
+                    ).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    # A value Postgres cannot hold. The column type is what
+                    # makes that impossible, which is the point of the skip on
+                    # the one test that needs it.
+                    raise
+            prepared[key] = value
+
+        async def write():
+            assignments = ", ".join(
+                f"{k} = ${i}" for i, k in enumerate(prepared, start=1)
+            )
+            async with self._store._pool.acquire() as conn:
+                await conn.execute(
+                    f"UPDATE app.authorized_users SET {assignments} "
+                    f"WHERE user_id = ${len(prepared) + 1}",
+                    *prepared.values(), user_id,
+                )
+
+        self._run(write())
+
+    def truncate(self):
+        async def wipe():
+            async with self._store._pool.acquire() as conn:
+                await conn.execute(
+                    "TRUNCATE app.authorized_users, app.user_preferences, "
+                    "app.celebrated_milestones, app.report_history"
+                )
+
+        self._run(wipe())
+
+
+@pytest.fixture(params=["sqlite", "postgres"], autouse=True)
+def db(request, tmp_path, monkeypatch):
+    """The same tests, against whichever engine is available.
+
+    This is the file's whole reason for existing twice. 46 call sites were left
+    untouched by the port on the promise that the engine can change without
+    them noticing, and the only way to check a promise like that is to run the
+    same assertions against both implementations.
+
+    The Postgres half needs `KS_PG_DSN` and is skipped without one, so a
+    laptop runs 44 tests and a runtime with a database runs 88. That asymmetry
+    is deliberate and is what `pytest -m external` does elsewhere in this
+    suite; the difference is that here the skip is silent on purpose — a
+    developer should not have to run Postgres to work on the bot.
+    """
     use_bot_store(None)
+
+    if request.param == "sqlite":
+        path = tmp_path / "bot.db"
+        monkeypatch.setattr(store_sqlite, "DB_PATH", path)
+        # The cache lives in SQLite under both engines, so it needs this path
+        # whichever branch runs.
+        database.init_database()
+        yield _SqliteHarness(path)
+        use_bot_store(None)
+        return
+
+    if not DSN:
+        pytest.skip("KS_PG_DSN is not set — the Postgres half needs a database")
+
+    from bot.store_postgres import PostgresBotStore
+
+    monkeypatch.setattr(store_sqlite, "DB_PATH", tmp_path / "bot.db")
+    store = PostgresBotStore(DSN)
+    use_bot_store(store)
+    # The real path, not a shortcut: `initialise` is also what creates the
+    # local cache table this engine still needs.
     database.init_database()
-    yield path
-    use_bot_store(None)
+    harness = _PostgresHarness(store)
+    harness.truncate()
+    try:
+        yield harness
+    finally:
+        harness.truncate()
+        use_bot_store(None)
+        store.close()
 
 
 def _row(db, user_id):
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute(
-            "SELECT * FROM authorized_users WHERE user_id = ?", (user_id,)
-        ).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    return db.row(user_id)
 
 
 def _set(db, user_id, **values):
-    conn = sqlite3.connect(db)
-    try:
-        assignments = ", ".join(f"{k} = ?" for k in values)
-        conn.execute(
-            f"UPDATE authorized_users SET {assignments} WHERE user_id = ?",
-            (*values.values(), user_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    db.set(user_id, **values)
 
 
 @pytest.fixture
@@ -243,7 +360,14 @@ class TestTheFreezeExpires:
         assert database.is_user_frozen(1) is True
 
     def test_an_unparseable_timestamp_leaves_the_freeze_on(self, db):
-        """Fail closed: a value nobody can read is not a licence to come back."""
+        """Fail closed: a value nobody can read is not a licence to come back.
+
+        SQLite only, and that is the finding rather than the limitation: the
+        column is `TEXT` there and `TIMESTAMPTZ` in Postgres, so this failure
+        mode does not exist on the other engine. The type removes it.
+        """
+        if db.engine != "sqlite":
+            pytest.skip("TIMESTAMPTZ cannot hold an unparseable value")
         database.request_access(1)
         for _ in range(database.MAX_DENIAL_COUNT):
             database.deny_user(1, 9)

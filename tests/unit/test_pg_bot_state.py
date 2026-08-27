@@ -439,12 +439,20 @@ class TestTheJob:
             "await reconcile_bot_state()"
         )
 
-    def test_the_bot_container_is_not_touched(self):
-        """Step 03's first half needs no change to the bot: no environment
-        variable, no asyncpg on its path, no new way for it to fail. It reads
-        the file the web container already opens for the weekly report."""
+    def test_the_copy_path_still_does_not_touch_the_bot(self):
+        """Step 03's first half needed no change to the bot at all — it reads
+        the file the web container already opens for the weekly report.
+
+        The second half does change it: `bot/store_postgres.py` is the adapter
+        and must know the revision it requires. That one module is the whole
+        allowance, and the point of naming it here is that a *third* module
+        under `bot/` reaching for `core.pg` would mean the bot had grown a
+        second, unmanaged path to the database.
+        """
         offenders = []
         for path in (REPO / "bot").rglob("*.py"):
+            if path.name == "store_postgres.py":
+                continue
             text = path.read_text(encoding="utf-8")
             if re.search(r"^\s*(from|import)\s+core\.pg", text, re.MULTILINE):
                 offenders.append(path.name)

@@ -987,6 +987,61 @@ left alone: it is a startup one-shot copying `authorized_users` into DuckDB's
 own `users` table, unrelated to what the port is for. It will need a decision
 when the engine moves, because it opens `data/bot.db` directly.
 
+### The Postgres adapter behind that port, and the switch
+
+`bot/store_postgres.py` implements the same port against `app.*`, chosen by
+`KS_BOT_STORE=postgres` (default `sqlite`; **an unknown value raises** — a typo
+in the one variable deciding where the approval list lives should stop the bot,
+not quietly point it at the old copy).
+
+**One driver, on a loop of its own — decided by measurement.** `psycopg` was
+already rejected once in writing (`requirements-dev.txt`: "two drivers'
+behaviour to know, for one database"), so the bar was a number. On production
+hardware, from inside a running event loop, 300 calls each:
+
+| | read | write |
+|---|---|---|
+| SQLite, what the bot pays today | 0.252 ms | 0.259 ms |
+| asyncpg through the bridge | 0.674 ms | 1.649 ms |
+| asyncpg native `await` | 0.515 ms | — |
+
+The bridge costs **0.16 ms**; Postgres costs about half a millisecond more per
+call, against a Telegram round trip of ~100 ms. **It blocks the bot's event
+loop** — 50 calls took 42 ms and a 1 ms ticker beside them ticked *zero* times
+— and so does SQLite today; the change is duration, not nature. If traffic ever
+makes that matter, the answer is an async port and forty `await`s, not a second
+driver.
+
+**The adapter returns SQLite's shapes on purpose.** Postgres disagrees on
+exactly two things and both would have shipped silently: `notifications_enabled`
+(handlers write `1 if enabled else 0`, asyncpg refuses an int for `BOOLEAN`) and
+timestamps (aware `datetime` where the admin screens interpolate SQLite's text
+straight into a message). Coerced on write, rendered on read.
+
+**The proof is the same tests against both engines.** `test_bot_database.py`
+is parametrised over sqlite and postgres, the latter skipped without
+`KS_PG_DSN`. On the runtime: **87 passed, 1 skipped** — the skip being the
+unparseable-timestamp case, which `TIMESTAMPTZ` makes impossible. A caller
+cannot tell the two apart.
+
+**Two guards, and they are the most dangerous code in the change.**
+`replicate_bot_state` is an hourly *full replace* from `data/bot.db`; run after
+the switch it would roll back every approval, once an hour, looking fine in
+between. It refuses under `KS_BOT_STORE=postgres`, and `reconcile_bot_state`
+stands down with it — `bot.db` becomes a frozen artefact, so every change since
+the switch would read as a discrepancy the check itself created.
+
+**The cache stays local under both engines** (revision 0009 left it out of
+Postgres). `initialise()` therefore still creates the SQLite cache table — found
+on a real database, where a missing `data/bot.db` made `cache_set` raise
+`no such table: cache` and take a sales report with it.
+
+**To switch**: `KS_BOT_STORE=postgres` on the bot **and** the web container —
+`web/services/auth_service.py` reads the same store. Both need `KS_PG_DSN`; the
+bot has none today. Roll back by removing the variable, but note that anything
+written to Postgres in between does not come back to SQLite: the copy is
+one-way and it was standing down the whole time.
+
 ### The bot's own state, and the only store with no backup
 
 `data/bot.db` is the third store in this system. Measured 2026-08-27: it is in

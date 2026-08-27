@@ -2004,16 +2004,25 @@ async def reconcile_bot_state(
     watermark going stale, which `_watermark_findings` reports without needing
     the file to exist.
 
+    Skips just as silently once `KS_BOT_STORE=postgres`. At that point the bot
+    is the writer and `bot.db` is a frozen artefact, so every approval made
+    since the switch would read as a discrepancy — a check that reports a
+    difference it created is worse than no check, and this is the same guard
+    the copy in `core/pg_bot_state.py` carries for the same moment.
+
     Reports only, like every other comparison in this module.
     """
     import sqlite3
 
     from core import pg_landing
     from core.bot_prefs import BOT_DB_PATH
+    from core.bot_store import ENGINE_ENV
     from core.pg import get_pool, require_revision
     from core.pg_bot_state import BUSY_TIMEOUT_SECONDS
 
     if not pg_landing.enabled():
+        return []
+    if os.getenv(ENGINE_ENV, "sqlite").strip().lower() == "postgres":
         return []
 
     path = Path(db_path) if db_path is not None else BOT_DB_PATH

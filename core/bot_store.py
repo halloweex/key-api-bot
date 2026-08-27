@@ -175,19 +175,41 @@ class BotStore(Protocol):
 _store: Optional[BotStore] = None
 
 
+# Which engine holds the bot's state. SQLite unless somebody says otherwise,
+# because that is what production has run since the beginning and a default
+# that changes under a deploy is not a switch, it is a surprise.
+ENGINE_ENV = "KS_BOT_STORE"
+
+
 def get_bot_store() -> BotStore:
-    """The active store, defaulting to SQLite.
+    """The active store, chosen by `KS_BOT_STORE` and defaulting to SQLite.
 
     Lazy, so importing this module costs nothing and a test that never touches
-    the bot's state never creates a file. The default is SQLite because that is
-    what production runs; the Postgres adapter arrives as an argument to
-    `use_bot_store`, not as a change here.
+    the bot's state never creates a file — nor, under `postgres`, opens a
+    connection.
+
+    An unknown value is refused rather than quietly treated as SQLite: a typo
+    in the one variable that decides where the approval list lives should stop
+    the bot, not silently point it at the old copy.
     """
     global _store
     if _store is None:
-        from bot.store_sqlite import SqliteBotStore
+        import os
 
-        _store = SqliteBotStore()
+        engine = os.getenv(ENGINE_ENV, "sqlite").strip().lower()
+        if engine in ("", "sqlite"):
+            from bot.store_sqlite import SqliteBotStore
+
+            _store = SqliteBotStore()
+        elif engine == "postgres":
+            from bot.store_postgres import PostgresBotStore
+
+            _store = PostgresBotStore()
+        else:
+            raise RuntimeError(
+                f"{ENGINE_ENV}={engine!r} is not a store this code knows. "
+                "Expected 'sqlite' or 'postgres'."
+            )
     return _store
 
 

@@ -47,6 +47,18 @@ way out rather than left for whoever reads the table next:
   24 approvals move by three hours. The shop's port hit the same trap from the
   other side and it is recorded in its point 4.
 
+IT STOPS THE MOMENT THE BOT WRITES POSTGRES ITSELF
+
+This is a **one-way** copy and a full replace. Once `KS_BOT_STORE=postgres` the
+bot writes `app.*` directly, and an hourly replace from a `bot.db` nobody is
+updating any more would silently roll every approval back to whatever SQLite
+last held — the worst possible shape, because it would look like the switch
+worked for fifty-nine minutes at a time.
+
+So the copy refuses to run under that setting rather than trusting whoever
+flips it to also remember this file. The guard is here rather than in the
+adapter because it is this code that would do the damage.
+
 FAILURE POLICY
 
 Never raises. It is called from a scheduler job beside the operational copy, and
@@ -59,6 +71,7 @@ so in the morning.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -211,10 +224,17 @@ async def replicate_bot_state(db_path: Optional[Path] = None) -> Dict[str, Any]:
     computed from one snapshot's approvals and another's mute settings.
     """
     from core.bot_prefs import BOT_DB_PATH
+    from core.bot_store import ENGINE_ENV
     from core.mirror_reconciliation import configured
 
     if not configured():
         return {"skipped": "KS_PG_DSN is not set"}
+
+    engine = os.getenv(ENGINE_ENV, "sqlite").strip().lower()
+    if engine == "postgres":
+        # The bot is the writer now. Replacing `app.*` from SQLite here would
+        # undo every approval made since the switch, once an hour.
+        return {"skipped": f"{ENGINE_ENV}=postgres — the bot owns these tables"}
 
     path = Path(db_path) if db_path is not None else BOT_DB_PATH
     if not path.exists():
