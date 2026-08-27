@@ -619,6 +619,30 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Replicate the operational history into Postgres (hourly)
+        #
+        # One call site on purpose. Five separate code paths write these tables
+        # — the inventory snapshot job, two branches of the sync service, and
+        # both repair jobs — and hooking each of them is how the sixth gets
+        # forgotten. That is not hypothetical: `update_manager_stats`
+        # recomputed three columns without replicating them for exactly this
+        # reason, and it took a daily CRITICAL to notice (cf34e8b, 2026-08-27).
+        #
+        # A job instead. Idempotent, self-watermarking, and cheap when nothing
+        # moved: two MAX() reads and ~1,100 rows replaced. The cost is lag —
+        # Postgres is behind by up to one interval, which is why
+        # OPERATIONAL_GRACE_MINUTES is sized against this number and must be
+        # raised with it.
+        self._add_job(
+            job_id="replicate_operational",
+            name="Replicate: operational history",
+            description="Copy the five irreplaceable tables into Postgres",
+            func=self._run_replicate_operational,
+            trigger=IntervalTrigger(hours=1),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Half-written order repair (every 2 h)
         # Orders with revenue and no line items. Detection is a table scan of
         # our own data, so an idle run costs nothing; a working one costs one
@@ -795,6 +819,26 @@ class BackgroundScheduler:
                 "Inventory snapshot job complete",
                 extra=result
             )
+            return result
+
+    async def _run_replicate_operational(self) -> Dict[str, Any]:
+        """Copy `stock_movements` and its four neighbours into Postgres.
+
+        The five tables step 05 routes to Postgres rather than ClickHouse,
+        because none of them can be rebuilt from KeyCRM — see revision 0008.
+
+        Never raises: `replicate_operational` returns its own error rather than
+        propagating, so a Postgres fault cannot take a scheduler job into the
+        failure history it shares with the sync.
+        """
+        from core.duckdb_store import get_store
+        from core.pg_operational import replicate_operational
+
+        with correlation_context():
+            store = await get_store()
+            result = await replicate_operational(store)
+            if "skipped" not in result:
+                logger.info("Operational replication: %s", result)
             return result
 
     async def _run_manager_stats(self) -> Dict[str, Any]:
@@ -1186,6 +1230,7 @@ class BackgroundScheduler:
             read_duckdb_side,
             reconcile_mirror,
             reconcile_gold,
+            reconcile_operational,
             reconcile_orders,
             reconcile_silver,
         )
@@ -1223,6 +1268,12 @@ class BackgroundScheduler:
                 # the opposite of `reconciliation_pg`, which is a separate
                 # layer precisely because it *can* stop running on its own.
                 issues += await reconcile_gold(store)
+                # And the five tables that are neither landing nor computed —
+                # the ones with no source to be rebuilt from. Last because they
+                # are the least likely to be wrong and the most expensive to
+                # read, and because a Silver or Gold finding above them is
+                # almost certainly the better explanation of both.
+                issues += await reconcile_operational(store)
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("Mirror reconciliation raised")

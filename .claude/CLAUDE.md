@@ -502,7 +502,8 @@ whole reason the group is read from the source now.
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **both stores**, one fetch |
-| `dq_mirror_landing` | 07:30 | Reconciliation A: landing, then Silver, then Gold — Postgres against DuckDB, tolerance zero |
+| `dq_mirror_landing` | 07:30 | Reconciliation A: landing, Silver, Gold, then the five `app.*` tables — Postgres against DuckDB, tolerance zero |
+| `replicate_operational` | every 1 h | Copy the five irreplaceable tables into Postgres |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 
@@ -852,6 +853,67 @@ instead: the mirror of landing keeps working, and `rebuild_silver`,
 `SchemaVersionError`. The rebuilds are swallowed and logged; the checks persist
 failed runs, so the layer ages go stale and the 09:00 digest says so. Fails
 closed, not silently — but you find out the next morning, not at deploy.
+
+### The five tables with no source to be rebuilt from
+
+`bronze.*` can be re-fetched from KeyCRM; Silver and Gold can be recomputed.
+These cannot, which is why the plan's 2026-08-22 amendment routes them to
+Postgres and **not** to ClickHouse — a store you would rebuild from source is a
+cache, and none of these has a source.
+
+| `app.*` (revision 0008) | rows | what it knows that KeyCRM does not |
+|---|---|---|
+| `stock_movements` | 50,386 | the only record that a quantity ever changed — a delta against the *previous* `offer_stocks`, so a movement not written when it happened is gone |
+| `inventory_sku_history` | 143,274 | per-SKU daily snapshot since 2026-01-27 |
+| `sku_inventory_status` | 887 | `first_seen_at`, carried forward out of the table's own previous contents |
+| `inventory_history` | 188 | the same snapshot rolled up |
+| `order_backfill_misses` | 43 | ids KeyCRM **could not supply** — the one fact an API can never be asked for |
+
+**Replicated, not mirrored**, for `app.manager_classifications`' reason: all
+five are derived from state only DuckDB holds, so a second computation here
+would diverge the first time either side missed a sync. `core/pg_operational.py`
+copies them as they stand.
+
+**Two shipping shapes, chosen by how DuckDB writes each one.** The three small
+tables are replaced whole — and `sku_inventory_status` is a `DELETE`+`INSERT`
+on the DuckDB side too, so that is the same operation rather than a decision.
+`inventory_sku_history` and `stock_movements` are **append-only** — verified by
+parsing the repository for an `UPDATE` or `DELETE` against either, and pinned
+by a test — so they ship what is above `MAX(date)` / `MAX(id)` read back out of
+Postgres. **No stored cursor**, `core/pg_backfill.py`'s reason: nothing to be
+wrong, and an interrupted run resumes by recomputing.
+
+`stock_movements.id` is **carried from DuckDB, never generated here.** A
+Postgres sequence would give the same movement two names and the comparison
+would be meaningless before it began.
+
+**One scheduled job, hourly, and exactly one call site.** Five code paths write
+these tables and hooking each is how the sixth gets forgotten — which is
+precisely what `update_manager_stats` did until `cf34e8b`. The cost is lag, so
+`OPERATIONAL_GRACE_MINUTES` (90) is sized against the interval the way
+`SILVER_GRACE_MINUTES` is against `KS_PG_SILVER_INTERVAL_S`; raise one and the
+other moves with it.
+
+**The hole a watermark cannot see.** A row lost from Postgres *below* the
+watermark is invisible to `id > MAX(id)` and to `date >= MAX(date)` forever.
+The daily comparison finds it; `replicate_operational(store, full=True)` puts
+it back, upserting so a row that is present and *wrong* is corrected too. Never
+on a schedule — Reconciliation A reports and does not repair, and that matters
+most here, where a "repair" would be writing the only record of a stock change
+from the only other record of it.
+
+`reconcile_operational` runs last inside `dq_mirror_landing`: the three small
+tables read whole with `full_replace=True`, the two large ones fingerprinted.
+`inventory_sku_history` buckets by the **day**, not by an id — there are only
+~900 offers, so dividing an id would put all 143,274 rows in one bucket and the
+drill-down would scan the table to find one row.
+
+Verified 2026-08-27 on a throwaway PostgreSQL 17.2 loaded from the production
+backup. First replication **9.3 s**, incremental **116 ms**, whole comparison
+**177–221 ms**. Then broken on purpose, seven ways: four deletions and three
+value changes were each reported CRITICAL with the id; the incremental run
+repaired the full-replace table and left the two append-only ones broken, as
+documented; `full=True` cleared all of it.
 
 ### What the warehouse validation can and cannot see
 `validation_passed` covers: Bronze→Silver row counts, Silver→Gold revenue

@@ -119,6 +119,24 @@ def _duckdb_gold(conn):
 
 
 
+def _ancestry(revision):
+    """A revision and everything it is built on, by walking `down_revision`."""
+    import importlib.util
+
+    chain = {}
+    for path in _VERSIONS.glob("[0-9]*.py"):
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        chain[module.revision] = module.down_revision
+
+    seen = []
+    while revision is not None:
+        seen.append(revision)
+        revision = chain.get(revision)
+    return seen
+
+
 def _stored(value):
     """What lands in the column, not what the projection returned.
 
@@ -618,11 +636,13 @@ class TestTheJobRunsIt:
 
 
 class TestTheRevisionGate:
-    def test_the_code_requires_the_migration_that_creates_the_table(self):
-        """Rule 11: the application declares its version and fails closed."""
+    def test_the_code_requires_a_revision_that_includes_the_table(self):
+        """Rule 11: the application declares its version and fails closed. It
+        was the head until 0008; what has to stay true is that the demanded
+        revision still carries this table."""
         from core.pg import REQUIRED_REVISION
 
-        assert REQUIRED_REVISION == "0007_gold_daily_revenue"
+        assert "0007_gold_daily_revenue" in _ancestry(REQUIRED_REVISION)
 
     def test_the_required_revision_is_the_head_of_the_chain(self):
         """The durable form of the test above, which will not need editing at
