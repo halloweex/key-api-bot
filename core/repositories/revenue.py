@@ -1,14 +1,72 @@
 """DuckDBStore revenue and analytics methods."""
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
 from core.duckdb_constants import UNKNOWN_BRAND, brand_where
 from core.models import OrderStatus
 
+logger = logging.getLogger(__name__)
+
 
 class RevenueMixin:
+
+    # ── Step 1 of «Одна бронза»: the Gold primitives can read Postgres ──────
+    #
+    # Interception mirrors DuckDB's own routing exactly: a request DuckDB's
+    # Gold cannot answer (a source without a channel column, a line-level
+    # filter) never reaches the Postgres reader either, so KS_READ_GOLD
+    # changes the engine and nothing else. A failed Postgres read falls back
+    # to DuckDB with an ERROR in the log — the flag is обкатка, and the
+    # dashboard staying up is what makes flipping it survivable.
+
+    async def _pg_gold_summary(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str,
+        source_id: Optional[int],
+    ) -> Optional[Tuple[int, float, int, float]]:
+        from core import pg_gold_read
+
+        if source_id and source_id not in self._GOLD_SOURCE_COLUMNS:
+            return None  # DuckDB answers zeros here; parity keeps it that way
+        if not pg_gold_read.enabled():
+            return None
+        try:
+            return await pg_gold_read.fetch_summary(
+                start_date, end_date, sales_type, source_id
+            )
+        except Exception as e:
+            logger.error(
+                "KS_READ_GOLD=postgres but the summary read failed, "
+                "falling back to DuckDB: %s", e,
+            )
+            return None
+
+    async def _pg_gold_series(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str,
+        source_id: Optional[int],
+    ) -> Optional[List[Tuple[date, float, int]]]:
+        from core import pg_gold_read
+
+        if not pg_gold_read.enabled():
+            return None
+        try:
+            return await pg_gold_read.fetch_series(
+                start_date, end_date, sales_type, source_id
+            )
+        except Exception as e:
+            logger.error(
+                "KS_READ_GOLD=postgres but the series read failed, "
+                "falling back to DuckDB: %s", e,
+            )
+            return None
 
     async def get_summary_stats(
         self,
@@ -82,6 +140,32 @@ class RevenueMixin:
                 total_returns = int(ret_result[0])
                 returns_revenue = float(ret_result[1])
             else:
+                # Step 1 of «Одна бронза»: this Gold-only branch may read
+                # Postgres instead. None means "not enabled / not answerable /
+                # read failed" — every one of those lands on the DuckDB path
+                # below, unchanged.
+                pg_totals = await self._pg_gold_summary(
+                    start_date, end_date, sales_type, source_id
+                )
+                if pg_totals is not None:
+                    total_orders, total_revenue, total_returns, returns_revenue = (
+                        int(pg_totals[0]), float(pg_totals[1]),
+                        int(pg_totals[2]), float(pg_totals[3]),
+                    )
+                    # The same seven keys the shared tail below builds — an
+                    # early return with fewer would change the API shape by
+                    # engine, which is exactly what the flag must not do.
+                    avg_check = total_revenue / total_orders if total_orders > 0 else 0
+                    return {
+                        "totalOrders": total_orders,
+                        "totalRevenue": round(total_revenue, 2),
+                        "avgCheck": round(avg_check, 2),
+                        "totalReturns": total_returns,
+                        "returnsRevenue": round(returns_revenue, 2),
+                        "startDate": start_date.isoformat(),
+                        "endDate": end_date.isoformat(),
+                    }
+
                 # Use gold_daily_revenue for non-product queries
                 params = [start_date, end_date]
                 where_clauses = ["date BETWEEN ? AND ?"]
@@ -457,11 +541,17 @@ class RevenueMixin:
                 and (not source_id or source_id in self._GOLD_SOURCE_COLUMNS)
             )
 
+            pg_series = None
             if use_lines:
                 sql, params = self._build_silver_products_revenue_query(
                     start_date, end_date, sales_type, source_id, cat_ids, brand, promocode
                 )
             elif gold_can_answer:
+                # Step 1 of «Одна бронза»: the Gold series may come from
+                # Postgres. None falls through to the DuckDB query below.
+                pg_series = await self._pg_gold_series(
+                    start_date, end_date, sales_type, source_id
+                )
                 sql, params = self._build_gold_revenue_query(
                     start_date, end_date, sales_type, source_id
                 )
@@ -470,7 +560,10 @@ class RevenueMixin:
                     start_date, end_date, sales_type, source_id, promocode
                 )
 
-            results = conn.execute(sql, params).fetchall()
+            results = (
+                pg_series if pg_series is not None
+                else conn.execute(sql, params).fetchall()
+            )
             daily_data = {row[0]: (float(row[1]), int(row[2])) for row in results}
 
             # Build labels and data
@@ -514,11 +607,17 @@ class RevenueMixin:
                 # The comparison period has to be measured the same way as the
                 # current one, or the growth percentage is a ratio between two
                 # different questions.
+                prev_pg_series = None
                 if use_lines:
                     prev_sql, prev_params = self._build_silver_products_revenue_query(
                         prev_start, prev_end, sales_type, source_id, cat_ids, brand, promocode
                     )
                 elif gold_can_answer:
+                    # Same engine as the current period, or the growth number
+                    # becomes a ratio between two stores.
+                    prev_pg_series = await self._pg_gold_series(
+                        prev_start, prev_end, sales_type, source_id
+                    )
                     prev_sql, prev_params = self._build_gold_revenue_query(
                         prev_start, prev_end, sales_type, source_id
                     )
@@ -528,7 +627,10 @@ class RevenueMixin:
                     )
 
                 # Only need day + revenue for comparison
-                prev_results = conn.execute(prev_sql, prev_params).fetchall()
+                prev_results = (
+                    prev_pg_series if prev_pg_series is not None
+                    else conn.execute(prev_sql, prev_params).fetchall()
+                )
                 prev_daily = {row[0]: float(row[1]) for row in prev_results}
 
                 prev_data = []
