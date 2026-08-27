@@ -17,6 +17,7 @@ So: copied from DuckDB, replaced whole, and pinned here.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -242,3 +243,72 @@ class TestItHappensAtStartup:
 
         source = inspect.getsource(BackgroundScheduler.start)
         assert "_replicate_classification_once" in source
+
+
+class TestStatsRecomputeReplicates:
+    """`update_manager_stats` writes three columns that Postgres also holds.
+
+    Replication used to hang off `upsert_managers` alone, which is a different
+    event: the daily `manager_stats` job never replicated at all, and
+    `sync_managers` recomputes *after* upserting, so even the sync path ended
+    with the two stores apart. `dq_mirror_landing` reported the result as
+    CRITICAL every morning — `mirror_row_values` on last_order_date and
+    order_count — against a check whose tolerance is deliberately zero.
+    """
+
+    @pytest.mark.asyncio
+    async def test_recomputing_stats_replicates_the_result(self, tmp_path):
+        store = await _store(tmp_path)
+        with patch("core.pg_replication.replicate_managers",
+                   new=AsyncMock()) as rep:
+            await store.update_manager_stats()
+        rep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_the_replicated_numbers_are_the_new_ones(self, tmp_path):
+        """Replicating before the recompute would ship the old figures and
+        leave exactly the disagreement this is meant to end."""
+        store = await _store(tmp_path)
+        async with store.connection() as conn:
+            conn.execute("INSERT INTO managers (id, name) VALUES (7, 'M')")
+            conn.execute(
+                "INSERT INTO orders (id, source_id, status_id, manager_id, ordered_at, "
+                "grand_total) VALUES (1, 1, 1, 7, TIMESTAMP '2026-08-20 10:00:00', 100)"
+            )
+
+        seen = {}
+
+        async def _capture(store_arg):
+            async with store_arg.connection() as conn:
+                seen["row"] = conn.execute(
+                    "SELECT order_count, last_order_date FROM managers WHERE id = 7"
+                ).fetchone()
+            return {"ok": True}
+
+        with patch("core.pg_replication.replicate_managers", new=_capture):
+            await store.update_manager_stats()
+
+        assert seen["row"][0] == 1, "replication saw the recomputed order_count"
+        assert str(seen["row"][1]) == "2026-08-20"
+
+    @pytest.mark.asyncio
+    async def test_it_replicates_outside_the_connection_lock(self, tmp_path):
+        """`asyncio.Lock` is not reentrant and `replicate_managers` opens its
+        own connection, so calling it inside the block deadlocks rather than
+        failing — a hang, with no traceback to read. This pins the call site
+        outside: the stand-in takes the lock itself and must not block.
+        """
+        store = await _store(tmp_path)
+        acquired = False
+
+        async def _needs_the_lock(store_arg):
+            nonlocal acquired
+            async with store_arg.connection() as conn:
+                conn.execute("SELECT 1")
+                acquired = True
+            return {"ok": True}
+
+        with patch("core.pg_replication.replicate_managers", new=_needs_the_lock):
+            await asyncio.wait_for(store.update_manager_stats(), timeout=5)
+
+        assert acquired, "replication ran while the store lock was free"

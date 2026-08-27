@@ -3759,7 +3759,8 @@ class DuckDBStore(
     async def update_manager_stats(self) -> int:
         """Update manager order statistics from orders table.
 
-        Updates first_order_date, last_order_date, and order_count for all managers.
+        Updates first_order_date, last_order_date, and order_count for all
+        managers, and replicates the result to Postgres.
 
         Returns:
             Number of managers updated
@@ -3786,7 +3787,25 @@ class DuckDBStore(
             """)
             count = result.fetchone()
             logger.info(f"Updated manager statistics")
-            return count[0] if count else 0
+            updated = count[0] if count else 0
+
+        # Step 05. These three columns are computed here, and `replicate_managers`
+        # is what carries them to Postgres — but it only ever ran from
+        # `upsert_managers`, which is a different event. So every recompute left
+        # the two stores disagreeing until the next manager sync, and
+        # `dq_mirror_landing` reported it as CRITICAL every morning
+        # (`mirror_row_values` on last_order_date and order_count, seen daily up
+        # to 2026-08-27). The daily `manager_stats` job never replicated at all,
+        # and `sync_managers` recomputes *after* upserting, so even the sync path
+        # ended with the stores apart. Replicating here is what makes the check's
+        # tolerance of zero honest for this table.
+        #
+        # Outside the connection block: `asyncio.Lock` is not reentrant and
+        # `replicate_managers` opens its own. It never raises.
+        from core.pg_replication import replicate_managers
+
+        await replicate_managers(self)
+        return updated
 
     async def set_manager_retail_status(
         self,
