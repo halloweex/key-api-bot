@@ -1304,4 +1304,4 @@ GET /api/admin/resync/status/{job_id}
 
 ---
 
-*Last updated: 2026-08-10*
+*Last updated: 2026-08-27*
