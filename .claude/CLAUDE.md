@@ -502,7 +502,7 @@ whole reason the group is read from the source now.
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **both stores**, one fetch |
-| `dq_mirror_landing` | 07:30 | Reconciliation A: landing, Silver, Gold, the five `app.*` tables, then `bot.db` — tolerance zero |
+| `dq_mirror_landing` | 07:30 | Reconciliation A: landing, Silver, Gold, the five `app.*` tables, `bot.db` — tolerance zero — then the order-version archive, which is a liveness check and not a comparison |
 | `replicate_operational` | every 1 h | Copy the five irreplaceable tables and `data/bot.db` into Postgres |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
@@ -914,6 +914,90 @@ backup. First replication **9.3 s**, incremental **116 ms**, whole comparison
 value changes were each reported CRITICAL with the id; the incremental run
 repaired the full-replace table and left the two append-only ones broken, as
 documented; `full=True` cleared all of it.
+
+### The archive of order versions, and why it was built first
+
+`app.order_versions` (revision 0010) is the sixth thing here that nothing can
+rebuild, and the only one that is *still being lost*. The five tables above at
+least exist; yesterday's order status does not. KeyCRM serves current state and
+has no history endpoint, so a transition nobody wrote down when it happened is
+gone — the same sentence as `stock_movements`, which is why the order of work
+was inverted to put this first.
+
+**It is a side branch, not a layer.** Silver keeps feeding from the latest state
+in bronze; nothing downstream reads the archive, and dropping it would not move
+a number on any dashboard. That is what makes it safe to build first.
+
+**Fed from `updated_ids`, never from a poll.** `upsert_orders` already computes
+the exact set of orders it wrote — rows already in the desired state go to
+`skipped_unchanged` instead — and until now discarded it. A scan keyed on
+`updated_at` cannot work here and would fail on precisely the transitions this
+exists for: KeyCRM does not bump `updated_at` on a status change, which is the
+whole reason `force_update` exists.
+
+**A version is a change, not an observation.** `force_update` bypasses the state
+check by design, so `updated_ids` carries orders whose content did not move.
+Measured on production before anything was written: `order_status_refresh` runs
+daily at 05:15 over a 30-day `created_between` window and force-wrote **1,388**
+orders in one hour on 26.08, while the reconciliation against KeyCRM reported
+**0 discrepancies on 13 of the last 14 days** — the store already agreed with
+the source, so those writes rewrote identical content. Without the comparison
+the table gains ~500 K rows a year recording nothing; with it, ~100 a day
+against ~48 orders created. `bronze_order_events` is the standing proof of the
+alternative: it keyed on the observation, wrote ~150 K rows a day and took the
+database to 43 GB.
+
+Three decisions that read as details and are not:
+
+- **The capture runs inside `write_orders`' transaction**, not in
+  `mirror_orders`. The mirror never raises because the backfill can ship what it
+  missed; **this has no backfill and cannot have one**, so it must not inherit
+  that contract. The version and the row it describes land together or neither
+  does.
+- **It reads the stored row, never the payload.** `manager_comment` is upserted
+  as `COALESCE(EXCLUDED, stored)` because it carries UTM attribution, and 32 437
+  of 46 685 orders have a value in it. Comparing an incoming payload that omits
+  the field would report "comment removed" on two orders in three, every tick,
+  forever.
+- **Header only.** The 05:15 refresh runs `skip_products=True` and carries no
+  line items at all, so an archive that recorded them would minute the deletion
+  of ~1 400 baskets every morning.
+
+`updated_at` is stored and deliberately **not** compared: if it moves while every
+stored column is identical, nothing this store holds has changed.
+
+**The check is liveness, because a healthy archive is quiet.** Comparing version
+count against `updated_ids` — the obvious check — fails by construction, since
+writing fewer rows than ids offered is the design. What breaks the tie is that a
+brand-new order has no previous version and so always writes one, and production
+creates ~48 a day: a whole day with no version is a broken writer, not a quiet
+day. `reconcile_order_versions` runs inside `dq_mirror_landing` on the same
+layer as the rest — one call, one age — and reports `order_versions_stalled`,
+`order_versions_flooding`, `order_versions_missing` and `order_versions_empty`.
+Report-only, and more absolutely than anything else in that module: a "repair"
+would mean inventing the history this table is the only record of.
+
+Append-only is enforced by there being no statement that is not an `INSERT`,
+pinned by a test that **parses** the repository — not by a `REVOKE`. Migrations
+run as `ks_app` (the `migrate` service chose that over `postgres` deliberately),
+so `ks_app` owns the table and an owner can grant itself back anything it
+revoked; a `REVOKE` here would look like a guarantee and be a speed bump.
+
+Verified 2026-08-27 by execution on a throwaway PostgreSQL 17.11, because local
+tests do not run SQL and revision 0009 died at `COMMENT ON` on a real server
+after four tables had already been created. The migration applies and seeds a
+baseline for every order already held; the real `write_orders` was driven
+through six cases including the `manager_comment` one; the archive was broken
+six ways and each was reported with the right severity and id. Cost at
+production scale (130 K-row archive, 24 MB): **0.6 ms** for an ordinary tick,
+**2.4 ms** for the 1 400-id 05:15 batch, **7.4 ms** for a 5 000-id backfill
+chunk — ~190 bytes a row, so **~7 MB a year**.
+
+**Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
+moves to `0010_order_versions` and `require_revision` raises on any mismatch,
+ahead or behind. The bot checks it too, but only in `initialise()`, so a running
+bot survives the migration; only a restart before its image is replaced would
+fail.
 
 ### The port in front of the bot's state
 
