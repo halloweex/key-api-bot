@@ -275,11 +275,22 @@ services:
     mem_limit: 512m
     cpus: 0.5
     healthcheck:
-      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/data/bot.db') else 1)"]
+      # Reads the heartbeat the bot writes on its own event loop after a real
+      # read through its store. The previous check was
+      # `os.path.exists('/app/data/bot.db')`, which said nothing about whether
+      # the bot was polling and became a lie on 2026-08-27, when the bot moved
+      # to Postgres and that file was frozen in place.
+      #
+      # The check must not touch the database itself: under
+      # KS_BOT_STORE=postgres it would build a pool and a loop thread every
+      # thirty seconds. See bot/heartbeat.py.
+      test: ["CMD", "python", "-m", "bot.heartbeat"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      # Four beats. A fresh container has no heartbeat at all and is unhealthy
+      # until it writes one, which is correct and is what this window is for.
+      start_period: 60s
 
   web:
     image: halloweex/keycrm-web:latest

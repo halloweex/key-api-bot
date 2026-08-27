@@ -23,6 +23,7 @@ from bot.services import ReportService
 from bot import handlers, handlers_legacy
 from bot import database
 from bot.canary import CanaryState, run_canary, format_alert, format_recovery
+from bot.heartbeat import BEAT_INTERVAL_SECONDS, beat_job
 from core.config import validate_config, ConfigurationError
 
 # Configure logging
@@ -352,6 +353,15 @@ def main() -> None:
         name="milestone_check"
     )
     logger.info(f"Milestone check scheduled daily at {milestone_time}")
+
+    # The container's healthcheck reads what this writes. On the loop, so it
+    # only happens if the loop that answers Telegram is turning, and it probes
+    # the store first so an unreachable database goes stale rather than
+    # reporting healthy — which is what the old `bot.db` file check did after
+    # the move to Postgres. See bot/heartbeat.py.
+    application.job_queue.run_repeating(
+        beat_job, interval=BEAT_INTERVAL_SECONDS, first=1, name="heartbeat",
+    )
 
     # Run session cleanup every 10 minutes
     application.job_queue.run_repeating(cleanup_sessions, interval=600, first=60)
