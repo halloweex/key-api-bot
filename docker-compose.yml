@@ -269,6 +269,15 @@ services:
       - .env
     environment:
       - TZ=Europe/Kyiv
+      # Step 03: the bot's own state moves to Postgres. `app.*` has held
+      # an hourly copy of data/bot.db since revision 0009; this is what
+      # makes the bot read and write it instead.
+      #
+      # Removing KS_BOT_STORE rolls back to SQLite, but anything written
+      # to Postgres in between does not come back: the copy is one-way and
+      # stands down while this is set.
+      - KS_PG_DSN=postgresql://ks_app:${KS_APP_PASSWORD:?set it in .env}@postgres:5432/ks
+      - KS_BOT_STORE=postgres
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
@@ -301,6 +310,10 @@ services:
       - .env
     environment:
       - TZ=Europe/Kyiv
+      # The same store the bot uses: web/services/auth_service.py reads it
+      # to decide who may open the dashboard. The two must agree, or one
+      # of them is answering from a database nobody is writing.
+      - KS_BOT_STORE=postgres
       # DuckDB's own ceiling, well under mem_limit so Python/pandas/Meili keep
       # room. Raise before a full warehouse rebuild; 3GB is what OOM'd on
       # 2026-08-02 and truncated the Gold layer.
