@@ -15,9 +15,9 @@ networks:
   # exists on the host:  docker network create ks-data
   #
   # THE TRAP, and it now lives in this file: the moment a service here gains a
-  # `networks:` key it stops joining `default` implicitly. `postgres` below
-  # therefore lists BOTH. Do not add a `networks:` key to web, bot, nginx or
-  # meilisearch without also listing `default` — nginx would lose
+  # `networks:` key it stops joining `default` implicitly. `postgres` and
+  # `web` below therefore list BOTH. Do not add a `networks:` key to bot,
+  # nginx or meilisearch without also listing `default` — nginx would lose
   # `proxy_pass http://web` and fail silently, because it only resolves the
   # name when a request arrives, so nothing complains at startup.
   ks-data:
@@ -306,6 +306,11 @@ services:
     container_name: keycrm-web
     restart: unless-stopped
     logging: *default-logging
+    # `default` is listed explicitly because naming any network drops the
+    # implicit membership (the trap above) — nginx reaches web over it.
+    # `ks-data` is how this container reaches `ks-clickhouse`, which lives in
+    # the platform's compose project and publishes no ports (rule 12).
+    networks: [default, ks-data]
     env_file:
       - .env
     environment:
@@ -323,6 +328,17 @@ services:
       # error on every sync instead of writing — which is why it is set here
       # rather than left to whoever remembers.
       - KS_PG_DSN=postgresql://ks_app:${KS_APP_PASSWORD:?set it in .env}@postgres:5432/ks
+      # Step 4 of «Одна бронза»: gold copied into ClickHouse hourly. Both come
+      # from .env and both may be absent — the shipper and its reconciliation
+      # stand down silently without KS_CH_URL, so a host without ClickHouse
+      # runs unchanged. The password is the platform's `ks_app` CH user.
+      - KS_CH_URL=${KS_CH_URL:-}
+      - KS_CH_PASSWORD=${KS_CH_PASSWORD:-}
+      # Step 1 of «Одна бронза»: which engine serves the Gold-only reads of
+      # /api/summary and /api/revenue/trend. `duckdb` (default) or `postgres`;
+      # a typo raises on the first read rather than serving the old store.
+      # Rollback is flipping it back — no rebuild, no recreate.
+      - KS_READ_GOLD=${KS_READ_GOLD:-duckdb}
     volumes:
       - ./data:/app/data
     expose:

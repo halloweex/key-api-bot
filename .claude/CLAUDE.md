@@ -504,6 +504,7 @@ whole reason the group is read from the source now.
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **both stores**, one fetch |
 | `dq_mirror_landing` | 07:30 | Reconciliation A: landing, Silver, Gold, the five `app.*` tables, `bot.db` — tolerance zero — then the order-version archive, which is a liveness check and not a comparison |
 | `replicate_operational` | every 1 h | Copy the five irreplaceable tables and `data/bot.db` into Postgres |
+| `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 
@@ -1187,6 +1188,99 @@ carries the sentence explaining why a disagreement matters, because the shared
 default was landing's story — "the same parsed tuple in the same call" — and
 that is false for every replicated table. It was found by reading a real
 finding, not by reading the code.
+
+### Шаги 1–2 «Одной бронзы»: переключение чтения и строка на клиента
+
+**Шаг 1 — `KS_READ_GOLD`** (`duckdb` по умолчанию | `postgres`; опечатка
+роняет запрос, правило `KS_BOT_STORE`). Подменяет ровно два голдовых
+примитива — итоги `/api/summary` и дневной ряд `/api/revenue/trend`
+(`core/pg_gold_read.py`); сравнения, гранулярность, прогноз и вся логика выше
+остаются в одном экземпляре. Перехват повторяет собственную маршрутизацию
+DuckDB: источник без колонки канала (5) и линейные фильтры до Postgres не
+доходят — флаг меняет движок и ничего больше. Ошибка чтения PG — fallback в
+DuckDB с ERROR в логе; откат — вернуть переменную, без пересоздания.
+
+**Шаг 2 — ревизия 0011**: `bronze.buyers`/`bronze.buyer_contacts` (ландинг —
+`mirror_buyers` получает тот же разобранный батч, что `upsert_buyers`; синк
+дельтовый, история — `backfill_buyers(store)`, ids-diff без курсора, сверка
+гейтится на `backfilled_at`); `silver.order_lines` — VIEW, одно тело на два
+движка в `core.sql_dialect.order_lines_select`, миграция заморозила
+PG-рендер и тест сверяет их; `app.customer_profile` — витрина: строка на
+retail-клиента, **факты без уровней** (пороги — политика кампаний и живут в
+коде), пересобирается целиком тем же тиком, что Gold. Её сверка
+(`reconcile_customer_profile`) пересобирает и проверяет материализацию об
+тот же снимок Silver в одной REPEATABLE READ транзакции — допуск ноль
+законен, потому что обе стороны видят один Silver. Ключ контактов —
+натуральная тройка, sequence-id DuckDB намеренно не переносится. Куда витрине
+переезжать (этот Postgres или магазина) — открытый вопрос владельца; она
+derived, переезд стоит одну пересборку.
+
+Проверено на одноразовом PostgreSQL 17.2 (миграции 0001→0011 + initdb):
+читатели шага 1 сходятся с независимо посчитанной правдой по каждой ячейке;
+витрина 38 клиентов, SUM(ltv) == Silver, сверка ноль; зеркало покупателей —
+ноль находок на честной копии, три подложенных дефекта пойманы, лечится
+зеркалом и бэкфиллом.
+
+### Gold в ClickHouse — шаг 4 «Одной бронзы», копия на обкатку
+
+`core/ch_gold.py` копирует `gold.daily_revenue` из Postgres в ClickHouse
+(база `gold`, та же таблица) ежечасно и **ничего не вычисляет** — uniqExact и
+настоящая деривация приезжают с шагом 5. Что обкатывается: связность (web
+вошёл в сеть `ks-data`, где живёт `ks-clickhouse` без опубликованных портов),
+форма доставки (staging + атомарный `EXCHANGE TABLES`, потому что транзакций
+нет и TRUNCATE+INSERT по живой таблице дал бы читателю пустую), и суточная
+сверка на слое `mirror_landing`.
+
+- **Включается `KS_CH_URL`** (`http://ks-clickhouse:8123`); без него шиппер и
+  сверка молча стоят — хост без ClickHouse работает без изменений. Пароль
+  `ks_app` (пользователь уже заведён платформой с правами на `bronze/silver/
+  gold.*`) — `KS_CH_PASSWORD` из `.env`; кредензии едут заголовками, не в URL.
+- **Счётчик до обмена**: короткая заливка в staging не подменяет живую
+  таблицу — EXCHANGE случается только при равенстве числа строк.
+- **Сверка сначала отгружает, потом читает обратно** и сравнивает с тем же
+  снимком в памяти: PG gold пересобирается каждые ~10 минут и не несёт
+  таймстемпов строк, так что сверка «свежести» врала бы ежедневно. Свежесть —
+  дело вотермарки (`meta.mirror_state`, строка `clickhouse.gold_daily_revenue`);
+  сверка меряет верность копии. Допуск ноль **включая** `avg_order_value` —
+  цент прощается двум движкам, которые считают, а не копии.
+- Недоступный ClickHouse — WARN-находка, не исключение: опциональное
+  хранилище не должно валить слой обязательных сравнений.
+- Проверено против настоящего ClickHouse 24.8.14.39 (версия прода): 10 950
+  синтетических ячеек — отгрузка 0.28 с, чтение 0.06 с, чистый круг — ноль
+  находок; три подложенных дефекта (цент, потерянная и выдуманная ячейка)
+  пойманы с правильными именами; повторная отгрузка лечит.
+- **Выкладка требует `--force-recreate web`** — членство в сети меняется
+  только пересозданием контейнера, restart его не даёт (урок D3).
+
+### Шаги 5–6: ClickHouse считает Gold сам, и архив наследуется
+
+Шаг 4 (копия голда) превзойдён и оставлен фолбэком. Часовой `ch_sync` теперь:
+`core/ch_silver.py` отгружает **silver целиком** (staging + EXCHANGE, копия —
+допуск ноль на круге) и **деривит gold внутри ClickHouse** из этого silver;
+`core/ch_history.py` дописывает `history.order_versions` поверх собственного
+`MAX(id)` (append-only, курсора нет — вотермарка читается из самого CH).
+
+**Третьего диалекта мер нет** — и это снимает возражение И1: `GOLD_MEASURES`
+написаны как `COUNT(DISTINCT CASE WHEN …)` / `COALESCE(SUM(CASE …), 0)`, и
+ClickHouse 24.8 понимает этот же текст с той же семантикой (проверено, не
+предположено). `derive_gold_sql` рендерит выражения дословно из того же
+словаря, что PG и DuckDB; тест провалится, если кто-то перепишет меру «под
+ClickHouse».
+
+Суточный вердикт в `dq_mirror_landing`: круг silver (ноль), **gold двух
+движков друг против друга** — независимые агрегации одного silver, ноль
+всюду, кроме документированного цента на `avg_order_value` (движки по-разному
+делят DECIMAL), — и бакеты архива (ноль ниже вотермарки; находка о потерянной
+строке **не лечится** — архив чинит человек). Проверено на живой паре
+PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движках, **0
+расхождений**, включая 374 дня, где uniqExact-свёртка законно не равна сумме
+мелких строк; сверка 0.7 с; архив — 12 000 унаследовано + 40 инкрементом,
+удалённая строка поймана и находка не исчезает при повторной сверке.
+
+**База `history` в прод-CH не существует и в грантах ks_app её нет** — перед
+включением платформа выполняет две строки: `CREATE DATABASE history` и тот же
+GRANT, что у bronze/silver/gold. До этого каждый ship пишет failed-строку в
+`meta.mirror_state` — громко, не молча.
 
 ### What the warehouse validation can and cannot see
 `validation_passed` covers: Bronze→Silver row counts, Silver→Gold revenue

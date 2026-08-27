@@ -643,6 +643,26 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: ClickHouse sync (hourly) — steps 5–6 of «Одна бронза»
+        #
+        # Silver ships whole (staging + EXCHANGE), Gold is then DERIVED inside
+        # ClickHouse from that silver — the same GOLD_MEASURES text, third
+        # engine — and the archive appends above its own MAX(id). Stands down
+        # silently while KS_CH_URL is unset, so registering it is safe on a
+        # host with no ClickHouse at all. Freshness rides meta.mirror_state
+        # ('clickhouse.silver_orders' / 'gold_daily_revenue' /
+        # 'order_versions'); fidelity and the engine-vs-engine Gold verdict
+        # are checked daily inside dq_mirror_landing.
+        self._add_job(
+            job_id="ch_sync",
+            name="ClickHouse: silver → gold + history",
+            description="Ship silver, derive gold in ClickHouse, append the archive (steps 5–6)",
+            func=self._run_ch_sync,
+            trigger=IntervalTrigger(hours=1),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Half-written order repair (every 2 h)
         # Orders with revenue and no line items. Detection is a table scan of
         # our own data, so an idle run costs nothing; a working one costs one
@@ -845,6 +865,23 @@ class BackgroundScheduler:
             result["bot_state"] = await replicate_bot_state()
             if "skipped" not in result:
                 logger.info("Operational replication: %s", result)
+            return result
+
+    async def _run_ch_sync(self) -> Dict[str, Any]:
+        """Silver into ClickHouse, Gold derived there, the archive appended.
+
+        Never raises: each half returns its own error rather than propagating,
+        `_run_replicate_operational`'s contract — an optional store's fault
+        must not enter the failure history the scheduler shares with the sync.
+        """
+        from core.ch_history import ship_history
+        from core.ch_silver import ch_silver_sync
+
+        with correlation_context():
+            result = await ch_silver_sync()
+            result["history"] = await ship_history()
+            if "skipped" not in result:
+                logger.info("ClickHouse sync: %s", result)
             return result
 
     async def _run_manager_stats(self) -> Dict[str, Any]:
@@ -1071,6 +1108,14 @@ class BackgroundScheduler:
             # what should happen — a Gold rebuilt over a stale Silver would
             # stamp a fresh watermark on a stale answer, and that reads clean.
             logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
+            # And the витрина, from the same Silver in the same tick — one
+            # floor, one тик, Gold's own reasoning one consumer down.
+            from core.pg_vitrina import rebuild_customer_profile
+
+            logger.info(
+                "Rebuilding customer profile in Postgres: %s",
+                await rebuild_customer_profile(),
+            )
         except Exception as e:
             # ERROR, not DEBUG. A mirror that fails quietly is the 2026-08-09
             # shape, and the watermark it did not move is what Reconciliation A
@@ -1292,6 +1337,24 @@ class BackgroundScheduler:
                 # anything. Same layer as the rest for the same reason — one
                 # call, one age, and a fourth layer would invent one.
                 issues += await reconcile_order_versions()
+                # And the buyer landing — step 2. Same layer, same argument.
+                from core.mirror_reconciliation import reconcile_buyers
+                issues += await reconcile_buyers(store)
+                # And the витрина, which rebuilds itself and then checks the
+                # materialisation against the same Silver snapshot.
+                from core.pg_vitrina import reconcile_customer_profile
+                issues += await reconcile_customer_profile()
+                # And the third engine — steps 5–6. Silver round-trips, then
+                # the two engines' independent Gold aggregations are set
+                # against each other («сверка навсегда»), then the archive's
+                # buckets. Stands down when KS_CH_URL is unset; an unreachable
+                # ClickHouse is a WARN finding rather than an exception — an
+                # optional store being down must not silence the comparisons
+                # of the mandatory ones.
+                from core.ch_history import reconcile_ch_history
+                from core.ch_silver import reconcile_clickhouse
+                issues += await reconcile_clickhouse()
+                issues += await reconcile_ch_history()
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("Mirror reconciliation raised")
