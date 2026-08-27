@@ -162,3 +162,72 @@ class TestOneBodyTwoEngines:
         normal = " ".join(frozen.group(1).split())
         rendered = " ".join(order_lines_select(POSTGRES).split())
         assert normal == rendered
+
+
+class TestTheSelfGatedBackfill:
+    """The backfill needs the store, the store admits one process — so it
+    rides the hourly job, gated on `backfilled_at`, and runs at most once."""
+
+    @pytest.mark.asyncio
+    async def test_runs_when_the_watermark_row_is_absent(self, monkeypatch):
+        from core import pg_buyers
+        import core.pg_landing as pg_landing
+
+        monkeypatch.setattr(pg_landing, "enabled", lambda: True)
+
+        class _Pool:
+            def acquire(self):
+                class _Ctx:
+                    async def __aenter__(self):
+                        conn = AsyncMock()
+                        conn.fetchval = AsyncMock(return_value=None)
+                        return conn
+
+                    async def __aexit__(self, *a):
+                        return False
+
+                return _Ctx()
+
+        import core.pg as pg
+
+        monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=_Pool()))
+        ran = AsyncMock(return_value={"shipped": 5, "missing_was": 5})
+        monkeypatch.setattr(pg_buyers, "backfill_buyers", ran)
+
+        out = await pg_buyers.backfill_if_pending(store=object())
+        assert out == {"shipped": 5, "missing_was": 5}
+        ran.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stays_quiet_once_backfilled(self, monkeypatch):
+        from datetime import datetime, timezone
+
+        from core import pg_buyers
+        import core.pg_landing as pg_landing
+
+        monkeypatch.setattr(pg_landing, "enabled", lambda: True)
+
+        class _Pool:
+            def acquire(self):
+                class _Ctx:
+                    async def __aenter__(self):
+                        conn = AsyncMock()
+                        conn.fetchval = AsyncMock(
+                            return_value=datetime(2026, 8, 28, tzinfo=timezone.utc)
+                        )
+                        return conn
+
+                    async def __aexit__(self, *a):
+                        return False
+
+                return _Ctx()
+
+        import core.pg as pg
+
+        monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=_Pool()))
+        ran = AsyncMock()
+        monkeypatch.setattr(pg_buyers, "backfill_buyers", ran)
+
+        out = await pg_buyers.backfill_if_pending(store=object())
+        assert out == {"skipped": "already backfilled"}
+        ran.assert_not_awaited()

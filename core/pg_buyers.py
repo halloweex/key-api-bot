@@ -234,3 +234,37 @@ async def backfill_buyers(store, *, chunk: int = 2000) -> Dict[str, Any]:
             BUYERS_STATE,
         )
     return {"shipped": shipped, "missing_was": len(missing)}
+
+
+async def backfill_if_pending(store) -> Dict[str, Any]:
+    """Run the backfill once, self-gated on `backfilled_at`.
+
+    The backfill needs the DuckDB store, and the store admits exactly one
+    process — so there is no way to run it from outside the container, and a
+    one-shot that has to be remembered is a one-shot that gets forgotten. So
+    it rides the hourly replication job the way the manager-classification
+    catch-up rides scheduler start: checks the watermark, runs at most once,
+    and every later tick costs one SELECT. Never raises — the job's contract.
+    """
+    from core import pg_landing
+
+    if not pg_landing.enabled():
+        return {"skipped": "KS_PG_DSN is not set"}
+    try:
+        from core.pg import get_pool
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            done = await conn.fetchval(
+                "SELECT backfilled_at FROM meta.mirror_state WHERE table_name = $1",
+                BUYERS_STATE,
+            )
+        if done is not None:
+            return {"skipped": "already backfilled"}
+        result = await backfill_buyers(store)
+        logger.info("pg_buyers: backfill ran self-gated: %s", result)
+        return result
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+        logger.error("pg_buyers: self-gated backfill failed: %s", detail)
+        return {"error": detail}

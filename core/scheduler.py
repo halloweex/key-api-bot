@@ -863,6 +863,13 @@ class BackgroundScheduler:
             # about. It reads the file the web container already opens
             # read-only for the weekly report, so the bot is not touched.
             result["bot_state"] = await replicate_bot_state()
+            # The buyers backfill rides here self-gated on `backfilled_at`:
+            # it needs the store, the store admits one process, and a
+            # one-shot somebody must remember is a one-shot that gets
+            # forgotten. After it has run once, this line costs one SELECT.
+            from core.pg_buyers import backfill_if_pending
+
+            result["buyers_backfill"] = await backfill_if_pending(store)
             if "skipped" not in result:
                 logger.info("Operational replication: %s", result)
             return result
