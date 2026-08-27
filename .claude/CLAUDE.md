@@ -502,7 +502,7 @@ whole reason the group is read from the source now.
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **both stores**, one fetch |
-| `dq_mirror_landing` | 07:30 | Reconciliation A: landing in Postgres against landing in DuckDB, tolerance zero |
+| `dq_mirror_landing` | 07:30 | Reconciliation A: landing, then Silver, then Gold — Postgres against DuckDB, tolerance zero |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 
@@ -783,6 +783,75 @@ table scan of both stores. `mirror_landing` is in
 `WATCHED_LAYERS` (digest section, layer age, catch-up) but deliberately not yet
 in the canary's `DQ_MAX_AGE_S` — that dict pages, and the canary's first probe
 is 90 s after the bot starts, before the catch-up run can finish.
+
+### Gold in Postgres, and why it is not the same table
+
+`gold.daily_revenue` (revision 0007) is the second thing Postgres *derives*
+rather than receives. `core/pg_gold.py` writes it from `silver.orders`, in the
+same call that rebuilds Silver and immediately after it — one floor, one tick,
+so Gold can never aggregate a Silver the next statement is about to replace.
+`TRUNCATE` then one `INSERT`, in one transaction, for `pg_silver`'s reasons.
+
+**The measures are shared; the shape is not.** The eight aggregates live in
+`GOLD_MEASURES` (`core/duckdb_store.py`) and are rendered verbatim into both
+`GOLD_REVENUE_SELECT_SQL` and the Postgres projection — rule 1, with a test
+per expression. What does not transfer is DuckDB's channel columns:
+`instagram_revenue` and its five siblings can only name a channel somebody
+wrote a column for. Source 5 (Виставка) arrived with #101 and is
+**₴266,059.00 across 177 orders** that sits in `revenue` and in none of the
+three columns; all of it in the `exhibition` rows, whose channel columns are
+empty while their revenue is not. Postgres carries `source_id` as a dimension
+instead — the grain `gold_daily_products` has had all along.
+
+**The table holds both grains, and the roll-up is not redundancy.** Three
+measures are `COUNT(DISTINCT buyer_id)` and distinct counts do not add up:
+folding the per-source rows overstates `unique_customers` in 29 of 2,107
+production cells, `new_customers` in 12, `returning_customers` in 17 — each by
+one buyer who used two channels in a day. The criterion is zero, so an
+approximation is not available, and the read switch cannot serve those columns
+from the fine rows either. `GROUP BY GROUPING SETS` computes both grains in one
+pass over one snapshot; `source_id IS NULL` is the roll-up. ClickHouse will
+answer this with `AggregateFunction(uniqExact)` at step 06 — PostgreSQL has no
+equivalent, and this is its answer.
+
+An inactive source still gets a row, and it is all zeroes: every measure
+filters `is_active_source`, so Opencart's 2,470 orders and ₴5.8M gross produce
+zeros. That is `is_active_source` written out, and DuckDB already does the same
+one grain up.
+
+**`reconcile_gold` compares through a mapping, never by folding.** DuckDB's
+fourteen measures each have an exact counterpart: the eight against the roll-up
+row, the six channel columns against the fine rows for sources 1, 2 and 4 —
+sound only while those are in `REVENUE_SOURCE_IDS`, which a test pins. An
+absent fine row reads as zero, not as a missing row. Tolerance is zero
+everywhere except `avg_order_value`, which may differ by one cent because
+DuckDB's DECIMAL division promotes to DOUBLE — measured, not assumed: **5 cells
+of 2,106 actually do**. `gold_rollup_mismatch` additionally checks the fine
+rows add up to the roll-up for the four additive measures, which is the only
+thing that sees sources 3 and 5 at all.
+
+It runs inside `dq_mirror_landing`, on layer `mirror_landing`, after
+`reconcile_silver`. **Not its own layer** — all three comparisons run in one
+call, so they cannot have different ages and a fourth layer would invent one.
+That is the opposite of `reconciliation_pg`, which is separate precisely
+because it *can* stop running on its own.
+
+Verified end to end 2026-08-27 on a throwaway Postgres 17.2 against the
+production backup: 46,620 Silver rows → **5,681 Gold rows in 235 ms**, 2,106
+roll-ups matching DuckDB's 2,106 cells exactly, and **29,484 values compared
+with 0 discrepancies**.
+
+**Deploying 0007 needs both images, migrate first.** `Dockerfile.migrate`
+COPYs `migrations/`, so `keycrm-migrate` must be rebuilt and pushed alongside
+`keycrm-web`.
+
+Getting the order wrong does **not** crash the container — there is no startup
+revision gate, and `web/main.py` never imports `core/pg.py`. What happens
+instead: the mirror of landing keeps working, and `rebuild_silver`,
+`rebuild_gold`, the backfill and all three reconciliations raise
+`SchemaVersionError`. The rebuilds are swallowed and logged; the checks persist
+failed runs, so the layer ages go stale and the 09:00 digest says so. Fails
+closed, not silently — but you find out the next morning, not at deploy.
 
 ### What the warehouse validation can and cannot see
 `validation_passed` covers: Bronze→Silver row counts, Silver→Gold revenue

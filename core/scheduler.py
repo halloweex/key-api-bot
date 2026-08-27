@@ -949,13 +949,14 @@ class BackgroundScheduler:
                 # landing. Outside every `store.connection()` block — the
                 # refresh has released the DuckDB lock by now, and holding it
                 # across a network round-trip is how a sync becomes a stall.
-                await self._rebuild_postgres_silver(result)
+                await self._rebuild_postgres_layers(result)
                 return result
 
-    # Postgres Silver is rebuilt whole, so its cost does not shrink with the
-    # size of the change: 46,446 rows, 2.19 s, every time. The warehouse
-    # refresh fires as often as orders move, which on a busy afternoon is
-    # every two minutes — 720 rebuilds a day for a table nothing reads yet.
+    # Postgres Silver and Gold are both rebuilt whole, so their cost does not
+    # shrink with the size of the change: 46,446 rows, 2.19 s, every time. The
+    # warehouse refresh fires as often as orders move, which on a busy
+    # afternoon is every two minutes — 720 rebuilds a day for tables nothing
+    # reads yet.
     #
     # A floor instead. Ten minutes keeps Postgres far closer to DuckDB than
     # the daily reconciliation that compares them needs, at roughly a tenth of
@@ -968,8 +969,8 @@ class BackgroundScheduler:
     # invisible, on a CI runner it fired immediately.
     _pg_silver_last_at = None
 
-    async def _rebuild_postgres_silver(self, refresh_result) -> None:
-        """Recompute `silver.orders` from `bronze.orders`. Never raises.
+    async def _rebuild_postgres_layers(self, refresh_result) -> None:
+        """Recompute `silver.orders`, then `gold.daily_revenue`. Never raises.
 
         Same failure policy as the mirror, and the same reason: DuckDB is what
         the business looks at, and a Postgres fault must not be able to break
@@ -980,6 +981,11 @@ class BackgroundScheduler:
         landing would still work, but reporting a fresh Postgres Silver beside
         a failed DuckDB one invites reading the two as comparable when they are
         not.
+
+        One floor covers both layers, and one call runs them in order. The
+        method was named for Silver alone until Gold joined it on 2026-08-27;
+        the shared name is the honest one, because there is exactly one moment
+        at which Postgres recomputes what it derives.
         """
         import os
         import time
@@ -1000,14 +1006,26 @@ class BackgroundScheduler:
                 return
             BackgroundScheduler._pg_silver_last_at = now
 
+            from core.pg_gold import rebuild_gold
             from core.pg_silver import rebuild_silver
 
             logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
+            # Gold reads the Silver that was just written, in the same tick and
+            # from the same caller, so it can never aggregate a Silver the next
+            # statement is about to replace. Not in its own job for the same
+            # reason: two schedules would let Gold be built from a Silver one
+            # interval stale, and the comparison would then be measuring the
+            # gap between two of our own timers.
+            #
+            # Order matters on failure too. Silver raising skips Gold, which is
+            # what should happen — a Gold rebuilt over a stale Silver would
+            # stamp a fresh watermark on a stale answer, and that reads clean.
+            logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
         except Exception as e:
             # ERROR, not DEBUG. A mirror that fails quietly is the 2026-08-09
             # shape, and the watermark it did not move is what Reconciliation A
             # reads as "not rebuilt yet".
-            logger.error("Postgres Silver rebuild failed: %s", e, exc_info=True)
+            logger.error("Postgres layer rebuild failed: %s", e, exc_info=True)
 
     async def _run_backup(self) -> Dict[str, Any]:
         """Daily consistent backup of the DuckDB warehouse (A9-1)."""
@@ -1138,7 +1156,7 @@ class BackgroundScheduler:
             return result
 
     async def _run_dq_mirror_landing(self) -> Dict[str, Any]:
-        """Reconciliation A: is the Postgres mirror of landing equal to DuckDB?
+        """Reconciliation A: does Postgres hold — and compute — what DuckDB does?
 
         The closing criterion for step 05 is this reporting zero, so it runs on
         its own layer with its own age rather than riding along with the
@@ -1167,6 +1185,7 @@ class BackgroundScheduler:
             configured,
             read_duckdb_side,
             reconcile_mirror,
+            reconcile_gold,
             reconcile_orders,
             reconcile_silver,
         )
@@ -1196,6 +1215,14 @@ class BackgroundScheduler:
                 # And the two computations of Silver. Same layer: it is the
                 # same question — do the stores agree — asked one level up.
                 issues += await reconcile_silver(store)
+                # And of Gold, one level up again. Still the same layer, and
+                # here the argument is stronger than for Silver: all three run
+                # inside this one call, so an exception from any of them fails
+                # the whole run. They cannot have different ages, and separate
+                # layers would only invent an age that does not exist. That is
+                # the opposite of `reconciliation_pg`, which is a separate
+                # layer precisely because it *can* stop running on its own.
+                issues += await reconcile_gold(store)
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("Mirror reconciliation raised")

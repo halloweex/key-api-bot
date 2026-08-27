@@ -1177,3 +1177,383 @@ async def reconcile_silver(
         issues += _divergence_findings(spec, found, max_samples=max_samples)
 
     return issues
+
+
+# ─── Gold: one aggregate, two shapes, compared through the mapping ───────────
+#
+# Silver was the same projection on both sides, so it could be compared column
+# for column. Gold cannot: DuckDB splits the channels into columns and Postgres
+# carries `source_id` as a dimension, because a column can only name a channel
+# somebody wrote a column for — see revision 0007 for the ₴266,059.00 that
+# proves it.
+#
+# So the comparison goes through a mapping instead, and the mapping is total:
+# every one of DuckDB's fourteen measures has an exact counterpart here, and
+# nothing is compared by folding one grain into the other.
+#
+#     revenue … avg_order_value   ↔  the Postgres roll-up row (source_id NULL)
+#     instagram_revenue           ↔  the fine row for source 1, column revenue
+#     telegram_orders             ↔  the fine row for source 2, orders_count
+#     …and so on for 2 and 4
+#
+# THE ROLL-UP IS COMPARED, NOT RECONSTRUCTED
+#
+# `unique_customers`, `new_customers` and `returning_customers` are
+# `COUNT(DISTINCT buyer_id)`, and adding the per-source rows up overstates them
+# in 29, 12 and 17 of 2,107 production cells — one buyer who used two channels
+# in a day. That is why `gold.daily_revenue` stores the roll-up rather than
+# leaving it to be derived, and why this reads it rather than summing.
+#
+# WHAT IS NOT COMPARED, AND WHY THAT IS NOT A HOLE
+#
+# The fine rows for sources 3 and 5 have no DuckDB counterpart — that absence
+# is the entire reason the grain changed. Their contribution is still checked,
+# twice over: they are inside DuckDB's `revenue`, which the roll-up comparison
+# covers exactly, and `_gold_internal_findings` asserts the fine rows add up to
+# the roll-up for the four measures that are additive.
+
+GOLD_PG_TABLE = "gold.daily_revenue"
+GOLD_DK_TABLE = "gold_daily_revenue"
+
+# Gold is rebuilt in the same call as Silver, on the same floor, so it is
+# behind by the same amount and forgiven for the same window.
+GOLD_GRACE_MINUTES = SILVER_GRACE_MINUTES
+
+_GOLD_ROLLUP_MEASURES: Tuple[str, ...] = (
+    "revenue", "orders_count", "unique_customers", "new_customers",
+    "returning_customers", "returns_count", "returns_revenue",
+    "avg_order_value",
+)
+
+# DuckDB column → (source_id, the Postgres column holding the same number).
+#
+# Sound only while 1, 2 and 4 are all in REVENUE_SOURCE_IDS: DuckDB's channel
+# columns filter `source_id = n` where Postgres filters `is_active_source`, and
+# the two agree exactly because those sources are active. A test pins that.
+_GOLD_SOURCE_MEASURES: Dict[str, Tuple[int, str]] = {
+    "instagram_revenue": (1, "revenue"),
+    "telegram_revenue": (2, "revenue"),
+    "shopify_revenue": (4, "revenue"),
+    "instagram_orders": (1, "orders_count"),
+    "telegram_orders": (2, "orders_count"),
+    "shopify_orders": (4, "orders_count"),
+}
+
+# Zero everywhere except the one column that is a division. DuckDB's DECIMAL
+# `/` promotes to DOUBLE and rounds the result; PostgreSQL divides exactly and
+# rounds once. The warehouse's own Gold check has allowed exactly this cent
+# since it was written — `MATERIAL_THRESHOLDS` in core/data_quality.py.
+_GOLD_TOLERANCES: Dict[str, Decimal] = {"avg_order_value": Decimal("0.01")}
+
+# The four measures that survive being added up across sources. The other four
+# are distinct counts and a division, and summing any of them is the mistake
+# this table's shape exists to avoid.
+_GOLD_ADDITIVE: Tuple[str, ...] = (
+    "revenue", "orders_count", "returns_count", "returns_revenue",
+)
+
+
+def _gold_cell(cell: Tuple[Any, str]) -> str:
+    return f"{cell[0]} {cell[1]}"
+
+
+def _gold_cells(cells: Sequence[Tuple[Any, str]], limit: int) -> str:
+    shown = ", ".join(_gold_cell(c) for c in sorted(cells)[:limit])
+    return shown + ("…" if len(cells) > limit else "")
+
+
+def fetch_duckdb_gold(conn) -> Tuple[
+    Dict[Tuple[Any, str], Dict[str, Optional[Decimal]]],
+    Dict[Tuple[Any, str], Optional[datetime]],
+]:
+    """DuckDB's Gold, and how fresh each cell's newest order is.
+
+    2,107 rows of 16 columns — small enough to read whole, which is why this
+    needs none of the bucketed fingerprint machinery that `orders` and Silver
+    do.
+
+    The freshness comes from the orders behind the cell, because a Gold cell
+    carries no timestamp of its own on either side. A cell holding an order
+    synced two minutes ago is legitimately different between the stores until
+    Postgres rebuilds, exactly as a Silver row is.
+    """
+    columns = list(_GOLD_ROLLUP_MEASURES) + list(_GOLD_SOURCE_MEASURES)
+    rows = conn.execute(
+        f"SELECT date, sales_type, {', '.join(columns)} FROM {GOLD_DK_TABLE}"
+    ).fetchall()
+    values = {
+        (r[0], r[1]): {c: _as_decimal(v) for c, v in zip(columns, r[2:])}
+        for r in rows
+    }
+
+    fresh = conn.execute(
+        "SELECT s.order_date, s.sales_type, MAX(o.synced_at) "
+        "FROM silver_orders s LEFT JOIN orders o ON o.id = s.id "
+        "GROUP BY s.order_date, s.sales_type"
+    ).fetchall()
+    return values, {(r[0], r[1]): r[2] for r in fresh}
+
+
+async def fetch_pg_gold(pool) -> Tuple[
+    Dict[Tuple[Any, str], Dict[str, Optional[Decimal]]],
+    Dict[Tuple[Any, str, int], Dict[str, Optional[Decimal]]],
+]:
+    """The Postgres roll-up rows and fine rows, keyed apart.
+
+    Keyed apart rather than filtered later because they answer different
+    questions and a caller that confused them would compare a channel against
+    a day.
+    """
+    columns = list(_GOLD_ROLLUP_MEASURES)
+    rows = await pool.fetch(
+        f"SELECT date, sales_type, source_id, {', '.join(columns)} "
+        f"FROM {GOLD_PG_TABLE}"
+    )
+    rollup: Dict[Tuple[Any, str], Dict[str, Optional[Decimal]]] = {}
+    fine: Dict[Tuple[Any, str, int], Dict[str, Optional[Decimal]]] = {}
+    for r in rows:
+        measures = {c: _as_decimal(r[c]) for c in columns}
+        if r["source_id"] is None:
+            rollup[(r["date"], r["sales_type"])] = measures
+        else:
+            fine[(r["date"], r["sales_type"], int(r["source_id"]))] = measures
+    return rollup, fine
+
+
+_GOLD_ZERO: Dict[str, Decimal] = {c: Decimal(0) for c in _GOLD_ROLLUP_MEASURES}
+
+
+def _gold_expected(
+    cell: Tuple[Any, str],
+    rollup: Mapping[Tuple[Any, str], Mapping[str, Optional[Decimal]]],
+    fine: Mapping[Tuple[Any, str, int], Mapping[str, Optional[Decimal]]],
+) -> Dict[str, Optional[Decimal]]:
+    """What Postgres says DuckDB's fourteen measures should be, for one cell.
+
+    An absent fine row is zero, not a missing row: Postgres writes a channel
+    row only for channels that sold something that day, where DuckDB writes a
+    zero into the column regardless. Reporting that as a missing row would
+    report the shape rather than the data.
+    """
+    expected = dict(rollup[cell])
+    for dk_column, (source_id, pg_column) in _GOLD_SOURCE_MEASURES.items():
+        row = fine.get((cell[0], cell[1], source_id), _GOLD_ZERO)
+        expected[dk_column] = row[pg_column]
+    return expected
+
+
+def compare_gold(
+    dk_rows: Mapping[Tuple[Any, str], Mapping[str, Optional[Decimal]]],
+    dk_fresh: Mapping[Tuple[Any, str], Optional[datetime]],
+    pg_rollup: Mapping[Tuple[Any, str], Mapping[str, Optional[Decimal]]],
+    pg_fine: Mapping[Tuple[Any, str, int], Mapping[str, Optional[Decimal]]],
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = GOLD_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Both sides, already read. No I/O, so it is testable whole."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=int(grace_minutes))
+    issues: List[IntegrityIssue] = []
+
+    def in_flight(cell: Tuple[Any, str]) -> bool:
+        synced = dk_fresh.get(cell)
+        if synced is None:
+            return False
+        if synced.tzinfo is None:
+            synced = synced.replace(tzinfo=timezone.utc)
+        return synced > cutoff
+
+    # ── the cell sets ──
+    #
+    # This is the August incident's shape one layer up: 100 → 90 → 84 missing
+    # cells with zero value mismatches, invisible to every scalar. The
+    # warehouse's own cell guard catches it between Silver and Gold in one
+    # store; this catches it between the stores.
+    missing = [c for c in dk_rows.keys() - pg_rollup.keys() if not in_flight(c)]
+    if missing:
+        issues.append(IntegrityIssue(
+            check_name="gold_missing_cells",
+            table_name=GOLD_PG_TABLE,
+            severity=Severity.CRITICAL,
+            count=len(missing),
+            description=(
+                f"{len(missing)} (date, sales_type) cell(s) exist in DuckDB's "
+                f"Gold and have no roll-up row in {GOLD_PG_TABLE}: "
+                f"{_gold_cells(missing, max_samples)}. Gold is rebuilt whole on "
+                "both sides, so a missing cell was not aggregated — there is no "
+                "'retired' to mean here."
+            ),
+        ))
+
+    orphans = [c for c in pg_rollup.keys() - dk_rows.keys() if not in_flight(c)]
+    if orphans:
+        issues.append(IntegrityIssue(
+            check_name="gold_orphan_cells",
+            table_name=GOLD_PG_TABLE,
+            severity=Severity.CRITICAL,
+            count=len(orphans),
+            description=(
+                f"{len(orphans)} roll-up row(s) in {GOLD_PG_TABLE} have no cell "
+                f"behind them in DuckDB's Gold: {_gold_cells(orphans, max_samples)}. "
+                "Either DuckDB's Gold lost a cell it should hold, or the two "
+                "stores disagree about which orders exist at all — check the "
+                "Silver comparison in the same run before this one."
+            ),
+        ))
+
+    # ── the values ──
+    offenders: Dict[str, int] = {}
+    differing: List[Tuple[Any, str]] = []
+    worst_example = None
+    for cell in sorted(dk_rows.keys() & pg_rollup.keys()):
+        if in_flight(cell):
+            continue
+        expected = _gold_expected(cell, pg_rollup, pg_fine)
+        cell_differs = False
+        for column, dk_value in dk_rows[cell].items():
+            pg_value = expected.get(column)
+            if dk_value is None or pg_value is None:
+                if dk_value is pg_value:
+                    continue
+            else:
+                gap = abs(dk_value - pg_value)
+                if gap <= _GOLD_TOLERANCES.get(column, Decimal(0)):
+                    continue
+            cell_differs = True
+            offenders[column] = offenders.get(column, 0) + 1
+            if worst_example is None:
+                worst_example = (cell, column, dk_value, pg_value)
+        if cell_differs:
+            differing.append(cell)
+
+    if differing:
+        worst = ", ".join(
+            f"{c} ({n})"
+            for c, n in sorted(offenders.items(), key=lambda kv: -kv[1])[:5]
+        )
+        cell, column, dk_value, pg_value = worst_example
+        issues.append(IntegrityIssue(
+            check_name="gold_cell_values",
+            table_name=GOLD_PG_TABLE,
+            severity=Severity.CRITICAL,
+            count=len(differing),
+            description=(
+                f"{len(differing)} cell(s) are aggregated by both stores and "
+                f"disagree. Columns: {worst}. First: {_gold_cell(cell)} "
+                f"{column} DuckDB={dk_value} Postgres={pg_value}. Cells: "
+                f"{_gold_cells(differing, max_samples)}. Both sides run the "
+                "same measures from GOLD_MEASURES over a Silver the same run "
+                "already proved equal, so a difference here is the aggregation "
+                "or the shape mapping, not the data underneath."
+            ),
+        ))
+
+    issues += _gold_internal_findings(pg_rollup, pg_fine, max_samples=max_samples)
+    return issues
+
+
+def _gold_internal_findings(
+    rollup: Mapping[Tuple[Any, str], Mapping[str, Optional[Decimal]]],
+    fine: Mapping[Tuple[Any, str, int], Mapping[str, Optional[Decimal]]],
+    *,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Do the Postgres fine rows add up to the Postgres roll-up?
+
+    The only check that sees the fine rows for sources 3 and 5 at all, because
+    those have no DuckDB column to be compared against — which is the whole
+    reason `source_id` became a dimension. It covers the four additive
+    measures; the three distinct counts and the division are excluded because
+    summing them is exactly the error the roll-up rows exist to prevent.
+
+    Postgres-only, and deliberately so: it needs no DuckDB, so it keeps working
+    unchanged after the parallel period ends and the other half of this module
+    is deleted.
+    """
+    sums: Dict[Tuple[Any, str], Dict[str, Decimal]] = {}
+    for (date, sales_type, _source), row in fine.items():
+        acc = sums.setdefault((date, sales_type), {c: Decimal(0) for c in _GOLD_ADDITIVE})
+        for column in _GOLD_ADDITIVE:
+            acc[column] += row[column] or Decimal(0)
+
+    offenders: Dict[str, int] = {}
+    bad: List[Tuple[Any, str]] = []
+    for cell, totals in sums.items():
+        if cell not in rollup:
+            continue
+        hit = False
+        for column in _GOLD_ADDITIVE:
+            if (rollup[cell][column] or Decimal(0)) != totals[column]:
+                offenders[column] = offenders.get(column, 0) + 1
+                hit = True
+        if hit:
+            bad.append(cell)
+
+    if not bad:
+        return []
+    worst = ", ".join(
+        f"{c} ({n})" for c, n in sorted(offenders.items(), key=lambda kv: -kv[1])
+    )
+    return [IntegrityIssue(
+        check_name="gold_rollup_mismatch",
+        table_name=GOLD_PG_TABLE,
+        severity=Severity.CRITICAL,
+        count=len(bad),
+        description=(
+            f"{len(bad)} cell(s) whose per-source rows do not add up to their "
+            f"own roll-up row. Columns: {worst}. Cells: "
+            f"{_gold_cells(bad, max_samples)}. Both grains come from one "
+            "GROUPING SETS over one snapshot, so these cannot disagree unless "
+            "the rebuild wrote them from different reads — a partial write, or "
+            "something outside core/pg_gold.py writing this table."
+        ),
+    )]
+
+
+async def reconcile_gold(
+    store,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = GOLD_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Compare the two aggregations of Gold.
+
+    Gated like Silver and for the same reason: `rebuild_gold` writes the table
+    whole every time, so the only question the watermark has to answer is
+    whether it has ever run — `_watermark_findings` reports that as
+    `mirror_never_shipped` and suppresses everything below it.
+
+    Reports only. A finding here cannot start a rebuild, on this module's
+    standing grounds: a comparison that repairs what it finds destroys the
+    evidence that it found anything.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    # The DuckDB read and the Postgres round-trips stay in separate blocks: the
+    # store's lock is not held across the network.
+    async with store.connection() as conn:
+        dk_rows, dk_fresh = fetch_duckdb_gold(conn)
+
+    issues, last_ok_at = _watermark_findings(
+        GOLD_PG_TABLE, watermarks.get(GOLD_PG_TABLE), len(dk_rows),
+    )
+    if last_ok_at is None:
+        return issues
+
+    pg_rollup, pg_fine = await fetch_pg_gold(pool)
+    return issues + compare_gold(
+        dk_rows, dk_fresh, pg_rollup, pg_fine,
+        now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+    )

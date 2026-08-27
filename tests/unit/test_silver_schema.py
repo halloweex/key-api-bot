@@ -100,13 +100,33 @@ class TestTheIndexesTheNextStepsNeed:
         assert "ON silver.orders (buyer_id)" in MIGRATION
 
 
+
+def _ancestry(revision):
+    """A revision and everything it is built on, by walking `down_revision`."""
+    chain = {}
+    for path in (REPO / "migrations" / "versions").glob("[0-9]*.py"):
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        chain[module.revision] = module.down_revision
+
+    seen = []
+    while revision is not None:
+        seen.append(revision)
+        revision = chain.get(revision)
+    return seen
+
+
 class TestTheChainIsIntact:
     def test_it_follows_the_classification(self):
         assert _rev.down_revision == "0005_manager_classification"
         assert _rev.revision == "0006_silver_orders"
 
-    def test_it_is_what_the_code_requires(self):
-        assert pg.REQUIRED_REVISION == "0006_silver_orders"
+    def test_the_code_requires_a_revision_that_includes_it(self):
+        """It was the head until 0007 added Gold. What has to stay true is that
+        the revision the application demands still carries this table — a chain
+        that forked would satisfy a name check and not this one."""
+        assert "0006_silver_orders" in _ancestry(pg.REQUIRED_REVISION)
 
     def test_it_can_be_undone(self):
         assert "DROP TABLE IF EXISTS silver.orders" in DOWN
