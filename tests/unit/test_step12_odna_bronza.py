@@ -164,70 +164,47 @@ class TestOneBodyTwoEngines:
         assert normal == rendered
 
 
-class TestTheSelfGatedBackfill:
-    """The backfill needs the store, the store admits one process — so it
-    rides the hourly job, gated on `backfilled_at`, and runs at most once."""
+class TestTheHourlyIdsDiff:
+    """The buyers backfill runs every hour, not once: the sync is a delta and
+    never re-fetches an existing buyer, so a row lost from Postgres after a
+    one-shot backfill would have had no repair path, ever — the audit's
+    finding. The diff ships nothing when nothing is missing."""
 
     @pytest.mark.asyncio
-    async def test_runs_when_the_watermark_row_is_absent(self, monkeypatch):
+    async def test_runs_the_diff_every_tick(self, monkeypatch):
         from core import pg_buyers
         import core.pg_landing as pg_landing
 
         monkeypatch.setattr(pg_landing, "enabled", lambda: True)
-
-        class _Pool:
-            def acquire(self):
-                class _Ctx:
-                    async def __aenter__(self):
-                        conn = AsyncMock()
-                        conn.fetchval = AsyncMock(return_value=None)
-                        return conn
-
-                    async def __aexit__(self, *a):
-                        return False
-
-                return _Ctx()
-
-        import core.pg as pg
-
-        monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=_Pool()))
-        ran = AsyncMock(return_value={"shipped": 5, "missing_was": 5})
+        ran = AsyncMock(return_value={"shipped": 0, "missing_was": 0})
         monkeypatch.setattr(pg_buyers, "backfill_buyers", ran)
 
         out = await pg_buyers.backfill_if_pending(store=object())
-        assert out == {"shipped": 5, "missing_was": 5}
+        assert out == {"shipped": 0, "missing_was": 0}
         ran.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_stays_quiet_once_backfilled(self, monkeypatch):
-        from datetime import datetime, timezone
-
+    async def test_stands_down_without_a_dsn(self, monkeypatch):
         from core import pg_buyers
         import core.pg_landing as pg_landing
 
-        monkeypatch.setattr(pg_landing, "enabled", lambda: True)
-
-        class _Pool:
-            def acquire(self):
-                class _Ctx:
-                    async def __aenter__(self):
-                        conn = AsyncMock()
-                        conn.fetchval = AsyncMock(
-                            return_value=datetime(2026, 8, 28, tzinfo=timezone.utc)
-                        )
-                        return conn
-
-                    async def __aexit__(self, *a):
-                        return False
-
-                return _Ctx()
-
-        import core.pg as pg
-
-        monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=_Pool()))
+        monkeypatch.setattr(pg_landing, "enabled", lambda: False)
         ran = AsyncMock()
         monkeypatch.setattr(pg_buyers, "backfill_buyers", ran)
 
         out = await pg_buyers.backfill_if_pending(store=object())
-        assert out == {"skipped": "already backfilled"}
+        assert "skipped" in out
         ran.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failure_is_returned_not_raised(self, monkeypatch):
+        from core import pg_buyers
+        import core.pg_landing as pg_landing
+
+        monkeypatch.setattr(pg_landing, "enabled", lambda: True)
+        monkeypatch.setattr(
+            pg_buyers, "backfill_buyers",
+            AsyncMock(side_effect=RuntimeError("pg down")),
+        )
+        out = await pg_buyers.backfill_if_pending(store=object())
+        assert "error" in out
