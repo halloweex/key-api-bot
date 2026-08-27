@@ -52,11 +52,14 @@ services:
       KS_APP_PASSWORD: ${KS_APP_PASSWORD:?set it in .env}
       KS_READONLY_PASSWORD: ${KS_READONLY_PASSWORD:?set it in .env}
     # Sized for a host with 7.7 GiB total that already peaks near 5 GiB during
-    # the nightly export.
+    # the nightly export. 128 → 256 MB on 28.08: the database crossed 140 MB
+    # (the order-versions baseline alone is 25 MB), so the working set no
+    # longer fit — and the standing rule is that this is the cheap answer to
+    # «объём», not a ClickHouse trigger.
     command:
       - postgres
       - -c
-      - shared_buffers=128MB
+      - shared_buffers=256MB
       - -c
       - work_mem=8MB
       - -c
