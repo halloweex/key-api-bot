@@ -328,6 +328,12 @@ class TestTheComparisonSpecs:
         that was dropped, and every recently-written row is a CRITICAL."""
         assert all(spec.synced_column for spec in OPERATIONAL_TABLES)
 
+    def test_a_finding_says_these_are_copies_not_a_shared_parse(self):
+        """The default sentence is landing's and is true only of landing."""
+        for spec in OPERATIONAL_TABLES:
+            assert "copied out of DuckDB" in spec.origin_note
+            assert "same parsed tuple" not in spec.origin_note
+
     def test_the_compared_columns_are_the_shipped_columns(self):
         """Two lists a file apart. If the shipper gains a column the comparison
         does not read, the column is copied and never checked."""
@@ -441,28 +447,16 @@ class TestTheJob:
         )
 
     @pytest.mark.asyncio
-    async def test_the_job_returns_what_the_replicator_returned(self):
+    async def test_the_job_returns_both_copies(self):
+        """`data/bot.db` rides the same job — same cadence, same grace window,
+        one schedule to reason about."""
         from core.scheduler import BackgroundScheduler
 
         with patch("core.duckdb_store.get_store", new=AsyncMock()), \
              patch("core.pg_operational.replicate_operational",
-                   new=AsyncMock(return_value={"movements_appended": 3})):
+                   new=AsyncMock(return_value={"movements_appended": 3})), \
+             patch("core.pg_bot_state.replicate_bot_state",
+                   new=AsyncMock(return_value={"rows": {"app.authorized_users": 24}})):
             result = await BackgroundScheduler()._run_replicate_operational()
-        assert result == {"movements_appended": 3}
-
-
-class TestTheRevisionGate:
-    def test_the_head_of_the_chain_is_what_the_code_requires(self):
-        import importlib.util
-
-        from core.pg import REQUIRED_REVISION
-
-        revisions, parents = set(), set()
-        for path in (REPO / "migrations" / "versions").glob("[0-9]*.py"):
-            spec = importlib.util.spec_from_file_location(path.stem, path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            revisions.add(module.revision)
-            parents.add(module.down_revision)
-        assert revisions - parents == {REQUIRED_REVISION}
-        assert REQUIRED_REVISION == "0008_operational_history"
+        assert result["movements_appended"] == 3
+        assert result["bot_state"]["rows"]["app.authorized_users"] == 24

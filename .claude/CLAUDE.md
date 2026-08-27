@@ -502,8 +502,8 @@ whole reason the group is read from the source now.
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **both stores**, one fetch |
-| `dq_mirror_landing` | 07:30 | Reconciliation A: landing, Silver, Gold, then the five `app.*` tables — Postgres against DuckDB, tolerance zero |
-| `replicate_operational` | every 1 h | Copy the five irreplaceable tables into Postgres |
+| `dq_mirror_landing` | 07:30 | Reconciliation A: landing, Silver, Gold, the five `app.*` tables, then `bot.db` — tolerance zero |
+| `replicate_operational` | every 1 h | Copy the five irreplaceable tables and `data/bot.db` into Postgres |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 
@@ -914,6 +914,68 @@ backup. First replication **9.3 s**, incremental **116 ms**, whole comparison
 value changes were each reported CRITICAL with the id; the incremental run
 repaired the full-replace table and left the two append-only ones broken, as
 documented; `full=True` cleared all of it.
+
+### The bot's own state, and the only store with no backup
+
+`data/bot.db` is the third store in this system. Measured 2026-08-27: it is in
+**no backup at all** — `data/backups/` holds `analytics-*.duckdb`,
+`deploy/daily_offsite.sh` globs the same pattern, and the Ark froze the
+warehouse. One file, one disk, no copy, holding 24 approved users, 25
+celebrated milestones and everyone's language choice. Nothing re-derives any of
+it: an approval is a human's decision, a celebrated milestone is a message
+already sent, a language is a preference nobody will re-enter.
+
+Revision 0009 lands four of its five tables in `app` — `authorized_users`,
+`user_preferences`, `celebrated_milestones`, `report_history` — which puts them
+inside step 01's WAL archiving and nightly dump. That is worth having on its
+own, before any question of switching the writer.
+
+**`app`, not a schema of its own**, because `postgres/initdb/30-app.sql` already
+decided it in writing, naming these exact rows. A `bot` schema would draw the
+boundary along the writing container rather than the meaning, and this
+repository's bot and web are one codebase, one image and one deploy — unlike
+the shop, whose `tgbot` schema separates a genuinely different application.
+
+**`cache` stays behind.** A ten-minute TTL cache holds no fact that can be
+lost, and copying it would report a discrepancy every time an entry expired
+between the copy and the comparison.
+
+**It runs in the web container and does not touch the bot.** `core/bot_prefs.py`
+already opens this file read-only from there for the weekly report; the copy
+does the same. So step 03's first half needs no environment variable on the
+bot, no asyncpg on its path and no new way for it to fail — pinned by a test
+that no module under `bot/` imports `core.pg`.
+
+**Two conversions, both traps, both pinned.** SQLite has no boolean and no
+timezone. `notifications_enabled` 1/0 becomes a real boolean — and NULL stays
+NULL, because `core/bot_prefs.py` reads NULL as *on* and turning it into False
+would mute everybody who has never opened settings. Timestamps are naive
+strings from `CURRENT_TIMESTAMP`, **which is UTC by definition**; read as
+anything else, all 24 approvals move by the container's offset, silently.
+`core.pg_bot_state._convert` is the one home for both, and the comparison
+imports it rather than converting a second time.
+
+Full replace, all four in one transaction — the weekly report joins approvals
+to mute settings to decide who is written to, so a half-applied pair computes
+the audience from one snapshot's approvals and another's settings. `deny_user`
+and `revoke_user` genuinely delete, so `full_replace=True` is right: a ghost in
+`authorized_users` reads as an approved person who is not.
+
+`reconcile_bot_state` reuses `compare_table` unchanged — it is pure and takes
+two already-read dictionaries, so it does not care that one came out of SQLite.
+Only the reader is new.
+
+Verified 2026-08-27 against the production `bot.db` on a throwaway PostgreSQL
+17.2: 51 rows copied in **35 ms**, comparison **6–9 ms**, zero findings. Then
+broken seven ways — a deleted user, an invented milestone, and four changed
+values including a timestamp shifted by three hours — each reported with the
+column and the id; a second copy cleared all of it.
+
+**A finding now says what its own table is.** `MirroredTable.origin_note`
+carries the sentence explaining why a disagreement matters, because the shared
+default was landing's story — "the same parsed tuple in the same call" — and
+that is false for every replicated table. It was found by reading a real
+finding, not by reading the code.
 
 ### What the warehouse validation can and cannot see
 `validation_passed` covers: Bronze→Silver row counts, Silver→Gold revenue

@@ -165,3 +165,41 @@ class TestTheRevisionCompiles:
         assert "CREATE SCHEMA" not in sql, (
             "the platform owns schemas, this owns tables — charter rule 11"
         )
+
+    def test_the_rendered_sql_never_ends_inside_a_string_literal(
+        self, monkeypatch, tmp_path,
+    ):
+        """The one syntax error this suite can see without a server.
+
+        Rendering offline proves Alembic runs; it does **not** prove the SQL
+        parses. Revision 0009 put "a human's decision" inside a single-quoted
+        `COMMENT ON` literal and failed on a real server *after four tables had
+        already been created* — every test that had looked at that file parsed
+        the DDL as text, and none of them executed it.
+
+        One stray apostrophe makes the number of quote delimiters odd, so the
+        file ends inside a literal. A parity check over the whole output is all
+        that is, and it costs one pass.
+
+        What it does not catch: two stray apostrophes, which cancel. The real
+        answer to that is a Postgres service in CI, which this repository does
+        not have — see the handoff.
+        """
+        pytest.importorskip("alembic", reason="dev dependency")
+        out = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head", "--sql"],
+            cwd=REPO, capture_output=True, text=True, timeout=120,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        )
+        assert out.returncode == 0, out.stderr[-2000:]
+
+        # `--` line comments first: Alembic writes its own, and a revision
+        # message may legitimately contain an apostrophe. Then `\'\'`, which is
+        # SQL's own escape and not a delimiter.
+        body = "\n".join(
+            line.split("--", 1)[0] for line in out.stdout.splitlines()
+        )
+        assert body.replace("''", "").count("'") % 2 == 0, (
+            "the rendered migration SQL ends inside a string literal — "
+            "an apostrophe somewhere is opening a quote it never closes"
+        )

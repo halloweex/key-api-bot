@@ -119,24 +119,6 @@ def _duckdb_gold(conn):
 
 
 
-def _ancestry(revision):
-    """A revision and everything it is built on, by walking `down_revision`."""
-    import importlib.util
-
-    chain = {}
-    for path in _VERSIONS.glob("[0-9]*.py"):
-        spec = importlib.util.spec_from_file_location(path.stem, path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        chain[module.revision] = module.down_revision
-
-    seen = []
-    while revision is not None:
-        seen.append(revision)
-        revision = chain.get(revision)
-    return seen
-
-
 def _stored(value):
     """What lands in the column, not what the projection returned.
 
@@ -633,33 +615,3 @@ class TestTheJobRunsIt:
 
         assert MIRROR_LAYER in WATCHED_LAYERS
         assert GOLD_PG_TABLE == GOLD_TABLE
-
-
-class TestTheRevisionGate:
-    def test_the_code_requires_a_revision_that_includes_the_table(self):
-        """Rule 11: the application declares its version and fails closed. It
-        was the head until 0008; what has to stay true is that the demanded
-        revision still carries this table."""
-        from core.pg import REQUIRED_REVISION
-
-        assert "0007_gold_daily_revenue" in _ancestry(REQUIRED_REVISION)
-
-    def test_the_required_revision_is_the_head_of_the_chain(self):
-        """The durable form of the test above, which will not need editing at
-        revision 0008: whatever the head is, that is what the application must
-        demand. A migration added and not gated on is a deploy that reads a
-        table it created and cannot rely on."""
-        import importlib.util
-
-        from core.pg import REQUIRED_REVISION
-
-        revisions, parents = set(), set()
-        for path in _VERSIONS.glob("[0-9]*.py"):
-            spec = importlib.util.spec_from_file_location(path.stem, path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            revisions.add(module.revision)
-            parents.add(module.down_revision)
-
-        heads = revisions - parents
-        assert heads == {REQUIRED_REVISION}

@@ -79,11 +79,18 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from core.data_quality import IntegrityIssue, Severity
 from core.landing_rows import CATEGORY_COLUMNS, PRODUCT_COLUMNS
+from core.pg_bot_state import (
+    AUTHORIZED_COLUMNS,
+    MILESTONE_COLUMNS,
+    PREFERENCE_COLUMNS,
+    REPORT_HISTORY_COLUMNS,
+)
 from core.pg_operational import (
     INVENTORY_HISTORY_COLUMNS,
     MISS_COLUMNS,
@@ -119,6 +126,19 @@ class MirroredTable:
     # Where the grace window reads "when did this store last write the row".
     # None means the table has no such column and nothing is ever in flight.
     synced_column: Optional[str] = "synced_at"
+    # Why a disagreement here is a defect, in this table's own terms. The
+    # default is the landing mirror's story and it is true only of landing:
+    # `bronze.products` really is one parsed tuple handed to two stores. The
+    # replicated tables are a *copy* — of DuckDB, or of SQLite through a type
+    # conversion — and telling their reader otherwise sends them looking for a
+    # write path that does not exist. Found by reading a real finding: a
+    # changed `language` in `app.user_preferences` was reported as impossible
+    # arithmetic between two parsers.
+    origin_note: str = (
+        "Both sides are written from the same parsed tuple in the same call, "
+        "so there is no arithmetic between them that could differ — a "
+        "disagreement here is a defect in the write path, not drift."
+    )
     # True when the writer replaces the whole table rather than upserting.
     #
     # This decides what a row present in DuckDB and absent from Postgres
@@ -138,6 +158,23 @@ class MirroredTable:
         which is what a human would go looking for anyway.
         """
         return self.columns.index(self.key_columns[0])
+
+
+# What a disagreement means for a table that is *copied* rather than mirrored.
+# Landing is one parsed tuple handed to two stores; these are not, and a
+# finding that says otherwise sends its reader hunting a shared write path that
+# does not exist.
+_COPIED_FROM_DUCKDB = (
+    "This table is copied out of DuckDB as it stands, not parsed twice, so a "
+    "disagreement is the copy: it did not run, it ran against a different "
+    "snapshot, or something other than the replicator wrote this table."
+)
+_COPIED_FROM_SQLITE = (
+    "This table is copied out of data/bot.db through a type conversion "
+    "(SQLite has no boolean and no timezone), so a disagreement is either the "
+    "copy not having run or the conversion — check the column named above "
+    "against core/pg_bot_state._convert before anything else."
+)
 
 
 # Order matters only for reporting. Products first: it is the table that moves.
@@ -160,12 +197,14 @@ MIRRORED_TABLES: Tuple[MirroredTable, ...] = (
     # missing row here unambiguous: there is no "KeyCRM retired it" to mean.
     MirroredTable(
         pg_table="bronze.managers",
+        origin_note=_COPIED_FROM_DUCKDB,
         dk_table="managers",
         columns=MANAGER_COLUMNS,
         full_replace=True,
     ),
     MirroredTable(
         pg_table="app.manager_classifications",
+        origin_note=_COPIED_FROM_DUCKDB,
         dk_table="manager_classifications",
         columns=CLASSIFICATION_COLUMNS,
         key_columns=("manager_id", "valid_from"),
@@ -508,10 +547,7 @@ def compare_table(
             sample_ids=_sample(spec, differing, max_samples),
             description=(
                 f"{len(differing)} row(s) are present in both stores and "
-                f"disagree. Columns: {worst}. Both sides are written from the "
-                "same parsed tuple in the same call, so there is no arithmetic "
-                "between them that could differ — a disagreement here is a "
-                "defect in the write path, not drift."
+                f"disagree. Columns: {worst}. {spec.origin_note}"
             ),
         ))
 
@@ -1635,6 +1671,7 @@ OPERATIONAL_GRACE_MINUTES = 90
 OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
     MirroredTable(
         pg_table="app.order_backfill_misses",
+        origin_note=_COPIED_FROM_DUCKDB,
         dk_table="order_backfill_misses",
         columns=MISS_COLUMNS,
         key_columns=("order_id",),
@@ -1648,6 +1685,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
     ),
     MirroredTable(
         pg_table="app.inventory_history",
+        origin_note=_COPIED_FROM_DUCKDB,
         dk_table="inventory_history",
         columns=INVENTORY_HISTORY_COLUMNS,
         key_columns=("date",),
@@ -1657,6 +1695,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
     ),
     MirroredTable(
         pg_table="app.sku_inventory_status",
+        origin_note=_COPIED_FROM_DUCKDB,
         dk_table="sku_inventory_status",
         columns=SKU_STATUS_COLUMNS,
         key_columns=("offer_id",),
@@ -1847,4 +1886,159 @@ async def reconcile_operational(
             )
         issues += _divergence_findings(spec, found, max_samples=max_samples)
 
+    return issues
+
+
+# ─── The bot's own state: the third store, and the one with no backup ────────
+#
+# Everything above compares DuckDB against Postgres. This compares **SQLite**
+# against Postgres, because `data/bot.db` is the third store in this system and
+# the only one that is in no backup at all — `data/backups/` and
+# `deploy/daily_offsite.sh` both glob `analytics-*.duckdb`, and the Ark froze
+# the warehouse. Revision 0009 has the measurement.
+#
+# `compare_table` is reused unchanged, which is the point: it is pure and takes
+# two already-read dictionaries, so it does not care that one of them came out
+# of a different engine. Only the reader is new.
+#
+# `full_replace=True` on all four. `deny_user` and `revoke_user` really do
+# delete rows, so "in SQLite and not in Postgres" has one meaning here and it
+# is not "retired" — a ghost in `authorized_users` reads as an approved person
+# who is not, which is the worst shape this particular table has.
+
+BOT_DB_GRACE_MINUTES = OPERATIONAL_GRACE_MINUTES
+
+# `dk_table` names the SQLite table. The field means "the other store's table"
+# and the other store is not always DuckDB from here on.
+BOT_STATE_TABLES: Tuple[MirroredTable, ...] = (
+    MirroredTable(
+        pg_table="app.authorized_users",
+        origin_note=_COPIED_FROM_SQLITE,
+        dk_table="authorized_users",
+        columns=AUTHORIZED_COLUMNS,
+        key_columns=("user_id",),
+        # A row always has `requested_at`; the other two are often NULL. Read
+        # in that order so a person approved four minutes ago is in flight
+        # rather than CRITICAL — the copy runs hourly.
+        synced_column="COALESCE(last_activity, reviewed_at, requested_at)",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.user_preferences",
+        origin_note=_COPIED_FROM_SQLITE,
+        dk_table="user_preferences",
+        columns=PREFERENCE_COLUMNS,
+        key_columns=("user_id",),
+        synced_column="updated_at",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.celebrated_milestones",
+        origin_note=_COPIED_FROM_SQLITE,
+        dk_table="celebrated_milestones",
+        columns=MILESTONE_COLUMNS,
+        key_columns=("id",),
+        synced_column="celebrated_at",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.report_history",
+        origin_note=_COPIED_FROM_SQLITE,
+        dk_table="report_history",
+        columns=REPORT_HISTORY_COLUMNS,
+        key_columns=("id",),
+        synced_column="created_at",
+        full_replace=True,
+    ),
+)
+
+
+def fetch_sqlite_rows(
+    conn, spec: MirroredTable,
+) -> Tuple[Dict[Any, Tuple[Any, ...]], Dict[Any, Optional[datetime]]]:
+    """One `bot.db` table, in the shape `compare_table` already understands.
+
+    The values go through `core.pg_bot_state._convert`, the same function the
+    copy uses. That is not tidiness: SQLite has no boolean and no timezone, so
+    an uncoverted `1` would never equal Postgres' `True` and a naive string
+    would never equal a `timestamptz`. Two conversions would have to agree, and
+    a rule with two homes is a rule that will differ.
+    """
+    from core.pg_bot_state import _convert
+
+    cols = ", ".join(spec.columns)
+    rows = conn.execute(
+        f"SELECT {cols}, {spec.synced_column} FROM {spec.dk_table}"
+    ).fetchall()
+
+    width = len(spec.columns)
+    values: Dict[Any, Tuple[Any, ...]] = {}
+    synced: Dict[Any, Optional[datetime]] = {}
+    for row in rows:
+        converted = _convert(spec.dk_table, spec.columns, row[:width])
+        if any(converted[spec.columns.index(c)] is None for c in spec.key_columns):
+            continue
+        key = _row_key(spec, converted)
+        values[key] = _normalise_row(converted, spec.columns, spec.numeric)
+        synced[key] = _as_utc_stamp(row[width])
+    return values, synced
+
+
+def _as_utc_stamp(value: Any) -> Optional[datetime]:
+    from core.pg_bot_state import as_utc
+
+    return as_utc(value)
+
+
+async def reconcile_bot_state(
+    db_path=None,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = BOT_DB_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Compare `data/bot.db` against `app.*`.
+
+    Skips silently when the file is absent, which is a developer's checkout and
+    not a defect. A missing `bot.db` on production would show up as the copy's
+    watermark going stale, which `_watermark_findings` reports without needing
+    the file to exist.
+
+    Reports only, like every other comparison in this module.
+    """
+    import sqlite3
+
+    from core import pg_landing
+    from core.bot_prefs import BOT_DB_PATH
+    from core.pg import get_pool, require_revision
+    from core.pg_bot_state import BUSY_TIMEOUT_SECONDS
+
+    if not pg_landing.enabled():
+        return []
+
+    path = Path(db_path) if db_path is not None else BOT_DB_PATH
+    if not path.exists():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    with sqlite3.connect(
+        f"file:{path}?mode=ro", uri=True, timeout=BUSY_TIMEOUT_SECONDS,
+    ) as conn:
+        sqlite_side = {
+            spec.pg_table: fetch_sqlite_rows(conn, spec)
+            for spec in BOT_STATE_TABLES
+        }
+
+    issues: List[IntegrityIssue] = []
+    for spec in BOT_STATE_TABLES:
+        rows, synced = sqlite_side[spec.pg_table]
+        pg_rows = await fetch_pg_rows(pool, spec)
+        issues += compare_table(
+            spec, rows, synced, pg_rows, watermarks.get(spec.pg_table),
+            now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+        )
     return issues

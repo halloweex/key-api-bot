@@ -635,8 +635,8 @@ class BackgroundScheduler:
         # raised with it.
         self._add_job(
             job_id="replicate_operational",
-            name="Replicate: operational history",
-            description="Copy the five irreplaceable tables into Postgres",
+            name="Replicate: operational history and bot state",
+            description="Copy the irreplaceable tables and data/bot.db into Postgres",
             func=self._run_replicate_operational,
             trigger=IntervalTrigger(hours=1),
             max_instances=1,
@@ -832,11 +832,17 @@ class BackgroundScheduler:
         failure history it shares with the sync.
         """
         from core.duckdb_store import get_store
+        from core.pg_bot_state import replicate_bot_state
         from core.pg_operational import replicate_operational
 
         with correlation_context():
             store = await get_store()
             result = await replicate_operational(store)
+            # `data/bot.db` rides the same job rather than getting one of its
+            # own: same cadence, same grace window, and one schedule to reason
+            # about. It reads the file the web container already opens
+            # read-only for the weekly report, so the bot is not touched.
+            result["bot_state"] = await replicate_bot_state()
             if "skipped" not in result:
                 logger.info("Operational replication: %s", result)
             return result
@@ -1229,6 +1235,7 @@ class BackgroundScheduler:
             configured,
             read_duckdb_side,
             reconcile_mirror,
+            reconcile_bot_state,
             reconcile_gold,
             reconcile_operational,
             reconcile_orders,
@@ -1274,6 +1281,10 @@ class BackgroundScheduler:
                 # read, and because a Silver or Gold finding above them is
                 # almost certainly the better explanation of both.
                 issues += await reconcile_operational(store)
+                # And the third store. `data/bot.db` is SQLite, not DuckDB, and
+                # it is the only one of the three that is in no backup — which
+                # is the whole reason its fifty rows are being copied at all.
+                issues += await reconcile_bot_state()
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("Mirror reconciliation raised")
