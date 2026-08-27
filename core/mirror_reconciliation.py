@@ -2051,3 +2051,174 @@ async def reconcile_bot_state(
             now=now, grace_minutes=grace_minutes, max_samples=max_samples,
         )
     return issues
+
+
+# ─── the order-version archive: not a comparison, a liveness check ───────────
+#
+# Every other check in this file asks whether two stores agree. This one cannot:
+# `app.order_versions` has no counterpart anywhere, which is the entire reason
+# it exists. KeyCRM serves current state and has no history, DuckDB never held
+# one, and a transition that was not written when it happened is not
+# recoverable from either.
+#
+# So the question changes. Not "do the copies match" but "is it still writing" —
+# and that question is genuinely hard to answer by looking at the table, because
+# a healthy archive is *supposed* to be quiet. At ~100 rows a day with long gaps
+# between them, a writer that died looks exactly like a morning when nothing
+# moved.
+#
+# What breaks the tie is that a brand-new order can never be silent: it has no
+# previous version, so the comparison in `core/pg_order_versions.py` always
+# writes one. Production creates ~48 orders a day, measured over 31 days. A
+# whole day with no version at all therefore is not a quiet day, it is a broken
+# writer.
+#
+# Three findings, and each fires only on a condition that is actually wrong. In
+# particular there is no daily INFO reciting the row count: a finding that
+# arrives every morning for a permanent reason teaches its reader to skip the
+# message it arrives in, which is how the August incident stayed invisible for a
+# month.
+
+ORDER_VERSIONS_TABLE = "app.order_versions"
+
+# A day with no new version at all. Not tunable per environment on purpose: the
+# argument for it is the ~48 orders a day, and an installation without those has
+# nothing for this check to say.
+ORDER_VERSIONS_STALL_HOURS = 24
+
+# Ten times the expected daily volume. Above this the content comparison has
+# almost certainly stopped discriminating — the 05:15 status refresh alone
+# offers ~1,400 ids every morning, and if those are landing wholesale then this
+# table is becoming `bronze_order_events`, which is the one failure mode the
+# design is built to avoid.
+ORDER_VERSIONS_FLOOD_PER_DAY = 1000
+
+
+async def reconcile_order_versions(
+    *,
+    now: Optional[datetime] = None,
+    stall_hours: int = ORDER_VERSIONS_STALL_HOURS,
+    flood_per_day: int = ORDER_VERSIONS_FLOOD_PER_DAY,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Is the archive still being written, does it cover the catalogue, and is
+    it writing too much?
+
+    Takes no store: there is nothing on the DuckDB side to take. Reports only,
+    like everything else here — and more absolutely than anything else here,
+    because a "repair" would mean inventing the history the table exists to be
+    the only record of.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+
+    issues: List[IntegrityIssue] = []
+
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(
+            f"SELECT count(*) FROM {ORDER_VERSIONS_TABLE}"
+        )
+        newest = await conn.fetchval(
+            f"SELECT max(captured_at) FROM {ORDER_VERSIONS_TABLE}"
+        )
+        recent = await conn.fetchval(
+            f"SELECT count(*) FROM {ORDER_VERSIONS_TABLE} "
+            f"WHERE captured_at >= $1",
+            now - timedelta(hours=24),
+        )
+        # Orders the archive does not cover at all. Should be impossible: the
+        # baseline in revision 0010 seeded every row `bronze.orders` held, and
+        # every row written since goes through `write_orders`, which captures
+        # in the same transaction. That is exactly why it is worth asking — an
+        # invariant with no known way to break is the one whose breach nobody
+        # would otherwise notice.
+        uncovered = await conn.fetch(
+            f"SELECT o.id FROM bronze.orders o "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {ORDER_VERSIONS_TABLE} v "
+            f"                  WHERE v.order_id = o.id) "
+            f"ORDER BY o.id LIMIT $1",
+            max_samples + 1,
+        )
+        uncovered_total = 0
+        if uncovered:
+            uncovered_total = await conn.fetchval(
+                f"SELECT count(*) FROM bronze.orders o "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {ORDER_VERSIONS_TABLE} v "
+                f"                  WHERE v.order_id = o.id)"
+            )
+
+    stale_after = now - timedelta(hours=stall_hours)
+    if total == 0:
+        issues.append(IntegrityIssue(
+            check_name="order_versions_empty",
+            table_name=ORDER_VERSIONS_TABLE,
+            severity=Severity.CRITICAL,
+            count=0,
+            description=(
+                "The order-version archive is empty. Revision 0010 seeds a "
+                "baseline row for every order in bronze.orders as part of the "
+                "migration itself, so an empty table means either the "
+                "migration did not run its seed or the table has been emptied "
+                "since. Nothing re-derives this: KeyCRM has no history."
+            ),
+        ))
+    elif newest is None or newest < stale_after:
+        age = "never" if newest is None else newest.isoformat()
+        issues.append(IntegrityIssue(
+            check_name="order_versions_stalled",
+            table_name=ORDER_VERSIONS_TABLE,
+            severity=Severity.CRITICAL,
+            count=0,
+            description=(
+                f"No order version has been written since {age}, more than "
+                f"{stall_hours}h ago. This is not a quiet day: production "
+                f"creates ~48 orders a day and a new order has no previous "
+                f"version to match, so it always writes one. Every transition "
+                f"since then is lost and cannot be recovered — KeyCRM serves "
+                f"current state only. Check the mirror: the capture runs "
+                f"inside write_orders, so a failing mirror stops the archive."
+            ),
+        ))
+
+    if recent is not None and recent > flood_per_day:
+        issues.append(IntegrityIssue(
+            check_name="order_versions_flooding",
+            table_name=ORDER_VERSIONS_TABLE,
+            severity=Severity.WARN,
+            count=recent,
+            description=(
+                f"{recent} versions written in the last 24h, against an "
+                f"expected ~100 and a threshold of {flood_per_day}. The "
+                f"content comparison has probably stopped discriminating: the "
+                f"05:15 status refresh offers ~1,400 ids every morning with "
+                f"force_update=True, and if those are landing wholesale then "
+                f"this table is recording observations rather than changes — "
+                f"which is what took bronze_order_events to 43 GB."
+            ),
+        ))
+
+    if uncovered_total:
+        issues.append(IntegrityIssue(
+            check_name="order_versions_missing",
+            table_name=ORDER_VERSIONS_TABLE,
+            severity=Severity.CRITICAL,
+            count=uncovered_total,
+            sample_ids=tuple(int(r[0]) for r in uncovered[:max_samples]),
+            description=(
+                f"{uncovered_total} order(s) in bronze.orders have no version "
+                f"at all. Every order written since revision 0010 is captured "
+                f"in the same transaction as its header, and the migration "
+                f"seeded a baseline for everything that predated it, so this "
+                f"should not be reachable. Something is writing bronze.orders "
+                f"without going through write_orders."
+            ),
+        ))
+
+    return issues

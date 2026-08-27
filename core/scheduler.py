@@ -1238,6 +1238,7 @@ class BackgroundScheduler:
             reconcile_bot_state,
             reconcile_gold,
             reconcile_operational,
+            reconcile_order_versions,
             reconcile_orders,
             reconcile_silver,
         )
@@ -1285,6 +1286,12 @@ class BackgroundScheduler:
                 # it is the only one of the three that is in no backup — which
                 # is the whole reason its fifty rows are being copied at all.
                 issues += await reconcile_bot_state()
+                # And the archive, which is none of the above: it has no
+                # counterpart to be compared against, so this asks whether it
+                # is still being written rather than whether it agrees with
+                # anything. Same layer as the rest for the same reason — one
+                # call, one age, and a fourth layer would invent one.
+                issues += await reconcile_order_versions()
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("Mirror reconciliation raised")
