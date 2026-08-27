@@ -29,6 +29,7 @@ def _healthy_payload():
         "data_quality": {
             "integrity": {"last_success_at": "2026-08-08T19:00:00+03:00", "age_seconds": 1800},
             "reconciliation": {"last_success_at": "2026-08-08T05:00:00+03:00", "age_seconds": 52200},
+            "mirror_landing": {"last_success_at": "2026-08-08T07:30:00+03:00", "age_seconds": 43200},
         },
     }
 
@@ -124,10 +125,11 @@ def _dq_payload(**layers):
     return {"data_quality": layers}
 
 
-def test_dq_freshness_passes_when_both_layers_recent():
+def test_dq_freshness_passes_when_all_layers_recent():
     failures, ages = canary.check_dq_freshness(_healthy_payload())
     assert failures == []
-    assert ages == {"integrity": 1800, "reconciliation": 52200}
+    assert ages == {"integrity": 1800, "reconciliation": 52200,
+                    "mirror_landing": 43200}
 
 
 def test_dq_freshness_flags_stale_reconciliation():
@@ -155,7 +157,9 @@ def test_dq_freshness_null_payload_is_a_failure():
 def test_dq_freshness_missing_layer_is_a_failure():
     payload = _dq_payload(integrity={"age_seconds": 60})
     failures, ages = canary.check_dq_freshness(payload)
-    assert [k for k, _ in failures] == ["dq_missing:reconciliation"]
+    assert sorted(k for k, _ in failures) == [
+        "dq_missing:mirror_landing", "dq_missing:reconciliation",
+    ]
     assert ages["reconciliation"] is None
 
 
@@ -164,10 +168,12 @@ def test_dq_freshness_never_succeeded_is_a_failure():
     payload = _dq_payload(
         integrity={"last_success_at": None, "age_seconds": None},
         reconciliation={"last_success_at": None, "age_seconds": None},
+        mirror_landing={"last_success_at": None, "age_seconds": None},
     )
     failures, _ = canary.check_dq_freshness(payload)
     assert sorted(k for k, _ in failures) == [
-        "dq_never:integrity", "dq_never:reconciliation",
+        "dq_never:integrity", "dq_never:mirror_landing",
+        "dq_never:reconciliation",
     ]
 
 

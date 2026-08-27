@@ -47,6 +47,14 @@ ALERT_COOLDOWN_S = 3600  # 1 hour
 DQ_MAX_AGE_S = {
     "reconciliation": 30 * 3600,  # 24h cycle + 6h grace
     "integrity": 12 * 3600,       # 6h cycle + 6h grace
+    # Daily at 07:30 Kyiv, same shape as reconciliation. Added 28.08 after the
+    # layer grew the step-2/5/6 comparisons (buyers, витрина, two engines'
+    # Gold, the archive) — a сверка that quietly stops running would now hide
+    # six copies at once. The old worry — the first probe firing 90 s after a
+    # restart, before the catch-up run finishes — only bites when the layer is
+    # ALREADY past 30h at restart, i.e. after a genuine day-long outage, and
+    # one page on the way out of that is the canary doing its job.
+    "mirror_landing": 30 * 3600,  # 24h cycle + 6h grace
 }
 
 
