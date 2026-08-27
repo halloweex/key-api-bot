@@ -162,46 +162,16 @@ SILVER_ORDERS_DDL = """CREATE TABLE IF NOT EXISTS silver_orders (
 # sides, 986 dates on both sides, zero disagreeing. The ₴11.2M it holds *above*
 # Gold is returns (₴5.67M) and inactive sources (₴6.26M), which Gold excludes
 # on purpose and this level leaves to the caller.
-SILVER_ORDER_LINES_VIEW_SQL = """CREATE OR REPLACE VIEW silver_order_lines AS
-        SELECT
-            op.id                                        AS line_id,
-            op.order_id,
-            op.product_id,
-            op.name                                      AS product_name,  -- as sold
-            op.quantity,
-            op.price_sold,
-            CAST(op.quantity * op.price_sold AS DECIMAL(14, 2)) AS line_amount,
-            -- the order, denormalised: every predicate a page applies to
-            -- revenue applies here too, and re-deriving them was the bug
-            s.order_date,
-            s.ordered_at,
-            s.sales_type,
-            s.source_id,
-            s.source_name,
-            s.is_return,
-            s.is_active_source,
-            s.buyer_id,
-            s.manager_id,
-            s.is_new_customer,
-            s.buyer_first_order_date,
-            s.promocode,
-            s.grand_total                                AS order_grand_total,
-            -- the catalog, denormalised. 8.2 % of lines carry no product_id and
-            -- 31 % no category; both stay NULL rather than being dropped, which
-            -- is the difference between a level and a filter.
-            p.name                                       AS catalog_product_name,
-            p.brand,
-            p.sku,
-            p.category_id,
-            c.name                                       AS category_name,
-            c.parent_id                                  AS parent_category_id,
-            parent_c.name                                AS parent_category_name
-        FROM order_products op
-        JOIN silver_orders s ON s.id = op.order_id
-        LEFT JOIN products p ON p.id = op.product_id
-        LEFT JOIN categories c ON c.id = p.category_id
-        LEFT JOIN categories parent_c ON parent_c.id = c.parent_id
-"""
+# One body, two engines — the same contract the Silver projection has. The
+# Postgres rendering is `silver.order_lines` (migration 0011); a test renders
+# both from `core.sql_dialect.order_lines_select` and asserts they agree.
+from core.sql_dialect import DUCKDB as _DUCKDB_DIALECT
+from core.sql_dialect import order_lines_select as _order_lines_select
+
+SILVER_ORDER_LINES_VIEW_SQL = (
+    "CREATE OR REPLACE VIEW silver_order_lines AS\n"
+    + _order_lines_select(_DUCKDB_DIALECT)
+)
 
 
 # ─── The one definition of a Silver row ──────────────────────────────────────

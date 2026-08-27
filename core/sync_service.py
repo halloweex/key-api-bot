@@ -351,6 +351,12 @@ class SyncService:
 
             if buyers:
                 count = await self.store.upsert_buyers(buyers)
+                # Step 2 of «Одна бронза»: the same parsed batch, two stores —
+                # `mirror_products`' shape. Never raises; failures land in
+                # meta.mirror_state where the daily comparison reads them.
+                from core.pg_buyers import mirror_buyers
+
+                await mirror_buyers(buyers)
                 await self.store.set_last_sync_time("buyers")
                 logger.info(f"Synced {count} buyers from KeyCRM")
                 return count

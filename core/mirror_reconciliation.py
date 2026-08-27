@@ -2245,3 +2245,131 @@ async def reconcile_order_versions(
         ))
 
     return issues
+
+
+# ─── The buyer landing: delta-fed like orders, small enough to read whole ────
+#
+# `bronze.buyers` is one parsed Buyer batch handed to two stores in the same
+# call (`core/pg_buyers.py`) — landing in the exact sense of the catalogue.
+# But it is *fed* like orders: the sync only ever fetches buyers missing from
+# the table, so there is no catalogue re-ship to license the retired category.
+# DuckDB never deletes a buyer, and after `backfill_buyers` has carried
+# history across, a row missing from Postgres has exactly one meaning: lost.
+# That is `full_replace=True` used for its semantics, stated out loud.
+
+_BUYERS_ORIGIN = (
+    "Both sides are written from the same parsed Buyer batch in the same "
+    "call, and DuckDB never deletes a buyer — after the backfill, a row "
+    "missing here was lost by the mirror, not retired by KeyCRM."
+)
+
+def _buyers_spec():
+    from core.pg_buyers import BUYER_COLUMNS
+
+    return MirroredTable(
+        pg_table="bronze.buyers",
+        dk_table="buyers",
+        columns=BUYER_COLUMNS,
+        numeric=("loyalty_discount", "loyalty_amount"),
+        key_columns=("id",),
+        synced_column="synced_at",
+        origin_note=_BUYERS_ORIGIN,
+        full_replace=True,
+    )
+
+
+def _contacts_spec():
+    from core.pg_buyers import CONTACT_COLUMNS
+
+    return MirroredTable(
+        pg_table="bronze.buyer_contacts",
+        dk_table="buyer_contacts",
+        columns=CONTACT_COLUMNS,
+        key_columns=("buyer_id", "contact_type", "value"),
+        # No timestamp of its own; the reader below joins the owning buyer's
+        # `synced_at`, because contacts ship in the same transaction as their
+        # buyer and are in flight exactly when the buyer is.
+        synced_column=None,
+        origin_note=_BUYERS_ORIGIN,
+        full_replace=True,
+    )
+
+
+async def reconcile_buyers(
+    store,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = MIRROR_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Compare the buyer landing, row by row, tolerance zero.
+
+    Gated on `backfilled_at` like orders and for the same reason: the mirror
+    ships deltas, so until history has crossed, every buyer older than the
+    mirror looks exactly like a lost one. One `mirror_backfill_pending`
+    instead of twenty thousand CRITICALs.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+    from core.pg_buyers import BUYERS_STATE, CONTACT_COLUMNS
+
+    if not pg_landing.enabled():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    buyers_spec = _buyers_spec()
+    contacts_spec = _contacts_spec()
+
+    wm = watermarks.get(BUYERS_STATE)
+    if wm and wm.get("last_ok_at") and not wm.get("backfilled_at"):
+        return [IntegrityIssue(
+            check_name="mirror_backfill_pending",
+            table_name=BUYERS_STATE,
+            severity=Severity.INFO,
+            count=1,
+            description=(
+                "bronze.buyers is receiving deltas but history has not been "
+                "backfilled; row-level comparison is suppressed until "
+                "backfill_buyers stamps backfilled_at, or every historical "
+                "buyer would read as lost."
+            ),
+        )]
+
+    async with store.connection() as conn:
+        dk_buyers, dk_buyers_synced = fetch_duckdb_rows(conn, buyers_spec)
+        # Contacts, with the owning buyer's clock attached.
+        contact_rows = conn.execute(
+            """
+            SELECT c.buyer_id, c.contact_type, c.value, c.is_primary, b.synced_at
+            FROM buyer_contacts c
+            JOIN buyers b ON b.id = c.buyer_id
+            """
+        ).fetchall()
+
+    dk_contacts: Dict[Any, Tuple[Any, ...]] = {}
+    dk_contacts_synced: Dict[Any, Optional[datetime]] = {}
+    for row in contact_rows:
+        key = (row[0], row[1], row[2])
+        dk_contacts[key] = _normalise_row(
+            tuple(row[:4]), contacts_spec.columns, contacts_spec.numeric
+        )
+        dk_contacts_synced[key] = row[4]
+
+    issues: List[IntegrityIssue] = []
+    pg_buyers = await fetch_pg_rows(pool, buyers_spec)
+    issues += compare_table(
+        buyers_spec, dk_buyers, dk_buyers_synced, pg_buyers,
+        watermarks.get(buyers_spec.pg_table),
+        now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+    )
+    pg_contacts = await fetch_pg_rows(pool, contacts_spec)
+    issues += compare_table(
+        contacts_spec, dk_contacts, dk_contacts_synced, pg_contacts,
+        watermarks.get(contacts_spec.pg_table),
+        now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+    )
+    return issues
