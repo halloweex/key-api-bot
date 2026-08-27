@@ -1,527 +1,187 @@
-"""
-SQLite database module for persistent storage.
+"""The bot's state, as forty-six call sites already know how to ask for it.
 
-Handles:
-- User preferences (default filters, settings)
-- Report history (last reports per user)
-- Cache (API responses with TTL)
+This was 717 lines of `sqlite3`. The SQL now lives in `bot/store_sqlite.py`
+behind the port in `core/bot_store.py`, and what is left here is the shape the
+callers use: module-level functions, synchronous, same names, same signatures.
+
+WHY A FACADE RATHER THAN MOVING THE CALLERS
+
+Because the goal is a seam, and the seam is already here once these functions
+delegate. Rewriting 46 call sites to say `get_bot_store().access.approve(...)`
+would change every one of them to buy nothing the engine switch needs — and
+`bot/handlers_legacy.py` holds 38 of them, in code with no tests of its own.
+
+The layering cost is real and worth naming: callers see this module, not the
+port, so nothing stops a future one from importing `bot.store_sqlite` directly
+and going round the seam. There is no import linter here to forbid it. The
+test that watches for it is `tests/unit/test_bot_store.py`.
+
+WHAT IS HERE AND NOT IN THE PORT
+
+Two things, both because they are rules rather than storage:
+
+* `get_user_language` reads a preference and then applies a decision about this
+  company — Ukrainian for everyone, English for admins, a stored choice wins
+  for good. An adapter should not have to know who the admins are.
+* `generate_cache_key` touches nothing at all.
+
+And one thing that is here because it is a surprise: `revoke_user` is
+`deny_user`. Revoking somebody's access increments their denial count, and five
+revocations freeze them out for thirty days. It is deliberately not a port
+method — see `core/bot_store.py` — so that changing that decision adds a method
+rather than quietly redefining one.
 """
-import sqlite3
-import json
+from __future__ import annotations
+
 import logging
-from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List, Generator
-from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from core.bot_store import get_bot_store
 
 logger = logging.getLogger(__name__)
 
-# Database file path
-DB_PATH = Path(__file__).parent.parent / "data" / "bot.db"
+# Re-exported: `bot/handlers_legacy.py` reads three of these to build its admin
+# screens, and `MAX_DENIAL_COUNT` reaches the message a denied person is shown.
+from bot.store_sqlite import (  # noqa: E402  (after the port import, on purpose)
+    FREEZE_DURATION_DAYS,
+    MAX_DENIAL_COUNT,
+    STATUS_APPROVED,
+    STATUS_DENIED,
+    STATUS_FROZEN,
+    STATUS_PENDING,
+)
+
+__all__ = [
+    "STATUS_PENDING", "STATUS_APPROVED", "STATUS_DENIED", "STATUS_FROZEN",
+    "MAX_DENIAL_COUNT", "FREEZE_DURATION_DAYS",
+    "init_database", "get_database_stats",
+    "get_user_auth_status", "is_user_authorized", "has_pending_request",
+    "is_user_frozen", "unfreeze_user", "request_access", "approve_user",
+    "deny_user", "revoke_user", "reset_user_to_pending", "update_last_activity",
+    "revoke_inactive_users", "get_pending_requests", "get_all_authorized_users",
+    "get_frozen_users",
+    "get_user_preferences", "get_user_language", "save_user_preferences",
+    "update_user_preference",
+    "cache_get", "cache_set", "cache_delete", "cache_cleanup",
+    "generate_cache_key",
+    "is_milestone_celebrated", "mark_milestone_celebrated",
+    "get_celebrated_milestones",
+]
 
 
-def get_connection() -> sqlite3.Connection:
-    """Get database connection with row factory."""
-    # Ensure data directory exists
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-@contextmanager
-def db_connection() -> Generator[sqlite3.Connection, None, None]:
-    """Context manager for database connections with automatic cleanup."""
-    conn = get_connection()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def init_database():
+def init_database() -> None:
     """Initialize database tables."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
+    get_bot_store().initialise()
 
-        # User preferences table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS user_preferences (
-                user_id INTEGER PRIMARY KEY,
-                default_source TEXT DEFAULT NULL,
-                default_report_type TEXT DEFAULT 'summary',
-                timezone TEXT DEFAULT 'Europe/Kyiv',
-                default_date_range TEXT DEFAULT 'week',
-                notifications_enabled INTEGER DEFAULT 1,
-                language TEXT DEFAULT 'en',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
 
-        # Add new columns if they don't exist (migration for existing DBs)
-        try:
-            cursor.execute("ALTER TABLE user_preferences ADD COLUMN default_date_range TEXT DEFAULT 'week'")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-
-        try:
-            cursor.execute("ALTER TABLE user_preferences ADD COLUMN notifications_enabled INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-
-        # The interface language, and the language the weekly report arrives in.
-        # Read from the *web* container too — see core/bot_prefs.py — because
-        # the report is built where DuckDB lives and this file is the only
-        # place a user's choice is recorded.
-        try:
-            cursor.execute("ALTER TABLE user_preferences ADD COLUMN language TEXT DEFAULT 'en'")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-
-        # Report history table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS report_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                report_type TEXT NOT NULL,
-                start_date TEXT NOT NULL,
-                end_date TEXT NOT NULL,
-                source TEXT DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES user_preferences(user_id)
-            )
-        """)
-
-        # Create index for faster lookups
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_report_history_user
-            ON report_history(user_id, created_at DESC)
-        """)
-
-        # Cache table with TTL
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS cache (
-                cache_key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                expires_at TIMESTAMP NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        # Authorized users table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS authorized_users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_name TEXT,
-                status TEXT DEFAULT 'pending',
-                requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                reviewed_at TIMESTAMP,
-                reviewed_by INTEGER,
-                last_activity TIMESTAMP
-            )
-        """)
-
-        # Add last_activity column if it doesn't exist (migration for existing DBs)
-        try:
-            cursor.execute("ALTER TABLE authorized_users ADD COLUMN last_activity TIMESTAMP")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-
-        # Add denial_count column if it doesn't exist (migration for existing DBs)
-        try:
-            cursor.execute("ALTER TABLE authorized_users ADD COLUMN denial_count INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-
-        # Create index for status lookups
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_authorized_users_status
-            ON authorized_users(status)
-        """)
-
-        # Celebrated milestones table (to avoid duplicate notifications)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS celebrated_milestones (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                period_type TEXT NOT NULL,
-                period_key TEXT NOT NULL,
-                milestone_amount INTEGER NOT NULL,
-                revenue REAL NOT NULL,
-                celebrated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(period_type, period_key, milestone_amount)
-            )
-        """)
-
-    logger.info(f"Database initialized at {DB_PATH}")
+def get_database_stats() -> Dict[str, int]:
+    """Get database statistics."""
+    return get_bot_store().stats()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # USER AUTHORIZATION
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Status constants
-STATUS_PENDING = 'pending'
-STATUS_APPROVED = 'approved'
-STATUS_DENIED = 'denied'
-STATUS_FROZEN = 'frozen'
-
-# Max denial count before freezing
-MAX_DENIAL_COUNT = 5
-
-# Freeze duration in days
-FREEZE_DURATION_DAYS = 30
-
-
-
-# ─── The clock these tables are written by ───────────────────────────────────
-#
-# SQLite's `CURRENT_TIMESTAMP` is **UTC** and writes `'YYYY-MM-DD HH:MM:SS'`.
-# Two comparisons here read those values back, and both had a bug:
-#
-#   `datetime.now()` is the container's local time, and the container runs
-#   TZ=Europe/Kyiv. Every stored moment was therefore compared against a clock
-#   three hours ahead of it.
-#
-#   `datetime.isoformat()` separates the date and the time with `'T'`, and the
-#   stored values use a space. The comparison in `revoke_inactive_users` is a
-#   **string** comparison, and `' '` (0x20) sorts before `'T'` (0x54) — so
-#   every row whose `last_activity` fell on the cutoff *date* read as older
-#   than the cutoff, whatever the time of day. Somebody active that morning was
-#   swept.
-#
-# Together the daily sweep was up to twenty-seven hours too eager, on a job
-# that takes people's access away. Both are closed by writing the comparison in
-# the same clock and the same format the column is stored in.
-
-def _utc_now() -> datetime:
-    """Naive UTC — the shape SQLite stores, so the two are comparable."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def _sqlite_stamp(moment: datetime) -> str:
-    """A moment in the exact text `CURRENT_TIMESTAMP` produces."""
-    return moment.strftime("%Y-%m-%d %H:%M:%S")
-
 
 def get_user_auth_status(user_id: int) -> Optional[Dict[str, Any]]:
     """Get user authorization status."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM authorized_users WHERE user_id = ?",
-            (user_id,)
-        )
-        row = cursor.fetchone()
-        if row:
-            return dict(row)
-        return None
+    return get_bot_store().access.status(user_id)
 
 
 def is_user_authorized(user_id: int) -> bool:
     """Check if user is authorized (approved status)."""
-    status = get_user_auth_status(user_id)
-    if not status:
-        return False
-    return status['status'] == STATUS_APPROVED
+    return get_bot_store().access.is_approved(user_id)
 
 
 def has_pending_request(user_id: int) -> bool:
     """Check if user has a pending access request."""
-    status = get_user_auth_status(user_id)
-    if not status:
-        return False
-    return status['status'] == STATUS_PENDING
+    status = get_bot_store().access.status(user_id)
+    return bool(status) and status["status"] == STATUS_PENDING
 
 
 def is_user_frozen(user_id: int) -> bool:
-    """
-    Check if user is frozen (too many denials).
-    Auto-unfreezes after FREEZE_DURATION_DAYS.
-    """
-    status = get_user_auth_status(user_id)
-    if not status:
-        return False
-
-    if status['status'] != STATUS_FROZEN:
-        return False
-
-    # Check if freeze period has expired
-    reviewed_at = status.get('reviewed_at')
-    if reviewed_at:
-        try:
-            frozen_date = datetime.fromisoformat(reviewed_at)
-            if _utc_now() - frozen_date > timedelta(days=FREEZE_DURATION_DAYS):
-                # Auto-unfreeze: reset to denied so user can request again
-                _auto_unfreeze_user(user_id)
-                logger.info(f"User {user_id} auto-unfrozen after {FREEZE_DURATION_DAYS} days")
-                return False
-        except (ValueError, TypeError):
-            pass
-
-    return True
-
-
-def _auto_unfreeze_user(user_id: int) -> None:
-    """Internal: Reset frozen user to denied status."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE authorized_users
-            SET status = ?, denial_count = 0
-            WHERE user_id = ? AND status = ?
-        """, (STATUS_DENIED, user_id, STATUS_FROZEN))
+    """Check if user is frozen. Auto-unfreezes after FREEZE_DURATION_DAYS."""
+    return get_bot_store().access.is_frozen(user_id)
 
 
 def unfreeze_user(user_id: int, admin_id: int) -> bool:
-    """Admin unfreezes a user. Resets denial count. Returns True if successful."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE authorized_users
-            SET status = ?, denial_count = 0, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
-            WHERE user_id = ? AND status = ?
-        """, (STATUS_DENIED, admin_id, user_id, STATUS_FROZEN))
-        success = cursor.rowcount > 0
-
-    if success:
-        logger.info(f"User {user_id} unfrozen by admin {admin_id}")
-    return success
+    """Admin unfreezes a user. Resets denial count. True if successful."""
+    return get_bot_store().access.unfreeze(user_id, admin_id)
 
 
 def request_access(
     user_id: int,
     username: str = None,
     first_name: str = None,
-    last_name: str = None
+    last_name: str = None,
 ) -> bool:
-    """
-    Request access to the bot.
-    Returns True if new request created, False if already exists.
-    """
-    with db_connection() as conn:
-        cursor = conn.cursor()
-
-        # Check if already exists
-        cursor.execute(
-            "SELECT status FROM authorized_users WHERE user_id = ?",
-            (user_id,)
-        )
-        existing = cursor.fetchone()
-
-        if existing:
-            return False  # Already has a record
-
-        # Create new request
-        cursor.execute("""
-            INSERT INTO authorized_users (user_id, username, first_name, last_name, status)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, username, first_name, last_name, STATUS_PENDING))
-
-    logger.info(f"Access request created for user {user_id} (@{username})")
-    return True
+    """Request access. True if a new request was created, False if one exists."""
+    return get_bot_store().access.request(
+        user_id, username, first_name, last_name,
+    )
 
 
 def approve_user(user_id: int, admin_id: int) -> bool:
-    """Approve user access. Resets denial count. Returns True if successful."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE authorized_users
-            SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?, denial_count = 0
-            WHERE user_id = ?
-        """, (STATUS_APPROVED, admin_id, user_id))
-        success = cursor.rowcount > 0
-
-    if success:
-        logger.info(f"User {user_id} approved by admin {admin_id}")
-    return success
+    """Approve user access. Resets denial count. True if successful."""
+    return get_bot_store().access.approve(user_id, admin_id)
 
 
 def deny_user(user_id: int, admin_id: int) -> tuple[bool, bool]:
-    """
-    Deny user access. Increments denial count.
-    Returns (success, is_frozen) tuple.
-    """
-    with db_connection() as conn:
-        cursor = conn.cursor()
-
-        # Get current denial count
-        cursor.execute("SELECT denial_count FROM authorized_users WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        current_count = (row[0] or 0) if row else 0
-        new_count = current_count + 1
-
-        # Determine new status
-        if new_count >= MAX_DENIAL_COUNT:
-            new_status = STATUS_FROZEN
-            is_frozen = True
-        else:
-            new_status = STATUS_DENIED
-            is_frozen = False
-
-        cursor.execute("""
-            UPDATE authorized_users
-            SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?, denial_count = ?
-            WHERE user_id = ?
-        """, (new_status, admin_id, new_count, user_id))
-
-        success = cursor.rowcount > 0
-
-    if success:
-        if is_frozen:
-            logger.info(f"User {user_id} FROZEN by admin {admin_id} (denied {new_count} times)")
-        else:
-            logger.info(f"User {user_id} denied by admin {admin_id} (count: {new_count}/{MAX_DENIAL_COUNT})")
-    return success, is_frozen
-
-
-def get_pending_requests() -> List[Dict[str, Any]]:
-    """Get all pending access requests."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM authorized_users
-            WHERE status = ?
-            ORDER BY requested_at ASC
-        """, (STATUS_PENDING,))
-        rows = cursor.fetchall()
-        return [dict(row) for row in rows]
-
-
-def get_all_authorized_users() -> List[Dict[str, Any]]:
-    """Get all approved users."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM authorized_users
-            WHERE status = ?
-            ORDER BY reviewed_at DESC
-        """, (STATUS_APPROVED,))
-        rows = cursor.fetchall()
-        return [dict(row) for row in rows]
-
-
-def get_frozen_users() -> List[Dict[str, Any]]:
-    """Get all frozen users."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM authorized_users
-            WHERE status = ?
-            ORDER BY reviewed_at DESC
-        """, (STATUS_FROZEN,))
-        rows = cursor.fetchall()
-        return [dict(row) for row in rows]
+    """Deny user access. Increments denial count. Returns (success, is_frozen)."""
+    return get_bot_store().access.deny(user_id, admin_id)
 
 
 def revoke_user(user_id: int, admin_id: int) -> bool:
-    """Revoke user access (set to denied). Returns True if successful."""
-    success, _ = deny_user(user_id, admin_id)
+    """Revoke user access.
+
+    A denial, and therefore counted as one: five revocations freeze somebody
+    out for thirty days. Pinned by `tests/unit/test_bot_database.py`, which
+    calls it surprising rather than correct — if that is ever changed, it
+    becomes its own port method rather than a different meaning for `deny`.
+    """
+    success, _ = get_bot_store().access.deny(user_id, admin_id)
     return success
 
 
 def reset_user_to_pending(user_id: int) -> tuple[bool, bool]:
-    """
-    Reset user status to pending (for re-requesting access).
-    Returns (success, was_frozen) tuple.
-    Frozen users cannot reset.
-    """
-    # Check if frozen first
-    if is_user_frozen(user_id):
-        logger.warning(f"Frozen user {user_id} attempted to re-request access")
-        return False, True
-
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE authorized_users
-            SET status = ?, requested_at = CURRENT_TIMESTAMP, reviewed_at = NULL, reviewed_by = NULL
-            WHERE user_id = ? AND status != ?
-        """, (STATUS_PENDING, user_id, STATUS_FROZEN))
-        success = cursor.rowcount > 0
-
-    if success:
-        logger.info(f"User {user_id} reset to pending status")
-    return success, False
+    """Reset to pending for a re-request. Returns (success, was_frozen)."""
+    return get_bot_store().access.reset_to_pending(user_id)
 
 
 def update_last_activity(user_id: int) -> None:
     """Update user's last activity timestamp."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE authorized_users
-            SET last_activity = CURRENT_TIMESTAMP
-            WHERE user_id = ? AND status = ?
-        """, (user_id, STATUS_APPROVED))
+    get_bot_store().access.touch(user_id)
 
 
 def revoke_inactive_users(days: int = 45) -> int:
-    """
-    Revoke access for users inactive for X days.
-    Returns count of revoked users.
-    """
-    cutoff = _sqlite_stamp(_utc_now() - timedelta(days=days))
+    """Revoke access for users inactive for X days. Returns count revoked."""
+    return get_bot_store().access.sweep_inactive(days)
 
-    with db_connection() as conn:
-        cursor = conn.cursor()
 
-        # Get users to revoke (for logging)
-        cursor.execute("""
-            SELECT user_id, username FROM authorized_users
-            WHERE status = ? AND (
-                last_activity < ? OR
-                (last_activity IS NULL AND reviewed_at < ?)
-            )
-        """, (STATUS_APPROVED, cutoff, cutoff))
+def get_pending_requests() -> List[Dict[str, Any]]:
+    """Get all pending access requests."""
+    return get_bot_store().access.pending()
 
-        users_to_revoke = cursor.fetchall()
 
-        if users_to_revoke:
-            # Revoke inactive users
-            cursor.execute("""
-                UPDATE authorized_users
-                SET status = ?
-                WHERE status = ? AND (
-                    last_activity < ? OR
-                    (last_activity IS NULL AND reviewed_at < ?)
-                )
-            """, (STATUS_DENIED, STATUS_APPROVED, cutoff, cutoff))
+def get_all_authorized_users() -> List[Dict[str, Any]]:
+    """Get all approved users."""
+    return get_bot_store().access.approved()
 
-            revoked_count = cursor.rowcount
 
-            for user in users_to_revoke:
-                logger.info(f"Revoked inactive user {user[0]} (@{user[1]}) - no activity for {days}+ days")
-        else:
-            revoked_count = 0
-
-    return revoked_count
+def get_frozen_users() -> List[Dict[str, Any]]:
+    """Get all frozen users."""
+    return get_bot_store().access.frozen()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # USER PREFERENCES
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def get_user_preferences(user_id: int) -> Optional[Dict[str, Any]]:
     """Get user preferences."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM user_preferences WHERE user_id = ?",
-            (user_id,)
-        )
-        row = cursor.fetchone()
-        if row:
-            return dict(row)
-        return None
+    return get_bot_store().preferences.get(user_id)
 
 
 def get_user_language(user_id: int) -> str:
@@ -531,12 +191,15 @@ def get_user_language(user_id: int) -> str:
     at which point the stored choice wins for good, here and in the weekly
     report alike. Telegram's own `language_code` is deliberately not consulted:
     the default is a decision about this company, not about a phone's locale.
+
+    Stays out of the port because of that second paragraph: it is a rule about
+    this company, and an adapter has no business knowing who the admins are.
     """
     from bot.config import ADMIN_USER_IDS
     from core.bot_prefs import default_language_for
     from core.i18n import normalize
 
-    prefs = get_user_preferences(user_id) or {}
+    prefs = get_bot_store().preferences.get(user_id) or {}
     stored = prefs.get("language")
     if stored:
         return normalize(stored)
@@ -549,200 +212,85 @@ def save_user_preferences(
     default_report_type: str = "summary",
     timezone: str = "Europe/Kyiv",
     default_date_range: str = "week",
-    notifications_enabled: bool = True
+    notifications_enabled: bool = True,
 ) -> None:
     """Save or update user preferences."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO user_preferences (user_id, default_source, default_report_type, timezone, default_date_range, notifications_enabled, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id) DO UPDATE SET
-                default_source = excluded.default_source,
-                default_report_type = excluded.default_report_type,
-                timezone = excluded.timezone,
-                default_date_range = excluded.default_date_range,
-                notifications_enabled = excluded.notifications_enabled,
-                updated_at = CURRENT_TIMESTAMP
-        """, (user_id, default_source, default_report_type, timezone, default_date_range, 1 if notifications_enabled else 0))
-
-    logger.debug(f"Saved preferences for user {user_id}")
+    get_bot_store().preferences.save(
+        user_id,
+        default_source=default_source,
+        default_report_type=default_report_type,
+        timezone=timezone,
+        default_date_range=default_date_range,
+        notifications_enabled=notifications_enabled,
+    )
 
 
 def update_user_preference(user_id: int, key: str, value: Any) -> None:
     """Update a single user preference."""
-    # Ensure user exists first
-    if not get_user_preferences(user_id):
-        save_user_preferences(user_id)
-
-    # Only allow specific keys
-    allowed_keys = {'default_source', 'default_report_type', 'timezone',
-                    'default_date_range', 'notifications_enabled', 'language'}
-    if key not in allowed_keys:
-        logger.warning(f"Attempted to update invalid preference key: {key}")
-        return
-
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"""
-            UPDATE user_preferences
-            SET {key} = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = ?
-        """, (value, user_id))
+    get_bot_store().preferences.set(user_id, key, value)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# REPORT HISTORY
+# CACHE
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 def cache_get(key: str) -> Optional[Any]:
     """Get value from cache if not expired."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT value, expires_at FROM cache
-            WHERE cache_key = ?
-        """, (key,))
-        row = cursor.fetchone()
-
-    if not row:
-        return None
-
-    # Check if expired
-    expires_at = datetime.fromisoformat(row['expires_at'])
-    if datetime.now() > expires_at:
-        cache_delete(key)
-        return None
-
-    try:
-        return json.loads(row['value'])
-    except json.JSONDecodeError:
-        return row['value']
+    return get_bot_store().cache.get(key)
 
 
 def cache_set(key: str, value: Any, ttl_minutes: int = 10) -> None:
     """Set value in cache with TTL."""
-    expires_at = datetime.now() + timedelta(minutes=ttl_minutes)
-
-    # Serialize value
-    if isinstance(value, (dict, list)):
-        value_str = json.dumps(value)
-    else:
-        value_str = str(value)
-
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO cache (cache_key, value, expires_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(cache_key) DO UPDATE SET
-                value = excluded.value,
-                expires_at = excluded.expires_at,
-                created_at = CURRENT_TIMESTAMP
-        """, (key, value_str, expires_at.isoformat()))
+    get_bot_store().cache.set(key, value, ttl_minutes)
 
 
 def cache_delete(key: str) -> None:
     """Delete a cache entry."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM cache WHERE cache_key = ?", (key,))
+    get_bot_store().cache.delete(key)
 
 
 def cache_cleanup() -> int:
     """Remove all expired cache entries. Returns count deleted."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            DELETE FROM cache
-            WHERE expires_at < ?
-        """, (datetime.now().isoformat(),))
-        deleted = cursor.rowcount
+    return get_bot_store().cache.sweep()
 
-    if deleted > 0:
-        logger.debug(f"Cleaned up {deleted} expired cache entries")
-
-    return deleted
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# UTILITY FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════════════
 
 def generate_cache_key(prefix: str, **kwargs) -> str:
-    """Generate a cache key from prefix and parameters."""
+    """Generate a cache key from prefix and parameters.
+
+    Pure, and therefore not a port method: it touches no store.
+    """
     parts = [prefix]
     for k, v in sorted(kwargs.items()):
         parts.append(f"{k}={v}")
     return ":".join(parts)
 
 
-def get_database_stats() -> Dict[str, int]:
-    """Get database statistics."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        stats = {}
-
-        cursor.execute("SELECT COUNT(*) FROM user_preferences")
-        stats['users'] = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM report_history")
-        stats['reports'] = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM cache WHERE expires_at > ?",
-                       (datetime.now().isoformat(),))
-        stats['active_cache'] = cursor.fetchone()[0]
-
-    return stats
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # MILESTONE TRACKING
 # ═══════════════════════════════════════════════════════════════════════════
 
-def is_milestone_celebrated(period_type: str, period_key: str, milestone_amount: int) -> bool:
+
+def is_milestone_celebrated(
+    period_type: str, period_key: str, milestone_amount: int,
+) -> bool:
     """Check if a milestone has already been celebrated for a given period."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT 1 FROM celebrated_milestones
-            WHERE period_type = ? AND period_key = ? AND milestone_amount = ?
-        """, (period_type, period_key, milestone_amount))
-        result = cursor.fetchone() is not None
-    return result
+    return get_bot_store().milestones.already_celebrated(
+        period_type, period_key, milestone_amount,
+    )
 
 
-def mark_milestone_celebrated(period_type: str, period_key: str, milestone_amount: int, revenue: float) -> bool:
-    """Mark a milestone as celebrated. Returns True if newly inserted, False if already exists."""
-    try:
-        with db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO celebrated_milestones (period_type, period_key, milestone_amount, revenue)
-                VALUES (?, ?, ?, ?)
-            """, (period_type, period_key, milestone_amount, revenue))
-        return True
-    except sqlite3.IntegrityError:
-        # Already celebrated
-        return False
+def mark_milestone_celebrated(
+    period_type: str, period_key: str, milestone_amount: int, revenue: float,
+) -> bool:
+    """Mark a milestone celebrated. True if newly inserted, False if it existed."""
+    return get_bot_store().milestones.celebrate(
+        period_type, period_key, milestone_amount, revenue,
+    )
 
 
-def get_celebrated_milestones(period_type: str = None, limit: int = 10) -> List[Dict[str, Any]]:
+def get_celebrated_milestones(
+    period_type: str = None, limit: int = 10,
+) -> List[Dict[str, Any]]:
     """Get recent celebrated milestones."""
-    with db_connection() as conn:
-        cursor = conn.cursor()
-        if period_type:
-            cursor.execute("""
-                SELECT * FROM celebrated_milestones
-                WHERE period_type = ?
-                ORDER BY celebrated_at DESC
-                LIMIT ?
-            """, (period_type, limit))
-        else:
-            cursor.execute("""
-                SELECT * FROM celebrated_milestones
-                ORDER BY celebrated_at DESC
-                LIMIT ?
-            """, (limit,))
-        rows = cursor.fetchall()
-        return [dict(row) for row in rows]
+    return get_bot_store().milestones.recent(period_type, limit)

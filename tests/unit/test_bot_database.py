@@ -25,7 +25,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from bot import database
+from bot import database, store_sqlite
+from core.bot_store import use_bot_store
 
 
 @pytest.fixture(autouse=True)
@@ -35,11 +36,17 @@ def db(tmp_path, monkeypatch):
     Not an in-memory database: `get_connection` opens a new connection per
     call, and `:memory:` would give every call its own empty one — the tests
     would pass while testing nothing.
+
+    `DB_PATH` moved to `bot/store_sqlite.py` with the SQL. The store itself is
+    reset because it is a process-wide singleton: a store built against an
+    earlier test's `tmp_path` would still be installed.
     """
     path = tmp_path / "bot.db"
-    monkeypatch.setattr(database, "DB_PATH", path)
+    monkeypatch.setattr(store_sqlite, "DB_PATH", path)
+    use_bot_store(None)
     database.init_database()
-    return path
+    yield path
+    use_bot_store(None)
 
 
 def _row(db, user_id):

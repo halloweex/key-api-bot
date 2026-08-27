@@ -915,6 +915,78 @@ value changes were each reported CRITICAL with the id; the incremental run
 repaired the full-replace table and left the two append-only ones broken, as
 documented; `full=True` cleared all of it.
 
+### The port in front of the bot's state
+
+`bot/database.py` was 717 lines of `sqlite3` with 46 call sites and no tests.
+Step 03 needs the engine underneath it to change, so it now has a seam:
+
+```
+core/bot_store.py     the port — four Protocols, a registry, no SQL
+bot/store_sqlite.py   the adapter — every statement, moved verbatim
+bot/database.py       the facade — same names, same signatures, delegating
+```
+
+**Synchronous, and that is the one decision worth arguing.** Measured before
+choosing: 38 of the 46 call sites are already inside `async def` and would take
+an `await`. The 8 that would not include `bot/handlers_legacy._lang()`, which
+resolves the reader's language and is called from about forty places precisely
+so a parameter is not threaded through forty signatures. Against that, sync
+SQLite from async code is already how `core/bot_prefs.py` and
+`core/pg_bot_state.py` read these same 51 rows. **The cost is named rather than
+discovered later:** a sync port cannot be backed by asyncpg directly, so a
+Postgres adapter needs `psycopg` — a second driver — or asyncpg on a background
+loop. That belongs with the adapter, on a measurement.
+
+**A facade, not a caller migration.** Rewriting 46 sites to
+`get_bot_store().access.approve(...)` buys nothing the engine switch needs, and
+38 of them are in `handlers_legacy.py`. The layering cost is that callers see
+the module rather than the port and nothing but a test forbids going round it —
+`tests/unit/test_bot_store.py` is that test: it installs a store that records,
+calls every public function, and fails on any that never reached the port.
+
+**Storage only in the port.** `get_user_language` reads a preference and then
+applies a rule about this company (Ukrainian for everyone, English for admins),
+so the rule stays in the facade and an adapter never learns who the admins are.
+`generate_cache_key` touches nothing and is not in the port at all.
+
+**`revoke_user` is deliberately not a port method.** It is implemented as
+`deny`, so revoking somebody's access increments their denial count and five
+revocations freeze them for thirty days. Surprising enough to be pinned by
+name; kept out of the port so that changing the decision adds a method rather
+than redefining `deny`.
+
+**Two clocks, and they must not be unified.** `authorized_users`,
+`user_preferences` and `celebrated_milestones` carry timestamps written by
+SQLite's `CURRENT_TIMESTAMP` — UTC, `'YYYY-MM-DD HH:MM:SS'`. The cache writes
+`expires_at` itself with Python's *local* `datetime.now().isoformat()` and
+reads it back the same way: self-consistent, different convention, and merging
+them expires the cache by the wrong clock.
+
+Two defects were found putting the first set under test, both on the same
+comparison and both now fixed with `_utc_now()` / `_sqlite_stamp()`: the
+container runs `TZ=Europe/Kyiv` so `datetime.now()` sat three hours ahead of
+every stored value, and `cutoff.isoformat()` writes a `'T'` where SQLite writes
+a space — `' '` is 0x20, `'T'` is 0x54, so every row whose activity fell on the
+cutoff *date* sorted as older than the cutoff. Together the daily inactivity
+sweep was up to twenty-seven hours too eager, on a job that takes access away.
+
+Verified 2026-08-27 in both production images against a copy of the real
+`bot.db`: the adapter satisfies every Protocol, all read paths answer, the
+engine swaps and restores, and `web/services/auth_service.py` answers through
+it. 86 tests — 44 characterising the behaviour, 42 on the seam.
+
+**Seven functions here have no caller anywhere**: `has_pending_request`,
+`is_user_frozen` (live only through `reset_to_pending`), `get_pending_requests`,
+`cache_delete`, `generate_cache_key`, `get_database_stats`,
+`get_celebrated_milestones`. They are ported rather than deleted — leaving them
+un-ported would be code that silently reads SQLite after the engine moves —
+but deleting them would make the port smaller and is the owner's call.
+
+**`web/main.py._migrate_sqlite_users_to_duckdb` goes round the seam** and is
+left alone: it is a startup one-shot copying `authorized_users` into DuckDB's
+own `users` table, unrelated to what the port is for. It will need a decision
+when the engine moves, because it opens `data/bot.db` directly.
+
 ### The bot's own state, and the only store with no backup
 
 `data/bot.db` is the third store in this system. Measured 2026-08-27: it is in
