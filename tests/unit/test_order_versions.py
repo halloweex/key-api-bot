@@ -272,6 +272,31 @@ class TestItCannotLoseAVersionTheMirrorWouldHaveLost:
         assert "acquire" not in src
 
 
+class TestTheSeedIsNotTheWritersOutput:
+    """Found on production, not by reading: the first run of the check filed
+    `order_versions_flooding` with count=46,695 — the baseline the migration had
+    just seeded, all stamped `now()`, counted as a day's writing.
+
+    These read the statements themselves. The comments explaining the exclusion
+    necessarily contain the words a source-text search would look for, so a
+    grep would have passed with the clause deleted."""
+
+    def test_the_daily_rate_excludes_the_baseline(self):
+        from core.mirror_reconciliation import ORDER_VERSIONS_RECENT_SQL
+
+        assert "kind <> 'baseline'" in ORDER_VERSIONS_RECENT_SQL
+        assert "captured_at >= $1" in ORDER_VERSIONS_RECENT_SQL
+
+    def test_the_staleness_check_does_not_exclude_it(self):
+        """The opposite decision, and deliberate: the baseline is what gives a
+        freshly migrated archive its first 24 hours before anyone is asked why
+        it is quiet."""
+        from core.mirror_reconciliation import ORDER_VERSIONS_NEWEST_SQL
+
+        assert "baseline" not in ORDER_VERSIONS_NEWEST_SQL
+        assert "max(captured_at)" in ORDER_VERSIONS_NEWEST_SQL
+
+
 class TestAppendOnlyIsAPropertyOfTheCodeNotAPromise:
     def test_no_statement_anywhere_updates_or_deletes_the_archive(self):
         """Enforced here rather than by a REVOKE: migrations run as `ks_app`,

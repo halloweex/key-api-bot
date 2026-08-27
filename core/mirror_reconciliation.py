@@ -2093,6 +2093,21 @@ ORDER_VERSIONS_STALL_HOURS = 24
 # design is built to avoid.
 ORDER_VERSIONS_FLOOD_PER_DAY = 1000
 
+# Named, rather than inline, so a test can assert on the statement instead of on
+# the source text around it. The comment below explains the `kind <> 'baseline'`
+# and therefore contains it — a test grepping this module would pass with the
+# clause deleted, which is the seventh time that trap has come up here.
+ORDER_VERSIONS_RECENT_SQL = (
+    f"SELECT count(*) FROM {ORDER_VERSIONS_TABLE} "
+    f"WHERE captured_at >= $1 AND kind <> 'baseline'"
+)
+
+# No such exclusion here, deliberately: see the two paragraphs in
+# `reconcile_order_versions`.
+ORDER_VERSIONS_NEWEST_SQL = (
+    f"SELECT max(captured_at) FROM {ORDER_VERSIONS_TABLE}"
+)
+
 
 async def reconcile_order_versions(
     *,
@@ -2125,13 +2140,21 @@ async def reconcile_order_versions(
         total = await conn.fetchval(
             f"SELECT count(*) FROM {ORDER_VERSIONS_TABLE}"
         )
-        newest = await conn.fetchval(
-            f"SELECT max(captured_at) FROM {ORDER_VERSIONS_TABLE}"
-        )
+        newest = await conn.fetchval(ORDER_VERSIONS_NEWEST_SQL)
+        # The baseline exclusion in the next statement is load-bearing, and it
+        # was found by running this against production rather than by reading
+        # it. Revision 0010 seeds one row per order inside the migration, all
+        # stamped `now()`, so on the day of any deploy that count is the whole
+        # catalogue — 46,695 rows, forty-six times the threshold. Counting the
+        # seed as the writer's output files a WARN on every install for its
+        # first 24 hours, and a finding that arrives for a permanent reason is
+        # how a reader learns to skip the message it arrives in.
+        #
+        # `newest` above deliberately does *not* exclude it: there the baseline
+        # is the right answer, because it gives a fresh archive its first 24
+        # hours before anyone is asked why it is quiet.
         recent = await conn.fetchval(
-            f"SELECT count(*) FROM {ORDER_VERSIONS_TABLE} "
-            f"WHERE captured_at >= $1",
-            now - timedelta(hours=24),
+            ORDER_VERSIONS_RECENT_SQL, now - timedelta(hours=24),
         )
         # Orders the archive does not cover at all. Should be impossible: the
         # baseline in revision 0010 seeded every row `bronze.orders` held, and
