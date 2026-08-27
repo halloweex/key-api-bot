@@ -309,3 +309,63 @@ class TestExposure:
     def test_public_paths_stay_small(self):
         """Every entry here is reachable without a login — keep the list audited."""
         assert PUBLIC_API_PATHS == {"/api/health", "/api/webhooks/turbosms"}
+
+
+class TestAbandonedRequestsAreNotMalformedPayloads:
+    """A gateway that hangs up mid-body is not sending bad JSON.
+
+    Both land in the same `except` if you let them, and then a burst of
+    abandoned requests reads as a burst of bad payloads — which is what
+    happened on 2026-08-27, when 25 of them sent their reader off to compare
+    TURBOSMS_WEBHOOK_SECRET while the secret was provably fine. nginx logs
+    these as 499 and never as 400; that difference is the whole point.
+    """
+
+    def test_a_disconnect_is_counted_apart_from_a_bad_payload(
+        self, client, store, monkeypatch,
+    ):
+        from starlette.requests import ClientDisconnect
+
+        async def _hang_up(self):
+            raise ClientDisconnect()
+
+        monkeypatch.setattr("starlette.requests.Request.json", _hang_up)
+
+        r = client.post(PATH, json=_signed("evt-1", "mid-1", "DELIVRD"))
+
+        # 408, not 400: nothing was wrong with the payload, and the status is
+        # academic anyway — the client that would read it has already gone, so
+        # nginx records the exchange as 499.
+        assert r.status_code == 408
+        assert webhooks._dlr_counts["client_disconnected"] == 1
+        assert webhooks._dlr_counts["malformed_body"] == 0
+        assert store.calls == []
+
+    def test_genuinely_broken_json_still_counts_as_malformed(self, client, store):
+        r = client.post(
+            PATH, content=b"{not json", headers={"Content-Type": "application/json"},
+        )
+
+        assert r.status_code == 400
+        assert webhooks._dlr_counts["malformed_body"] == 1
+        assert webhooks._dlr_counts["client_disconnected"] == 0
+
+
+class TestTheAlertNamesItsOwnCause:
+    """The message used to name `bad_signature` whatever the condition was."""
+
+    def test_a_disconnect_does_not_send_anyone_after_the_secret(self):
+        text = webhooks._GUIDANCE["client_disconnected"]
+
+        assert "TURBOSMS_WEBHOOK_SECRET" not in text
+        assert "check_turbosms_signature" not in text
+
+    def test_a_bad_signature_still_points_at_the_secret(self):
+        assert "TURBOSMS_WEBHOOK_SECRET" in webhooks._GUIDANCE["bad_signature"]
+
+    def test_every_condition_the_endpoint_raises_has_guidance(self):
+        """A kind with no entry falls back, and the fallback must not claim
+        something the condition does not imply."""
+        for kind in ("bad_signature", "secret_unset", "client_disconnected"):
+            assert kind in webhooks._GUIDANCE, kind
+        assert "TURBOSMS_WEBHOOK_SECRET" not in webhooks._GUIDANCE_DEFAULT

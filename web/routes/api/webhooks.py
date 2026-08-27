@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 from fastapi import APIRouter, Request, HTTPException
+from starlette.requests import ClientDisconnect
 
 from core.turbosms import TurboSmsConfig, classify_dlr, match_webhook_signature
 from ._deps import limiter, get_store
@@ -55,9 +56,41 @@ _dlr_counts: Counter = Counter()
 _ALERT_AT = 25          # first alert once a burst is clearly not noise
 _ALERT_EVERY = 500      # then a reminder, throttled by condition key downstream
 
+# What to actually do about each condition. This used to be one paragraph that
+# named `bad_signature` whatever the kind was, so a burst of
+# `client_disconnected` — a condition in which the secret is provably fine —
+# sent its reader off to compare secrets. An alert that misnames its own cause
+# costs more than no alert.
+_GUIDANCE: Dict[str, str] = {
+    "bad_signature": (
+        "Compare TURBOSMS_WEBHOOK_SECRET with the secret key set beside the "
+        "callback URL in the TurboSMS panel "
+        "(<code>scripts/check_turbosms_signature.py</code> settles it)."
+    ),
+    "secret_unset": (
+        "TURBOSMS_WEBHOOK_SECRET is not set in this container. Note that "
+        "<code>docker compose up -d</code> does not pick up a changed .env — "
+        "that needs <code>--force-recreate</code>, which is how this hid once "
+        "already."
+    ),
+    "client_disconnected": (
+        "Nothing here is misconfigured — the signature was never even read. "
+        "The gateway hung up mid-request, which it does when we answer too "
+        "slowly, so this counts capacity and not format. A send delivers "
+        "~1000 callbacks in ~7s against ~100/s of capacity; on 2026-08-27 that "
+        "lost ~48% of a burst. The lever that works without knowing the cause "
+        "is asking TurboSMS to spread the callbacks out."
+    ),
+}
+_GUIDANCE_DEFAULT = (
+    "The payload did not have the shape this endpoint parses. Compare a raw "
+    "callback against the TurboSMS docs before changing anything here."
+)
+
 
 async def _note_rejection(kind: str, **fields: Any) -> None:
-    """Record a rejected callback and tell a human when it stops looking like noise.
+    """Record a callback we could not record and tell a human when it stops
+    looking like noise.
 
     `kind` names the condition, which is what the alert throttle keys on — the
     message text carries live counters and would defeat it. Nothing here can
@@ -66,20 +99,25 @@ async def _note_rejection(kind: str, **fields: Any) -> None:
     _dlr_counts[kind] += 1
     count = _dlr_counts[kind]
     logger.warning(
-        "TurboSMS webhook rejected (%s), %d so far | %s", kind, count, fields,
+        "TurboSMS webhook not recorded (%s), %d so far | %s", kind, count, fields,
     )
     if count != _ALERT_AT and count % _ALERT_EVERY != 0:
         return
+    # We rejected it, or it never finished arriving. Saying "rejected" for the
+    # second one is what made the old message point at the wrong thing.
+    headline = (
+        "are being dropped before we can read them"
+        if kind == "client_disconnected"
+        else "are being rejected"
+    )
     try:
         from bot.main import send_admin_message
         await send_admin_message(
-            f"⚠️ TurboSMS delivery reports are being rejected: <b>{kind}</b>\n"
+            f"⚠️ TurboSMS delivery reports {headline}: <b>{kind}</b>\n"
             f"{count} so far, accepted: {_dlr_counts['accepted']}.\n"
-            f"Every rejected report is a delivery result lost for good — the "
-            f"gateway gives up after 4.5 hours. If this is "
-            f"<code>bad_signature</code>, compare TURBOSMS_WEBHOOK_SECRET with "
-            f"the secret key set beside the callback URL in the TurboSMS panel "
-            f"(<code>scripts/check_turbosms_signature.py</code> settles it).",
+            f"Each one is a delivery result lost for good — the gateway gives "
+            f"up after 4.5 hours and offers no replay.\n"
+            f"{_GUIDANCE.get(kind, _GUIDANCE_DEFAULT)}",
             key=f"turbosms:webhook:{kind}",
         )
     except Exception as e:  # noqa: BLE001 — alerting must never break the endpoint
@@ -114,6 +152,15 @@ async def turbosms_delivery_report(request: Request):
 
     try:
         payload: Dict[str, Any] = await request.json()
+    except ClientDisconnect:
+        # Not a malformed payload — the gateway stopped sending it. Counted
+        # apart from `malformed_body` because the two need opposite responses:
+        # one is a format or secret problem to debug here, the other is us
+        # being too slow, and lumping them together is how 25 abandoned
+        # requests read as 25 bad payloads on 2026-08-27. nginx records these
+        # as 499 and never as 400, which is the tell.
+        await _note_rejection("client_disconnected")
+        raise HTTPException(status_code=408, detail="client disconnected")
     except Exception:
         await _note_rejection("malformed_body")
         raise HTTPException(status_code=400, detail="expected a JSON body")
