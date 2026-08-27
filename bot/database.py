@@ -10,7 +10,7 @@ import sqlite3
 import json
 import logging
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Generator
 from pathlib import Path
 
@@ -180,6 +180,37 @@ MAX_DENIAL_COUNT = 5
 FREEZE_DURATION_DAYS = 30
 
 
+
+# ─── The clock these tables are written by ───────────────────────────────────
+#
+# SQLite's `CURRENT_TIMESTAMP` is **UTC** and writes `'YYYY-MM-DD HH:MM:SS'`.
+# Two comparisons here read those values back, and both had a bug:
+#
+#   `datetime.now()` is the container's local time, and the container runs
+#   TZ=Europe/Kyiv. Every stored moment was therefore compared against a clock
+#   three hours ahead of it.
+#
+#   `datetime.isoformat()` separates the date and the time with `'T'`, and the
+#   stored values use a space. The comparison in `revoke_inactive_users` is a
+#   **string** comparison, and `' '` (0x20) sorts before `'T'` (0x54) — so
+#   every row whose `last_activity` fell on the cutoff *date* read as older
+#   than the cutoff, whatever the time of day. Somebody active that morning was
+#   swept.
+#
+# Together the daily sweep was up to twenty-seven hours too eager, on a job
+# that takes people's access away. Both are closed by writing the comparison in
+# the same clock and the same format the column is stored in.
+
+def _utc_now() -> datetime:
+    """Naive UTC — the shape SQLite stores, so the two are comparable."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _sqlite_stamp(moment: datetime) -> str:
+    """A moment in the exact text `CURRENT_TIMESTAMP` produces."""
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def get_user_auth_status(user_id: int) -> Optional[Dict[str, Any]]:
     """Get user authorization status."""
     with db_connection() as conn:
@@ -227,7 +258,7 @@ def is_user_frozen(user_id: int) -> bool:
     if reviewed_at:
         try:
             frozen_date = datetime.fromisoformat(reviewed_at)
-            if datetime.now() - frozen_date > timedelta(days=FREEZE_DURATION_DAYS):
+            if _utc_now() - frozen_date > timedelta(days=FREEZE_DURATION_DAYS):
                 # Auto-unfreeze: reset to denied so user can request again
                 _auto_unfreeze_user(user_id)
                 logger.info(f"User {user_id} auto-unfrozen after {FREEZE_DURATION_DAYS} days")
@@ -438,7 +469,7 @@ def revoke_inactive_users(days: int = 45) -> int:
     Revoke access for users inactive for X days.
     Returns count of revoked users.
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = _sqlite_stamp(_utc_now() - timedelta(days=days))
 
     with db_connection() as conn:
         cursor = conn.cursor()
@@ -450,7 +481,7 @@ def revoke_inactive_users(days: int = 45) -> int:
                 last_activity < ? OR
                 (last_activity IS NULL AND reviewed_at < ?)
             )
-        """, (STATUS_APPROVED, cutoff.isoformat(), cutoff.isoformat()))
+        """, (STATUS_APPROVED, cutoff, cutoff))
 
         users_to_revoke = cursor.fetchall()
 
@@ -463,7 +494,7 @@ def revoke_inactive_users(days: int = 45) -> int:
                     last_activity < ? OR
                     (last_activity IS NULL AND reviewed_at < ?)
                 )
-            """, (STATUS_DENIED, STATUS_APPROVED, cutoff.isoformat(), cutoff.isoformat()))
+            """, (STATUS_DENIED, STATUS_APPROVED, cutoff, cutoff))
 
             revoked_count = cursor.rowcount
 
