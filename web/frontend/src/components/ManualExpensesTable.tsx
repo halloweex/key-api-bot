@@ -8,6 +8,8 @@ import { formatCurrency } from '../utils/formatters'
 import { useFilterStore } from '../store/filterStore'
 import { CurrencyIcon, TrashIcon } from './icons'
 import { Select } from './Select'
+import { TileGrid } from './TileGrid'
+import { Wrapper } from './Wrapper'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -249,7 +251,7 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
     >
       {/* Summary Cards */}
       {data?.summary && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+        <Wrapper marginBottom="xl"><TileGrid columns={4}>
           <MetricCard
             surface="tile-gradient"
             tone="red"
@@ -277,7 +279,7 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
               />
             )
           })}
-        </div>
+        </TileGrid></Wrapper>
       )}
 
       {/* Table */}

@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Megaphone, Sparkles, Monitor, CircleHelp, User, Info } from 'lucide-react'
 import { StatCard, StatCardSkeleton } from './StatCard'
+import { TileGrid } from './TileGrid'
 import { useTrafficAnalytics } from '../hooks/useApi'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 
@@ -67,13 +68,13 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+      <TileGrid columns={5}>
         <StatCardSkeleton />
         <StatCardSkeleton />
         <StatCardSkeleton />
         <StatCardSkeleton />
         <StatCardSkeleton />
-      </div>
+      </TileGrid>
     )
   }
 
@@ -120,7 +121,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
       )}
 
       {/* Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+      <TileGrid columns={5}>
       <StatCard
         label={t('traffic.paidAds')}
         value={summary?.paid?.revenue ?? 0}
@@ -168,7 +169,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         subtitle={`${formatNumber(summary?.unknown?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.unknown')}: ${formatCurrency(summary?.unknown?.revenue ?? 0)}`}
       />
-      </div>
+      </TileGrid>
 
       {/* Paid Ads Breakdown */}
       {showPaidBreakdown && (

@@ -2,6 +2,7 @@ import { useMemo, useCallback, useState, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { X, AlertCircle } from 'lucide-react'
 import { StatCard, StatCardSkeleton, type StatCardVariant } from './StatCard'
+import { TileGrid } from './TileGrid'
 import { MilestoneProgress } from './MilestoneProgress'
 import { useSummary, useReturns } from '../hooks'
 import { formatCurrency, formatNumber, formatPercent } from '../utils/formatters'
@@ -276,10 +277,8 @@ export function SummaryCards() {
       )}
 
       {/* Summary Cards Grid */}
-      <section
-        aria-label="Summary statistics"
-        className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4 mobile-single-col"
-      >
+      <section aria-label="Summary statistics">
+        <TileGrid columns={4}>
         {isLoading && <LoadingState />}
 
         {error && !isLoading && (
@@ -295,6 +294,7 @@ export function SummaryCards() {
             <ReturnsCard data={data} />
           </>
         )}
+        </TileGrid>
       </section>
     </div>
   )

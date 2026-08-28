@@ -23,6 +23,8 @@ import {
   formatAxisK,
 } from './chartConfig'
 import { MetricCard } from './MetricCard'
+import { TileGrid } from './TileGrid'
+import { Wrapper } from './Wrapper'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -86,7 +88,7 @@ export const CohortLTVChart = memo(function CohortLTVChart({
   return (
     <div>
       {/* Summary Stats */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
+      <Wrapper marginBottom="xl"><TileGrid columns={3}>
         <MetricCard
           surface="tile-gradient"
           tone="blue"
@@ -113,7 +115,7 @@ export const CohortLTVChart = memo(function CohortLTVChart({
           label={t('retention.cohortsAnalyzed')}
           value={formatNumber(data.cohorts.length)}
         />
-      </div>
+      </TileGrid></Wrapper>
 
       {/* Chart */}
       <div style={{ height: CHART_DIMENSIONS.height.xl }}>

@@ -5,6 +5,7 @@ import { StatCard, StatCardSkeleton } from './StatCard'
 import { useBasketSummary } from '../hooks/useApi'
 import { formatNumber, formatCurrency } from '../utils/formatters'
 import { InfoPopover } from './InfoPopover'
+import { TileGrid } from './TileGrid'
 
 export const BasketSummaryCards = memo(function BasketSummaryCards() {
   const { t } = useTranslation()
@@ -12,14 +13,14 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
 
   if (isLoading || !data) {
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+      <TileGrid columns={4}>
         {Array.from({ length: 4 }).map((_, i) => <StatCardSkeleton key={i} />)}
-      </div>
+      </TileGrid>
     )
   }
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+    <TileGrid columns={4}>
       <StatCard
         label={t('products.avgBasketSize')}
         value={data.avgBasketSize}
@@ -72,6 +73,6 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
           </InfoPopover>
         }
       />
-    </div>
+    </TileGrid>
   )
 })

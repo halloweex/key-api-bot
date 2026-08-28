@@ -5,6 +5,7 @@ import { useMarginOverview } from '../hooks'
 import { formatCurrency, formatPercent, formatNumber } from '../utils/formatters'
 import { SkeletonChart } from './Skeleton'
 import { MetricCard } from './MetricCard'
+import { TileGrid } from './TileGrid'
 
 export const MarginSummaryCards = memo(function MarginSummaryCards() {
   const { t } = useTranslation()
@@ -15,7 +16,7 @@ export const MarginSummaryCards = memo(function MarginSummaryCards() {
 
   return (
     <section aria-label={t('margin.overview')}>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <TileGrid columns={4}>
         <MetricCard
           surface="tile-gradient"
           tone="blue"
@@ -48,7 +49,7 @@ export const MarginSummaryCards = memo(function MarginSummaryCards() {
           value={formatPercent(data.coverage_pct)}
           sub={`${data.skus_with_cost}/${data.total_skus} ${t('margin.skus')}`}
         />
-      </div>
+      </TileGrid>
     </section>
   )
 })

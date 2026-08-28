@@ -390,6 +390,14 @@ component boundary. Concretely:
 - **Storybook is the component library** (`npm run storybook`): stories are
   co-located `X.stories.tsx`. A new or reshaped component gets a story in the
   same change.
+- **Spacing has two levels, one token each, same on every tab.** The page
+  rhythm — between top-level blocks (a chart panel, a summary row, a table) —
+  is 16px → 24px on sm+, owned only by `PageShell` (vertical) and `ChartGrid`
+  (side-by-side panels). Tile grids — metric cards in a row, inside or outside
+  a panel — are 12px → 16px on sm+, owned by `TileGrid`. Pages and chart
+  components never write their own `space-y`/`gap` for these; if two tabs
+  disagree about a gap, something is bypassing one of the three owners.
+  Spacing *inside* a card (padding, header margins) stays the component's own.
 
 ### Timezone Handling
 KeyCRM API stores timestamps in +04:00 (server timezone), but UI displays in Europe/Kyiv. DuckDB queries use `_date_in_kyiv()` helper to convert before extracting dates.

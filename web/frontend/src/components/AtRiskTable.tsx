@@ -5,6 +5,8 @@ import type { AtRiskResponse } from '../types/api'
 import { formatNumber, formatCurrency, formatPercent } from '../utils/formatters'
 import { MetricCard } from './MetricCard'
 import { InfoBanner } from './InfoBanner'
+import { TileGrid } from './TileGrid'
+import { Wrapper } from './Wrapper'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -37,7 +39,7 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
   return (
     <div>
       {/* Summary Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <Wrapper marginBottom="xl"><TileGrid columns={4}>
         <MetricCard
           surface="tile-gradient"
           tone="red"
@@ -74,7 +76,7 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
           value={`${data.daysThreshold} ${t('retention.days')}`}
           sub={t('retention.sinceLastPurchase')}
         />
-      </div>
+      </TileGrid></Wrapper>
 
       {/* Table */}
       <div className="overflow-x-auto">

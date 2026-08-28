@@ -5,6 +5,8 @@ import { formatNumber, formatPercent, formatCurrency } from '../utils/formatters
 import { MetricCard } from './MetricCard'
 import { Badge } from './Badge'
 import type { TabId } from './cohortTabsConfig'
+import { TileGrid } from './TileGrid'
+import { Wrapper } from './Wrapper'
 
 interface CohortSummaryCardsProps {
   data: EnhancedCohortRetentionResponse
@@ -32,7 +34,7 @@ export function CohortSummaryCards({ data, activeTab, monthsBack, m1Trend }: Coh
       : undefined
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+    <Wrapper marginBottom="xl"><TileGrid columns={4}>
       <MetricCard
         surface="tile-gradient"
         tone="neutral"
@@ -79,6 +81,6 @@ export function CohortSummaryCards({ data, activeTab, monthsBack, m1Trend }: Coh
           sub={t('retention.returnIn4thMonth')}
         />
       )}
-    </div>
+    </TileGrid></Wrapper>
   )
 }

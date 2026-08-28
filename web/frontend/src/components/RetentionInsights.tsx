@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { TrendingUp, TrendingDown, DollarSign, Activity, Award, ChevronDown, ChevronUp, Minus } from 'lucide-react'
 import { InsightCard } from './InsightCard'
+import { TileGrid } from './TileGrid'
 import type { CohortInsights } from '../types/api'
 import { formatCurrency } from '../utils/formatters'
 
@@ -30,7 +31,7 @@ export const RetentionInsights = memo(function RetentionInsights({ insights }: R
       </button>
 
       {expanded && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <TileGrid columns={2}>
           {/* Retention Trend */}
           {insights.retentionTrend && (
             <InsightCard
@@ -115,7 +116,7 @@ export const RetentionInsights = memo(function RetentionInsights({ insights }: R
               tone="green"
             />
           )}
-        </div>
+        </TileGrid>
       )}
     </div>
   )

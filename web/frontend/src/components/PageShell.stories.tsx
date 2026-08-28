@@ -29,16 +29,6 @@ export const Feature: Story = {
   ),
 }
 
-export const Dashboard: Story = {
-  args: { variant: 'dashboard', children: null },
-  render: (args) => (
-    <PageShell {...args}>
-      <DemoCard title="Dense rhythm" />
-      <DemoCard title="Between chart panels" />
-    </PageShell>
-  ),
-}
-
 export const Admin: Story = {
   args: { variant: 'admin', children: null },
   render: (args) => (

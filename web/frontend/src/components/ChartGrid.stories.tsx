@@ -17,22 +17,12 @@ const Panel = ({ title }: { title: string }) => (
   </Card>
 )
 
-export const Comfortable: Story = {
+export const Default: Story = {
   args: { children: null },
   render: () => (
     <ChartGrid>
       <Panel title="Orders by Source" />
       <Panel title="Revenue by Source" />
-    </ChartGrid>
-  ),
-}
-
-export const Dense: Story = {
-  args: { children: null, density: 'dense' },
-  render: () => (
-    <ChartGrid density="dense">
-      <Panel title="Top Products" />
-      <Panel title="Top by Revenue" />
     </ChartGrid>
   ),
 }

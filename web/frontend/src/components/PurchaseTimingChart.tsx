@@ -24,6 +24,7 @@ import {
 import { MetricCard } from './MetricCard'
 import { InfoBanner } from './InfoBanner'
 import { Wrapper } from './Wrapper'
+import { TileGrid } from './TileGrid'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -75,7 +76,7 @@ export const PurchaseTimingChart = memo(function PurchaseTimingChart({
   return (
     <div>
       {/* Summary Stats */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
+      <Wrapper marginBottom="xl"><TileGrid columns={3}>
         <MetricCard
           surface="tile-gradient"
           tone="green"
@@ -102,7 +103,7 @@ export const PurchaseTimingChart = memo(function PurchaseTimingChart({
           value={data.summary.avgDays ? String(Math.round(data.summary.avgDays)) : '-'}
           sub={t('retention.to2ndPurchase')}
         />
-      </div>
+      </TileGrid></Wrapper>
 
       {/* Chart */}
       <div style={{ height: CHART_DIMENSIONS.height.lg }}>

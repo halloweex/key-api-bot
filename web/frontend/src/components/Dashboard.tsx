@@ -24,7 +24,7 @@ import {
 
 export const Dashboard = memo(function Dashboard() {
   return (
-    <PageShell variant="dashboard">
+    <PageShell variant="feature">
       {/* Summary Cards - loaded immediately */}
       <section>
         <SummaryCards />
@@ -36,7 +36,7 @@ export const Dashboard = memo(function Dashboard() {
       </ChartSection>
 
       {/* Orders & Revenue by Source - Side by Side */}
-      <ChartGrid density="dense">
+      <ChartGrid>
         <ChartSection>
           <LazyOrdersBySourceChart />
         </ChartSection>
@@ -46,7 +46,7 @@ export const Dashboard = memo(function Dashboard() {
       </ChartGrid>
 
       {/* Charts Row 2 - Top Products (Quantity & Revenue) */}
-      <ChartGrid density="dense">
+      <ChartGrid>
         <ChartSection>
           <LazyTopProductsChart />
         </ChartSection>
