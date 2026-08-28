@@ -263,6 +263,25 @@ async def get_data_quality_health(request: Request):
                     conn, integrity["run_id"], limit=20,
                 )
 
+            # The two layers that arrived after this endpoint was written.
+            # Found by an audit standing exactly where on-call would stand: a
+            # WARN verdict in the mirror-landing log line, and no way to see
+            # WHICH findings without opening the database — which the
+            # single-writer rule forbids from outside the process. The layer
+            # holding the most comparisons must not be the one invisible here.
+            mirror_landing = fetch_latest_run(conn, layer="mirror_landing")
+            mirror_issues = []
+            if mirror_landing:
+                mirror_issues = fetch_run_issues(
+                    conn, mirror_landing["run_id"], limit=20,
+                )
+            reconciliation_pg = fetch_latest_run(conn, layer="reconciliation_pg")
+            reconciliation_pg_diffs = []
+            if reconciliation_pg:
+                reconciliation_pg_diffs = fetch_run_diffs(
+                    conn, reconciliation_pg["run_id"], limit=20,
+                )
+
         return {
             "integrity": {
                 "last_run": integrity,
@@ -271,6 +290,14 @@ async def get_data_quality_health(request: Request):
             "reconciliation": {
                 "last_run": reconciliation,
                 "diffs": reconciliation_diffs,
+            },
+            "mirror_landing": {
+                "last_run": mirror_landing,
+                "issues": mirror_issues,
+            },
+            "reconciliation_pg": {
+                "last_run": reconciliation_pg,
+                "diffs": reconciliation_pg_diffs,
             },
         }
     except Exception as e:
