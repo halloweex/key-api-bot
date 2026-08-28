@@ -134,7 +134,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (needs `sms` view/edit) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
 | `/api/managers/{id}/retail-status` | Classify a manager, marks warehouse dirty (POST, admin) |
-| `/api/health/data-quality` | Latest integrity + reconciliation run, with issues/diffs |
+| `/api/health/data-quality` | Latest run per layer — integrity, reconciliation, mirror_landing, reconciliation_pg — with issues/diffs (за сессией) |
 | `/api/warehouse/status` | Last refresh, checksums, validation_passed |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/mirror/backfill/orders` | Ship the orders Postgres is missing; idempotent (POST, admin) |
@@ -1192,7 +1192,9 @@ finding, not by reading the code.
 ### Шаги 1–2 «Одной бронзы»: переключение чтения и строка на клиента
 
 **Шаг 1 — `KS_READ_GOLD`** (`duckdb` по умолчанию | `postgres`; опечатка
-роняет запрос, правило `KS_BOT_STORE`). Подменяет ровно два голдовых
+роняет запрос, правило `KS_BOT_STORE`). **В проде `postgres` с 28.08** —
+включён после разбора WARN-гейта (§32 хендоффа): summary и trend читают
+Postgres, откат — переменная в .env и `up -d web`. Подменяет ровно два голдовых
 примитива — итоги `/api/summary` и дневной ряд `/api/revenue/trend`
 (`core/pg_gold_read.py`); сравнения, гранулярность, прогноз и вся логика выше
 остаются в одном экземпляре. Перехват повторяет собственную маршрутизацию
