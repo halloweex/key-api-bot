@@ -275,14 +275,21 @@ async def _derive_gold() -> int:
 
 async def ch_silver_sync() -> Dict[str, Any]:
     """Ship silver, derive gold — the hourly tick. Never raises."""
+    from core.pg_silver import PG_LAYER_LOCK
+
     if not configured():
         return {"skipped": f"{URL_ENV} is not set"}
     try:
-        rows = await _fetch_pg_silver()
-        await _ship_silver_rows(rows)
-        await _mark_ok(SILVER_STATE, len(rows))
-        gold_rows = await _derive_gold()
-        await _mark_ok(GOLD_STATE, gold_rows)
+        # Under PG_LAYER_LOCK for two of the review's races: the hourly tick
+        # and the daily reconciliation both drive TRUNCATE/EXCHANGE on the
+        # same staging tables, and interleaved they can swap an empty staging
+        # into place under a fresh OK watermark.
+        async with PG_LAYER_LOCK:
+            rows = await _fetch_pg_silver()
+            await _ship_silver_rows(rows)
+            await _mark_ok(SILVER_STATE, len(rows))
+            gold_rows = await _derive_gold()
+            await _mark_ok(GOLD_STATE, gold_rows)
         logger.info(
             "ch_silver: shipped %d silver row(s), derived %d gold row(s)",
             len(rows), gold_rows,
@@ -458,41 +465,60 @@ async def reconcile_clickhouse(*, max_samples: int = 10) -> List[IntegrityIssue]
     """The daily ClickHouse verdict: ship, round-trip silver, then set the two
     engines' Gold against each other. `ch_gold.reconcile_ch_gold`'s contract:
     stands down unconfigured, WARNs instead of raising — an optional store
-    must not silence the mandatory comparisons in this layer."""
+    must not silence the mandatory comparisons in this layer.
+
+    The whole body runs under PG_LAYER_LOCK, and the reason is the review's
+    sharpest finding: without it, a silver rebuild committing between "fetch
+    the silver we ship" and "fetch the gold we compare against" makes
+    Postgres Gold reflect a *different* silver than the one ClickHouse
+    derived from — and the zero-tolerance verdict files a CRITICAL about an
+    engine-semantics defect that does not exist. Under the lock the pair is
+    consistent by construction, and the tolerance stays honestly zero.
+    """
+    from core.pg_silver import PG_LAYER_LOCK
+
     if not configured():
         return []
 
-    try:
-        shipped = await _fetch_pg_silver()
-        await _ship_silver_rows(shipped)
-        await _mark_ok(SILVER_STATE, len(shipped))
-        gold_rows = await _derive_gold()
-        await _mark_ok(GOLD_STATE, gold_rows)
-    except Exception as e:
-        detail = f"{type(e).__name__}: {e}"
-        await _mark_failed(SILVER_STATE, detail)
-        return [IntegrityIssue(
-            check_name="ch_silver_sync_failed",
-            table_name=SILVER_TABLE, severity=Severity.WARN, count=1,
-            description=(
-                f"could not ship silver / derive gold in ClickHouse: {detail}. "
-                f"Both tables keep their previous copy; freshness is in "
-                f"meta.mirror_state"
-            ),
-        )]
+    async with PG_LAYER_LOCK:
+        try:
+            shipped = await _fetch_pg_silver()
+            await _ship_silver_rows(shipped)
+            await _mark_ok(SILVER_STATE, len(shipped))
+            gold_rows = await _derive_gold()
+            await _mark_ok(GOLD_STATE, gold_rows)
+        except Exception as e:
+            detail = f"{type(e).__name__}: {e}"
+            await _mark_failed(SILVER_STATE, detail)
+            return [IntegrityIssue(
+                check_name="ch_silver_sync_failed",
+                table_name=SILVER_TABLE, severity=Severity.WARN, count=1,
+                description=(
+                    f"could not ship silver / derive gold in ClickHouse: {detail}. "
+                    f"Both tables keep their previous copy; freshness is in "
+                    f"meta.mirror_state"
+                ),
+            )]
+
+        try:
+            readback = parse_tsv(await _execute(
+                f"SELECT {', '.join(SILVER_COLUMNS)} FROM {SILVER_TABLE} "
+                f"FORMAT TabSeparated"
+            ))
+            pg_gold_cells = await _fetch_pg_gold_cells()
+            ch_gold_cells = await _fetch_ch_gold_cells()
+        except Exception as e:
+            # The optional store failing mid-comparison must degrade to a
+            # WARN, not an exception — a raise here fails the whole
+            # mirror_landing run and silences the mandatory comparisons,
+            # which is exactly what this module's contract forbids.
+            return [IntegrityIssue(
+                check_name="ch_silver_unreachable",
+                table_name=SILVER_TABLE, severity=Severity.WARN, count=1,
+                description=f"shipped, but a read-back failed: {type(e).__name__}: {e}",
+            )]
 
     issues: List[IntegrityIssue] = []
-    try:
-        readback = parse_tsv(await _execute(
-            f"SELECT {', '.join(SILVER_COLUMNS)} FROM {SILVER_TABLE} "
-            f"FORMAT TabSeparated"
-        ))
-    except Exception as e:
-        return [IntegrityIssue(
-            check_name="ch_silver_unreachable",
-            table_name=SILVER_TABLE, severity=Severity.WARN, count=1,
-            description=f"shipped, but the read-back failed: {type(e).__name__}: {e}",
-        )]
 
     want = {r[0]: r for r in shipped}
     got = {r[0]: r for r in readback}
@@ -513,8 +539,6 @@ async def reconcile_clickhouse(*, max_samples: int = 10) -> List[IntegrityIssue]
         ))
 
     issues += compare_gold_cells(
-        await _fetch_pg_gold_cells(),
-        await _fetch_ch_gold_cells(),
-        max_samples=max_samples,
+        pg_gold_cells, ch_gold_cells, max_samples=max_samples,
     )
     return issues

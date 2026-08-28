@@ -208,3 +208,77 @@ class TestTheHourlyIdsDiff:
         )
         out = await pg_buyers.backfill_if_pending(store=object())
         assert "error" in out
+
+
+class TestTheLockIsNeverHeldAcrossTheNetwork:
+    """The review's sharpest live finding: the Postgres read used to happen
+    inside `self.connection()` — the asyncio lock that serialises every DuckDB
+    access — so a hung Postgres would have held the whole dashboard. Now the
+    Gold-only branch answered from Postgres must never touch the store at all."""
+
+    @pytest.mark.asyncio
+    async def test_summary_from_pg_never_touches_the_store(self, monkeypatch):
+        from core import pg_gold_read
+        from core.duckdb_store import DuckDBStore
+
+        monkeypatch.setenv(pg_gold_read.ENV, "postgres")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://x")
+        monkeypatch.setattr(
+            pg_gold_read, "fetch_summary",
+            AsyncMock(return_value=(10, 1000.0, 1, 50.0)),
+        )
+
+        store = DuckDBStore.__new__(DuckDBStore)
+
+        def forbidden():
+            raise AssertionError("store lock was taken for a PG-answered read")
+
+        store.connection = forbidden  # type: ignore[method-assign]
+
+        out = await store.get_summary_stats(date(2026, 8, 1), date(2026, 8, 27))
+        assert out["totalOrders"] == 10
+        assert out["totalRevenue"] == 1000.0
+        assert set(out) == {
+            "totalOrders", "totalRevenue", "avgCheck", "totalReturns",
+            "returnsRevenue", "startDate", "endDate",
+        }
+
+    @pytest.mark.asyncio
+    async def test_trend_prefetch_happens_before_the_lock(self, monkeypatch):
+        # Both series — current and comparison — must be awaited before
+        # connection() is entered; the fake lock records the ordering.
+        from core import pg_gold_read
+        from core.duckdb_store import DuckDBStore
+
+        monkeypatch.setenv(pg_gold_read.ENV, "postgres")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://x")
+        calls: list = []
+
+        async def fake_series(lo, hi, st, src):
+            calls.append(("pg", lo, hi))
+            return [(lo, 1.0, 1)]
+
+        monkeypatch.setattr(pg_gold_read, "fetch_series", fake_series)
+
+        store = DuckDBStore.__new__(DuckDBStore)
+
+        class _Conn:
+            def execute(self, *a):  # comparison-branch SQL builds, unused
+                raise AssertionError("DuckDB was queried for a PG-answered trend")
+
+        class _Ctx:
+            async def __aenter__(self):
+                calls.append(("lock",))
+                return _Conn()
+
+            async def __aexit__(self, *a):
+                return False
+
+        store.connection = lambda: _Ctx()  # type: ignore[method-assign]
+
+        out = await store.get_revenue_trend(
+            date(2026, 8, 20), date(2026, 8, 21), include_comparison=True,
+        )
+        assert [c[0] for c in calls[:2]] == ["pg", "pg"]
+        assert ("lock",) in calls
+        assert out["labels"]

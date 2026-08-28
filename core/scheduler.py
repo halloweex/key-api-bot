@@ -1101,33 +1101,40 @@ class BackgroundScheduler:
             BackgroundScheduler._pg_silver_last_at = now
 
             from core.pg_gold import rebuild_gold
-            from core.pg_silver import rebuild_silver
+            from core.pg_silver import PG_LAYER_LOCK, rebuild_silver
 
-            logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
-            # Gold reads the Silver that was just written, in the same tick and
-            # from the same caller, so it can never aggregate a Silver the next
-            # statement is about to replace. Not in its own job for the same
-            # reason: two schedules would let Gold be built from a Silver one
-            # interval stale, and the comparison would then be measuring the
-            # gap between two of our own timers.
-            #
-            # Order matters on failure too. Silver raising skips Gold, which is
-            # what should happen — a Gold rebuilt over a stale Silver would
-            # stamp a fresh watermark on a stale answer, and that reads clean.
-            logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
-            # And the витрина, from the same Silver in the same tick — one
-            # floor, one тик, Gold's own reasoning one consumer down.
-            from core.pg_vitrina import rebuild_customer_profile
-
-            logger.info(
-                "Rebuilding customer profile in Postgres: %s",
-                await rebuild_customer_profile(),
-            )
+            async with PG_LAYER_LOCK:
+                await self._rebuild_pg_layers(rebuild_silver, rebuild_gold)
         except Exception as e:
             # ERROR, not DEBUG. A mirror that fails quietly is the 2026-08-09
             # shape, and the watermark it did not move is what Reconciliation A
             # reads as "not rebuilt yet".
             logger.error("Postgres layer rebuild failed: %s", e, exc_info=True)
+
+    async def _rebuild_pg_layers(self, rebuild_silver, rebuild_gold) -> None:
+        """The three derived layers, in order, under PG_LAYER_LOCK.
+
+        Gold reads the Silver that was just written, in the same tick and
+        from the same caller, so it can never aggregate a Silver the next
+        statement is about to replace. Not in its own job for the same
+        reason: two schedules would let Gold be built from a Silver one
+        interval stale, and the comparison would then be measuring the
+        gap between two of our own timers.
+
+        Order matters on failure too. Silver raising skips Gold, which is
+        what should happen — a Gold rebuilt over a stale Silver would
+        stamp a fresh watermark on a stale answer, and that reads clean.
+        """
+        logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
+        logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
+        # And the витрина, from the same Silver in the same tick — one
+        # floor, one тик, Gold's own reasoning one consumer down.
+        from core.pg_vitrina import rebuild_customer_profile
+
+        logger.info(
+            "Rebuilding customer profile in Postgres: %s",
+            await rebuild_customer_profile(),
+        )
 
     async def _run_backup(self) -> Dict[str, Any]:
         """Daily consistent backup of the DuckDB warehouse (A9-1)."""

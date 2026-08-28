@@ -110,14 +110,21 @@ async def reconcile_customer_profile(*, max_note: int = 3):
     """
     from core.data_quality import IntegrityIssue, Severity
     from core.pg import get_pool, require_revision
+    from core.pg_silver import PG_LAYER_LOCK
 
     pool = await get_pool()
     await require_revision()
-    async with pool.acquire() as conn:
-        async with conn.transaction(isolation="repeatable_read"):
-            await conn.execute("TRUNCATE app.customer_profile")
-            await conn.execute(_REBUILD_SQL)
-            row = await conn.fetchrow(_CHECK_SQL)
+    # PG_LAYER_LOCK, because REPEATABLE READ alone is not enough: TRUNCATE is
+    # not MVCC-safe, and a silver rebuild committing mid-transaction would
+    # show this snapshot an emptied Silver — thousands of false CRITICALs
+    # against a table that was simply being replaced. The lock keeps the
+    # rebuild tick out for the second this takes.
+    async with PG_LAYER_LOCK:
+        async with pool.acquire() as conn:
+            async with conn.transaction(isolation="repeatable_read"):
+                await conn.execute("TRUNCATE app.customer_profile")
+                await conn.execute(_REBUILD_SQL)
+                row = await conn.fetchrow(_CHECK_SQL)
 
     missing, extra, differing = int(row[0]), int(row[1]), int(row[2])
     if not (missing or extra or differing):

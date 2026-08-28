@@ -46,6 +46,22 @@ class RevenueMixin:
             )
             return None
 
+    @staticmethod
+    def _comparison_window(
+        start_date: date, end_date: date, compare_type: str,
+    ) -> Tuple[date, date]:
+        """The comparison period's bounds — one home, two callers (the
+        pre-lock Postgres prefetch and the in-lock DuckDB path)."""
+        if compare_type == "year_ago":
+            from dateutil.relativedelta import relativedelta
+            return start_date - relativedelta(years=1), end_date - relativedelta(years=1)
+        if compare_type == "month_ago":
+            from dateutil.relativedelta import relativedelta
+            return start_date - relativedelta(months=1), end_date - relativedelta(months=1)
+        period_days = (end_date - start_date).days + 1
+        prev_end = start_date - timedelta(days=1)
+        return prev_end - timedelta(days=period_days - 1), prev_end
+
     async def _pg_gold_series(
         self,
         start_date: date,
@@ -55,6 +71,8 @@ class RevenueMixin:
     ) -> Optional[List[Tuple[date, float, int]]]:
         from core import pg_gold_read
 
+        if source_id and source_id not in self._GOLD_SOURCE_COLUMNS:
+            return None  # same guard as the summary twin — parity by routing
         if not pg_gold_read.enabled():
             return None
         try:
@@ -79,6 +97,33 @@ class RevenueMixin:
         promocode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get summary statistics for a date range (from Gold/Silver layers)."""
+        # Step 1 of «Одна бронза» — and it happens BEFORE the store lock, not
+        # inside it: `self.connection()` serialises every DuckDB access in the
+        # process, and holding that lock across a network round trip hands a
+        # hung Postgres the entire dashboard plus the 2-minute refresh queue.
+        # The rule is the scheduler's own: the store's lock is not held across
+        # the network. The Gold-only branch needs no DuckDB at all when
+        # Postgres answers, so on success the lock is never taken.
+        if not (category_id or brand or promocode):
+            pg_totals = await self._pg_gold_summary(
+                start_date, end_date, sales_type, source_id
+            )
+            if pg_totals is not None:
+                total_orders, total_revenue = int(pg_totals[0]), float(pg_totals[1])
+                total_returns, returns_revenue = int(pg_totals[2]), float(pg_totals[3])
+                avg_check = total_revenue / total_orders if total_orders > 0 else 0
+                # The same seven keys the DuckDB tail builds — the API shape
+                # must not change with the engine.
+                return {
+                    "totalOrders": total_orders,
+                    "totalRevenue": round(total_revenue, 2),
+                    "avgCheck": round(avg_check, 2),
+                    "totalReturns": total_returns,
+                    "returnsRevenue": round(returns_revenue, 2),
+                    "startDate": start_date.isoformat(),
+                    "endDate": end_date.isoformat(),
+                }
+
         async with self.connection() as conn:
             if category_id or brand or promocode:
                 # Use Silver layer with JOINs for correct distinct order counts
@@ -140,33 +185,8 @@ class RevenueMixin:
                 total_returns = int(ret_result[0])
                 returns_revenue = float(ret_result[1])
             else:
-                # Step 1 of «Одна бронза»: this Gold-only branch may read
-                # Postgres instead. None means "not enabled / not answerable /
-                # read failed" — every one of those lands on the DuckDB path
-                # below, unchanged.
-                pg_totals = await self._pg_gold_summary(
-                    start_date, end_date, sales_type, source_id
-                )
-                if pg_totals is not None:
-                    total_orders, total_revenue, total_returns, returns_revenue = (
-                        int(pg_totals[0]), float(pg_totals[1]),
-                        int(pg_totals[2]), float(pg_totals[3]),
-                    )
-                    # The same seven keys the shared tail below builds — an
-                    # early return with fewer would change the API shape by
-                    # engine, which is exactly what the flag must not do.
-                    avg_check = total_revenue / total_orders if total_orders > 0 else 0
-                    return {
-                        "totalOrders": total_orders,
-                        "totalRevenue": round(total_revenue, 2),
-                        "avgCheck": round(avg_check, 2),
-                        "totalReturns": total_returns,
-                        "returnsRevenue": round(returns_revenue, 2),
-                        "startDate": start_date.isoformat(),
-                        "endDate": end_date.isoformat(),
-                    }
-
-                # Use gold_daily_revenue for non-product queries
+                # Use gold_daily_revenue for non-product queries. (Postgres
+                # was already given its chance above, before the lock.)
                 params = [start_date, end_date]
                 where_clauses = ["date BETWEEN ? AND ?"]
 
@@ -527,31 +547,46 @@ class RevenueMixin:
         so applying one silently changed the measure by ₴1.5M lifetime, with
         nothing in the response saying so.
         """
+        # Line-level filters only. A promocode selects whole orders and
+        # belongs on the order grain; it used to land here and change the
+        # measure as a side effect.
+        use_lines = bool(category_id or brand)
+        gold_can_answer = (
+            not promocode
+            and (not source_id or source_id in self._GOLD_SOURCE_COLUMNS)
+        )
+
+        # Step 1 of «Одна бронза»: both Gold series — current and comparison —
+        # are read from Postgres BEFORE the store lock, get_summary_stats'
+        # reasoning: the lock serialises every DuckDB access in the process
+        # and must not be held across the network.
+        pg_series = prev_pg_series = None
+        if not use_lines and gold_can_answer:
+            pg_series = await self._pg_gold_series(
+                start_date, end_date, sales_type, source_id
+            )
+            if include_comparison and pg_series is not None:
+                prev_start, prev_end = self._comparison_window(
+                    start_date, end_date, compare_type
+                )
+                # Same engine as the current period, or the growth number
+                # becomes a ratio between two stores.
+                prev_pg_series = await self._pg_gold_series(
+                    prev_start, prev_end, sales_type, source_id
+                )
+
         async with self.connection() as conn:
             cat_ids = None
             if category_id:
                 cat_ids = await self._get_category_with_children(conn, category_id)
 
-            # Line-level filters only. A promocode selects whole orders and
-            # belongs on the order grain; it used to land here and change the
-            # measure as a side effect.
-            use_lines = bool(category_id or brand)
-            gold_can_answer = (
-                not promocode
-                and (not source_id or source_id in self._GOLD_SOURCE_COLUMNS)
-            )
-
-            pg_series = None
             if use_lines:
                 sql, params = self._build_silver_products_revenue_query(
                     start_date, end_date, sales_type, source_id, cat_ids, brand, promocode
                 )
             elif gold_can_answer:
-                # Step 1 of «Одна бронза»: the Gold series may come from
-                # Postgres. None falls through to the DuckDB query below.
-                pg_series = await self._pg_gold_series(
-                    start_date, end_date, sales_type, source_id
-                )
+                # pg_series may already hold the Postgres answer (prefetched
+                # above, before the lock); None falls through to DuckDB.
                 sql, params = self._build_gold_revenue_query(
                     start_date, end_date, sales_type, source_id
                 )
@@ -590,34 +625,20 @@ class RevenueMixin:
 
             # Add previous period comparison
             if include_comparison:
-                period_days = (end_date - start_date).days + 1
-
-                if compare_type == "year_ago":
-                    from dateutil.relativedelta import relativedelta
-                    prev_start = start_date - relativedelta(years=1)
-                    prev_end = end_date - relativedelta(years=1)
-                elif compare_type == "month_ago":
-                    from dateutil.relativedelta import relativedelta
-                    prev_start = start_date - relativedelta(months=1)
-                    prev_end = end_date - relativedelta(months=1)
-                else:
-                    prev_end = start_date - timedelta(days=1)
-                    prev_start = prev_end - timedelta(days=period_days - 1)
+                prev_start, prev_end = self._comparison_window(
+                    start_date, end_date, compare_type
+                )
 
                 # The comparison period has to be measured the same way as the
                 # current one, or the growth percentage is a ratio between two
                 # different questions.
-                prev_pg_series = None
                 if use_lines:
                     prev_sql, prev_params = self._build_silver_products_revenue_query(
                         prev_start, prev_end, sales_type, source_id, cat_ids, brand, promocode
                     )
                 elif gold_can_answer:
-                    # Same engine as the current period, or the growth number
-                    # becomes a ratio between two stores.
-                    prev_pg_series = await self._pg_gold_series(
-                        prev_start, prev_end, sales_type, source_id
-                    )
+                    # prev_pg_series was prefetched above, before the lock,
+                    # from the same engine as the current period.
                     prev_sql, prev_params = self._build_gold_revenue_query(
                         prev_start, prev_end, sales_type, source_id
                     )

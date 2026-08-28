@@ -44,11 +44,26 @@ reconciled would be marking its own homework.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
+
+# One process, several actors over the same Postgres layer: the scheduler's
+# rebuild tick (silver → gold → витрина), the витрина's own rebuild-and-check,
+# and the ClickHouse ship-and-derive. Unserialised, they race in three
+# documented ways the review named: a silver rebuild landing between the
+# reconcile's two reads turns the flagship engines-verdict into a false
+# CRITICAL; a TRUNCATE is not MVCC-safe, so even REPEATABLE READ sees the
+# витрина check compare against an emptied Silver; and two CH shippers
+# interleaving TRUNCATE/EXCHANGE can swap an empty staging into place under a
+# fresh OK watermark. One lock, taken by every actor for its whole
+# read-derive-write span, removes all three. It is a coordination lock over
+# network-bound work — deliberately NOT the DuckDB store lock, whose rule
+# ("never held across the network") stays intact.
+PG_LAYER_LOCK = asyncio.Lock()
 
 SILVER_TABLE = "silver.orders"
 
