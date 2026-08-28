@@ -40,8 +40,9 @@ SUPERSEDED BY STEP 5, KEPT AS THE FALLBACK AND THE CLIENT
 `core/ch_silver.py` now ships silver and derives Gold *inside* ClickHouse,
 and the scheduler's hourly tick calls it instead of `ship_gold`. This module
 stays as the copy-mode fallback (a Gold copy needs nothing but bronze-free
-connectivity) and as the home of the shared HTTP client (`_execute`) and the
-Gold table DDL, which step 5 imports rather than restates.
+connectivity) and as the home of the Gold table DDL, which step 5 imports
+rather than restates. The shared HTTP client and the rest of the plumbing
+moved to `core/ch_common.py`.
 
 CONFIGURATION
 
@@ -317,6 +318,16 @@ async def reconcile_ch_gold(*, max_samples: int = 10) -> List[IntegrityIssue]:
     if not configured():
         return []
 
+    # Dormant today (step 5's reconcile superseded this), but if the fallback
+    # is ever revived it shares the staging tables with _derive_gold — so it
+    # takes the same layer lock, or race №3 comes back with it.
+    from core.pg_silver import PG_LAYER_LOCK
+
+    async with PG_LAYER_LOCK:
+        return await _reconcile_copy_mode(max_samples=max_samples)
+
+
+async def _reconcile_copy_mode(*, max_samples: int = 10) -> List[IntegrityIssue]:
     try:
         shipped = await _fetch_pg_rows()
         await _ship(shipped)

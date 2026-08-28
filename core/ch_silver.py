@@ -175,9 +175,7 @@ def derive_gold_sql() -> Tuple[str, str]:
     items = _gold_measure_items()
     fine = f"""
 INSERT INTO {GOLD_STAGING}
-    (date, sales_type, source_id, revenue, orders_count, unique_customers,
-     new_customers, returning_customers, returns_count, returns_revenue,
-     avg_order_value)
+    ({', '.join(GOLD_COLUMNS)})
 SELECT order_date AS date, sales_type, source_id,
     {items}
 FROM {SILVER_TABLE}
@@ -185,9 +183,7 @@ GROUP BY order_date, sales_type, source_id
 """
     rollup = f"""
 INSERT INTO {GOLD_STAGING}
-    (date, sales_type, source_id, revenue, orders_count, unique_customers,
-     new_customers, returning_customers, returns_count, returns_revenue,
-     avg_order_value)
+    ({', '.join(GOLD_COLUMNS)})
 SELECT order_date AS date, sales_type, NULL,
     {items}
 FROM {SILVER_TABLE}
@@ -333,9 +329,7 @@ def compare_gold_cells(
 
 async def _fetch_ch_gold_cells() -> List[Tuple[Any, ...]]:
     text = await _execute(
-        "SELECT date, sales_type, source_id, revenue, orders_count, "
-        "unique_customers, new_customers, returning_customers, returns_count, "
-        "returns_revenue, avg_order_value "
+        f"SELECT {', '.join(GOLD_COLUMNS)} "
         f"FROM {GOLD_TABLE} FORMAT TabSeparated"
     )
     from core.ch_gold import parse_tsv as parse_gold_tsv
@@ -349,10 +343,7 @@ async def _fetch_pg_gold_cells() -> List[Tuple[Any, ...]]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         records = await conn.fetch(
-            "SELECT date, sales_type, source_id, revenue, orders_count, "
-            "unique_customers, new_customers, returning_customers, "
-            "returns_count, returns_revenue, avg_order_value "
-            "FROM gold.daily_revenue"
+            f"SELECT {', '.join(GOLD_COLUMNS)} FROM gold.daily_revenue"
         )
     return [tuple(r) for r in records]
 

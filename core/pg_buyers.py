@@ -267,15 +267,33 @@ async def hourly_ids_diff(store) -> Dict[str, Any]:
     if not pg_landing.enabled():
         return {"skipped": "KS_PG_DSN is not set"}
     try:
+        # Initialisation is not a heal: the very first fill ships ~20k rows
+        # legitimately, and filing that as "the mirror lost something" would
+        # cry wolf on day one. History = the watermark row already carries
+        # backfilled_at from a previous clean pass.
+        from core.pg import get_pool
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            had_history = await conn.fetchval(
+                "SELECT backfilled_at IS NOT NULL FROM meta.mirror_state "
+                "WHERE table_name = $1",
+                BUYERS_STATE,
+            )
         result = await backfill_buyers(store)
         if result.get("shipped"):
-            # WARNING, not info: an hourly heal that ships rows means the
-            # mirror lost something since the last pass, and a repair the
-            # daily comparison never gets to see must at least be loud.
-            logger.warning("pg_buyers: ids-diff healed missing rows: %s", result)
-            from datetime import datetime, timezone
+            if had_history:
+                # WARNING, not info: an hourly heal that ships rows means the
+                # mirror lost something since the last pass, and a repair the
+                # daily comparison never gets to see must at least be loud.
+                logger.warning("pg_buyers: ids-diff healed missing rows: %s", result)
+                from datetime import datetime, timezone
 
-            last_heal.update(at=datetime.now(timezone.utc), shipped=result["shipped"])
+                last_heal.update(
+                    at=datetime.now(timezone.utc), shipped=result["shipped"]
+                )
+            else:
+                logger.info("pg_buyers: initial backfill: %s", result)
         return result
     except Exception as e:
         detail = f"{type(e).__name__}: {e}"

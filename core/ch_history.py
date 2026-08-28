@@ -3,10 +3,12 @@
 Not a layer of the trunk and not a second bronze: `app.order_versions` in
 Postgres remains the archive of record (it is where the RETURNING writes, in
 the transaction that writes the order), and ClickHouse *inherits* it — an
-append-only feed above `MAX(id)`, `core/pg_operational.py`'s watermark shape
-with `pg_backfill`'s no-cursor rule: the watermark is read back out of
-ClickHouse itself, so there is nothing stored to be wrong, and an interrupted
-run resumes by recomputing. The first run inherits everything.
+hourly **ids-diff**, `pg_backfill`'s no-cursor rule: nothing stored to be
+wrong, an interrupted run resumes by recomputing, the first run inherits
+everything, and a row lost below the copy's own high-water mark heals within
+the hour instead of being reported CRITICAL forever. A heal is loud — a
+WARNING in the log and an INFO finding in the daily check — because a repair
+the comparison never sees would otherwise be measuring the already-repaired.
 
 Append-only is a property of the engine here — plain MergeTree receives only
 INSERTs from one statement in this module — and of the source: revision 0010
@@ -19,11 +21,13 @@ same GRANT the other three databases already have. Until then every ship
 fails loudly into `meta.mirror_state` — a missing grant is a failed row, not
 a silent stand-down.
 
-The comparison is bucketed counts, `dq_mirror_landing`'s cheapest shape: both
-sides are append-only, so below ClickHouse's own MAX(id) the sets must match
-exactly — a count per 10,000-id bucket sees any loss, and there is no update
-for it to miss (the fingerprint subtlety that haunts `bronze.orders` does not
-exist for a table nothing rewrites).
+The comparison is bucketed counts, `dq_mirror_landing`'s cheapest shape:
+both sides are append-only, so below ClickHouse's own MAX(id) the sets must
+match exactly — a count per 10,000-id bucket sees any loss, and there is no
+update for it to miss (the fingerprint subtlety that haunts `bronze.orders`
+does not exist for a table nothing rewrites). A short bucket the next hourly
+diff will refill still files its finding first: the check runs on the state
+it sees, and the heal leaves its own trace.
 """
 from __future__ import annotations
 
@@ -45,6 +49,12 @@ from core.ch_common import (
 from core.data_quality import IntegrityIssue, Severity
 
 logger = logging.getLogger(__name__)
+
+# The last below-watermark heal this process performed, read by
+# reconcile_ch_history — the buyers mirror's rule applied to its own sibling:
+# a repair the daily check never gets to see must leave a trace in the
+# findings, not only in a log line. Process-local, same caveat, same reason.
+last_heal: Dict[str, Any] = {}
 
 DB_ENV = "KS_CH_HISTORY_DB"
 STATE_ROW = "clickhouse.order_versions"
@@ -126,7 +136,12 @@ async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
     if not configured():
         return {"skipped": f"{URL_ENV} is not set"}
     try:
-        await _ch_max_id(ensure=True)  # schema, and the table's existence
+        # The ceiling BEFORE shipping is what tells a heal from an append:
+        # anything we ship at or below it is a row the copy had lost.
+        ceiling = await _ch_max_id(ensure=True)
+        # A full id scan of a forever-growing table, hourly: ~47k ids today,
+        # ~100 new a day — an int column stays trivial for decades, and the
+        # day it is not, this comment is where the pagination goes.
         ch_text = await _execute(f"SELECT id FROM {table()} FORMAT TabSeparated")
         ch_ids = {int(line) for line in ch_text.split("\n") if line}
         pool = await get_pool()
@@ -151,7 +166,16 @@ async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
             )
             shipped += len(rows)
         await _mark_ok(STATE_ROW, shipped)
-        if shipped:
+        healed = sum(1 for i in missing if i <= ceiling)
+        if healed:
+            logger.warning(
+                "ch_history: ids-diff healed %d version(s) below the "
+                "watermark — rows the copy had lost", healed,
+            )
+            from datetime import datetime, timezone
+
+            last_heal.update(at=datetime.now(timezone.utc), shipped=healed)
+        elif shipped:
             logger.info("ch_history: appended %d version(s)", shipped)
         return {"appended": shipped}
     except Exception as e:
@@ -195,13 +219,31 @@ async def reconcile_ch_history(*, max_samples: int = 10) -> List[IntegrityIssue]
         )
     pg_buckets = {int(r[0]): int(r[1]) for r in records}
 
+    issues: List[IntegrityIssue] = []
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    if last_heal and (now - last_heal["at"]).total_seconds() < 24 * 3600:
+        issues.append(IntegrityIssue(
+            check_name="ch_history_selfhealed",
+            table_name=table(), severity=Severity.INFO,
+            count=int(last_heal["shipped"]),
+            description=(
+                f"the hourly ids-diff re-shipped {last_heal['shipped']} "
+                f"version(s) below the copy's watermark at "
+                f"{last_heal['at'].isoformat()} — loss this comparison would "
+                f"otherwise never have seen. Once is housekeeping; daily is "
+                f"a leak wearing a bandage."
+            ),
+        ))
+
     bad = sorted(
         b for b in set(ch_buckets) | set(pg_buckets)
         if ch_buckets.get(b, 0) != pg_buckets.get(b, 0)
     )
     if not bad:
-        return []
-    return [IntegrityIssue(
+        return issues
+    issues.append(IntegrityIssue(
         check_name="ch_history_buckets",
         table_name=table(), severity=Severity.CRITICAL,
         count=len(bad),
@@ -212,4 +254,5 @@ async def reconcile_ch_history(*, max_samples: int = 10) -> List[IntegrityIssue]
             f"watermark the sets must match exactly — a short bucket is loss, "
             f"a long one is a writer that is not this module"
         ),
-    )]
+    ))
+    return issues

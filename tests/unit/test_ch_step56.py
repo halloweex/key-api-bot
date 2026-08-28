@@ -238,3 +238,8 @@ class TestTheColumnListsHaveOneHome:
 
         assert set(ch_silver._TYPES) == set(ch_silver.SILVER_COLUMNS)
         assert set(ch_history._TYPES) == set(ch_history.COLUMNS)
+
+    def test_gold_type_map_covers_the_cell_shape_too(self):
+        from core import ch_gold
+
+        assert set(ch_gold._GOLD_TYPES) == set(ch_gold.COLUMNS)

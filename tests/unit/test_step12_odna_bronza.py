@@ -170,18 +170,71 @@ class TestTheHourlyIdsDiff:
     one-shot backfill would have had no repair path, ever — the audit's
     finding. The diff ships nothing when nothing is missing."""
 
+    @staticmethod
+    def _pool(had_history):
+        class _Ctx:
+            async def __aenter__(self):
+                conn = AsyncMock()
+                conn.fetchval = AsyncMock(return_value=had_history)
+                return conn
+
+            async def __aexit__(self, *a):
+                return False
+
+        class _Pool:
+            def acquire(self):
+                return _Ctx()
+
+        return _Pool()
+
     @pytest.mark.asyncio
     async def test_runs_the_diff_every_tick(self, monkeypatch):
         from core import pg_buyers
+        import core.pg as pg
         import core.pg_landing as pg_landing
 
         monkeypatch.setattr(pg_landing, "enabled", lambda: True)
+        monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=self._pool(True)))
         ran = AsyncMock(return_value={"shipped": 0, "missing_was": 0})
         monkeypatch.setattr(pg_buyers, "backfill_buyers", ran)
 
         out = await pg_buyers.hourly_ids_diff(store=object())
         assert out == {"shipped": 0, "missing_was": 0}
         ran.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_first_fill_is_initialisation_not_a_heal(self, monkeypatch):
+        from core import pg_buyers
+        import core.pg as pg
+        import core.pg_landing as pg_landing
+
+        monkeypatch.setattr(pg_landing, "enabled", lambda: True)
+        monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=self._pool(None)))
+        monkeypatch.setattr(
+            pg_buyers, "backfill_buyers",
+            AsyncMock(return_value={"shipped": 20060, "missing_was": 20060}),
+        )
+        pg_buyers.last_heal.clear()
+
+        await pg_buyers.hourly_ids_diff(store=object())
+        assert not pg_buyers.last_heal  # первый налив — не «лечение»
+
+    @pytest.mark.asyncio
+    async def test_a_later_diff_that_ships_is_a_heal(self, monkeypatch):
+        from core import pg_buyers
+        import core.pg as pg
+        import core.pg_landing as pg_landing
+
+        monkeypatch.setattr(pg_landing, "enabled", lambda: True)
+        monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=self._pool(True)))
+        monkeypatch.setattr(
+            pg_buyers, "backfill_buyers",
+            AsyncMock(return_value={"shipped": 3, "missing_was": 3}),
+        )
+        pg_buyers.last_heal.clear()
+
+        await pg_buyers.hourly_ids_diff(store=object())
+        assert pg_buyers.last_heal["shipped"] == 3
 
     @pytest.mark.asyncio
     async def test_stands_down_without_a_dsn(self, monkeypatch):
@@ -262,23 +315,13 @@ class TestTheLockIsNeverHeldAcrossTheNetwork:
 
         store = DuckDBStore.__new__(DuckDBStore)
 
-        class _Conn:
-            def execute(self, *a):  # comparison-branch SQL builds, unused
-                raise AssertionError("DuckDB was queried for a PG-answered trend")
+        def forbidden():
+            raise AssertionError("store lock was taken for a PG-answered trend")
 
-        class _Ctx:
-            async def __aenter__(self):
-                calls.append(("lock",))
-                return _Conn()
-
-            async def __aexit__(self, *a):
-                return False
-
-        store.connection = lambda: _Ctx()  # type: ignore[method-assign]
+        store.connection = forbidden  # type: ignore[method-assign]
 
         out = await store.get_revenue_trend(
             date(2026, 8, 20), date(2026, 8, 21), include_comparison=True,
         )
-        assert [c[0] for c in calls[:2]] == ["pg", "pg"]
-        assert ("lock",) in calls
+        assert [c[0] for c in calls] == ["pg", "pg"]
         assert out["labels"]

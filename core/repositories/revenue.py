@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from datetime import date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -575,7 +576,15 @@ class RevenueMixin:
                     prev_start, prev_end, sales_type, source_id
                 )
 
-        async with self.connection() as conn:
+        # When Postgres answered everything the method will ask for, the store
+        # is not touched at all — not even an empty lock acquisition, which
+        # would still serialise this request behind a running rebuild.
+        fully_pg = (
+            not use_lines
+            and pg_series is not None
+            and (not include_comparison or prev_pg_series is not None)
+        )
+        async with (nullcontext(None) if fully_pg else self.connection()) as conn:
             cat_ids = None
             if category_id:
                 cat_ids = await self._get_category_with_children(conn, category_id)
