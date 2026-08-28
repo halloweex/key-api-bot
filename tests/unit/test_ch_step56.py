@@ -214,3 +214,27 @@ class TestTheArchiveCopy:
         assert issue.check_name == "ch_history_buckets"
         assert issue.severity is Severity.CRITICAL
         assert issue.sample_ids == (1,)
+
+
+class TestTheColumnListsHaveOneHome:
+    """The review's finding: the copies restated their column lists, so a
+    revision 0012 adding a column to Postgres would silently never reach
+    ClickHouse while every round-trip check stayed green — the copy would be
+    verifying itself against its own stale list. Identity, not equality: the
+    modules must share the object, not agree today."""
+
+    def test_silver_copy_shares_the_projection_write_order(self):
+        from core import ch_silver, pg_silver
+
+        assert ch_silver.SILVER_COLUMNS is pg_silver.SILVER_COLUMNS
+
+    def test_gold_copy_shares_the_cell_shape(self):
+        from core import ch_gold, pg_gold
+
+        assert ch_gold.COLUMNS is pg_gold.GOLD_COLUMNS
+
+    def test_type_maps_cover_exactly_the_shared_columns(self):
+        from core import ch_history, ch_silver
+
+        assert set(ch_silver._TYPES) == set(ch_silver.SILVER_COLUMNS)
+        assert set(ch_history._TYPES) == set(ch_history.COLUMNS)

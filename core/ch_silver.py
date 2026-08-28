@@ -44,8 +44,20 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from core.ch_common import (
+    URL_ENV,
+    configured,
+    date_sample_id,
+    ensure_database,
+    execute as _execute,
+    mark_failed as _mark_failed,
+    mark_ok as _mark_ok,
+    parse_tsv as _parse_generic,
+    render_tsv as _render_generic,
+)
 from core.data_quality import IntegrityIssue, Severity
-from core.ch_gold import URL_ENV, _execute, configured  # one client, one config
+from core.pg_gold import GOLD_COLUMNS
+from core.pg_silver import SILVER_COLUMNS
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +69,8 @@ SILVER_STAGING = "silver.orders_staging"
 GOLD_TABLE = "gold.daily_revenue"
 GOLD_STAGING = "gold.daily_revenue_staging"
 
-# The 15 columns of Postgres silver.orders (revision 0006), in DDL order.
-SILVER_COLUMNS: Tuple[str, ...] = (
-    "id", "source_id", "status_id", "grand_total", "ordered_at",
-    "buyer_id", "manager_id", "order_date", "is_return", "sales_type",
-    "is_active_source", "source_name", "is_new_customer",
-    "buyer_first_order_date", "promocode",
-)
+# SILVER_COLUMNS is imported from core.pg_silver — the projection's own
+# write order, one home; a test pins the identity.
 
 # Column -> TSV type. One map, three readers: the DDL below, the renderer and
 # the parser — a test walks the DDL and asserts it agrees.
@@ -99,80 +106,14 @@ ORDER BY (order_date, sales_type, id)
 """
 
 
-def _escape(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\").replace("\t", "\\t")
-        .replace("\n", "\\n").replace("\r", "\\r")
-    )
+def render_tsv(rows):
+    """Typed TSV over the shared codec — bools as true/false, DateTime as
+    UTC seconds, the two spots a generic str() writes wrong."""
+    return _render_generic(rows, SILVER_COLUMNS, _TYPES)
 
 
-def _unescape(value: str) -> str:
-    out, i = [], 0
-    while i < len(value):
-        ch = value[i]
-        if ch == "\\" and i + 1 < len(value):
-            nxt = value[i + 1]
-            out.append({"t": "\t", "n": "\n", "r": "\r", "\\": "\\"}.get(nxt, nxt))
-            i += 2
-        else:
-            out.append(ch)
-            i += 1
-    return "".join(out)
-
-
-def render_tsv(rows: Sequence[Tuple[Any, ...]]) -> bytes:
-    """Typed TSV. Bool as true/false, DateTime as UTC seconds — the two spots
-    where a generic str() renderer writes something ClickHouse reads wrong."""
-    lines: List[str] = []
-    for row in rows:
-        cells: List[str] = []
-        for name, value in zip(SILVER_COLUMNS, row):
-            kind = _TYPES[name]
-            if value is None:
-                cells.append("\\N")
-            elif kind == "bool":
-                cells.append("true" if value else "false")
-            elif kind == "ts":
-                cells.append(
-                    value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                )
-            elif kind == "date":
-                cells.append(value.strftime("%Y-%m-%d"))
-            elif kind == "str":
-                cells.append(_escape(str(value)))
-            else:
-                cells.append(str(value))
-        lines.append("\t".join(cells))
-    return ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
-
-
-def parse_tsv(text: str) -> List[Tuple[Any, ...]]:
-    rows: List[Tuple[Any, ...]] = []
-    for line in text.split("\n"):
-        if not line:
-            continue
-        typed: List[Any] = []
-        for name, cell in zip(SILVER_COLUMNS, line.split("\t")):
-            kind = _TYPES[name]
-            if cell == "\\N":
-                typed.append(None)
-            elif kind == "bool":
-                typed.append(cell == "true")
-            elif kind == "ts":
-                typed.append(
-                    datetime.strptime(cell, "%Y-%m-%d %H:%M:%S")
-                    .replace(tzinfo=timezone.utc)
-                )
-            elif kind == "date":
-                typed.append(date.fromisoformat(cell))
-            elif kind == "decimal":
-                typed.append(Decimal(cell))
-            elif kind == "int":
-                typed.append(int(cell))
-            else:
-                typed.append(_unescape(cell))
-        rows.append(tuple(typed))
-    return rows
+def parse_tsv(text):
+    return _parse_generic(text, SILVER_COLUMNS, _TYPES)
 
 
 async def _fetch_pg_silver() -> List[Tuple[Any, ...]]:
@@ -199,9 +140,7 @@ async def _fetch_pg_silver() -> List[Tuple[Any, ...]]:
 
 
 async def _ship_silver_rows(rows: Sequence[Tuple[Any, ...]]) -> None:
-    from core.ch_gold import _ensure_database
-
-    await _ensure_database("silver")
+    await ensure_database("silver", execute=_execute)
     await _execute(_SILVER_DDL.format(name=SILVER_TABLE))
     await _execute(_SILVER_DDL.format(name=SILVER_STAGING))
     await _execute(f"TRUNCATE TABLE {SILVER_STAGING}")
@@ -259,9 +198,9 @@ GROUP BY order_date, sales_type
 
 async def _derive_gold() -> int:
     """Recompute gold.daily_revenue from the silver just shipped, atomically."""
-    from core.ch_gold import _TABLE_DDL, _ensure_database
+    from core.ch_gold import _TABLE_DDL
 
-    await _ensure_database("gold")
+    await ensure_database("gold", execute=_execute)
     await _execute(_TABLE_DDL.format(name=GOLD_TABLE))
     await _execute(_TABLE_DDL.format(name=GOLD_STAGING))
     await _execute(f"TRUNCATE TABLE {GOLD_STAGING}")
@@ -302,46 +241,7 @@ async def ch_silver_sync() -> Dict[str, Any]:
         return {"error": detail}
 
 
-async def _mark_ok(state_row: str, rows: int) -> None:
-    from core.pg import get_pool
-
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO meta.mirror_state
-                   (table_name, last_attempted_at, last_ok_at,
-                    failures_since_ok, last_error, last_rows)
-            VALUES ($1, now(), now(), 0, NULL, $2)
-            ON CONFLICT (table_name) DO UPDATE SET
-                last_attempted_at = now(), last_ok_at = now(),
-                failures_since_ok = 0, last_error = NULL,
-                last_rows = EXCLUDED.last_rows
-            """,
-            state_row, rows,
-        )
-
-
-async def _mark_failed(state_row: str, error: str) -> None:
-    try:
-        from core.pg import get_pool
-
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO meta.mirror_state
-                       (table_name, last_attempted_at, failures_since_ok, last_error)
-                VALUES ($1, now(), 1, $2)
-                ON CONFLICT (table_name) DO UPDATE SET
-                    last_attempted_at = now(),
-                    failures_since_ok = meta.mirror_state.failures_since_ok + 1,
-                    last_error = EXCLUDED.last_error
-                """,
-                state_row, error[:2000],
-            )
-    except Exception as exc:  # pragma: no cover - double fault
-        logger.debug("ch_silver: could not record the failure either: %s", exc)
+# _mark_ok / _mark_failed are core.ch_common.mark_ok / mark_failed.
 
 
 # ─── The comparisons ─────────────────────────────────────────────────────────
@@ -366,11 +266,7 @@ def compare_gold_cells(
     issues: List[IntegrityIssue] = []
     want = {_key3(r): r for r in pg_cells}
     got = {_key3(r): r for r in ch_cells}
-    columns = (
-        "date", "sales_type", "source_id", "revenue", "orders_count",
-        "unique_customers", "new_customers", "returning_customers",
-        "returns_count", "returns_revenue", "avg_order_value",
-    )
+    columns = GOLD_COLUMNS
     avg_i = columns.index("avg_order_value")
 
     missing = sorted(k for k in want if k not in got)
@@ -393,7 +289,7 @@ def compare_gold_cells(
                 break
 
     def _sid(k):
-        return k[0].year * 10000 + k[0].month * 100 + k[0].day
+        return date_sample_id(k[0])
 
     if missing:
         issues.append(IntegrityIssue(

@@ -33,8 +33,16 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from core.ch_common import (
+    URL_ENV,
+    configured,
+    ensure_database,
+    execute as _execute,
+    mark_failed as _mark_failed,
+    mark_ok as _mark_ok,
+    render_tsv as _render_generic,
+)
 from core.data_quality import IntegrityIssue, Severity
-from core.ch_gold import URL_ENV, _execute, configured
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +57,11 @@ COLUMNS: Tuple[str, ...] = (
 )
 
 _TYPES: Dict[str, str] = {
-    "id": "int", "order_id": "int", "captured_at": "ts", "kind": "str",
+    "id": "int", "order_id": "int", "captured_at": "ts6", "kind": "str",
     "source_id": "int", "status_id": "int", "status_group_id": "int",
-    "grand_total": "decimal", "ordered_at": "ts", "buyer_id": "int",
+    "grand_total": "decimal", "ordered_at": "ts6", "buyer_id": "int",
     "manager_id": "int", "manager_comment": "str", "promocode": "str",
-    "updated_at": "ts",
+    "updated_at": "ts6",
 }
 
 _DDL = """
@@ -83,30 +91,8 @@ def table() -> str:
     return f"{db}.order_versions"
 
 
-def _escape(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\").replace("\t", "\\t")
-        .replace("\n", "\\n").replace("\r", "\\r")
-    )
-
-
 def render_tsv(rows: Sequence[Tuple[Any, ...]]) -> bytes:
-    lines: List[str] = []
-    for row in rows:
-        cells: List[str] = []
-        for name, value in zip(COLUMNS, row):
-            if value is None:
-                cells.append("\\N")
-            elif _TYPES[name] == "ts":
-                cells.append(
-                    value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
-                )
-            elif _TYPES[name] == "str":
-                cells.append(_escape(str(value)))
-            else:
-                cells.append(str(value))
-        lines.append("\t".join(cells))
-    return ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
+    return _render_generic(rows, COLUMNS, _TYPES)
 
 
 async def _ch_max_id(*, ensure: bool = False) -> int:
@@ -114,9 +100,7 @@ async def _ch_max_id(*, ensure: bool = False) -> int:
     the shipper's business; the reconciliation only reads, and a missing
     table there is an honest WARN, not something a check should build."""
     if ensure:
-        from core.ch_gold import _ensure_database
-
-        await _ensure_database(table().split(".")[0])
+        await ensure_database(table().split(".")[0], execute=_execute)
         await _execute(_DDL.format(name=table()))
     text = await _execute(f"SELECT coalesce(max(id), 0) FROM {table()}")
     return int(text.strip() or 0)
@@ -166,8 +150,6 @@ async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
                 body=render_tsv(rows),
             )
             shipped += len(rows)
-        from core.ch_silver import _mark_ok
-
         await _mark_ok(STATE_ROW, shipped)
         if shipped:
             logger.info("ch_history: appended %d version(s)", shipped)
@@ -175,8 +157,6 @@ async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
     except Exception as e:
         detail = f"{type(e).__name__}: {e}"
         logger.error("ch_history: ship failed: %s", detail)
-        from core.ch_silver import _mark_failed
-
         await _mark_failed(STATE_ROW, detail)
         return {"error": detail}
 

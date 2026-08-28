@@ -60,13 +60,23 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from core.ch_common import (
+    PASSWORD_ENV,
+    URL_ENV,
+    USER_ENV,
+    configured,
+    date_sample_id,
+    ensure_database,
+    execute as _execute,
+    mark_failed as _mark_failed_common,
+    mark_ok as _mark_ok_common,
+    parse_tsv as _parse_generic,
+    render_tsv as _render_generic,
+)
 from core.data_quality import IntegrityIssue, Severity
+from core.pg_gold import GOLD_COLUMNS as COLUMNS
 
 logger = logging.getLogger(__name__)
-
-URL_ENV = "KS_CH_URL"
-USER_ENV = "KS_CH_USER"
-PASSWORD_ENV = "KS_CH_PASSWORD"
 
 # The row in meta.mirror_state. Prefixed so the store is unmistakable in a
 # listing where every other row is a Postgres table.
@@ -75,15 +85,8 @@ STATE_ROW = "clickhouse.gold_daily_revenue"
 TABLE = "gold.daily_revenue"
 STAGING = "gold.daily_revenue_staging"
 
-# The exact column set of Postgres gold.daily_revenue (revision 0007), in
-# order. The shipper renders these, the DDL declares them, and the comparison
-# walks them by index — one list, three readers.
-COLUMNS: Tuple[str, ...] = (
-    "date", "sales_type", "source_id",
-    "revenue", "orders_count", "unique_customers", "new_customers",
-    "returning_customers", "returns_count", "returns_revenue",
-    "avg_order_value",
-)
+# COLUMNS is imported from core.pg_gold.GOLD_COLUMNS — the one home for the
+# cell shape; a test pins the identity so a 0012 cannot drift this copy.
 
 _DECIMAL_COLUMNS = {"revenue", "returns_revenue", "avg_order_value"}
 _INT_COLUMNS = {
@@ -115,47 +118,8 @@ ORDER BY (date, sales_type)
 """
 
 
-def configured() -> bool:
-    return bool(os.getenv(URL_ENV, "").strip())
-
-
-def _auth_headers() -> Dict[str, str]:
-    headers = {"X-ClickHouse-User": os.getenv(USER_ENV, "ks_app").strip() or "ks_app"}
-    password = os.getenv(PASSWORD_ENV, "")
-    if password:
-        headers["X-ClickHouse-Key"] = password
-    return headers
-
-
-async def _execute(sql: str, *, body: Optional[bytes] = None) -> str:
-    """One ClickHouse HTTP round trip.
-
-    DDL/SELECT travel as the request body; an INSERT travels as `?query=` with
-    the TSV payload as the body, which is the documented way to stream data.
-    httpx, because it is already in the lock (the bot brought it) and because
-    urllib would block the event loop this application spends its life
-    defending.
-    """
-    import httpx
-
-    url = os.getenv(URL_ENV, "").strip().rstrip("/") + "/"
-    params: Dict[str, str] = {}
-    content: bytes
-    if body is None:
-        content = sql.encode("utf-8")
-    else:
-        params["query"] = sql
-        content = body
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            url, params=params, content=content, headers=_auth_headers(),
-        )
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"ClickHouse HTTP {response.status_code}: {response.text[:300]}"
-        )
-    return response.text
+# configured() and the HTTP client live in core.ch_common now; `_execute`
+# is imported under its old name so tests keep patching ch_gold._execute.
 
 
 # ─── TSV: the wire format both directions ────────────────────────────────────
@@ -165,72 +129,19 @@ async def _execute(sql: str, *, body: Optional[bytes] = None) -> str:
 # anyway: a format that is correct only for today's data is a format that
 # breaks silently.
 
-def _escape(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace("\t", "\\t")
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-    )
+_GOLD_TYPES = {
+    "date": "date", "sales_type": "str",
+    **{c: "int" for c in _INT_COLUMNS}, "source_id": "int",
+    **{c: "decimal" for c in _DECIMAL_COLUMNS},
+}
 
 
-def _unescape(value: str) -> str:
-    out: List[str] = []
-    i = 0
-    while i < len(value):
-        ch = value[i]
-        if ch == "\\" and i + 1 < len(value):
-            nxt = value[i + 1]
-            out.append({"t": "\t", "n": "\n", "r": "\r", "\\": "\\"}.get(nxt, nxt))
-            i += 2
-        else:
-            out.append(ch)
-            i += 1
-    return "".join(out)
+def render_tsv(rows):
+    return _render_generic(rows, COLUMNS, _GOLD_TYPES)
 
 
-def render_tsv(rows: Sequence[Tuple[Any, ...]]) -> bytes:
-    lines: List[str] = []
-    for row in rows:
-        cells: List[str] = []
-        for value in row:
-            if value is None:
-                cells.append("\\N")
-            elif isinstance(value, (date, datetime)):
-                cells.append(value.strftime("%Y-%m-%d"))
-            elif isinstance(value, str):
-                cells.append(_escape(value))
-            else:
-                cells.append(str(value))
-        lines.append("\t".join(cells))
-    return ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
-
-
-def parse_tsv(text: str) -> List[Tuple[Any, ...]]:
-    """Parse a `SELECT ... FORMAT TabSeparated` response into typed rows.
-
-    Types come from COLUMNS by position: date → date, the three money columns
-    → Decimal, counters → int, sales_type → str. source_id's `\\N` → None.
-    """
-    rows: List[Tuple[Any, ...]] = []
-    for line in text.split("\n"):
-        if not line:
-            continue
-        cells = line.split("\t")
-        typed: List[Any] = []
-        for name, cell in zip(COLUMNS, cells):
-            if cell == "\\N":
-                typed.append(None)
-            elif name == "date":
-                typed.append(date.fromisoformat(cell))
-            elif name in _DECIMAL_COLUMNS:
-                typed.append(Decimal(cell))
-            elif name in _INT_COLUMNS or name == "source_id":
-                typed.append(int(cell))
-            else:
-                typed.append(_unescape(cell))
-        rows.append(tuple(typed))
-    return rows
+def parse_tsv(text):
+    return _parse_generic(text, COLUMNS, _GOLD_TYPES)
 
 
 def _key(row: Tuple[Any, ...]) -> Tuple[Any, Any, Any]:
@@ -238,13 +149,7 @@ def _key(row: Tuple[Any, ...]) -> Tuple[Any, Any, Any]:
 
 
 def _sample_id(row_key: Tuple[Any, Any, Any]) -> int:
-    """A cell key rendered as the one int `IntegrityIssue.sample_ids` holds.
-
-    yyyymmdd of the cell's date — enough to find the cell, which is all a
-    sample is for.
-    """
-    d = row_key[0]
-    return d.year * 10000 + d.month * 100 + d.day
+    return date_sample_id(row_key[0])
 
 
 # ─── Postgres side ───────────────────────────────────────────────────────────
@@ -261,68 +166,17 @@ async def _fetch_pg_rows() -> List[Tuple[Any, ...]]:
 
 
 async def _watermark_ok(rows: int) -> None:
-    from core.pg import get_pool
-
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO meta.mirror_state
-                   (table_name, last_attempted_at, last_ok_at,
-                    failures_since_ok, last_error, last_rows)
-            VALUES ($1, now(), now(), 0, NULL, $2)
-            ON CONFLICT (table_name) DO UPDATE SET
-                last_attempted_at = now(),
-                last_ok_at        = now(),
-                failures_since_ok = 0,
-                last_error        = NULL,
-                last_rows         = EXCLUDED.last_rows
-            """,
-            STATE_ROW, rows,
-        )
+    await _mark_ok_common(STATE_ROW, rows)
 
 
 async def _watermark_failed(error: str) -> None:
-    """Best effort, `pg_landing._record_failure`'s reasoning: the case that
-    misleads is a ClickHouse fault while Postgres is fine, and without this
-    the row would keep its last success and read as healthy."""
-    try:
-        from core.pg import get_pool
-
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO meta.mirror_state
-                       (table_name, last_attempted_at, failures_since_ok, last_error)
-                VALUES ($1, now(), 1, $2)
-                ON CONFLICT (table_name) DO UPDATE SET
-                    last_attempted_at = now(),
-                    failures_since_ok = meta.mirror_state.failures_since_ok + 1,
-                    last_error        = EXCLUDED.last_error
-                """,
-                STATE_ROW, error[:2000],
-            )
-    except Exception as exc:  # pragma: no cover - double fault
-        logger.debug("ch_gold: could not record the failure either: %s", exc)
+    await _mark_failed_common(STATE_ROW, error)
 
 
 # ─── The shipper ─────────────────────────────────────────────────────────────
 
 async def _ensure_database(name: str) -> None:
-    """CREATE DATABASE IF NOT EXISTS, tolerating a denied global right.
-
-    On production the platform pre-creates bronze/silver/gold and `ks_app`
-    holds no global CREATE DATABASE — the statement is denied even when the
-    database exists. An existing database is the expected case there, and the
-    CREATE TABLE that follows is the real probe: it fails honestly when the
-    database truly is not there.
-    """
-    try:
-        await _execute(f"CREATE DATABASE IF NOT EXISTS {name}")
-    except RuntimeError as e:
-        if "ACCESS_DENIED" not in str(e) and "Code: 497" not in str(e):
-            raise
+    await ensure_database(name, execute=_execute)
 
 
 async def ensure_schema() -> None:
