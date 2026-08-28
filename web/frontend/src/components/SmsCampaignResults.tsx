@@ -1,4 +1,5 @@
 import { memo, useMemo, useState } from 'react'
+import { ChevronDown, ChevronRight } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { Select } from './Select'
@@ -72,15 +73,28 @@ function Verdict({ comparison }: { comparison: SmsComparison }) {
   )
 }
 
-/** Rate over the arm, with the counts it was computed from underneath. */
+/** Rate over the arm, the counts it came from, and what one person was worth.
+ *
+ *  The per-person line is the whole reason this cell has three rows. An arm's
+ *  own money only ever appeared here as a conversion percentage, and the
+ *  incremental figure two columns over is a difference — so "₴22 a head against
+ *  ₴7 a head" , the one comparison anybody reads without training, was on the
+ *  page nowhere. It is deliberately the arm's own revenue over its own
+ *  contacts: no modelling, no interval, just what happened divided by how many
+ *  it happened to. */
 function RateCell({ stats }: { stats: SmsGroupStats }) {
+  const { t } = useTranslation()
   const rate = stats.contacts ? (100 * stats.converted) / stats.contacts : 0
+  const perPerson = stats.contacts ? stats.revenue / stats.contacts : 0
 
   return (
     <>
       <div className="font-medium text-slate-800">{rate.toFixed(1)}%</div>
       <div className="text-[11px] text-slate-500">
         {formatNumber(stats.converted)} / {formatNumber(stats.contacts)}
+      </div>
+      <div className="text-[11px] text-slate-600 mt-0.5">
+        {formatCurrency(perPerson)} <span className="text-slate-400">{t('sms.perPerson')}</span>
       </div>
     </>
   )
@@ -128,11 +142,83 @@ function formatP(p: number): string {
   return p < 0.001 ? '<0.001' : p.toFixed(3)
 }
 
-export const SmsCampaignResults = memo(function SmsCampaignResults() {
+/** The answer, in a sentence, before any of the apparatus.
+ *
+ *  What this block showed first used to be a forest plot and a table with
+ *  p-values and percentage points — for a campaign whose entire dataset is one
+ *  row. Every figure that mattered was on the page and none of them added up to
+ *  a sentence, so the honest summary ("we spent ₴5 375, we appear to have made
+ *  ₴64 000 more than the control, and it cannot be proven because one person in
+ *  the control bought anything") had to be assembled by the reader.
+ *
+ *  The caveat is not a footnote here. Money that has not cleared the verdict is
+ *  a plausible range with a loss in it, and this is the line most likely to be
+ *  quoted at somebody, so the reason it might be wrong travels with it. */
+function Headline({ comparison, costTotal }: {
+  comparison: SmsComparison
+  costTotal: number | null | undefined
+}) {
   const { t } = useTranslation()
-  const [campaign, setCampaign] = useState<string | null>(null)
+  const proven = comparison.significant
+  const payback =
+    costTotal != null ? comparison.incrementalMarginTotal - costTotal : null
+
+  return (
+    <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3">
+      <p className="text-[15px] leading-snug text-slate-800">
+        {t(proven ? 'sms.headlineProven' : 'sms.headlineApparent', {
+          revenue: formatCurrency(comparison.incrementalRevenueTotal),
+        })}
+      </p>
+
+      <p className="mt-1 text-xs text-slate-600 tabular-nums">
+        {t('sms.headlineMargin', {
+          margin: formatCurrency(comparison.incrementalMarginTotal),
+        })}
+        {costTotal != null && (
+          <>
+            {' · '}
+            {t('sms.headlineSpent', { cost: formatCurrency(costTotal) })}
+            {' · '}
+            <span className={payback! >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
+              {t(payback! >= 0 ? 'sms.headlinePaidBack' : 'sms.headlineShort', {
+                amount: formatCurrency(Math.abs(payback!)),
+              })}
+            </span>
+          </>
+        )}
+      </p>
+
+      {/* Why the number above may not survive contact with more data. */}
+      <p className="mt-1.5 text-xs text-slate-500 leading-snug">
+        {!comparison.verdictReady
+          ? t('sms.headlineWhyEarly', {
+              n: comparison.eventsHoldout, min: comparison.minEvents,
+            })
+          : proven
+            ? t('sms.headlineWhyProven')
+            : t('sms.headlineWhyWide')}
+      </p>
+    </div>
+  )
+}
+
+/** Controlled from the page when the campaign list drives the choice; the
+ *  props stay optional so the block still works — and still tests — alone. */
+interface SmsCampaignResultsProps {
+  campaign?: string | null
+  onCampaignChange?: (campaign: string) => void
+}
+
+export const SmsCampaignResults = memo(function SmsCampaignResults({
+  campaign: campaignProp,
+  onCampaignChange,
+}: SmsCampaignResultsProps = {}) {
+  const { t } = useTranslation()
+  const [ownCampaign, setOwnCampaign] = useState<string | null>(null)
   const [windowDays, setWindowDays] = useState(30)
   const [deliveredOnly, setDeliveredOnly] = useState(false)
+  const [showStats, setShowStats] = useState(false)
 
   const { data: list } = useSmsCampaigns()
   const sent = useMemo(
@@ -140,6 +226,11 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
     [list],
   )
 
+  const campaign = campaignProp !== undefined ? campaignProp : ownCampaign
+  const setCampaign = (c: string) => {
+    setOwnCampaign(c)
+    onCampaignChange?.(c)
+  }
   const selected = campaign ?? sent[0]?.campaign ?? null
   const { data, isLoading, error } = useSmsCampaignResults(
     selected, windowDays, deliveredOnly,
@@ -299,14 +390,42 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
               </div>
             )}
 
-            {/* ── Every arm on one axis — the only chart here ─────────── */}
+            {/* ── The answer, before the apparatus ────────────────────── */}
+            {data.overall.comparison && (
+              <Headline
+                comparison={data.overall.comparison}
+                costTotal={data.costTotal}
+              />
+            )}
+
+            {/* ── Every arm on one axis — folded away by default ───────
+                Interval width is worth a chart, but it is an expert's chart,
+                and it was the first thing on screen above a table nobody had
+                got to yet. It stays one click away rather than gone. */}
             {forestRows.length > 0 && (
-              <div className="rounded-lg border border-slate-200 p-3 sm:p-4 mb-4">
-                <h3 className="text-sm font-medium text-slate-700 mb-1">
-                  {t('sms.forestTitle')}
-                </h3>
-                <p className="text-xs text-slate-500 mb-3">{t('sms.forestDesc')}</p>
-                <SmsLiftForest rows={forestRows} />
+              <div className="mb-4">
+                <button
+                  type="button"
+                  onClick={() => setShowStats((s) => !s)}
+                  aria-expanded={showStats}
+                  className="flex items-center gap-1.5 text-xs font-medium text-slate-600
+                             hover:text-purple-800"
+                >
+                  {showStats
+                    ? <ChevronDown className="w-3.5 h-3.5" />
+                    : <ChevronRight className="w-3.5 h-3.5" />}
+                  {t('sms.statsToggle')}
+                </button>
+
+                {showStats && (
+                  <div className="mt-2 rounded-lg border border-slate-200 p-3 sm:p-4">
+                    <h3 className="text-sm font-medium text-slate-700 mb-1">
+                      {t('sms.forestTitle')}
+                    </h3>
+                    <p className="text-xs text-slate-500 mb-3">{t('sms.forestDesc')}</p>
+                    <SmsLiftForest rows={forestRows} />
+                  </div>
+                )}
               </div>
             )}
 
@@ -320,7 +439,7 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
                       <Th align="right">{t('sms.colMessaged')}</Th>
                       <Th align="right">{t('sms.colControl')}</Th>
                       <Th align="right">{`${t('sms.lift')}, ${t('sms.pp')}`}</Th>
-                      <Th align="right">{t('sms.pValue')}</Th>
+                      {showStats && <Th align="right">{t('sms.pValue')}</Th>}
                       <Th align="right">{t('sms.guideRevenueTerm')}</Th>
                       <Th align="right">{t('sms.guideMarginTerm')}</Th>
                     </Tr>
@@ -355,7 +474,9 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
                                   {c.liftPp > 0 ? '+' : ''}{c.liftPp.toFixed(1)}
                                 </span>
                               </Td>
-                              <Td align="right" tabular>{formatP(c.pValue)}</Td>
+                              {showStats && (
+                                <Td align="right" tabular>{formatP(c.pValue)}</Td>
+                              )}
                               <Td align="right" tabular>
                                 <MoneyCell
                                   total={c.incrementalRevenueTotal}
@@ -372,7 +493,7 @@ export const SmsCampaignResults = memo(function SmsCampaignResults() {
                               </Td>
                             </>
                           ) : (
-                            <Td align="right" colSpan={4}>
+                            <Td align="right" colSpan={showStats ? 4 : 3}>
                               <span className="text-[11px] text-slate-500">
                                 {t('sms.noControlInTier')}
                               </span>

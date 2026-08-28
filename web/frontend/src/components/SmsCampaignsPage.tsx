@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { memo, useCallback, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { FlaskConical, Plus } from 'lucide-react'
 import { PageShell } from './PageShell'
@@ -23,6 +23,19 @@ import { SmsCampaignResults } from './SmsCampaignResults'
 export const SmsCampaignsPage = memo(function SmsCampaignsPage() {
   const { t } = useTranslation()
   const [building, setBuilding] = useState(false)
+  // The chosen campaign lives here because both blocks below speak about it:
+  // the list picks one, the results read it. They used to hold that choice
+  // separately, so the list could not answer the only question a sent campaign
+  // still has.
+  const [selected, setSelected] = useState<string | null>(null)
+  const resultsRef = useRef<HTMLElement>(null)
+
+  const showResults = useCallback((campaign: string) => {
+    setSelected(campaign)
+    // Picking from the list is a request to read the results, and on a phone
+    // they are a screen away.
+    resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
 
   return (
     <PageShell variant="feature" ariaLabel={t('sms.title')}>
@@ -48,10 +61,10 @@ export const SmsCampaignsPage = memo(function SmsCampaignsPage() {
       )}
 
       <section aria-label={t('sms.campaignsTitle')}>
-        <SmsCampaignList />
+        <SmsCampaignList selected={selected} onSelect={showResults} />
       </section>
-      <section aria-label={t('sms.resultsTitle')}>
-        <SmsCampaignResults />
+      <section aria-label={t('sms.resultsTitle')} ref={resultsRef}>
+        <SmsCampaignResults campaign={selected} onCampaignChange={setSelected} />
       </section>
     </PageShell>
   )

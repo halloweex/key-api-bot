@@ -247,3 +247,77 @@ describe('SmsCampaignResults', () => {
     expect(screen.queryByRole('table')).toBeNull()
   })
 })
+
+// ─── What the block says before the apparatus ───────────────────────────────
+
+describe('SmsCampaignResults, read by someone who is not a statistician', () => {
+  it('answers in a sentence before showing any table', () => {
+    renderWith(response({ costTotal: 5374.72 }))
+    // The lead line names the money, not the percentage points it came from.
+    expect(screen.getByText(/sms\.headlineApparent/)).toBeInTheDocument()
+  })
+
+  it('calls the money proven only once the comparison is', () => {
+    renderWith(response({
+      overall: {
+        target: stats(), holdout: stats({ contacts: 120, converted: 4 }),
+        comparison: comparison({ significant: true }),
+      },
+    }))
+    expect(screen.getByText(/sms\.headlineProven/)).toBeInTheDocument()
+  })
+
+  it('says why it cannot be proven, in the same breath as the number', () => {
+    renderWith(response({
+      overall: {
+        target: stats(), holdout: stats({ contacts: 472, converted: 1 }),
+        comparison: comparison({ verdictReady: false, eventsHoldout: 1, minEvents: 5 }),
+      },
+    }))
+    // The reason travels with the figure — this is the line most likely to be
+    // quoted at somebody.
+    expect(screen.getByText(/sms\.headlineWhyEarly.*"n":1.*"min":5/)).toBeInTheDocument()
+  })
+
+  it('says whether the send covered its own cost, in the lead', () => {
+    renderWith(response({ costTotal: 1000 }))   // margin 4000 against cost 1000
+    expect(screen.getByText(/sms\.headlinePaidBack/)).toBeInTheDocument()
+  })
+
+  it('does not claim payback when it lost money', () => {
+    renderWith(response({ costTotal: 9000 }))   // margin 4000 against cost 9000
+    expect(screen.getByText(/sms\.headlineShort/)).toBeInTheDocument()
+  })
+
+  it('gives each arm its own money per person', () => {
+    // The one comparison a reader makes unaided — ₴90 a head against ₴750 —
+    // and it was on the page nowhere: arms carried a conversion rate only.
+    renderWith(response())
+    expect(screen.getAllByText('sms.perPerson').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('keeps the statistics one click away rather than first', () => {
+    renderWith(response())
+    // Folded: no p-value column, no forest plot heading.
+    expect(screen.queryByText('sms.pValue')).not.toBeInTheDocument()
+    expect(screen.queryAllByRole('heading', { name: 'sms.forestTitle' })).toHaveLength(0)
+    expect(screen.getByText('sms.statsToggle')).toBeInTheDocument()
+  })
+
+  it('shows them in full once asked', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event')
+    renderWith(response())
+    await userEvent.click(screen.getByText('sms.statsToggle'))
+    expect(screen.getByText('sms.pValue')).toBeInTheDocument()
+    // The guide names the plot too, so the heading is not unique once open.
+    expect(screen.getAllByText('sms.forestTitle').length).toBeGreaterThan(0)
+  })
+
+  it('reads the campaign it is told to read', () => {
+    // The list drives this from above; without the prop the block still picks
+    // its own, which is what every test above relies on.
+    results.current = response()
+    render(<SmsCampaignResults campaign="jul-promo" />)
+    expect(screen.getByText(/sms\.headlineApparent/)).toBeInTheDocument()
+  })
+})

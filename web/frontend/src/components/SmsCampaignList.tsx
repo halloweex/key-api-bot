@@ -8,7 +8,7 @@ import { SkeletonTable } from './Skeleton'
 import { useSmsCampaigns, useMarkSmsCampaignSent } from '../hooks/useApi'
 import { useToast } from './Toast'
 import { SmsSendDialog } from './SmsSendDialog'
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { BarChart3, ChevronDown, ChevronRight } from 'lucide-react'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import { describeFrozenCriteria } from '../utils/smsAudience'
 import type { SmsCampaignSummary } from '../types/api'
@@ -31,7 +31,16 @@ function formatDateTime(iso: string | null): string {
       })
 }
 
-export const SmsCampaignList = memo(function SmsCampaignList() {
+/** `onSelect` wires the list to the results block below it. Optional, so the
+ *  list still stands alone — and still tests alone. */
+interface SmsCampaignListProps {
+  selected?: string | null
+  onSelect?: (campaign: string) => void
+}
+
+export const SmsCampaignList = memo(function SmsCampaignList({
+  selected, onSelect,
+}: SmsCampaignListProps = {}) {
   const { t } = useTranslation()
   const { data, isLoading } = useSmsCampaigns()
   const markSent = useMarkSmsCampaignSent()
@@ -87,7 +96,7 @@ export const SmsCampaignList = memo(function SmsCampaignList() {
               <tbody className="divide-y divide-slate-100">
                 {campaigns.map((c) => (
                   <Fragment key={c.campaign}>
-                  <tr>
+                  <tr className={selected === c.campaign ? 'bg-purple-50/60' : undefined}>
                     <td className="py-2.5 pr-3">
                       {/* The name opens the campaign. Everything a campaign was
                           — the audience, the text, the bill — was recorded from
@@ -126,6 +135,21 @@ export const SmsCampaignList = memo(function SmsCampaignList() {
                       )}
                     </td>
                     <td className="py-2.5 pl-3 text-right">
+                      {/* A sent campaign's only remaining question is what it
+                          did. The results block sat directly below with its own
+                          campaign picker and no connection to this table, so
+                          reading last month's campaign meant noticing a second
+                          dropdown existed. */}
+                      {c.sentAt && onSelect && (
+                        <Button
+                          size="sm"
+                          variant={selected === c.campaign ? 'primary' : 'secondary'}
+                          onClick={() => onSelect(c.campaign)}
+                        >
+                          <BarChart3 className="w-3.5 h-3.5" />
+                          {t('sms.viewResults')}
+                        </Button>
+                      )}
                       {!c.sentAt && (
                         <div className="flex justify-end gap-2">
                           <Button size="sm" onClick={() => setSending(c)}>
