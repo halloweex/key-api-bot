@@ -43,11 +43,13 @@ export function Card({ children, variant = 'default', animate = 'none' }: CardPr
 
 interface CardHeaderProps {
   children: ReactNode
+  /** Bottom divider. Switch off for a header-only card (a collapsed panel). */
+  divider?: boolean
 }
 
-export function CardHeader({ children }: CardHeaderProps) {
+export function CardHeader({ children, divider = true }: CardHeaderProps) {
   return (
-    <div className="px-3 sm:px-5 py-3 sm:py-4 border-b border-slate-100">
+    <div className={`px-3 sm:px-5 py-3 sm:py-4 ${divider ? 'border-b border-slate-100' : ''}`}>
       {children}
     </div>
   )

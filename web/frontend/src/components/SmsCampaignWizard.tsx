@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Bookmark, Check, X } from 'lucide-react'
+import { Bookmark, Check, Plus, X } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
 import { Button } from './Button'
 import { Badge } from './Badge'
@@ -634,6 +634,33 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
           campaign={created} initialText={text} onClose={() => setSending(false)}
         />
       )}
+    </Card>
+  )
+})
+
+// ─── SmsWizardIntro ──────────────────────────────────────────────────────────
+//
+// Step 1's collapsed state: the same panel header the wizard opens with, so
+// the page reads Step 1 → 2 → 3 whether or not a campaign is being built.
+// The "New campaign" button lives here — in the header slot every panel keeps
+// its action in — not floating between sections.
+
+export const SmsWizardIntro = memo(function SmsWizardIntro({ onStart }: { onStart: () => void }) {
+  const { t } = useTranslation()
+  return (
+    <Card>
+      <CardHeader divider={false}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Badge tone="slate" shape="tag">{t('sms.step', { n: 1 })}</Badge>
+            <CardTitle>{t('sms.wizardTitle')}</CardTitle>
+          </div>
+          <Button variant="primary" size="sm" onClick={onStart}>
+            <Plus className="w-4 h-4" /> {t('sms.newCampaign')}
+          </Button>
+        </div>
+        <p className="text-xs text-slate-500 mt-0.5">{t('sms.wizardIntro')}</p>
+      </CardHeader>
     </Card>
   )
 })

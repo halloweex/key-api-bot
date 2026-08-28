@@ -1,10 +1,9 @@
 import { memo, useCallback, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { FlaskConical, Plus } from 'lucide-react'
+import { FlaskConical } from 'lucide-react'
 import { PageShell } from './PageShell'
 import { InfoBanner } from './InfoBanner'
-import { Button } from './Button'
-import { SmsCampaignWizard } from './SmsCampaignWizard'
+import { SmsCampaignWizard, SmsWizardIntro } from './SmsCampaignWizard'
 import { SmsCampaignList } from './SmsCampaignList'
 import { SmsCampaignResults } from './SmsCampaignResults'
 
@@ -48,17 +47,17 @@ export const SmsCampaignsPage = memo(function SmsCampaignsPage() {
         <p className="mt-1.5">{t('sms.howControl')}</p>
       </InfoBanner>
 
-      {building ? (
-        <section aria-label={t('sms.wizardTitle')}>
+      {/* Step 1 keeps its place on the page whether or not a campaign is
+          being built — collapsed, it is the panel header with the "new
+          campaign" action; open, it is the wizard. Without this the page
+          used to open on a bare "Step 2". */}
+      <section aria-label={t('sms.wizardTitle')}>
+        {building ? (
           <SmsCampaignWizard onClose={() => setBuilding(false)} />
-        </section>
-      ) : (
-        <div className="flex justify-end">
-          <Button onClick={() => setBuilding(true)}>
-            <Plus className="w-4 h-4" /> {t('sms.newCampaign')}
-          </Button>
-        </div>
-      )}
+        ) : (
+          <SmsWizardIntro onStart={() => setBuilding(true)} />
+        )}
+      </section>
 
       <section aria-label={t('sms.campaignsTitle')}>
         <SmsCampaignList selected={selected} onSelect={showResults} />

@@ -51,6 +51,20 @@ export const CompactPadding: Story = {
   ),
 }
 
+export const HeaderOnly: Story = {
+  args: { children: null },
+  render: () => (
+    <Card>
+      <CardHeader divider={false}>
+        <CardTitle>Collapsed panel</CardTitle>
+        <p className="text-xs text-slate-500 mt-0.5">
+          Header-only card: the divider is off so no stray line sits above the card edge.
+        </p>
+      </CardHeader>
+    </Card>
+  ),
+}
+
 export const TablePadding: Story = {
   args: { children: null },
   render: () => (
