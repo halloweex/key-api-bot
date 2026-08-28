@@ -1398,6 +1398,17 @@ class BackgroundScheduler:
                 "severity": sev.value,
                 "duration_ms": int((ended_at - started_at).total_seconds() * 1000),
                 "error": error_message,
+                # Name the findings, or the severity is a dead end: the audit
+                # hit a WARN verdict here and had no way to learn WHICH checks
+                # fired — the issue rows live in DuckDB (one process, no
+                # outside reader), /api/jobs and the DQ health detail sit
+                # behind a session, and the digest goes to Telegram. Check
+                # name, table and count only — no descriptions, no sample ids.
+                "findings": [
+                    f"{i.severity.value}:{i.check_name}:{i.table_name}:{i.count}"
+                    for i in issues
+                    if i.severity is not Severity.INFO
+                ][:10],
             }
             logger.info("Mirror reconciliation complete", extra=result)
             return result
