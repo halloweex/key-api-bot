@@ -568,3 +568,24 @@ describe('the send dialog', () => {
     expect(filled.length).toBeGreaterThan(0)
   })
 })
+
+// ─── One numbering on the page ──────────────────────────────────────────────
+//
+// The page counted 1-2-3 across its cards while the wizard counted 1-2-3-4
+// inside one of them, and a third count sat in the "how it works" banner. So
+// "Step 2" meant Control here and Frozen campaigns a few centimetres below.
+// The page keeps the numbers; the stages inside one step keep their names.
+
+describe('SmsCampaignWizard, in the page it belongs to', () => {
+  it('is step one of the page, and says so', () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+    expect(screen.getByText(/sms\.step.*"n":1/)).toBeInTheDocument()
+  })
+
+  it('numbers none of its own stages', () => {
+    const { container } = render(<SmsCampaignWizard onClose={vi.fn()} />)
+    const nav = container.querySelector('nav')!
+    // The four stage chips carry names and a state dot, never an ordinal.
+    expect(nav.textContent).not.toMatch(/[1-4]/)
+  })
+})
