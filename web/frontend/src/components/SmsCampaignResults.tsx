@@ -6,7 +6,6 @@ import { Select } from './Select'
 import { Badge } from './Badge'
 import { Checkbox } from './Checkbox'
 import { EmptyState } from './EmptyState'
-import { InfoBanner } from './InfoBanner'
 import { SkeletonCard } from './Skeleton'
 import { DataTable, Th, Td, Tr } from './DataTable'
 import { SmsResultsGuide } from './SmsResultsGuide'
@@ -49,28 +48,6 @@ interface ResultRow {
   comparison: SmsComparison | null
   /** The totals row, which leads the table and carries the verdict. */
   emphasis?: boolean
-}
-
-// Three states, not two. "No effect shown" is a claim about the campaign;
-// before either arm has bought enough, the only true statement is that nobody
-// has measured anything yet, and saying the stronger thing reads as a failure.
-function Verdict({ comparison }: { comparison: SmsComparison }) {
-  const { t } = useTranslation()
-
-  if (!comparison.verdictReady) {
-    return (
-      <Badge tone="orange">
-        {t('sms.verdictTooEarly', { n: comparison.eventsHoldout })}
-      </Badge>
-    )
-  }
-  return comparison.significant ? (
-    <Badge tone="green">
-      {t('sms.verdictProven', { lift: comparison.liftPp.toFixed(1) })}
-    </Badge>
-  ) : (
-    <Badge tone="slate">{t('sms.verdictInconclusive')}</Badge>
-  )
 }
 
 /** Rate over the arm, the counts it came from, and what one person was worth.
@@ -120,11 +97,16 @@ function MoneyCell({ total, perContact, estimate }: {
 }) {
   const { t } = useTranslation()
 
+  // Grey, not greyed-and-captioned. The words used to repeat under all four
+  // money cells; the lead now says once, in a sentence, that these are
+  // estimates, and the ink alone carries it from there.
   if (estimate) {
     return (
       <>
         <div className="text-slate-400">{formatCurrency(total)}</div>
-        <div className="text-[11px] text-slate-400 italic">{t('sms.moneyEstimate')}</div>
+        <div className="text-[11px] text-slate-400">
+          {perContact.toFixed(2)} {t('sms.perContact')}
+        </div>
       </>
     )
   }
@@ -165,7 +147,7 @@ function Headline({ comparison, costTotal }: {
 
   return (
     <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3">
-      <p className="text-[15px] leading-snug text-slate-800">
+      <p className="text-sm leading-snug text-slate-800">
         {t(proven ? 'sms.headlineProven' : 'sms.headlineApparent', {
           revenue: formatCurrency(comparison.incrementalRevenueTotal),
         })}
@@ -281,18 +263,6 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
     [rows],
   )
 
-  // Every interval crossing zero is a state in its own right, not four grey
-  // bars to squint at. It means the campaign has not been measured yet — which
-  // is emphatically not the same as it having done nothing.
-  const nothingProven =
-    forestRows.length > 0 && forestRows.every((r) => !r.comparison.significant)
-  // And there are two ways to arrive there. Too few purchases to judge is the
-  // ordinary state of a campaign in its first days; intervals that span zero on
-  // arms that have bought plenty is a much later, much weaker result. They
-  // deserve different sentences.
-  const nothingMeasurable =
-    nothingProven && forestRows.every((r) => !r.comparison.verdictReady)
-  const minEvents = forestRows[0]?.comparison.minEvents ?? 5
 
   if (sent.length === 0) {
     return (
@@ -370,28 +340,11 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
 
             <label className="mb-4 flex items-start gap-2 cursor-pointer">
               <Checkbox checked={deliveredOnly} onChange={setDeliveredOnly} size="sm" />
-              <span className="text-xs text-slate-600 leading-snug">
-                <span className="font-medium text-slate-700">
-                  {t('sms.deliveredOnlyLabel')}
-                </span>
-                {' — '}
-                {t('sms.deliveredOnlyHint')}
+              <span className="text-xs text-slate-600" title={t('sms.deliveredOnlyHint')}>
+                {t('sms.deliveredOnlyLabel')}
               </span>
             </label>
 
-            {/* ── Nothing clears zero: say so once, plainly ───────────── */}
-            {nothingProven && (
-              <div className="mb-4">
-                <InfoBanner
-                  title={t(nothingMeasurable
-                    ? 'sms.tooEarlyTitle' : 'sms.insufficientTitle')}
-                >
-                  {nothingMeasurable
-                    ? t('sms.tooEarlyBody', { n: minEvents })
-                    : t('sms.insufficientBody')}
-                </InfoBanner>
-              </div>
-            )}
 
             {/* ── The answer, before the apparatus ────────────────────── */}
             {data.overall.comparison && (
@@ -458,12 +411,7 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
 
                       return (
                         <Tr key={r.key} hover={false}>
-                          <Td bold={r.emphasis}>
-                            <span className="flex flex-wrap items-center gap-2">
-                              {r.label}
-                              {r.emphasis && c && <Verdict comparison={c} />}
-                            </span>
-                          </Td>
+                          <Td bold={r.emphasis}>{r.label}</Td>
                           <Td align="right" tabular>
                             <RateCell stats={r.target} />
                           </Td>
@@ -510,32 +458,6 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
               </div>
             )}
 
-            {/* ── Did it pay for itself ───────────────────────────────── */}
-            {data.costTotal != null && data.overall.comparison && (
-              <div className="mt-3 flex flex-wrap items-baseline gap-x-2 gap-y-1
-                              text-sm tabular-nums">
-                <span className="text-slate-600">{t('sms.payback')}</span>
-                <span className="font-medium text-slate-800">
-                  {formatCurrency(
-                    data.overall.comparison.incrementalMarginTotal - data.costTotal,
-                  )}
-                </span>
-                <span className="text-xs text-slate-500">
-                  {t('sms.paybackParts', {
-                    margin: formatCurrency(data.overall.comparison.incrementalMarginTotal),
-                    cost: formatCurrency(data.costTotal),
-                  })}
-                </span>
-                {/* The verdict gates this the same way it gates the money
-                    columns: a margin nobody has measured minus a cost that is
-                    exact is not a profit, it is an exact number of a guess. */}
-                {!data.overall.comparison.verdictReady && (
-                  <span className="text-xs text-slate-400 italic">
-                    {t('sms.moneyEstimate')}
-                  </span>
-                )}
-              </div>
-            )}
 
             {data.promocode && (
               <p className="mt-3 text-xs text-slate-500">
@@ -546,9 +468,6 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
               </p>
             )}
 
-            <p className="mt-3 text-[11px] text-slate-400 leading-snug">
-              {t('sms.deliveryCaveat')}
-            </p>
 
             {data.segments.length === 0 && <EmptyState message={t('sms.noRosterData')} />}
           </>

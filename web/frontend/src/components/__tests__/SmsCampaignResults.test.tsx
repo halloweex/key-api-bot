@@ -94,8 +94,10 @@ describe('SmsCampaignResults', () => {
   })
 
   it('says the campaign is unmeasured when no interval clears zero', () => {
+    // Said once, in the lead. It used to be said again in a banner, again in
+    // a badge on the totals row, and again under all four money cells.
     renderWith(response())
-    expect(screen.getByText('sms.insufficientTitle')).toBeTruthy()
+    expect(screen.getByText(/sms\.headlineWhyWide/)).toBeTruthy()
   })
 
   it('drops that notice as soon as one arm shows an effect', () => {
@@ -107,7 +109,8 @@ describe('SmsCampaignResults', () => {
       },
     }))
 
-    expect(screen.queryByText('sms.insufficientTitle')).toBeNull()
+    expect(screen.queryByText(/sms\.headlineWhy(Wide|Early)/)).toBeNull()
+    expect(screen.getByText(/sms\.headlineWhyProven/)).toBeTruthy()
   })
 
   it('marks a proven lift and leaves an unproven one plain', () => {
@@ -152,8 +155,8 @@ describe('SmsCampaignResults', () => {
     }))
 
     // The weaker sentence, and the count that explains it.
-    expect(screen.getByText(/sms\.verdictTooEarly.*"n":1/)).toBeTruthy()
-    expect(screen.queryByText('sms.verdictInconclusive')).toBeNull()
+    expect(screen.getByText(/sms\.headlineWhyEarly.*"n":1/)).toBeTruthy()
+    expect(screen.queryByText(/sms\.headlineWhyWide/)).toBeNull()
   })
 
   it('picks the banner that matches why nothing is proven', () => {
@@ -168,14 +171,14 @@ describe('SmsCampaignResults', () => {
         comparison: comparison({ verdictReady: false, eventsHoldout: 0 }),
       }],
     }))
-    expect(screen.getByText('sms.tooEarlyTitle')).toBeTruthy()
-    expect(screen.queryByText('sms.insufficientTitle')).toBeNull()
+    expect(screen.getByText(/sms\.headlineWhyEarly/)).toBeTruthy()
+    expect(screen.queryByText(/sms\.headlineWhyWide/)).toBeNull()
   })
 
   it('falls back to the wider-interval wording once the arms have bought', () => {
     renderWith(response())   // verdictReady, nothing significant
-    expect(screen.getByText('sms.insufficientTitle')).toBeTruthy()
-    expect(screen.queryByText('sms.tooEarlyTitle')).toBeNull()
+    expect(screen.getByText(/sms\.headlineWhyWide/)).toBeTruthy()
+    expect(screen.queryByText(/sms\.headlineWhyEarly/)).toBeNull()
   })
 
   it('never paints a lift green while the verdict is withheld', () => {
@@ -204,10 +207,10 @@ describe('SmsCampaignResults', () => {
     }))
 
     const overall = screen.getAllByRole('row')[1]
-    // Still printed — watching it move is the point — but not as a result.
+    // Still printed — watching it move is the point — but greyed, with the
+    // caveat carried once by the lead rather than captioned four times.
     expect(within(overall).getByText('₴12,000').className).toContain('slate-400')
-    expect(within(overall).getAllByText('sms.moneyEstimate')).toHaveLength(2)
-    expect(within(overall).queryByText('12.00 sms.perContact')).toBeNull()
+    expect(screen.getByText(/sms\.headlineWhyEarly/)).toBeTruthy()
   })
 
   it('gives the money its full weight once a verdict is offered', () => {
@@ -220,14 +223,14 @@ describe('SmsCampaignResults', () => {
 
   it('states whether the campaign covered what it cost', () => {
     renderWith(response({ costTotal: 5000 }))
-    // 4 000 added margin against 5 000 spent — it did not.
-    expect(screen.getByText('\u20B4-1,000')).toBeTruthy()
-    expect(screen.getByText('sms.payback')).toBeTruthy()
+    // 4 000 added margin against 5 000 spent — it did not. Said in the lead,
+    // where the money is, instead of on a line of its own below the table.
+    expect(screen.getByText(/sms\.headlineShort.*1,000/)).toBeTruthy()
   })
 
   it('says nothing about payback when no cost was recorded', () => {
     renderWith(response())          // costTotal: null
-    expect(screen.queryByText('sms.payback')).toBeNull()
+    expect(screen.queryByText(/sms\.headlinePaidBack|sms\.headlineShort/)).toBeNull()
   })
 
   it('marks the payback as an estimate while the verdict is withheld', () => {
@@ -238,7 +241,7 @@ describe('SmsCampaignResults', () => {
         comparison: comparison({ verdictReady: false, eventsHoldout: 1 }),
       },
     }))
-    expect(screen.getAllByText('sms.moneyEstimate').length).toBeGreaterThan(0)
+    expect(screen.getByText(/sms\.headlineWhyEarly/)).toBeTruthy()
   })
 
   it('draws no table at all until the results have loaded', () => {
