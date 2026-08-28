@@ -39,7 +39,7 @@ export const SmsCampaignsPage = memo(function SmsCampaignsPage() {
 
   return (
     <PageShell variant="feature" ariaLabel={t('sms.title')}>
-      <InfoBanner icon={<FlaskConical className="w-4 h-4" />} title={t('sms.howItWorks')}>
+      <InfoBanner icon={FlaskConical} title={t('sms.howItWorks')}>
         <ol className="list-decimal list-outside ml-4 space-y-0.5">
           <li>{t('sms.how1')}</li>
           <li>{t('sms.how2')}</li>

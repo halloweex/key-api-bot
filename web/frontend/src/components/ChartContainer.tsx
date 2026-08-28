@@ -121,7 +121,12 @@ export const ChartContainer = memo(function ChartContainer({
           className="animate-chart-scale"
         >
           {isEmpty ? (
-            <EmptyState message={resolvedEmptyMessage} height={chartHeight} />
+            // The empty scene fills the slot the chart would have occupied, so
+            // the panel keeps its height. The value is data-driven layout owned
+            // here — EmptyState itself knows nothing about chart dimensions.
+            <div style={{ height: chartHeight }}>
+              <EmptyState message={resolvedEmptyMessage} />
+            </div>
           ) : (
             children
           )}

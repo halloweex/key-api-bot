@@ -24,7 +24,7 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         label={t('products.avgBasketSize')}
         value={data.avgBasketSize}
         formatter={(v) => `${v.toFixed(1)} ${t('products.items')}`}
-        icon={<ShoppingCart className="w-5 h-5" />}
+        icon={ShoppingCart}
         variant="blue"
         subtitle={`${formatNumber(data.totalOrders)} ${t('products.orders')}`}
         labelExtra={
@@ -37,7 +37,7 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         label={t('products.multiItemOrders')}
         value={data.multiItemPct}
         formatter={(v) => `${v.toFixed(1)}%`}
-        icon={<Layers className="w-5 h-5" />}
+        icon={Layers}
         variant="purple"
         subtitle={`${formatNumber(data.multiItemOrders)} ${t('products.of')} ${formatNumber(data.totalOrders)}`}
         labelExtra={
@@ -50,7 +50,7 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         label={t('products.aovUplift')}
         value={data.aovUplift}
         formatter={(v) => `${v.toFixed(1)}x`}
-        icon={<TrendingUp className="w-5 h-5" />}
+        icon={TrendingUp}
         variant="green"
         subtitle={`${formatCurrency(data.multiAov)} ${t('products.vs')} ${formatCurrency(data.singleAov)}`}
         labelExtra={
@@ -63,7 +63,7 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         label={t('products.topPair')}
         value={data.topPairCount}
         formatter={formatNumber}
-        icon={<Link className="w-5 h-5" />}
+        icon={Link}
         variant="orange"
         subtitle={data.topPair}
         labelExtra={

@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useState, useRef, useEffect, type ReactNode } from 'react'
+import { useMemo, useCallback, useState, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { X, AlertCircle } from 'lucide-react'
 import { StatCard, StatCardSkeleton, type StatCardVariant } from './StatCard'
@@ -7,6 +7,7 @@ import { useSummary, useReturns } from '../hooks'
 import { formatCurrency, formatNumber, formatPercent } from '../utils/formatters'
 import type { SummaryResponse, ReturnOrder } from '../types/api'
 import {
+  type IconComponent,
   ShoppingCartIcon,
   CurrencyIcon,
   CalculatorIcon,
@@ -19,7 +20,7 @@ interface CardConfig {
   id: string
   label: string
   variant: StatCardVariant
-  icon: ReactNode
+  icon: IconComponent
   getValue: (data: SummaryResponse) => number
   formatter: (value: number) => string
   getSubtitle?: (data: SummaryResponse) => string | undefined
@@ -33,7 +34,7 @@ const CARD_CONFIGS: (Omit<CardConfig, 'label'> & { labelKey: string })[] = [
     id: 'orders',
     labelKey: 'summary.totalOrders',
     variant: 'blue',
-    icon: <ShoppingCartIcon />,
+    icon: ShoppingCartIcon,
     getValue: (data) => data.totalOrders,
     formatter: formatNumber,
     getSubtitle: (data) => `${data.startDate} - ${data.endDate}`,
@@ -42,7 +43,7 @@ const CARD_CONFIGS: (Omit<CardConfig, 'label'> & { labelKey: string })[] = [
     id: 'revenue',
     labelKey: 'summary.totalRevenue',
     variant: 'green',
-    icon: <CurrencyIcon />,
+    icon: CurrencyIcon,
     getValue: (data) => data.totalRevenue,
     formatter: formatCurrency,
   },
@@ -50,7 +51,7 @@ const CARD_CONFIGS: (Omit<CardConfig, 'label'> & { labelKey: string })[] = [
     id: 'avgCheck',
     labelKey: 'summary.avgCheck',
     variant: 'purple',
-    icon: <CalculatorIcon />,
+    icon: CalculatorIcon,
     getValue: (data) => data.avgCheck,
     formatter: formatCurrency,
   },
@@ -131,7 +132,7 @@ function ReturnsCard({ data }: ReturnsCardProps) {
           value={data.totalReturns}
           formatter={formatNumber}
           variant="orange"
-          icon={<ArrowUturnLeftIcon />}
+          icon={ArrowUturnLeftIcon}
           subtitle={returnRate > 0 ? `${formatPercent(returnRate)}` : undefined}
           clickable={data.totalReturns > 0}
         />

@@ -1,4 +1,4 @@
-import { memo, useEffect, type ReactNode } from 'react'
+import { memo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import {
@@ -11,6 +11,7 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import { api } from '../api/client'
 import { navigate, useRouter } from '../hooks/useRouter'
 import { NavLink } from './NavLink'
+import type { IconComponent } from './icons'
 import { UserProfileDropdown } from './UserProfileDropdown'
 import { UserAvatar } from './UserAvatar'
 import { LiveIndicator } from './LiveIndicator'
@@ -38,7 +39,7 @@ const Logo = ({ size = 32 }: { size?: number }) => (
 
 // ─── Collapsed Nav Icon ──────────────────────────────────────────────────────
 
-function CollapsedNavIcon({ href, icon, label }: { href: string; icon: ReactNode; label: string }) {
+function CollapsedNavIcon({ href, icon: Icon, label }: { href: string; icon: IconComponent; label: string }) {
   const path = useRouter()
   const isActive = path === href
 
@@ -59,7 +60,7 @@ function CollapsedNavIcon({ href, icon, label }: { href: string; icon: ReactNode
           : 'text-slate-500 hover:bg-slate-200 hover:text-slate-700'
       }`}
     >
-      {icon}
+      <Icon className="w-5 h-5" aria-hidden />
     </a>
   )
 }
@@ -194,14 +195,14 @@ export const SidebarRail = memo(function SidebarRail() {
         className={`absolute top-14 left-0 right-0 hidden sm:flex flex-col items-center gap-1 pt-2 px-1
           ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
       >
-        <CollapsedNavIcon href="/" icon={<BarChart3 className="w-5 h-5" />} label={t('nav.salesDashboard')} />
-        <CollapsedNavIcon href="/products" icon={<Lightbulb className="w-5 h-5" />} label={t('nav.productIntelligence')} />
-        <CollapsedNavIcon href="/traffic" icon={<Activity className="w-5 h-5" />} label={t('nav.trafficAnalytics')} />
-        <CollapsedNavIcon href="/inventory" icon={<Box className="w-5 h-5" />} label={t('nav.inventory')} />
-        <CollapsedNavIcon href="/reports" icon={<ClipboardList className="w-5 h-5" />} label={t('nav.reports')} />
-        <CollapsedNavIcon href="/marketing" icon={<Rocket className="w-5 h-5" />} label={t('nav.marketing')} />
+        <CollapsedNavIcon href="/" icon={BarChart3} label={t('nav.salesDashboard')} />
+        <CollapsedNavIcon href="/products" icon={Lightbulb} label={t('nav.productIntelligence')} />
+        <CollapsedNavIcon href="/traffic" icon={Activity} label={t('nav.trafficAnalytics')} />
+        <CollapsedNavIcon href="/inventory" icon={Box} label={t('nav.inventory')} />
+        <CollapsedNavIcon href="/reports" icon={ClipboardList} label={t('nav.reports')} />
+        <CollapsedNavIcon href="/marketing" icon={Rocket} label={t('nav.marketing')} />
         {canSms && (
-          <CollapsedNavIcon href="/sms" icon={<MessageSquare className="w-5 h-5" />} label={t('nav.smsCampaigns')} />
+          <CollapsedNavIcon href="/sms" icon={MessageSquare} label={t('nav.smsCampaigns')} />
         )}
       </div>
 
@@ -212,30 +213,30 @@ export const SidebarRail = memo(function SidebarRail() {
       >
         {/* Main navigation */}
         <nav className="space-y-1" aria-label="Dashboard pages">
-          <NavLink href="/" icon={<BarChart3 className="w-5 h-5" />}>
+          <NavLink href="/" icon={BarChart3}>
             {t('nav.salesDashboard')}
           </NavLink>
-          <NavLink href="/products" icon={<Lightbulb className="w-5 h-5" />}>
+          <NavLink href="/products" icon={Lightbulb}>
             {t('nav.productIntelligence')}
           </NavLink>
-          <NavLink href="/traffic" icon={<Activity className="w-5 h-5" />}>
+          <NavLink href="/traffic" icon={Activity}>
             {t('nav.trafficAnalytics')}
           </NavLink>
-          <NavLink href="/inventory" icon={<Box className="w-5 h-5" />}>
+          <NavLink href="/inventory" icon={Box}>
             {t('nav.inventory')}
           </NavLink>
-          <NavLink href="/reports" icon={<ClipboardList className="w-5 h-5" />}>
+          <NavLink href="/reports" icon={ClipboardList}>
             {t('nav.reports')}
           </NavLink>
-          <NavLink href="/marketing" icon={<Rocket className="w-5 h-5" />}>
+          <NavLink href="/marketing" icon={Rocket}>
             {t('nav.marketing')}
           </NavLink>
           {canSms && (
-            <NavLink href="/sms" icon={<MessageSquare className="w-5 h-5" />}>
+            <NavLink href="/sms" icon={MessageSquare}>
               {t('nav.smsCampaigns')}
             </NavLink>
           )}
-          <NavLink href="/financial" icon={<CircleDollarSign className="w-5 h-5" />} disabled>
+          <NavLink href="/financial" icon={CircleDollarSign} disabled>
             {t('nav.financial')}
           </NavLink>
         </nav>
@@ -247,13 +248,13 @@ export const SidebarRail = memo(function SidebarRail() {
               {t('nav.admin')}
             </p>
             <nav className="space-y-1" aria-label="Admin pages">
-              <NavLink href="/admin/users" icon={<Users className="w-5 h-5" />}>
+              <NavLink href="/admin/users" icon={Users}>
                 {t('nav.manageUsers')}
               </NavLink>
-              <NavLink href="/admin/permissions" icon={<ShieldCheck className="w-5 h-5" />}>
+              <NavLink href="/admin/permissions" icon={ShieldCheck}>
                 {t('nav.permissions')}
               </NavLink>
-              <NavLink href="/margin" icon={<Percent className="w-5 h-5" />}>
+              <NavLink href="/margin" icon={Percent}>
                 {t('nav.margin')}
               </NavLink>
             </nav>

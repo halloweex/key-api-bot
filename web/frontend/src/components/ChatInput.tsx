@@ -1,5 +1,4 @@
 import { memo, useState, useRef, useCallback, useEffect } from 'react'
-import { Loader2, Send } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
 import { Textarea } from './Textarea'
 import { ChatSendButton } from './ChatSendButton'
@@ -169,7 +168,7 @@ export const ChatInput = memo(function ChatInput() {
           onClick={handleSubmit}
           disabled={!input.trim() || isLoading}
           ariaLabel="Send message (Enter)"
-          icon={isLoading ? <Loader2 className="animate-spin h-5 w-5" /> : <Send className="h-5 w-5" />}
+          loading={isLoading}
         />
       </div>
 

@@ -91,7 +91,7 @@ export const CohortLTVChart = memo(function CohortLTVChart({
           surface="tile-gradient"
           tone="blue"
           iconStyle="watermark"
-          icon={<DollarSign size={28} />}
+          icon={DollarSign}
           label={t('retention.avgLTV')}
           value={formatCurrency(data.summary.avgLTV)}
           sub={t('retention.acrossAllCohorts')}
@@ -100,7 +100,7 @@ export const CohortLTVChart = memo(function CohortLTVChart({
           surface="tile-gradient"
           tone="green"
           iconStyle="watermark"
-          icon={<TrendingUp size={28} />}
+          icon={TrendingUp}
           label={t('retention.bestCohort')}
           value={data.summary.bestCohort || '-'}
           sub={`LTV: ${formatCurrency(data.summary.bestCohortLTV)}`}
@@ -109,7 +109,7 @@ export const CohortLTVChart = memo(function CohortLTVChart({
           surface="tile-gradient"
           tone="neutral"
           iconStyle="watermark"
-          icon={<Users size={28} />}
+          icon={Users}
           label={t('retention.cohortsAnalyzed')}
           value={formatNumber(data.cohorts.length)}
         />

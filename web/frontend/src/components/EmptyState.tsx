@@ -14,15 +14,12 @@ interface EmptyStateProps {
   message: string
   /** Secondary helper line — defaults to "Adjust filters and try again". */
   hint?: string
-  /** Optional fixed height (used when embedded inside ChartContainer). */
-  height?: number
 }
 
-export const EmptyState = memo(function EmptyState({ message, hint, height }: EmptyStateProps) {
+export const EmptyState = memo(function EmptyState({ message, hint }: EmptyStateProps) {
   const { t } = useTranslation()
-  const style = height !== undefined ? { height } : undefined
   return (
-    <div className="flex flex-col items-center justify-center py-10 animate-fade-in" style={style}>
+    <div className="h-full flex flex-col items-center justify-center py-10 animate-fade-in">
       <Wrapper marginBottom="sm">
         <LottieAnimation animationData={emptyDataAnimation} size="lg" />
       </Wrapper>

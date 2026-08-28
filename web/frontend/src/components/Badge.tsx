@@ -1,4 +1,5 @@
 import { memo, type ReactNode } from 'react'
+import type { IconComponent } from './icons'
 
 // ─── Badge ───────────────────────────────────────────────────────────────────
 //
@@ -31,8 +32,8 @@ interface BadgeProps {
   children: ReactNode
   tone?: BadgeTone
   shape?: BadgeShape
-  /** Optional icon shown to the left of the label. */
-  icon?: ReactNode
+  /** Optional icon shown to the left of the label. Sized by the badge itself. */
+  icon?: IconComponent
 }
 
 const toneClass: Record<BadgeTone, string> = {
@@ -60,14 +61,14 @@ export const Badge = memo(function Badge({
   children,
   tone = 'neutral',
   shape = 'pill',
-  icon,
+  icon: Icon,
 }: BadgeProps) {
-  const padding = icon ? 'px-2.5 py-1 gap-1' : 'px-2 py-0.5'
+  const padding = Icon ? 'px-2.5 py-1 gap-1' : 'px-2 py-0.5'
   return (
     <span
       className={`inline-flex items-center ${padding} text-xs font-medium ${shapeClass[shape]} ${toneClass[tone]}`}
     >
-      {icon}
+      {Icon && <Icon className="w-3 h-3" aria-hidden />}
       {children}
     </span>
   )

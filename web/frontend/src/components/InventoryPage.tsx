@@ -1,6 +1,7 @@
-import { Suspense, memo, useState } from 'react'
-import { SkeletonChart } from './Skeleton'
+import { memo, useState } from 'react'
 import { PageShell } from './PageShell'
+import { ChartSection } from './ChartSection'
+import { ChartGrid } from './ChartGrid'
 import {
   LazyStockSummaryChart,
   LazyDeadStockChart,
@@ -9,8 +10,6 @@ import {
   LazyBrandRotationCard,
   LazySkuRotationTable,
 } from './chartsLazy'
-
-const ChartFallback = () => <SkeletonChart />
 
 type SkuPreset = 'all' | 'discount' | 'reorder' | 'skip' | 'decelerating'
 
@@ -31,38 +30,30 @@ export const InventoryPage = memo(function InventoryPage() {
 
   return (
     <PageShell variant="feature">
-      <section className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-        <Suspense fallback={<ChartFallback />}>
+      <ChartGrid>
+        <ChartSection>
           <LazyStockSummaryChart />
-        </Suspense>
-        <Suspense fallback={<ChartFallback />}>
+        </ChartSection>
+        <ChartSection>
           <LazyDeadStockChart />
-        </Suspense>
-      </section>
-      <section>
-        <Suspense fallback={<ChartFallback />}>
-          <LazyInventoryTurnoverChart />
-        </Suspense>
-      </section>
-      <section>
-        <Suspense fallback={<ChartFallback />}>
-          <LazyBrandRotationCard onBrandClick={onBrandClick} />
-        </Suspense>
-      </section>
-      <section>
-        <Suspense fallback={<ChartFallback />}>
-          <LazySkuRotationTable
-            brandFilter={skuBrandFilter}
-            presetOverride={skuPreset}
-            onClearExternalFilter={onClearExternalFilter}
-          />
-        </Suspense>
-      </section>
-      <section>
-        <Suspense fallback={<ChartFallback />}>
-          <LazyInventoryTrendChart />
-        </Suspense>
-      </section>
+        </ChartSection>
+      </ChartGrid>
+      <ChartSection>
+        <LazyInventoryTurnoverChart />
+      </ChartSection>
+      <ChartSection>
+        <LazyBrandRotationCard onBrandClick={onBrandClick} />
+      </ChartSection>
+      <ChartSection>
+        <LazySkuRotationTable
+          brandFilter={skuBrandFilter}
+          presetOverride={skuPreset}
+          onClearExternalFilter={onClearExternalFilter}
+        />
+      </ChartSection>
+      <ChartSection>
+        <LazyInventoryTrendChart />
+      </ChartSection>
     </PageShell>
   )
 })

@@ -1,6 +1,7 @@
 import { memo, useState, useCallback, useRef, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChartContainer } from './ChartContainer'
+import { SortableTh, type SortDirection } from './DataTable'
 import { Badge } from './Badge'
 import { Select } from './Select'
 import { formatCurrency, formatNumber } from '../utils/formatters'
@@ -91,49 +92,8 @@ const FilterSelect = memo(function FilterSelect({
   )
 })
 
-// ─── Sortable Header ─────────────────────────────────────────────────────────
-
-type SortDir = 'asc' | 'desc'
-
 // Columns where the first click should sort descending (biggest first)
 const NUMERIC_COLUMNS = new Set(['orders', 'revenue'])
-
-const SortableTh = memo(function SortableTh({
-  column,
-  label,
-  sortBy,
-  sortDir,
-  onSort,
-  align = 'left',
-  className = '',
-}: {
-  column: string
-  label: string
-  sortBy: string
-  sortDir: SortDir
-  onSort: (column: string) => void
-  align?: 'left' | 'right'
-  className?: string
-}) {
-  const isActive = sortBy === column
-  const arrow = isActive ? (sortDir === 'asc' ? '▲' : '▼') : ''
-
-  return (
-    <th
-      className={`py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide
-                  cursor-pointer select-none hover:text-slate-900 hover:bg-slate-100 transition-colors
-                  ${align === 'right' ? 'text-right' : 'text-left'} ${className}`}
-      onClick={() => onSort(column)}
-      aria-sort={isActive ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
-    >
-      <span className="inline-flex items-center gap-1">
-        {align === 'right' && isActive && <span className="text-[9px] text-blue-600">{arrow}</span>}
-        {label}
-        {align === 'left' && isActive && <span className="text-[9px] text-blue-600">{arrow}</span>}
-      </span>
-    </th>
-  )
-})
 
 const PAGE_SIZE = 50
 
@@ -144,7 +104,7 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
   const [trafficFilter, setTrafficFilter] = useState('')
   const [platformFilter, setPlatformFilter] = useState('')
   const [sortBy, setSortBy] = useState('revenue')
-  const [sortDir, setSortDir] = useState<SortDir>('desc')
+  const [sortDir, setSortDir] = useState<SortDirection>('desc')
   const [offset, setOffset] = useState(0)
   // Accumulate loaded pages; keyed by the filter context to reset on change
   const pagesRef = useRef<UtmCampaignRow[]>([])
@@ -232,9 +192,9 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
               <SortableTh column="campaign" label={t('traffic.campaign')}
                 sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
               <SortableTh column="utm_source" label={t('traffic.source')}
-                sortBy={sortBy} sortDir={sortDir} onSort={handleSort} className="hidden md:table-cell" />
+                sortBy={sortBy} sortDir={sortDir} onSort={handleSort} hideBelow="md" />
               <SortableTh column="platform" label={t('traffic.platform')}
-                sortBy={sortBy} sortDir={sortDir} onSort={handleSort} className="hidden md:table-cell" />
+                sortBy={sortBy} sortDir={sortDir} onSort={handleSort} hideBelow="md" />
               <SortableTh column="traffic_type" label={t('chart.type')}
                 sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
               <SortableTh column="orders" label={t('common.orders')} align="right"

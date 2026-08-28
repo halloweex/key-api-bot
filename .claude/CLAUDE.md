@@ -39,7 +39,7 @@ key-api-bot/
 │   ├── frontend/                # React Dashboard (TypeScript + Vite)
 │   │   └── src/
 │   │       ├── api/             # API client with error handling
-│   │       ├── components/      # React components (cards, charts, filters, ui)
+│   │       ├── components/      # ALL components, flat; co-located *.stories.tsx (Storybook)
 │   │       ├── hooks/           # TanStack Query hooks
 │   │       ├── store/           # Zustand filter store
 │   │       └── utils/           # Formatters, colors
@@ -250,6 +250,10 @@ cd web/frontend && npm run dev
 
 # Build frontend for production
 cd web/frontend && npm run build
+
+# Component library (Storybook): dev on :6006, static build to storybook-static/
+cd web/frontend && npm run storybook
+cd web/frontend && npm run build-storybook
 ```
 
 ## Monitoring
@@ -364,6 +368,28 @@ What does exist:
 - Dashboard link
 
 ## Important Notes
+
+### UI component architecture (frontend)
+Every visual style lives inside its component; nothing cosmetic crosses a
+component boundary. Concretely:
+
+- **No `style`/`className` props on components.** Consumers express intent via
+  semantic props only (`variant`, `tone`, `surface`, `size`, `hideBelow`, ...).
+  Internal `className`/inline styles for data-driven values (a bar width, a
+  virtual-list offset) are implementation, not API.
+- **Layout between siblings is the parent's job, via `Wrapper`** — the one
+  component allowed to carry `gap`/`padding`/`margin`/`flex` props. Page-level
+  chrome comes from `PageShell` (feature | dashboard | admin), chart pages
+  compose `ChartSection`/`ChartGrid`.
+- **Icons pass as components, never as styled elements**: `icon={Users}`, typed
+  `IconComponent` (`components/icons.tsx`); the owning component sets size and
+  colour. Lucide icons satisfy the contract as-is.
+- **All components live flat in `src/components/`** — pages included; no local
+  UI components inside page files. Check for an existing component before
+  writing a new one.
+- **Storybook is the component library** (`npm run storybook`): stories are
+  co-located `X.stories.tsx`. A new or reshaped component gets a story in the
+  same change.
 
 ### Timezone Handling
 KeyCRM API stores timestamps in +04:00 (server timezone), but UI displays in Europe/Kyiv. DuckDB queries use `_date_in_kyiv()` helper to convert before extracting dates.

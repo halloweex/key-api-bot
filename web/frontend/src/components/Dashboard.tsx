@@ -1,6 +1,8 @@
-import { Suspense, memo } from 'react'
+import { memo } from 'react'
 import { SummaryCards } from './SummaryCards'
-import { SkeletonChart } from './Skeleton'
+import { PageShell } from './PageShell'
+import { ChartSection } from './ChartSection'
+import { ChartGrid } from './ChartGrid'
 import { ProtectedSection } from './ProtectedSection'
 import {
   LazyRevenueTrendChart,
@@ -15,47 +17,14 @@ import {
   LazyManualExpensesTable,
 } from './chartsLazy'
 
-// ─── Chart Loading Fallback ──────────────────────────────────────────────────
-
-const ChartFallback = memo(function ChartFallback() {
-  return <SkeletonChart />
-})
-
-// ─── Chart Section with Suspense ─────────────────────────────────────────────
-
-interface ChartSectionProps {
-  children: React.ReactNode
-}
-
-const ChartSection = memo(function ChartSection({ children }: ChartSectionProps) {
-  return (
-    <section>
-      <Suspense fallback={<ChartFallback />}>
-        {children}
-      </Suspense>
-    </section>
-  )
-})
-
-// ─── Grid Section ────────────────────────────────────────────────────────────
-
-interface GridSectionProps {
-  children: React.ReactNode
-}
-
-const GridSection = memo(function GridSection({ children }: GridSectionProps) {
-  return (
-    <section className="grid grid-cols-1 lg:grid-cols-2 gap-1.5 sm:gap-2">
-      {children}
-    </section>
-  )
-})
-
-// ─── Dashboard Component ─────────────────────────────────────────────────────
+// ─── Dashboard ───────────────────────────────────────────────────────────────
+//
+// The main sales dashboard: summary cards, then the chart panels in reading
+// order. Pure composition — every panel owns its own data and visuals.
 
 export const Dashboard = memo(function Dashboard() {
   return (
-    <main className="py-1.5 px-1 sm:py-2 sm:px-1.5 lg:py-3 lg:px-2 space-y-1.5 sm:space-y-2 max-w-[1800px]">
+    <PageShell variant="dashboard">
       {/* Summary Cards - loaded immediately */}
       <section>
         <SummaryCards />
@@ -67,24 +36,24 @@ export const Dashboard = memo(function Dashboard() {
       </ChartSection>
 
       {/* Orders & Revenue by Source - Side by Side */}
-      <GridSection>
+      <ChartGrid density="dense">
         <ChartSection>
           <LazyOrdersBySourceChart />
         </ChartSection>
         <ChartSection>
           <LazyRevenueBySourceChart />
         </ChartSection>
-      </GridSection>
+      </ChartGrid>
 
       {/* Charts Row 2 - Top Products (Quantity & Revenue) */}
-      <GridSection>
+      <ChartGrid density="dense">
         <ChartSection>
           <LazyTopProductsChart />
         </ChartSection>
         <ChartSection>
           <LazyTopProductsByRevenueChart />
         </ChartSection>
-      </GridSection>
+      </ChartGrid>
 
       {/* Charts Row 3 - Category Breakdown */}
       <ChartSection>
@@ -112,6 +81,6 @@ export const Dashboard = memo(function Dashboard() {
           <LazyManualExpensesTable />
         </ChartSection>
       </ProtectedSection>
-    </main>
+    </PageShell>
   )
 })

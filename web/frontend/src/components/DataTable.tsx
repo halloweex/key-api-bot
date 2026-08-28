@@ -184,6 +184,60 @@ export const Th = memo(function Th({
   )
 })
 
+// ─── Sortable header cell ────────────────────────────────────────────────────
+//
+// Clickable <th> that owns the sort affordance (hover, arrow, aria-sort).
+// The arrow sits on the inner side of the label for right-aligned columns so
+// numbers stay flush. Responsive hiding is semantic via `hideBelow`, like Th.
+
+export type SortDirection = 'asc' | 'desc'
+
+interface SortableThProps {
+  /** Column key reported to `onSort`. */
+  column: string
+  label: string
+  /** Currently active sort column. */
+  sortBy: string
+  sortDir: SortDirection
+  onSort: (column: string) => void
+  align?: 'left' | 'right'
+  hideBelow?: HideBelow
+}
+
+export const SortableTh = memo(function SortableTh({
+  column,
+  label,
+  sortBy,
+  sortDir,
+  onSort,
+  align = 'left',
+  hideBelow,
+}: SortableThProps) {
+  const isActive = sortBy === column
+  const arrow = isActive ? (sortDir === 'asc' ? '▲' : '▼') : ''
+
+  return (
+    <th
+      className={[
+        'py-3 px-4 text-slate-600 font-semibold text-xs uppercase tracking-wide',
+        'cursor-pointer select-none hover:text-slate-900 hover:bg-slate-100 transition-colors',
+        align === 'right' ? 'text-right' : 'text-left',
+        hideBelow ? hideClass[hideBelow] : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      onClick={() => onSort(column)}
+      aria-sort={isActive ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+    >
+      <span className="inline-flex items-center gap-1">
+        {align === 'right' && isActive && <span className="text-[9px] text-blue-600">{arrow}</span>}
+        {label}
+        {align === 'left' && isActive && <span className="text-[9px] text-blue-600">{arrow}</span>}
+      </span>
+    </th>
+  )
+})
+
 export const Td = memo(function Td({
   children,
   align = 'left',

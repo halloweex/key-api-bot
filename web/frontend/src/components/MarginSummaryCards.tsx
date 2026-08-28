@@ -19,7 +19,7 @@ export const MarginSummaryCards = memo(function MarginSummaryCards() {
         <MetricCard
           surface="tile-gradient"
           tone="blue"
-          icon={<CircleDollarSign className="w-5 h-5" />}
+          icon={CircleDollarSign}
           label={t('margin.costedRevenue')}
           value={formatCurrency(data.costed_revenue)}
           sub={`${t('margin.totalRevenue')}: ${formatCurrency(data.total_revenue)}`}
@@ -27,7 +27,7 @@ export const MarginSummaryCards = memo(function MarginSummaryCards() {
         <MetricCard
           surface="tile-gradient"
           tone="orange"
-          icon={<Package className="w-5 h-5" />}
+          icon={Package}
           label={t('margin.cogs')}
           value={formatCurrency(data.cogs)}
           sub={`${formatNumber(data.total_units)} ${t('margin.units')}`}
@@ -35,7 +35,7 @@ export const MarginSummaryCards = memo(function MarginSummaryCards() {
         <MetricCard
           surface="tile-gradient"
           tone="green"
-          icon={<TrendingUp className="w-5 h-5" />}
+          icon={TrendingUp}
           label={t('margin.grossProfit')}
           value={formatCurrency(data.profit)}
           sub={`${t('margin.margin')}: ${formatPercent(data.margin_pct)}`}
@@ -43,7 +43,7 @@ export const MarginSummaryCards = memo(function MarginSummaryCards() {
         <MetricCard
           surface="tile-gradient"
           tone="purple"
-          icon={<ShieldCheck className="w-5 h-5" />}
+          icon={ShieldCheck}
           label={t('margin.costCoverage')}
           value={formatPercent(data.coverage_pct)}
           sub={`${data.skus_with_cost}/${data.total_skus} ${t('margin.skus')}`}

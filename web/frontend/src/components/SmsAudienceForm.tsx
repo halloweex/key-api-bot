@@ -8,6 +8,7 @@ import {
 import { Badge } from './Badge'
 import { Button } from './Button'
 import { Select } from './Select'
+import type { IconComponent } from './icons'
 import { useBrands, useCategories } from '../hooks/useApi'
 import {
   countFilters, dateToDaysAgo, daysAgoToDate,
@@ -83,9 +84,9 @@ function Chip({
 
 /** One family of filters, under the question it answers. */
 function Group({
-  icon, title, hint, children,
+  icon: Icon, title, hint, children,
 }: {
-  icon: React.ReactNode
+  icon: IconComponent
   title: string
   hint: string
   children: React.ReactNode
@@ -93,7 +94,7 @@ function Group({
   return (
     <section className="rounded-lg border border-slate-200 bg-slate-50/70 p-4">
       <div className="flex items-center gap-2">
-        <span className="text-slate-400">{icon}</span>
+        <span className="text-slate-400"><Icon className="w-4 h-4" aria-hidden /></span>
         <h4 className="text-sm font-semibold text-slate-800">{title}</h4>
       </div>
       <p className="text-xs text-slate-500 mt-1 mb-3 leading-snug">{hint}</p>
@@ -104,9 +105,9 @@ function Group({
 
 /** One control, its icon, and the example that says what goes in it. */
 function Field({
-  icon, label, example, children,
+  icon: Icon, label, example, children,
 }: {
-  icon: React.ReactNode
+  icon: IconComponent
   label: string
   example?: string
   children: React.ReactNode
@@ -114,7 +115,7 @@ function Field({
   return (
     <div>
       <div className="flex items-center gap-1.5 mb-1.5">
-        <span className="text-slate-400">{icon}</span>
+        <span className="text-slate-400"><Icon className="w-4 h-4" aria-hidden /></span>
         <span className="text-sm font-medium text-slate-700">{label}</span>
       </div>
       {children}
@@ -284,8 +285,6 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
     [categories],
   )
 
-  const icon = 'w-4 h-4'
-
   return (
     <div className="space-y-4">
       {/* ── The filters themselves ───────────────────────────────────── */}
@@ -297,7 +296,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
           className="flex items-center gap-1.5 text-sm font-medium text-slate-700
                      hover:text-slate-900"
         >
-          {open ? <ChevronUp className={icon} /> : <ChevronDown className={icon} />}
+          {open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
           {t('sms.filtersTitle')}
           {active > 0 && <Badge tone="purple">{active}</Badge>}
         </button>
@@ -307,12 +306,12 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
           <div className="mt-3 space-y-3">
             {/* ── When they bought ─────────────────────────────────── */}
             <Group
-              icon={<Clock className={icon} />}
+              icon={Clock}
               title={t('sms.filterGroupWhen')}
               hint={t('sms.filterGroupWhenHint')}
             >
               <Field
-                icon={<CalendarRange className={icon} />}
+                icon={CalendarRange}
                 label={t('sms.filterWindow')}
                 example={t('sms.filterWindowHint')}
               >
@@ -339,7 +338,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Field>
 
               <Field
-                icon={<CalendarClock className={icon} />}
+                icon={CalendarClock}
                 label={t('sms.filterLastOrder')}
                 example={
                   filters.recencyMin != null || filters.recencyMax != null
@@ -368,7 +367,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Field>
 
               <Field
-                icon={<Clock className={icon} />}
+                icon={Clock}
                 label={t('sms.filterRecency')}
                 example={t('sms.filterRecencyHint')}
               >
@@ -383,7 +382,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Field>
 
               <Field
-                icon={<UserPlus className={icon} />}
+                icon={UserPlus}
                 label={t('sms.filterFirstOrder')}
                 example={t('sms.exFirstOrder')}
               >
@@ -419,12 +418,12 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
 
             {/* ── How much they bought ─────────────────────────────── */}
             <Group
-              icon={<Banknote className={icon} />}
+              icon={Banknote}
               title={t('sms.filterGroupHowMuch')}
               hint={t('sms.filterGroupHowMuchHint')}
             >
               <Field
-                icon={<ShoppingBag className={icon} />}
+                icon={ShoppingBag}
                 label={t('sms.filterOrders')}
                 example={t('sms.exOrders')}
               >
@@ -439,7 +438,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Field>
 
               <Field
-                icon={<Banknote className={icon} />}
+                icon={Banknote}
                 label={t('sms.filterLtv')}
                 example={t('sms.exLtv')}
               >
@@ -455,7 +454,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Field>
 
               <Field
-                icon={<Receipt className={icon} />}
+                icon={Receipt}
                 label={t('sms.filterAov')}
                 example={t('sms.exAov')}
               >
@@ -471,7 +470,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Field>
 
               <Field
-                icon={<Sparkles className={icon} />}
+                icon={Sparkles}
                 label={t('sms.levelLabel')}
                 example={
                   audience.tiers.length === 0 ? t('sms.levelAllHint') : undefined
@@ -501,7 +500,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Field>
 
               <Field
-                icon={<Banknote className={icon} />}
+                icon={Banknote}
                 label={t('sms.basisLabel')}
                 example={t('sms.basisHint')}
               >
@@ -522,12 +521,12 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
 
             {/* ── What they bought ─────────────────────────────────── */}
             <Group
-              icon={<ShoppingBag className={icon} />}
+              icon={ShoppingBag}
               title={t('sms.filterGroupWhat')}
               hint={t('sms.filterGroupWhatHint')}
             >
               <Field
-                icon={<Tag className={icon} />}
+                icon={Tag}
                 label={t('sms.filterBrand')}
                 example={t('sms.exBrand')}
               >
@@ -541,7 +540,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Field>
 
               <Field
-                icon={<Layers className={icon} />}
+                icon={Layers}
                 label={t('sms.filterCategory')}
                 example={t('sms.exCategory')}
               >
@@ -555,7 +554,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Field>
 
               <Field
-                icon={<Store className={icon} />}
+                icon={Store}
                 label={t('sms.filterSource')}
                 example={t('sms.exSource')}
               >
@@ -581,7 +580,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               </Field>
 
               <Field
-                icon={<Ticket className={icon} />}
+                icon={Ticket}
                 label={t('sms.filterPromocode')}
                 example={t('sms.exPromocode')}
               >
@@ -599,7 +598,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               {/* Sits inside this group because it qualifies only this group:
                   it is "bought that, recently", not a rule of its own. */}
               <Field
-                icon={<CalendarClock className={icon} />}
+                icon={CalendarClock}
                 label={t('sms.filterBoughtWithin')}
                 example={t('sms.filterBoughtWithinHint')}
               >
@@ -623,12 +622,12 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
 
             {/* ── Who they are ─────────────────────────────────────── */}
             <Group
-              icon={<Users className={icon} />}
+              icon={Users}
               title={t('sms.filterGroupWho')}
               hint={t('sms.filterGroupWhoHint')}
             >
               <Field
-                icon={<MapPin className={icon} />}
+                icon={MapPin}
                 label={t('sms.filterCity')}
                 example={t('sms.exCity')}
               >
@@ -673,7 +672,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
           aria-expanded={measureOpen}
           className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700"
         >
-          {measureOpen ? <ChevronUp className={icon} /> : <ChevronDown className={icon} />}
+          {measureOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
           {t('sms.measureTitle')}
           {audience.grouping === 'rfm' && <Badge tone="purple">{t('sms.measureOn')}</Badge>}
         </button>
@@ -682,7 +681,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
           <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50/70 p-4
                           flex flex-col gap-3">
             <Field
-              icon={<Banknote className={icon} />}
+              icon={Banknote}
               label={t('sms.tierRulesLabel')}
               example={t('sms.tierRulesHint')}
               >

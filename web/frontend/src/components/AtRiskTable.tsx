@@ -42,7 +42,7 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
           surface="tile-gradient"
           tone="red"
           iconStyle="watermark"
-          icon={<AlertTriangle size={28} />}
+          icon={AlertTriangle}
           label={t('retention.atRiskCustomers')}
           value={formatNumber(data.summary.totalAtRisk)}
           sub={`${formatPercent(data.summary.overallAtRiskPct)} ${t('retention.atRiskOfTotal')}`}
@@ -51,7 +51,7 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
           surface="tile-gradient"
           tone="red"
           iconStyle="watermark"
-          icon={<Users size={28} />}
+          icon={Users}
           label={t('retention.churnedCustomers')}
           value={formatNumber(data.summary.totalChurned)}
           sub={`${formatPercent(data.summary.churnPct)} ${t('retention.atRiskOfTotal')}`}
@@ -60,7 +60,7 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
           surface="tile-gradient"
           tone="orange"
           iconStyle="watermark"
-          icon={<TrendingUp size={28} />}
+          icon={TrendingUp}
           label={t('retention.atRiskRevenue')}
           value={formatCurrency(totalAtRiskRevenue)}
           sub={t('retention.historicalValue')}
@@ -69,7 +69,7 @@ export const AtRiskTable = memo(function AtRiskTable({ data }: AtRiskTableProps)
           surface="tile-gradient"
           tone="blue"
           iconStyle="watermark"
-          icon={<Clock size={28} />}
+          icon={Clock}
           label={t('retention.threshold')}
           value={`${data.daysThreshold} ${t('retention.days')}`}
           sub={t('retention.sinceLastPurchase')}

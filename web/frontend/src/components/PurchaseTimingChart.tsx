@@ -80,7 +80,7 @@ export const PurchaseTimingChart = memo(function PurchaseTimingChart({
           surface="tile-gradient"
           tone="green"
           iconStyle="watermark"
-          icon={<Users size={28} />}
+          icon={Users}
           label={t('retention.repeatCustomers')}
           value={formatNumber(data.summary.totalRepeatCustomers)}
         />
@@ -88,7 +88,7 @@ export const PurchaseTimingChart = memo(function PurchaseTimingChart({
           surface="tile-gradient"
           tone="neutral"
           iconStyle="watermark"
-          icon={<Clock size={28} />}
+          icon={Clock}
           label={t('retention.medianDays')}
           value={data.summary.medianDays != null ? String(data.summary.medianDays) : '-'}
           sub={t('retention.to2ndPurchase')}
@@ -97,7 +97,7 @@ export const PurchaseTimingChart = memo(function PurchaseTimingChart({
           surface="tile-gradient"
           tone="neutral"
           iconStyle="watermark"
-          icon={<TrendingUp size={28} />}
+          icon={TrendingUp}
           label={t('retention.averageDays')}
           value={data.summary.avgDays ? String(Math.round(data.summary.avgDays)) : '-'}
           sub={t('retention.to2ndPurchase')}

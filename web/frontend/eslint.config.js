@@ -26,7 +26,7 @@ const FORM_PRIMITIVE_FILES = [
 ]
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  globalIgnores(['dist', 'storybook-static']),
 
   // Base config — applies to all TS/TSX.
   {

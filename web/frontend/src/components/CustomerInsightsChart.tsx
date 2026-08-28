@@ -101,7 +101,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
             <MetricCard
               surface="tile-gradient"
               tone="blue"
-              icon={<UserPlusIcon />}
+              icon={UserPlusIcon}
               label={t('customer.newCustomers')}
               value={formatNumber(metrics.newCustomers ?? 0)}
               sub={`${newPercent}% ${t('customer.ofTotal')}`}
@@ -109,7 +109,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
             <MetricCard
               surface="tile-gradient"
               tone="purple"
-              icon={<UserGroupIcon />}
+              icon={UserGroupIcon}
               label={t('customer.returningCustomers')}
               value={formatNumber(metrics.returningCustomers ?? 0)}
               sub={`${returningPercent}% ${t('customer.ofTotal')}`}
@@ -117,7 +117,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
             <MetricCard
               surface="tile-gradient"
               tone="green"
-              icon={<RefreshIcon />}
+              icon={RefreshIcon}
               label={t('customer.repeatRate')}
               value={formatPercent(metrics.repeatRate ?? 0)}
               sub={t('customer.ordersFromReturning')}
@@ -125,7 +125,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
             <MetricCard
               surface="tile-gradient"
               tone="orange"
-              icon={<CurrencyIcon />}
+              icon={CurrencyIcon}
               label={t('customer.avgOrderValue')}
               value={formatCurrency(metrics.averageOrderValue ?? 0)}
               sub={t('customer.perOrder')}
@@ -155,7 +155,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 <MetricCard
                   surface="tile-gradient"
                   tone="rose"
-                  icon={<HeartIcon />}
+                  icon={HeartIcon}
                   label={t('customer.clv')}
                   value={formatCurrency(metrics.customerLifetimeValue ?? 0)}
                   sub={t('customer.clvShort')}
@@ -163,7 +163,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 <MetricCard
                   surface="tile-gradient"
                   tone="indigo"
-                  icon={<ShoppingBagIcon />}
+                  icon={ShoppingBagIcon}
                   label={t('customer.purchaseFrequency')}
                   value={`${(metrics.avgPurchaseFrequency ?? 0).toFixed(1)}x`}
                   sub={t('customer.purchaseFrequencyShort')}
@@ -171,7 +171,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 <MetricCard
                   surface="tile-gradient"
                   tone="teal"
-                  icon={<CalendarIcon />}
+                  icon={CalendarIcon}
                   label={t('customer.customerLifespan')}
                   value={`${Math.round(metrics.avgCustomerLifespanDays ?? 0)} ${t('customer.daysUnit')}`}
                   sub={t('customer.customerLifespanShort')}
@@ -179,7 +179,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 <MetricCard
                   surface="tile-gradient"
                   tone="orange"
-                  icon={<RefreshIcon />}
+                  icon={RefreshIcon}
                   label={t('customer.ordersPerCustomer')}
                   value={`${(metrics.purchaseFrequency ?? 0).toFixed(2)}x`}
                   sub={t('customer.inSelectedPeriod')}
@@ -200,7 +200,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 <MetricCard
                   surface="tile-gradient"
                   tone="cyan"
-                  icon={<UserGroupIcon />}
+                  icon={UserGroupIcon}
                   label={t('customer.totalCustomers')}
                   value={formatNumber(metrics.totalCustomersAllTime ?? 0)}
                   sub={t('customer.uniqueCustomers')}
@@ -208,7 +208,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 <MetricCard
                   surface="tile-gradient"
                   tone="green"
-                  icon={<RefreshIcon />}
+                  icon={RefreshIcon}
                   label={t('customer.trueRepeatRate')}
                   value={formatPercent(metrics.trueRepeatRate ?? 0)}
                   sub={`${formatNumber(metrics.repeatCustomersAllTime ?? 0)} ${t('customer.repeatCustomersCount')}`}
@@ -216,7 +216,7 @@ export const CustomerInsightsChart = memo(function CustomerInsightsChart() {
                 <MetricCard
                   surface="tile-gradient"
                   tone="orange"
-                  icon={<ShoppingBagIcon />}
+                  icon={ShoppingBagIcon}
                   label={t('customer.ordersPerCustomer')}
                   value={`${(metrics.avgOrdersPerCustomer ?? 0).toFixed(2)}x`}
                   sub={t('customer.average')}

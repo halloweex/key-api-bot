@@ -37,7 +37,7 @@ export function CohortSummaryCards({ data, activeTab, monthsBack, m1Trend }: Coh
         surface="tile-gradient"
         tone="neutral"
         iconStyle="watermark"
-        icon={<Users size={28} />}
+        icon={Users}
         label={t('retention.totalCohorts')}
         value={formatNumber(data.summary.totalCohorts)}
         sub={t('retention.lastMonths', { count: monthsBack })}
@@ -46,7 +46,7 @@ export function CohortSummaryCards({ data, activeTab, monthsBack, m1Trend }: Coh
         surface="tile-gradient"
         tone="neutral"
         iconStyle="watermark"
-        icon={<Repeat size={28} />}
+        icon={Repeat}
         label={t('customer.totalCustomers')}
         value={formatNumber(data.summary.totalCustomers)}
         sub={t('retention.inAnalyzedCohorts')}
@@ -55,7 +55,7 @@ export function CohortSummaryCards({ data, activeTab, monthsBack, m1Trend }: Coh
         surface="tile-gradient"
         tone="green"
         iconStyle="watermark"
-        icon={<TrendingUp size={28} />}
+        icon={TrendingUp}
         label={activeTab === 'revenue' ? t('retention.avgM1RevRetention') : t('retention.avgM1Retention')}
         value={avgRetention?.[1] ? formatPercent(avgRetention[1]) : '-'}
         sub={t('retention.returnIn2ndMonth')}
