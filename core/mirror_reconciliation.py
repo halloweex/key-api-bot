@@ -2372,4 +2372,27 @@ async def reconcile_buyers(
         watermarks.get(contacts_spec.pg_table),
         now=now, grace_minutes=grace_minutes, max_samples=max_samples,
     )
+
+    # The hourly ids-diff heals a lost buyer before this comparison can see
+    # it — which is the point, and also the review's objection: a report-only
+    # check that only ever measures the already-repaired is measuring
+    # nothing. So a heal leaves a trace here. Process-local by design: the
+    # healer and this check share a process, and a restart between them costs
+    # one finding (the WARNING log line survives).
+    from core.pg_buyers import last_heal
+
+    if last_heal and (now - last_heal["at"]).total_seconds() < 24 * 3600:
+        issues.append(IntegrityIssue(
+            check_name="mirror_selfhealed_rows",
+            table_name="bronze.buyers",
+            severity=Severity.INFO,
+            count=int(last_heal["shipped"]),
+            description=(
+                f"the hourly ids-diff re-shipped {last_heal['shipped']} "
+                f"buyer(s) at {last_heal['at'].isoformat()} — rows the mirror "
+                f"had lost and this comparison would otherwise never have "
+                f"seen. One heal is housekeeping; a heal every day is a "
+                f"leak wearing a bandage."
+            ),
+        ))
     return issues

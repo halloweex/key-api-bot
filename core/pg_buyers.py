@@ -236,7 +236,15 @@ async def backfill_buyers(store, *, chunk: int = 2000) -> Dict[str, Any]:
     return {"shipped": shipped, "missing_was": len(missing)}
 
 
-async def backfill_if_pending(store) -> Dict[str, Any]:
+# The last self-heal this process performed, read by reconcile_buyers so a
+# repair leaves a trace in the DQ findings and not only in a log line. It is
+# process-local on purpose: the healer and the reconciliation run in the same
+# process, and a restart between them costs one unreported (but logged) heal —
+# a column in meta.mirror_state can make it durable if that ever bites.
+last_heal: Dict[str, Any] = {}
+
+
+async def hourly_ids_diff(store) -> Dict[str, Any]:
     """Run the ids-diff every hour, not once.
 
     The first draft gated on `backfilled_at` and ran a single time — which
@@ -261,7 +269,13 @@ async def backfill_if_pending(store) -> Dict[str, Any]:
     try:
         result = await backfill_buyers(store)
         if result.get("shipped"):
-            logger.info("pg_buyers: ids-diff shipped: %s", result)
+            # WARNING, not info: an hourly heal that ships rows means the
+            # mirror lost something since the last pass, and a repair the
+            # daily comparison never gets to see must at least be loud.
+            logger.warning("pg_buyers: ids-diff healed missing rows: %s", result)
+            from datetime import datetime, timezone
+
+            last_heal.update(at=datetime.now(timezone.utc), shipped=result["shipped"])
         return result
     except Exception as e:
         detail = f"{type(e).__name__}: {e}"

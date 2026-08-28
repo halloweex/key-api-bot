@@ -136,6 +136,20 @@ async def startup_event():
     from core.config import config as app_config
     logger.info(f"Sync mode: {app_config.sync.mode}")
 
+    # A half-enabled read switch is the same trap as a typo in it: the flag
+    # says postgres, the missing DSN quietly serves the old store, and nobody
+    # learns until the numbers disagree. Loud at startup, once.
+    import os as _os
+    if (
+        _os.getenv("KS_READ_GOLD", "").strip().lower() == "postgres"
+        and not _os.getenv("KS_PG_DSN", "").strip()
+    ):
+        logger.error(
+            "KS_READ_GOLD=postgres but KS_PG_DSN is not set — every Gold "
+            "read will silently fall back to DuckDB. Set the DSN or unset "
+            "the flag."
+        )
+
     # Validate configuration early - fail fast with clear errors
     try:
         validate_config(require_bot=False, require_api=True, require_secret_key=True)

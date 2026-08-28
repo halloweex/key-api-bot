@@ -123,7 +123,16 @@ async def _ch_max_id(*, ensure: bool = False) -> int:
 
 
 async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
-    """Append everything Postgres holds above ClickHouse's MAX(id).
+    """Append every version Postgres holds that the copy lacks.
+
+    An ids-diff, not a high-water mark — the review's finding: BIGSERIAL ids
+    can commit out of order, and a `> MAX(id)` shipper skips forever a version
+    whose id committed after a larger one had already shipped; the bucket
+    check would then file its absence CRITICAL to the end of time with no
+    repair path. The diff ships exactly the missing set, is idempotent,
+    resumes by recomputing, inherits everything on the first run, and heals a
+    below-watermark loss within the hour — the buyers mirror's pattern, for
+    the buyers mirror's reason. Two id scans an hour is its whole price.
 
     Never raises. The chunked read keeps the first inheritance (46,699 rows
     today, all of history forever) from ever being one giant statement.
@@ -133,18 +142,23 @@ async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
     if not configured():
         return {"skipped": f"{URL_ENV} is not set"}
     try:
-        floor = await _ch_max_id(ensure=True)
+        await _ch_max_id(ensure=True)  # schema, and the table's existence
+        ch_text = await _execute(f"SELECT id FROM {table()} FORMAT TabSeparated")
+        ch_ids = {int(line) for line in ch_text.split("\n") if line}
         pool = await get_pool()
+        async with pool.acquire() as conn:
+            pg_ids = {r[0] for r in await conn.fetch("SELECT id FROM app.order_versions")}
+        missing = sorted(pg_ids - ch_ids)
+
         shipped = 0
-        while True:
+        for start in range(0, len(missing), chunk):
+            ids = missing[start:start + chunk]
             async with pool.acquire() as conn:
                 records = await conn.fetch(
                     f"SELECT {', '.join(COLUMNS)} FROM app.order_versions "
-                    f"WHERE id > $1 ORDER BY id LIMIT $2",
-                    floor, chunk,
+                    f"WHERE id = ANY($1::bigint[]) ORDER BY id",
+                    ids,
                 )
-            if not records:
-                break
             rows = [tuple(r) for r in records]
             await _execute(
                 f"INSERT INTO {table()} ({', '.join(COLUMNS)}) "
@@ -152,7 +166,6 @@ async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
                 body=render_tsv(rows),
             )
             shipped += len(rows)
-            floor = rows[-1][0]
         from core.ch_silver import _mark_ok
 
         await _mark_ok(STATE_ROW, shipped)

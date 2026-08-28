@@ -179,7 +179,7 @@ class TestTheHourlyIdsDiff:
         ran = AsyncMock(return_value={"shipped": 0, "missing_was": 0})
         monkeypatch.setattr(pg_buyers, "backfill_buyers", ran)
 
-        out = await pg_buyers.backfill_if_pending(store=object())
+        out = await pg_buyers.hourly_ids_diff(store=object())
         assert out == {"shipped": 0, "missing_was": 0}
         ran.assert_awaited_once()
 
@@ -192,7 +192,7 @@ class TestTheHourlyIdsDiff:
         ran = AsyncMock()
         monkeypatch.setattr(pg_buyers, "backfill_buyers", ran)
 
-        out = await pg_buyers.backfill_if_pending(store=object())
+        out = await pg_buyers.hourly_ids_diff(store=object())
         assert "skipped" in out
         ran.assert_not_awaited()
 
@@ -206,7 +206,7 @@ class TestTheHourlyIdsDiff:
             pg_buyers, "backfill_buyers",
             AsyncMock(side_effect=RuntimeError("pg down")),
         )
-        out = await pg_buyers.backfill_if_pending(store=object())
+        out = await pg_buyers.hourly_ids_diff(store=object())
         assert "error" in out
 
 
