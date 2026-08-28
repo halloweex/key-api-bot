@@ -68,12 +68,18 @@ describe('SmsCampaignList, as the way into a campaign', () => {
     expect(screen.getByText('sms.send')).toBeInTheDocument()
   })
 
-  it('marks which campaign is being read', () => {
+  it('marks which campaign is being read, and marks it once', () => {
+    // The button that takes you there is the marker. A row tint as well was a
+    // second signal for one fact, which is the habit this page was cleaned of.
     campaigns.current = [campaign(), campaign({ campaign: 'jul-promo' })]
     const { container } = render(
       <SmsCampaignList selected="jul-promo" onSelect={vi.fn()} />,
     )
-    expect(container.querySelectorAll('tr.bg-purple-50\\/60')).toHaveLength(1)
+    const buttons = screen.getAllByText('sms.viewResults')
+    expect(buttons).toHaveLength(2)
+    const filled = buttons.filter((b) => b.closest('button')!.className.includes('purple-700'))
+    expect(filled).toHaveLength(1)
+    expect(container.querySelectorAll('[class*="bg-purple-50"]')).toHaveLength(0)
   })
 
   it('still stands alone, with the name opening the campaign as before', async () => {

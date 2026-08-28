@@ -5,6 +5,7 @@ import { Button } from './Button'
 import { Badge } from './Badge'
 import { EmptyState } from './EmptyState'
 import { SkeletonTable } from './Skeleton'
+import { DataTable, Th, Td, Tr } from './DataTable'
 import { useSmsCampaigns, useMarkSmsCampaignSent } from '../hooks/useApi'
 import { useToast } from './Toast'
 import { SmsSendDialog } from './SmsSendDialog'
@@ -81,23 +82,22 @@ export const SmsCampaignList = memo(function SmsCampaignList({
             hint={t('sms.noCampaignsHint')}
           />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-                  <th className="py-2 pr-3 font-medium">{t('sms.campaign')}</th>
-                  <th className="py-2 px-3 font-medium text-right">{t('sms.toSend')}</th>
-                  <th className="py-2 px-3 font-medium text-right">{t('sms.control')}</th>
-                  <th className="py-2 px-3 font-medium">{t('sms.exported')}</th>
-                  <th className="py-2 px-3 font-medium">{t('sms.sent')}</th>
-                  <th className="py-2 pl-3" />
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
+          <DataTable>
+            <thead>
+              <Tr header>
+                <Th>{t('sms.campaign')}</Th>
+                <Th align="right">{t('sms.toSend')}</Th>
+                <Th align="right">{t('sms.control')}</Th>
+                <Th>{t('sms.exported')}</Th>
+                <Th>{t('sms.sent')}</Th>
+                <Th />
+              </Tr>
+            </thead>
+            <tbody>
                 {campaigns.map((c) => (
                   <Fragment key={c.campaign}>
-                  <tr className={selected === c.campaign ? 'bg-purple-50/60' : undefined}>
-                    <td className="py-2.5 pr-3">
+                  <Tr hover={false}>
+                    <Td>
                       {/* The name opens the campaign. Everything a campaign was
                           — the audience, the text, the bill — was recorded from
                           the start and readable nowhere. */}
@@ -105,7 +105,7 @@ export const SmsCampaignList = memo(function SmsCampaignList({
                         type="button"
                         onClick={() => setOpen(open === c.campaign ? null : c.campaign)}
                         aria-expanded={open === c.campaign}
-                        className="flex items-center gap-1 font-medium text-slate-800
+                        className="flex items-center gap-1.5 font-medium text-slate-800
                                    hover:text-purple-800"
                       >
                         {open === c.campaign
@@ -117,24 +117,24 @@ export const SmsCampaignList = memo(function SmsCampaignList({
                         {t(`sms.basis${c.ltvBasis === 'margin' ? 'Margin' : 'Revenue'}`)}
                         {c.promocode ? ` · ${c.promocode}` : ''}
                       </div>
-                    </td>
-                    <td className="py-2.5 px-3 text-right tabular-nums text-slate-700">
-                      {formatNumber(c.target)}
-                    </td>
-                    <td className="py-2.5 px-3 text-right tabular-nums text-slate-700">
-                      {formatNumber(c.holdout)}
-                    </td>
-                    <td className="py-2.5 px-3 text-slate-600 text-xs whitespace-nowrap">
-                      {formatDateTime(c.exportedAt)}
-                    </td>
-                    <td className="py-2.5 px-3 text-xs whitespace-nowrap">
+                    </Td>
+                    <Td align="right" tabular>{formatNumber(c.target)}</Td>
+                    <Td align="right" tabular>{formatNumber(c.holdout)}</Td>
+                    <Td>
+                      <span className="text-xs text-slate-600 whitespace-nowrap">
+                        {formatDateTime(c.exportedAt)}
+                      </span>
+                    </Td>
+                    <Td>
                       {c.sentAt ? (
-                        <span className="text-slate-600">{formatDateTime(c.sentAt)}</span>
+                        <span className="text-xs text-slate-600 whitespace-nowrap">
+                          {formatDateTime(c.sentAt)}
+                        </span>
                       ) : (
                         <Badge tone="orange">{t('sms.notSent')}</Badge>
                       )}
-                    </td>
-                    <td className="py-2.5 pl-3 text-right">
+                    </Td>
+                    <Td align="right">
                       {/* A sent campaign's only remaining question is what it
                           did. The results block sat directly below with its own
                           campaign picker and no connection to this table, so
@@ -168,13 +168,15 @@ export const SmsCampaignList = memo(function SmsCampaignList({
                           </Button>
                         </div>
                       )}
-                    </td>
-                  </tr>
+                    </Td>
+                  </Tr>
 
                   {open === c.campaign && (
-                    <tr>
-                      <td colSpan={6} className="bg-slate-50/70 px-3 py-3">
-                        <div className="grid gap-4 sm:grid-cols-2">
+                    <Tr hover={false}>
+                      <Td colSpan={6}>
+                        {/* Same tint as the lead panel in the results block —
+                            one recessed surface on this page, not two. */}
+                        <div className="rounded-lg bg-slate-50/70 p-4 grid gap-4 sm:grid-cols-2">
                           <div>
                             <p className="text-[11px] uppercase tracking-wide text-slate-500">
                               {t('sms.detailsMessage')}
@@ -225,14 +227,13 @@ export const SmsCampaignList = memo(function SmsCampaignList({
                             </ul>
                           </div>
                         </div>
-                      </td>
-                    </tr>
+                      </Td>
+                    </Tr>
                   )}
                   </Fragment>
                 ))}
-              </tbody>
-            </table>
-          </div>
+            </tbody>
+          </DataTable>
         )}
       </CardContent>
 

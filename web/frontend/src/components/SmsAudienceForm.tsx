@@ -91,7 +91,7 @@ function Group({
   children: React.ReactNode
 }) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-slate-50/40 p-4">
+    <section className="rounded-lg border border-slate-200 bg-slate-50/70 p-4">
       <div className="flex items-center gap-2">
         <span className="text-slate-400">{icon}</span>
         <h4 className="text-sm font-semibold text-slate-800">{title}</h4>
@@ -679,7 +679,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
         </button>
 
         {measureOpen && (
-          <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50/40 p-4
+          <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50/70 p-4
                           flex flex-col gap-3">
             <Field
               icon={<Banknote className={icon} />}

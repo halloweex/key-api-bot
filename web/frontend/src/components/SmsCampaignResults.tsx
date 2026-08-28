@@ -146,7 +146,7 @@ function Headline({ comparison, costTotal }: {
     costTotal != null ? comparison.incrementalMarginTotal - costTotal : null
 
   return (
-    <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3">
+    <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50/70 p-4">
       <p className="text-sm leading-snug text-slate-800">
         {t(proven ? 'sms.headlineProven' : 'sms.headlineApparent', {
           revenue: formatCurrency(comparison.incrementalRevenueTotal),
@@ -374,7 +374,7 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
                 </button>
 
                 {showStats && (
-                  <div className="mt-2 rounded-lg border border-slate-200 p-3 sm:p-4">
+                  <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50/70 p-4">
                     <h3 className="text-sm font-medium text-slate-700 mb-1">
                       {t('sms.forestTitle')}
                     </h3>
