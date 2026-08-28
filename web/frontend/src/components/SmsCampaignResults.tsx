@@ -227,7 +227,10 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
   )
 
   const campaign = campaignProp !== undefined ? campaignProp : ownCampaign
-  const setCampaign = (c: string) => {
+  // `Select` hands back `string | null` even with `allowEmpty={false}`; an
+  // empty choice is not a campaign, so it is ignored rather than propagated.
+  const setCampaign = (c: string | null) => {
+    if (!c) return
     setOwnCampaign(c)
     onCampaignChange?.(c)
   }
