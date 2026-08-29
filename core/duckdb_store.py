@@ -2434,6 +2434,23 @@ class DuckDBStore(
                     partition_alert, "warehouse:sales_type_partition",
                 )
 
+            # Step 04: a tick that came back clean announces the recovery of
+            # whatever this group had announced — validation, partition, and
+            # the errored-refresh pair alike. Silence after an alert used to
+            # be indistinguishable from the throttle holding it, and this
+            # validator once stood failing for three straight weeks.
+            try:
+                from core.alerting import resolve_group
+
+                still = []
+                if validation_alert:
+                    still.append(validation_alert_key)
+                if partition_alert:
+                    still.append("warehouse:sales_type_partition")
+                await resolve_group("warehouse", still_firing=still)
+            except Exception as e:
+                logger.warning(f"Warehouse resolve failed: {e}")
+
             incremental_info = ""
             if affected_dates:
                 incremental_info = f", gold_dates={len(affected_dates)}"
@@ -2822,6 +2839,7 @@ class DuckDBStore(
 
             await raise_alert(
                 message, conditions=[key] if key else [], bucket=key,
+                group="warehouse",
             )
         except Exception as e:
             logger.warning(f"Failed to send warehouse alert: {e}")

@@ -133,7 +133,9 @@ class TestGateStateFile:
         g.decide("b", has_condition=True, now=0.0)
         g.record_delivery("b", now=0.0)
         data = json.loads(path.read_text())
-        assert data["b"]["last_sent"] == 0.0
+        # Format v2 since step 04: buckets + the delivered-conditions map.
+        assert data["buckets"]["b"]["last_sent"] == 0.0
+        assert "delivered" in data
         assert not list(tmp_path.glob("gate.json*[!n]"))  # no tmp leftovers
 
     def test_an_unwritable_path_never_breaks_a_decision(self, tmp_path):

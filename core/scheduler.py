@@ -1165,6 +1165,32 @@ class BackgroundScheduler:
 
     # ─── Data Quality framework (Layer 1 + 2) ─────────────────────────────────
 
+    async def _resolve_dq_layer(
+        self, layer: str, issues, error_message: "Optional[str]",
+    ) -> None:
+        """Announce the layer's cleared page-conditions after a run.
+
+        Only after a run that actually produced a verdict: a failed run
+        proves nothing — the condition is unknown, not cleared, and calling
+        this on error would announce recoveries nobody verified. Checks
+        still present at CRITICAL stay firing; a check that dropped to WARN
+        cleared as a *page* condition — the digest still carries it, which
+        is the page/digest lane split the charter draws.
+        """
+        if error_message:
+            return
+        try:
+            from core.data_quality import Severity
+            from core.alerting import resolve_group
+
+            still = [
+                i.check_name for i in issues
+                if i.severity == Severity.CRITICAL
+            ]
+            await resolve_group(f"dq:{layer}", still_firing=still)
+        except Exception as e:
+            logger.warning(f"DQ resolve for {layer} failed: {e}")
+
     async def _send_dq_alert_throttled(
         self, layer: str, message: str, key: Optional[str] = None,
         conditions: "Sequence[str]" = (),
@@ -1189,6 +1215,7 @@ class BackgroundScheduler:
 
             return await raise_alert(
                 message, conditions=list(conditions), bucket=bucket,
+                group=f"dq:{layer}",
             ) > 0
         except Exception as e:
             logger.warning(f"DQ alert send failed ({bucket}): {e}")
@@ -1252,6 +1279,7 @@ class BackgroundScheduler:
                     alert_fingerprint("integrity", sev, issues, []),
                     conditions=[i.check_name for i in issues],
                 )
+            await self._resolve_dq_layer("integrity", issues, error_message)
 
             result = {
                 "run_id": run_id,
@@ -1402,6 +1430,7 @@ class BackgroundScheduler:
                     alert_fingerprint(MIRROR_LAYER, sev, issues, []),
                     conditions=[i.check_name for i in issues],
                 )
+            await self._resolve_dq_layer(MIRROR_LAYER, issues, error_message)
 
             result = {
                 "run_id": run_id,
@@ -1558,6 +1587,15 @@ class BackgroundScheduler:
                     f"{sample['disk_free_gb']:.1f} GB free, "
                     f"DB={sample['db_size_mb']:,.0f} MB ({growth_str})"
                 )
+                # A breach that was announced and has cleared says so once
+                # (step 04) — silence after an alert used to be
+                # indistinguishable from the throttle holding it.
+                try:
+                    from core.alerting import resolve_group
+
+                    await resolve_group("disk")
+                except Exception as e:
+                    logger.warning(f"Disk resolve failed: {e}")
                 return result
 
             logger.warning(f"Disk watchdog: {alert.severity.value} — {alert.reason}")
@@ -1580,7 +1618,7 @@ class BackgroundScheduler:
                     "reclaim, and it stops both containers while it runs."
                 )
                 delivered = await raise_alert(
-                    msg, conditions=[disk_key], bucket=disk_key,
+                    msg, conditions=[disk_key], bucket=disk_key, group="disk",
                 )
                 result["alert_fired"] = delivered > 0
             except Exception as e:
@@ -1748,6 +1786,7 @@ class BackgroundScheduler:
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
                 conditions=[i.check_name for i in issues],
             )
+        await self._resolve_dq_layer(layer, issues, error_message)
 
     async def _run_dq_reconciliation(self, window_days: int = 90) -> Dict[str, Any]:
         """Layer-2 source-of-truth reconciliation vs KeyCRM.
@@ -1919,6 +1958,7 @@ class BackgroundScheduler:
                     alert_fingerprint("reconciliation", sev, issues, discrepancies),
                     conditions=[i.check_name for i in issues],
                 )
+            await self._resolve_dq_layer("reconciliation", issues, error_message)
 
             result = {
                 "run_id": run_id,
@@ -2352,6 +2392,12 @@ class BackgroundScheduler:
                     f"Bronze invariant OK: mode={mode}, shadow={shadow}, "
                     f"total={stats['total']:,}"
                 )
+                try:
+                    from core.alerting import resolve_group
+
+                    await resolve_group("bronze")
+                except Exception as e:
+                    logger.warning(f"Bronze resolve failed: {e}")
                 return result
 
             logger.warning(f"Bronze invariant VIOLATED: {reason}")
@@ -2369,7 +2415,7 @@ class BackgroundScheduler:
                     f"{reason}\n\n"
                     "Likely cause: prune misconfigured, or sync writing despite opt-out.",
                     conditions=["bronze:invariant_violated"],
-                    bucket="bronze:invariant_violated",
+                    bucket="bronze:invariant_violated", group="bronze",
                 )
             except Exception as e:
                 logger.warning(f"Failed to send bronze invariant alert: {e}")
@@ -2523,6 +2569,12 @@ class BackgroundScheduler:
             result["db_size_mb"] = round(db_size)
 
         if alert is None:
+            try:
+                from core.alerting import resolve_group
+
+                await resolve_group("memory")
+            except Exception as e:
+                logger.warning(f"Memory resolve failed: {e}")
             pct = (mem["working_set"] / mem["limit"]) if mem["limit"] else 0
             # info, not debug, and it names both halves: the whole point is that
             # the big number and the number that matters are different.
@@ -2586,10 +2638,22 @@ class BackgroundScheduler:
         # switch was built against. An OOM kill goes unkeyed on purpose: it is
         # a fact about the past, each occurrence is its own message, and the
         # per-level cooldown above already decided this one should go.
-        from bot.main import send_admin_message
+        if alert.oom_kills_delta:
+            # An OOM kill is an event: unkeyed on purpose (each kill is its
+            # own fact) and never resolvable.
+            from bot.main import send_admin_message
 
-        key = None if alert.oom_kills_delta else f"memory:{level}"
-        delivered = await send_admin_message("\n".join(lines), key=key)
+            delivered = await send_admin_message("\n".join(lines), key=None)
+        else:
+            # bucket=None: the per-level cooldown above already decided this
+            # one goes; the Gate contributes the delivered-conditions map so
+            # the recovery can be announced (step 04).
+            from core.alerting import raise_alert
+
+            delivered = await raise_alert(
+                "\n".join(lines), conditions=[f"memory:{level}"],
+                bucket=None, group="memory",
+            )
         result["alert_sent"] = level
         result["alert_delivered"] = delivered
         return result

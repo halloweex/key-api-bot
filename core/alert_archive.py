@@ -105,6 +105,78 @@ async def _write_fired(
         logger.info("alert archive: writes succeeding again")
 
 
+async def _write_resolved(keys, message, delivered) -> None:
+    global _standing_down
+    from core.pg import get_pool
+
+    pool = await get_pool()
+    instance = _instance()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE app.alert_series
+                   SET state = 'resolved', resolved_at = now(),
+                       updated_at = now()
+                 WHERE condition_key = ANY($1::text[])
+                   AND kind = 'condition'
+                """,
+                list(keys),
+            )
+            await conn.executemany(
+                """
+                INSERT INTO app.alert_events
+                    (condition_key, event_type, instance, delivered_to, message)
+                VALUES ($1, 'resolved', $2, $3, $4)
+                """,
+                [
+                    (key, instance, delivered, message if i == 0 else None)
+                    for i, key in enumerate(keys)
+                ],
+            )
+    if _standing_down:
+        _standing_down = False
+        logger.info("alert archive: writes succeeding again")
+
+
+def _spawn(coro) -> "Optional[asyncio.Task]":
+    """Wrap an archive write in the standard armour: budget, one warning per
+    streak, never raises, never blocks the caller."""
+
+    async def _task() -> None:
+        global _standing_down
+        try:
+            await asyncio.wait_for(coro, timeout=WRITE_TIMEOUT_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not _standing_down:
+                _standing_down = True
+                logger.warning(
+                    "alert archive standing down (%s: %s) — alerts still "
+                    "deliver, the ledger misses rows until this clears",
+                    type(exc).__name__, exc,
+                )
+
+    try:
+        if not os.getenv("KS_PG_DSN", "").strip():
+            coro.close()
+            return None
+        return asyncio.get_running_loop().create_task(_task())
+    except RuntimeError:
+        coro.close()
+        return None
+
+
+def record_resolved(
+    keys: Sequence[str], *, delivered: int, message: str,
+) -> "Optional[asyncio.Task]":
+    """Archive a resolution: close the series, add the event rows."""
+    if not keys:
+        return None
+    return _spawn(_write_resolved(list(keys), message, delivered))
+
+
 def record_fired(
     conditions: Iterable[str],
     *,

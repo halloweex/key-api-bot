@@ -299,6 +299,11 @@ class AlertGate:
 
     def __init__(self, state_path: "_Path | None" = None) -> None:
         self._state: Dict[str, _BucketState] = {}
+        # condition_key -> {"group": str|None, "first_delivered": float}.
+        # The resolution gate (step 04): a "✅ resolved" may only follow a
+        # fired notice that actually reached someone — otherwise the first
+        # thing a human hears about a condition is that it went away.
+        self._delivered: Dict[str, Dict] = {}
         self._path = state_path
         self._last_save = 0.0
         self._dirty = False
@@ -310,9 +315,18 @@ class AlertGate:
     def _load(self) -> None:
         try:
             raw = _json.loads(self._path.read_text())
-            self._state = {
-                k: _BucketState(**v) for k, v in raw.items()
-            }
+            if "buckets" in raw:
+                self._state = {
+                    k: _BucketState(**v) for k, v in raw["buckets"].items()
+                }
+                self._delivered = dict(raw.get("delivered", {}))
+            else:
+                # The step-03 format: a bare bucket map. One deploy's worth of
+                # tolerance costs four lines; a crash on the old file would
+                # cost the history the file exists to keep.
+                self._state = {
+                    k: _BucketState(**v) for k, v in raw.items()
+                }
         except FileNotFoundError:
             pass
         except Exception as exc:
@@ -330,9 +344,10 @@ class AlertGate:
             return
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            payload = _json.dumps(
-                {k: vars(v) for k, v in self._state.items()}
-            )
+            payload = _json.dumps({
+                "buckets": {k: vars(v) for k, v in self._state.items()},
+                "delivered": self._delivered,
+            })
             fd, tmp = _tempfile.mkstemp(
                 dir=str(self._path.parent), prefix=self._path.name,
             )
@@ -402,8 +417,48 @@ class AlertGate:
         self._save(now, force=True)
         return flushed
 
+    def note_delivered_conditions(
+        self, keys: "Sequence[str]", group: "str | None",
+        *, now: "float | None" = None,
+    ) -> None:
+        """Remember which conditions have a delivered fired-notice, so their
+        clearing may be announced. Events are excluded by kind: nothing about
+        the past ever "goes away"."""
+        now = _time.time() if now is None else now
+        for key in keys:
+            if not is_condition(key):
+                continue
+            entry = self._delivered.get(key)
+            if entry is None:
+                self._delivered[key] = {"group": group, "first_delivered": now}
+            else:
+                entry["group"] = group
+        self._dirty = True
+        self._save(now, force=True)
+
+    def take_resolved(
+        self, group: str, still_firing: "Sequence[str]" = (),
+        *, now: "float | None" = None,
+    ) -> Dict[str, float]:
+        """Pop and return {key: first_delivered} for the group's conditions
+        that are no longer firing. Popping is the idempotence: one resolved
+        notice per delivered fired-cycle, never a stream of them."""
+        now = _time.time() if now is None else now
+        firing = set(still_firing)
+        taken: Dict[str, float] = {}
+        for key in list(self._delivered):
+            entry = self._delivered[key]
+            if entry.get("group") == group and key not in firing:
+                taken[key] = float(entry.get("first_delivered") or now)
+                del self._delivered[key]
+        if taken:
+            self._dirty = True
+            self._save(now, force=True)
+        return taken
+
     def reset(self) -> None:
         self._state.clear()
+        self._delivered.clear()
         self._dirty = False
 
 
@@ -421,6 +476,7 @@ async def raise_alert(
     conditions: "Sequence[str]",
     bucket: "str | None",
     parse_mode: str = "HTML",
+    group: "str | None" = None,
 ) -> int:
     """Raise an alert about the named conditions. Returns admins reached.
 
@@ -456,11 +512,63 @@ async def raise_alert(
     )
     if delivered:
         swallowed = _gate.record_delivery(bucket) if bucket is not None else 0
+        _gate.note_delivered_conditions(conditions, group)
         from core.alert_archive import record_fired
 
         record_fired(
             conditions, message=text + suffix,
             delivered=delivered, swallowed=swallowed,
+        )
+    return delivered
+
+
+def _age(seconds: float) -> str:
+    hours = int(seconds // 3600)
+    if hours < 1:
+        return f"{int(seconds // 60)}m"
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d {hours % 24}h"
+
+
+async def resolve_group(
+    group: str, still_firing: "Sequence[str]" = (),
+) -> int:
+    """Announce that a group's delivered conditions have cleared.
+
+    Called by the emitter that can observe the clearing — the `clears` column
+    of the REGISTRY names which one that is — on every healthy pass, with
+    whatever is *still* firing excluded. Gated on delivery by construction:
+    only conditions whose fired notice reached someone are in the map, so
+    "✅ resolved" can never be the first a human hears of a condition. One
+    notice per fired-cycle: taking a key out of the map is the idempotence.
+
+    Returns admins reached (0: nothing to resolve, or nothing deliverable).
+    """
+    import logging as _logging
+    import time as _t
+
+    taken = _gate.take_resolved(group, still_firing)
+    if not taken:
+        return 0
+
+    now = _t.time()
+    lines = [
+        f"• {key} — stood {_age(now - first)}"
+        for key, first in sorted(taken.items())
+    ]
+    text = "✅ Resolved:\n" + "\n".join(lines)
+
+    from bot.main import send_admin_message
+
+    delivered = await send_admin_message(text, pre_throttled=True)
+    from core.alert_archive import record_resolved
+
+    record_resolved(list(taken), delivered=delivered, message=text)
+    if not delivered:
+        _logging.getLogger(__name__).info(
+            "resolved notice for %s reached nobody (suppressed or failed); "
+            "the series still closes in the archive", sorted(taken),
         )
     return delivered
 
