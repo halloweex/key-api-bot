@@ -21,7 +21,11 @@ DAILY_BUDGET=10
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 export HOME="${HOME:-/root}"
 
-mkdir -p "$SPOOL/pending" "$SPOOL/processing" "$SPOOL/done"
+# pending is written by the CONTAINERS (uid 999) and drained by root:
+# tmp-style sticky world-writable, or the first root-created directory
+# silently eats every task with EACCES — found by the first live test.
+install -d -m 1777 "$SPOOL/pending"
+install -d "$SPOOL/processing" "$SPOOL/done"
 source "$COMPOSE_DIR/deploy/notify.sh"
 
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
