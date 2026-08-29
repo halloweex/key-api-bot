@@ -58,8 +58,8 @@ CONVERSATION_TIMEOUT_SECONDS = 30 * 60
 
 async def send_admin_message(
     text: str, parse_mode: str = "HTML", *, key: str | None = None,
-) -> None:
-    """Broadcast `text` to every admin in ADMIN_USER_IDS.
+) -> int:
+    """Broadcast `text` to every admin. Returns how many it actually reached.
 
     Imported by core/scheduler.py, core/duckdb_store.py and
     core/prediction_service.py — all of which run inside the *web* container,
@@ -73,6 +73,12 @@ async def send_admin_message(
     one people learn to swipe away. Pass `key` to name the condition: bodies
     that carry live checksums or attempt counters are never twice the same
     string, so text-keyed throttling does not touch them.
+
+    The return value used to be None, which made "delivered" and "silently
+    dropped" indistinguishable to every caller — and the digest advanced its
+    weekly beat on the strength of that blindness. 0 means suppressed,
+    throttled, or failed; a caller that must know pays attention, the rest
+    ignore it as before.
     """
     from core.telegram_alerts import alerts_disabled, throttle_check
 
@@ -81,34 +87,54 @@ async def send_admin_message(
         # before the throttle so a suppressed condition does not silently
         # consume its cooldown slot.
         logger.info("admin message suppressed (KS_ALERTS_DISABLED): %.80s", text)
-        return
+        return 0
 
     should_send, text = throttle_check(text, key)
     if not should_send:
-        return
+        return 0
 
     if _application is None:
         # Unsigned on purpose: the HTTP transport signs, and signing here too
         # would either double the line or rely on `sign` staying idempotent.
         from core.telegram_alerts import send_admin_message_http
-        await send_admin_message_http(text, parse_mode)
-        return
+        return await send_admin_message_http(text, parse_mode)
     if not ADMIN_USER_IDS:
-        return
+        return 0
 
     # The Application path never reaches core/telegram_alerts, so it is the one
-    # place outside the two transports that has to sign for itself.
-    from core.telegram_alerts import sign
+    # place outside the two transports that has to sign, clamp, and degrade
+    # for itself.
+    from core.telegram_alerts import _signature_reserve, clamp_message, sign
 
-    text = sign(text)
+    text = sign(clamp_message(text, reserve=_signature_reserve()))
+    delivered = 0
     for admin_id in ADMIN_USER_IDS:
         try:
-            await _application.bot.send_message(
-                chat_id=admin_id, text=text, parse_mode=parse_mode,
-                disable_web_page_preview=True,
-            )
+            try:
+                await _application.bot.send_message(
+                    chat_id=admin_id, text=text, parse_mode=parse_mode,
+                    disable_web_page_preview=True,
+                )
+            except Exception as exc:
+                # Same degradation the HTTP transport applies: markup Telegram
+                # cannot parse costs formatting, never delivery. This is the
+                # path that silently ate the certificate alert — the one the
+                # canary was written for.
+                if parse_mode and "can't parse entities" in str(exc).lower():
+                    logger.warning(
+                        "Admin message to %s rejected as unparseable %s; "
+                        "resending as plain text", admin_id, parse_mode,
+                    )
+                    await _application.bot.send_message(
+                        chat_id=admin_id, text=text,
+                        disable_web_page_preview=True,
+                    )
+                else:
+                    raise
+            delivered += 1
         except Exception as exc:
             logger.warning("Failed to send admin message to %s: %s", admin_id, exc)
+    return delivered
 
 
 async def setup_command_menu(application: Application) -> None:
@@ -347,7 +373,13 @@ def main() -> None:
             )
         elif decision == "recovery":
             logger.info("Canary recovery")
-            await send_admin_message(format_recovery(result, DASHBOARD_URL))
+            # Keyed so a flapping dashboard cannot deliver "recovered" every
+            # few minutes: the body carries cert days and sync age, which vary
+            # per probe, so an unkeyed recovery was effectively unthrottled —
+            # against the rule this file states twice.
+            await send_admin_message(
+                format_recovery(result, DASHBOARD_URL), key="canary:recovery",
+            )
         else:
             logger.debug(
                 "Canary OK: cert_days=%s sync_age=%s dq_ages=%s",

@@ -15,6 +15,7 @@ bot/main.py.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import socket
 import ssl
@@ -455,7 +456,12 @@ def format_alert(result: CanaryResult, dashboard_url: str) -> str:
         "",
     ]
     for failure in result.failures:
-        lines.append(f"• {failure}")
+        # Escaped because failure text is data, not markup: the cert line
+        # carries a literal `(<14)` and httpx exception strings can carry
+        # anything. Under parse_mode=HTML an unescaped `<` is a Telegram 400
+        # — which is how the certificate alert, the alert this module was
+        # written for, went undeliverable without anyone knowing.
+        lines.append(f"• {html.escape(failure)}")
 
     action = _what_to_do(result)
     if action:
@@ -479,7 +485,7 @@ def format_alert(result: CanaryResult, dashboard_url: str) -> str:
         )
     if extras:
         lines.append("")
-        lines.append("<i>" + " · ".join(extras) + "</i>")
+        lines.append("<i>" + html.escape(" · ".join(extras)) + "</i>")
     return "\n".join(lines)
 
 

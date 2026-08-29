@@ -22,6 +22,7 @@ Vocabulary
 """
 from __future__ import annotations
 
+import html as html_module
 import importlib
 import json
 import logging
@@ -1679,7 +1680,7 @@ def format_alert_message(
     that quietly consulted module state could not be tested by calling it.
 
     Shape:
-        🚨 Data Quality CRITICAL (reconciliation)
+        🚨 Data Quality CRITICAL (reconciliation)   [rendered <b>…</b>]
         Window: 2026-02 .. 2026-05
         ── Issues (1) ──
         • fk_orphan_order_products_order_id: 3 orphans (sample: 88888)
@@ -1690,7 +1691,10 @@ def format_alert_message(
         Machine already tried: buyers ids-diff re-shipped 3 row(s) 41 min ago.
     """
     icon = {"CRITICAL": "🚨", "WARN": "⚠️", "INFO": "ℹ️"}[severity.value]
-    lines: List[str] = [f"{icon} *Data Quality {severity.value}* ({layer})"]
+    # HTML tags, not Markdown asterisks: every send in this codebase goes out
+    # with parse_mode=HTML, so `*bold*` reached phones as literal asterisks
+    # for months before anyone said it out loud.
+    lines: List[str] = [f"{icon} <b>Data Quality {severity.value}</b> ({layer})"]
     if window:
         lines.append(f"Window: {window[0].isoformat()} .. {window[1].isoformat()}")
 
@@ -1976,14 +1980,14 @@ def build_digest(
 
     for s in sorted(sections, key=lambda x: x.layer):
         if s.run is None:
-            body.append(f"*{s.layer}* — no successful run on record")
+            body.append(f"<b>{s.layer}</b> — no successful run on record")
             news = True
             continue
 
         limit = DIGEST_MAX_AGE_HOURS.get(s.layer)
         stale = limit is not None and s.age_hours is not None and s.age_hours > limit
         when = (s.run.get("started_at") or "")[:16].replace("T", " ")
-        head = f"*{s.layer}* · {s.run.get('status')} · {when}"
+        head = f"<b>{s.layer}</b> · {s.run.get('status')} · {when}"
         if stale:
             head += f" · ⏳ {s.age_hours:.0f}h old (>{limit}h)"
             news = True
@@ -2003,7 +2007,11 @@ def build_digest(
                 body.append(f"• {i['check_name']}: {i['count']:,} ({note})")
                 desc = (i.get("description") or "").strip()
                 if desc:
-                    body.append(f"  ↳ {desc[:200]}")
+                    # Escaped because descriptions carry raw exception text —
+                    # asyncpg's `last_error`, DuckDB's messages — and one `<`
+                    # in an HTML-parsed body is a Telegram 400 that costs the
+                    # whole digest, on the morning it has the most to say.
+                    body.append(f"  ↳ {html_module.escape(desc[:200])}")
             if len(s.issues) > max_issue_lines:
                 body.append(f"  …and {len(s.issues) - max_issue_lines} more")
                 # A finding past the cut has no line and so no delta of its
@@ -2035,7 +2043,7 @@ def build_digest(
             body.append("• clean")
 
     if news:
-        return "\n".join(["📋 *Data quality digest*", ""] + body)
+        return "\n".join(["📋 <b>Data quality digest</b>", ""] + body)
 
     if not standing:
         return None
@@ -2049,16 +2057,16 @@ def build_digest(
             return None
         days = max(1, int((now - since).days))
         footer = (
-            f"_Nothing has changed since the last digest {days}d ago. "
+            f"<i>Nothing has changed since the last digest {days}d ago. "
             "Repeated weekly so a standing finding is not forgotten; "
-            "the days in between stay quiet._"
+            "the days in between stay quiet.</i>"
         )
     else:
         footer = (
-            "_Standing findings, restated. The digest is quiet on days "
-            "nothing changes._"
+            "<i>Standing findings, restated. The digest is quiet on days "
+            "nothing changes.</i>"
         )
-    return "\n".join(["📋 *Data quality digest*", ""] + body + ["", footer])
+    return "\n".join(["📋 <b>Data quality digest</b>", ""] + body + ["", footer])
 
 
 def fetch_last_success_ages(

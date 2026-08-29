@@ -473,7 +473,7 @@ class TestDqAlertThrottleKeying:
         # has to be fetched explicitly.
         bot_main = importlib.import_module("bot.main")
         reset_throttle()
-        sender = AsyncMock()
+        sender = AsyncMock(return_value=2)
         monkeypatch.setattr(bot_main, "send_admin_message", sender)
 
         scheduler = BackgroundScheduler()

@@ -2297,7 +2297,7 @@ class DuckDBStore(
                         f"known-types gold={gold_revenue_known:.2f}; {detail}"
                     )
                     partition_alert = (
-                        "🚨 *Unknown `sales_type` in Gold*\n"
+                        "🚨 <b>Unknown <code>sales_type</code> in Gold</b>\n"
                         f"Silver revenue {silver_revenue:,.2f} vs "
                         f"{gold_revenue_known:,.2f} across "
                         f"{', '.join(KNOWN_SALES_TYPES)}.\n"
@@ -2385,7 +2385,7 @@ class DuckDBStore(
                             "row and a full rebuild did not fix it — the Gold layer may be "
                             f"serving WRONG revenue. Manual fix needed.\n{detail}"
                             f"\n\n→ the machine has tried {consecutive} times and a "
-                            "full rebuild, and is out of levers. `missing cells` "
+                            "full rebuild, and is out of levers. «missing cells» "
                             "is the August shape (Silver has days Gold does "
                             "not); a revenue mismatch with matching cells is "
                             "not. warehouse_refreshes holds every tick."
@@ -2870,7 +2870,7 @@ class DuckDBStore(
                    f"~{src_size*1.1/1e9:.1f}GB for {src.name}")
             logger.error(msg)
             await self._send_warehouse_alert(
-                f"🚨 DB backup FAILED — {msg}", "warehouse:backup_failed",
+                f"🚨 DB backup FAILED — {msg}", "warehouse:backup_preflight",
             )
             return {"status": "error", "error": msg}
 

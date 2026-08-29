@@ -194,8 +194,9 @@ async def send_admin_message_http(
 
     # Signed here rather than at the ~dozen places that build a message: one
     # call site per transport is the only version of this that cannot be
-    # forgotten by the next alert somebody adds.
-    text = sign(text)
+    # forgotten by the next alert somebody adds. Clamped before signing so the
+    # signature always survives the cut.
+    text = sign(clamp_message(text, reserve=_signature_reserve()))
 
     token = token if token is not None else BOT_TOKEN
     recipients = list(chat_ids if chat_ids is not None else ADMIN_USER_IDS)
@@ -219,6 +220,22 @@ async def send_admin_message_http(
                         "parse_mode": parse_mode,
                         "disable_web_page_preview": True,
                     })
+                    if _is_parse_rejection(
+                        response.status_code, response.text,
+                    ) and parse_mode:
+                        # Broken markup degrades to plain text instead of
+                        # dying: delivery outranks typography, and this net is
+                        # what makes every builder's forgotten escape a
+                        # cosmetic bug instead of a silent one.
+                        logger.warning(
+                            "Admin alert to %s rejected as unparseable %s; "
+                            "resending as plain text", admin_id, parse_mode,
+                        )
+                        response = await client.post(url, json={
+                            "chat_id": admin_id,
+                            "text": text,
+                            "disable_web_page_preview": True,
+                        })
                     response.raise_for_status()
                     delivered += 1
                 except asyncio.CancelledError:
@@ -241,6 +258,54 @@ async def send_admin_message_http(
 # been applied, so markup does not spend the budget — but the text does, and a
 # caption over the limit fails the whole send rather than being trimmed.
 TELEGRAM_CAPTION_LIMIT = 1024
+
+# The message limit, in the same UTF-16 units. Nothing guarded this until
+# 29.08: an incident-morning digest renders ~10 000 characters, so the digest
+# failed hardest exactly when it had the most to say — and then advanced its
+# beat and went quiet for a week.
+TELEGRAM_MESSAGE_LIMIT = 4096
+
+
+def _utf16_units(text: str) -> int:
+    """Length the way Telegram measures it: UTF-16 code units."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+_TRUNCATION_MARK = "\n… (обрезано)"
+
+
+def clamp_message(text: str, *, reserve: int = 0) -> str:
+    """Cut `text` to fit Telegram's message limit, minus `reserve` units.
+
+    Truncation may split an HTML tag; that is deliberately tolerated because
+    the transports fall back to a plain-text resend on any parse rejection —
+    a clipped tag costs formatting, never delivery.
+    """
+    budget = TELEGRAM_MESSAGE_LIMIT - reserve
+    if _utf16_units(text) <= budget:
+        return text
+    budget -= _utf16_units(_TRUNCATION_MARK)
+    # Cut by UTF-16 units, not Python chars: an emoji is two units.
+    encoded = text.encode("utf-16-le")[: budget * 2]
+    clipped = encoded.decode("utf-16-le", errors="ignore")
+    return clipped + _TRUNCATION_MARK
+
+
+def _signature_reserve() -> int:
+    """UTF-16 units the transport will append: two newlines plus the line."""
+    return _utf16_units("\n\n" + sign(""))
+
+
+def _is_parse_rejection(status_code: int, body: str) -> bool:
+    """Telegram's 400 for markup it cannot parse — e.g. an unescaped `<`.
+
+    This is the failure that silently killed the canary's certificate alert:
+    `cert expires in 13d (<14)` under parse_mode=HTML is an "unsupported
+    start tag". The check is deliberately narrow — other 400s (bad chat id,
+    message too long) must not trigger a plain-text retry that would fail
+    identically.
+    """
+    return status_code == 400 and "can't parse entities" in body.lower()
 
 
 async def send_admin_photo_http(

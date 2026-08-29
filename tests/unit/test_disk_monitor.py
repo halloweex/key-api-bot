@@ -331,7 +331,7 @@ class TestSchedulerJob:
         store = DuckDBStore(db_path=tmp_path / "test.duckdb")
         await store.connect()
         try:
-            BackgroundScheduler._disk_alert_last_sent = 0.0
+            BackgroundScheduler._disk_alert_last_sent = {}
             scheduler = BackgroundScheduler()
 
             with patch(
@@ -342,7 +342,7 @@ class TestSchedulerJob:
                     "disk_free_gb": 55.0,
                 },
             ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
-               patch("bot.main.send_admin_message", new_callable=AsyncMock) as send:
+               patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
                 result = await scheduler._run_disk_watchdog()
 
             assert result["alert_fired"] is False
@@ -377,7 +377,7 @@ class TestSchedulerJob:
         store = DuckDBStore(db_path=tmp_path / "test.duckdb")
         await store.connect()
         try:
-            BackgroundScheduler._disk_alert_last_sent = 0.0
+            BackgroundScheduler._disk_alert_last_sent = {}
 
             now = datetime.now(timezone.utc)
             async with store.connection() as conn:
@@ -396,7 +396,7 @@ class TestSchedulerJob:
                     "disk_free_gb": 25.4,
                 },
             ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
-               patch("bot.main.send_admin_message", new_callable=AsyncMock) as send:
+               patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
                 result = await scheduler._run_disk_watchdog()
 
             assert result["alert_fired"] is False
@@ -413,7 +413,7 @@ class TestSchedulerJob:
         store = DuckDBStore(db_path=tmp_path / "test.duckdb")
         await store.connect()
         try:
-            BackgroundScheduler._disk_alert_last_sent = 0.0
+            BackgroundScheduler._disk_alert_last_sent = {}
 
             scheduler = BackgroundScheduler()
             with patch(
@@ -424,7 +424,7 @@ class TestSchedulerJob:
                     "disk_free_gb": 6.0,
                 },
             ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
-               patch("bot.main.send_admin_message", new_callable=AsyncMock) as send:
+               patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
                 result = await scheduler._run_disk_watchdog()
 
             assert result["alert_fired"] is True
@@ -445,7 +445,7 @@ class TestSchedulerJob:
         await store.connect()
         try:
             # Pretend we alerted 1 minute ago
-            BackgroundScheduler._disk_alert_last_sent = _time.time() - 60
+            BackgroundScheduler._disk_alert_last_sent = {"disk:WARN": _time.time() - 60, "disk:CRITICAL": _time.time() - 60}
 
             scheduler = BackgroundScheduler()
             with patch(
@@ -456,7 +456,7 @@ class TestSchedulerJob:
                     "disk_free_gb": 6.0,
                 },
             ), patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
-               patch("bot.main.send_admin_message", new_callable=AsyncMock) as send:
+               patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send:
                 result = await scheduler._run_disk_watchdog()
 
             assert result["alert_fired"] is False

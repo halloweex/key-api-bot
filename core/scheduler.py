@@ -1193,9 +1193,13 @@ class BackgroundScheduler:
             return False
         try:
             from bot.main import send_admin_message
-            await send_admin_message(message, key=bucket)
-            BackgroundScheduler._dq_last_alert[bucket] = now
-            return True
+            delivered = await send_admin_message(message, key=bucket)
+            if delivered:
+                # The 24h slot is paid for by a delivered message, not by an
+                # attempt: a kill-switched or rejected send used to consume a
+                # day of silence for a page nobody got.
+                BackgroundScheduler._dq_last_alert[bucket] = now
+            return delivered > 0
         except Exception as e:
             logger.warning(f"DQ alert send failed ({bucket}): {e}")
             return False
@@ -1430,7 +1434,10 @@ class BackgroundScheduler:
 
     # ─── Disk capacity watchdog ───────────────────────────────────────────────
 
-    _disk_alert_last_sent: float = 0.0
+    # Keyed by condition ("disk:WARN" / "disk:CRITICAL"), because one shared
+    # timestamp meant a WARN at 06:00 muted the escalation to CRITICAL for a
+    # full day — the exact transition a watchdog exists to announce.
+    _disk_alert_last_sent: Dict[str, float] = {}
     _DISK_ALERT_COOLDOWN_S = 86400  # 24h
 
     async def _run_disk_watchdog(self) -> Dict[str, Any]:
@@ -1566,7 +1573,8 @@ class BackgroundScheduler:
 
             # Throttle: avoid paging admins every 6h while the breach persists.
             now = time.time()
-            since = now - BackgroundScheduler._disk_alert_last_sent
+            disk_key = "disk:" + alert.severity.value
+            since = now - BackgroundScheduler._disk_alert_last_sent.get(disk_key, 0.0)
             if since < self._DISK_ALERT_COOLDOWN_S:
                 logger.info(
                     f"Disk alert throttled — last sent {int(since)}s ago "
@@ -1574,12 +1582,11 @@ class BackgroundScheduler:
                 )
                 return result
 
-            BackgroundScheduler._disk_alert_last_sent = now
             try:
                 from bot.main import send_admin_message
                 icon = "🚨" if alert.severity.value == "CRITICAL" else "⚠️"
                 msg = (
-                    f"{icon} *Disk watchdog: {alert.severity.value}*\n"
+                    f"{icon} <b>Disk watchdog: {alert.severity.value}</b>\n"
                     f"{alert.reason}\n\n"
                     f"DB: {alert.db_size_mb:,.0f} MB\n"
                     f"Disk: {alert.disk_pct_used:.1f}% used, "
@@ -1591,8 +1598,12 @@ class BackgroundScheduler:
                     "The weekly compact (Sun 02:00 UTC) is the only automatic "
                     "reclaim, and it stops both containers while it runs."
                 )
-                await send_admin_message(msg, key="disk:" + alert.severity.value)
-                result["alert_fired"] = True
+                delivered = await send_admin_message(msg, key=disk_key)
+                if delivered:
+                    # Recorded only on delivery: a cooldown paid for by a
+                    # message nobody received used to buy a day of silence.
+                    BackgroundScheduler._disk_alert_last_sent[disk_key] = now
+                result["alert_fired"] = delivered > 0
             except Exception as e:
                 logger.warning(f"Disk alert send failed: {e}")
 
@@ -2090,8 +2101,11 @@ class BackgroundScheduler:
             if message:
                 try:
                     from bot.main import send_admin_message
-                    await send_admin_message(message, key="dq:digest")
-                    sent = True
+                    # The beat moves only on delivery — "did not raise" also
+                    # covered kill-switched, throttled and Telegram-rejected
+                    # sends, and each of those muted the next seven days on
+                    # the strength of a message nobody received.
+                    sent = await send_admin_message(message, key="dq:digest") > 0
                 except Exception as e:
                     logger.warning(f"DQ digest send failed: {e}")
 
@@ -2371,8 +2385,8 @@ class BackgroundScheduler:
                 try:
                     from bot.main import send_admin_message
                     await send_admin_message(
-                        "⚠️ *Bronze invariant violated*\n"
-                        f"`mode={mode}`, `shadow={shadow}`\n"
+                        "⚠️ <b>Bronze invariant violated</b>\n"
+                        f"<code>mode={mode}</code>, <code>shadow={shadow}</code>\n"
                         f"total: {stats['total']:,} | unprocessed: {stats['unprocessed']:,}\n\n"
                         f"{reason}\n\n"
                         "Likely cause: prune misconfigured, or sync writing despite opt-out.",
@@ -2430,7 +2444,7 @@ class BackgroundScheduler:
             age_str = f"{int(age_s)}s" if age_s else "unknown"
 
             msg = (
-                "\u26a0\ufe0f **Bronze Backlog Alert**\n"
+                "\u26a0\ufe0f <b>Bronze Backlog Alert</b>\n"
                 f"Unprocessed events: {unprocessed}\n"
                 f"Oldest age: {age_str}\n\n"
                 "Promotion may be falling behind. "
@@ -2466,38 +2480,6 @@ class BackgroundScheduler:
             if path.exists():
                 return path.stat().st_size / (1024 * 1024)
         return None
-
-    async def _send_admin_telegram(self, message: str) -> None:
-        """Send a Telegram message to all admin users."""
-        import os
-
-        bot_token = os.getenv("BOT_TOKEN", "")
-        admin_str = os.getenv("ADMIN_USER_IDS", "")
-        if not bot_token or not admin_str:
-            logger.warning("BOT_TOKEN or ADMIN_USER_IDS not set, skipping alert")
-            return
-
-        admin_ids = [
-            uid.strip() for uid in admin_str.split(",") if uid.strip().isdigit()
-        ]
-
-        import httpx
-
-        async with httpx.AsyncClient(timeout=10) as client:
-            for uid in admin_ids:
-                try:
-                    resp = await client.post(
-                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                        json={
-                            "chat_id": uid,
-                            "text": message,
-                            "parse_mode": "HTML",
-                        },
-                    )
-                    if resp.status_code != 200:
-                        logger.error(f"Telegram alert to {uid} failed: {resp.text}")
-                except Exception as e:
-                    logger.error(f"Telegram alert to {uid} error: {e}")
 
     async def _run_memory_monitor(self) -> Dict[str, Any]:
         """Sample container memory, persist it, and alert on real pressure.
@@ -2616,8 +2598,18 @@ class BackgroundScheduler:
                 "container limit. Check what ran: <code>docker logs keycrm-web</code>",
             ]
 
-        await self._send_admin_telegram("\n".join(lines))
+        # Through the shared path since 29.08 — the raw transport this used
+        # to hold bypassed KS_ALERTS_DISABLED, the signature and the escaping
+        # net, which is exactly the phantom-from-a-laptop scenario the kill
+        # switch was built against. An OOM kill goes unkeyed on purpose: it is
+        # a fact about the past, each occurrence is its own message, and the
+        # per-level cooldown above already decided this one should go.
+        from bot.main import send_admin_message
+
+        key = None if alert.oom_kills_delta else f"memory:{level}"
+        delivered = await send_admin_message("\n".join(lines), key=key)
         result["alert_sent"] = level
+        result["alert_delivered"] = delivered
         return result
 
     # ═══════════════════════════════════════════════════════════════════════════

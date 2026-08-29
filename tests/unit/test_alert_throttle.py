@@ -208,7 +208,7 @@ class TestTheDevKillSwitch:
 
         monkeypatch.setattr(telegram_alerts, "throttle_check", forbidden)
 
-        assert await bot_main.send_admin_message("тревога", key="dq:test") is None
+        assert await bot_main.send_admin_message("тревога", key="dq:test") == 0
 
     def test_unset_means_alerts_flow(self, monkeypatch):
         from core import telegram_alerts

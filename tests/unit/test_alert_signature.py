@@ -78,7 +78,8 @@ class TestBothTransportsSign:
             async def __aexit__(self, *a): return False
             async def post(self, url, json=None, **kw):
                 sent.append(json)
-                return type("R", (), {"raise_for_status": lambda self: None})()
+                return type("R", (), {"status_code": 200, "text": "ok",
+                                      "raise_for_status": lambda self: None})()
 
         monkeypatch.setattr(telegram_alerts.httpx, "AsyncClient",
                             lambda **kw: FakeClient())
