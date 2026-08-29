@@ -126,10 +126,15 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # ── resource watchdogs (web) ──
     "disk:WARN": _c("usage back under the warning threshold"),
     "disk:CRITICAL": _c("usage back under the critical threshold"),
-    "memory:WARN": _c("working set back under the warning threshold"),
-    "memory:CRITICAL": _c("working set back under the critical threshold"),
-    # memory's OOM-kill alert is deliberately unkeyed (each kill is its own
-    # fact, throttling them would hide a second kill) and so has no entry.
+    # Per container, because the two processes have different limits (web 7g,
+    # bot 512m) and different failure stories — one key for both would make
+    # the series lie about which cgroup is starving.
+    "memory:web:WARN": _c("working set back under the warning threshold"),
+    "memory:web:CRITICAL": _c("working set back under the critical threshold"),
+    "memory:bot:WARN": _c("working set back under the warning threshold"),
+    "memory:bot:CRITICAL": _c("working set back under the critical threshold"),
+    # The OOM-kill alerts are deliberately unkeyed (each kill is its own
+    # fact, throttling them would hide a second kill) and so have no entry.
 
     # ── bronze (staging mode only — dead in this deployment, kept honest) ──
     "bronze:invariant_violated": _c("table size matches the mode invariant"),
@@ -478,6 +483,7 @@ async def raise_alert(
     bucket: "str | None",
     parse_mode: str = "HTML",
     group: "str | None" = None,
+    spool_as: "str | None" = None,
 ) -> int:
     """Raise an alert about the named conditions. Returns admins reached.
 
@@ -529,6 +535,15 @@ async def raise_alert(
             from core.alert_agent_spool import drop_task
 
             drop_task(conditions, bucket, text)
+        elif spool_as is not None:
+            # The bucket-less emitters — memory keeps its own pre-Gate
+            # cooldown as the pre-OOM exception — still deserve a
+            # diagnostician. `spool_as` names the task explicitly, and the
+            # upstream cooldown is what keeps this from re-summoning the
+            # agent every tick.
+            from core.alert_agent_spool import drop_task
+
+            drop_task(list(conditions) or [spool_as], spool_as, text)
     return delivered
 
 

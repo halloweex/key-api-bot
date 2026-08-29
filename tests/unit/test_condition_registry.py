@@ -134,8 +134,11 @@ def collect_family_keys() -> set:
     # constructs an alert; evaluate_* return None below WARN).
     keys |= {"disk:WARN", "disk:CRITICAL"}
 
-    # memory: f"memory:{level}"; the OOM path passes key=None on purpose.
-    keys |= {"memory:WARN", "memory:CRITICAL"}
+    # memory: f"memory:web:{level}" in the scheduler, "memory:bot:{level}"
+    # in bot/memory_watch.py — one key per container, because the two have
+    # different limits and different failure stories. OOM stays unkeyed.
+    keys |= {f"memory:{role}:{level}"
+             for role in ("web", "bot") for level in ("WARN", "CRITICAL")}
 
     # prediction: f"prediction:retrain_rejected:{sales_type}" — enumerate the
     # sales_type literals actually passed to train() anywhere in the codebase.

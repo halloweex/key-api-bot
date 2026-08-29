@@ -449,6 +449,17 @@ def main() -> None:
 
     # Run canary every 15 minutes; first probe 90s after startup so the web
     # container has time to come up after a co-deploy.
+    # The bot watching its own 512 MB — the container nobody was watching
+    # until 29.08: the web monitor reads its own cgroup, and this limit is
+    # fourteen times smaller. Same evaluator, own JSON persistence.
+    async def bot_memory_job(context):
+        from bot.memory_watch import check_bot_memory
+
+        await check_bot_memory()
+
+    application.job_queue.run_repeating(
+        bot_memory_job, interval=1800, first=120, name="bot_memory_watch",
+    )
     application.job_queue.run_repeating(
         canary_job, interval=900, first=90, name="dashboard_canary"
     )

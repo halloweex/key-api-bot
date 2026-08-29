@@ -2824,21 +2824,24 @@ class BackgroundScheduler:
         # switch was built against. An OOM kill goes unkeyed on purpose: it is
         # a fact about the past, each occurrence is its own message, and the
         # per-level cooldown above already decided this one should go.
-        if alert.oom_kills_delta:
-            # An OOM kill is an event: unkeyed on purpose (each kill is its
-            # own fact) and never resolvable.
-            from bot.main import send_admin_message
+        from core.alerting import raise_alert
 
-            delivered = await send_admin_message("\n".join(lines), key=None)
+        if alert.oom_kills_delta:
+            # An OOM kill is an event: no conditions (never resolvable), no
+            # bucket (each kill is its own fact) — but a diagnosis is exactly
+            # what a kill deserves, so it spools.
+            delivered = await raise_alert(
+                "\n".join(lines), conditions=[],
+                bucket=None, spool_as="memory:web:oom",
+            )
         else:
             # bucket=None: the per-level cooldown above already decided this
             # one goes; the Gate contributes the delivered-conditions map so
-            # the recovery can be announced (step 04).
-            from core.alerting import raise_alert
-
+            # the recovery can be announced (step 04), and spool_as summons
+            # the diagnostician the bucket-less path otherwise skips.
             delivered = await raise_alert(
-                "\n".join(lines), conditions=[f"memory:{level}"],
-                bucket=None, group="memory",
+                "\n".join(lines), conditions=[f"memory:web:{level}"],
+                bucket=None, group="memory", spool_as=f"memory:web:{level}",
             )
         result["alert_sent"] = level
         result["alert_delivered"] = delivered

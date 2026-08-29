@@ -37,6 +37,7 @@ family_for() {
         warehouse:*)                          echo warehouse ;;
         mirror_*|dq_*|ch_*|order_versions_*|freshness_*) echo mirror ;;
         disk:*)                               echo disk ;;
+        memory:*)                             echo memory ;;
         health_*|cert_*|alerting_*)           echo health ;;
         *)                                    echo default ;;
     esac
@@ -85,6 +86,8 @@ $(cat "$task")"
             "Bash(curl -s:*)" \
             "Bash(df:*)" \
             "Bash(du:*)" \
+            "Bash(docker stats:*)" \
+            "Bash(free:*)" \
             "Bash(echo:*)" \
             "Bash(openssl:*)" \
         2>>"$LOG")"
