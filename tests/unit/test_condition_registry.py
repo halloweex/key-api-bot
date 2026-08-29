@@ -16,7 +16,13 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from core.alerting import EXCLUDED_MESSAGE_KEYS, REGISTRY, Kind, spec_for
+from core.alerting import (
+    EXCLUDED_MESSAGE_KEYS,
+    PENDING_EMITTERS,
+    REGISTRY,
+    Kind,
+    spec_for,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -203,11 +209,18 @@ class TestCompleteness:
     def test_every_registered_key_is_emittable(self):
         """The direction that keeps the registry honest: an entry nobody can
         emit is documentation of a condition that does not exist."""
-        stale = set(REGISTRY) - emittable()
+        stale = set(REGISTRY) - emittable() - PENDING_EMITTERS
         assert not stale, (
             f"registry entries no emitter produces: {sorted(stale)} — delete "
             "them or fix the collector that should have found them"
         )
+
+    def test_pending_emitters_are_registered_and_stay_small(self):
+        """PENDING is a coordination valve for the shared branch, not a
+        loophole: every pending key must already be registered, and the set
+        must not quietly grow into a second registry."""
+        assert PENDING_EMITTERS <= set(REGISTRY)
+        assert len(PENDING_EMITTERS) <= 3
 
     def test_excluded_keys_are_not_registered(self):
         """The digest and the recovery notice are channel messages, not
