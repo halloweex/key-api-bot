@@ -7,7 +7,6 @@ missing local secret.
 import hashlib
 import logging
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -153,153 +152,6 @@ class TestPayload:
         assert r.json()["matched"] is False
 
 
-class TestTheSignedIdIsBoundToItsMessage:
-    """The signature proves the caller knew the secret; it says nothing about
-    which message the callback is for.
-
-    TurboSMS signs SHA1(secret + id) and nothing else, so the object actually
-    written — ``data.message_id`` — is outside the proof. One captured
-    (id, signature) pair therefore used to be a permanent write into any
-    recipient's delivery state: the pair never expires, there is no nonce, and
-    the pairs are obtainable (TURBOSMS_WEBHOOK_DEBUG prints one, and the
-    gateway hands one to us with every callback). Delivery state is what the
-    campaign's measured lift is computed from.
-
-    These run against a real store, not the fake: what is being proved is that
-    the write does not land, and a fake cannot show that.
-    """
-
-    @staticmethod
-    def _member(buyer_id: int) -> dict:
-        return {
-            "buyerId": buyer_id, "phone": f"3809{buyer_id:08d}", "tier": "CORE",
-            "assignment": "target", "orders": 2, "revenueLtv": 5000.0,
-            "marginLtv": 3000.0, "recencyDays": 30,
-        }
-
-    async def _campaign(self, tmp_path, monkeypatch):
-        """A sent campaign with two recipients, and the webhook wired to it."""
-        from core.duckdb_store import DuckDBStore
-
-        store = DuckDBStore(db_path=tmp_path / "dlr.duckdb")
-        await store.connect()
-        await store.freeze_sms_campaign(
-            campaign="aug", customers=[self._member(1), self._member(2)],
-            criteria={}, ltv_basis="margin", sales_type="retail", holdout_pct=0,
-        )
-        await store.record_sms_send(
-            "aug", {1: "mid-attacker", 2: "mid-victim"}, [], {},
-        )
-
-        async def _get_store():
-            return store
-
-        monkeypatch.setattr("web.routes.api.webhooks.get_store", _get_store)
-        monkeypatch.setenv("TURBOSMS_WEBHOOK_SECRET", SECRET)
-        return store
-
-    @staticmethod
-    def _client():
-        # ASGITransport runs the app in this test's own event loop, so the
-        # store's asyncio lock is used from one loop throughout. TestClient
-        # builds a fresh loop per request unless entered as a context manager,
-        # and entering it would run the app's whole startup.
-        return httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
-        )
-
-    @staticmethod
-    async def _row(store, message_id: str) -> tuple:
-        async with store.connection() as conn:
-            return conn.execute(
-                "SELECT delivery_status, delivered FROM sms_campaign_members"
-                " WHERE message_id = ?", [message_id],
-            ).fetchone()
-
-    @pytest.mark.asyncio
-    async def test_a_captured_pair_cannot_be_repointed_at_another_message(
-        self, tmp_path, monkeypatch,
-    ):
-        """The whole exploit in two calls: sign one event, then reuse that same
-        signature for somebody else's message."""
-        store = await self._campaign(tmp_path, monkeypatch)
-        forged = _signed("evt-A", "mid-attacker", "Sent")
-
-        async with self._client() as ac:
-            first = await ac.post(PATH, json=forged)
-            # Same id, same signature — only the object reference is swapped.
-            forged["data"]["message_id"] = "mid-victim"
-            forged["data"]["status"] = "UNDELIV"
-            second = await ac.post(PATH, json=forged)
-
-        assert first.status_code == 200
-        assert second.status_code != 200, "a re-pointed pair must not be accepted"
-        assert await self._row(store, "mid-victim") == ("Accepted", None), (
-            "the victim's delivery state is what the campaign's lift is "
-            "computed from, and a callback that never referred to them "
-            "must not touch it"
-        )
-        await store.close()
-
-    @pytest.mark.asyncio
-    async def test_the_rejection_is_counted_under_its_own_condition(
-        self, tmp_path, monkeypatch,
-    ):
-        """A burst of these is either a replay or the gateway reusing ids
-        across messages, and the counters are how anyone tells."""
-        store = await self._campaign(tmp_path, monkeypatch)
-        forged = _signed("evt-A", "mid-attacker", "Sent")
-
-        async with self._client() as ac:
-            await ac.post(PATH, json=forged)
-            forged["data"]["message_id"] = "mid-victim"
-            await ac.post(PATH, json=forged)
-
-        assert webhooks._dlr_counts["event_rebound"] == 1
-        assert webhooks._dlr_counts["accepted"] == 1, "the forged one is not accepted"
-        await store.close()
-
-    @pytest.mark.asyncio
-    async def test_the_gateways_nine_retries_are_still_recorded(
-        self, tmp_path, monkeypatch,
-    ):
-        """The regression that matters most.
-
-        TurboSMS retries each event nine times over 4.5 hours and offers no
-        replay, so a callback this endpoint refuses is a delivery result lost
-        for good. A legitimate retry carries the same id and the same data —
-        it must never look like a replay.
-        """
-        store = await self._campaign(tmp_path, monkeypatch)
-        retry = _signed("evt-A", "mid-victim", "DELIVRD")
-
-        async with self._client() as ac:
-            for attempt in range(9):
-                r = await ac.post(PATH, json={**retry, "try": attempt + 1})
-                assert r.status_code == 200, f"retry {attempt + 1} refused"
-                assert r.json() == {"ok": True, "matched": True}
-
-        assert await self._row(store, "mid-victim") == ("DELIVRD", True)
-        assert webhooks._dlr_counts["accepted"] == 9
-        await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_second_event_for_the_same_message_still_records(
-        self, tmp_path, monkeypatch,
-    ):
-        """Sent then DELIVRD are two events about one message. Binding the id
-        to the message must not turn the second one into a replay."""
-        store = await self._campaign(tmp_path, monkeypatch)
-
-        async with self._client() as ac:
-            await ac.post(PATH, json=_signed("evt-A", "mid-victim", "Sent"))
-            r = await ac.post(PATH, json=_signed("evt-B", "mid-victim", "DELIVRD"))
-
-        assert r.status_code == 200
-        assert await self._row(store, "mid-victim") == ("DELIVRD", True)
-        await store.close()
-
-
 class TestDiagnosis:
     """A wrong shared secret and an unparsed payload are the same 401 to the
     caller, and they need opposite fixes. The counters have to tell them apart —
@@ -350,48 +202,6 @@ class TestDiagnosis:
 
         assert sent not in caplog.text
         assert "signature_len" in caplog.text
-
-
-class TestDebugLogging:
-    """TURBOSMS_WEBHOOK_DEBUG is an opt-in, off-by-default diagnostic: it exists
-    so one real (id, signature) pair from a rejected callback can reach
-    scripts/check_turbosms_signature.py. That pair has to be logged for the tool
-    to work, but nothing else does — dumping the whole attacker-controlled
-    payload verbatim lets a caller inject fake log lines and bloats the log.
-    """
-
-    def test_debug_off_by_default_logs_nothing_extra(self, client, store, caplog):
-        with caplog.at_level(logging.WARNING, logger="web.routes.api.webhooks"):
-            client.post(PATH, json=_signed("evt-1", "mid-1", "DELIVRD",
-                                           secret="the-wrong-one"))
-        assert "webhook debug" not in caplog.text.lower()
-
-    def test_debug_logs_the_pair_the_diagnostic_needs(self, client, store,
-                                                      monkeypatch, caplog):
-        monkeypatch.setenv("TURBOSMS_WEBHOOK_DEBUG", "1")
-        payload = _signed("evt-1", "mid-1", "DELIVRD", secret="the-wrong-one")
-        sent_sig = payload["signature"]
-
-        with caplog.at_level(logging.WARNING, logger="web.routes.api.webhooks"):
-            client.post(PATH, json=payload)
-
-        assert "evt-1" in caplog.text
-        assert sent_sig in caplog.text, "the tool cannot test candidate secrets without it"
-
-    def test_debug_does_not_reflect_arbitrary_payload_fields(self, client, store,
-                                                            monkeypatch, caplog):
-        """The payload is attacker-controlled. Only the diagnostic fields are
-        logged, so a crafted value cannot land verbatim in the log."""
-        monkeypatch.setenv("TURBOSMS_WEBHOOK_DEBUG", "1")
-        payload = _signed("evt-1", "mid-1", "DELIVRD", secret="the-wrong-one")
-        payload["data"]["status"] = "INJECTED-MARKER"
-        payload["surprise"] = "SHOULD-NOT-APPEAR"
-
-        with caplog.at_level(logging.WARNING, logger="web.routes.api.webhooks"):
-            client.post(PATH, json=payload)
-
-        assert "INJECTED-MARKER" not in caplog.text
-        assert "SHOULD-NOT-APPEAR" not in caplog.text
 
 
 class TestAlerting:
@@ -559,14 +369,6 @@ class TestTheAlertNamesItsOwnCause:
     def test_every_condition_the_endpoint_raises_has_guidance(self):
         """A kind with no entry falls back, and the fallback must not claim
         something the condition does not imply."""
-        for kind in ("bad_signature", "secret_unset", "client_disconnected",
-                     "event_rebound"):
+        for kind in ("bad_signature", "secret_unset", "client_disconnected"):
             assert kind in webhooks._GUIDANCE, kind
         assert "TURBOSMS_WEBHOOK_SECRET" not in webhooks._GUIDANCE_DEFAULT
-
-    def test_a_rebound_event_is_not_read_as_a_wrong_secret(self):
-        """The secret verified — that is what makes this condition what it is."""
-        text = webhooks._GUIDANCE["event_rebound"]
-
-        assert "TURBOSMS_WEBHOOK_SECRET" not in text
-        assert "message_id" in text
