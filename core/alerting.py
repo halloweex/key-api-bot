@@ -519,6 +519,15 @@ async def raise_alert(
             conditions, message=text + suffix,
             delivered=delivered, swallowed=swallowed,
         )
+        if bucket is not None and suffix == "":
+            # A fresh incident (an empty suffix is the first fire of a
+            # bucket, including one returning after the quiet-hour reset) —
+            # the moment worth a diagnosis. Reminders and standing repeats
+            # never re-summon the agent; the host runner adds a daily budget
+            # on top.
+            from core.alert_agent_spool import drop_task
+
+            drop_task(conditions, bucket, text)
     return delivered
 
 
