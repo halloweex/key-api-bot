@@ -170,6 +170,7 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "customer_profile_mismatch": _c("the next витрина rebuild on the same tick"),
 
     # ── data-quality findings: ClickHouse copies and derivations ──
+    "ch_reconcile_pending": _c("silver ships fresh again (hourly ch_sync)"),
     "ch_silver_unreachable": _c("ClickHouse answers again"),
     "ch_silver_sync_failed": _c("the next hourly ship succeeds"),
     "ch_silver_roundtrip": _c("the copy reads back equal"),

@@ -1795,6 +1795,10 @@ def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, An
 # 30 h at that restart, which is a genuine outage worth one page.
 WATCHED_LAYERS: Tuple[str, ...] = (
     "integrity", "reconciliation", "mirror_landing", "reconciliation_pg",
+    # The third arm of the source reconciliation: ClickHouse against the same
+    # 05:30 snapshot. Its own layer for reconciliation_pg's reason — an arm
+    # that stops running must not hide behind a fresh sibling.
+    "reconciliation_ch",
 )
 
 
@@ -1880,6 +1884,7 @@ DIGEST_MAX_AGE_HOURS = {
     # and therefore its limit. A `reconciliation_pg` older than the
     # `reconciliation` beside it means the Postgres half stopped while the
     # DuckDB half kept going — which is precisely why it is a layer of its own.
+    "reconciliation_ch": 30,
     "reconciliation_pg": 30,
 }
 

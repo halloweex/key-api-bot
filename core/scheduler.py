@@ -1788,6 +1788,169 @@ class BackgroundScheduler:
             )
         await self._resolve_dq_layer(layer, issues, error_message)
 
+    async def _reconcile_clickhouse(
+        self, kc_orders, *, window_start, window_end, as_of, inflight_ids,
+    ):
+        """The third arm: ClickHouse's silver against the same KeyCRM snapshot.
+
+        The owner's criterion, applied to the third store: two copies can
+        agree perfectly and both be wrong, and until now ClickHouse's honesty
+        against the source was only transitive — through Postgres, with a
+        two-hour gap between the links. When ClickHouse becomes a reader of
+        Gold, this stops being optional; it is built while the snapshot
+        machinery is warm.
+
+        **Still no extra API calls** — the fetch happened once, at 05:30, and
+        all three verdicts are against the identical snapshot, which is what
+        makes them comparable at all.
+
+        Header grain only: silver carries no line items, so the three
+        line-level fields are out of scope here — the DuckDB and Postgres
+        arms cover them. And the watermark exclusion is computed in Postgres
+        bronze (where `updated_at` lives), because ClickHouse's copy has no
+        such column and skipping the rule would ghost the ~1,400 orders the
+        05:15 status refresh force-rewrites every morning.
+
+        No repair path, more firmly than anywhere: the copy's medicine is its
+        own hourly re-ship (ch_sync), which will have run before any human
+        reads this verdict.
+        """
+        from core import ch_common
+        from core.data_quality import (
+            IntegrityIssue,
+            Severity,
+            classify_order_discrepancies,
+        )
+        from core.mirror_reconciliation import configured, fetch_watermarks
+        from core.reconciliation_io import (
+            CH_HEADER_FIELDS,
+            clickhouse_orders_in_window,
+            pg_ids_updated_since,
+        )
+
+        if not ch_common.configured() or not configured():
+            return None
+
+        issues: list = []
+        discrepancies: list = []
+        error_message = None
+
+        try:
+            from core.pg import get_pool
+
+            pool = await get_pool()
+
+            # The gate: a copy that never shipped, or shipped hours ago, must
+            # not be reconciled against the source — the verdict would measure
+            # the ship's lag and call it a lie. Three hours is the hourly
+            # cadence plus grace.
+            watermarks = await fetch_watermarks(pool)
+            silver_state = watermarks.get("clickhouse.silver_orders") or {}
+            last_ok = silver_state.get("last_ok_at")
+            from datetime import datetime, timedelta, timezone
+
+            stale = (
+                last_ok is None
+                or (datetime.now(timezone.utc) - last_ok) > timedelta(hours=3)
+            )
+            if stale:
+                issues.append(IntegrityIssue(
+                    check_name="ch_reconcile_pending",
+                    table_name="silver.orders",
+                    severity=Severity.WARN,
+                    count=0,
+                    description=(
+                        "ClickHouse silver has not shipped recently enough to "
+                        "be reconciled against KeyCRM (last_ok_at="
+                        f"{last_ok}); comparing now would measure the ship's "
+                        "lag and call it a lie. The hourly ch_sync is the fix."
+                    ),
+                ))
+                return {"issues": issues, "discrepancies": [], "error": None}
+
+            exclude = set(inflight_ids or ())
+            exclude |= await pg_ids_updated_since(
+                pool, window_start, window_end, as_of,
+            )
+            ch_orders = await clickhouse_orders_in_window(
+                window_start, window_end, exclude_ids=exclude,
+            )
+            # The KeyCRM side must shrink by the same exclusion set — the
+            # other arms apply the watermark inside their own SQL; here both
+            # sides get it applied once, symmetrically.
+            kc_comparable = {
+                oid: facts for oid, facts in kc_orders.items()
+                if oid not in exclude
+            }
+            discrepancies = classify_order_discrepancies(
+                ch_orders, kc_comparable, fields=CH_HEADER_FIELDS,
+            )
+            logger.info(
+                f"DQ reconciliation (ClickHouse): ch_orders={len(ch_orders)} "
+                f"kc={len(kc_comparable)} excluded={len(exclude)} "
+                f"discrepancies={len(discrepancies)}"
+            )
+        except Exception as e:
+            error_message = f"{type(e).__name__}: {e}"
+            logger.exception("DQ reconciliation against ClickHouse raised")
+
+        return {
+            "issues": issues,
+            "discrepancies": discrepancies,
+            "error": error_message,
+        }
+
+    async def _persist_ch_reconciliation(
+        self, result, *, started_at, as_of, window_start, window_end,
+    ) -> None:
+        """Write the ClickHouse verdict as its own run — `reconciliation_pg`'s
+        reasons, verbatim: one layer per comparison, so an arm that stops
+        running cannot hide behind a fresh sibling."""
+        from datetime import datetime, timezone
+        from core.data_quality import (
+            Severity,
+            alert_fingerprint,
+            format_alert_message,
+            machine_attempts_note,
+            overall_severity,
+            persist_run,
+        )
+        from core.duckdb_store import get_store
+
+        layer = "reconciliation_ch"
+        issues = result["issues"]
+        discrepancies = result["discrepancies"]
+        error_message = result["error"]
+
+        store = await get_store()
+        try:
+            async with store.connection() as conn:
+                persist_run(
+                    conn,
+                    started_at=started_at,
+                    ended_at=datetime.now(timezone.utc),
+                    as_of=as_of,
+                    window_start=window_start, window_end=window_end,
+                    layer=layer,
+                    issues=issues, discrepancies=discrepancies,
+                    api_calls_used=0,
+                    error_message=error_message,
+                )
+        except Exception as e:
+            logger.exception(f"DQ ClickHouse reconciliation persist failed: {e}")
+
+        sev = overall_severity(issues, discrepancies)
+        if sev == Severity.CRITICAL and not error_message:
+            msg = format_alert_message(
+                layer, sev, issues, discrepancies,
+                machine_note=machine_attempts_note(),
+            )
+            await self._send_dq_alert_throttled(
+                layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
+                conditions=[i.check_name for i in issues],
+            )
+        await self._resolve_dq_layer(layer, issues, error_message)
+
     async def _run_dq_reconciliation(self, window_days: int = 90) -> Dict[str, Any]:
         """Layer-2 source-of-truth reconciliation vs KeyCRM.
 
@@ -1838,6 +2001,7 @@ class BackgroundScheduler:
             discrepancies: list = []
             api_calls = 0
             pg_result = None
+            ch_result = None
 
             try:
                 # 1. KeyCRM orders (counts API calls). Runs first because it
@@ -1877,6 +2041,13 @@ class BackgroundScheduler:
                     window_start=window_start, window_end=window_end,
                     as_of=as_of, inflight_ids=inflight_ids,
                 )
+                # …and a third time, against ClickHouse. Same snapshot, same
+                # zero API calls, own layer.
+                ch_result = await self._reconcile_clickhouse(
+                    kc_orders,
+                    window_start=window_start, window_end=window_end,
+                    as_of=as_of, inflight_ids=inflight_ids,
+                )
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("DQ reconciliation raised")
@@ -1907,6 +2078,11 @@ class BackgroundScheduler:
             if pg_result is not None:
                 await self._persist_postgres_reconciliation(
                     pg_result, started_at=started_at, as_of=as_of,
+                    window_start=window_start, window_end=window_end,
+                )
+            if ch_result is not None:
+                await self._persist_ch_reconciliation(
+                    ch_result, started_at=started_at, as_of=as_of,
                     window_start=window_start, window_end=window_end,
                 )
 
