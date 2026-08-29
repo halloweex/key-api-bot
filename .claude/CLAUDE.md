@@ -636,6 +636,11 @@ month after a day number takes the genitive in both Slavic languages.
 flag in its internal tooling is not a neutral act. Languages have names.
 
 ### How a failure reaches a human
+- **`KS_ALERTS_DISABLED=1` глушит весь исходящий Telegram** (алерты, дайджест,
+  watchdog'и, недельный отчёт) — рубильник dev-инстансов: ноутбук на копии
+  прод-бэкапа дважды слал админам «прод»-тревоги о самом себе. Прод не
+  ставит переменную; локальный .env — ставит. Подавление тотально (HTTP-клиент
+  не создаётся) и громко (INFO-строка на каждое проглоченное).
 - **Alert throttle** keys on the *condition* (`warehouse:validation_retrying`,
   `dq:{layer}:{severity}:{checks}`, `canary:{failing keys}`), never on message
   text — the validator embeds live checksums, so 3 119 failures once produced
