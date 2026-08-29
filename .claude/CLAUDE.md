@@ -134,7 +134,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (needs `sms` view/edit) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
 | `/api/managers/{id}/retail-status` | Classify a manager, marks warehouse dirty (POST, admin) |
-| `/api/health/data-quality` | Latest run per layer — integrity, reconciliation, mirror_landing, reconciliation_pg — with issues/diffs (за сессией) |
+| `/api/health/data-quality` | Latest run per layer — integrity, reconciliation, mirror_landing, reconciliation_pg, reconciliation_ch — with issues/diffs (за сессией) |
 | `/api/warehouse/status` | Last refresh, checksums, validation_passed |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/mirror/backfill/orders` | Ship the orders Postgres is missing; idempotent (POST, admin) |
@@ -535,12 +535,13 @@ whole reason the group is read from the source now.
 | `warehouse_refresh` | every 2 min | Silver + Gold rebuild, validation, cell guard |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
-| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **both stores**, one fetch |
+| `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **all three stores** (DuckDB, PG, ClickHouse), one fetch; слои `reconciliation`, `reconciliation_pg`, `reconciliation_ch` |
 | `dq_mirror_landing` | 07:30 | Reconciliation A: landing, Silver, Gold, the five `app.*` tables, `bot.db` — tolerance zero — then the order-version archive, which is a liveness check and not a comparison |
 | `replicate_operational` | every 1 h | Copy the five irreplaceable tables and `data/bot.db` into Postgres |
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
+| `bot_memory_watch` | every 30 min (bot) | бот сторожит свои 512 МБ тем же evaluator'ом; предыдущий сэмпл — в `data/memory-bot-last.json` (OOM-счётчик ядра сбрасывается при recreate) |
 
 **Never schedule anything at 05:00–05:05 Kyiv.** The host cron
 `0 2 * * 0 weekly_compact.sh` is 02:00 UTC — the same instant — and it stops
@@ -644,6 +645,27 @@ flag in its internal tooling is not a neutral act. Languages have names.
   пять дыр (memory monitor, два хендлера, четыре shell-скрипта) — закрыты
   шагами 00 и 07 переработки алертов; shell читает рубильник из .env через
   `deploy/notify.sh`.
+- **Третья рука сверки** — `reconciliation_ch` (внутри `dq_reconciliation`):
+  клик против того же снапшота KeyCRM, ноль лишних вызовов API. Шапочное
+  зерно (silver без позиций), вотермарочное исключение считается в PG bronze
+  (у клика нет `updated_at` — без этого ~1 400 force-переписанных в 05:15
+  заказов были бы фантомами), копия старше 3 ч гейтится
+  (`ch_reconcile_pending`), а не обвиняется.
+- **Агент-диагност** (трек Б): доставленный свежий инцидент кладёт задачу в
+  `data/alert-tasks/pending/` (sticky 1777 — пишут контейнеры, дренит root);
+  systemd path-unit на хосте запускает headless `claude -p` с ранбуком
+  семейства (`deploy/agent/runbooks/`), инструменты — только чтение (docker
+  logs, psql под SELECT-only ролью `ks_readonly` через local trust, curl,
+  df/du/stats/free); бюджет 10/день, таймаут 5 мин. Диагноз — вторым
+  сообщением через `deploy/notify.sh` и целиком в журнал
+  (`event_type='diagnosed'`). Логи для агента — недоверенные данные; граница
+  — allowlist, не промпт. bucket-less эмиттеры зовут его через
+  `raise_alert(spool_as=...)`.
+- **Память — по контейнерам**: ключи `memory:web:*` и `memory:bot:*` (лимиты
+  7g и 512m — один ключ врал бы, чей cgroup голодает); кулдауны WARN 24ч /
+  CRITICAL 6ч — задокументированное pre-OOM исключение из суточного
+  затухания Gate; OOM не троттлится никогда и спулится агенту с
+  `conditions=[]`.
 - **Условия и жизненный цикл**: словарь — `core/alerting.py` (REGISTRY,
   ~105 ключей, condition/event, exact-match; тест полноты вычисляет
   эмиттируемое множество из AST). Политика — AlertGate: громкий час (30 мин),
@@ -1486,4 +1508,4 @@ GET /api/admin/resync/status/{job_id}
 
 ---
 
-*Last updated: 2026-08-29*
+*Last updated: 2026-08-30*
