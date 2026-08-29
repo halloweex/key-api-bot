@@ -167,6 +167,43 @@ def sign(text: str) -> str:
     return f"{text}\n\n{line}" if text else line
 
 
+# ─── The alerting watching itself ───────────────────────────────────────────
+#
+# Every transport failure used to be a logger.warning and nothing else, which
+# is how the certificate alert stayed undeliverable for months. This counter
+# is read by /api/health (web) and judged by the canary from the other
+# container — the same shape as every other dead-man's switch here. Only real
+# attempts count: a kill-switched or empty-recipients send is configuration,
+# not a transport failure.
+_consecutive_transport_failures = 0
+_last_delivery_at: "float | None" = None
+
+
+def record_transport_outcome(delivered: int, attempted: int) -> None:
+    global _consecutive_transport_failures, _last_delivery_at
+    if attempted <= 0:
+        return
+    if delivered > 0:
+        _consecutive_transport_failures = 0
+        _last_delivery_at = time.time()
+    else:
+        _consecutive_transport_failures += 1
+
+
+def transport_health() -> dict:
+    return {
+        "consecutive_transport_failures": _consecutive_transport_failures,
+        "last_delivery_at": _last_delivery_at,
+    }
+
+
+def reset_transport_health() -> None:
+    """For tests."""
+    global _consecutive_transport_failures, _last_delivery_at
+    _consecutive_transport_failures = 0
+    _last_delivery_at = None
+
+
 def _log_suppressed(what: str, text: str) -> None:
     logger.info(
         "%s suppressed (%s): %.80s", what, DISABLE_ENV, text.replace("\n", " ")
@@ -251,6 +288,7 @@ async def send_admin_message_http(
     if delivered:
         logger.info("Admin alert delivered over HTTP to %d/%d admins",
                     delivered, len(recipients))
+    record_transport_outcome(delivered, len(recipients))
     return delivered
 
 
@@ -381,4 +419,5 @@ async def send_admin_photo_http(
     if delivered:
         logger.info("Admin photo delivered over HTTP to %d/%d admins",
                     delivered, len(recipients))
+    record_transport_outcome(delivered, len(recipients))
     return delivered

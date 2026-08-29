@@ -148,7 +148,7 @@ class TestTheTableIsWhereItsMeaningPutsIt:
         The pin moves with the head migration — 0011 since the buyer landing
         and the витрина — and this assertion is the speed bump that makes the
         move a decision rather than a side effect."""
-        assert pg.REQUIRED_REVISION == "0011_buyers_lines_vitrina"
+        assert pg.REQUIRED_REVISION == "0012_alert_archive"
 
     def test_money_keeps_the_scale_it_has_everywhere_else(self):
         """NUMERIC(12,2), as in `bronze.orders` and as DECIMAL(12,2) in DuckDB.

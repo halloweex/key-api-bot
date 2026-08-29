@@ -140,6 +140,10 @@ async def send_admin_message(
             delivered += 1
         except Exception as exc:
             logger.warning("Failed to send admin message to %s: %s", admin_id, exc)
+
+    from core.telegram_alerts import record_transport_outcome
+
+    record_transport_outcome(delivered, len(ADMIN_USER_IDS))
     return delivered
 
 

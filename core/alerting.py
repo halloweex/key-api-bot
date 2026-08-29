@@ -103,6 +103,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "mirror_never:bronze.orders": _c("the table's first successful shipment"),
     "mirror_stale:bronze.orders": _c("a shipment inside the age limit"),
     "mirror_failing:bronze.orders": _c("failures_since_ok back to zero"),
+    # The alerting machinery watching itself: consecutive transport failures
+    # published in /api/health and judged by the canary — the one subsystem
+    # that had no dead-man's switch, which is how the certificate alert died
+    # unnoticed. Rule 3 applies to the block itself: absent is a failure.
+    "alerting_transport_failing": _c("a send reaches at least one admin again"),
+    "alerting_block_missing": _c("health payload carries the alerting block again"),
     # The canary's guaranteed-fallback bucket for a result with no keys.
     # Registered so the completeness test sees it; firing it is a bug.
     "unkeyed": _EVENT,
@@ -245,11 +251,21 @@ EXCLUDED_MESSAGE_KEYS: FrozenSet[str] = frozenset({"dq:digest", "canary:recovery
 # and how many repeats it stands for. Events never escalate their cooldown —
 # each occurrence is its own fact.
 #
-# State is in-process and resets on restart, like every throttle before it —
-# deliberately, for now: the durable decision-state file is step 03, and
-# after a restart the first alert of each kind should land anyway.
+# Decision state survives restarts (step 03): a JSON snapshot per container
+# on the ./data volume, written atomically and loaded tolerantly. Wall clock,
+# not monotonic — a monotonic timestamp is meaningless across restarts, and
+# durability is what this state is for. What the file protects: last_sent, so
+# a deploy inside a standing condition's daily cooldown does not re-page; what
+# it deliberately lets happen: a bucket whose last_attempt has gone stale
+# reads as a new incident, so after a long outage the first alert of each
+# kind still lands — the charter's restart rule, now a property of the data
+# rather than of amnesia.
 
+import json as _json
+import os as _os
+import tempfile as _tempfile
 import time as _time
+from pathlib import Path as _Path
 
 
 @dataclass
@@ -262,14 +278,75 @@ class _BucketState:
     suppressed: int = 0
 
 
+def _default_state_path() -> "_Path | None":
+    """`data/alert-gate-{role}.json`; both containers mount ./data, so the
+    role (KS_ROLE: web|bot) keeps them from clobbering each other. An empty
+    KS_ALERT_GATE_STATE_DIR disables persistence — the test suite's setting,
+    so two thousand tests do not take turns rewriting one real file."""
+    root = _os.getenv("KS_ALERT_GATE_STATE_DIR", "data")
+    if not root.strip():
+        return None
+    role = _os.getenv("KS_ROLE", "web").strip() or "web"
+    return _Path(root) / f"alert-gate-{role}.json"
+
+
 class AlertGate:
     BASE_COOLDOWN_S = 1800.0      # the loud phase: repeats every 30 min
     LOUD_PHASE_S = 3600.0         # for the condition's first hour
     STANDING_COOLDOWN_S = 86400.0  # then one reminder a day
     INCIDENT_RESET_S = 3600.0     # an hour of quiet = the next raise is news
+    _SAVE_DEBOUNCE_S = 60.0
 
-    def __init__(self) -> None:
+    def __init__(self, state_path: "_Path | None" = None) -> None:
         self._state: Dict[str, _BucketState] = {}
+        self._path = state_path
+        self._last_save = 0.0
+        self._dirty = False
+        if self._path is not None:
+            self._load()
+
+    # ── persistence (tolerant on both ends) ──
+
+    def _load(self) -> None:
+        try:
+            raw = _json.loads(self._path.read_text())
+            self._state = {
+                k: _BucketState(**v) for k, v in raw.items()
+            }
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "alert gate state unreadable (%s); starting empty", exc,
+            )
+            self._state = {}
+
+    def _save(self, now: float, *, force: bool = False) -> None:
+        if self._path is None or not self._dirty:
+            return
+        if not force and (now - self._last_save) < self._SAVE_DEBOUNCE_S:
+            return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            payload = _json.dumps(
+                {k: vars(v) for k, v in self._state.items()}
+            )
+            fd, tmp = _tempfile.mkstemp(
+                dir=str(self._path.parent), prefix=self._path.name,
+            )
+            with _os.fdopen(fd, "w") as handle:
+                handle.write(payload)
+            _os.replace(tmp, self._path)
+            self._last_save = now
+            self._dirty = False
+        except Exception as exc:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "alert gate state not saved (%s); continuing in memory", exc,
+            )
 
     def decide(
         self, bucket: str, *, has_condition: bool, now: "float | None" = None,
@@ -281,16 +358,20 @@ class AlertGate:
         disk watchdog, whose 24h slot used to be consumed by a message nobody
         received.
         """
-        now = _time.monotonic() if now is None else now
+        now = _time.time() if now is None else now
         st = self._state.get(bucket)
         if st is not None and (now - st.last_attempt) > self.INCIDENT_RESET_S:
             # Quiet long enough that this is a new incident, not a repeat.
             st = None
         if st is None:
             self._state[bucket] = _BucketState(first_seen=now, last_attempt=now)
+            self._dirty = True
+            self._save(now)
             return True, ""
 
         st.last_attempt = now
+        self._dirty = True
+        self._save(now)
         age = now - st.first_seen
         standing = has_condition and age >= self.LOUD_PHASE_S
         cooldown = self.STANDING_COOLDOWN_S if standing else self.BASE_COOLDOWN_S
@@ -307,18 +388,26 @@ class AlertGate:
             parts.append("next reminder in 24h")
         return True, ("\n\n⏳ " + " · ".join(parts) if parts else "")
 
-    def record_delivery(self, bucket: str, *, now: "float | None" = None) -> None:
-        now = _time.monotonic() if now is None else now
+    def record_delivery(self, bucket: str, *, now: "float | None" = None) -> int:
+        """Commit the cooldown; returns the swallowed count this delivery
+        flushed, which is what the archive records against the series."""
+        now = _time.time() if now is None else now
         st = self._state.get(bucket)
-        if st is not None:
-            st.last_sent = now
-            st.suppressed = 0
+        if st is None:
+            return 0
+        flushed = st.suppressed
+        st.last_sent = now
+        st.suppressed = 0
+        self._dirty = True
+        self._save(now, force=True)
+        return flushed
 
     def reset(self) -> None:
         self._state.clear()
+        self._dirty = False
 
 
-_gate = AlertGate()
+_gate = AlertGate(state_path=_default_state_path())
 
 
 def reset_gate() -> None:
@@ -365,8 +454,14 @@ async def raise_alert(
     delivered = await send_admin_message(
         text + suffix, parse_mode, pre_throttled=True,
     )
-    if delivered and bucket is not None:
-        _gate.record_delivery(bucket)
+    if delivered:
+        swallowed = _gate.record_delivery(bucket) if bucket is not None else 0
+        from core.alert_archive import record_fired
+
+        record_fired(
+            conditions, message=text + suffix,
+            delivered=delivered, swallowed=swallowed,
+        )
     return delivered
 
 

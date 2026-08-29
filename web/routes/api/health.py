@@ -139,6 +139,14 @@ async def health_check(request: Request):
     # the 07:30 comparison, which is a whole day of silence at the main copy.
     mirrors = await _mirror_freshness()
 
+    # The alerting machinery watching itself: consecutive transport failures
+    # in THIS process, judged by the canary from the other container. The one
+    # subsystem that had no dead-man's switch — which is how the certificate
+    # alert stayed undeliverable for months.
+    from core.telegram_alerts import transport_health
+
+    alerting = transport_health()
+
     return {
         "status": (
             "degraded" if not duckdb_stats or migrations.get("status") == "failed"
@@ -157,6 +165,7 @@ async def health_check(request: Request):
         "sync": sync_status,
         "data_quality": data_quality,
         "mirrors": mirrors,
+        "alerting": alerting,
     }
 
 

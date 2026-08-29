@@ -59,6 +59,12 @@ os.environ["KS_ALERTS_DISABLED"] = "0"
 # about a rendered message machine-dependent.
 os.environ["KS_INSTANCE"] = "test-instance"
 
+# The Gate persists its decision state under data/ by default; two thousand
+# tests taking turns rewriting a real file would be both slow and a way for
+# one run to poison the next. Empty means disabled; tests that exercise
+# persistence construct AlertGate(state_path=tmp_path/...) explicitly.
+os.environ["KS_ALERT_GATE_STATE_DIR"] = ""
+
 import pytest  # noqa: E402  — must follow the environment block above
 
 

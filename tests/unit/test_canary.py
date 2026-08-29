@@ -42,6 +42,11 @@ def _healthy_payload():
                 "failing": False,
             },
         },
+        # The alerting watching itself (step 03). Absent → failure, rule 3.
+        "alerting": {
+            "consecutive_transport_failures": 0,
+            "last_delivery_at": 1723900000.0,
+        },
     }
 
 

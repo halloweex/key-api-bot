@@ -300,6 +300,33 @@ def check_mirror_freshness(
     return failures, ages
 
 
+# How many transport failures in a row before the canary says the alerting
+# itself is broken. One failure is a Telegram hiccup the next send retries;
+# three consecutive means nothing is reaching anyone — and nothing else in
+# the system would ever say so, which is how the certificate alert stayed
+# undeliverable for months.
+ALERTING_MAX_CONSECUTIVE_FAILURES = 3
+
+
+def check_alerting_health(
+    payload: Optional[dict],
+) -> "list[tuple[str, str]]":
+    """Judge the `alerting` block of /api/health. Absence is a failure —
+    rule 3, same as the data_quality and mirrors blocks."""
+    block = (payload or {}).get("alerting")
+    if not isinstance(block, dict):
+        return [("alerting_block_missing",
+                 "health payload has no alerting block")]
+    failures = int(block.get("consecutive_transport_failures") or 0)
+    if failures >= ALERTING_MAX_CONSECUTIVE_FAILURES:
+        return [(
+            "alerting_transport_failing",
+            f"alerting: {failures} consecutive transport failures — "
+            "alerts may be reaching nobody",
+        )]
+    return []
+
+
 # ─── Orchestration ──────────────────────────────────────────────────────────
 
 async def run_canary(
@@ -376,6 +403,15 @@ async def run_canary(
         for key, message in mirror_failures:
             fail(key, message)
         if mirror_failures and severity == "ok":
+            severity = "warn"
+
+        # The alerting watching itself — the web process reports its own
+        # transport health; this container judges it. Warn, not critical:
+        # the site serves, but the verdict channel may be mute.
+        alerting_failures = check_alerting_health(payload)
+        for key, message in alerting_failures:
+            fail(key, message)
+        if alerting_failures and severity == "ok":
             severity = "warn"
 
     if cert_err:

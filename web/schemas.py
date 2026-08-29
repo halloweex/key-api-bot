@@ -87,6 +87,15 @@ class HealthResponse(BaseModel):
             "because Pydantic already owns that word."
         ),
     )
+    alerting: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "The alerting machinery's own health: consecutive transport "
+            "failures in this process and the last successful delivery. "
+            "Judged by the canary — the one subsystem that had no dead-man's "
+            "switch on itself."
+        ),
+    )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(
         None,
         description=(

@@ -286,6 +286,9 @@ services:
       # and changes on every recreate. A dev instance that forgets
       # KS_ALERTS_DISABLED at least says whose laptop it is.
       - KS_INSTANCE=${KS_INSTANCE:-prod-vps}
+      # Names this process's slice of shared state (both containers mount
+      # ./data): the alert gate's decision file is alert-gate-{role}.json.
+      - KS_ROLE=bot
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
@@ -352,6 +355,9 @@ services:
       # and changes on every recreate. A dev instance that forgets
       # KS_ALERTS_DISABLED at least says whose laptop it is.
       - KS_INSTANCE=${KS_INSTANCE:-prod-vps}
+      # Names this process's slice of shared state (both containers mount
+      # ./data): the alert gate's decision file is alert-gate-{role}.json.
+      - KS_ROLE=web
     volumes:
       - ./data:/app/data
     expose:

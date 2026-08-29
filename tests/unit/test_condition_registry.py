@@ -193,6 +193,9 @@ def collect_canary_keys() -> set:
     keys.add("dq_block_missing")
     keys.add("mirror_block_missing")
     keys.add("unkeyed")  # the guaranteed-fallback bucket in decide()
+    # check_alerting_health returns its keys as tuple literals rather than
+    # through fail(); a declared family, like disk's and memory's.
+    keys |= {"alerting_block_missing", "alerting_transport_failing"}
     return keys
 
 
