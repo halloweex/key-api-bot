@@ -171,3 +171,47 @@ class TestSendAdminMessageIsThrottled:
             await bot_main.send_admin_message("backup could not run", key="warehouse:backup_failed")
 
         assert sender.await_count == 2
+
+
+class TestTheDevKillSwitch:
+    """KS_ALERTS_DISABLED exists because a developer laptop, running the whole
+    app on a copy of the production backup, sent the admins a disk CRITICAL
+    and a digest about a machine that was not production — twice in two days.
+    Suppression must be total (no HTTP), loud (logged), and must not consume
+    a throttle slot the real instance might need."""
+
+    @pytest.mark.asyncio
+    async def test_http_senders_never_touch_the_network(self, monkeypatch):
+        import httpx
+
+        from core import telegram_alerts
+
+        monkeypatch.setenv(telegram_alerts.DISABLE_ENV, "1")
+
+        def forbidden(*a, **kw):
+            raise AssertionError("suppressed alert opened an HTTP client")
+
+        monkeypatch.setattr(httpx, "AsyncClient", forbidden)
+
+        assert await telegram_alerts.send_admin_message_http("боль") == 0
+        assert await telegram_alerts.send_admin_photo_http(b"png", "отчёт") == 0
+
+    @pytest.mark.asyncio
+    async def test_bot_side_gate_spares_the_throttle(self, monkeypatch):
+        from bot import main as bot_main
+        from core import telegram_alerts
+
+        monkeypatch.setenv(telegram_alerts.DISABLE_ENV, "true")
+
+        def forbidden(*a, **kw):
+            raise AssertionError("suppressed alert consumed a throttle check")
+
+        monkeypatch.setattr(telegram_alerts, "throttle_check", forbidden)
+
+        assert await bot_main.send_admin_message("тревога", key="dq:test") is None
+
+    def test_unset_means_alerts_flow(self, monkeypatch):
+        from core import telegram_alerts
+
+        monkeypatch.delenv(telegram_alerts.DISABLE_ENV, raising=False)
+        assert telegram_alerts.alerts_disabled() is False

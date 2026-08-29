@@ -74,7 +74,14 @@ async def send_admin_message(
     that carry live checksums or attempt counters are never twice the same
     string, so text-keyed throttling does not touch them.
     """
-    from core.telegram_alerts import throttle_check
+    from core.telegram_alerts import alerts_disabled, throttle_check
+
+    if alerts_disabled():
+        # The dev-instance kill switch — see core/telegram_alerts.py. Gated
+        # before the throttle so a suppressed condition does not silently
+        # consume its cooldown slot.
+        logger.info("admin message suppressed (KS_ALERTS_DISABLED): %.80s", text)
+        return
 
     should_send, text = throttle_check(text, key)
     if not should_send:

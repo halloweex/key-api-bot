@@ -12,6 +12,7 @@ falls back to it when no Application is available.
 """
 import asyncio
 import logging
+import os
 import time
 from typing import Iterable
 
@@ -103,6 +104,26 @@ def reset_throttle() -> None:
     _throttle._suppressed.clear()
 
 
+# The kill switch for every outbound Telegram this codebase produces. Born
+# of two phantoms in two days: a developer laptop running on a copy of the
+# production backup sent the admins a disk CRITICAL and a data-quality digest,
+# both describing a machine that was not production. A dev instance must be
+# able to run the whole app — schedulers, watchdogs, digests — without ever
+# reaching a real human's phone. Explicit env, not inference: alerts fail
+# CLOSED to sending (production sets nothing), and dev declares itself.
+DISABLE_ENV = "KS_ALERTS_DISABLED"
+
+
+def alerts_disabled() -> bool:
+    return os.getenv(DISABLE_ENV, "").strip().lower() in {"1", "true", "yes"}
+
+
+def _log_suppressed(what: str, text: str) -> None:
+    logger.info(
+        "%s suppressed (%s): %.80s", what, DISABLE_ENV, text.replace("\n", " ")
+    )
+
+
 async def send_admin_message_http(
     text: str,
     parse_mode: str = "HTML",
@@ -117,6 +138,10 @@ async def send_admin_message_http(
     exists to restore.
     """
     from core.config import ADMIN_USER_IDS, BOT_TOKEN
+
+    if alerts_disabled():
+        _log_suppressed("admin message", text)
+        return 0
 
     token = token if token is not None else BOT_TOKEN
     recipients = list(chat_ids if chat_ids is not None else ADMIN_USER_IDS)
@@ -179,6 +204,9 @@ async def send_admin_photo_http(
     to plain text on a partial or total failure instead of assuming a picture
     got through.
     """
+    if alerts_disabled():
+        _log_suppressed("photo", caption or "<photo>")
+        return 0
     from core.config import ADMIN_USER_IDS, BOT_TOKEN
 
     token = token if token is not None else BOT_TOKEN
