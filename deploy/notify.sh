@@ -53,7 +53,11 @@ _ks_chat_ids() {
         printf '%s' "$BACKUP_ALERT_CHAT_ID" | tr ',' '\n'
         return 0
     fi
-    _ks_env_value ADMIN_USER_IDS | tr ',' '\n' | tr -d '[:space:]' || true
+    # NOT `tr -d '[:space:]'`: that deletes the newlines the first tr just
+    # made, welding every admin id into one invalid chat_id. Inherited from
+    # offsite_check.sh, where BACKUP_ALERT_CHAT_ID happened to mask it;
+    # found the day this file was live-tested without the override.
+    _ks_env_value ADMIN_USER_IDS | tr ',' '\n' | tr -d ' \t\r' || true
 }
 
 _ks_archive_event() {
@@ -83,7 +87,9 @@ notify() {
         attempted=1
         # Never let a failed notification change the script's own outcome,
         # and never let one unreachable admin stop the others being told.
-        if curl -sS -m 15 -o /dev/null \
+        # -f is load-bearing: without it an HTTP 400 from Telegram counts
+        # as a delivery, and the archive would swear somebody heard us.
+        if curl -sSf -m 15 -o /dev/null \
             --data-urlencode "chat_id=$chat" \
             --data-urlencode "text=$text" \
             "https://api.telegram.org/bot${token}/sendMessage"; then

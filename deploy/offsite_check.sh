@@ -51,7 +51,9 @@ alert_chat_ids() {
         printf '%s' "$BACKUP_ALERT_CHAT_ID" | tr ',' '\n'
         return 0
     fi
-    _env_value ADMIN_USER_IDS | tr ',' '\n' | tr -d '[:space:]' || true
+    # tr -d '[:space:]' ел и переводы строк — оба id склеивались в один
+    # невалидный chat_id; BACKUP_ALERT_CHAT_ID это маскировал. Найдено 29.08.
+    _env_value ADMIN_USER_IDS | tr ',' '\n' | tr -d ' \t\r' || true
 }
 
 # Step 07 of the alerts rework: one notifier for all host-cron shell —
