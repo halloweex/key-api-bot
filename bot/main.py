@@ -397,6 +397,17 @@ def main() -> None:
                 result.dq_ages,
             )
 
+        # Step 05: the escalator rides the same tick, judging the archive for
+        # standing unacknowledged conditions. Gated on what this very probe
+        # just measured — a dead web is already its own page, and every
+        # series goes stale together during one.
+        try:
+            from core.alert_escalator import escalate_due
+
+            await escalate_due(web_alive=(result.http_code == 200))
+        except Exception as exc:
+            logger.warning("Escalator failed on canary tick: %s", exc)
+
     # Set up command menu at startup
     application.job_queue.run_once(set_commands, 1)
 

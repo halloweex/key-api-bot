@@ -168,6 +168,39 @@ def _spawn(coro) -> "Optional[asyncio.Task]":
         return None
 
 
+async def _write_escalated(keys, message, delivered) -> None:
+    global _standing_down
+    from core.pg import get_pool
+
+    pool = await get_pool()
+    instance = _instance()
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO app.alert_events
+                (condition_key, event_type, instance, delivered_to, message)
+            VALUES ($1, 'escalated', $2, $3, $4)
+            """,
+            [
+                (key, instance, delivered, message if i == 0 else None)
+                for i, key in enumerate(keys)
+            ],
+        )
+    if _standing_down:
+        _standing_down = False
+        logger.info("alert archive: writes succeeding again")
+
+
+def record_escalated(
+    keys: Sequence[str], *, delivered: int, message: str,
+) -> "Optional[asyncio.Task]":
+    """Archive an escalation. The series stays firing — an escalation is a
+    louder repeat about it, not a state change."""
+    if not keys:
+        return None
+    return _spawn(_write_escalated(list(keys), message, delivered))
+
+
 def record_resolved(
     keys: Sequence[str], *, delivered: int, message: str,
 ) -> "Optional[asyncio.Task]":
