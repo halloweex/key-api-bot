@@ -23,6 +23,38 @@ _stats_cache: dict = {"data": None, "expires_at": 0}
 _stats_cache_lock = asyncio.Lock()
 _STATS_CACHE_TTL = 60
 
+# The mirror watermarks ride their own cache on the same TTL. Separate from the
+# stats cache above because they come from a different database: folding them in
+# would mean one Postgres hiccup blanking the DuckDB block, or the reverse.
+_mirror_cache: dict = {"data": None, "expires_at": 0}
+_mirror_cache_lock = asyncio.Lock()
+
+
+async def _mirror_freshness() -> "dict | None":
+    """Age of the last successful shipment per watched mirror table.
+
+    Returns None — never an empty dict — when it cannot be told, because the
+    canary treats a missing block as a failure (rule 3: silence is not health)
+    and an empty dict would read as "asked, nothing watched".
+    """
+    now = time.time()
+    async with _mirror_cache_lock:
+        if _mirror_cache["data"] is not None and now < _mirror_cache["expires_at"]:
+            return _mirror_cache["data"]
+        try:
+            from core.mirror_reconciliation import fetch_mirror_freshness
+            from core.pg import get_pool
+
+            data = await fetch_mirror_freshness(await get_pool())
+        except Exception as e:
+            # A host with no Postgres configured raises here on every call, and
+            # that is not an error worth a warning every minute.
+            logger.debug(f"Mirror freshness unavailable: {e}")
+            return None
+        _mirror_cache["data"] = data
+        _mirror_cache["expires_at"] = now + _STATS_CACHE_TTL
+        return data
+
 
 @router.get("/health", response_model=HealthResponse)
 @limiter.limit("60/minute")
@@ -102,6 +134,11 @@ async def health_check(request: Request):
     except Exception as e:
         migrations = {"status": "unknown", "error": str(e)}
 
+    # The copy that carries the money. Its own watchdog lives in bot/canary.py,
+    # out of this container — a mirror that stopped shipping used to wait for
+    # the 07:30 comparison, which is a whole day of silence at the main copy.
+    mirrors = await _mirror_freshness()
+
     return {
         "status": (
             "degraded" if not duckdb_stats or migrations.get("status") == "failed"
@@ -119,6 +156,7 @@ async def health_check(request: Request):
         "migrations": migrations,
         "sync": sync_status,
         "data_quality": data_quality,
+        "mirrors": mirrors,
     }
 
 

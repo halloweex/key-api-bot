@@ -13,6 +13,7 @@ falls back to it when no Application is available.
 import asyncio
 import logging
 import os
+import socket
 import time
 from typing import Iterable
 
@@ -118,6 +119,54 @@ def alerts_disabled() -> bool:
     return os.getenv(DISABLE_ENV, "").strip().lower() in {"1", "true", "yes"}
 
 
+# ─── Who is speaking ────────────────────────────────────────────────────────
+#
+# Every outbound message says which instance produced it. The kill switch above
+# stops a dev instance from reaching anyone; this answers the question that
+# comes *after* a message has already arrived — "which machine is telling me
+# this?" — which took a backup-restore and two phantom alerts to become a
+# question worth answering. `KS_ALERTS_DISABLED` is opt-in and therefore
+# forgettable; the signature is not opt-in and costs one line.
+#
+# The default is the hostname rather than "unknown": inside a container that is
+# the short container id, which is ugly but true and traceable, and `docker
+# compose` sets `KS_INSTANCE` on both services so production reads `prod-vps`.
+INSTANCE_ENV = "KS_INSTANCE"
+
+# Rendered with no markup at all. Two parse modes are in use on this channel —
+# HTML from the canary and the bot, Markdown from the data-quality formatter —
+# and a signature appended by the transport cannot know which one it landed in.
+# Plain text is the only thing that renders correctly under both.
+_SIGNATURE_PREFIX = "· "
+
+
+def instance_name() -> str:
+    """The name this instance signs its messages with."""
+    configured = os.getenv(INSTANCE_ENV, "").strip()
+    if configured:
+        # One line, always: a multi-line value would look like message body.
+        return " ".join(configured.split())
+    try:
+        return socket.gethostname() or "unknown"
+    except Exception:  # pragma: no cover - gethostname does not fail in practice
+        return "unknown"
+
+
+def sign(text: str) -> str:
+    """Append the instance signature to `text`.
+
+    Applied by the transports, so every path is covered by one call site each
+    and nothing that merely *builds* a message has to remember. Idempotent
+    against itself: a text already carrying this instance's signature is
+    returned unchanged, which is what keeps the bot's Application path and its
+    HTTP fallback from signing the same string twice.
+    """
+    line = _SIGNATURE_PREFIX + instance_name()
+    if text.rstrip().endswith(line):
+        return text
+    return f"{text}\n\n{line}" if text else line
+
+
 def _log_suppressed(what: str, text: str) -> None:
     logger.info(
         "%s suppressed (%s): %.80s", what, DISABLE_ENV, text.replace("\n", " ")
@@ -142,6 +191,11 @@ async def send_admin_message_http(
     if alerts_disabled():
         _log_suppressed("admin message", text)
         return 0
+
+    # Signed here rather than at the ~dozen places that build a message: one
+    # call site per transport is the only version of this that cannot be
+    # forgotten by the next alert somebody adds.
+    text = sign(text)
 
     token = token if token is not None else BOT_TOKEN
     recipients = list(chat_ids if chat_ids is not None else ADMIN_USER_IDS)
@@ -207,6 +261,12 @@ async def send_admin_photo_http(
     if alerts_disabled():
         _log_suppressed("photo", caption or "<photo>")
         return 0
+
+    # Before the limit check below, not after: a signature that pushed the
+    # caption over Telegram's budget would cost the picture silently, and the
+    # budget has to be measured against what is actually sent.
+    caption = sign(caption)
+
     from core.config import ADMIN_USER_IDS, BOT_TOKEN
 
     token = token if token is not None else BOT_TOKEN

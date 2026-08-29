@@ -88,11 +88,19 @@ async def send_admin_message(
         return
 
     if _application is None:
+        # Unsigned on purpose: the HTTP transport signs, and signing here too
+        # would either double the line or rely on `sign` staying idempotent.
         from core.telegram_alerts import send_admin_message_http
         await send_admin_message_http(text, parse_mode)
         return
     if not ADMIN_USER_IDS:
         return
+
+    # The Application path never reaches core/telegram_alerts, so it is the one
+    # place outside the two transports that has to sign for itself.
+    from core.telegram_alerts import sign
+
+    text = sign(text)
     for admin_id in ADMIN_USER_IDS:
         try:
             await _application.bot.send_message(

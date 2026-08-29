@@ -40,6 +40,25 @@ os.environ["DASHBOARD_SECRET_KEY"] = "test-signing-key-not-a-real-secret"
 os.environ["BOT_TOKEN"] = "123456:test-bot-token-not-a-real-secret"
 os.environ["KEYCRM_API_KEY"] = "test-keycrm-key-not-a-real-secret"
 
+# The dev kill switch is a property of a *machine*, not of the suite, and a
+# developer laptop sets it in `.env`. Left in place it silences the transports
+# before they are reached, so nine tests that assert an alert was delivered
+# passed on CI and failed on the machine that had switched alerts off — the
+# opposite of what a kill switch should cost. Neutralised here rather than in
+# each test: what stops the suite reaching Telegram is the autouse fixture
+# below, never this variable. A test that wants suppression sets it with
+# monkeypatch.
+#
+# Assigned "0" rather than deleted, for the reason the block above turns on:
+# `load_dotenv()` only declines to overwrite a name that is *present*, so
+# popping this one just clears the way for `.env` to put it back.
+os.environ["KS_ALERTS_DISABLED"] = "0"
+
+# Same shape, different reason: every message signs itself with the instance
+# name, which without this is the developer's hostname and makes any assertion
+# about a rendered message machine-dependent.
+os.environ["KS_INSTANCE"] = "test-instance"
+
 import pytest  # noqa: E402  — must follow the environment block above
 
 

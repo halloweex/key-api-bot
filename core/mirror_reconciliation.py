@@ -320,6 +320,60 @@ async def fetch_pg_rows(pool, spec: MirroredTable) -> Dict[Any, Tuple[Any, ...]]
     return out
 
 
+# The tables whose freshness a watchdog outside this container is expected to
+# judge. `bronze.orders` alone, deliberately: it is the copy that carries the
+# money, and it is the one whose failure used to wait for 07:30 — a whole day
+# in which the main copy could be broken with nobody told. The ClickHouse rows
+# are NOT here; that store is optional and its daily window of silence was
+# accepted and written down when step 4 shipped.
+WATCHED_MIRRORS: Tuple[str, ...] = ("bronze.orders",)
+
+
+async def fetch_mirror_freshness(
+    pool, tables: Tuple[str, ...] = WATCHED_MIRRORS, now: Optional[datetime] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Age of the last successful shipment per watched table, plus its failures.
+
+    Two numbers, because on their own each one lies in a different direction:
+
+    - **age alone cannot be tight.** `mirror_orders` refuses to move the
+      watermark when there was nothing to ship, so a quiet night is
+      indistinguishable from a dead mirror by age. Measured on production,
+      the orders watermark legitimately stands still from about 01:00 until
+      the 05:15 status refresh, and again until traffic resumes around 07:00.
+    - **failures alone cannot be complete.** A mirror switched off, or a sync
+      that stopped feeding it, never raises and so never counts a failure.
+
+    `failures_since_ok` is what makes the age threshold affordable: an actively
+    failing mirror is caught on the next sync tick regardless of how generous
+    the age limit is.
+
+    A table with no row at all reports every field None — it has never shipped,
+    which is a different thing from having shipped long ago and must not be
+    flattened into a large age.
+    """
+    reference = now or datetime.now(timezone.utc)
+    rows = await fetch_watermarks(pool)
+    out: Dict[str, Dict[str, Any]] = {}
+    for table in tables:
+        state = rows.get(table)
+        last_ok = (state or {}).get("last_ok_at")
+        out[table] = {
+            "last_ok_at": last_ok.isoformat() if last_ok else None,
+            "age_seconds": (
+                int((reference - last_ok).total_seconds()) if last_ok else None
+            ),
+            "failures_since_ok": (
+                int(state["failures_since_ok"] or 0) if state else None
+            ),
+            # The text is deliberately not published: it is an exception string
+            # from a database driver, and /api/health is public. Whether there
+            # is one is the part a watchdog acts on.
+            "failing": bool(state and state.get("last_error")),
+        }
+    return out
+
+
 async def fetch_watermarks(pool) -> Dict[str, Dict[str, Any]]:
     """`meta.mirror_state`, keyed by table name."""
     async with pool.acquire() as conn:

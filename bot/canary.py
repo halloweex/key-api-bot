@@ -57,6 +57,30 @@ DQ_MAX_AGE_S = {
     "mirror_landing": 30 * 3600,  # 24h cycle + 6h grace
 }
 
+# How stale the Postgres copy of a landing table may get before we say so.
+#
+# The hole this closes: until the 07:30 comparison, a broken orders mirror was
+# silent — a full day in which the copy that carries the money could be dead
+# with nobody told.
+#
+# **The number is measured, not chosen.** `mirror_orders` deliberately refuses
+# to move the watermark when there was nothing to ship ("moving it here would
+# date-stamp a shipment that did not happen"), so the threshold has to clear
+# the longest *legitimate* silence. On production, order writes stop at about
+# 01:00 Kyiv, resume for the 05:15 status refresh — measured 29.08: 1 458
+# orders written in that one hour — and then again with traffic around 07:00.
+# That is a real ~4h15m quiet window, ~6h if the 05:15 job is ever skipped.
+# Eight hours is that plus grace.
+#
+# A generous age limit is affordable only because it is not the primary
+# signal: `failures_since_ok` catches an actively failing mirror on the next
+# sync tick, minutes after it breaks. The age is the backstop for the failure
+# mode that raises nothing — a mirror switched off, or a sync that stopped
+# feeding it.
+MIRROR_MAX_AGE_S = {
+    "bronze.orders": 8 * 3600,
+}
+
 
 @dataclass
 class CanaryResult:
@@ -75,6 +99,8 @@ class CanaryResult:
     sync_seconds_since: Optional[int] = None
     # layer -> seconds since its last successful run (None = never / unknown)
     dq_ages: dict[str, Optional[int]] = field(default_factory=dict)
+    # mirrored table -> seconds since its last successful shipment
+    mirror_ages: dict[str, Optional[int]] = field(default_factory=dict)
 
 
 # ─── Health probe ───────────────────────────────────────────────────────────
@@ -212,6 +238,67 @@ def check_dq_freshness(
     return failures, ages
 
 
+def check_mirror_freshness(
+    payload: Optional[dict],
+    max_age_s: Optional[dict[str, int]] = None,
+) -> tuple[list[tuple[str, str]], dict[str, Optional[int]]]:
+    """Judge the `mirrors` block of /api/health.
+
+    Same shape and same rule as `check_dq_freshness`: **absence is a failure**.
+    The endpoint publishes null rather than an empty object when it could not
+    read the watermarks, so "nobody is watching the main copy" cannot arrive
+    looking like "nothing is wrong".
+
+    Two independent verdicts per table, and the order matters — a mirror that
+    is failing says so on the next sync tick, long before its age crosses
+    anything, so the failure count is checked first and reported on its own.
+    """
+    thresholds = max_age_s if max_age_s is not None else MIRROR_MAX_AGE_S
+    failures: list[tuple[str, str]] = []
+    ages: dict[str, Optional[int]] = {}
+
+    block = (payload or {}).get("mirrors")
+    if not isinstance(block, dict):
+        return [("mirror_block_missing",
+                 "health payload has no mirrors block")], ages
+
+    for table, limit in thresholds.items():
+        entry = block.get(table)
+        if not isinstance(entry, dict):
+            failures.append(
+                (f"mirror_missing:{table}", f"mirror: no {table} freshness reported")
+            )
+            ages[table] = None
+            continue
+
+        age = entry.get("age_seconds")
+        ages[table] = age
+
+        # The mirror is actively erroring. This is the fast signal and it is
+        # worth saying even when the age is still inside its limit, because it
+        # is the difference between "it broke minutes ago" and waiting 8 hours
+        # to find out.
+        failed = entry.get("failures_since_ok") or 0
+        if entry.get("failing") or failed:
+            failures.append((
+                f"mirror_failing:{table}",
+                f"mirror: {table} has failed {failed}× since its last success",
+            ))
+
+        if age is None:
+            failures.append(
+                (f"mirror_never:{table}", f"mirror: {table} has never shipped")
+            )
+        elif age > limit:
+            failures.append((
+                f"mirror_stale:{table}",
+                f"mirror: {table} last shipped {_format_age(int(age))} ago "
+                f"(>{_format_age(limit)})",
+            ))
+
+    return failures, ages
+
+
 # ─── Orchestration ──────────────────────────────────────────────────────────
 
 async def run_canary(
@@ -259,6 +346,7 @@ async def run_canary(
     health_status = None
     sync_seconds = None
     dq_ages: dict[str, Optional[int]] = {}
+    mirror_ages: dict[str, Optional[int]] = {}
     if payload:
         health_status = payload.get("status")
         sync_block = payload.get("sync") or {}
@@ -277,6 +365,16 @@ async def run_canary(
             # A blind checker is degraded observability, not an outage:
             # the dashboard still serves. Loud enough to be delivered,
             # quiet enough not to read as a site-down page.
+            severity = "warn"
+
+        # Same judgement, same reason it is only made when the endpoint
+        # answered. The copy of landing in Postgres is the store the whole
+        # migration is being carried to; its own comparison runs once a day,
+        # so without this a broken mirror waits until 07:30 to be noticed.
+        mirror_failures, mirror_ages = check_mirror_freshness(payload)
+        for key, message in mirror_failures:
+            fail(key, message)
+        if mirror_failures and severity == "ok":
             severity = "warn"
 
     if cert_err:
@@ -299,10 +397,52 @@ async def run_canary(
         cert_days_remaining=cert_days,
         sync_seconds_since=sync_seconds,
         dq_ages=dq_ages,
+        mirror_ages=mirror_ages,
     )
 
 
 # ─── Alert formatting + dedup state machine ─────────────────────────────────
+
+# What the reader is supposed to *do*, per failing key. Rule 1 of the alerts
+# charter: a page that does not name a lever is a page that trains people to
+# swipe. Ordered by how much the answer differs — the first matching key wins,
+# because "the dashboard is unreachable" outranks "a layer is stale" when both
+# are true.
+_ACTIONS: tuple[tuple[str, str], ...] = (
+    ("health_unreachable",
+     "curl /api/health from the VPS itself — this probe runs from the bot "
+     "container and cannot tell the dashboard apart from the path to it "
+     "(nginx, TLS, DNS). Restarting web is the last lever, not the first."),
+    ("health_http",
+     "read the web container's log for the failing request; the app answered, "
+     "so this is not a network problem."),
+    ("health_status",
+     "the app calls itself degraded: /api/health names which part "
+     "(duckdb, migrations). A failed migration is not fixed by a restart."),
+    ("cert_expiring",
+     "certbot renewal — a silent lapse here cost 12 h once. See the certbot "
+     "hooks; renewal is automatic, so this means the hook failed."),
+    ("cert_unreachable",
+     "the TLS handshake failed, which is nginx or the network, not the app."),
+    ("mirror_",
+     "the copy of landing in Postgres has stopped moving. Read "
+     "meta.mirror_state (last_ok_at, failures_since_ok, last_error) and the "
+     "web log; the mirror re-ships on its own, so this is about why it "
+     "cannot, not about shipping it by hand."),
+    ("dq_",
+     "a data-quality layer has gone quiet. Nothing is comparing the "
+     "warehouse against anything meanwhile — check the scheduler jobs in "
+     "/api/jobs before trusting any number on the dashboard."),
+)
+
+
+def _what_to_do(result: CanaryResult) -> Optional[str]:
+    """The single most useful lever for this result, or None."""
+    for prefix, action in _ACTIONS:
+        if any(k.startswith(prefix) for k in result.failure_keys):
+            return action
+    return None
+
 
 def format_alert(result: CanaryResult, dashboard_url: str) -> str:
     """Build a Telegram HTML message for a failing result."""
@@ -317,6 +457,11 @@ def format_alert(result: CanaryResult, dashboard_url: str) -> str:
     for failure in result.failures:
         lines.append(f"• {failure}")
 
+    action = _what_to_do(result)
+    if action:
+        lines.append("")
+        lines.append(f"→ {action}")
+
     extras: list[str] = []
     if result.http_code is not None:
         extras.append(f"http={result.http_code}")
@@ -328,6 +473,10 @@ def format_alert(result: CanaryResult, dashboard_url: str) -> str:
         extras.append(f"sync_age={result.sync_seconds_since}s")
     for layer, age in result.dq_ages.items():
         extras.append(f"{layer}_age=" + (_format_age(int(age)) if age is not None else "never"))
+    for table, age in result.mirror_ages.items():
+        extras.append(
+            f"{table}_mirror=" + (_format_age(int(age)) if age is not None else "never")
+        )
     if extras:
         lines.append("")
         lines.append("<i>" + " · ".join(extras) + "</i>")

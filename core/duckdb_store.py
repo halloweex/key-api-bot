@@ -2349,6 +2349,11 @@ class DuckDBStore(
                         validation_alert = (
                             "⚠️ Warehouse validation failed — full retry scheduled "
                             f"(attempt {consecutive + 1}/{MAX_VALIDATION_RETRIES}).\n{detail}"
+                            "\n\n→ nothing to do yet: the rebuild retries on the "
+                            "next two-minute tick and most of these clear "
+                            f"themselves. If it reaches "
+                            f"{MAX_VALIDATION_RETRIES}/{MAX_VALIDATION_RETRIES} "
+                            "you will hear again."
                         )
                         validation_alert_key = "warehouse:validation_retrying"
                     elif self._claim_stuck_rebuild_slot():
@@ -2363,6 +2368,11 @@ class DuckDBStore(
                             "row. The Gold layer may be serving WRONG revenue. Attempting a "
                             f"full rebuild; if this alert returns in {hours}h the cause is "
                             f"not transient and needs a human.\n{detail}"
+                            f"\n\n→ the machine has used its last automatic lever "
+                            f"({consecutive} per-tick retries, now one full "
+                            "rebuild). Do not trigger another rebuild — wait out "
+                            f"the {hours}h and read warehouse_refreshes for the "
+                            "first tick that broke."
                         )
                         validation_alert_key = "warehouse:validation_rebuilding"
                     else:
@@ -2374,6 +2384,11 @@ class DuckDBStore(
                             f"🚨 CRITICAL: Warehouse validation failed {consecutive}x in a "
                             "row and a full rebuild did not fix it — the Gold layer may be "
                             f"serving WRONG revenue. Manual fix needed.\n{detail}"
+                            f"\n\n→ the machine has tried {consecutive} times and a "
+                            "full rebuild, and is out of levers. `missing cells` "
+                            "is the August shape (Silver has days Gold does "
+                            "not); a revenue mismatch with matching cells is "
+                            "not. warehouse_refreshes holds every tick."
                         )
                         validation_alert_key = "warehouse:validation_unfixed"
 

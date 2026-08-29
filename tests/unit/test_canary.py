@@ -31,6 +31,17 @@ def _healthy_payload():
             "reconciliation": {"last_success_at": "2026-08-08T05:00:00+03:00", "age_seconds": 52200},
             "mirror_landing": {"last_success_at": "2026-08-08T07:30:00+03:00", "age_seconds": 43200},
         },
+        # The Postgres copy of landing. Absent, `run_canary` reports
+        # `mirror_block_missing` — that is the point of the block, and it is
+        # exercised in tests/unit/test_mirror_freshness.py.
+        "mirrors": {
+            "bronze.orders": {
+                "last_ok_at": "2026-08-08T19:25:00+03:00",
+                "age_seconds": 300,
+                "failures_since_ok": 0,
+                "failing": False,
+            },
+        },
     }
 
 

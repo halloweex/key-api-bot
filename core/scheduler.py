@@ -1208,6 +1208,7 @@ class BackgroundScheduler:
             alert_fingerprint,
             check_internal_integrity,
             format_alert_message,
+            machine_attempts_note,
             overall_severity,
             persist_run,
         )
@@ -1248,7 +1249,10 @@ class BackgroundScheduler:
 
             sev = overall_severity(issues, [])
             if sev == Severity.CRITICAL and not error_message:
-                msg = format_alert_message("integrity", sev, issues, [])
+                msg = format_alert_message(
+                    "integrity", sev, issues, [],
+                    machine_note=machine_attempts_note(),
+                )
                 await self._send_dq_alert_throttled(
                     "integrity", msg,
                     alert_fingerprint("integrity", sev, issues, []),
@@ -1285,6 +1289,7 @@ class BackgroundScheduler:
             Severity,
             alert_fingerprint,
             format_alert_message,
+            machine_attempts_note,
             overall_severity,
             persist_run,
         )
@@ -1393,7 +1398,10 @@ class BackgroundScheduler:
 
             sev = overall_severity(issues, [])
             if sev == Severity.CRITICAL and not error_message:
-                msg = format_alert_message(MIRROR_LAYER, sev, issues, [])
+                msg = format_alert_message(
+                    MIRROR_LAYER, sev, issues, [],
+                    machine_note=machine_attempts_note(),
+                )
                 await self._send_dq_alert_throttled(
                     MIRROR_LAYER, msg,
                     alert_fingerprint(MIRROR_LAYER, sev, issues, []),
@@ -1575,7 +1583,13 @@ class BackgroundScheduler:
                     f"{alert.reason}\n\n"
                     f"DB: {alert.db_size_mb:,.0f} MB\n"
                     f"Disk: {alert.disk_pct_used:.1f}% used, "
-                    f"{alert.disk_free_gb:.1f} GB free"
+                    f"{alert.disk_free_gb:.1f} GB free\n\n"
+                    # Nothing reclaims disk on its own here — no self-healing to
+                    # count, so this says where the space goes instead. The two
+                    # commands are the ones that have actually answered it.
+                    "→ du -xd1 /opt/key-api-bot/data | sort -h; docker system df. "
+                    "The weekly compact (Sun 02:00 UTC) is the only automatic "
+                    "reclaim, and it stops both containers while it runs."
                 )
                 await send_admin_message(msg, key="disk:" + alert.severity.value)
                 result["alert_fired"] = True
@@ -1704,6 +1718,7 @@ class BackgroundScheduler:
             Severity,
             alert_fingerprint,
             format_alert_message,
+            machine_attempts_note,
             overall_severity,
             persist_run,
         )
@@ -1735,7 +1750,10 @@ class BackgroundScheduler:
 
         sev = overall_severity(issues, discrepancies)
         if sev == Severity.CRITICAL and not error_message:
-            msg = format_alert_message(layer, sev, issues, discrepancies)
+            msg = format_alert_message(
+                layer, sev, issues, discrepancies,
+                machine_note=machine_attempts_note(),
+            )
             await self._send_dq_alert_throttled(
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
             )
@@ -1755,6 +1773,7 @@ class BackgroundScheduler:
             classify_discrepancies,
             classify_order_discrepancies,
             format_alert_message,
+            machine_attempts_note,
             overall_severity,
             persist_run,
         )
@@ -1895,6 +1914,7 @@ class BackgroundScheduler:
                 msg = format_alert_message(
                     "reconciliation", sev, issues, discrepancies,
                     window=(window_start, window_end),
+                    machine_note=machine_attempts_note(),
                 )
                 if repair and repair.get("repaired"):
                     msg += (

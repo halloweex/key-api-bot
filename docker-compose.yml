@@ -281,6 +281,11 @@ services:
       # stands down while this is set.
       - KS_PG_DSN=postgresql://ks_app:${KS_APP_PASSWORD:?set it in .env}@postgres:5432/ks
       - KS_BOT_STORE=postgres
+      # Who signs every outbound Telegram. Set here rather than left to the
+      # hostname default, which inside a container is the short container id
+      # and changes on every recreate. A dev instance that forgets
+      # KS_ALERTS_DISABLED at least says whose laptop it is.
+      - KS_INSTANCE=${KS_INSTANCE:-prod-vps}
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
@@ -342,6 +347,11 @@ services:
       # a typo raises on the first read rather than serving the old store.
       # Rollback is flipping it back — no rebuild, no recreate.
       - KS_READ_GOLD=${KS_READ_GOLD:-duckdb}
+      # Who signs every outbound Telegram. Set here rather than left to the
+      # hostname default, which inside a container is the short container id
+      # and changes on every recreate. A dev instance that forgets
+      # KS_ALERTS_DISABLED at least says whose laptop it is.
+      - KS_INSTANCE=${KS_INSTANCE:-prod-vps}
     volumes:
       - ./data:/app/data
     expose:

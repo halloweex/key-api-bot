@@ -22,12 +22,13 @@ Vocabulary
 """
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -1507,6 +1508,160 @@ def fetch_run_issues(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]
     return out
 
 
+# ─── What to do about it ─────────────────────────────────────────────────────
+#
+# Rule 1 of the alerts charter is "a page is an action". A CRITICAL that names
+# a check and a count still leaves the reader to work out which lever exists,
+# and the levers are not guessable: some of these conditions are repaired by a
+# job that is already running, some by one admin POST, and some — the archive
+# and the stock movements — must never be "repaired" at all, because the only
+# record of the fact is the thing that would be overwritten.
+#
+# Matched by longest prefix, because half of the check names are generated
+# (`fk_orphan_<child>_<fk>`, `freshness_<entity>`, `pk_uniqueness_<table>`) and
+# a table keyed on exact names would silently miss every one of them.
+REMEDIATION: Tuple[Tuple[str, str], ...] = (
+    # Copies of landing in Postgres. The hourly ids-diff re-ships what is
+    # missing on its own; history that never crossed needs the backfill once.
+    ("mirror_", "the mirror ships hourly and re-ships what it finds missing — "
+                "read meta.mirror_state (last_ok_at, failures_since_ok, "
+                "last_error) before touching anything. History that never "
+                "crossed: POST /api/mirror/backfill/orders. Never hand-copy "
+                "rows from one store into the other."),
+    ("mirror_never_shipped", "this table has no successful shipment on record "
+                             "at all — it is written by the weekly full sync, "
+                             "so before Sunday this is the sync's cadence, not "
+                             "a defect. After Sunday it is one."),
+    ("mirror_backfill_pending", "history has not crossed yet; the row-level "
+                                "comparison is suppressed until it has. "
+                                "POST /api/mirror/backfill/orders, then wait "
+                                "for the next 07:30."),
+    # ClickHouse is the optional store: an hourly re-ship fixes a copy.
+    ("ch_", "ClickHouse is optional and re-shipped hourly by ch_sync — "
+            "a single failure resolves itself. Check KS_CH_URL and "
+            "meta.mirror_state rows prefixed `clickhouse.`; a stuck ship "
+            "usually means a missing GRANT."),
+    ("ch_history_", "the order-version archive. A row present in Postgres and "
+                    "missing in ClickHouse is re-shipped by the hourly "
+                    "ids-diff; a row missing from BOTH is gone and is not "
+                    "repairable — decide as a human what to do."),
+    # The archive: report-only, absolutely.
+    ("order_versions_", "the archive is the only record of an order's history "
+                        "and has no repair path by design. Stalled means the "
+                        "writer stopped: check that the sync is writing orders "
+                        "at all (/api/health sync block). Never backfill it "
+                        "from current state — that invents the history."),
+    # Everything derived is rebuilt on a tick; the lever is one rebuild.
+    ("silver_", "Silver is derived and rebuilt every two minutes; a difference "
+                "that survives two ticks is real. POST /api/warehouse/refresh "
+                "forces a full rebuild."),
+    ("gold_", "Gold is derived from Silver in the same tick, so it cannot be "
+              "stale on its own. POST /api/warehouse/refresh forces a full "
+              "rebuild of both."),
+    ("customer_profile_", "the витрина is rebuilt whole on the same tick as "
+                          "Gold — one PG_LAYER_LOCK tick repairs it. If it "
+                          "survives a tick, Silver is the suspect, not the "
+                          "витрина."),
+    # Sync-side.
+    ("freshness_", "nothing new has arrived for this entity. This is the sync, "
+                   "not the warehouse: read the `sync` block of /api/health and "
+                   "the incremental_sync job before looking at any layer."),
+    ("orders_without_line_items", "halfwritten_repair re-fetches these every "
+                                  "two hours — one cycle is not a problem. "
+                                  "Ids KeyCRM cannot supply land in "
+                                  "order_backfill_misses and are skipped for "
+                                  "30 days."),
+    # DB-only integrity: nothing repairs these automatically, on purpose.
+    ("pk_uniqueness_", "a duplicate primary key is not something a sync can "
+                       "fix — it needs a human with a query."),
+    ("fk_orphan_", "an orphan means the parent row never landed or was "
+                   "removed. Re-sync the parent entity first; do not delete "
+                   "the child."),
+    ("not_null_", "a column the schema promises is populated is not. Find the "
+                  "sync path that wrote it before repairing rows."),
+    ("value_domain_", "a value outside the domain the code assumes. The "
+                      "reader that assumes it is the thing at risk, not the "
+                      "row."),
+    # Standing findings with an explanation already written down.
+    ("headline_vs_line_items", "orders whose header carries revenue with no "
+                               "line items. The standing count is explained in "
+                               "CLAUDE.md; a *rising* count is not."),
+    ("goods_shipped_without_sale", "shipments carrying line items and no money "
+                                   "— by design for blogger shipments. A rise "
+                                   "is the signal, not the level."),
+    ("status_group_vs_return_list", "the stored status group disagrees with "
+                                    "the legacy return list. The group is "
+                                    "authoritative; the list is the fallback "
+                                    "for rows synced before the column."),
+    ("inventory_snapshot_gaps", "a day with no per-SKU snapshot cannot be "
+                                "recovered later — the snapshot is a "
+                                "measurement, not a derivation. Check the "
+                                "inventory_snapshot job."),
+)
+
+# The anchor for anything unlisted: the section that explains which routes an
+# alert can take to a human at all, so a reader who has never seen this check
+# still knows where the machinery is documented.
+DEFAULT_REMEDIATION = (
+    "no lever is written down for this check — see CLAUDE.md, "
+    "\u00abHow a failure reaches a human\u00bb, and add one."
+)
+
+
+def remediation_for(check_names: Iterable[str]) -> List[str]:
+    """The distinct "what to do" lines for a set of check names.
+
+    Longest prefix wins, so `mirror_never_shipped` gets its own sentence
+    rather than the generic `mirror_` one. Deduplicated and order-stable: an
+    alert naming eight `fk_orphan_*` checks should say the one useful thing
+    once.
+    """
+    lines: List[str] = []
+    for name in check_names:
+        best = ""
+        chosen = DEFAULT_REMEDIATION
+        for prefix, line in REMEDIATION:
+            if name.startswith(prefix) and len(prefix) > len(best):
+                best, chosen = prefix, line
+        if chosen not in lines:
+            lines.append(chosen)
+    return lines
+
+
+def machine_attempts_note(now: Optional[datetime] = None) -> Optional[str]:
+    """What the self-healing machinery has already tried in the last 24 h.
+
+    Rule 5 of the charter: an alert must not *trigger* a repair, but it owes
+    the reader the count. Without it the honest reading of a CRITICAL is "and
+    nothing is being done", which is false for every mirror finding — the
+    hourly ids-diffs have usually already re-shipped rows by the time the
+    07:30 comparison speaks.
+
+    Reads the two in-process heal ledgers. Returns None when neither has run,
+    which is the common case and must not produce an empty line.
+    """
+    reference = now or datetime.now(timezone.utc)
+    parts: List[str] = []
+    for label, module in (
+        ("buyers", "core.pg_buyers"), ("archive", "core.ch_history"),
+    ):
+        try:
+            heal = importlib.import_module(module).last_heal
+        except Exception:  # pragma: no cover - import failure is not an alert
+            continue
+        if not heal or "at" not in heal:
+            continue
+        age = (reference - heal["at"]).total_seconds()
+        if 0 <= age < 24 * 3600:
+            parts.append(
+                f"{label} ids-diff re-shipped {int(heal.get('shipped', 0))} "
+                f"row(s) {int(age // 60)} min ago"
+            )
+    if not parts:
+        return None
+    return "Machine already tried: " + "; ".join(parts) + "."
+
+
 def format_alert_message(
     layer: str,
     severity: Severity,
@@ -1515,8 +1670,13 @@ def format_alert_message(
     *,
     window: Optional[Tuple[date, date]] = None,
     max_lines: int = 12,
+    machine_note: Optional[str] = None,
 ) -> str:
     """Build a Telegram-friendly summary. Pure function — no I/O.
+
+    `machine_note` is passed in rather than read here so this stays pure:
+    `machine_attempts_note()` reads process-local heal ledgers, and a formatter
+    that quietly consulted module state could not be tested by calling it.
 
     Shape:
         🚨 Data Quality CRITICAL (reconciliation)
@@ -1525,7 +1685,9 @@ def format_alert_message(
         • fk_orphan_order_products_order_id: 3 orphans (sample: 88888)
         ── Discrepancies (2) ──
         • 2026-04 / src=1: orders DK=565 KC=566 (MISSING_IN_DK)
-        ...
+        ── What to do ──
+        • …the lever for the checks above…
+        Machine already tried: buyers ids-diff re-shipped 3 row(s) 41 min ago.
     """
     icon = {"CRITICAL": "🚨", "WARN": "⚠️", "INFO": "ℹ️"}[severity.value]
     lines: List[str] = [f"{icon} *Data Quality {severity.value}* ({layer})"]
@@ -1552,6 +1714,25 @@ def format_alert_message(
             )
         if len(discrepancies) > max_lines:
             lines.append(f"  …and {len(discrepancies) - max_lines} more")
+
+    # The lever, last, because it is what the reader acts on. INFO is a journal
+    # entry rather than a page and does not ask anybody to do anything.
+    if severity is not Severity.INFO:
+        actions = remediation_for(i.check_name for i in issues)
+        if not actions and discrepancies:
+            # A pure reconciliation difference names no check, and its lever is
+            # not one of the table's: the repair path re-fetches by id and has
+            # already run by the time this is read.
+            actions = [
+                "the reconciliation re-fetches orders it is missing by id on "
+                "the same run; a difference that survives that is real. "
+                "Compare one order against KeyCRM by hand before rebuilding."
+            ]
+        if actions:
+            lines.append("── What to do ──")
+            lines.extend(f"• {a}" for a in actions)
+        if machine_note:
+            lines.append(machine_note)
 
     return "\n".join(lines)
 
@@ -1603,11 +1784,11 @@ def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, An
 # A layer absent from this tuple has a null age forever, which the catch-up
 # reads as "never succeeded" and re-queues on every single restart.
 #
-# It is deliberately NOT in `bot/canary.py`'s `DQ_MAX_AGE_S` yet: that dict is
-# the paging path, it is opted into by name, and a layer with no track record
-# would page during the first deploy window — the canary's first probe is 90 s
-# after the bot starts, before the catch-up run has finished. The digest already
-# says a layer went silent, every morning it stays silent.
+# It was opted into `bot/canary.py`'s `DQ_MAX_AGE_S` on 28.08, once the layer
+# had a track record and had grown the step-2/5/6 comparisons; the worry it
+# was held back for — the canary's first probe firing 90 s after a restart,
+# before the catch-up run finishes — only bites when the layer is already past
+# 30 h at that restart, which is a genuine outage worth one page.
 WATCHED_LAYERS: Tuple[str, ...] = (
     "integrity", "reconciliation", "mirror_landing", "reconciliation_pg",
 )
