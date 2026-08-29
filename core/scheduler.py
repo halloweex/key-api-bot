@@ -2118,6 +2118,16 @@ class BackgroundScheduler:
                     ))
 
             message = build_digest(sections, last_sent_at=last_sent_at, now=now)
+            if message:
+                # Step 06: the ledger's tail — standing conditions with their
+                # ages, escalations, the acknowledged count. It rides a digest
+                # that news already earned and can never summon one: on a
+                # quiet day the tail is not even fetched.
+                from core.alert_archive import fetch_digest_tail
+
+                tail = await fetch_digest_tail()
+                if tail:
+                    message = f"{message}\n\n{tail}"
             sent = False
             if message:
                 try:

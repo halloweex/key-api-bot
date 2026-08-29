@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime
 from typing import Iterable, Optional, Sequence
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,114 @@ async def _write_escalated(keys, message, delivered) -> None:
     if _standing_down:
         _standing_down = False
         logger.info("alert archive: writes succeeding again")
+
+
+# ─── The digest's tail (step 06) ────────────────────────────────────────────
+#
+# The digest's *delta* stays on data_quality_issues in DuckDB — the review's
+# finding 24: a ledger-based delta answers a different question from a
+# different store, and a metric defined twice drifts. What the archive
+# contributes is the part only it knows: which conditions stand firing right
+# now, for how long, what was escalated, and — once П4 lands — how many are
+# acknowledged. The tail may never summon a digest on its own; it rides one
+# that news already earned.
+
+_TAIL_FIRING_LIMIT = 10
+
+
+def render_digest_tail(
+    firing: "Sequence[tuple]",
+    resolved_24h: int,
+    acknowledged: int,
+    now: "Optional[datetime]" = None,
+) -> "Optional[str]":
+    """Pure renderer. `firing` rows: (key, first_fired_at, fired_count,
+    escalated: bool). Returns None when there is nothing to say — an empty
+    ledger block every morning would be the digest teaching readers to skip
+    its tail."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    now = now or _dt.now(_tz.utc)
+    lines = []
+    if firing:
+        shown = list(firing)[:_TAIL_FIRING_LIMIT]
+        rendered = []
+        for key, first, count, escalated in shown:
+            if first.tzinfo is None:
+                first = first.replace(tzinfo=_tz.utc)
+            hours = int((now - first).total_seconds() // 3600)
+            age = f"{hours}h" if hours < 48 else f"{hours // 24}d"
+            mark = " · эскалировано" if escalated else ""
+            rendered.append(f"• {key} — {age}, fired {count}×{mark}")
+        lines.append("⏳ Горит:")
+        lines.extend(rendered)
+        if len(firing) > _TAIL_FIRING_LIMIT:
+            lines.append(f"  …и ещё {len(firing) - _TAIL_FIRING_LIMIT}")
+    if resolved_24h:
+        lines.append(f"✅ Погашено за сутки: {resolved_24h}")
+    if acknowledged:
+        lines.append(f"📌 Узаконено: {acknowledged}")
+    if not lines:
+        return None
+    return "── Журнал тревог ──\n" + "\n".join(lines)
+
+
+async def fetch_digest_tail() -> "Optional[str]":
+    """Read the ledger and render the tail. None on any failure — the digest
+    goes out without its tail rather than not at all, and this read must
+    never summon or sink the message it rides."""
+    if not os.getenv("KS_PG_DSN", "").strip():
+        return None
+    try:
+        from core.pg import get_pool
+
+        pool = await get_pool()
+
+        async def _read():
+            async with pool.acquire() as conn:
+                firing = await conn.fetch(
+                    """
+                    SELECT s.condition_key, s.first_fired_at, s.fired_count,
+                           EXISTS (
+                               SELECT 1 FROM app.alert_events e
+                               WHERE e.condition_key = s.condition_key
+                                 AND e.event_type = 'escalated'
+                                 AND e.at > s.first_fired_at
+                           ) AS escalated
+                    FROM app.alert_series s
+                    WHERE s.kind = 'condition' AND s.state = 'firing'
+                      AND s.acknowledged_at IS NULL
+                    ORDER BY s.first_fired_at
+                    """
+                )
+                resolved = await conn.fetchval(
+                    """
+                    SELECT count(DISTINCT condition_key)
+                    FROM app.alert_events
+                    WHERE event_type = 'resolved'
+                      AND at > now() - interval '24 hours'
+                    """
+                )
+                acked = await conn.fetchval(
+                    """
+                    SELECT count(*) FROM app.alert_series
+                    WHERE acknowledged_at IS NOT NULL AND state = 'firing'
+                    """
+                )
+                return firing, int(resolved or 0), int(acked or 0)
+
+        firing, resolved, acked = await asyncio.wait_for(
+            _read(), timeout=2.0,
+        )
+        rows = [
+            (r["condition_key"], r["first_fired_at"],
+             int(r["fired_count"]), bool(r["escalated"]))
+            for r in firing
+        ]
+        return render_digest_tail(rows, resolved, acked)
+    except Exception as exc:
+        logger.warning("digest tail unavailable (%s) — digest rides without it", exc)
+        return None
 
 
 def record_escalated(
