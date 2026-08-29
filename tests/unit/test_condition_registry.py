@@ -86,8 +86,16 @@ def collect_literal_send_keys() -> set:
         for node in ast.walk(_parse(path)):
             if isinstance(node, ast.Call):
                 for kw in node.keywords:
-                    if kw.arg == "key" and _const_str(kw.value) is not None:
+                    # `key=` is the legacy throttle argument; `bucket=` and
+                    # `conditions=[...]` are the Gate's (step 02). All three
+                    # name conditions when they are literals.
+                    if kw.arg in ("key", "bucket") and _const_str(kw.value) is not None:
                         keys.add(kw.value.value)
+                    if kw.arg == "conditions" and isinstance(kw.value, ast.List):
+                        for element in kw.value.elts:
+                            value = _const_str(element)
+                            if value is not None:
+                                keys.add(value)
                 # _send_warehouse_alert(msg, "warehouse:...") passes the key
                 # positionally as the second argument.
                 func = node.func

@@ -2818,8 +2818,11 @@ class DuckDBStore(
         dependency on bot.main at module load.
         """
         try:
-            from bot.main import send_admin_message
-            await send_admin_message(message, key=key)
+            from core.alerting import raise_alert
+
+            await raise_alert(
+                message, conditions=[key] if key else [], bucket=key,
+            )
         except Exception as e:
             logger.warning(f"Failed to send warehouse alert: {e}")
 

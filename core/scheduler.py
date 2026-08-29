@@ -1165,41 +1165,31 @@ class BackgroundScheduler:
 
     # ─── Data Quality framework (Layer 1 + 2) ─────────────────────────────────
 
-    # Alert throttling — independent timers per layer so an integrity issue
-    # doesn't suppress a reconciliation alert in the same cooldown window.
-    _dq_last_alert: Dict[str, float] = {}
-    _DQ_ALERT_COOLDOWN_S = 86400  # 24 h
-
     async def _send_dq_alert_throttled(
         self, layer: str, message: str, key: Optional[str] = None,
+        conditions: "Sequence[str]" = (),
     ) -> bool:
-        """Send a Data Quality alert with a 24h cooldown per distinct problem.
+        """Send a Data Quality alert through the Gate.
 
-        The cooldown used to be per *layer*, which meant a second, unrelated
-        CRITICAL in the same layer was silently swallowed for a day by the
-        first one. `key` — from `alert_fingerprint`, naming the checks and
-        discrepancy classes involved — makes each problem its own bucket.
+        The dedup bucket is still the fingerprint (`key`) — per problem, not
+        per layer, so a second unrelated CRITICAL in the same layer is not
+        swallowed by the first one's cooldown. `conditions` are the canonical
+        check names involved, which is what gives the Gate its standing/event
+        judgement and, from step 03 on, the ledger its series.
 
-        Returns True if alert was sent, False if throttled or failed.
+        The private 24h dict this method used to keep is gone: the Gate's
+        standing cooldown *is* daily, it pays for the slot only on delivery,
+        and it is one policy instead of a sixth.
+
+        Returns True if the alert reached at least one admin.
         """
         bucket = key or layer
-        now = time.time()
-        last = BackgroundScheduler._dq_last_alert.get(bucket, 0.0)
-        if now - last < self._DQ_ALERT_COOLDOWN_S:
-            logger.info(
-                f"DQ alert ({bucket}) throttled: "
-                f"last sent {int(now - last)}s ago"
-            )
-            return False
         try:
-            from bot.main import send_admin_message
-            delivered = await send_admin_message(message, key=bucket)
-            if delivered:
-                # The 24h slot is paid for by a delivered message, not by an
-                # attempt: a kill-switched or rejected send used to consume a
-                # day of silence for a page nobody got.
-                BackgroundScheduler._dq_last_alert[bucket] = now
-            return delivered > 0
+            from core.alerting import raise_alert
+
+            return await raise_alert(
+                message, conditions=list(conditions), bucket=bucket,
+            ) > 0
         except Exception as e:
             logger.warning(f"DQ alert send failed ({bucket}): {e}")
             return False
@@ -1260,6 +1250,7 @@ class BackgroundScheduler:
                 await self._send_dq_alert_throttled(
                     "integrity", msg,
                     alert_fingerprint("integrity", sev, issues, []),
+                    conditions=[i.check_name for i in issues],
                 )
 
             result = {
@@ -1409,6 +1400,7 @@ class BackgroundScheduler:
                 await self._send_dq_alert_throttled(
                     MIRROR_LAYER, msg,
                     alert_fingerprint(MIRROR_LAYER, sev, issues, []),
+                    conditions=[i.check_name for i in issues],
                 )
 
             result = {
@@ -1434,10 +1426,9 @@ class BackgroundScheduler:
 
     # ─── Disk capacity watchdog ───────────────────────────────────────────────
 
-    # Keyed by condition ("disk:WARN" / "disk:CRITICAL"), because one shared
-    # timestamp meant a WARN at 06:00 muted the escalation to CRITICAL for a
-    # full day — the exact transition a watchdog exists to announce.
-    _disk_alert_last_sent: Dict[str, float] = {}
+    # The disk watchdog's private cooldown is gone (29.08): the Gate keys per
+    # condition — so a WARN cannot mute the escalation to CRITICAL — and its
+    # standing policy is the daily reminder this 24h float was approximating.
     _DISK_ALERT_COOLDOWN_S = 86400  # 24h
 
     async def _run_disk_watchdog(self) -> Dict[str, Any]:
@@ -1571,19 +1562,9 @@ class BackgroundScheduler:
 
             logger.warning(f"Disk watchdog: {alert.severity.value} — {alert.reason}")
 
-            # Throttle: avoid paging admins every 6h while the breach persists.
-            now = time.time()
             disk_key = "disk:" + alert.severity.value
-            since = now - BackgroundScheduler._disk_alert_last_sent.get(disk_key, 0.0)
-            if since < self._DISK_ALERT_COOLDOWN_S:
-                logger.info(
-                    f"Disk alert throttled — last sent {int(since)}s ago "
-                    f"(cooldown {self._DISK_ALERT_COOLDOWN_S}s)"
-                )
-                return result
-
             try:
-                from bot.main import send_admin_message
+                from core.alerting import raise_alert
                 icon = "🚨" if alert.severity.value == "CRITICAL" else "⚠️"
                 msg = (
                     f"{icon} <b>Disk watchdog: {alert.severity.value}</b>\n"
@@ -1598,11 +1579,9 @@ class BackgroundScheduler:
                     "The weekly compact (Sun 02:00 UTC) is the only automatic "
                     "reclaim, and it stops both containers while it runs."
                 )
-                delivered = await send_admin_message(msg, key=disk_key)
-                if delivered:
-                    # Recorded only on delivery: a cooldown paid for by a
-                    # message nobody received used to buy a day of silence.
-                    BackgroundScheduler._disk_alert_last_sent[disk_key] = now
+                delivered = await raise_alert(
+                    msg, conditions=[disk_key], bucket=disk_key,
+                )
                 result["alert_fired"] = delivered > 0
             except Exception as e:
                 logger.warning(f"Disk alert send failed: {e}")
@@ -1767,6 +1746,7 @@ class BackgroundScheduler:
             )
             await self._send_dq_alert_throttled(
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
+                conditions=[i.check_name for i in issues],
             )
 
     async def _run_dq_reconciliation(self, window_days: int = 90) -> Dict[str, Any]:
@@ -1937,6 +1917,7 @@ class BackgroundScheduler:
                 await self._send_dq_alert_throttled(
                     "reconciliation", msg,
                     alert_fingerprint("reconciliation", sev, issues, discrepancies),
+                    conditions=[i.check_name for i in issues],
                 )
 
             result = {
@@ -2337,8 +2318,6 @@ class BackgroundScheduler:
 
                 return result
 
-    _bronze_invariant_last_alert: float = 0.0
-    _BRONZE_INVARIANT_ALERT_COOLDOWN_S = 21600  # 6 hours — match check interval
 
     async def _run_bronze_invariant_check(self) -> Dict[str, Any]:
         """Assert bronze table size matches the (mode, shadow_enabled) invariant.
@@ -2377,23 +2356,23 @@ class BackgroundScheduler:
 
             logger.warning(f"Bronze invariant VIOLATED: {reason}")
 
-            # Throttle Telegram alerts so a persistent breach doesn't spam.
-            now = time.time()
-            since_last = now - BackgroundScheduler._bronze_invariant_last_alert
-            if since_last >= self._BRONZE_INVARIANT_ALERT_COOLDOWN_S:
-                BackgroundScheduler._bronze_invariant_last_alert = now
-                try:
-                    from bot.main import send_admin_message
-                    await send_admin_message(
-                        "⚠️ <b>Bronze invariant violated</b>\n"
-                        f"<code>mode={mode}</code>, <code>shadow={shadow}</code>\n"
-                        f"total: {stats['total']:,} | unprocessed: {stats['unprocessed']:,}\n\n"
-                        f"{reason}\n\n"
-                        "Likely cause: prune misconfigured, or sync writing despite opt-out.",
-                        key="bronze:invariant_violated",
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to send bronze invariant alert: {e}")
+            # The Gate owns the cooldown: loud first hour, then one daily
+            # reminder while the breach stands — this used to be a private
+            # 6h float, the fifth of the six throttles.
+            try:
+                from core.alerting import raise_alert
+
+                await raise_alert(
+                    "⚠️ <b>Bronze invariant violated</b>\n"
+                    f"<code>mode={mode}</code>, <code>shadow={shadow}</code>\n"
+                    f"total: {stats['total']:,} | unprocessed: {stats['unprocessed']:,}\n\n"
+                    f"{reason}\n\n"
+                    "Likely cause: prune misconfigured, or sync writing despite opt-out.",
+                    conditions=["bronze:invariant_violated"],
+                    bucket="bronze:invariant_violated",
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send bronze invariant alert: {e}")
 
             return result
 
@@ -2438,7 +2417,8 @@ class BackgroundScheduler:
             return
 
         try:
-            from bot.main import send_admin_message
+            from core.alerting import raise_alert
+
             unprocessed = stats["unprocessed"]
             age_s = stats.get("oldest_unprocessed_age_s")
             age_str = f"{int(age_s)}s" if age_s else "unknown"
@@ -2448,9 +2428,11 @@ class BackgroundScheduler:
                 f"Unprocessed events: {unprocessed}\n"
                 f"Oldest age: {age_str}\n\n"
                 "Promotion may be falling behind. "
-                "Check `/api/bronze/stats` and scheduler jobs."
+                "Check <code>/api/bronze/stats</code> and scheduler jobs."
             )
-            await send_admin_message(msg, key="bronze:backlog")
+            await raise_alert(
+                msg, conditions=["bronze:backlog"], bucket="bronze:backlog",
+            )
         except Exception as e:
             logger.warning(f"Failed to send bronze alert: {e}")
 

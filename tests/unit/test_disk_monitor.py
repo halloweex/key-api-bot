@@ -331,7 +331,6 @@ class TestSchedulerJob:
         store = DuckDBStore(db_path=tmp_path / "test.duckdb")
         await store.connect()
         try:
-            BackgroundScheduler._disk_alert_last_sent = {}
             scheduler = BackgroundScheduler()
 
             with patch(
@@ -377,7 +376,6 @@ class TestSchedulerJob:
         store = DuckDBStore(db_path=tmp_path / "test.duckdb")
         await store.connect()
         try:
-            BackgroundScheduler._disk_alert_last_sent = {}
 
             now = datetime.now(timezone.utc)
             async with store.connection() as conn:
@@ -413,7 +411,6 @@ class TestSchedulerJob:
         store = DuckDBStore(db_path=tmp_path / "test.duckdb")
         await store.connect()
         try:
-            BackgroundScheduler._disk_alert_last_sent = {}
 
             scheduler = BackgroundScheduler()
             with patch(
@@ -445,7 +442,11 @@ class TestSchedulerJob:
         await store.connect()
         try:
             # Pretend we alerted 1 minute ago
-            BackgroundScheduler._disk_alert_last_sent = {"disk:WARN": _time.time() - 60, "disk:CRITICAL": _time.time() - 60}
+            # A delivery 60s ago, recorded where the policy now lives: the Gate.
+            from core.alerting import _gate
+            for bucket in ("disk:WARN", "disk:CRITICAL"):
+                _gate.decide(bucket, has_condition=True)
+                _gate.record_delivery(bucket)
 
             scheduler = BackgroundScheduler()
             with patch(

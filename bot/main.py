@@ -58,6 +58,7 @@ CONVERSATION_TIMEOUT_SECONDS = 30 * 60
 
 async def send_admin_message(
     text: str, parse_mode: str = "HTML", *, key: str | None = None,
+    pre_throttled: bool = False,
 ) -> int:
     """Broadcast `text` to every admin. Returns how many it actually reached.
 
@@ -89,9 +90,14 @@ async def send_admin_message(
         logger.info("admin message suppressed (KS_ALERTS_DISABLED): %.80s", text)
         return 0
 
-    should_send, text = throttle_check(text, key)
-    if not should_send:
-        return 0
+    if not pre_throttled:
+        should_send, text = throttle_check(text, key)
+        if not should_send:
+            return 0
+    # pre_throttled: the AlertGate (core/alerting.py) already made the
+    # suppression decision with its own condition-aware policy; running the
+    # 30-minute text/key throttle on top would double-throttle. The kill
+    # switch above still applies — policy may be upstream, the channel is not.
 
     if _application is None:
         # Unsigned on purpose: the HTTP transport signs, and signing here too

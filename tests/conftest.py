@@ -91,6 +91,17 @@ def _no_telegram_from_tests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_alert_gate():
+    """The Gate is a module singleton with per-bucket cooldown state; without
+    this, one test's alert buys thirty minutes of silence in the next."""
+    from core.alerting import reset_gate
+
+    reset_gate()
+    yield
+    reset_gate()
+
+
+@pytest.fixture(autouse=True)
 def _never_the_production_database(monkeypatch, tmp_path):
     """No test may open the real analytics database. Ever.
 

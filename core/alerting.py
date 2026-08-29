@@ -45,7 +45,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, FrozenSet
+from typing import Dict, FrozenSet, Sequence
 
 
 class Kind(str, Enum):
@@ -226,6 +226,148 @@ PENDING_EMITTERS: FrozenSet[str] = frozenset({"turbosms:webhook:event_rebound"})
 # lifecycle message *about* conditions. Neither may ever grow a lifecycle of
 # its own.
 EXCLUDED_MESSAGE_KEYS: FrozenSet[str] = frozenset({"dq:digest", "canary:recovery"})
+
+
+# ─── The Gate — step 02 ─────────────────────────────────────────────────────
+#
+# One door for the web container's emitters. What it owns is the *policy*:
+# whether this raise becomes a message, and what standing-condition context
+# rides along. What it does not own is the channel — delivery goes through
+# `bot.main.send_admin_message(pre_throttled=True)`, so the kill switch, the
+# signature, the clamp and the plain-text degradation stay in one place.
+#
+# The cooldown grows with the condition's age, and the number is measured,
+# not chosen: production history holds three multi-week episodes of the
+# warehouse validator failing ~545 ticks a day — a standing CRITICAL against
+# a flat 30-minute cooldown is 48 messages a day for weeks, which is how one
+# June condition delivered 404 copies. A condition that has been standing an
+# hour is no longer news; it becomes one daily reminder that says how long
+# and how many repeats it stands for. Events never escalate their cooldown —
+# each occurrence is its own fact.
+#
+# State is in-process and resets on restart, like every throttle before it —
+# deliberately, for now: the durable decision-state file is step 03, and
+# after a restart the first alert of each kind should land anyway.
+
+import time as _time
+
+
+@dataclass
+class _BucketState:
+    first_seen: float
+    last_attempt: float
+    # None, not 0.0: a bucket that was decided but never delivered must retry
+    # on the next raise, and a zero would read as "sent at epoch".
+    last_sent: "float | None" = None
+    suppressed: int = 0
+
+
+class AlertGate:
+    BASE_COOLDOWN_S = 1800.0      # the loud phase: repeats every 30 min
+    LOUD_PHASE_S = 3600.0         # for the condition's first hour
+    STANDING_COOLDOWN_S = 86400.0  # then one reminder a day
+    INCIDENT_RESET_S = 3600.0     # an hour of quiet = the next raise is news
+
+    def __init__(self) -> None:
+        self._state: Dict[str, _BucketState] = {}
+
+    def decide(
+        self, bucket: str, *, has_condition: bool, now: "float | None" = None,
+    ) -> "tuple[bool, str]":
+        """(should_send, context_suffix) — without committing the cooldown.
+
+        The cooldown is committed by `record_delivery`, so an attempt that the
+        transport could not deliver does not buy silence — the lesson of the
+        disk watchdog, whose 24h slot used to be consumed by a message nobody
+        received.
+        """
+        now = _time.monotonic() if now is None else now
+        st = self._state.get(bucket)
+        if st is not None and (now - st.last_attempt) > self.INCIDENT_RESET_S:
+            # Quiet long enough that this is a new incident, not a repeat.
+            st = None
+        if st is None:
+            self._state[bucket] = _BucketState(first_seen=now, last_attempt=now)
+            return True, ""
+
+        st.last_attempt = now
+        age = now - st.first_seen
+        standing = has_condition and age >= self.LOUD_PHASE_S
+        cooldown = self.STANDING_COOLDOWN_S if standing else self.BASE_COOLDOWN_S
+        if st.last_sent is not None and (now - st.last_sent) < cooldown:
+            st.suppressed += 1
+            return False, ""
+
+        parts = []
+        if standing:
+            parts.append(f"standing {int(age // 3600)}h")
+        if st.suppressed:
+            parts.append(f"{st.suppressed} repeat(s) swallowed")
+        if standing:
+            parts.append("next reminder in 24h")
+        return True, ("\n\n⏳ " + " · ".join(parts) if parts else "")
+
+    def record_delivery(self, bucket: str, *, now: "float | None" = None) -> None:
+        now = _time.monotonic() if now is None else now
+        st = self._state.get(bucket)
+        if st is not None:
+            st.last_sent = now
+            st.suppressed = 0
+
+    def reset(self) -> None:
+        self._state.clear()
+
+
+_gate = AlertGate()
+
+
+def reset_gate() -> None:
+    """For tests and for a deliberate re-arm."""
+    _gate.reset()
+
+
+async def raise_alert(
+    text: str,
+    *,
+    conditions: "Sequence[str]",
+    bucket: "str | None",
+    parse_mode: str = "HTML",
+) -> int:
+    """Raise an alert about the named conditions. Returns admins reached.
+
+    `conditions` are canonical keys from the REGISTRY — the vocabulary this
+    module declares. An unregistered key is tolerated (it gets the inert
+    EVENT default) but logged, because it means somebody added an alert
+    without declaring what it is about, and the completeness test will say
+    so louder.
+
+    `bucket` names the dedup identity — usually the single condition, for the
+    DQ layers today still the fingerprint. `None` means no dedup at all: the
+    caller has already decided this occurrence must go (the OOM path).
+    """
+    import logging as _logging
+
+    log = _logging.getLogger(__name__)
+    for key in conditions:
+        if key not in REGISTRY and key not in EXCLUDED_MESSAGE_KEYS:
+            log.warning("raise_alert: unregistered condition key %r", key)
+
+    suffix = ""
+    if bucket is not None:
+        has_condition = any(is_condition(k) for k in conditions)
+        should_send, suffix = _gate.decide(bucket, has_condition=has_condition)
+        if not should_send:
+            log.debug("Alert suppressed by gate (bucket=%s)", bucket)
+            return 0
+
+    from bot.main import send_admin_message
+
+    delivered = await send_admin_message(
+        text + suffix, parse_mode, pre_throttled=True,
+    )
+    if delivered and bucket is not None:
+        _gate.record_delivery(bucket)
+    return delivered
 
 
 def spec_for(key: str) -> ConditionSpec:

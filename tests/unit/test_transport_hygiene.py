@@ -180,12 +180,18 @@ class TestDeliveredCount:
 
 
 class TestDiskThrottleIsKeyed:
-    """A WARN at 06:00 must not mute the escalation to CRITICAL at 12:00."""
+    """A WARN at 06:00 must not mute the escalation to CRITICAL at 12:00.
 
-    def test_state_is_a_dict_not_a_shared_float(self):
+    Step 00 fixed this by turning the shared float into a per-key dict;
+    step 02 moved the policy into the Gate, which keys per bucket by
+    construction — so the assertion is now that the private state is gone."""
+
+    def test_the_private_disk_cooldown_is_gone(self):
         from core.scheduler import BackgroundScheduler
 
-        assert isinstance(BackgroundScheduler._disk_alert_last_sent, dict)
+        assert not hasattr(BackgroundScheduler, "_disk_alert_last_sent")
+        assert not hasattr(BackgroundScheduler, "_bronze_invariant_last_alert")
+        assert not hasattr(BackgroundScheduler, "_dq_last_alert")
 
 
 class TestTheFourthTransportIsGone:

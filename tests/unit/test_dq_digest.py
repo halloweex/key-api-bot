@@ -455,8 +455,10 @@ class TestFetchPreviousRun:
 
 class TestDqAlertThrottleKeying:
     def setup_method(self):
-        from core.scheduler import BackgroundScheduler
-        BackgroundScheduler._dq_last_alert.clear()
+        # The private 24h dict died with step 02; the Gate owns the cooldown.
+        from core.alerting import reset_gate
+
+        reset_gate()
 
     teardown_method = setup_method
 

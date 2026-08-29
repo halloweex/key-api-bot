@@ -111,14 +111,16 @@ async def _note_rejection(kind: str, **fields: Any) -> None:
         else "are being rejected"
     )
     try:
-        from bot.main import send_admin_message
-        await send_admin_message(
+        from core.alerting import raise_alert
+
+        condition = f"turbosms:webhook:{kind}"
+        await raise_alert(
             f"⚠️ TurboSMS delivery reports {headline}: <b>{kind}</b>\n"
             f"{count} so far, accepted: {_dlr_counts['accepted']}.\n"
             f"Each one is a delivery result lost for good — the gateway gives "
             f"up after 4.5 hours and offers no replay.\n"
             f"{_GUIDANCE.get(kind, _GUIDANCE_DEFAULT)}",
-            key=f"turbosms:webhook:{kind}",
+            conditions=[condition], bucket=condition,
         )
     except Exception as e:  # noqa: BLE001 — alerting must never break the endpoint
         logger.warning("Failed to send TurboSMS webhook alert: %s", e)
