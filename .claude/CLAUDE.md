@@ -650,8 +650,41 @@ flag in its internal tooling is not a neutral act. Languages have names.
 - **Run-age watchdog**: `/api/health` publishes the age of the last successful
   run per layer, keyed on `error_message IS NULL` — a failed run writes a row
   too, so row-existence alone reads green. `bot/canary.py` judges it from the
-  *other* container every 15 min: 30 h for reconciliation, 12 h for integrity.
-  A missing block or a layer that never succeeded both count as failures.
+  *other* container every 15 min: 30 h for reconciliation, 12 h for integrity,
+  30 h for mirror_landing. A missing block or a layer that never succeeded
+  both count as failures.
+- **Every message is signed with `KS_INSTANCE`** (default `gethostname()`,
+  `prod-vps` in compose on both services). Applied by the two HTTP transports
+  and by the bot's Application path — three call sites, so nothing that merely
+  *builds* a message has to remember — and idempotent, so the bot's fallback
+  to HTTP cannot sign twice. Plain text, no markup: HTML and Markdown both
+  ride this channel and a transport cannot know which. The photo caption is
+  signed **before** the 1 024-char check, or the signature would silently cost
+  the weekly card its picture.
+- **A CRITICAL names its lever.** `REMEDIATION` in `core/data_quality.py` maps
+  check name → what to do, matched by **longest prefix** because half the
+  names are generated (`fk_orphan_*`, `freshness_*`). The canary, the disk
+  watchdog and the three warehouse-validation alerts carry theirs inline.
+  Anything unlisted gets an anchor to this section — which is the signal to
+  add one.
+- **The alert says what the machine already tried**, and still never triggers
+  a repair. `machine_attempts_note()` reads the two ids-diff heal ledgers
+  (24 h window) and is *passed into* `format_alert_message`, which stays pure.
+- **Mirror freshness**: `/api/health` publishes `mirrors` — `last_ok_at` age,
+  `failures_since_ok` and a boolean `failing` for `bronze.orders`. The error
+  *text* is deliberately not published; this endpoint is public and the text
+  is a driver exception. Both numbers are needed: `mirror_orders` refuses to
+  move the watermark when there was nothing to ship, so age alone cannot tell
+  a quiet night from a dead mirror — measured, the orders watermark stands
+  still from ~01:00 Kyiv to the 05:15 status refresh and again to ~07:00, so
+  the canary's limit is **8 h**, not the hour first sketched. What makes 8 h
+  affordable is `failures_since_ok`, which catches an actively failing mirror
+  on the next sync tick. ClickHouse rows are **not** watched — that store's
+  daily window of silence was accepted when step 4 shipped.
+- **The suite is hermetic against the kill switch**: `tests/conftest.py`
+  assigns `KS_ALERTS_DISABLED=0` (assigns, never pops — `load_dotenv` only
+  declines to overwrite a name that is *present*). What stops tests reaching
+  Telegram is the autouse fixture, never that variable.
 
 ### The Postgres mirror of landing
 One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed
@@ -1439,4 +1472,4 @@ GET /api/admin/resync/status/{job_id}
 
 ---
 
-*Last updated: 2026-08-27*
+*Last updated: 2026-08-29*
