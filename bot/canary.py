@@ -35,9 +35,8 @@ HEALTH_TIMEOUT_S = 10.0
 CERT_TIMEOUT_S = 10.0
 CERT_WARN_DAYS = 14
 
-# Cooldown so a sustained outage doesn't spam admins. Recovery messages
-# bypass cooldown so admins always learn when service returns.
-ALERT_COOLDOWN_S = 3600  # 1 hour
+# The alert policy lives in core/alerting.py's Gate since step 07 —
+# CanaryState, this module's own throttle for its first four months, is gone.
 
 # How stale the last *successful* data-quality run may get before we say so.
 # One missed cycle plus grace: the job either ran late or did not run, and
@@ -523,70 +522,3 @@ def format_alert(result: CanaryResult, dashboard_url: str) -> str:
         lines.append("")
         lines.append("<i>" + html.escape(" · ".join(extras)) + "</i>")
     return "\n".join(lines)
-
-
-def format_recovery(result: CanaryResult, dashboard_url: str) -> str:
-    """Telegram message announcing return to healthy."""
-    extras: list[str] = []
-    if result.cert_days_remaining is not None:
-        extras.append(f"cert {result.cert_days_remaining}d")
-    if result.sync_seconds_since is not None:
-        extras.append(f"sync {result.sync_seconds_since}s ago")
-    suffix = f" ({', '.join(extras)})" if extras else ""
-    return (
-        "✅ <b>Dashboard recovered</b>\n"
-        f"<a href=\"{dashboard_url}\">{dashboard_url}</a>{suffix}"
-    )
-
-
-class CanaryState:
-    """Tracks failures per problem to dedupe alerts and emit recovery notices.
-
-    Throttling is keyed on `CanaryResult.failure_keys` — stable identifiers
-    like `dq_stale:reconciliation` — and never on the rendered message, which
-    carries ages and counts that change on every cycle and would defeat the
-    cooldown. Keying per problem also means a new problem alerts immediately
-    instead of waiting out an unrelated problem's cooldown.
-
-    Kept as a small object so tests can construct independent instances and
-    the bot can hold one shared instance across job runs.
-    """
-
-    def __init__(self, cooldown_s: float = ALERT_COOLDOWN_S):
-        self.cooldown_s = cooldown_s
-        # key -> timestamp of the last alert sent for that key
-        self._alerted_at: dict[str, float] = {}
-
-    def decide(
-        self, result: CanaryResult, *, now: Optional[float] = None
-    ) -> Optional[str]:
-        """Return 'alert', 'recovery', or None depending on state transitions."""
-        ts = now if now is not None else time.monotonic()
-        if result.ok:
-            if self._alerted_at:
-                self._alerted_at.clear()
-                return "recovery"
-            return None
-
-        # A result with no keys still has to alert — fall back to one bucket
-        # rather than silently dropping it.
-        keys = result.failure_keys or ["unkeyed"]
-
-        # Forget problems that have resolved, so their return alerts at once
-        # instead of inheriting a cooldown from the last time they happened.
-        for stale_key in set(self._alerted_at) - set(keys):
-            del self._alerted_at[stale_key]
-
-        due = [
-            k for k in keys
-            if k not in self._alerted_at
-            or (ts - self._alerted_at[k]) >= self.cooldown_s
-        ]
-        if due:
-            # A key missing from the map is due by definition, so recording
-            # the due ones records every currently-failing problem.
-            for k in due:
-                self._alerted_at[k] = ts
-            return "alert"
-        # Suppressed (every current problem alerted within the cooldown).
-        return None

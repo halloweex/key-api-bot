@@ -1,6 +1,7 @@
 """Tests for bot/canary.py — health probe, cert expiry, state machine."""
 from __future__ import annotations
 
+import pathlib
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -8,7 +9,7 @@ import httpx
 import pytest
 
 from bot import canary
-from bot.canary import CanaryState, run_canary
+from bot.canary import run_canary
 
 
 DASHBOARD = "https://ksanalytics.duckdns.org"
@@ -332,117 +333,30 @@ async def test_run_canary_unreachable_does_not_add_dq_noise():
     assert not any(k.startswith("dq_") for k in result.failure_keys)
 
 
-# ─── State machine: dedup + recovery ────────────────────────────────────────
-
-def _failing_result():
-    return canary.CanaryResult(
-        ok=False, severity="critical", failures=["health returned HTTP 503"],
-        failure_keys=["health_http"], http_code=503,
-    )
-
-
-def _ok_result():
-    return canary.CanaryResult(
-        ok=True, severity="ok", failures=[], health_status="healthy",
-        http_code=200, cert_days_remaining=90, sync_seconds_since=30,
-    )
+# ─── The state machine is gone (step 07) ───────────────────────────────────
+#
+# CanaryState — per-key cooldowns, recovery transitions — was the sixth and
+# last private throttle. Its properties live on in the shared machinery and
+# are tested there: "a new problem is never masked" is the Gate's
+# per-bucket state (a changed failure set is a new compound bucket, which
+# fires immediately); the standing-condition decay is the Gate's escalating
+# cooldown (tests/unit/test_alert_gate.py); and recovery is resolve_group's
+# per-key "✅ Resolved" with its delivered-first gate
+# (tests/unit/test_alert_resolved.py) — which announces partial recoveries,
+# something the all-or-nothing transition never could.
 
 
-def test_state_first_failure_alerts():
-    state = CanaryState(cooldown_s=3600)
-    assert state.decide(_failing_result(), now=0) == "alert"
+def test_the_state_machine_is_really_gone():
+    """The consolidation pin: six throttles became one Gate."""
+    import bot.canary as canary_module
+    import bot.main as bot_main_module
 
+    assert not hasattr(canary_module, "CanaryState")
+    assert not hasattr(canary_module, "format_recovery")
+    # bot.main no longer imports either — the job speaks to the Gate.
+    assert not hasattr(bot_main_module, "CanaryState")
+    assert not hasattr(bot_main_module, "format_recovery")
 
-def test_state_repeat_failure_within_cooldown_silent():
-    state = CanaryState(cooldown_s=3600)
-    assert state.decide(_failing_result(), now=0) == "alert"
-    assert state.decide(_failing_result(), now=60) is None
-    assert state.decide(_failing_result(), now=3599) is None
-
-
-def test_state_repeat_failure_after_cooldown_alerts_again():
-    state = CanaryState(cooldown_s=3600)
-    state.decide(_failing_result(), now=0)
-    assert state.decide(_failing_result(), now=3600) == "alert"
-
-
-def test_state_recovery_emits_recovery_then_silent():
-    state = CanaryState(cooldown_s=3600)
-    state.decide(_failing_result(), now=0)
-    assert state.decide(_ok_result(), now=120) == "recovery"
-    # Subsequent OKs are silent.
-    assert state.decide(_ok_result(), now=180) is None
-
-
-def test_state_no_alert_when_starting_healthy():
-    state = CanaryState(cooldown_s=3600)
-    assert state.decide(_ok_result(), now=0) is None
-
-
-def test_state_alerts_again_after_recovery_then_failure():
-    state = CanaryState(cooldown_s=3600)
-    state.decide(_failing_result(), now=0)
-    state.decide(_ok_result(), now=120)
-    # New failure after recovery should alert immediately, ignoring old cooldown.
-    assert state.decide(_failing_result(), now=200) == "alert"
-
-
-# ─── State machine: per-key throttling ──────────────────────────────────────
-
-def _keyed_result(*keys):
-    return canary.CanaryResult(
-        ok=False, severity="warn",
-        failures=[f"problem {k}" for k in keys], failure_keys=list(keys),
-    )
-
-
-def test_state_new_problem_alerts_despite_another_cooldown():
-    """A second, different problem must not be swallowed by the first's cooldown."""
-    state = CanaryState(cooldown_s=3600)
-    assert state.decide(_keyed_result("health_http"), now=0) == "alert"
-    assert state.decide(_keyed_result("health_http"), now=60) is None
-    assert state.decide(
-        _keyed_result("health_http", "dq_stale:reconciliation"), now=120
-    ) == "alert"
-
-
-def test_state_same_key_suppressed_regardless_of_message_text():
-    """Throttling keys on the problem, not on text that moves every cycle."""
-    state = CanaryState(cooldown_s=3600)
-    first = canary.CanaryResult(
-        ok=False, severity="warn",
-        failures=["last successful reconciliation run was 30h ago"],
-        failure_keys=["dq_stale:reconciliation"],
-    )
-    later = canary.CanaryResult(
-        ok=False, severity="warn",
-        failures=["last successful reconciliation run was 31h ago"],
-        failure_keys=["dq_stale:reconciliation"],
-    )
-    assert state.decide(first, now=0) == "alert"
-    assert state.decide(later, now=900) is None
-
-
-def test_state_resolved_key_alerts_again_without_full_recovery():
-    """One problem clearing while another persists must not mute its return."""
-    state = CanaryState(cooldown_s=3600)
-    state.decide(_keyed_result("health_http", "dq_stale:reconciliation"), now=0)
-    # reconciliation recovers; health still broken and still in cooldown
-    assert state.decide(_keyed_result("health_http"), now=600) is None
-    # reconciliation goes stale again well inside the original cooldown
-    assert state.decide(
-        _keyed_result("health_http", "dq_stale:reconciliation"), now=1200
-    ) == "alert"
-
-
-def test_state_unkeyed_failure_still_alerts():
-    result = canary.CanaryResult(ok=False, severity="critical", failures=["boom"])
-    state = CanaryState(cooldown_s=3600)
-    assert state.decide(result, now=0) == "alert"
-    assert state.decide(result, now=60) is None
-
-
-# ─── Formatters ─────────────────────────────────────────────────────────────
 
 def test_format_alert_includes_failures_and_extras():
     result = canary.CanaryResult(
@@ -474,9 +388,3 @@ def test_format_alert_includes_dq_ages():
     assert "reconciliation_age=2d 6h" in msg
     assert "integrity_age=1h" in msg
 
-
-def test_format_recovery_mentions_cert_and_sync():
-    msg = canary.format_recovery(_ok_result(), DASHBOARD)
-    assert "recovered" in msg
-    assert "cert 90d" in msg
-    assert "sync 30s" in msg

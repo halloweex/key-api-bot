@@ -637,10 +637,24 @@ flag in its internal tooling is not a neutral act. Languages have names.
 
 ### How a failure reaches a human
 - **`KS_ALERTS_DISABLED=1` глушит весь исходящий Telegram** (алерты, дайджест,
-  watchdog'и, недельный отчёт) — рубильник dev-инстансов: ноутбук на копии
-  прод-бэкапа дважды слал админам «прод»-тревоги о самом себе. Прод не
-  ставит переменную; локальный .env — ставит. Подавление тотально (HTTP-клиент
-  не создаётся) и громко (INFO-строка на каждое проглоченное).
+  watchdog'и, недельный отчёт, хендлерные уведомления, host-cron скрипты) —
+  рубильник dev-инстансов: ноутбук на копии прод-бэкапа дважды слал админам
+  «прод»-тревоги о самом себе. Прод не ставит переменную; локальный .env —
+  ставит. Подавление тотально и громко. До 29.08 у заявления «весь» было
+  пять дыр (memory monitor, два хендлера, четыре shell-скрипта) — закрыты
+  шагами 00 и 07 переработки алертов; shell читает рубильник из .env через
+  `deploy/notify.sh`.
+- **Условия и жизненный цикл**: словарь — `core/alerting.py` (REGISTRY,
+  ~105 ключей, condition/event, exact-match; тест полноты вычисляет
+  эмиттируемое множество из AST). Политика — AlertGate: громкий час (30 мин),
+  затем суточное напоминание со стажем; кулдаун платится только доставкой;
+  час тишины = новый инцидент. Журнал — `app.alert_series`/`alert_events`
+  (ревизия 0012, доступ МИМО require_revision, fire-and-forget ≤1с, повторы
+  счётчиком). Resolved — `resolve_group` на здоровом проходе эмиттера,
+  только после доставленного fired. Эскалатор — в боте на тике канарейки:
+  горящее+неузаконенное 6ч → один повтор за цикл, стоит при мёртвом web.
+  Хвост дайджеста — из журнала; дельта находок осталась на
+  data_quality_issues. Канарейка с шага 07 тоже на Gate (CanaryState умер).
 - **Alert throttle** keys on the *condition* (`warehouse:validation_retrying`,
   `dq:{layer}:{severity}:{checks}`, `canary:{failing keys}`), never on message
   text — the validator embeds live checksums, so 3 119 failures once produced

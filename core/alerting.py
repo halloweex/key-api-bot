@@ -228,10 +228,10 @@ PENDING_EMITTERS: FrozenSet[str] = frozenset({"turbosms:webhook:event_rebound"})
 
 
 # Channel messages that ride the same throttle machinery but are not
-# conditions: the digest is a scheduled report, the recovery notice is a
-# lifecycle message *about* conditions. Neither may ever grow a lifecycle of
-# its own.
-EXCLUDED_MESSAGE_KEYS: FrozenSet[str] = frozenset({"dq:digest", "canary:recovery"})
+# conditions: the digest is a scheduled report. (canary:recovery lived here
+# until step 07, when the canary's bespoke recovery died in favour of the
+# standard per-key "✅ Resolved".)
+EXCLUDED_MESSAGE_KEYS: FrozenSet[str] = frozenset({"dq:digest"})
 
 
 # ─── The Gate — step 02 ─────────────────────────────────────────────────────

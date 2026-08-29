@@ -22,7 +22,7 @@ from core.keycrm import SyncKeyCRMClient as KeyCRMClient
 from bot.services import ReportService
 from bot import handlers, handlers_legacy
 from bot import database
-from bot.canary import CanaryState, run_canary, format_alert, format_recovery
+from bot.canary import format_alert, run_canary
 from bot.heartbeat import BEAT_INTERVAL_SECONDS, beat_job
 from core.config import validate_config, ConfigurationError
 
@@ -362,8 +362,14 @@ def main() -> None:
             logger.info(f"Revoked {revoked_count} inactive users (45+ days)")
 
     # Internal canary: probe the public dashboard from the bot every 15 min.
-    # Runs in a separate container, so it catches outages a self-check would miss.
-    canary_state = CanaryState()
+    # Runs in a separate container, so it catches outages a self-check would
+    # miss. Since step 07 its policy is the shared Gate — CanaryState, the
+    # sixth and last private throttle, is gone: the compound bucket gives the
+    # same "a new problem is never masked by an old one's cooldown" (a changed
+    # failure set is a new bucket, which fires immediately), the Gate adds the
+    # standing-condition decay CanaryState never had, and recovery is the
+    # standard per-key "✅ Resolved" — which announces partial recoveries,
+    # something the old all-or-nothing transition never could.
 
     async def canary_job(context):
         try:
@@ -372,23 +378,16 @@ def main() -> None:
             logger.error("Canary job crashed: %s", exc, exc_info=True)
             return
 
-        decision = canary_state.decide(result)
-        if decision == "alert":
+        from core.alerting import raise_alert, resolve_group
+
+        if result.failures:
             logger.warning("Canary alerting: %s", result.failures)
-            # Key on which problems are failing, not on the text: the body
-            # carries ages and cert days that differ on every probe.
-            await send_admin_message(
+            keys = list(result.failure_keys or ["unkeyed"])
+            await raise_alert(
                 format_alert(result, DASHBOARD_URL),
-                key="canary:" + ",".join(sorted(result.failure_keys or ["unkeyed"])),
-            )
-        elif decision == "recovery":
-            logger.info("Canary recovery")
-            # Keyed so a flapping dashboard cannot deliver "recovered" every
-            # few minutes: the body carries cert days and sync age, which vary
-            # per probe, so an unkeyed recovery was effectively unthrottled —
-            # against the rule this file states twice.
-            await send_admin_message(
-                format_recovery(result, DASHBOARD_URL), key="canary:recovery",
+                conditions=keys,
+                bucket="canary:" + ",".join(sorted(keys)),
+                group="canary",
             )
         else:
             logger.debug(
@@ -396,6 +395,14 @@ def main() -> None:
                 result.cert_days_remaining, result.sync_seconds_since,
                 result.dq_ages,
             )
+
+        # Every tick, not only the clean ones: with still_firing excluded,
+        # a problem that dropped out of the failing set announces its own
+        # recovery even while its siblings still burn.
+        try:
+            await resolve_group("canary", still_firing=result.failure_keys)
+        except Exception as exc:
+            logger.warning("Canary resolve failed: %s", exc)
 
         # Step 05: the escalator rides the same tick, judging the archive for
         # standing unacknowledged conditions. Gated on what this very probe
