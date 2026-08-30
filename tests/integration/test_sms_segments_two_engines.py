@@ -21,6 +21,8 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timezone
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 import pytest_asyncio
 
@@ -276,3 +278,60 @@ async def test_the_fixture_actually_exercises_the_exclusions(engines):
     assert 8 not in selected and 9 in selected, (
         "the shared phone number was not de-duplicated to the higher-value buyer"
     )
+
+
+@pytest.mark.asyncio
+async def test_the_whole_result_matches_through_the_store(engines, monkeypatch):
+    """The end-to-end shape, not just the rows.
+
+    Above, both renderings are executed side by side. This drives the real
+    `get_sms_segments` twice — once per engine, chosen by `KS_SMS_STORE` — and
+    compares what the API would actually return: the level summaries, the
+    funnel, the customer rows and the arm each customer landed in.
+
+    The arms are the reason this is worth running separately. They are decided
+    in Python now (`core.sms_holdout`) precisely so the engines cannot
+    disagree, and an assertion that never looked at them would not notice if
+    that stopped being true.
+    """
+    store, conn = engines
+
+    monkeypatch.delenv("KS_SMS_STORE", raising=False)
+    duck = await store.get_sms_segments(
+        grouping="single", include_customers=True, campaign="aug-compare",
+    )
+
+    monkeypatch.setenv("KS_SMS_STORE", "postgres")
+    with patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn))), \
+         patch("core.pg.require_revision", new=AsyncMock()):
+        postgres = await store.get_sms_segments(
+            grouping="single", include_customers=True, campaign="aug-compare",
+        )
+
+    assert duck["funnel"] == postgres["funnel"]
+    assert duck["segments"] == postgres["segments"]
+    assert duck["totals"] == postgres["totals"]
+    assert [c["buyerId"] for c in duck["customers"]] == \
+           [c["buyerId"] for c in postgres["customers"]]
+    assert [c["assignment"] for c in duck["customers"]] == \
+           [c["assignment"] for c in postgres["customers"]]
+    assert duck["customers"] == postgres["customers"]
+
+
+class _PoolOf:
+    """The one connection the fixture already opened, shaped like a pool."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def acquire(self):
+        conn = self._conn
+
+        class _Ctx:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()

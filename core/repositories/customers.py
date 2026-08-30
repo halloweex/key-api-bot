@@ -130,7 +130,8 @@ def _compare_groups(
 
 from core.duckdb_constants import B2B_MANAGER_ID, RETAIL_MANAGER_IDS
 from core.sms_holdout import assign_arm
-from core.sql_dialect import DUCKDB, sms_segments_select
+from core.pg_sms import sms_store_is_postgres
+from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
 
 # Tier cut-offs per LTV basis for get_sms_segments.
 #
@@ -2341,74 +2342,82 @@ class CustomersMixin:
             tier = [tier]
         tiers = [t.upper() for t in tier] if tier else None
 
-        async with self.connection() as conn:
-            # Silver already classifies each order, so filter on the column
-            # rather than re-deriving retail/b2b from manager_id here.
-            sales_type_filter = "" if sales_type == "all" else "AND l.sales_type = ?"
+        # Silver already classifies each order, so filter on the column
+        # rather than re-deriving retail/b2b from manager_id here.
+        sales_type_filter = "" if sales_type == "all" else "AND l.sales_type = ?"
 
-            # Phones are stored as free text; normalise to digits and keep only
-            # full Ukrainian MSISDNs (380 + 9 digits). Everything shorter is a
-            # partial record that no SMS gateway will accept.
-            # Which lifetime value drives tiering. Both are always computed.
-            ltv_column = "revenue_ltv" if ltv_basis == "revenue" else "margin_ltv"
+        # Phones are stored as free text; normalise to digits and keep only
+        # full Ukrainian MSISDNs (380 + 9 digits). Everything shorter is a
+        # partial record that no SMS gateway will accept.
+        # Which lifetime value drives tiering. Both are always computed.
+        ltv_column = "revenue_ltv" if ltv_basis == "revenue" else "margin_ltv"
 
-            # The value level is always computed, because it does two separate
-            # jobs and only one of them is splitting. As a *filter* — "send to
-            # VIP only" — it applies whether or not the campaign is measured in
-            # arms; tying it to the split is what made three tier cards read as
-            # three audiences.
-            tier_case = f"""CASE
-                        WHEN c.{ltv_column} >= ? THEN 'VIP'
-                        WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
-                        WHEN c.recency <= ? THEN 'REACTIVATION'
-                    END"""
+        # The value level is always computed, because it does two separate
+        # jobs and only one of them is splitting. As a *filter* — "send to
+        # VIP only" — it applies whether or not the campaign is measured in
+        # arms; tying it to the split is what made three tier cards read as
+        # three audiences.
+        tier_case = f"""CASE
+                    WHEN c.{ltv_column} >= ? THEN 'VIP'
+                    WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
+                    WHEN c.recency <= ? THEN 'REACTIVATION'
+                END"""
 
-            # The arm is what the result is measured on. Under "single" there
-            # is one, and nobody is dropped for belonging to no level; under
-            # "rfm" the arm is the level, and whoever has none falls out.
-            if grouping == "single":
-                arm_expr = f"'{SINGLE_GROUP_NAME}'"
-                ok_tier_expr = "TRUE"
-            else:
-                arm_expr = "tier_level"
-                ok_tier_expr = "tier_level IS NOT NULL"
+        # The arm is what the result is measured on. Under "single" there
+        # is one, and nobody is dropped for belonging to no level; under
+        # "rfm" the arm is the level, and whoever has none falls out.
+        if grouping == "single":
+            arm_expr = f"'{SINGLE_GROUP_NAME}'"
+            ok_tier_expr = "TRUE"
+        else:
+            arm_expr = "tier_level"
+            ok_tier_expr = "tier_level IS NOT NULL"
 
-            filter_sql, filter_params = filters.predicate(
-                ltv_column, sales_type, DUCKDB.order_lines,
-            )
+        # Which store answers. Decided out here on purpose: the Postgres path
+        # must not take DuckDB's connection at all — §34's invariant, because a
+        # read that queues behind the warehouse rebuild has moved the
+        # bottleneck rather than left it behind.
+        use_postgres = sms_store_is_postgres()
+        dialect = POSTGRES if use_postgres else DUCKDB
 
-            # One body, two engines — `core/sql_dialect.py`. Rendered for
-            # DuckDB here; the Postgres rendering of the identical text is what
-            # lets `/sms` be answered without this store at all.
-            query = sms_segments_select(
-                DUCKDB,
-                ltv_column=ltv_column,
-                sales_type_filter=sales_type_filter,
-                tier_case=tier_case,
-                arm_expr=arm_expr,
-                ok_tier_expr=ok_tier_expr,
-                filter_sql=filter_sql,
-                tier_subset=(
-                    f"WHERE tier_level IN ({', '.join('?' * len(tiers))})"
-                    if tiers else ""
-                ),
-            )
+        filter_sql, filter_params = filters.predicate(
+            ltv_column, sales_type, dialect.order_lines,
+        )
+        fragments = dict(
+            ltv_column=ltv_column,
+            sales_type_filter=sales_type_filter,
+            tier_case=tier_case,
+            arm_expr=arm_expr,
+            ok_tier_expr=ok_tier_expr,
+            filter_sql=filter_sql,
+            tier_subset=(
+                f"WHERE tier_level IN ({', '.join('?' * len(tiers))})"
+                if tiers else ""
+            ),
+        )
 
-            # Bound in textual order of the `?` placeholders above: the line
-            # items filter, the level CASE, the recency window, the audience
-            # predicate, then the level subset. The holdout split is not among
-            # them — it is `core.sms_holdout`, in Python, so that this store and
-            # Postgres cannot disagree about who was withheld.
-            params: list = []
-            if sales_type != "all":
-                params.append(sales_type)
-            params += [vip_ltv, core_min_orders, core_ltv, reactivation_max_recency]
-            params.append(max_recency_days)
-            params += filter_params
-            if tiers:
-                params += tiers
+        # Bound in textual order of the `?` placeholders: the line-items
+        # filter, the level CASE, the recency window, the audience predicate,
+        # then the level subset. The holdout split is not among them — it is
+        # `core.sms_holdout`, in Python, so that this store and Postgres cannot
+        # disagree about who was withheld.
+        params: list = []
+        if sales_type != "all":
+            params.append(sales_type)
+        params += [vip_ltv, core_min_orders, core_ltv, reactivation_max_recency]
+        params.append(max_recency_days)
+        params += filter_params
+        if tiers:
+            params += tiers
 
-            rows = conn.execute(query, params).fetchall()
+        if use_postgres:
+            from core.pg_sms_read import fetch_segments, render
+            rows = await fetch_segments(render(**fragments), params)
+        else:
+            # One body, two engines — `core/sql_dialect.py`.
+            query = sms_segments_select(DUCKDB, **fragments)
+            async with self.connection() as conn:
+                rows = conn.execute(query, params).fetchall()
 
         tiers: Dict[str, Dict[str, Any]] = {}
         customers = []
