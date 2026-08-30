@@ -133,3 +133,72 @@ class TestItDoesNotTakeTheDuckDbLock:
             assert result["funnel"][0] == {"stage": "customers", "remaining": 0}
         finally:
             await store.close()
+
+
+class TestTheHalfSwitchRefuses:
+    """`KS_SMS_STORE=postgres` moves the audience read and nothing else yet.
+
+    A flag that moved the read without the roster would compute an audience
+    from Postgres and freeze the campaign it produced into DuckDB — the two
+    would drift apart in silence, and a campaign whose roster is not the
+    audience it was built from cannot be measured at all. So the unported half
+    refuses out loud instead of writing where the reader will not look.
+    """
+
+    def test_every_unported_name_is_actually_guarded(self):
+        """The list and the code must not drift. Parsed, not grepped: a
+        comment naming the function would satisfy a grep."""
+        import ast
+        import inspect
+
+        from core.pg_sms import UNPORTED
+        from core.repositories import customers as module
+
+        tree = ast.parse(inspect.getsource(module))
+        guarded = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            for call in ast.walk(node):
+                if (isinstance(call, ast.Call)
+                        and getattr(call.func, "id", None) == "refuse_while_unported"):
+                    guarded.add(node.name)
+
+        assert guarded == set(UNPORTED), (
+            f"guarded but not listed: {guarded - set(UNPORTED)}; "
+            f"listed but not guarded: {set(UNPORTED) - guarded}"
+        )
+
+    def test_every_unported_name_exists_on_the_store(self):
+        from core.duckdb_store import DuckDBStore
+        from core.pg_sms import UNPORTED
+
+        for name in UNPORTED:
+            assert hasattr(DuckDBStore, name), f"{name} is not a store method"
+
+    @pytest.mark.asyncio
+    async def test_freezing_a_campaign_refuses_while_the_flag_is_on(
+        self, tmp_path, monkeypatch,
+    ):
+        from core.duckdb_store import DuckDBStore
+
+        monkeypatch.setenv("KS_SMS_STORE", "postgres")
+        store = DuckDBStore(db_path=tmp_path / "half.duckdb")
+        await store.connect()
+        try:
+            with pytest.raises(NotImplementedError, match="KS_SMS_STORE"):
+                await store.list_sms_campaigns()
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_it_stays_out_of_the_way_by_default(self, tmp_path, monkeypatch):
+        from core.duckdb_store import DuckDBStore
+
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        store = DuckDBStore(db_path=tmp_path / "whole.duckdb")
+        await store.connect()
+        try:
+            assert await store.list_sms_campaigns() == []
+        finally:
+            await store.close()

@@ -130,7 +130,7 @@ def _compare_groups(
 
 from core.duckdb_constants import B2B_MANAGER_ID, RETAIL_MANAGER_IDS
 from core.sms_holdout import assign_arm
-from core.pg_sms import sms_store_is_postgres
+from core.pg_sms import refuse_while_unported, sms_store_is_postgres
 from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
 
 # Tier cut-offs per LTV basis for get_sms_segments.
@@ -1371,6 +1371,7 @@ class CustomersMixin:
         describes — the classic RFM cohort is the reference every past campaign
         was built from, and it has to keep meaning the same thing.
         """
+        refuse_while_unported("list_sms_audience_presets")
         rows = []
         async with self.connection() as conn:
             rows = conn.execute("""
@@ -1411,6 +1412,7 @@ class CustomersMixin:
         Raises ValueError on a built-in name: shadowing "RFM tiers" with
         something else would make every conversation about it ambiguous.
         """
+        refuse_while_unported("save_sms_audience_preset")
         if name in BUILTIN_AUDIENCE_PRESETS:
             raise ValueError(f"{name!r} is a built-in audience and cannot be replaced")
 
@@ -1429,6 +1431,7 @@ class CustomersMixin:
 
     async def delete_sms_audience_preset(self, name: str) -> bool:
         """Remove a saved audience. Returns False if there was none."""
+        refuse_while_unported("delete_sms_audience_preset")
         if name in BUILTIN_AUDIENCE_PRESETS:
             raise ValueError(f"{name!r} is a built-in audience and cannot be deleted")
 
@@ -1479,6 +1482,7 @@ class CustomersMixin:
             ValueError: If the campaign exists and overwrite is False, or if
                 customers is empty (an empty roster measures nothing).
         """
+        refuse_while_unported("freeze_sms_campaign")
         if not customers:
             raise ValueError(
                 "refusing to freeze an empty roster — nothing could be measured"
@@ -1575,6 +1579,7 @@ class CustomersMixin:
         Raises:
             ValueError: If the campaign does not exist.
         """
+        refuse_while_unported("mark_sms_campaign_sent")
         async with self.connection() as conn:
             row = conn.execute(
                 "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign]
@@ -1617,6 +1622,7 @@ class CustomersMixin:
         Raises:
             ValueError: If the campaign is unknown or already claimed.
         """
+        refuse_while_unported("get_sms_campaign_targets")
         async with self.connection() as conn:
             camp = conn.execute(
                 "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign],
@@ -1653,6 +1659,7 @@ class CustomersMixin:
         Only safe when no message left: clearing the stamp makes the campaign
         sendable again, which is a double-send if anything did go out.
         """
+        refuse_while_unported("release_sms_campaign")
         async with self.connection() as conn:
             conn.execute(
                 "UPDATE sms_campaigns SET sent_at = NULL WHERE campaign = ?",
@@ -1689,6 +1696,7 @@ class CustomersMixin:
         but without them the results page cannot say whether the campaign paid
         for itself.
         """
+        refuse_while_unported("record_sms_send")
         async with self.connection() as conn:
             for buyer_id, message_id in accepted.items():
                 conn.execute(
@@ -1820,6 +1828,7 @@ class CustomersMixin:
         defends against: the gateway tries nine times over 4.5 hours and offers
         no replay. The terminal-delivery rule above is what guards the status.
         """
+        refuse_while_unported("record_sms_delivery")
         async with self.connection() as conn:
             bound = conn.execute(
                 "SELECT message_id FROM sms_dlr_events WHERE event_id = ?",
@@ -1893,6 +1902,7 @@ class CustomersMixin:
         with no undo. Everything else is left as first written, because the
         first refusal is the fact and its `source` is who to ask about it.
         """
+        refuse_while_unported("add_marketing_optout")
         async with self.connection() as conn:
             conn.execute(
                 """
@@ -1954,6 +1964,7 @@ class CustomersMixin:
             ValueError: If the campaign is unknown or has no send date — an
                 unsent campaign has no window to measure over.
         """
+        refuse_while_unported("get_sms_campaign_results")
         async with self.connection() as conn:
             camp = conn.execute(
                 "SELECT sent_at, promocode, ltv_basis, holdout_pct, cost_total"
@@ -2168,6 +2179,7 @@ class CustomersMixin:
         `notes` is where the provenance goes — restored by hand is not the same
         fact as recorded at send, and the page says which one it is looking at.
         """
+        refuse_while_unported("backfill_sms_campaign_record")
         async with self.connection() as conn:
             row = conn.execute("""
                 UPDATE sms_campaigns
@@ -2188,6 +2200,7 @@ class CustomersMixin:
         — "which text went out in August, and to whom" had no answer short of a
         SQL prompt.
         """
+        refuse_while_unported("list_sms_campaigns")
         async with self.connection() as conn:
             rows = conn.execute(
                 """

@@ -320,3 +320,40 @@ def sms_store_is_postgres() -> bool:
             f"KS_SMS_STORE must be 'duckdb' or 'postgres', got {value!r}"
         )
     return value == "postgres"
+
+
+# The names still answered by DuckDB alone. `get_sms_segments` has moved; these
+# have not, and until they do the switch is half a switch.
+UNPORTED = (
+    "list_sms_audience_presets", "save_sms_audience_preset",
+    "delete_sms_audience_preset", "freeze_sms_campaign",
+    "mark_sms_campaign_sent", "get_sms_campaign_targets",
+    "release_sms_campaign", "record_sms_send", "record_sms_delivery",
+    "add_marketing_optout", "get_sms_campaign_results",
+    "backfill_sms_campaign_record", "list_sms_campaigns",
+)
+
+
+def refuse_while_unported(operation: str) -> None:
+    """Stop a half-switched `/sms` from writing to the store nobody is reading.
+
+    `KS_SMS_STORE=postgres` moves the audience read. It does not yet move the
+    roster, the opt-outs or the presets, and a flag that moved one without the
+    other is the exact failure this codebase keeps paying for: the audience
+    would be computed from Postgres while the campaign it produced was frozen
+    into DuckDB, so the frozen roster and the store being read would drift
+    apart silently — and a campaign whose roster is not the audience it was
+    built from cannot be measured at all.
+
+    So the unported half refuses, loudly, rather than writing somewhere the
+    reader will not look. When each name below moves, it drops off `UNPORTED`
+    and this call goes with it; `tests/unit/test_pg_sms_read.py` fails if the
+    list and the guarded methods stop agreeing.
+    """
+    if sms_store_is_postgres():
+        raise NotImplementedError(
+            f"{operation} still writes DuckDB, and KS_SMS_STORE=postgres has "
+            f"moved the audience read to Postgres. Flipping one without the "
+            f"other would freeze a roster into a store nobody is reading. "
+            f"Unset KS_SMS_STORE until the remaining paths are ported."
+        )
