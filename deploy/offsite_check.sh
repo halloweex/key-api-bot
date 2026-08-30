@@ -125,7 +125,15 @@ fi
 # wrong teaches nobody what its silence means, and its own absence becomes
 # invisible — which is the failure it is here to prevent, applied to itself.
 echo "instruments ok: off-site ${AGE_HOURS}h, watchdog ${WD_LINE}"
-notify "$(printf '%s\n%s\n%s' \
-    "🫀 Приборы в порядке" \
-    "внешняя копия: ${AGE_HOURS}ч назад (порог ${MAX_AGE_HOURS}ч)" \
-    "сторож диска: ${WD_LINE} (порог ${WATCHDOG_MAX_AGE_HOURS}ч)")"
+# Weekly, not daily (owner's no-noise pass, 30.08): a daily "all fine" is
+# noise the reader learns to swipe, but this heartbeat is also the only
+# dead-man's switch on the off-site path itself — so it survives, on
+# Mondays. Failures above still alert every day. (Historical note: until
+# 29.08 this message reached nobody at all — the delivery bug in the old
+# notify(); the first heartbeat anyone actually receives is a weekly one.)
+if [ "$(date +%u)" = "1" ]; then
+    notify "$(printf '%s\n%s\n%s' \
+        "🫀 Приборы в порядке (недельный)" \
+        "внешняя копия: ${AGE_HOURS}ч назад (порог ${MAX_AGE_HOURS}ч)" \
+        "сторож диска: ${WD_LINE} (порог ${WATCHDOG_MAX_AGE_HOURS}ч)")"
+fi

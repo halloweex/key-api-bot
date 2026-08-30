@@ -371,16 +371,29 @@ def main() -> None:
     # standard per-key "✅ Resolved" — which announces partial recoveries,
     # something the old all-or-nothing transition never could.
 
+    canary_prev_failures: set = set()
+
     async def canary_job(context):
+        nonlocal canary_prev_failures
         try:
             result = await run_canary(DASHBOARD_URL)
         except Exception as exc:
             logger.error("Canary job crashed: %s", exc, exc_info=True)
             return
 
+        from bot.canary import defer_flaky
         from core.alerting import raise_alert, resolve_group
 
-        if result.failures:
+        defer, canary_prev_failures = defer_flaky(
+            list(result.failure_keys), canary_prev_failures,
+        )
+        if result.failures and defer:
+            # A first-probe health blip: the 05:15 freeze window, a nginx
+            # reload, a GC pause. Confirmed by the next probe or forgotten.
+            logger.warning(
+                "Canary blip, confirming next tick: %s", result.failures,
+            )
+        elif result.failures:
             logger.warning("Canary alerting: %s", result.failures)
             keys = list(result.failure_keys or ["unkeyed"])
             await raise_alert(

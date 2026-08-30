@@ -55,6 +55,11 @@ def drop_task(
     failed. Never raises."""
     if not agent_enabled():
         return None
+    if bucket.startswith(("test:", "deploy-test:")):
+        # Deploy verifications and format samples must not summon a paid
+        # diagnosis — two stray "the alert is synthetic" reports taught this.
+        logger.debug("agent task skipped for test bucket %s", bucket)
+        return None
     try:
         spool = _spool_dir()
         spool.mkdir(parents=True, exist_ok=True)

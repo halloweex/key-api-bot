@@ -38,6 +38,35 @@ CERT_WARN_DAYS = 14
 # The alert policy lives in core/alerting.py's Gate since step 07 —
 # CanaryState, this module's own throttle for its first four months, is gone.
 
+# Keys that must fail two consecutive probes before they page. The 05:15
+# status refresh blocks web's event loop for ~4.5 minutes daily (the UTM
+# parse over 32k orders), and a probe landing in that window is a
+# self-healing blip: page + diagnosis + resolve for a condition that needs
+# no human — measured on the first real night. A true outage still pages
+# on the next probe (≤15 min later), and UptimeRobot watches from outside
+# on its own clock. Everything else — cert, dq, mirrors, alerting — pages
+# on the first probe as before: none of those flap with the event loop.
+FLAKY_PROBE_KEYS = frozenset(
+    {"health_unreachable", "health_http", "health_status"}
+)
+
+
+def defer_flaky(
+    keys: "list[str]", previous: "set[str]",
+) -> "tuple[bool, set[str]]":
+    """(defer_this_tick, new_previous).
+
+    Defer only when EVERY current failure is a flaky-probe key seen for the
+    first time — a mixed result (cert, dq, mirrors alongside) pages at once,
+    and a health failure already seen last tick is confirmed.
+    """
+    current = set(keys)
+    fresh_flaky = {
+        k for k in current if k in FLAKY_PROBE_KEYS and k not in previous
+    }
+    defer = bool(current) and current == fresh_flaky
+    return defer, current
+
 # How stale the last *successful* data-quality run may get before we say so.
 # One missed cycle plus grace: the job either ran late or did not run, and
 # either way nobody is checking the warehouse against KeyCRM meanwhile.
