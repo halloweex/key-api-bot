@@ -155,7 +155,7 @@ def test_dq_freshness_flags_stale_reconciliation():
     failures, ages = canary.check_dq_freshness(payload)
     keys = [k for k, _ in failures]
     assert keys == ["dq_stale:reconciliation"]
-    assert "3д" in failures[0][1]
+    assert "3d" in failures[0][1]
     assert ages["reconciliation"] == 3 * 86400
 
 
@@ -267,7 +267,7 @@ async def test_run_canary_flags_short_cert_as_critical():
         with patch.object(canary, "_fetch_peer_cert", return_value=fake_cert):
             result = await run_canary(DASHBOARD, client=client)
     assert result.severity == "critical"
-    assert any("сертификат истекает" in f for f in result.failures)
+    assert any("cert expires in" in f for f in result.failures)
 
 
 @pytest.mark.asyncio
@@ -279,7 +279,7 @@ async def test_run_canary_cert_failure_alone_is_warn():
         with patch.object(canary, "_fetch_peer_cert", side_effect=OSError("no route")):
             result = await run_canary(DASHBOARD, client=client)
     assert result.severity == "warn"
-    assert any("TLS не проверился" in f for f in result.failures)
+    assert any("cert check failed" in f for f in result.failures)
 
 
 @pytest.mark.asyncio
@@ -366,12 +366,12 @@ def test_format_alert_includes_failures_and_extras():
         sync_seconds_since=120,
     )
     msg = canary.format_alert(result, DASHBOARD)
-    assert "Дашборд лежит" in msg
+    assert "Dashboard DOWN" in msg
     # Ссылку из тела убрали правкой владельца 30.08 («коротко»): у обоих
     # админов дашборд в закладках, а URL в каждом алерте — шум.
     assert "status=degraded" in msg
     assert "cert expires in 5d" in msg
-    assert "cert 5д" in msg
+    assert "cert 5d" in msg
     # sync-возраст из тела убран тем же коротким форматом — он в /api/health
 
 

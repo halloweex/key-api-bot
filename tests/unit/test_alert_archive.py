@@ -200,7 +200,7 @@ class TestCanaryJudgesTheAlerting:
         from bot.canary import check_alerting_health
 
         assert check_alerting_health({"status": "healthy"}) == [
-            ("alerting_block_missing", "нет блока alerting в health")
+            ("alerting_block_missing", "no alerting block in health")
         ]
 
     def test_three_consecutive_failures_page(self):
@@ -210,7 +210,7 @@ class TestCanaryJudgesTheAlerting:
                               "last_delivery_at": None}}
         [(key, msg)] = check_alerting_health(block)
         assert key == "alerting_transport_failing"
-        assert "3 отказ" in msg
+        assert "3 delivery failures" in msg
 
     def test_a_single_hiccup_stays_quiet(self):
         from bot.canary import check_alerting_health

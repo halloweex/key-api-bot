@@ -427,7 +427,7 @@ class TestSchedulerJob:
             assert result["alert_fired"] is True
             send.assert_called_once()
             msg = send.call_args[0][0]
-            assert "Диск" in msg and "92" in msg
+            assert "Disk" in msg and "92" in msg
         finally:
             await store.close()
 

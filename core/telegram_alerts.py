@@ -92,7 +92,7 @@ def throttle_check(text: str, key: str | None = None) -> "tuple[bool, str]":
         return False, text
     if swallowed:
         minutes = int(_throttle.cooldown_seconds // 60)
-        return True, f"{text}\n(повтор ×{swallowed} за {minutes} мин)"
+        return True, f"{text}\n(repeat ×{swallowed} in {minutes} min)"
     return True, text
 
 
@@ -306,7 +306,7 @@ def _utf16_units(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-_TRUNCATION_MARK = "\n… (обрезано)"
+_TRUNCATION_MARK = "\n… (truncated)"
 
 
 def clamp_message(text: str, *, reserve: int = 0) -> str:

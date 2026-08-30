@@ -402,11 +402,11 @@ class AlertGate:
 
         parts = []
         if standing:
-            parts.append(f"стоит {int(age // 3600)}ч")
+            parts.append(f"standing {int(age // 3600)}h")
         if st.suppressed:
-            parts.append(f"повторов ×{st.suppressed}")
+            parts.append(f"repeats ×{st.suppressed}")
         if standing:
-            parts.append("след. напоминание через 24ч")
+            parts.append("next reminder in 24h")
         return True, ("\n⏳ " + " · ".join(parts) if parts else "")
 
     def record_delivery(self, bucket: str, *, now: "float | None" = None) -> int:
@@ -550,10 +550,10 @@ async def raise_alert(
 def _age(seconds: float) -> str:
     hours = int(seconds // 3600)
     if hours < 1:
-        return f"{int(seconds // 60)}м"
+        return f"{int(seconds // 60)}m"
     if hours < 48:
-        return f"{hours}ч"
-    return f"{hours // 24}д {hours % 24}ч"
+        return f"{hours}h"
+    return f"{hours // 24}d {hours % 24}h"
 
 
 async def resolve_group(
@@ -579,10 +579,10 @@ async def resolve_group(
 
     now = _t.time()
     lines = [
-        f"• {key} — стояло {_age(now - first)}"
+        f"• {key} — stood {_age(now - first)}"
         for key, first in sorted(taken.items())
     ]
-    text = "✅ Ушло:\n" + "\n".join(lines)
+    text = "✅ Resolved:\n" + "\n".join(lines)
 
     from bot.main import send_admin_message
 

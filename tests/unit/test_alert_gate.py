@@ -48,9 +48,9 @@ class TestTheEscalatingCooldown:
         assert len(after) == 1
         t, suffix = after[0]
         assert t >= 1800 + 86400
-        assert "стоит 24ч" in suffix
-        assert "повторов ×" in suffix
-        assert "напоминание через 24ч" in suffix
+        assert "standing 24h" in suffix
+        assert "repeats ×" in suffix
+        assert "next reminder in 24h" in suffix
 
     def test_events_never_escalate_their_cooldown(self):
         """An event repeat is a new fact, not a standing state."""

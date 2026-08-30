@@ -352,7 +352,7 @@ class TestFormatAlertMessage:
         msg = format_alert_message(
             "reconciliation", Severity.CRITICAL, [], diffs, max_lines=5,
         )
-        assert "…и ещё" in msg
+        assert "+22 more" in msg
         # Only ~5 diff lines shown
         diff_lines = [line for line in msg.split("\n") if line.startswith("• ")]
         assert len(diff_lines) == 4  # 3 строки + «…и ещё» — короткий формат

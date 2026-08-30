@@ -226,20 +226,20 @@ def render_digest_tail(
             if first.tzinfo is None:
                 first = first.replace(tzinfo=_tz.utc)
             hours = int((now - first).total_seconds() // 3600)
-            age = f"{hours}ч" if hours < 48 else f"{hours // 24}д"
-            mark = " · эскалировано" if escalated else ""
+            age = f"{hours}h" if hours < 48 else f"{hours // 24}d"
+            mark = " · escalated" if escalated else ""
             rendered.append(f"• {key} — {age}, ×{count}{mark}")
-        lines.append("⏳ Горит:")
+        lines.append("⏳ Firing:")
         lines.extend(rendered)
         if len(firing) > _TAIL_FIRING_LIMIT:
-            lines.append(f"  …и ещё {len(firing) - _TAIL_FIRING_LIMIT}")
+            lines.append(f"  …+{len(firing) - _TAIL_FIRING_LIMIT} more")
     if resolved_24h:
-        lines.append(f"✅ Погашено за сутки: {resolved_24h}")
+        lines.append(f"✅ Resolved in 24h: {resolved_24h}")
     if acknowledged:
-        lines.append(f"📌 Узаконено: {acknowledged}")
+        lines.append(f"📌 Acknowledged: {acknowledged}")
     if not lines:
         return None
-    return "── Журнал тревог ──\n" + "\n".join(lines)
+    return "── Alert ledger ──\n" + "\n".join(lines)
 
 
 async def fetch_digest_tail() -> "Optional[str]":

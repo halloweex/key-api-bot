@@ -113,7 +113,7 @@ class TestMessageClamp:
     def test_over_limit_is_cut_to_fit(self):
         out = clamp_message("я" * 6000)
         assert _utf16_units(out) <= TELEGRAM_MESSAGE_LIMIT
-        assert out.endswith("… (обрезано)")
+        assert out.endswith("… (truncated)")
 
     def test_units_are_utf16_because_telegram_counts_that_way(self):
         """An emoji is two units; a char-count clamp would overshoot."""

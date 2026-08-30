@@ -124,7 +124,7 @@ class TestBuildDigest:
         )]
         msg = build_digest(sections)
         assert "1,184 (+2)" in msg
-        assert "7 (новое)" in msg
+        assert "7 (new)" in msg
 
     def test_a_standing_problem_reads_as_unchanged(self):
         sections = [DigestSection(
@@ -140,12 +140,12 @@ class TestBuildDigest:
         ]
         msg = build_digest(sections)
         assert msg is not None
-        assert "молчит 52ч" in msg
+        assert "silent 52h" in msg
 
     def test_layer_that_never_ran_is_called_out(self):
         msg = build_digest([DigestSection(layer="reconciliation", run=None)])
         assert msg is not None
-        assert "ни одного успешного прогона" in msg
+        assert "no successful run" in msg
 
     def test_discrepancies_are_listed(self):
         sections = [DigestSection(
@@ -186,7 +186,7 @@ class TestBuildDigest:
             issues=[_row(f"check_{i}", i) for i in range(20)],
         )]
         msg = build_digest(sections, max_issue_lines=3)
-        assert "…и ещё 17" in msg
+        assert "…+17 more" in msg
 
 
 # ─── The unchanged standing WARN ────────────────────────────────────────────
@@ -227,7 +227,7 @@ class TestStandingFindingsGoQuiet:
         )
         assert msg is not None
         assert "headline_vs_line_items): 414" in msg
-        assert "недельное напоминание" in msg
+        assert "weekly restatement" in msg
 
     def test_a_finding_that_moves_by_one_is_news_at_once(self):
         """+1 order is the whole signal this check exists to give. It must not
@@ -240,7 +240,7 @@ class TestStandingFindingsGoQuiet:
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
         assert "415 (+1)" in msg
-        assert "недельное напоминание" not in msg
+        assert "weekly restatement" not in msg
 
     def test_a_new_check_beside_a_standing_one_is_news(self):
         sections = [DigestSection(
@@ -250,7 +250,7 @@ class TestStandingFindingsGoQuiet:
         )]
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
-        assert "fk_orphans: 3 (новое)" in msg
+        assert "fk_orphans: 3 (new)" in msg
 
     def test_a_stale_layer_speaks_through_the_quiet(self):
         """Silence has to mean "nothing changed", never "the checks stopped"."""
@@ -259,7 +259,7 @@ class TestStandingFindingsGoQuiet:
         ]
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
-        assert "молчит 52ч" in msg
+        assert "silent 52h" in msg
 
     def test_an_unchanged_warn_below_the_truncation_line_is_not_swallowed(self):
         """A finding with no line has no delta the reader can check."""
@@ -273,7 +273,7 @@ class TestStandingFindingsGoQuiet:
             last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW,
         )
         assert msg is not None
-        assert "…и ещё 4" in msg
+        assert "…+4 more" in msg
 
     def test_info_alone_does_not_get_restated_either(self):
         """A week of silence does not turn blogger seeding into a problem."""
@@ -354,7 +354,7 @@ class TestStandingDiscrepancies:
             last_sent_at=self.NOW - timedelta(days=1), now=self.NOW,
         )
         assert msg is not None
-        assert "чисто" in msg
+        assert "clean" in msg
 
     def test_a_reshuffled_order_id_sample_is_not_a_change(self):
         a = self._diff()
@@ -370,7 +370,7 @@ class TestStandingDiscrepancies:
             last_sent_at=self.NOW - timedelta(days=7, hours=1), now=self.NOW,
         )
         assert msg is not None
-        assert "недельное напоминание" in msg
+        assert "weekly restatement" in msg
 
 
 # ─── fetch_previous_run ─────────────────────────────────────────────────────

@@ -1607,11 +1607,11 @@ class BackgroundScheduler:
                 from core.alerting import raise_alert
                 icon = "🚨" if alert.severity.value == "CRITICAL" else "⚠️"
                 msg = (
-                    f"{icon} <b>Диск: {alert.disk_pct_used:.0f}% занято, "
-                    f"свободно {alert.disk_free_gb:.0f} ГБ</b>\n"
+                    f"{icon} <b>Disk: {alert.disk_pct_used:.0f}% used, "
+                    f"{alert.disk_free_gb:.0f} GB free</b>\n"
                     f"{alert.reason}\n"
-                    "→ du -xd1 data; docker system df. Компакт не дёргать — "
-                    "он гасит контейнеры"
+                    "→ du -xd1 data; docker system df. Never trigger the "
+                    "compact — it stops the containers"
                 )
                 delivered = await raise_alert(
                     msg, conditions=[disk_key], bucket=disk_key, group="disk",
@@ -2790,21 +2790,21 @@ class BackgroundScheduler:
             "\u26a0\ufe0f" if level == "WARN" else "\U0001f6a8"
         )
         title = (
-            "OOM: web убивало процессы" if alert.oom_kills_delta
-            else ("Память web" if level == "WARN" else "ПАМЯТЬ WEB")
+            "OOM kill (web)" if alert.oom_kills_delta
+            else f"Web memory {level}"
         )
 
         head = f"{alert.working_set_mb:,.0f}"
         if alert.limit_mb:
-            head += f" из {alert.limit_mb:,.0f}"
-        lines = [f"{icon} <b>{title}: {head} МБ</b>"]
+            head += f" of {alert.limit_mb:,.0f}"
+        lines = [f"{icon} <b>{title}: {head} MB</b>"]
         if alert.oom_kills_delta:
-            lines.append(f"убито процессов: {alert.oom_kills_delta}")
+            lines.append(f"processes killed: {alert.oom_kills_delta}")
         lines.append(f"<i>{alert.reason}</i>")
         if level == "CRITICAL":
             lines.append(
-                "→ Смотри, что бежало: docker logs keycrm-web; "
-                "рычаг — DUCKDB_MEMORY_LIMIT или лимит контейнера"
+                "→ docker logs keycrm-web to see what ran; the lever is "
+                "DUCKDB_MEMORY_LIMIT or the container limit"
             )
 
         # Through the shared path since 29.08 — the raw transport this used

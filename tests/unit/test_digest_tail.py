@@ -28,30 +28,30 @@ class TestRender:
              ("disk:WARN", _t(2), 1, False)],
             resolved_24h=0, acknowledged=0,
         )
-        assert "Журнал тревог" in tail
-        assert "mirror_failing — 30ч, ×3 · эскалировано" in tail
-        assert "disk:WARN — 2ч, ×1" in tail
-        assert "Погашено" not in tail
+        assert "Alert ledger" in tail
+        assert "mirror_failing — 30h, ×3 · escalated" in tail
+        assert "disk:WARN — 2h, ×1" in tail
+        assert "Resolved" not in tail
 
     def test_old_conditions_age_in_days(self):
         tail = render_digest_tail([("k", _t(75), 9, False)], 0, 0)
-        assert "3д" in tail
+        assert "3d" in tail
 
     def test_resolved_and_acknowledged_lines_render_only_when_nonzero(self):
         tail = render_digest_tail([], resolved_24h=2, acknowledged=1)
-        assert "Погашено за сутки: 2" in tail
-        assert "Узаконено: 1" in tail
-        assert "Горит" not in tail
+        assert "Resolved in 24h: 2" in tail
+        assert "Acknowledged: 1" in tail
+        assert "Firing" not in tail
 
     def test_the_firing_list_is_capped(self):
         rows = [(f"k{i}", _t(10), 1, False) for i in range(14)]
         tail = render_digest_tail(rows, 0, 0)
-        assert "…и ещё 4" in tail
+        assert "+4 more" in tail
 
     def test_naive_timestamps_read_as_utc(self):
         tail = render_digest_tail(
             [("k", datetime.utcnow() - timedelta(hours=5), 1, False)], 0, 0)
-        assert "5ч" in tail
+        assert "5h" in tail
 
 
 class TestDigestWiring:
