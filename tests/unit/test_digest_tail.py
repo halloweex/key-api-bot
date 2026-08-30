@@ -29,8 +29,8 @@ class TestRender:
             resolved_24h=0, acknowledged=0,
         )
         assert "Журнал тревог" in tail
-        assert "mirror_failing — 30h, fired 3× · эскалировано" in tail
-        assert "disk:WARN — 2h, fired 1×" in tail
+        assert "mirror_failing — 30h, ×3 · эскалировано" in tail
+        assert "disk:WARN — 2h, ×1" in tail
         assert "Погашено" not in tail
 
     def test_old_conditions_age_in_days(self):

@@ -92,10 +92,7 @@ def throttle_check(text: str, key: str | None = None) -> "tuple[bool, str]":
         return False, text
     if swallowed:
         minutes = int(_throttle.cooldown_seconds // 60)
-        return True, (
-            f"{text}\n\n(unchanged, and repeated {swallowed}× "
-            f"in the last {minutes} min)"
-        )
+        return True, f"{text}\n(повтор ×{swallowed} за {minutes} мин)"
     return True, text
 
 

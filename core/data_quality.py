@@ -1522,91 +1522,71 @@ def fetch_run_issues(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]
 # (`fk_orphan_<child>_<fk>`, `freshness_<entity>`, `pk_uniqueness_<table>`) and
 # a table keyed on exact names would silently miss every one of them.
 REMEDIATION: Tuple[Tuple[str, str], ...] = (
-    # Copies of landing in Postgres. The hourly ids-diff re-ships what is
-    # missing on its own; history that never crossed needs the backfill once.
-    ("mirror_", "the mirror ships hourly and re-ships what it finds missing — "
-                "read meta.mirror_state (last_ok_at, failures_since_ok, "
-                "last_error) before touching anything. History that never "
-                "crossed: POST /api/mirror/backfill/orders. Never hand-copy "
-                "rows from one store into the other."),
-    ("mirror_never_shipped", "this table has no successful shipment on record "
-                             "at all — it is written by the weekly full sync, "
-                             "so before Sunday this is the sync's cadence, not "
-                             "a defect. After Sunday it is one."),
-    ("mirror_backfill_pending", "history has not crossed yet; the row-level "
-                                "comparison is suppressed until it has. "
-                                "POST /api/mirror/backfill/orders, then wait "
-                                "for the next 07:30."),
-    # ClickHouse is the optional store: an hourly re-ship fixes a copy.
-    ("ch_", "ClickHouse is optional and re-shipped hourly by ch_sync — "
-            "a single failure resolves itself. Check KS_CH_URL and "
-            "meta.mirror_state rows prefixed `clickhouse.`; a stuck ship "
-            "usually means a missing GRANT."),
-    ("ch_history_", "the order-version archive. A row present in Postgres and "
-                    "missing in ClickHouse is re-shipped by the hourly "
-                    "ids-diff; a row missing from BOTH is gone and is not "
-                    "repairable — decide as a human what to do."),
-    # The archive: report-only, absolutely.
-    ("order_versions_", "the archive is the only record of an order's history "
-                        "and has no repair path by design. Stalled means the "
-                        "writer stopped: check that the sync is writing orders "
-                        "at all (/api/health sync block). Never backfill it "
-                        "from current state — that invents the history."),
-    # Everything derived is rebuilt on a tick; the lever is one rebuild.
-    ("silver_", "Silver is derived and rebuilt every two minutes; a difference "
-                "that survives two ticks is real. POST /api/warehouse/refresh "
-                "forces a full rebuild."),
-    ("gold_", "Gold is derived from Silver in the same tick, so it cannot be "
-              "stale on its own. POST /api/warehouse/refresh forces a full "
-              "rebuild of both."),
-    ("customer_profile_", "the витрина is rebuilt whole on the same tick as "
-                          "Gold — one PG_LAYER_LOCK tick repairs it. If it "
-                          "survives a tick, Silver is the suspect, not the "
-                          "витрина."),
-    # Sync-side.
-    ("freshness_", "nothing new has arrived for this entity. This is the sync, "
-                   "not the warehouse: read the `sync` block of /api/health and "
-                   "the incremental_sync job before looking at any layer."),
-    ("orders_without_line_items", "halfwritten_repair re-fetches these every "
-                                  "two hours — one cycle is not a problem. "
-                                  "Ids KeyCRM cannot supply land in "
-                                  "order_backfill_misses and are skipped for "
-                                  "30 days."),
-    # DB-only integrity: nothing repairs these automatically, on purpose.
-    ("pk_uniqueness_", "a duplicate primary key is not something a sync can "
-                       "fix — it needs a human with a query."),
-    ("fk_orphan_", "an orphan means the parent row never landed or was "
-                   "removed. Re-sync the parent entity first; do not delete "
-                   "the child."),
-    ("not_null_", "a column the schema promises is populated is not. Find the "
-                  "sync path that wrote it before repairing rows."),
-    ("value_domain_", "a value outside the domain the code assumes. The "
-                      "reader that assumes it is the thing at risk, not the "
-                      "row."),
-    # Standing findings with an explanation already written down.
-    ("headline_vs_line_items", "orders whose header carries revenue with no "
-                               "line items. The standing count is explained in "
-                               "CLAUDE.md; a *rising* count is not."),
-    ("goods_shipped_without_sale", "shipments carrying line items and no money "
-                                   "— by design for blogger shipments. A rise "
-                                   "is the signal, not the level."),
-    ("status_group_vs_return_list", "the stored status group disagrees with "
-                                    "the legacy return list. The group is "
-                                    "authoritative; the list is the fallback "
-                                    "for rows synced before the column."),
-    ("inventory_snapshot_gaps", "a day with no per-SKU snapshot cannot be "
-                                "recovered later — the snapshot is a "
-                                "measurement, not a derivation. Check the "
-                                "inventory_snapshot job."),
+    # Копии в Postgres: ids-diff пере-шлёт сам, историю везёт бэкфилл.
+    ("mirror_", "Жди часовой пере-шип; смотри meta.mirror_state. Руками не копировать"),
+    ("mirror_never_shipped", "До воскресенья — норма (пишет недельный синк); после — дефект"),
+    ("mirror_backfill_pending", "POST /api/mirror/backfill/orders, потом жди 07:30"),
+    # ClickHouse — опциональная копия, лечится своим часовым ch_sync.
+    ("ch_", "Жди часовой ch_sync; застряло — проверь KS_CH_URL и грант"),
+    ("ch_history_", "Потерянное в PG+CH одновременно не чинится — решает человек"),
+    # Архив — летопись, ремонта нет by design.
+    ("order_versions_", "Не чинить: архив — единственная летопись. Смотри, жив ли синк"),
+    # Всё derived пересобирается тиком.
+    ("silver_", "Пережило два тика — реально. POST /api/warehouse/refresh"),
+    ("gold_", "POST /api/warehouse/refresh пересоберёт оба слоя"),
+    ("customer_profile_", "Пересборка тем же тиком; пережило тик — виноват Silver"),
+    # Синк.
+    ("freshness_", "Это синк, не склад: смотри блок sync в /api/health"),
+    ("orders_without_line_items", "halfwritten_repair дочитает за 2 часа; один цикл — не проблема"),
+    # Целостность БД — руками.
+    ("pk_uniqueness_", "Дубль первичного ключа — только человек с запросом"),
+    ("fk_orphan_", "Сначала пере-синк родителя; детей не удалять"),
+    ("not_null_", "Найди путь синка, который это записал, потом чини строки"),
+    ("value_domain_", "Опасен читатель, который значение не ждёт, — не сама строка"),
+    # Стоячие с объяснением.
+    ("headline_vs_line_items", "Стоячее (сертификаты); сигнал — рост, не уровень"),
+    ("goods_shipped_without_sale", "By design (блогеры/раздачи); сигнал — рост"),
+    ("status_group_vs_return_list", "Группа из источника главнее легаси-списка"),
+    ("inventory_snapshot_gaps", "Пропущенный день не восстановим; проверь джобу снапшота"),
+    ("ch_reconcile_pending", "Жди свежий ch_sync — копию против источника не сверяем в лаге"),
 )
 
 # The anchor for anything unlisted: the section that explains which routes an
 # alert can take to a human at all, so a reader who has never seen this check
 # still knows where the machinery is documented.
 DEFAULT_REMEDIATION = (
-    "no lever is written down for this check — see CLAUDE.md, "
-    "\u00abHow a failure reaches a human\u00bb, and add one."
+    "Рычаг не записан — см. CLAUDE.md «How a failure reaches a human» и допиши"
 )
+
+
+# Что находка значит для читателя — по-русски, коротко. Имя проверки в
+# скобках остаётся ключом для поиска; без перевода алерт говорит на языке
+# кода, а страница, которую не понять за три секунды, — шум.
+HUMAN_CHECK_NAMES: Dict[str, str] = {
+    "mirror_missing_rows": "строк нет в копии",
+    "mirror_orphan_rows": "лишние строки в копии",
+    "mirror_row_values": "строки расходятся между копиями",
+    "mirror_retired_rows": "товар снят в KeyCRM, копия помнит",
+    "mirror_never_shipped": "таблица ещё ни разу не уезжала",
+    "mirror_backfill_pending": "история ещё не переехала",
+    "mirror_failing": "зеркало падает",
+    "orders_without_line_items": "заказы без позиций",
+    "headline_vs_line_items": "сумма заказа ≠ сумме позиций",
+    "goods_shipped_without_sale": "отгрузки без продажи",
+    "gold_missing_cells": "в Gold пропали дни",
+    "gold_cell_values": "ячейки Gold не сходятся",
+    "silver_row_values": "Silver расходится между движками",
+    "order_versions_stalled": "архив версий замолчал",
+    "ch_engines_gold_mismatch": "Gold двух движков не сходится",
+    "ch_silver_roundtrip": "копия в ClickHouse не сходится",
+    "ch_reconcile_pending": "копия ClickHouse отстала",
+    "freshness_orders": "заказы не приходят",
+}
+
+
+def human_check_name(name: str) -> str:
+    label = HUMAN_CHECK_NAMES.get(name)
+    return f"{label} ({name})" if label else name
 
 
 def remediation_for(check_names: Iterable[str]) -> List[str]:
@@ -1655,12 +1635,12 @@ def machine_attempts_note(now: Optional[datetime] = None) -> Optional[str]:
         age = (reference - heal["at"]).total_seconds()
         if 0 <= age < 24 * 3600:
             parts.append(
-                f"{label} ids-diff re-shipped {int(heal.get('shipped', 0))} "
-                f"row(s) {int(age // 60)} min ago"
+                f"{label}: машина дослала {int(heal.get('shipped', 0))} "
+                f"строк {int(age // 60)} мин назад"
             )
     if not parts:
         return None
-    return "Machine already tried: " + "; ".join(parts) + "."
+    return "🤖 " + "; ".join(parts)
 
 
 def format_alert_message(
@@ -1673,68 +1653,59 @@ def format_alert_message(
     max_lines: int = 12,
     machine_note: Optional[str] = None,
 ) -> str:
-    """Build a Telegram-friendly summary. Pure function — no I/O.
+    """Три строки, по-русски: что случилось · сколько · что делать.
 
-    `machine_note` is passed in rather than read here so this stays pure:
-    `machine_attempts_note()` reads process-local heal ledgers, and a formatter
-    that quietly consulted module state could not be tested by calling it.
+    Формат — ответ на прямую правку владельца 30.08: «коротко — ясно и по
+    сути». Обоснования рычагов живут в CLAUDE.md; детали — в журнале и у
+    агента-диагноста, который приходит вторым сообщением. Чистая функция.
 
-    Shape:
-        🚨 Data Quality CRITICAL (reconciliation)   [rendered <b>…</b>]
-        Window: 2026-02 .. 2026-05
-        ── Issues (1) ──
-        • fk_orphan_order_products_order_id: 3 orphans (sample: 88888)
-        ── Discrepancies (2) ──
-        • 2026-04 / src=1: orders DK=565 KC=566 (MISSING_IN_DK)
-        ── What to do ──
-        • …the lever for the checks above…
-        Machine already tried: buyers ids-diff re-shipped 3 row(s) 41 min ago.
+    Пример:
+        🚨 <b>Сверка копий: строки расходятся между копиями — 891</b>
+        • товар снят в KeyCRM, копия помнит — 1
+        → Жди часовой пере-шип; смотри meta.mirror_state
     """
     icon = {"CRITICAL": "🚨", "WARN": "⚠️", "INFO": "ℹ️"}[severity.value]
-    # HTML tags, not Markdown asterisks: every send in this codebase goes out
-    # with parse_mode=HTML, so `*bold*` reached phones as literal asterisks
-    # for months before anyone said it out loud.
-    lines: List[str] = [f"{icon} <b>Data Quality {severity.value}</b> ({layer})"]
-    if window:
-        lines.append(f"Window: {window[0].isoformat()} .. {window[1].isoformat()}")
+    titles = {
+        "integrity": "Целостность",
+        "reconciliation": "Сверка с KeyCRM",
+        "mirror_landing": "Сверка копий",
+        "reconciliation_pg": "Postgres против KeyCRM",
+        "reconciliation_ch": "ClickHouse против KeyCRM",
+    }
+    title = titles.get(layer, layer)
 
-    if issues:
-        lines.append(f"── Issues ({len(issues)}) ──")
-        for i in issues[:max_lines // 2]:
-            samples = (
-                f" (sample: {', '.join(str(s) for s in i.sample_ids[:3])})"
-                if i.sample_ids else ""
-            )
-            lines.append(f"• {i.check_name}: {i.count}{samples}")
-        if len(issues) > max_lines // 2:
-            lines.append(f"  …and {len(issues) - max_lines // 2} more")
-
-    if discrepancies:
-        lines.append(f"── Discrepancies ({len(discrepancies)}) ──")
-        for d in discrepancies[:max_lines]:
+    lines: List[str] = []
+    shown = sorted(issues, key=lambda i: (-i.severity.rank(), -i.count))
+    if shown:
+        first = shown[0]
+        head = f"{icon} <b>{title}: {human_check_name(first.check_name)} — {first.count}</b>"
+        lines.append(head)
+        for i in shown[1:4]:
+            lines.append(f"• {human_check_name(i.check_name)} — {i.count}")
+        if len(shown) > 4:
+            lines.append(f"• …и ещё {len(shown) - 4}")
+    elif discrepancies:
+        total_ids = sum(len(d.order_ids) for d in discrepancies)
+        lines.append(
+            f"{icon} <b>{title}: {len(discrepancies)} расхожд., "
+            f"~{total_ids or len(discrepancies)} заказов</b>"
+        )
+        for d in discrepancies[:3]:
             lines.append(
-                f"• {d.month} / src={d.source_id}: {d.field} "
-                f"DK={d.dk_value:.0f} KC={d.kc_value:.0f} ({d.diff_class.value})"
+                f"• {d.month}/src{d.source_id} {d.field}: "
+                f"{d.dk_value:.0f}≠{d.kc_value:.0f}"
             )
-        if len(discrepancies) > max_lines:
-            lines.append(f"  …and {len(discrepancies) - max_lines} more")
+        if len(discrepancies) > 3:
+            lines.append(f"• …и ещё {len(discrepancies) - 3}")
+    else:
+        lines.append(f"{icon} <b>{title}: {severity.value}</b>")
 
-    # The lever, last, because it is what the reader acts on. INFO is a journal
-    # entry rather than a page and does not ask anybody to do anything.
     if severity is not Severity.INFO:
-        actions = remediation_for(i.check_name for i in issues)
+        actions = remediation_for(i.check_name for i in shown)
         if not actions and discrepancies:
-            # A pure reconciliation difference names no check, and its lever is
-            # not one of the table's: the repair path re-fetches by id and has
-            # already run by the time this is read.
-            actions = [
-                "the reconciliation re-fetches orders it is missing by id on "
-                "the same run; a difference that survives that is real. "
-                "Compare one order against KeyCRM by hand before rebuilding."
-            ]
-        if actions:
-            lines.append("── What to do ──")
-            lines.extend(f"• {a}" for a in actions)
+            actions = ["Сверь один заказ руками с KeyCRM до всяких пересборок"]
+        for a in actions[:2]:
+            lines.append(f"→ {a}")
         if machine_note:
             lines.append(machine_note)
 
@@ -1907,14 +1878,19 @@ class DigestSection:
 
 
 def _delta_note(check_name: str, count: int, previous: List[Dict[str, Any]]) -> str:
-    """'new', 'unchanged', or '+12 since the last run'."""
+    """«новое», «=», или «+12».
+
+    «=» вместо слова: дельта — самое частое, что читатель сканирует, и один
+    символ читается быстрее слова. Логика `news` в build_digest сверяется с
+    этим значением — меняются вместе.
+    """
     for p in previous:
         if p["check_name"] == check_name:
             diff = count - int(p["count"])
             if diff == 0:
-                return "unchanged"
-            return f"{diff:+d} since the last run"
-    return "new"
+                return "="
+            return f"{diff:+d}"
+    return "новое"
 
 
 def _diff_signature(diffs: List[Dict[str, Any]]) -> frozenset:
@@ -1985,7 +1961,7 @@ def build_digest(
 
     for s in sorted(sections, key=lambda x: x.layer):
         if s.run is None:
-            body.append(f"<b>{s.layer}</b> — no successful run on record")
+            body.append(f"<b>{s.layer}</b> — ни одного успешного прогона")
             news = True
             continue
 
@@ -1994,7 +1970,7 @@ def build_digest(
         when = (s.run.get("started_at") or "")[:16].replace("T", " ")
         head = f"<b>{s.layer}</b> · {s.run.get('status')} · {when}"
         if stale:
-            head += f" · ⏳ {s.age_hours:.0f}h old (>{limit}h)"
+            head += f" · ⏳ молчит {s.age_hours:.0f}ч"
             news = True
         body.append(head)
 
@@ -2007,18 +1983,17 @@ def build_digest(
                 note = _delta_note(i["check_name"], int(i["count"]), s.previous_issues)
                 if i.get("severity") != "INFO":
                     standing = True
-                    if note != "unchanged":
+                    if note != "=":
                         news = True
-                body.append(f"• {i['check_name']}: {i['count']:,} ({note})")
-                desc = (i.get("description") or "").strip()
-                if desc:
-                    # Escaped because descriptions carry raw exception text —
-                    # asyncpg's `last_error`, DuckDB's messages — and one `<`
-                    # in an HTML-parsed body is a Telegram 400 that costs the
-                    # whole digest, on the morning it has the most to say.
-                    body.append(f"  ↳ {html_module.escape(desc[:200])}")
+                # Одна строка на находку, человеческим именем и с дельтой.
+                # 200-символьные описания владелец назвал визуальным шумом —
+                # их дом теперь журнал и дашборд, не телефон.
+                body.append(
+                    f"• {human_check_name(i['check_name'])}: "
+                    f"{i['count']:,} ({note})"
+                )
             if len(s.issues) > max_issue_lines:
-                body.append(f"  …and {len(s.issues) - max_issue_lines} more")
+                body.append(f"  …и ещё {len(s.issues) - max_issue_lines}")
                 # A finding past the cut has no line and so no delta of its
                 # own. Suppressing on a "quiet" the reader cannot see would be
                 # a guess; say the digest and let them scroll.
@@ -2042,13 +2017,13 @@ def build_digest(
                     f"DK={d['dk_value']:,.0f} KC={d['kc_value']:,.0f} ({d['diff_class']})"
                 )
             if len(s.diffs) > max_diff_lines:
-                body.append(f"  …and {len(s.diffs) - max_diff_lines} more")
+                body.append(f"  …и ещё {len(s.diffs) - max_diff_lines}")
 
         if not s.issues and not s.diffs and not stale:
-            body.append("• clean")
+            body.append("• чисто")
 
     if news:
-        return "\n".join(["📋 <b>Data quality digest</b>", ""] + body)
+        return "\n".join(["📋 <b>Качество данных</b>", ""] + body)
 
     if not standing:
         return None
@@ -2061,17 +2036,10 @@ def build_digest(
         if now - since < restate_after:
             return None
         days = max(1, int((now - since).days))
-        footer = (
-            f"<i>Nothing has changed since the last digest {days}d ago. "
-            "Repeated weekly so a standing finding is not forgotten; "
-            "the days in between stay quiet.</i>"
-        )
+        footer = f"<i>Без изменений {days}д; недельное напоминание.</i>"
     else:
-        footer = (
-            "<i>Standing findings, restated. The digest is quiet on days "
-            "nothing changes.</i>"
-        )
-    return "\n".join(["📋 <b>Data quality digest</b>", ""] + body + ["", footer])
+        footer = "<i>Стоячие находки; в тихие дни дайджест молчит.</i>"
+    return "\n".join(["📋 <b>Качество данных</b>", ""] + body + ["", footer])
 
 
 def fetch_last_success_ages(

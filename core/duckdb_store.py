@@ -2297,13 +2297,10 @@ class DuckDBStore(
                         f"known-types gold={gold_revenue_known:.2f}; {detail}"
                     )
                     partition_alert = (
-                        "🚨 <b>Unknown <code>sales_type</code> in Gold</b>\n"
-                        f"Silver revenue {silver_revenue:,.2f} vs "
-                        f"{gold_revenue_known:,.2f} across "
-                        f"{', '.join(KNOWN_SALES_TYPES)}.\n"
-                        f"Outside the partition: {detail}\n\n"
-                        "Revenue in an unknown sales_type reaches no page — "
-                        "every endpoint defaults to retail."
+                        "🚨 <b>Gold: выручка в неизвестном sales_type — "
+                        "её не видит ни одна страница</b>\n"
+                        f"{detail}\n"
+                        "→ Кто-то завёл тип вне retail/b2b/internal; смотри менеджеров"
                     )
 
                 if not validation_passed:
@@ -2347,13 +2344,11 @@ class DuckDBStore(
                         )
                         needs_full_retry = True
                         validation_alert = (
-                            "⚠️ Warehouse validation failed — full retry scheduled "
-                            f"(attempt {consecutive + 1}/{MAX_VALIDATION_RETRIES}).\n{detail}"
-                            "\n\n→ nothing to do yet: the rebuild retries on the "
-                            "next two-minute tick and most of these clear "
-                            f"themselves. If it reaches "
-                            f"{MAX_VALIDATION_RETRIES}/{MAX_VALIDATION_RETRIES} "
-                            "you will hear again."
+                            f"⚠️ <b>Склад: валидация не сошлась "
+                            f"(попытка {consecutive + 1}/{MAX_VALIDATION_RETRIES})</b>\n"
+                            f"{detail}\n"
+                            "→ Ничего: ретрай через 2 мин; дойдёт до "
+                            f"{MAX_VALIDATION_RETRIES}/{MAX_VALIDATION_RETRIES} — услышишь"
                         )
                         validation_alert_key = "warehouse:validation_retrying"
                     elif self._claim_stuck_rebuild_slot():
@@ -2364,15 +2359,11 @@ class DuckDBStore(
                         )
                         needs_full_retry = True
                         validation_alert = (
-                            f"🚨 CRITICAL: Warehouse validation failed {consecutive}x in a "
-                            "row. The Gold layer may be serving WRONG revenue. Attempting a "
-                            f"full rebuild; if this alert returns in {hours}h the cause is "
-                            f"not transient and needs a human.\n{detail}"
-                            f"\n\n→ the machine has used its last automatic lever "
-                            f"({consecutive} per-tick retries, now one full "
-                            "rebuild). Do not trigger another rebuild — wait out "
-                            f"the {hours}h and read warehouse_refreshes for the "
-                            "first tick that broke."
+                            f"🚨 <b>Склад: валидация падает ×{consecutive}, "
+                            "Gold может врать</b>\n"
+                            f"{detail}\n"
+                            f"→ Идёт полная пересборка (последний авторычаг); "
+                            f"вернусь через {hours}ч, если не поможет"
                         )
                         validation_alert_key = "warehouse:validation_rebuilding"
                     else:
@@ -2381,14 +2372,10 @@ class DuckDBStore(
                             f"full rebuild already attempted this period: {detail}"
                         )
                         validation_alert = (
-                            f"🚨 CRITICAL: Warehouse validation failed {consecutive}x in a "
-                            "row and a full rebuild did not fix it — the Gold layer may be "
-                            f"serving WRONG revenue. Manual fix needed.\n{detail}"
-                            f"\n\n→ the machine has tried {consecutive} times and a "
-                            "full rebuild, and is out of levers. «missing cells» "
-                            "is the August shape (Silver has days Gold does "
-                            "not); a revenue mismatch with matching cells is "
-                            "not. warehouse_refreshes holds every tick."
+                            f"🚨 <b>Склад: ×{consecutive} и пересборка не помогла — "
+                            "нужен человек</b>\n"
+                            f"{detail}\n"
+                            "→ Машина исчерпана; история тиков — warehouse_refreshes"
                         )
                         validation_alert_key = "warehouse:validation_unfixed"
 
@@ -2549,16 +2536,16 @@ class DuckDBStore(
                 if consecutive <= MAX_VALIDATION_RETRIES:
                     await self.mark_warehouse_dirty(None)
                     await self._send_warehouse_alert(
-                        f"⚠️ Warehouse refresh errored — full rebuild scheduled to "
-                        f"self-heal (attempt {consecutive}/{MAX_VALIDATION_RETRIES}). "
-                        f"Gold layers may be cross-inconsistent until then.\n{error_msg}",
+                        f"⚠️ <b>Склад: пересборка упала "
+                        f"(попытка {consecutive}/{MAX_VALIDATION_RETRIES})</b>\n"
+                        f"{error_msg}\n→ Само: полная пересборка следующим тиком",
                         "warehouse:refresh_errored",
                     )
                 else:
                     await self._send_warehouse_alert(
-                        f"🚨 CRITICAL: Warehouse refresh errored {consecutive}x in a row. "
-                        f"Auto-retry stopped — Gold layers may be cross-inconsistent. "
-                        f"Manual fix needed.\n{error_msg}",
+                        f"🚨 <b>Склад: пересборка падает ×{consecutive}, "
+                        f"авторетрай остановлен</b>\n{error_msg}\n"
+                        "→ Нужен человек: Gold может быть рассинхронизирован",
                         "warehouse:refresh_errored_exhausted",
                     )
             except Exception as heal_err:

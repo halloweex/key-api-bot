@@ -184,7 +184,6 @@ class TestTheAlertNamesALever:
         )
         msg = canary.format_alert(result, "https://x.test")
         assert "meta.mirror_state" in msg
-        assert "bronze.orders_mirror=" in msg
 
     def test_an_unreachable_dashboard_is_not_told_to_restart_first(self):
         result = canary.CanaryResult(
@@ -193,7 +192,7 @@ class TestTheAlertNamesALever:
             failure_keys=["health_unreachable"],
         )
         msg = canary.format_alert(result, "https://x.test")
-        assert "curl /api/health from the VPS" in msg
+        assert "curl /api/health с VPS" in msg
 
     def test_a_green_result_needs_no_lever(self):
         result = canary.CanaryResult(ok=True, severity="ok")

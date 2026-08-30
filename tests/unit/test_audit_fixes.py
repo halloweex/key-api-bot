@@ -128,7 +128,7 @@ class TestRefreshSelfHeal:
 
         is_dirty, _ = await store.consume_warehouse_dirty()
         assert is_dirty is False, "must STOP retrying past the bound"
-        assert any("CRITICAL" in msg for msg, _ in alerts)
+        assert any("🚨" in msg for msg, _ in alerts)
         assert any(key == "warehouse:refresh_errored_exhausted" for _, key in alerts)
 
 

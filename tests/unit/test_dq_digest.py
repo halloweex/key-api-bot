@@ -112,9 +112,9 @@ class TestBuildDigest:
         )]
         msg = build_digest(sections)
         assert msg is not None
-        assert "headline_vs_line_items: 1,184" in msg
-        assert "orders_without_line_items: 523" in msg
-        assert "4,196,208.36" in msg
+        assert "headline_vs_line_items): 1,184" in msg
+        assert "orders_without_line_items): 523" in msg
+        # Суммы из описаний убраны правкой владельца 30.08 — их дом дашборд
 
     def test_delta_against_the_previous_run(self):
         sections = [DigestSection(
@@ -123,8 +123,8 @@ class TestBuildDigest:
             previous_issues=[_row("headline_vs_line_items", 1182)],
         )]
         msg = build_digest(sections)
-        assert "1,184 (+2 since the last run)" in msg
-        assert "7 (new)" in msg
+        assert "1,184 (+2)" in msg
+        assert "7 (новое)" in msg
 
     def test_a_standing_problem_reads_as_unchanged(self):
         sections = [DigestSection(
@@ -132,7 +132,7 @@ class TestBuildDigest:
             issues=[_row("orders_without_line_items", 523)],
             previous_issues=[_row("orders_without_line_items", 523)],
         )]
-        assert "(unchanged)" in build_digest(sections)
+        assert "(=)" in build_digest(sections)
 
     def test_stale_layer_is_called_out(self):
         sections = [
@@ -140,12 +140,12 @@ class TestBuildDigest:
         ]
         msg = build_digest(sections)
         assert msg is not None
-        assert "52h old" in msg
+        assert "молчит 52ч" in msg
 
     def test_layer_that_never_ran_is_called_out(self):
         msg = build_digest([DigestSection(layer="reconciliation", run=None)])
         assert msg is not None
-        assert "no successful run on record" in msg
+        assert "ни одного успешного прогона" in msg
 
     def test_discrepancies_are_listed(self):
         sections = [DigestSection(
@@ -178,7 +178,7 @@ class TestBuildDigest:
         )]
         msg = build_digest(sections)
         assert msg is not None
-        assert "goods_shipped_without_sale: 448" in msg
+        assert "goods_shipped_without_sale): 448" in msg
 
     def test_long_lists_are_truncated(self):
         sections = [DigestSection(
@@ -186,13 +186,13 @@ class TestBuildDigest:
             issues=[_row(f"check_{i}", i) for i in range(20)],
         )]
         msg = build_digest(sections, max_issue_lines=3)
-        assert "…and 17 more" in msg
+        assert "…и ещё 17" in msg
 
 
 # ─── The unchanged standing WARN ────────────────────────────────────────────
 
 class TestStandingFindingsGoQuiet:
-    """`headline_vs_line_items: 414 (unchanged)` went out every morning for six
+    """`headline_vs_line_items): 414 (=)` went out every morning for six
     days. The delta that says nobody needs to hear it again was already being
     computed, and the send decision ignored it."""
 
@@ -226,8 +226,8 @@ class TestStandingFindingsGoQuiet:
             now=self.NOW,
         )
         assert msg is not None
-        assert "headline_vs_line_items: 414" in msg
-        assert "Repeated weekly" in msg
+        assert "headline_vs_line_items): 414" in msg
+        assert "недельное напоминание" in msg
 
     def test_a_finding_that_moves_by_one_is_news_at_once(self):
         """+1 order is the whole signal this check exists to give. It must not
@@ -239,8 +239,8 @@ class TestStandingFindingsGoQuiet:
         )]
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
-        assert "415 (+1 since the last run)" in msg
-        assert "Repeated weekly" not in msg
+        assert "415 (+1)" in msg
+        assert "недельное напоминание" not in msg
 
     def test_a_new_check_beside_a_standing_one_is_news(self):
         sections = [DigestSection(
@@ -250,7 +250,7 @@ class TestStandingFindingsGoQuiet:
         )]
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
-        assert "fk_orphans: 3 (new)" in msg
+        assert "fk_orphans: 3 (новое)" in msg
 
     def test_a_stale_layer_speaks_through_the_quiet(self):
         """Silence has to mean "nothing changed", never "the checks stopped"."""
@@ -259,7 +259,7 @@ class TestStandingFindingsGoQuiet:
         ]
         msg = build_digest(sections, last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW)
         assert msg is not None
-        assert "52h old" in msg
+        assert "молчит 52ч" in msg
 
     def test_an_unchanged_warn_below_the_truncation_line_is_not_swallowed(self):
         """A finding with no line has no delta the reader can check."""
@@ -273,7 +273,7 @@ class TestStandingFindingsGoQuiet:
             last_sent_at=self.NOW - timedelta(hours=1), now=self.NOW,
         )
         assert msg is not None
-        assert "…and 4 more" in msg
+        assert "…и ещё 4" in msg
 
     def test_info_alone_does_not_get_restated_either(self):
         """A week of silence does not turn blogger seeding into a problem."""
@@ -290,7 +290,7 @@ class TestStandingFindingsGoQuiet:
         """No marker means no evidence the reader has heard it. Say it."""
         msg = build_digest(self._standing(), now=self.NOW)
         assert msg is not None
-        assert "headline_vs_line_items: 414" in msg
+        assert "headline_vs_line_items): 414" in msg
 
     def test_a_naive_marker_is_read_as_utc_rather_than_crashing(self):
         msg = build_digest(
@@ -354,7 +354,7 @@ class TestStandingDiscrepancies:
             last_sent_at=self.NOW - timedelta(days=1), now=self.NOW,
         )
         assert msg is not None
-        assert "clean" in msg
+        assert "чисто" in msg
 
     def test_a_reshuffled_order_id_sample_is_not_a_change(self):
         a = self._diff()
@@ -370,7 +370,7 @@ class TestStandingDiscrepancies:
             last_sent_at=self.NOW - timedelta(days=7, hours=1), now=self.NOW,
         )
         assert msg is not None
-        assert "Repeated weekly" in msg
+        assert "недельное напоминание" in msg
 
 
 # ─── fetch_previous_run ─────────────────────────────────────────────────────

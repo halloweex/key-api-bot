@@ -34,7 +34,7 @@ class TestRemediationLookup:
         generic = remediation_for(["mirror_missing_rows"])[0]
         specific = remediation_for(["mirror_never_shipped"])[0]
         assert generic != specific
-        assert "Sunday" in specific
+        assert "воскресенья" in specific
 
     def test_generated_check_names_are_matched_by_prefix(self):
         """Half the check names are built at runtime; an exact-name table
@@ -69,7 +69,7 @@ class TestRemediationLookup:
         """The one table whose 'repair' would mean inventing the history it is
         the only record of."""
         line = remediation_for(["order_versions_stalled"])[0]
-        assert "never" in line.lower() or "not repairable" in line.lower()
+        assert "не чинить" in line.lower()
 
     def test_every_entry_says_something(self):
         for prefix, line in REMEDIATION:
@@ -95,7 +95,7 @@ class TestMachineAttemptsNote:
                             {"at": now - timedelta(minutes=41), "shipped": 3})
         monkeypatch.setattr(ch_history, "last_heal", {})
         note = machine_attempts_note(now=now)
-        assert "buyers" in note and "3" in note and "41 min" in note
+        assert "buyers" in note and "3" in note and "41 мин" in note
 
     def test_both_ledgers_are_reported(self, monkeypatch):
         import core.ch_history as ch_history
@@ -125,14 +125,14 @@ class TestTheAlertBody:
         msg = format_alert_message(
             "mirror_landing", Severity.CRITICAL, [_issue("mirror_missing_rows")], [],
         )
-        assert "── What to do ──" in msg
+        assert "→ " in msg
         assert "meta.mirror_state" in msg
 
     def test_the_lever_is_last_because_it_is_what_gets_acted_on(self):
         msg = format_alert_message(
             "integrity", Severity.CRITICAL, [_issue("pk_uniqueness_orders")], [],
         )
-        body, _, tail = msg.partition("── What to do ──")
+        body, _, tail = msg.partition("→ ")
         assert "pk_uniqueness_orders" in body
         assert tail.strip()
 
@@ -140,14 +140,14 @@ class TestTheAlertBody:
         msg = format_alert_message(
             "integrity", Severity.INFO, [_issue("mirror_retired_rows")], [],
         )
-        assert "What to do" not in msg
+        assert "→ " not in msg
 
     def test_machine_note_rides_along_when_given(self):
         msg = format_alert_message(
             "mirror_landing", Severity.CRITICAL, [_issue("mirror_missing_rows")], [],
-            machine_note="Machine already tried: buyers ids-diff re-shipped 3 row(s) 4 min ago.",
+            machine_note="🤖 buyers: машина дослала 3 строк 4 мин назад",
         )
-        assert "Machine already tried" in msg
+        assert "🤖" in msg
 
     def test_no_machine_note_leaves_no_blank_line(self):
         msg = format_alert_message(
@@ -167,5 +167,5 @@ class TestTheAlertBody:
             severity=Severity.CRITICAL,
         )
         msg = format_alert_message("reconciliation", Severity.CRITICAL, [], [d])
-        assert "── What to do ──" in msg
+        assert "→ " in msg
         assert "KeyCRM" in msg

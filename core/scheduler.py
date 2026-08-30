@@ -1607,17 +1607,11 @@ class BackgroundScheduler:
                 from core.alerting import raise_alert
                 icon = "🚨" if alert.severity.value == "CRITICAL" else "⚠️"
                 msg = (
-                    f"{icon} <b>Disk watchdog: {alert.severity.value}</b>\n"
-                    f"{alert.reason}\n\n"
-                    f"DB: {alert.db_size_mb:,.0f} MB\n"
-                    f"Disk: {alert.disk_pct_used:.1f}% used, "
-                    f"{alert.disk_free_gb:.1f} GB free\n\n"
-                    # Nothing reclaims disk on its own here — no self-healing to
-                    # count, so this says where the space goes instead. The two
-                    # commands are the ones that have actually answered it.
-                    "→ du -xd1 /opt/key-api-bot/data | sort -h; docker system df. "
-                    "The weekly compact (Sun 02:00 UTC) is the only automatic "
-                    "reclaim, and it stops both containers while it runs."
+                    f"{icon} <b>Диск: {alert.disk_pct_used:.0f}% занято, "
+                    f"свободно {alert.disk_free_gb:.0f} ГБ</b>\n"
+                    f"{alert.reason}\n"
+                    "→ du -xd1 data; docker system df. Компакт не дёргать — "
+                    "он гасит контейнеры"
                 )
                 delivered = await raise_alert(
                     msg, conditions=[disk_key], bucket=disk_key, group="disk",
@@ -2796,32 +2790,22 @@ class BackgroundScheduler:
             "\u26a0\ufe0f" if level == "WARN" else "\U0001f6a8"
         )
         title = (
-            "OOM KILL" if alert.oom_kills_delta
-            else ("Memory Warning" if level == "WARN" else "MEMORY CRITICAL")
+            "OOM: web убивало процессы" if alert.oom_kills_delta
+            else ("Память web" if level == "WARN" else "ПАМЯТЬ WEB")
         )
 
-        lines = [
-            f"{icon} <b>{title}</b>",
-            "",
-            f"<b>Working set:</b> {alert.working_set_mb:,.0f} MB"
-            + (f" / {alert.limit_mb:,.0f} MB" if alert.limit_mb else ""),
-            f"<b>Free:</b> {alert.headroom_mb:,.0f} MB",
-            f"<b>Page cache:</b> {alert.page_cache_mb:,.0f} MB (reclaimable, not counted)",
-        ]
-        if peak_24h:
-            lines.append(f"<b>Peak 24h:</b> {peak_24h:,.0f} MB")
-        if db_size:
-            lines.append(f"<b>DuckDB file:</b> {db_size:,.0f} MB")
+        head = f"{alert.working_set_mb:,.0f}"
+        if alert.limit_mb:
+            head += f" из {alert.limit_mb:,.0f}"
+        lines = [f"{icon} <b>{title}: {head} МБ</b>"]
         if alert.oom_kills_delta:
-            lines.append(f"<b>Processes killed:</b> {alert.oom_kills_delta}")
-
-        lines += ["", f"<i>{alert.reason}</i>"]
+            lines.append(f"убито процессов: {alert.oom_kills_delta}")
+        lines.append(f"<i>{alert.reason}</i>")
         if level == "CRITICAL":
-            lines += [
-                "",
-                "\U0001f449 Reduce <code>DUCKDB_MEMORY_LIMIT</code> or raise the "
-                "container limit. Check what ran: <code>docker logs keycrm-web</code>",
-            ]
+            lines.append(
+                "→ Смотри, что бежало: docker logs keycrm-web; "
+                "рычаг — DUCKDB_MEMORY_LIMIT или лимит контейнера"
+            )
 
         # Through the shared path since 29.08 — the raw transport this used
         # to hold bypassed KS_ALERTS_DISABLED, the signature and the escaping

@@ -228,7 +228,7 @@ def render_digest_tail(
             hours = int((now - first).total_seconds() // 3600)
             age = f"{hours}h" if hours < 48 else f"{hours // 24}d"
             mark = " · эскалировано" if escalated else ""
-            rendered.append(f"• {key} — {age}, fired {count}×{mark}")
+            rendered.append(f"• {key} — {age}, ×{count}{mark}")
         lines.append("⏳ Горит:")
         lines.extend(rendered)
         if len(firing) > _TAIL_FIRING_LIMIT:

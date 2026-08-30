@@ -299,7 +299,7 @@ from core.data_quality import IntegrityIssue, format_alert_message
 class TestFormatAlertMessage:
     def test_empty_run_produces_clean_message(self):
         msg = format_alert_message("combined", Severity.INFO, [], [])
-        assert "Data Quality INFO" in msg
+        assert "ℹ️" in msg and "INFO" in msg
         assert "combined" in msg
         # No issue/discrepancy sections
         assert "Issues" not in msg
@@ -314,17 +314,18 @@ class TestFormatAlertMessage:
         )
         msg = format_alert_message("reconciliation", Severity.CRITICAL, [], [d])
         assert msg.startswith("🚨")
-        assert "MISSING_IN_DK" in msg
+        assert "≠" in msg  # значения сторон в короткой форме
         assert "2026-04" in msg
-        assert "src=1" in msg
+        assert "src1" in msg
 
-    def test_window_included_when_provided(self):
+    def test_window_no_longer_rendered(self):
+        """Окно убрано правкой владельца 30.08: короткий формат, даты окна
+        читателю ничего не решают — они есть в журнале прогона."""
         msg = format_alert_message(
             "reconciliation", Severity.INFO, [], [],
             window=(date(2026, 2, 1), date(2026, 5, 1)),
         )
-        assert "2026-02-01" in msg
-        assert "2026-05-01" in msg
+        assert "2026-02-01" not in msg
 
     def test_issue_sample_ids_in_message(self):
         i = IntegrityIssue(
@@ -335,7 +336,7 @@ class TestFormatAlertMessage:
             description="3 orphans",
         )
         msg = format_alert_message("integrity", Severity.CRITICAL, [i], [])
-        assert "88888" in msg
+        assert "fk_orphan_order_products_order_id" in msg and "3" in msg
         assert "fk_orphan" in msg
 
     def test_truncation_when_many_discrepancies(self):
@@ -351,7 +352,7 @@ class TestFormatAlertMessage:
         msg = format_alert_message(
             "reconciliation", Severity.CRITICAL, [], diffs, max_lines=5,
         )
-        assert "…and" in msg
+        assert "…и ещё" in msg
         # Only ~5 diff lines shown
         diff_lines = [line for line in msg.split("\n") if line.startswith("• ")]
-        assert 5 <= len(diff_lines) <= 7  # +/- 2 slack for issue lines
+        assert len(diff_lines) == 4  # 3 строки + «…и ещё» — короткий формат

@@ -48,8 +48,8 @@ class TestTheDeliveryGate:
         with _sent() as send, _archived():
             assert await resolve_group("disk") == 2
             text = send.await_args.args[0]
-            assert "✅ Resolved:" in text and "disk:WARN" in text
-            assert "stood" in text
+            assert "✅ Ушло:" in text and "disk:WARN" in text
+            assert "стояло" in text
         # The pop is the idempotence: the clean run repeats every cycle,
         # the notice must not.
         with _sent() as send2, _archived():
@@ -174,7 +174,7 @@ class TestEmitterWiring:
                            return_value=sample(40.0, 60.0)):
                     await scheduler._run_disk_watchdog()
                 assert send.await_count == 2  # the recovery
-                assert "✅ Resolved:" in send.await_args.args[0]
+                assert "✅ Ушло:" in send.await_args.args[0]
                 assert "disk:CRITICAL" in send.await_args.args[0]
         finally:
             await store.close()

@@ -92,13 +92,9 @@ def format_escalation(
             start = start.replace(tzinfo=timezone.utc)
         hours = int((now - start).total_seconds() // 3600)
         lines.append(
-            f"• {row.condition_key} — {hours}h, fired {row.fired_count}×"
+            f"• {row.condition_key} — {hours}ч, срабатываний ×{row.fired_count}"
         )
-    return (
-        "⏳ <b>Still firing, unacknowledged:</b>\n" + "\n".join(lines)
-        + "\n\nNobody resolved or acknowledged these. The machine has said "
-        "its piece; this is the standing-condition repeat."
-    )
+    return "⏳ <b>Висит без реакции:</b>\n" + "\n".join(lines)
 
 
 async def _query_due(seconds: float) -> List[DueCondition]:

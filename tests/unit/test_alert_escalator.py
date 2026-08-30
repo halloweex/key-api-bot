@@ -62,8 +62,8 @@ class TestPolicy:
              patch("core.alert_archive.record_escalated") as rec:
             assert await escalate_due(web_alive=True, _due=rows) == 2
         text = send.await_args.args[0]
-        assert "mirror_failing — 7h, fired 3×" in text
-        assert "disk:CRITICAL — 9h" in text
+        assert "mirror_failing — 7ч, срабатываний ×3" in text
+        assert "disk:CRITICAL — 9ч" in text
         assert send.await_args.kwargs["pre_throttled"] is True
         assert sorted(rec.call_args.args[0]) == [
             "disk:CRITICAL", "mirror_failing"]
@@ -110,12 +110,12 @@ class TestTheCycleRule:
 class TestFormat:
     def test_the_message_names_age_and_count(self):
         text = format_escalation([_due(hours=26, fired=4)])
-        assert "26h" in text and "fired 4×" in text
-        assert "Still firing" in text
+        assert "26ч" in text and "×4" in text
+        assert "Висит без реакции" in text
 
     def test_naive_timestamps_are_read_as_utc(self):
         row = DueCondition(
             condition_key="k", fired_count=1,
             cycle_start=datetime.utcnow() - timedelta(hours=8),
         )
-        assert "8h" in format_escalation([row])
+        assert "8ч" in format_escalation([row])

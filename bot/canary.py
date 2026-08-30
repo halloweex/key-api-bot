@@ -211,13 +211,13 @@ def check_dq_freshness(
     if not isinstance(block, dict):
         # Older web build, or the freshness query itself failed. Either way
         # nothing is watching the watchers.
-        return [("dq_block_missing", "health payload has no data_quality block")], ages
+        return [("dq_block_missing", "нет блока data_quality в health")], ages
 
     for layer, limit in thresholds.items():
         entry = block.get(layer)
         if not isinstance(entry, dict):
             failures.append(
-                (f"dq_missing:{layer}", f"data quality: no {layer} freshness reported")
+                (f"dq_missing:{layer}", f"{layer}: свежесть не сообщается")
             )
             ages[layer] = None
             continue
@@ -226,13 +226,12 @@ def check_dq_freshness(
         ages[layer] = age
         if age is None:
             failures.append(
-                (f"dq_never:{layer}", f"data quality: {layer} has never run successfully")
+                (f"dq_never:{layer}", f"{layer}: ни одного успешного прогона")
             )
         elif age > limit:
             failures.append((
                 f"dq_stale:{layer}",
-                f"data quality: last successful {layer} run was "
-                f"{_format_age(int(age))} ago (>{_format_age(limit)})",
+                f"{layer}: молчит {_format_age(int(age))}",
             ))
 
     return failures, ages
@@ -260,13 +259,13 @@ def check_mirror_freshness(
     block = (payload or {}).get("mirrors")
     if not isinstance(block, dict):
         return [("mirror_block_missing",
-                 "health payload has no mirrors block")], ages
+                 "нет блока mirrors в health")], ages
 
     for table, limit in thresholds.items():
         entry = block.get(table)
         if not isinstance(entry, dict):
             failures.append(
-                (f"mirror_missing:{table}", f"mirror: no {table} freshness reported")
+                (f"mirror_missing:{table}", f"зеркало {table}: свежесть не сообщается")
             )
             ages[table] = None
             continue
@@ -282,18 +281,17 @@ def check_mirror_freshness(
         if entry.get("failing") or failed:
             failures.append((
                 f"mirror_failing:{table}",
-                f"mirror: {table} has failed {failed}× since its last success",
+                f"зеркало {table}: падает, {failed}× подряд",
             ))
 
         if age is None:
             failures.append(
-                (f"mirror_never:{table}", f"mirror: {table} has never shipped")
+                (f"mirror_never:{table}", f"зеркало {table}: ещё не уезжало")
             )
         elif age > limit:
             failures.append((
                 f"mirror_stale:{table}",
-                f"mirror: {table} last shipped {_format_age(int(age))} ago "
-                f"(>{_format_age(limit)})",
+                f"зеркало {table}: не уезжало {_format_age(int(age))}",
             ))
 
     return failures, ages
@@ -315,13 +313,12 @@ def check_alerting_health(
     block = (payload or {}).get("alerting")
     if not isinstance(block, dict):
         return [("alerting_block_missing",
-                 "health payload has no alerting block")]
+                 "нет блока alerting в health")]
     failures = int(block.get("consecutive_transport_failures") or 0)
     if failures >= ALERTING_MAX_CONSECUTIVE_FAILURES:
         return [(
             "alerting_transport_failing",
-            f"alerting: {failures} consecutive transport failures — "
-            "alerts may be reaching nobody",
+            f"алертинг: {failures} отказов доставки подряд — тревоги могут не доходить",
         )]
     return []
 
@@ -364,10 +361,10 @@ async def run_canary(
         failures.append(message)
 
     if http_err:
-        fail("health_unreachable", f"health request failed: {http_err}")
+        fail("health_unreachable", f"дашборд не отвечает: {http_err}")
         severity = "critical"
     elif http_code != 200:
-        fail("health_http", f"health returned HTTP {http_code}")
+        fail("health_http", f"дашборд вернул HTTP {http_code}")
         severity = "critical"
 
     health_status = None
@@ -379,7 +376,7 @@ async def run_canary(
         sync_block = payload.get("sync") or {}
         sync_seconds = sync_block.get("seconds_since_sync")
         if health_status and health_status != "healthy":
-            fail("health_status", f"status={health_status}")
+            fail("health_status", f"приложение деградировало: {health_status}")
             severity = "critical"
 
         # Only judge freshness when the endpoint answered at all — an
@@ -414,11 +411,11 @@ async def run_canary(
             severity = "warn"
 
     if cert_err:
-        fail("cert_unreachable", f"cert check failed: {cert_err}")
+        fail("cert_unreachable", f"TLS не проверился: {cert_err}")
         if severity == "ok":
             severity = "warn"
     elif cert_days is not None and cert_days < cert_warn_days:
-        fail("cert_expiring", f"cert expires in {cert_days}d (<{cert_warn_days})")
+        fail("cert_expiring", f"сертификат истекает через {cert_days}д")
         # Cert about to expire is critical even if health is otherwise OK —
         # silent expiry is what burned us last time.
         severity = "critical"
@@ -446,31 +443,16 @@ async def run_canary(
 # are true.
 _ACTIONS: tuple[tuple[str, str], ...] = (
     ("health_unreachable",
-     "curl /api/health from the VPS itself — this probe runs from the bot "
-     "container and cannot tell the dashboard apart from the path to it "
-     "(nginx, TLS, DNS). Restarting web is the last lever, not the first."),
-    ("health_http",
-     "read the web container's log for the failing request; the app answered, "
-     "so this is not a network problem."),
-    ("health_status",
-     "the app calls itself degraded: /api/health names which part "
-     "(duckdb, migrations). A failed migration is not fixed by a restart."),
-    ("cert_expiring",
-     "certbot renewal — a silent lapse here cost 12 h once. See the certbot "
-     "hooks; renewal is automatic, so this means the hook failed."),
-    ("cert_unreachable",
-     "the TLS handshake failed, which is nginx or the network, not the app."),
-    ("mirror_",
-     "the copy of landing in Postgres has stopped moving. Read "
-     "meta.mirror_state (last_ok_at, failures_since_ok, last_error) and the "
-     "web log; the mirror re-ships on its own, so this is about why it "
-     "cannot, not about shipping it by hand."),
-    ("dq_",
-     "a data-quality layer has gone quiet. Nothing is comparing the "
-     "warehouse against anything meanwhile — check the scheduler jobs in "
-     "/api/jobs before trusting any number on the dashboard."),
+     "curl /api/health с VPS — отделить приложение от nginx/TLS. "
+     "Рестарт web — последний рычаг"),
+    ("health_http", "Смотри лог web по упавшему запросу — сеть ни при чём"),
+    ("health_status", "/api/health скажет, что деградировало; миграцию рестарт не чинит"),
+    ("cert_expiring", "Проверь certbot на хосте — автопродление сломалось"),
+    ("cert_unreachable", "TLS не отвечает: nginx или сеть, не приложение"),
+    ("mirror_", "Смотри meta.mirror_state и лог web; зеркало шлёт само"),
+    ("dq_", "Проверь джобы в /api/jobs — склад сейчас никто не сверяет"),
+    ("alerting_", "Отказы доставки Telegram подряд — проверь лог web"),
 )
-
 
 def _what_to_do(result: CanaryResult) -> Optional[str]:
     """The single most useful lever for this result, or None."""
@@ -483,13 +465,9 @@ def _what_to_do(result: CanaryResult) -> Optional[str]:
 def format_alert(result: CanaryResult, dashboard_url: str) -> str:
     """Build a Telegram HTML message for a failing result."""
     icon = "\U0001f6a8" if result.severity == "critical" else "⚠️"
-    title = "Dashboard CRITICAL" if result.severity == "critical" else "Dashboard Warning"
+    title = "Дашборд лежит" if result.severity == "critical" else "Дашборд: тревога"
 
-    lines = [
-        f"{icon} <b>{title}</b>",
-        f"<a href=\"{dashboard_url}\">{dashboard_url}</a>",
-        "",
-    ]
+    lines = [f"{icon} <b>{title}</b>"]
     for failure in result.failures:
         # Escaped because failure text is data, not markup: the cert line
         # carries a literal `(<14)` and httpx exception strings can carry
@@ -500,25 +478,15 @@ def format_alert(result: CanaryResult, dashboard_url: str) -> str:
 
     action = _what_to_do(result)
     if action:
-        lines.append("")
         lines.append(f"→ {action}")
 
+    # Две-три ключевые цифры, не приборная панель: детальные возрасты живут
+    # в /api/health, а страница обязана читаться за три секунды.
     extras: list[str] = []
-    if result.http_code is not None:
-        extras.append(f"http={result.http_code}")
-    if result.health_status:
-        extras.append(f"status={result.health_status}")
     if result.cert_days_remaining is not None:
-        extras.append(f"cert_days={result.cert_days_remaining}")
-    if result.sync_seconds_since is not None:
-        extras.append(f"sync_age={result.sync_seconds_since}s")
-    for layer, age in result.dq_ages.items():
-        extras.append(f"{layer}_age=" + (_format_age(int(age)) if age is not None else "never"))
-    for table, age in result.mirror_ages.items():
-        extras.append(
-            f"{table}_mirror=" + (_format_age(int(age)) if age is not None else "never")
-        )
+        extras.append(f"cert {result.cert_days_remaining}д")
+    if result.http_code is not None and result.http_code != 200:
+        extras.append(f"http {result.http_code}")
     if extras:
-        lines.append("")
         lines.append("<i>" + html.escape(" · ".join(extras)) + "</i>")
     return "\n".join(lines)

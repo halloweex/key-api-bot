@@ -267,7 +267,7 @@ async def test_run_canary_flags_short_cert_as_critical():
         with patch.object(canary, "_fetch_peer_cert", return_value=fake_cert):
             result = await run_canary(DASHBOARD, client=client)
     assert result.severity == "critical"
-    assert any("expires in" in f for f in result.failures)
+    assert any("сертификат истекает" in f for f in result.failures)
 
 
 @pytest.mark.asyncio
@@ -279,7 +279,7 @@ async def test_run_canary_cert_failure_alone_is_warn():
         with patch.object(canary, "_fetch_peer_cert", side_effect=OSError("no route")):
             result = await run_canary(DASHBOARD, client=client)
     assert result.severity == "warn"
-    assert any("cert check failed" in f for f in result.failures)
+    assert any("TLS не проверился" in f for f in result.failures)
 
 
 @pytest.mark.asyncio
@@ -366,25 +366,25 @@ def test_format_alert_includes_failures_and_extras():
         sync_seconds_since=120,
     )
     msg = canary.format_alert(result, DASHBOARD)
-    assert "Dashboard CRITICAL" in msg
-    assert DASHBOARD in msg
+    assert "Дашборд лежит" in msg
+    # Ссылку из тела убрали правкой владельца 30.08 («коротко»): у обоих
+    # админов дашборд в закладках, а URL в каждом алерте — шум.
     assert "status=degraded" in msg
     assert "cert expires in 5d" in msg
-    assert "cert_days=5" in msg
-    assert "sync_age=120s" in msg
+    assert "cert 5д" in msg
+    # sync-возраст из тела убран тем же коротким форматом — он в /api/health
 
 
 def test_format_alert_includes_dq_ages():
-    result = canary.CanaryResult(
+    from bot.canary import CanaryResult, format_alert
+    """Перевёрнут правкой владельца 30.08: детальные возрасты слоёв — шум в
+    странице и живут в /api/health; тело несёт максимум пару ключевых цифр."""
+    result = CanaryResult(
         ok=False, severity="warn",
-        failures=["data quality: last successful reconciliation run was 2d 6h ago (>30h)"],
+        failures=["reconciliation: молчит 2d 6h"],
         failure_keys=["dq_stale:reconciliation"],
-        http_code=200, health_status="healthy",
-        dq_ages={"integrity": 3600, "reconciliation": 194400},
+        dq_ages={"reconciliation": 2 * 86400 + 6 * 3600, "integrity": 1800},
     )
-    msg = canary.format_alert(result, DASHBOARD)
-    assert "Dashboard Warning" in msg
-    assert "reconciliation run was 2d 6h ago" in msg
-    assert "reconciliation_age=2d 6h" in msg
-    assert "integrity_age=1h" in msg
-
+    msg = format_alert(result, DASHBOARD)
+    assert "reconciliation: молчит 2d 6h" in msg     # сам провал — да
+    assert "integrity" not in msg                     # приборная панель — нет

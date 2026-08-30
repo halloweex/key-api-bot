@@ -109,7 +109,7 @@ class TestThrottleCheckDecoration:
 
         should_send, text = throttle_check("x")
         assert should_send is True
-        assert "repeated 7×" in text
+        assert "повтор ×7" in text
         assert text.startswith("x")
 
 
