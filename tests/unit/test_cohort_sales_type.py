@@ -94,3 +94,52 @@ def test_all_still_means_no_filter(name):
     not quietly become a predicate."""
     code = _statements(name)
     assert 'if sales_type == "all"' in code or '"" if sales_type == "all"' in code
+
+
+class TestTheOneSpellingThatCannotBeShared:
+    """`CURRENT_DATE` has no form all three engines accept, and this pins which
+    half of the codebase uses which.
+
+    Measured, not assumed:
+
+        bare `CURRENT_DATE`      DuckDB ✓   PostgreSQL ✓   ClickHouse ✗
+        `CURRENT_DATE()`         DuckDB ✓   PostgreSQL ✗   ClickHouse ✓
+
+    PostgreSQL treats it as a reserved keyword and rejects the parentheses;
+    ClickHouse has no bare keyword and rejects their absence. So the "one body,
+    two engines" trick has a boundary, and it runs exactly between these two
+    groups of queries: the SMS audience targets DuckDB and PostgreSQL, the
+    cohort queries target DuckDB and ClickHouse.
+
+    Everything else in the cohort queries *is* shared — `DATE_TRUNC`,
+    `DATEDIFF`, `median`, `FILTER (WHERE …)`, CTEs, `COUNT(DISTINCT …)` and
+    `ROUND` were each run on both engines and agree. Only `strftime` needed
+    replacing, with `substring(CAST(x AS VARCHAR), 1, 7)`, which gives the same
+    string on both.
+
+    If the cohort tab is ever wanted on PostgreSQL too, this becomes a dialect
+    hole rather than a literal.
+    """
+
+    @pytest.mark.parametrize("name", FIVE)
+    def test_the_cohort_queries_use_the_form_clickhouse_accepts(self, name):
+        code = _statements(name)
+        if "CURRENT_DATE" not in code:
+            pytest.skip("this one does not ask for today's date")
+        assert "CURRENT_DATE()" in code
+        bare = code.replace("CURRENT_DATE()", "")
+        assert "CURRENT_DATE" not in bare, (
+            f"{name} still carries a bare CURRENT_DATE, which ClickHouse "
+            f"cannot parse"
+        )
+
+    def test_the_sms_predicate_keeps_the_form_postgres_accepts(self):
+        """The audience filter runs on DuckDB and PostgreSQL, where the
+        parenthesised form is a syntax error."""
+        from core.repositories.customers import SmsAudienceFilters
+
+        sql, _params = SmsAudienceFilters(
+            brands=("Cosrx",), bought_within_days=30,
+        ).predicate("revenue_ltv", "retail")
+        assert "CURRENT_DATE " in sql or "CURRENT_DATE\n" in sql
+        assert "CURRENT_DATE()" not in sql

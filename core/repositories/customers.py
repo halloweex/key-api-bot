@@ -716,14 +716,14 @@ class CustomersMixin:
                 GROUP BY r.cohort_month, r.months_since
             )
             SELECT
-                strftime(r.cohort_month, '%Y-%m') as cohort,
+                substring(CAST(r.cohort_month AS VARCHAR), 1, 7) as cohort,
                 s.size as cohort_size,
                 r.months_since as month_number,
                 r.retained_customers,
                 ROUND(100.0 * r.retained_customers / s.size, 1) as retention_pct
             FROM retention_data r
             JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
-            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
+            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE()) - INTERVAL '{int(months_back)} months'
             ORDER BY r.cohort_month DESC, r.months_since
             """
 
@@ -874,7 +874,7 @@ class CustomersMixin:
                 GROUP BY r.cohort_month, r.months_since
             )
             SELECT
-                strftime(r.cohort_month, '%Y-%m') as cohort,
+                substring(CAST(r.cohort_month AS VARCHAR), 1, 7) as cohort,
                 s.size as cohort_size,
                 s.m0_revenue,
                 r.months_since as month_number,
@@ -884,7 +884,7 @@ class CustomersMixin:
                 ROUND(100.0 * r.period_revenue / NULLIF(s.m0_revenue, 0), 1) as revenue_retention_pct
             FROM retention_data r
             JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
-            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
+            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE()) - INTERVAL '{int(months_back)} months'
             ORDER BY r.cohort_month DESC, r.months_since
             """
 
@@ -1174,7 +1174,7 @@ class CustomersMixin:
                     ON c1.buyer_id = c2.buyer_id
                     AND c1.order_num = 1
                     AND c2.order_num = 2
-                WHERE c1.order_date >= CURRENT_DATE - INTERVAL '{int(months_back)} months'
+                WHERE c1.order_date >= CURRENT_DATE() - INTERVAL '{int(months_back)} months'
             ),
             bucketed AS (
                 SELECT
@@ -1320,14 +1320,14 @@ class CustomersMixin:
                 GROUP BY cohort_month
             )
             SELECT
-                strftime(cm.cohort_month, '%Y-%m') AS cohort,
+                substring(CAST(cm.cohort_month AS VARCHAR), 1, 7) AS cohort,
                 cs.cohort_size,
                 cm.months_since,
                 cm.total_revenue,
                 cm.active_customers
             FROM cohort_monthly cm
             JOIN cohort_sizes cs ON cm.cohort_month = cs.cohort_month
-            WHERE cm.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
+            WHERE cm.cohort_month >= DATE_TRUNC('month', CURRENT_DATE()) - INTERVAL '{int(months_back)} months'
             ORDER BY cm.cohort_month DESC, cm.months_since
             """
 
@@ -1428,7 +1428,7 @@ class CustomersMixin:
                     o.buyer_id,
                     DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month,
                     MAX(o.order_date) AS last_order_date,
-                    DATEDIFF('day', MAX(o.order_date), CURRENT_DATE) AS days_since_last,
+                    DATEDIFF('day', MAX(o.order_date), CURRENT_DATE()) AS days_since_last,
                     COUNT(*) AS total_orders,
                     SUM(o.grand_total) AS total_revenue
                 FROM silver_orders o
@@ -1438,7 +1438,7 @@ class CustomersMixin:
                 GROUP BY o.buyer_id
             )
             SELECT
-                strftime(cohort_month, '%Y-%m') AS cohort,
+                substring(CAST(cohort_month AS VARCHAR), 1, 7) AS cohort,
                 COUNT(*) AS total_customers,
                 COUNT(*) FILTER (WHERE days_since_last > ? AND days_since_last <= ?) AS at_risk_count,
                 ROUND(100.0 * COUNT(*) FILTER (WHERE days_since_last > ?) / COUNT(*), 1) AS at_risk_pct,
@@ -1446,7 +1446,7 @@ class CustomersMixin:
                 AVG(total_orders) FILTER (WHERE days_since_last > ?) AS avg_orders_at_risk,
                 COUNT(*) FILTER (WHERE days_since_last > ?) AS churned_count
             FROM customer_activity
-            WHERE cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
+            WHERE cohort_month >= DATE_TRUNC('month', CURRENT_DATE()) - INTERVAL '{int(months_back)} months'
             GROUP BY cohort_month
             ORDER BY cohort_month DESC
             """
