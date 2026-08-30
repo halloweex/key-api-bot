@@ -428,3 +428,114 @@ def sms_segments_select(
         filter_sql=filter_sql,
         tier_subset=tier_subset,
     )
+
+
+# ─── The customer-analytics bodies, DuckDB and ClickHouse ───────────────────
+#
+# A second, smaller dialect, and the smallness is the point. The `Dialect`
+# above carries eight table names because the Silver projection and the SMS
+# audience touch eight tables; the cohort queries touch exactly one, and a
+# ClickHouse rendering has no answer for `bronze.buyers` or
+# `app.marketing_optouts` — those stores do not exist there and never will.
+# Reusing the big dialect would mean inventing names for tables the engine
+# cannot be asked about.
+#
+# `today` is a hole rather than a literal because `CURRENT_DATE` has **no
+# spelling all three engines accept** — measured, not assumed:
+#
+#     bare CURRENT_DATE     DuckDB ok   PostgreSQL ok   ClickHouse rejects
+#     CURRENT_DATE()        DuckDB ok   PostgreSQL rejects   ClickHouse ok
+#
+# PostgreSQL treats it as a reserved keyword and refuses the parentheses;
+# ClickHouse has no bare keyword and refuses their absence. It is the one place
+# where one body genuinely cannot serve three engines, so it is data.
+@dataclass(frozen=True)
+class AnalyticsDialect:
+    """Where the order facts live for one engine, and how it says "today"."""
+
+    name: str
+    silver_orders: str
+    today: str
+
+
+DUCKDB_ANALYTICS = AnalyticsDialect(
+    name="duckdb", silver_orders="silver_orders", today="CURRENT_DATE",
+)
+
+CLICKHOUSE_ANALYTICS = AnalyticsDialect(
+    # `core/ch_silver.py` ships Silver under the same name Postgres uses.
+    name="clickhouse", silver_orders="silver.orders", today="CURRENT_DATE()",
+)
+
+
+# Everything else in this body was run on DuckDB 1.5.5 and ClickHouse
+# 24.8.14.39 against the same rows: `DATE_TRUNC`, `DATEDIFF`, `median`,
+# `FILTER (WHERE …)`, CTEs, `COUNT(DISTINCT …)` and `ROUND` all agree, and
+# `substring(CAST(x AS VARCHAR), 1, 7)` returns the same month label on both —
+# which is why it stands where DuckDB's own `strftime` used to.
+_COHORT_RETENTION_BODY = """
+            WITH customer_cohorts AS (
+                -- Each customer's first order month is their cohort.
+                SELECT
+                    o.buyer_id,
+                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
+                FROM {silver_orders} o
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  {sales_type_filter}
+                GROUP BY o.buyer_id
+            ),
+            customer_orders AS (
+                SELECT DISTINCT
+                    o.buyer_id,
+                    c.cohort_month,
+                    DATEDIFF('month', c.cohort_month,
+                             DATE_TRUNC('month', o.order_date)) AS months_since
+                FROM {silver_orders} o
+                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
+                WHERE NOT o.is_return
+                  {sales_type_filter}
+            ),
+            cohort_sizes AS (
+                SELECT cohort_month, COUNT(DISTINCT buyer_id) AS size
+                FROM customer_cohorts
+                GROUP BY cohort_month
+            ),
+            retention_data AS (
+                SELECT
+                    r.cohort_month,
+                    r.months_since,
+                    COUNT(DISTINCT r.buyer_id) AS retained_customers
+                FROM customer_orders r
+                WHERE r.months_since <= ?
+                GROUP BY r.cohort_month, r.months_since
+            )
+            SELECT
+                substring(CAST(r.cohort_month AS VARCHAR), 1, 7) AS cohort,
+                s.size AS cohort_size,
+                r.months_since AS month_number,
+                r.retained_customers,
+                ROUND(100.0 * r.retained_customers / s.size, 1) AS retention_pct
+            FROM retention_data r
+            JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
+            WHERE r.cohort_month
+                  >= DATE_TRUNC('month', {today}) - INTERVAL '{months_back} months'
+            ORDER BY r.cohort_month DESC, r.months_since
+"""
+
+
+def cohort_retention_select(
+    dialect: AnalyticsDialect, *, sales_type_filter: str, months_back: int,
+) -> str:
+    """The retention matrix, rendered for one engine.
+
+    `months_back` is interpolated rather than bound because an interval cannot
+    be parameterised in either engine; it is an int by construction and never
+    user text. The retention horizon *is* bound, as the single `?`.
+    """
+    return _COHORT_RETENTION_BODY.format(
+        silver_orders=dialect.silver_orders,
+        today=dialect.today,
+        sales_type_filter=sales_type_filter,
+        months_back=int(months_back),
+    )

@@ -130,6 +130,9 @@ def _compare_groups(
     }
 
 from core.sms_holdout import assign_arm
+from core.sql_dialect import (
+    CLICKHOUSE_ANALYTICS, DUCKDB_ANALYTICS, cohort_retention_select,
+)
 from core.pg_sms import refuse_while_unported, sms_store_is_postgres
 from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
 
@@ -678,56 +681,41 @@ class CustomersMixin:
                 else f"AND o.sales_type = '{sales_type}'"
             )
 
-            query = f"""
-            WITH customer_cohorts AS (
-                -- Get each customer's first order month (their cohort)
-                SELECT
-                    o.buyer_id,
-                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
-                FROM silver_orders o
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
-                  {sales_type_filter}
-                GROUP BY o.buyer_id
-            ),
-            customer_orders AS (
-                -- Get all order months per customer
-                SELECT DISTINCT
-                    o.buyer_id,
-                    c.cohort_month,
-                    DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date)) AS months_since
-                FROM silver_orders o
-                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
-                WHERE NOT o.is_return
-                  {sales_type_filter}
-            ),
-            cohort_sizes AS (
-                SELECT cohort_month, COUNT(DISTINCT buyer_id) AS size
-                FROM customer_cohorts
-                GROUP BY cohort_month
-            ),
-            retention_data AS (
-                SELECT
-                    r.cohort_month,
-                    r.months_since,
-                    COUNT(DISTINCT r.buyer_id) AS retained_customers
-                FROM customer_orders r
-                WHERE r.months_since <= ?
-                GROUP BY r.cohort_month, r.months_since
-            )
-            SELECT
-                substring(CAST(r.cohort_month AS VARCHAR), 1, 7) as cohort,
-                s.size as cohort_size,
-                r.months_since as month_number,
-                r.retained_customers,
-                ROUND(100.0 * r.retained_customers / s.size, 1) as retention_pct
-            FROM retention_data r
-            JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
-            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE()) - INTERVAL '{int(months_back)} months'
-            ORDER BY r.cohort_month DESC, r.months_since
-            """
+            # ClickHouse when the flag says so and the store is configured,
+            # DuckDB otherwise. Decided before any connection is taken: a read
+            # bound for another engine must not queue behind DuckDB's single
+            # writer, §34's invariant.
+            from core import ch_cohorts
 
-            rows = conn.execute(query, [retention_months]).fetchall()
+            if ch_cohorts.enabled() and ch_cohorts.available():
+                query = cohort_retention_select(
+                    CLICKHOUSE_ANALYTICS,
+                    sales_type_filter=sales_type_filter,
+                    months_back=months_back,
+                )
+                try:
+                    rows = await ch_cohorts.fetch(
+                        query, [retention_months], ch_cohorts.RETENTION_TYPES,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # ClickHouse is optional here — nothing may depend on it
+                    # being up — so a fault costs the engine, not the tab.
+                    logger.error(
+                        "cohort retention: ClickHouse failed, falling back to "
+                        "DuckDB: %s", exc, exc_info=True,
+                    )
+                    rows = None
+            else:
+                rows = None
+
+            if rows is None:
+                query = cohort_retention_select(
+                    DUCKDB_ANALYTICS,
+                    sales_type_filter=sales_type_filter,
+                    months_back=months_back,
+                )
+                async with self.connection() as conn:
+                    rows = conn.execute(query, [retention_months]).fetchall()
 
             # Build cohort data structure
             cohorts = {}

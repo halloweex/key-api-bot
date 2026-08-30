@@ -121,11 +121,28 @@ class TestTheOneSpellingThatCannotBeShared:
     hole rather than a literal.
     """
 
+    def test_the_extracted_body_renders_each_engine_its_own_today(self):
+        """`cohort_retention_select` left the method, so the check follows it:
+        the hole exists precisely because no literal serves both."""
+        from core.sql_dialect import (
+            CLICKHOUSE_ANALYTICS, DUCKDB_ANALYTICS, cohort_retention_select,
+        )
+
+        kw = dict(sales_type_filter="AND o.sales_type = 'retail'", months_back=12)
+        duck = cohort_retention_select(DUCKDB_ANALYTICS, **kw)
+        clickhouse = cohort_retention_select(CLICKHOUSE_ANALYTICS, **kw)
+
+        assert "CURRENT_DATE)" in duck and "CURRENT_DATE()" not in duck
+        assert "CURRENT_DATE())" in clickhouse
+        # …and the table name is the only other difference.
+        assert clickhouse.replace("silver.orders", "silver_orders").replace(
+            "CURRENT_DATE()", "CURRENT_DATE") == duck
+
     @pytest.mark.parametrize("name", FIVE)
     def test_the_cohort_queries_use_the_form_clickhouse_accepts(self, name):
         code = _statements(name)
         if "CURRENT_DATE" not in code:
-            pytest.skip("this one does not ask for today's date")
+            pytest.skip("its query has moved to core/sql_dialect.py")
         assert "CURRENT_DATE()" in code
         bare = code.replace("CURRENT_DATE()", "")
         assert "CURRENT_DATE" not in bare, (
