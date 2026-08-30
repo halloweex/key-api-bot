@@ -129,7 +129,6 @@ def _compare_groups(
         "incrementalMarginTotal": round(margin_per_contact * t_n, 2),
     }
 
-from core.duckdb_constants import B2B_MANAGER_ID, RETAIL_MANAGER_IDS
 from core.sms_holdout import assign_arm
 from core.pg_sms import refuse_while_unported, sms_store_is_postgres
 from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
@@ -662,14 +661,22 @@ class CustomersMixin:
         """
         async with self.connection() as conn:
             # Build sales type filter
-            sales_type_filter = ""
-            if sales_type == "retail":
-                sales_type_filter = f"""
-                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
-                         OR (o.manager_id IS NULL AND o.source_id = 4))
-                """
-            elif sales_type == "b2b":
-                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+            # Silver already carries `sales_type`, materialised per order by the
+            # one CASE in `refresh_warehouse_layers`. These five methods used to
+            # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+            # was a second home for the rule and had gone stale in two ways:
+            # it required `source_id = 4` for a manager-less order where Silver
+            # requires nothing, and it read the *constant* list rather than
+            # `managers.is_retail`, which is what a human edits. Measured on
+            # production: 1,781 non-return orders are retail to every other tab
+            # and were invisible here, and 175 were the other way round.
+            #
+            # It is also the only spelling that can be asked of a third engine:
+            # a column, not a manager list rendered into SQL.
+            sales_type_filter = (
+                "" if sales_type == "all"
+                else f"AND o.sales_type = '{sales_type}'"
+            )
 
             query = f"""
             WITH customer_cohorts AS (
@@ -795,14 +802,22 @@ class CustomersMixin:
         """
         async with self.connection() as conn:
             # Build sales type filter
-            sales_type_filter = ""
-            if sales_type == "retail":
-                sales_type_filter = f"""
-                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
-                         OR (o.manager_id IS NULL AND o.source_id = 4))
-                """
-            elif sales_type == "b2b":
-                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+            # Silver already carries `sales_type`, materialised per order by the
+            # one CASE in `refresh_warehouse_layers`. These five methods used to
+            # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+            # was a second home for the rule and had gone stale in two ways:
+            # it required `source_id = 4` for a manager-less order where Silver
+            # requires nothing, and it read the *constant* list rather than
+            # `managers.is_retail`, which is what a human edits. Measured on
+            # production: 1,781 non-return orders are retail to every other tab
+            # and were invisible here, and 175 were the other way round.
+            #
+            # It is also the only spelling that can be asked of a third engine:
+            # a column, not a manager list rendered into SQL.
+            sales_type_filter = (
+                "" if sales_type == "all"
+                else f"AND o.sales_type = '{sales_type}'"
+            )
 
             query = f"""
             WITH customer_first_order AS (
@@ -1122,14 +1137,22 @@ class CustomersMixin:
         """
         async with self.connection() as conn:
             # Build sales type filter
-            sales_type_filter = ""
-            if sales_type == "retail":
-                sales_type_filter = f"""
-                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
-                         OR (o.manager_id IS NULL AND o.source_id = 4))
-                """
-            elif sales_type == "b2b":
-                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+            # Silver already carries `sales_type`, materialised per order by the
+            # one CASE in `refresh_warehouse_layers`. These five methods used to
+            # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+            # was a second home for the rule and had gone stale in two ways:
+            # it required `source_id = 4` for a manager-less order where Silver
+            # requires nothing, and it read the *constant* list rather than
+            # `managers.is_retail`, which is what a human edits. Measured on
+            # production: 1,781 non-return orders are retail to every other tab
+            # and were invisible here, and 175 were the other way round.
+            #
+            # It is also the only spelling that can be asked of a third engine:
+            # a column, not a manager list rendered into SQL.
+            sales_type_filter = (
+                "" if sales_type == "all"
+                else f"AND o.sales_type = '{sales_type}'"
+            )
 
             query = f"""
             WITH customer_orders_ranked AS (
@@ -1241,14 +1264,22 @@ class CustomersMixin:
         """
         async with self.connection() as conn:
             # Build sales type filter
-            sales_type_filter = ""
-            if sales_type == "retail":
-                sales_type_filter = f"""
-                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
-                         OR (o.manager_id IS NULL AND o.source_id = 4))
-                """
-            elif sales_type == "b2b":
-                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+            # Silver already carries `sales_type`, materialised per order by the
+            # one CASE in `refresh_warehouse_layers`. These five methods used to
+            # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+            # was a second home for the rule and had gone stale in two ways:
+            # it required `source_id = 4` for a manager-less order where Silver
+            # requires nothing, and it read the *constant* list rather than
+            # `managers.is_retail`, which is what a human edits. Measured on
+            # production: 1,781 non-return orders are retail to every other tab
+            # and were invisible here, and 175 were the other way round.
+            #
+            # It is also the only spelling that can be asked of a third engine:
+            # a column, not a manager list rendered into SQL.
+            sales_type_filter = (
+                "" if sales_type == "all"
+                else f"AND o.sales_type = '{sales_type}'"
+            )
 
             query = f"""
             WITH customer_cohorts AS (
@@ -1372,14 +1403,22 @@ class CustomersMixin:
         """
         async with self.connection() as conn:
             # Build sales type filter
-            sales_type_filter = ""
-            if sales_type == "retail":
-                sales_type_filter = f"""
-                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
-                         OR (o.manager_id IS NULL AND o.source_id = 4))
-                """
-            elif sales_type == "b2b":
-                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+            # Silver already carries `sales_type`, materialised per order by the
+            # one CASE in `refresh_warehouse_layers`. These five methods used to
+            # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+            # was a second home for the rule and had gone stale in two ways:
+            # it required `source_id = 4` for a manager-less order where Silver
+            # requires nothing, and it read the *constant* list rather than
+            # `managers.is_retail`, which is what a human edits. Measured on
+            # production: 1,781 non-return orders are retail to every other tab
+            # and were invisible here, and 175 were the other way round.
+            #
+            # It is also the only spelling that can be asked of a third engine:
+            # a column, not a manager list rendered into SQL.
+            sales_type_filter = (
+                "" if sales_type == "all"
+                else f"AND o.sales_type = '{sales_type}'"
+            )
 
             churn_threshold = days_threshold * 2
 
