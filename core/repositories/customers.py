@@ -129,6 +129,7 @@ def _compare_groups(
     }
 
 from core.duckdb_constants import B2B_MANAGER_ID, RETAIL_MANAGER_IDS
+from core.sms_holdout import assign_arm
 
 # Tier cut-offs per LTV basis for get_sms_segments.
 #
@@ -2531,8 +2532,6 @@ class CustomersMixin:
                 CASE WHEN last_order_item_count > 3
                      THEN last_order_items || ' +' || (last_order_item_count - 3) || ' ещё'
                      ELSE last_order_items END AS last_order_items,
-                CASE WHEN hash(buyer_id::VARCHAR || '|' || ?) % 100 < ?
-                     THEN 'holdout' ELSE 'target' END AS assignment,
                 f_customers, f_in_window, f_filtered, f_tiered, f_phone,
                 f_subscribed, f_eligible
             -- RIGHT JOIN, not CROSS: when nothing survives the filters the
@@ -2542,10 +2541,11 @@ class CustomersMixin:
             ORDER BY tier, ltv DESC, buyer_id
             """
 
-            # Bound in textual order of the `?` placeholders above.
             # Bound in textual order of the `?` placeholders above: the line
             # items filter, the level CASE, the recency window, the audience
-            # predicate, the level subset, then the holdout split.
+            # predicate, then the level subset. The holdout split is not among
+            # them — it is `core.sms_holdout`, in Python, so that this store and
+            # Postgres cannot disagree about who was withheld.
             params: list = []
             if sales_type != "all":
                 params.append(sales_type)
@@ -2554,7 +2554,6 @@ class CustomersMixin:
             params += filter_params
             if tiers:
                 params += tiers
-            params += [campaign, holdout_pct]
 
             rows = conn.execute(query, params).fetchall()
 
@@ -2565,7 +2564,6 @@ class CustomersMixin:
              revenue_ltv, margin_ltv, margin_pct, cost_coverage,
              recency, last_order, first_order,
              last_order_id, last_order_total, last_order_item_count, last_order_items,
-             assignment,
              f_customers, f_in_window, f_filtered, f_tiered, f_phone, f_subscribed,
              f_eligible) in rows:
             funnel_counts = (f_customers, f_in_window, f_filtered, f_tiered,
@@ -2573,6 +2571,8 @@ class CustomersMixin:
             # The funnel row survives the RIGHT JOIN even when no customer does.
             if buyer_id is None:
                 continue
+
+            assignment = assign_arm(buyer_id, campaign, holdout_pct)
 
             stats = tiers.setdefault(row_tier, {
                 "tier": row_tier, "total": 0, "target": 0, "holdout": 0,
