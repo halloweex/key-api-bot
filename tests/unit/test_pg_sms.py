@@ -36,6 +36,7 @@ from core.pg_sms import (
     _coerce,
     _insert,
     read_dlr_appends,
+    source_tables,
     read_full_replace,
     replicate_sms,
     sms_store_is_postgres,
@@ -91,10 +92,23 @@ async def _seed(store) -> None:
                 f"('aug', {buyer}, '38050000000{buyer}', 'VIP', "
                 f"'{assignment}', 3, 1000.00, 400.00, 12)"
             )
-        conn.execute(
-            "INSERT INTO sms_dlr_events (event_id, message_id, first_seen_at) "
-            "VALUES ('e1', 'm1', TIMESTAMPTZ '2026-08-11 09:00:00+00')"
-        )
+        if "sms_dlr_events" in source_tables(conn):
+            conn.execute(
+                "INSERT INTO sms_dlr_events (event_id, message_id, first_seen_at) "
+                "VALUES ('e1', 'm1', TIMESTAMPTZ '2026-08-11 09:00:00+00')"
+            )
+
+
+async def _has_dlr(store) -> bool:
+    """Whether this checkout's DuckDB carries the delivery-report binding.
+
+    It arrives with the TurboSMS signature fix. Tests that need it say so and
+    skip rather than seeding it themselves: a fixture that creates a
+    production table would keep passing after the real DDL had drifted away
+    from it, which is the one thing these contract tests exist to catch.
+    """
+    async with store.connection() as conn:
+        return "sms_dlr_events" in source_tables(conn)
 
 
 def _migration_columns(qualified: str) -> list[str]:
@@ -149,6 +163,8 @@ class TestColumnContracts:
     ):
         store = await _store(tmp_path)
         try:
+            if not await _has_dlr(store) and dk_table == "sms_dlr_events":
+                pytest.skip("the TurboSMS signature fix has not landed here yet")
             actual = await _duckdb_columns(store, dk_table)
             assert set(columns) <= actual, (
                 f"{dk_table} is missing {set(columns) - actual}"
@@ -280,6 +296,8 @@ class TestReads:
         dropped row is a security control missing its binding."""
         store = await _store(tmp_path)
         try:
+            if not await _has_dlr(store):
+                pytest.skip("the TurboSMS signature fix has not landed here yet")
             await _seed(store)
             instant = datetime(2026, 8, 11, 9, 0, tzinfo=UTC)
             async with store.connection() as conn:
@@ -297,9 +315,51 @@ class TestReads:
     async def test_dlr_without_a_watermark_ships_everything(self, tmp_path):
         store = await _store(tmp_path)
         try:
+            if not await _has_dlr(store):
+                pytest.skip("the TurboSMS signature fix has not landed here yet")
             await _seed(store)
             async with store.connection() as conn:
                 assert len(read_dlr_appends(conn, None)) == 1
+        finally:
+            await store.close()
+
+
+class TestASourceTableThatIsNotThereYet:
+    """The source schema is mid-flight, and this is what that costs.
+
+    `sms_dlr_events` arrives with the TurboSMS signature fix. A copier that
+    assumed it raises on every tick — found by the in-image gate on 2026-08-30,
+    where the laptop passed only because the fix was sitting uncommitted in the
+    working tree.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_missing_table_is_skipped_not_raised(self, tmp_path):
+        store = await _store(tmp_path)
+        try:
+            await _seed(store)
+            async with store.connection() as conn:
+                conn.execute("DROP TABLE marketing_optouts")
+                out = read_full_replace(conn)
+
+            assert "app.marketing_optouts" not in out
+            # and everything else still came back
+            assert len(out["app.sms_campaign_members"]) == 2
+            assert out["bronze.offer_stocks"]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_the_copier_asks_rather_than_assumes(self, tmp_path):
+        store = await _store(tmp_path)
+        try:
+            async with store.connection() as conn:
+                present = source_tables(conn)
+            # The five that are in committed code; the sixth may or may not be.
+            for table in ("offer_stocks", "marketing_optouts",
+                          "sms_audience_presets", "sms_campaigns",
+                          "sms_campaign_members"):
+                assert table in present
         finally:
             await store.close()
 

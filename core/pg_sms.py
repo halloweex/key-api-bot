@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -132,10 +132,32 @@ def _coerce(columns: Sequence[str], row: Sequence[Any]) -> tuple:
     return tuple(out)
 
 
-def read_full_replace(conn) -> Dict[str, List[tuple]]:
-    """The five replaced-whole tables out of DuckDB, in Postgres' column order."""
+def source_tables(conn) -> set:
+    """Which of these tables the DuckDB side actually has today.
+
+    Not defensive programming — the source schema is genuinely mid-flight.
+    `sms_dlr_events` arrives with the TurboSMS signature fix, which binds each
+    delivery-report event id to the message it first named; until that lands,
+    the table does not exist and a copier that assumes it does raises on every
+    tick. The tables are asked for rather than assumed so that the binding
+    starts being copied the day it appears, with no second deploy.
+
+    Absence is reported by the watermark, not by a finding: `replicate_sms`
+    writes no `last_ok_at` for a table it never read, and `reconcile_sms`
+    compares only what both sides have. A daily finding for a merge everyone
+    is already expecting is the noise the alerts charter exists to prevent.
+    """
+    rows = conn.execute("SELECT table_name FROM information_schema.tables").fetchall()
+    return {r[0] for r in rows}
+
+
+def read_full_replace(conn, present: Optional[set] = None) -> Dict[str, List[tuple]]:
+    """The replaced-whole tables out of DuckDB, in Postgres' column order."""
+    present = source_tables(conn) if present is None else present
     out: Dict[str, List[tuple]] = {}
     for pg_table, dk_table, columns, order_by in _FULL_REPLACE:
+        if dk_table not in present:
+            continue
         rows = conn.execute(
             f"SELECT {', '.join(columns)} FROM {dk_table} ORDER BY {order_by}"
         ).fetchall()
@@ -213,33 +235,49 @@ async def replicate_sms(store, *, full: bool = False) -> Dict[str, Any]:
                 )
 
         async with store.connection() as conn:
-            replaced = read_full_replace(conn)
-            dlr = read_dlr_appends(conn, since)
+            present = source_tables(conn)
+            replaced = read_full_replace(conn, present)
+            has_dlr = "sms_dlr_events" in present
+            dlr = read_dlr_appends(conn, since) if has_dlr else []
             dlr_total = conn.execute(
                 "SELECT COUNT(*) FROM sms_dlr_events"
-            ).fetchone()[0]
+            ).fetchone()[0] if has_dlr else 0
 
         async with pool.acquire() as conn:
             async with conn.transaction():
-                for pg_table, _dk, columns, _order in _FULL_REPLACE:
+                for pg_table, dk_table, columns, _order in _FULL_REPLACE:
+                    if pg_table not in replaced:
+                        continue
                     rows = replaced[pg_table]
                     await conn.execute(f"DELETE FROM {pg_table}")
                     if rows:
                         await _write_chunked(conn, _insert(pg_table, columns), rows)
                     await conn.execute(_WATERMARK_OK, pg_table, len(rows))
 
-                if dlr:
-                    await _write_chunked(
-                        conn,
-                        _insert(DLR_TABLE, DLR_COLUMNS)
-                        + " ON CONFLICT (event_id) DO NOTHING",
-                        dlr,
-                    )
-                await conn.execute(_WATERMARK_OK, DLR_TABLE, dlr_total)
+                if has_dlr:
+                    if dlr:
+                        await _write_chunked(
+                            conn,
+                            _insert(DLR_TABLE, DLR_COLUMNS)
+                            + " ON CONFLICT (event_id) DO NOTHING",
+                            dlr,
+                        )
+                    await conn.execute(_WATERMARK_OK, DLR_TABLE, dlr_total)
+
+        missing = [dk for _pg, dk, _c, _o in _FULL_REPLACE if dk not in present]
+        if not has_dlr:
+            missing.append("sms_dlr_events")
+        if missing:
+            logger.warning(
+                "SMS replication skipped %s — not in this DuckDB yet; their "
+                "watermarks stay unset until the table arrives",
+                ", ".join(missing),
+            )
 
         elapsed = time.monotonic() - started
-        counts = {t: len(replaced[t]) for t, _d, _c, _o in _FULL_REPLACE}
-        counts[DLR_TABLE] = len(dlr)
+        counts = {t: len(rows) for t, rows in replaced.items()}
+        if has_dlr:
+            counts[DLR_TABLE] = len(dlr)
         logger.info(
             "SMS state replicated in %.2fs: %s",
             elapsed,

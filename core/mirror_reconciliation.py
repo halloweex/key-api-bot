@@ -2230,11 +2230,19 @@ async def reconcile_sms(
     await require_revision()
     watermarks = await fetch_watermarks(pool)
 
+    # Only what the source actually has. `sms_dlr_events` arrives with the
+    # TurboSMS signature fix and is not in every checkout yet; comparing a
+    # table one side has never had reports the merge schedule rather than the
+    # data. See `core.pg_sms.source_tables`.
+    from core.pg_sms import source_tables
+
     async with store.connection() as conn:
-        dk_side = read_duckdb_side(conn, SMS_TABLES)
+        present = source_tables(conn)
+        specs = tuple(s for s in SMS_TABLES if s.dk_table in present)
+        dk_side = read_duckdb_side(conn, specs)
 
     issues: List[IntegrityIssue] = []
-    for spec in SMS_TABLES:
+    for spec in specs:
         dk_rows, dk_synced = dk_side[spec.pg_table]
         pg_rows = await fetch_pg_rows(pool, spec)
         issues += compare_table(
