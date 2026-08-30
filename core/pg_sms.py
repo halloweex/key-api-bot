@@ -1,0 +1,284 @@
+"""The SMS tab's state, copied into Postgres.
+
+Revision 0013's six tables, filled. Five are REPLICATED in
+`core/pg_operational.py`'s sense — derived from state only DuckDB holds, with
+no payload to re-parse, so a second computation here would diverge the first
+time either side missed a tick. The sixth, `bronze.offer_stocks`, is landing
+data and would be a legitimate mirror; it is replicated anyway, for the lesson
+`update_manager_stats` taught at the cost of a daily CRITICAL: **one scheduled
+job and exactly one call site**. Hooking the write path is how the next write
+path gets forgotten.
+
+WHY THIS EXISTS AT ALL, GIVEN THAT POSTGRES IS MEANT TO BECOME THE WRITER
+
+It is transitional scaffolding, and saying so is what keeps it from becoming
+permanent. While DuckDB still writes campaigns and opt-outs, any Postgres-side
+answer about them is wrong the moment it is stale — so the copy has to be
+current before a single read can move. Once the writer moves, this stands down
+the way `replicate_bot_state` does under `KS_BOT_STORE=postgres`: a full
+replace running after the switch would roll back every opt-out recorded since
+it, once an hour, looking fine in between.
+
+THE FRESHNESS STAMP, WHICH IS THE ONE NON-OBVIOUS PART
+
+The comparison forgives a row still in flight, and to do that it needs to know
+when the row last changed. Four of the six carry that directly. Members do not:
+`record_sms_send` writes `message_id` and `delivery_status` onto the member row
+with no timestamp of its own.
+
+It stamps the *campaign* in the same transaction, though, and that is enough.
+The three write paths and where each leaves a mark:
+
+    freeze_sms_campaign   → sms_campaigns.exported_at
+    record_sms_send       → sms_campaigns.sent_at   (same transaction)
+    record_sms_delivery   → sms_campaign_members.delivered_at
+
+so the row's clock is `delivered_at`, falling back to its campaign's
+`sent_at`, falling back to `exported_at`. Read through a correlated subquery
+rather than a join, because `read_duckdb_side` selects the stamp as one extra
+expression on a single-table SELECT. The alternative was adding `updated_at` to
+a live DuckDB table on the way out of that store, which is a schema change
+bought to describe rows that are about to stop being written there.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any, Dict, List, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
+
+OFFER_STOCKS_TABLE = "bronze.offer_stocks"
+OPTOUTS_TABLE = "app.marketing_optouts"
+PRESETS_TABLE = "app.sms_audience_presets"
+CAMPAIGNS_TABLE = "app.sms_campaigns"
+MEMBERS_TABLE = "app.sms_campaign_members"
+DLR_TABLE = "app.sms_dlr_events"
+
+# The shared contract per table: the columns both stores hold and compare.
+# Bookkeeping is excluded by construction — DuckDB stamps `synced_at`,
+# Postgres `mirrored_at`, and two correct copies differ on those.
+OFFER_STOCK_COLUMNS: Tuple[str, ...] = (
+    "id", "sku", "price", "purchased_price", "quantity", "reserve",
+)
+
+OPTOUT_COLUMNS: Tuple[str, ...] = (
+    "buyer_id", "channel", "phone", "reason", "source", "opted_out_at",
+)
+
+PRESET_COLUMNS: Tuple[str, ...] = (
+    "name", "criteria", "created_by", "created_at", "updated_at",
+)
+
+CAMPAIGN_COLUMNS: Tuple[str, ...] = (
+    "campaign", "ltv_basis", "sales_type", "holdout_pct", "criteria",
+    "promocode", "exported_at", "sent_at", "notes", "message_text",
+    "message_parts", "recipients_sent", "price_per_part", "cost_total",
+)
+
+MEMBER_COLUMNS: Tuple[str, ...] = (
+    "campaign", "buyer_id", "phone", "tier", "assignment", "orders_at_export",
+    "revenue_ltv_at_export", "margin_ltv_at_export", "recency_at_export",
+    "message_id", "delivery_status", "delivered", "delivered_at",
+)
+
+DLR_COLUMNS: Tuple[str, ...] = ("event_id", "message_id", "first_seen_at")
+
+# See the module docstring. Selected as one extra expression beside the row.
+MEMBER_STAMP = (
+    "COALESCE(delivered_at, (SELECT COALESCE(c.sent_at, c.exported_at) "
+    "FROM sms_campaigns c WHERE c.campaign = sms_campaign_members.campaign))"
+)
+
+# (postgres table, duckdb table, columns, ORDER BY). Spelled out rather than
+# derived by stripping the schema: `bronze.offer_stocks` and `offer_stocks`
+# happen to agree, `app.marketing_optouts` and `marketing_optouts` too, but a
+# rule that guesses a table name is a rule that will guess wrong.
+_FULL_REPLACE: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
+    (OFFER_STOCKS_TABLE, "offer_stocks", OFFER_STOCK_COLUMNS, "id"),
+    (OPTOUTS_TABLE, "marketing_optouts", OPTOUT_COLUMNS, "buyer_id, channel"),
+    (PRESETS_TABLE, "sms_audience_presets", PRESET_COLUMNS, "name"),
+    (CAMPAIGNS_TABLE, "sms_campaigns", CAMPAIGN_COLUMNS, "campaign"),
+    (MEMBERS_TABLE, "sms_campaign_members", MEMBER_COLUMNS, "campaign, buyer_id"),
+)
+
+CHUNK = 5000
+
+
+def _insert(table: str, columns: Sequence[str]) -> str:
+    values = ", ".join(f"${i}" for i in range(1, len(columns) + 1))
+    return f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({values})"
+
+
+async def _write_chunked(conn, sql: str, rows: Sequence[tuple]) -> None:
+    for start in range(0, len(rows), CHUNK):
+        await conn.executemany(sql, rows[start:start + CHUNK])
+
+
+def _coerce(columns: Sequence[str], row: Sequence[Any]) -> tuple:
+    """DuckDB's shapes into asyncpg's.
+
+    One column needs it and the reason is revision 0009's: asyncpg refuses an
+    int where a BOOLEAN is declared, and `delivered` is written by handlers
+    that have historically used 1/0 for booleans elsewhere in this codebase.
+    NULL survives as NULL — it is the third state, "the operator has not
+    reported yet", and coercing it to False would move every pending recipient
+    into the failed bucket of a table whose only purpose is measuring a number.
+    """
+    out = list(row)
+    for i, name in enumerate(columns):
+        if name == "delivered" and out[i] is not None:
+            out[i] = bool(out[i])
+    return tuple(out)
+
+
+def read_full_replace(conn) -> Dict[str, List[tuple]]:
+    """The five replaced-whole tables out of DuckDB, in Postgres' column order."""
+    out: Dict[str, List[tuple]] = {}
+    for pg_table, dk_table, columns, order_by in _FULL_REPLACE:
+        rows = conn.execute(
+            f"SELECT {', '.join(columns)} FROM {dk_table} ORDER BY {order_by}"
+        ).fetchall()
+        out[pg_table] = [_coerce(columns, r) for r in rows]
+    return out
+
+
+def read_dlr_appends(conn, since) -> List[tuple]:
+    """The delivery-report bindings Postgres does not have yet.
+
+    `>=` and not `>`, `inventory_sku_history`'s reason: several events can share
+    one `first_seen_at`, so a strict comparison drops every binding that landed
+    in the same instant as the watermark. Re-shipping the boundary costs a
+    conflict the insert already ignores; skipping it costs a security control
+    its row.
+    """
+    if since is None:
+        rows = conn.execute(
+            f"SELECT {', '.join(DLR_COLUMNS)} FROM sms_dlr_events "
+            "ORDER BY first_seen_at, event_id"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT {', '.join(DLR_COLUMNS)} FROM sms_dlr_events "
+            "WHERE first_seen_at >= ? ORDER BY first_seen_at, event_id",
+            [since],
+        ).fetchall()
+    return [tuple(r) for r in rows]
+
+
+async def replicate_sms(store, *, full: bool = False) -> Dict[str, Any]:
+    """Copy all six tables from DuckDB to Postgres. Never raises.
+
+    `full=True` ignores the delivery-report watermark and re-ships the whole
+    binding table. It is the repair path for a finding the daily comparison
+    raised — a row lost *below* the watermark is invisible to `first_seen_at >=
+    MAX(first_seen_at)` forever — and it is never taken on a schedule.
+
+    The DuckDB reads and the Postgres round trips are in separate blocks:
+    the store's lock is not reentrant and every other reader waits behind it,
+    so awaiting the network while holding it would stall the dashboard for the
+    length of the copy.
+
+    The watermark is read **before** the DuckDB read, so a binding written
+    between the two is re-shipped rather than skipped. The other order loses
+    rows; this one costs a duplicate the `ON CONFLICT DO NOTHING` absorbs.
+    """
+    from core.mirror_reconciliation import configured
+
+    if not configured():
+        return {"skipped": "KS_PG_DSN is not set"}
+
+    # The guard `replicate_bot_state` earned. Once Postgres is the writer, a
+    # full replace out of DuckDB rolls back every opt-out and every delivery
+    # report recorded since the switch — once an hour, looking healthy in
+    # between, and an opt-out rolled back is a message sent to somebody who
+    # asked not to receive one.
+    if sms_store_is_postgres():
+        return {"skipped": "KS_SMS_STORE=postgres — DuckDB is no longer the writer"}
+
+    started = time.monotonic()
+    try:
+        from core.pg import get_pool, require_revision
+        from core.pg_landing import _WATERMARK_OK
+
+        pool = await get_pool()
+        await require_revision()
+
+        if full:
+            since = None
+        else:
+            async with pool.acquire() as conn:
+                since = await conn.fetchval(
+                    f"SELECT MAX(first_seen_at) FROM {DLR_TABLE}"
+                )
+
+        async with store.connection() as conn:
+            replaced = read_full_replace(conn)
+            dlr = read_dlr_appends(conn, since)
+            dlr_total = conn.execute(
+                "SELECT COUNT(*) FROM sms_dlr_events"
+            ).fetchone()[0]
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for pg_table, _dk, columns, _order in _FULL_REPLACE:
+                    rows = replaced[pg_table]
+                    await conn.execute(f"DELETE FROM {pg_table}")
+                    if rows:
+                        await _write_chunked(conn, _insert(pg_table, columns), rows)
+                    await conn.execute(_WATERMARK_OK, pg_table, len(rows))
+
+                if dlr:
+                    await _write_chunked(
+                        conn,
+                        _insert(DLR_TABLE, DLR_COLUMNS)
+                        + " ON CONFLICT (event_id) DO NOTHING",
+                        dlr,
+                    )
+                await conn.execute(_WATERMARK_OK, DLR_TABLE, dlr_total)
+
+        elapsed = time.monotonic() - started
+        counts = {t: len(replaced[t]) for t, _d, _c, _o in _FULL_REPLACE}
+        counts[DLR_TABLE] = len(dlr)
+        logger.info(
+            "SMS state replicated in %.2fs: %s",
+            elapsed,
+            ", ".join(f"{t.split('.')[-1]}={n}" for t, n in counts.items()),
+        )
+        return {"tables": counts, "elapsed_s": round(elapsed, 3), "full": full}
+
+    except Exception as exc:  # noqa: BLE001 — a copy must not take the tick down
+        logger.error("SMS replication failed: %s", exc, exc_info=True)
+        await _record_failure(str(exc))
+        return {"error": str(exc)}
+
+
+async def _record_failure(error: str) -> None:
+    """Leave the failure where the watermark check will find it.
+
+    Silence here is the failure mode that matters: the tables look present and
+    merely stop moving, which reads as "nothing happened" rather than "the copy
+    is broken".
+    """
+    from core.pg_landing import _record_failure as _landing_failure
+
+    for table in (*[t for t, _d, _c, _o in _FULL_REPLACE], DLR_TABLE):
+        await _landing_failure(table, error)
+
+
+def sms_store_is_postgres() -> bool:
+    """Which store answers `/sms`.
+
+    `KS_BOT_STORE`'s rule, for `KS_BOT_STORE`'s reason: an unknown value
+    raises rather than falling back. A typo in the one variable deciding where
+    six thousand names and phone numbers are read from should stop the
+    container, not quietly point it at the copy that is about to go stale.
+    """
+    import os
+
+    value = os.getenv("KS_SMS_STORE", "duckdb").strip().lower()
+    if value not in ("duckdb", "postgres"):
+        raise ValueError(
+            f"KS_SMS_STORE must be 'duckdb' or 'postgres', got {value!r}"
+        )
+    return value == "postgres"

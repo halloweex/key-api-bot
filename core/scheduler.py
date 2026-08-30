@@ -870,6 +870,15 @@ class BackgroundScheduler:
             from core.pg_buyers import hourly_ids_diff
 
             result["buyers_backfill"] = await hourly_ids_diff(store)
+            # The SMS tab's own state rides here for the same reason as the
+            # rest: one call site. Five of its six tables are irreplaceable —
+            # a frozen roster cannot be recomputed, because the eligible
+            # population moves every day — and the sixth carries the cost
+            # side of margin. Stands down on its own once
+            # KS_SMS_STORE=postgres makes DuckDB no longer the writer.
+            from core.pg_sms import replicate_sms
+
+            result["sms_state"] = await replicate_sms(store)
             if "skipped" not in result:
                 logger.info("Operational replication: %s", result)
             return result
@@ -1383,6 +1392,14 @@ class BackgroundScheduler:
                 # And the buyer landing — step 2. Same layer, same argument.
                 from core.mirror_reconciliation import reconcile_buyers
                 issues += await reconcile_buyers(store)
+                # And the SMS tab's own six (revision 0013), on the way to
+                # answering /sms without DuckDB. Five of them are irreplaceable
+                # in `stock_movements`' sense — a frozen roster cannot be
+                # recomputed, so a lost one costs a campaign its control group
+                # and with it any measurable lift. Stands down once
+                # KS_SMS_STORE=postgres freezes the DuckDB side.
+                from core.mirror_reconciliation import reconcile_sms
+                issues += await reconcile_sms(store)
                 # And the витрина, which rebuilds itself and then checks the
                 # materialisation against the same Silver snapshot.
                 from core.pg_vitrina import reconcile_customer_profile

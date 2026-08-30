@@ -97,6 +97,15 @@ from core.pg_operational import (
     SKU_STATUS_COLUMNS,
 )
 from core.pg_replication import CLASSIFICATION_COLUMNS, MANAGER_COLUMNS
+from core.pg_sms import (
+    CAMPAIGN_COLUMNS,
+    DLR_COLUMNS,
+    MEMBER_COLUMNS,
+    MEMBER_STAMP,
+    OFFER_STOCK_COLUMNS,
+    OPTOUT_COLUMNS,
+    PRESET_COLUMNS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2102,6 +2111,134 @@ async def reconcile_bot_state(
         pg_rows = await fetch_pg_rows(pool, spec)
         issues += compare_table(
             spec, rows, synced, pg_rows, watermarks.get(spec.pg_table),
+            now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+        )
+    return issues
+
+
+# ─── the SMS tab's state (revision 0013) ─────────────────────────────────────
+#
+# Six tables, all compared whole, and the reason none of them is fingerprinted
+# is size rather than principle: a campaign is capped at 5 000 recipients and
+# the roster tables are a few thousand rows between them. Fingerprinting exists
+# in this file for `stock_movements` and `inventory_sku_history`, where pulling
+# 143 274 rows out of both stores every morning is the thing being avoided.
+# When `sms_dlr_events` passes ~50 000 rows — roughly ten campaigns, since it
+# takes one row per delivery report and is never pruned — it should move to
+# `BucketedTable` alongside them.
+#
+# `full_replace` answers "what does a row DuckDB has and Postgres does not
+# *mean*", and for all six the answer is the same: lost. Five are replaced
+# whole every hour. `sms_dlr_events` ships above a watermark instead, but it is
+# append-only at the source — nothing ever deletes a binding — so a missing row
+# still cannot be a retirement. The flag is set for the meaning, not the
+# shipping shape.
+SMS_TABLES: Tuple[MirroredTable, ...] = (
+    MirroredTable(
+        pg_table="bronze.offer_stocks",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="offer_stocks",
+        columns=OFFER_STOCK_COLUMNS,
+        key_columns=("id",),
+        synced_column="synced_at",
+        numeric=("price", "purchased_price"),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.marketing_optouts",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="marketing_optouts",
+        columns=OPTOUT_COLUMNS,
+        key_columns=("buyer_id", "channel"),
+        # The row's own value doubles as its clock, `order_backfill_misses`'
+        # arrangement: an opt-out is written once and never revised.
+        synced_column="opted_out_at",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.sms_audience_presets",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="sms_audience_presets",
+        columns=PRESET_COLUMNS,
+        key_columns=("name",),
+        # `updated_at` is NULL until the preset is first edited, so the
+        # fallback is what dates an untouched one.
+        synced_column="COALESCE(updated_at, created_at)",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.sms_campaigns",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="sms_campaigns",
+        columns=CAMPAIGN_COLUMNS,
+        key_columns=("campaign",),
+        synced_column="COALESCE(sent_at, exported_at)",
+        numeric=("price_per_part", "cost_total"),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.sms_campaign_members",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="sms_campaign_members",
+        columns=MEMBER_COLUMNS,
+        key_columns=("buyer_id", "campaign"),
+        # The one table here with no clock of its own; see core/pg_sms.py.
+        # `buyer_id` leads the key so the drill-down's sample id is an integer.
+        synced_column=MEMBER_STAMP,
+        numeric=("revenue_ltv_at_export", "margin_ltv_at_export"),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.sms_dlr_events",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="sms_dlr_events",
+        columns=DLR_COLUMNS,
+        key_columns=("event_id",),
+        synced_column="first_seen_at",
+        full_replace=True,
+    ),
+)
+
+
+async def reconcile_sms(
+    store,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = OPERATIONAL_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Compare the SMS tab's six tables between DuckDB and Postgres.
+
+    Stands down once `KS_SMS_STORE=postgres`, and not because the comparison
+    would be expensive: after the switch DuckDB is a frozen artefact, so every
+    opt-out and every campaign recorded since would read as a discrepancy this
+    check itself created. `reconcile_bot_state` stands down beside
+    `replicate_bot_state` for exactly this reason.
+
+    Reports only. A "repair" here would mean writing a frozen roster from a
+    copy of it — and the roster is the campaign's only control group.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+    from core.pg_sms import sms_store_is_postgres
+
+    if not pg_landing.enabled() or sms_store_is_postgres():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    async with store.connection() as conn:
+        dk_side = read_duckdb_side(conn, SMS_TABLES)
+
+    issues: List[IntegrityIssue] = []
+    for spec in SMS_TABLES:
+        dk_rows, dk_synced = dk_side[spec.pg_table]
+        pg_rows = await fetch_pg_rows(pool, spec)
+        issues += compare_table(
+            spec, dk_rows, dk_synced, pg_rows, watermarks.get(spec.pg_table),
             now=now, grace_minutes=grace_minutes, max_samples=max_samples,
         )
     return issues
