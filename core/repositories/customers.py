@@ -129,6 +129,7 @@ def _compare_groups(
         "incrementalMarginTotal": round(margin_per_contact * t_n, 2),
     }
 
+from core.ch_cohorts import RETENTION_TYPES
 from core.sms_holdout import assign_arm
 from core.sql_dialect import (
     CLICKHOUSE_ANALYTICS, DUCKDB_ANALYTICS, cohort_retention_select,
@@ -662,110 +663,82 @@ class CustomersMixin:
         Returns:
             Dict with cohorts, retention matrix, and summary metrics
         """
-        async with self.connection() as conn:
-            # Build sales type filter
-            # Silver already carries `sales_type`, materialised per order by the
-            # one CASE in `refresh_warehouse_layers`. These five methods used to
-            # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
-            # was a second home for the rule and had gone stale in two ways:
-            # it required `source_id = 4` for a manager-less order where Silver
-            # requires nothing, and it read the *constant* list rather than
-            # `managers.is_retail`, which is what a human edits. Measured on
-            # production: 1,781 non-return orders are retail to every other tab
-            # and were invisible here, and 175 were the other way round.
-            #
-            # It is also the only spelling that can be asked of a third engine:
-            # a column, not a manager list rendered into SQL.
-            sales_type_filter = (
-                "" if sales_type == "all"
-                else f"AND o.sales_type = '{sales_type}'"
-            )
+        # Build sales type filter
+        # Silver already carries `sales_type`, materialised per order by the
+        # one CASE in `refresh_warehouse_layers`. These five methods used to
+        # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+        # was a second home for the rule and had gone stale in two ways:
+        # it required `source_id = 4` for a manager-less order where Silver
+        # requires nothing, and it read the *constant* list rather than
+        # `managers.is_retail`, which is what a human edits. Measured on
+        # production: 1,781 non-return orders are retail to every other tab
+        # and were invisible here, and 175 were the other way round.
+        #
+        # It is also the only spelling that can be asked of a third engine:
+        # a column, not a manager list rendered into SQL.
+        sales_type_filter = (
+            "" if sales_type == "all"
+            else f"AND o.sales_type = '{sales_type}'"
+        )
 
-            # ClickHouse when the flag says so and the store is configured,
-            # DuckDB otherwise. Decided before any connection is taken: a read
-            # bound for another engine must not queue behind DuckDB's single
-            # writer, §34's invariant.
-            from core import ch_cohorts
+        rows = await self._analytics_rows(
+            lambda d: cohort_retention_select(
+                d, sales_type_filter=sales_type_filter,
+                months_back=months_back,
+            ),
+            [retention_months],
+            RETENTION_TYPES,
+        )
 
-            if ch_cohorts.enabled() and ch_cohorts.available():
-                query = cohort_retention_select(
-                    CLICKHOUSE_ANALYTICS,
-                    sales_type_filter=sales_type_filter,
-                    months_back=months_back,
-                )
-                try:
-                    rows = await ch_cohorts.fetch(
-                        query, [retention_months], ch_cohorts.RETENTION_TYPES,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    # ClickHouse is optional here — nothing may depend on it
-                    # being up — so a fault costs the engine, not the tab.
-                    logger.error(
-                        "cohort retention: ClickHouse failed, falling back to "
-                        "DuckDB: %s", exc, exc_info=True,
-                    )
-                    rows = None
-            else:
-                rows = None
-
-            if rows is None:
-                query = cohort_retention_select(
-                    DUCKDB_ANALYTICS,
-                    sales_type_filter=sales_type_filter,
-                    months_back=months_back,
-                )
-                async with self.connection() as conn:
-                    rows = conn.execute(query, [retention_months]).fetchall()
-
-            # Build cohort data structure
-            cohorts = {}
-            for cohort, size, month_num, retained, pct in rows:
-                if cohort not in cohorts:
-                    cohorts[cohort] = {
-                        "size": size,
-                        "retention": {}
-                    }
-                cohorts[cohort]["retention"][month_num] = {
-                    "count": retained,
-                    "percent": pct
+        # Build cohort data structure
+        cohorts = {}
+        for cohort, size, month_num, retained, pct in rows:
+            if cohort not in cohorts:
+                cohorts[cohort] = {
+                    "size": size,
+                    "retention": {}
                 }
-
-            # Calculate summary metrics
-            total_cohort_size = sum(c["size"] for c in cohorts.values())
-
-            # Weighted average retention by month (weight = cohort size)
-            avg_retention = {}
-            for m in range(retention_months + 1):
-                weighted_sum = 0
-                total_weight = 0
-                for c in cohorts.values():
-                    entry = c["retention"].get(m)
-                    if entry is not None:
-                        pct = entry.get("percent", 0)
-                        weighted_sum += pct * c["size"]
-                        total_weight += c["size"]
-                if total_weight > 0:
-                    avg_retention[m] = round(weighted_sum / total_weight, 1)
-
-            return {
-                "cohorts": [
-                    {
-                        "month": cohort,
-                        "size": data["size"],
-                        "retention": [
-                            data["retention"].get(m, {}).get("percent", None)
-                            for m in range(retention_months + 1)
-                        ]
-                    }
-                    for cohort, data in sorted(cohorts.items(), reverse=True)
-                ],
-                "retentionMonths": retention_months,
-                "summary": {
-                    "totalCohorts": len(cohorts),
-                    "totalCustomers": total_cohort_size,
-                    "avgRetention": avg_retention
-                }
+            cohorts[cohort]["retention"][month_num] = {
+                "count": retained,
+                "percent": pct
             }
+
+        # Calculate summary metrics
+        total_cohort_size = sum(c["size"] for c in cohorts.values())
+
+        # Weighted average retention by month (weight = cohort size)
+        avg_retention = {}
+        for m in range(retention_months + 1):
+            weighted_sum = 0
+            total_weight = 0
+            for c in cohorts.values():
+                entry = c["retention"].get(m)
+                if entry is not None:
+                    pct = entry.get("percent", 0)
+                    weighted_sum += pct * c["size"]
+                    total_weight += c["size"]
+            if total_weight > 0:
+                avg_retention[m] = round(weighted_sum / total_weight, 1)
+
+        return {
+            "cohorts": [
+                {
+                    "month": cohort,
+                    "size": data["size"],
+                    "retention": [
+                        data["retention"].get(m, {}).get("percent", None)
+                        for m in range(retention_months + 1)
+                    ]
+                }
+                for cohort, data in sorted(cohorts.items(), reverse=True)
+            ],
+            "retentionMonths": retention_months,
+            "summary": {
+                "totalCohorts": len(cohorts),
+                "totalCustomers": total_cohort_size,
+                "avgRetention": avg_retention
+            }
+        }
 
     async def get_enhanced_cohort_retention(
         self,
@@ -1490,6 +1463,38 @@ class CustomersMixin:
     # `sms_store_is_postgres()` is read before any connection is taken, §34's
     # invariant: the Postgres path must not queue behind DuckDB's single
     # writer on its way to another engine.
+
+    async def _analytics_rows(self, render, params, types):
+        """Rows for one customer-analytics query, from whichever engine answers.
+
+        ClickHouse when `KS_READ_COHORTS` says so and the store is configured,
+        DuckDB otherwise — and DuckDB again if ClickHouse faults, with an ERROR
+        in the log. That fallback is right here and wrong for `/sms`: nothing
+        diverges between these two, because ClickHouse holds a copy of Silver
+        and both engines read the same derived facts. ClickHouse is an optional
+        store in this architecture, so nothing may depend on it being up.
+
+        The engine is chosen before any connection is taken — a read bound for
+        another engine must not queue behind DuckDB's single writer (§34).
+
+        `render` takes an `AnalyticsDialect` and returns the SQL; one function
+        for both, so neither engine gets a body of its own.
+        """
+        from core import ch_cohorts
+
+        if ch_cohorts.enabled() and ch_cohorts.available():
+            try:
+                return await ch_cohorts.fetch(
+                    render(CLICKHOUSE_ANALYTICS), params, types,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "customer analytics: ClickHouse failed, falling back to "
+                    "DuckDB: %s", exc, exc_info=True,
+                )
+
+        async with self.connection() as conn:
+            return conn.execute(render(DUCKDB_ANALYTICS), list(params)).fetchall()
 
     @asynccontextmanager
     async def _sms_tx(self):
