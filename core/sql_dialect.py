@@ -826,3 +826,53 @@ def at_risk_customers_select(
         sales_type_filter=sales_type_filter,
         months_back=int(months_back),
     )
+
+
+# ─── What each body returns, once ───────────────────────────────────────────
+#
+# The column types live beside the body they describe, because they *are* part
+# of it: ClickHouse answers in TabSeparated and hands every value back as text,
+# so the reader needs this list to give the caller the shapes DuckDB would have
+# returned. Keeping them here rather than at the call site is not tidiness —
+# they were briefly in two places, the repository's copy said seven columns
+# where the enhanced matrix has eight and six where the at-risk projection has
+# seven, and the differential test could not see it because it carried a third
+# copy of its own.
+COHORT_RETENTION_TYPES: Tuple[str, ...] = (
+    "text",   # cohort, 'YYYY-MM'
+    "int",    # cohort_size
+    "int",    # month_number
+    "int",    # retained_customers
+    "float",  # retention_pct
+)
+
+ENHANCED_RETENTION_TYPES: Tuple[str, ...] = (
+    "text", "int", "float", "int", "int", "float", "float", "float",
+)
+
+DAYS_TO_SECOND_TYPES: Tuple[str, ...] = (
+    "text",   # bucket label
+    "int",    # customers
+    "float",  # avg_days
+    "float",  # median_days
+    "float",  # avg_days_overall
+    "int",    # total_count
+)
+
+COHORT_LTV_TYPES: Tuple[str, ...] = (
+    "text",   # cohort
+    "int",    # cohort_size
+    "int",    # months_since
+    "float",  # total_revenue
+    "int",    # active_customers
+)
+
+AT_RISK_TYPES: Tuple[str, ...] = (
+    "text",   # cohort
+    "int",    # total_customers
+    "int",    # at_risk_count
+    "float",  # at_risk_pct
+    "float",  # at_risk_revenue — NULL until a cohort has anyone at risk
+    "float",  # avg_orders_at_risk — likewise
+    "int",    # churned_count
+)

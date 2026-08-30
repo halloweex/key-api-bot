@@ -185,3 +185,66 @@ class TestTheOneSpellingThatCannotBeShared:
         ).predicate("revenue_ltv", "retail")
         assert "CURRENT_DATE " in sql or "CURRENT_DATE\n" in sql
         assert "CURRENT_DATE()" not in sql
+
+
+class TestTheColumnTypesDescribeTheProjection:
+    """A type list one entry short silently drops a column.
+
+    `_typed` zips the row against the list, so a list that is too short throws
+    the tail away and one that is mistyped raises deep inside the reader. Both
+    happened while the lists lived at the call site: the repository claimed
+    seven columns where the enhanced matrix has eight, and six where the
+    at-risk projection has seven — and every test stayed green, because the
+    differential test carried a third copy of its own.
+
+    They live beside the body now, and this counts them against the projection
+    itself rather than against another list written by the same hand.
+    """
+
+    PAIRS = (
+        ("cohort_retention_select", "COHORT_RETENTION_TYPES"),
+        ("enhanced_cohort_retention_select", "ENHANCED_RETENTION_TYPES"),
+        ("days_to_second_purchase_select", "DAYS_TO_SECOND_TYPES"),
+        ("cohort_ltv_select", "COHORT_LTV_TYPES"),
+        ("at_risk_customers_select", "AT_RISK_TYPES"),
+    )
+
+    @staticmethod
+    def _projection_width(sql: str) -> int:
+        """Columns in the outermost SELECT, counted by splitting on the commas
+        that separate them at depth zero — a comment or a nested `ROUND(a, 1)`
+        must not be mistaken for a column boundary."""
+        import re
+
+        tail = sql[sql.rindex("\n            SELECT"):]
+        head = tail[:tail.index("\n            FROM")]
+        head = "\n".join(l.split("--")[0] for l in head.splitlines())
+        head = head.replace("SELECT", "", 1)
+
+        depth, count = 0, 1
+        for ch in head:
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                count += 1
+        return count
+
+    @pytest.mark.parametrize("fn_name,types_name", PAIRS)
+    def test_the_list_is_exactly_as_wide_as_the_projection(self, fn_name, types_name):
+        import core.sql_dialect as dialects
+
+        sql = getattr(dialects, fn_name)(
+            dialects.DUCKDB_ANALYTICS, sales_type_filter="", months_back=12,
+        )
+        assert len(getattr(dialects, types_name)) == self._projection_width(sql), (
+            f"{types_name} does not describe {fn_name}'s projection"
+        )
+
+    @pytest.mark.parametrize("fn_name,types_name", PAIRS)
+    def test_every_entry_is_a_kind_the_reader_knows(self, fn_name, types_name):
+        import core.sql_dialect as dialects
+        from core.ch_cohorts import FLOAT, INT, TEXT
+
+        assert set(getattr(dialects, types_name)) <= {TEXT, INT, FLOAT}

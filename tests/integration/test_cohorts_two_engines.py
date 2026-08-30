@@ -105,9 +105,11 @@ async def test_both_engines_return_the_same_retention_matrix(tmp_path, sales_typ
             ).fetchall()
         duck = [tuple(r) for r in duck]
 
+        from core.sql_dialect import COHORT_RETENTION_TYPES
+
         clickhouse = await ch_cohorts.fetch(
             cohort_retention_select(CLICKHOUSE_ANALYTICS, **kw),
-            [12], ch_cohorts.RETENTION_TYPES,
+            [12], COHORT_RETENTION_TYPES,
         )
 
         assert duck == clickhouse, (
@@ -151,27 +153,27 @@ async def test_the_fixture_would_notice_an_accidental_agreement(tmp_path):
         await store.close()
 
 
-# The other four bodies. Each is (render function, bound params, column types),
-# and they run through the same fixture as the retention matrix above.
+# The other four bodies, each with the bound values it needs. The column types
+# are NOT repeated here: they are imported from beside the body, so this test
+# validates the list production actually uses. Carrying a copy is what let the
+# repository claim seven columns where the enhanced matrix has eight and six
+# where the at-risk projection has seven, with every test still green.
 OTHER_BODIES = (
-    ("enhanced_cohort_retention_select", [12],
-     ("TEXT", "INT", "FLOAT", "INT", "INT", "FLOAT", "FLOAT", "FLOAT")),
-    ("days_to_second_purchase_select", [],
-     ("TEXT", "INT", "FLOAT", "FLOAT", "FLOAT", "INT")),
-    ("cohort_ltv_select", [12], ("TEXT", "INT", "INT", "FLOAT", "FLOAT")),
+    ("enhanced_cohort_retention_select", [12], "ENHANCED_RETENTION_TYPES"),
+    ("days_to_second_purchase_select", [], "DAYS_TO_SECOND_TYPES"),
+    ("cohort_ltv_select", [12], "COHORT_LTV_TYPES"),
     # Six bound values: the at-risk window and the churn threshold, reused
     # across the five aggregates in the projection.
-    ("at_risk_customers_select", [90, 180, 90, 90, 90, 180],
-     ("TEXT", "INT", "INT", "FLOAT", "FLOAT", "FLOAT", "INT")),
+    ("at_risk_customers_select", [90, 180, 90, 90, 90, 180], "AT_RISK_TYPES"),
 )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "fn_name,params,_types", OTHER_BODIES, ids=[b[0] for b in OTHER_BODIES],
+    "fn_name,params,types_name", OTHER_BODIES, ids=[b[0] for b in OTHER_BODIES],
 )
 async def test_the_other_four_bodies_run_on_both_engines(
-    tmp_path, fn_name, params, _types,
+    tmp_path, fn_name, params, types_name,
 ):
     """Executed on both, compared as text rather than typed.
 
@@ -185,6 +187,8 @@ async def test_the_other_four_bodies_run_on_both_engines(
     import core.sql_dialect as dialects
     from core import ch_cohorts
     from core.ch_common import execute
+
+    _types = getattr(dialects, types_name)
 
     store = DuckDBStore(db_path=tmp_path / f"{fn_name}.duckdb")
     await store.connect()

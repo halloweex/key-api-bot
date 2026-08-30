@@ -129,10 +129,11 @@ def _compare_groups(
         "incrementalMarginTotal": round(margin_per_contact * t_n, 2),
     }
 
-from core.ch_cohorts import FLOAT, INT, RETENTION_TYPES, TEXT
 from core.sms_holdout import assign_arm
 from core.sql_dialect import (
-    CLICKHOUSE_ANALYTICS, DUCKDB_ANALYTICS, at_risk_customers_select,
+    AT_RISK_TYPES, CLICKHOUSE_ANALYTICS, COHORT_LTV_TYPES,
+    COHORT_RETENTION_TYPES, DAYS_TO_SECOND_TYPES, DUCKDB_ANALYTICS,
+    ENHANCED_RETENTION_TYPES, at_risk_customers_select,
     cohort_ltv_select, cohort_retention_select, days_to_second_purchase_select,
     enhanced_cohort_retention_select,
 )
@@ -689,7 +690,7 @@ class CustomersMixin:
                 months_back=months_back,
             ),
             [retention_months],
-            RETENTION_TYPES,
+            COHORT_RETENTION_TYPES,
         )
 
         # Build cohort data structure
@@ -787,7 +788,7 @@ class CustomersMixin:
                 months_back=months_back,
             ),
             [retention_months],
-            (TEXT, INT, FLOAT, INT, INT, FLOAT, FLOAT, FLOAT),
+            ENHANCED_RETENTION_TYPES,
         )
 
         # Build cohort data structure
@@ -1059,7 +1060,7 @@ class CustomersMixin:
                 months_back=months_back,
             ),
             [],
-            (TEXT, INT, FLOAT, FLOAT, FLOAT, INT),
+            DAYS_TO_SECOND_TYPES,
         )
 
         # Extract global stats from first row
@@ -1130,7 +1131,7 @@ class CustomersMixin:
                 months_back=months_back,
             ),
             [retention_months],
-            (TEXT, INT, INT, FLOAT, FLOAT),
+            COHORT_LTV_TYPES,
         )
 
         # Build cohort LTV structure with cumulative revenue
@@ -1233,7 +1234,7 @@ class CustomersMixin:
             days_threshold,  # avg_orders_at_risk
             churn_threshold,  # churned_count (> 2x threshold)
         ],
-            (INT, TEXT, TEXT, INT, INT, FLOAT),
+            AT_RISK_TYPES,
         )
 
         cohorts = []
