@@ -27,7 +27,7 @@ import pytest
 import pytest_asyncio
 
 from core.duckdb_store import DuckDBStore
-from core.repositories.customers import SmsAudienceFilters
+from core.repositories.customers import DlrEventRebound, SmsAudienceFilters
 from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
 
 asyncpg = pytest.importorskip("asyncpg")
@@ -544,3 +544,107 @@ class TestTheClaimIsAtomic:
         monkeypatch.delenv("KS_SMS_STORE", raising=False)
         with pytest.raises(ValueError, match="not frozen"):
             await store.get_sms_campaign_targets("nope")
+
+
+class TestTheRosterAndTheDeliveryBinding:
+    """The two write paths that carry real rules, on both engines."""
+
+    ROSTER = [
+        {"buyerId": 1, "phone": "380500000001", "tier": "VIP",
+         "assignment": "target", "orders": 3, "revenueLtv": 9000.0,
+         "marginLtv": 4000.0, "recencyDays": 12},
+        {"buyerId": 2, "phone": "380500000002", "tier": "VIP",
+         "assignment": "holdout", "orders": 2, "revenueLtv": 7000.0,
+         "marginLtv": 3000.0, "recencyDays": 30},
+    ]
+
+    @staticmethod
+    def _pg(conn):
+        return patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn)))
+
+    @pytest.mark.asyncio
+    async def test_a_frozen_roster_is_identical_in_both(self, engines, monkeypatch):
+        store, conn = engines
+        criteria = {"grouping": "single", "maxRecencyDays": 270}
+
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        duck = await store.freeze_sms_campaign(
+            "aug", self.ROSTER, criteria, "revenue", "retail", 10)
+
+        monkeypatch.setenv("KS_SMS_STORE", "postgres")
+        with self._pg(conn), patch("core.pg.require_revision", new=AsyncMock()):
+            postgres = await store.freeze_sms_campaign(
+                "aug", self.ROSTER, criteria, "revenue", "retail", 10)
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+
+        assert duck == postgres
+        assert duck["totals"] == {"customers": 2, "target": 1, "holdout": 1}
+
+    @pytest.mark.asyncio
+    async def test_re_freezing_is_refused_the_same_way(self, engines, monkeypatch):
+        """A roster that could be quietly rewritten after the send is a control
+        group that cannot be trusted."""
+        store, conn = engines
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        await store.freeze_sms_campaign(
+            "aug", self.ROSTER, {}, "revenue", "retail", 10)
+
+        with pytest.raises(ValueError, match="already frozen"):
+            await store.freeze_sms_campaign(
+                "aug", self.ROSTER, {}, "revenue", "retail", 10)
+
+        monkeypatch.setenv("KS_SMS_STORE", "postgres")
+        with self._pg(conn), patch("core.pg.require_revision", new=AsyncMock()):
+            await store.freeze_sms_campaign(
+                "aug", self.ROSTER, {}, "revenue", "retail", 10)
+            with pytest.raises(ValueError, match="already frozen"):
+                await store.freeze_sms_campaign(
+                    "aug", self.ROSTER, {}, "revenue", "retail", 10)
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_the_delivery_binding_holds_on_postgres_too(
+        self, engines, monkeypatch,
+    ):
+        """The security control, on the engine it is moving to: one captured
+        (id, signature) pair must not be re-pointable at another recipient."""
+        store, conn = engines
+        monkeypatch.setenv("KS_SMS_STORE", "postgres")
+        try:
+            with self._pg(conn), patch("core.pg.require_revision", new=AsyncMock()):
+                await store.freeze_sms_campaign(
+                    "aug", self.ROSTER, {}, "revenue", "retail", 10)
+                await store.record_sms_send(
+                    "aug", accepted={1: "msg-aaa", 2: "msg-bbb"},
+                    stoplisted=[], failed={})
+
+                known = await store.record_sms_delivery(
+                    message_id="msg-aaa", status="DELIVRD", delivered=True,
+                    delivered_at=None, event_id="evt-1")
+                assert known is True
+
+                # The same event id, now naming somebody else's message.
+                with pytest.raises(DlrEventRebound):
+                    await store.record_sms_delivery(
+                        message_id="msg-bbb", status="REJECTD", delivered=False,
+                        delivered_at=None, event_id="evt-1")
+        finally:
+            monkeypatch.delenv("KS_SMS_STORE", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_a_send_marks_everyone_the_gateway_never_answered_for(
+        self, engines, monkeypatch,
+    ):
+        """A send that dies partway leaves targets behind, and they must not
+        sit in the arm unable to respond to a message they never got."""
+        store, conn = engines
+        monkeypatch.setenv("KS_SMS_STORE", "postgres")
+        try:
+            with self._pg(conn), patch("core.pg.require_revision", new=AsyncMock()):
+                await store.freeze_sms_campaign(
+                    "aug", self.ROSTER, {}, "revenue", "retail", 10)
+                out = await store.record_sms_send(
+                    "aug", accepted={}, stoplisted=[], failed={})
+            assert out["notSent"] == 1        # the one target, never answered for
+        finally:
+            monkeypatch.delenv("KS_SMS_STORE", raising=False)

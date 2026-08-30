@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from dataclasses import asdict, dataclass
 from typing import Optional, Dict, Any, List, Sequence, Union
@@ -393,6 +394,69 @@ def _local_times(row: Sequence[Any]) -> tuple:
         v.astimezone() if isinstance(v, datetime) and v.tzinfo is not None else v
         for v in row
     )
+
+
+class _SmsTx:
+    """Statements inside one transaction, rendered for one engine.
+
+    The `{table}` holes and `?` markers are the same ones `_sms_run` fills, so
+    a statement reads identically whether it runs alone or in a transaction.
+    """
+
+    def __init__(self, dialect):
+        self._dialect = dialect
+
+    def _render(self, sql: str) -> str:
+        return sql.format(
+            campaigns=self._dialect.sms_campaigns,
+            members=self._dialect.sms_campaign_members,
+            presets=self._dialect.sms_audience_presets,
+            optouts=self._dialect.marketing_optouts,
+            dlr_events=self._dialect.sms_dlr_events,
+        )
+
+
+class _DuckTx(_SmsTx):
+    def __init__(self, conn, dialect):
+        super().__init__(dialect)
+        self._conn = conn
+
+    async def all(self, sql, params=None):
+        return self._conn.execute(self._render(sql), list(params or [])).fetchall()
+
+    async def one(self, sql, params=None):
+        return self._conn.execute(self._render(sql), list(params or [])).fetchone()
+
+    async def none(self, sql, params=None):
+        self._conn.execute(self._render(sql), list(params or []))
+
+    async def many(self, sql, rows):
+        self._conn.executemany(self._render(sql), [list(r) for r in rows])
+
+
+class _PgTx(_SmsTx):
+    def __init__(self, conn, dialect):
+        super().__init__(dialect)
+        self._conn = conn
+
+    def _sql(self, sql: str) -> str:
+        from core import pg_sms_read
+
+        return pg_sms_read.numbered(self._render(sql))
+
+    async def all(self, sql, params=None):
+        rows = await self._conn.fetch(self._sql(sql), *(params or []))
+        return [_local_times(r) for r in rows]
+
+    async def one(self, sql, params=None):
+        row = await self._conn.fetchrow(self._sql(sql), *(params or []))
+        return _local_times(row) if row is not None else None
+
+    async def none(self, sql, params=None):
+        await self._conn.execute(self._sql(sql), *(params or []))
+
+    async def many(self, sql, rows):
+        await self._conn.executemany(self._sql(sql), [tuple(r) for r in rows])
 
 
 class CustomersMixin:
@@ -1397,6 +1461,37 @@ class CustomersMixin:
     # invariant: the Postgres path must not queue behind DuckDB's single
     # writer on its way to another engine.
 
+    @asynccontextmanager
+    async def _sms_tx(self):
+        """Several SMS statements, one transaction, on either engine.
+
+        The freeze writes a campaign and its roster, and a failure between the
+        two would leave a campaign whose control group does not exist — which
+        looks like a campaign and cannot be measured. DuckDB's `connection()`
+        only takes the store lock, so until now that pair was autocommitted one
+        statement at a time; both engines get a real transaction here.
+        """
+        from core.sql_dialect import DUCKDB, POSTGRES
+
+        if sms_store_is_postgres():
+            from core.pg import get_pool, require_revision
+
+            pool = await get_pool()
+            await require_revision()
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    yield _PgTx(conn, POSTGRES)
+            return
+
+        async with self.connection() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                yield _DuckTx(conn, DUCKDB)
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+
     async def _sms_run(self, sql: str, params: Optional[List[Any]] = None,
                        *, mode: str = "all"):
         """Run one SMS statement against the store that owns the tab."""
@@ -1546,16 +1641,15 @@ class CustomersMixin:
             ValueError: If the campaign exists and overwrite is False, or if
                 customers is empty (an empty roster measures nothing).
         """
-        refuse_while_unported("freeze_sms_campaign")
         if not customers:
             raise ValueError(
                 "refusing to freeze an empty roster — nothing could be measured"
             )
 
-        async with self.connection() as conn:
-            exists = conn.execute(
-                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign]
-            ).fetchone()
+        async with self._sms_tx() as tx:
+            exists = await tx.one(
+                "SELECT sent_at FROM {campaigns} WHERE campaign = ?", [campaign]
+            )
 
             if exists is not None:
                 if not overwrite:
@@ -1568,12 +1662,14 @@ class CustomersMixin:
                         f"campaign {campaign!r} was already sent on {exists[0]} — "
                         f"its roster is the control group and cannot be rewritten"
                     )
-                conn.execute("DELETE FROM sms_campaign_members WHERE campaign = ?", [campaign])
-                conn.execute("DELETE FROM sms_campaigns WHERE campaign = ?", [campaign])
+                await tx.none(
+                    "DELETE FROM {members} WHERE campaign = ?", [campaign])
+                await tx.none(
+                    "DELETE FROM {campaigns} WHERE campaign = ?", [campaign])
 
-            conn.execute(
+            await tx.none(
                 """
-                INSERT INTO sms_campaigns
+                INSERT INTO {campaigns}
                     (campaign, ltv_basis, sales_type, holdout_pct, criteria,
                      promocode, notes)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1582,9 +1678,9 @@ class CustomersMixin:
                  json.dumps(criteria, ensure_ascii=False), promocode, notes],
             )
 
-            conn.executemany(
+            await tx.many(
                 """
-                INSERT INTO sms_campaign_members
+                INSERT INTO {members}
                     (campaign, buyer_id, phone, tier, assignment, orders_at_export,
                      revenue_ltv_at_export, margin_ltv_at_export, recency_at_export)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1596,18 +1692,18 @@ class CustomersMixin:
                 ],
             )
 
-            rows = conn.execute(
+            rows = await tx.all(
                 """
                 SELECT tier,
                        COUNT(*) AS total,
                        COUNT(*) FILTER (WHERE assignment = 'target') AS target,
                        COUNT(*) FILTER (WHERE assignment = 'holdout') AS holdout
-                FROM sms_campaign_members
+                FROM {members}
                 WHERE campaign = ?
                 GROUP BY tier
                 """,
                 [campaign],
-            ).fetchall()
+            )
 
         tier_order = {SINGLE_GROUP_NAME: 0, "VIP": 0, "CORE": 1, "REACTIVATION": 2}
         segments = [
@@ -1761,50 +1857,54 @@ class CustomersMixin:
         but without them the results page cannot say whether the campaign paid
         for itself.
         """
-        refuse_while_unported("record_sms_send")
-        async with self.connection() as conn:
-            for buyer_id, message_id in accepted.items():
-                conn.execute(
+        async with self._sms_tx() as tx:
+            # Batched rather than one statement per recipient: a send is up to
+            # 5,000 people, and against a connection pool that was 5,000 round
+            # trips where DuckDB paid none.
+            if accepted:
+                await tx.many(
                     """
-                    UPDATE sms_campaign_members
+                    UPDATE {members}
                     SET message_id = ?, delivery_status = 'Accepted'
                     WHERE campaign = ? AND buyer_id = ?
                     """,
-                    [message_id, campaign, buyer_id],
+                    [[message_id, campaign, buyer_id]
+                     for buyer_id, message_id in accepted.items()],
                 )
 
-            for buyer_id, status in failed.items():
-                conn.execute(
+            if failed:
+                await tx.many(
                     """
-                    UPDATE sms_campaign_members
+                    UPDATE {members}
                     SET delivery_status = ?, delivered = FALSE
                     WHERE campaign = ? AND buyer_id = ?
                     """,
-                    [status, campaign, buyer_id],
+                    [[status, campaign, buyer_id]
+                     for buyer_id, status in failed.items()],
                 )
 
-            for buyer_id in stoplisted:
-                conn.execute(
+            if stoplisted:
+                await tx.many(
                     """
-                    UPDATE sms_campaign_members
+                    UPDATE {members}
                     SET delivery_status = 'Stoplist', delivered = FALSE
                     WHERE campaign = ? AND buyer_id = ?
                     """,
-                    [campaign, buyer_id],
+                    [[campaign, buyer_id] for buyer_id in stoplisted],
                 )
-                conn.execute(
+                await tx.many(
                     """
-                    INSERT INTO marketing_optouts
+                    INSERT INTO {optouts}
                         (buyer_id, channel, phone, reason, source)
                     SELECT ?, 'sms', phone, 'stoplist', 'turbosms'
-                    FROM sms_campaign_members
+                    FROM {members}
                     WHERE campaign = ? AND buyer_id = ?
                     -- The gateway is where a phone-less manual opt-out finally
                     -- gets its number; see add_marketing_optout.
                     ON CONFLICT (buyer_id, channel) DO UPDATE
-                        SET phone = COALESCE(EXCLUDED.phone, marketing_optouts.phone)
+                        SET phone = COALESCE(EXCLUDED.phone, {optouts}.phone)
                     """,
-                    [buyer_id, campaign, buyer_id],
+                    [[buyer_id, campaign, buyer_id] for buyer_id in stoplisted],
                 )
 
             # Whoever the gateway never answered for was never messaged. A send
@@ -1816,16 +1916,16 @@ class CustomersMixin:
             # fact, which meant the exclusion was dead code resting on a manual
             # step. A member with neither a message id nor a status is exactly
             # the one nobody heard about.
-            not_sent = conn.execute(
+            not_sent = await tx.all(
                 """
-                UPDATE sms_campaign_members
+                UPDATE {members}
                 SET delivery_status = 'NotSent', delivered = FALSE
                 WHERE campaign = ? AND assignment = 'target'
                   AND message_id IS NULL AND delivery_status IS NULL
                 RETURNING buyer_id
                 """,
                 [campaign],
-            ).fetchall()
+            )
 
             # The cost is recorded here, from what actually left, rather than
             # estimated later from the roster: only the gateway knows how many
@@ -1835,9 +1935,9 @@ class CustomersMixin:
                 if message_parts and price_per_part is not None
                 else None
             )
-            conn.execute(
+            await tx.none(
                 """
-                UPDATE sms_campaigns
+                UPDATE {campaigns}
                 SET sent_at = ?, message_text = ?, message_parts = ?,
                     recipients_sent = ?, price_per_part = ?, cost_total = ?
                 WHERE campaign = ?
@@ -1893,18 +1993,21 @@ class CustomersMixin:
         defends against: the gateway tries nine times over 4.5 hours and offers
         no replay. The terminal-delivery rule above is what guards the status.
         """
-        refuse_while_unported("record_sms_delivery")
-        async with self.connection() as conn:
-            bound = conn.execute(
-                "SELECT message_id FROM sms_dlr_events WHERE event_id = ?",
+        async with self._sms_tx() as tx:
+            # The binding and the write share one transaction. They always
+            # should have: an event id spent without its write, or a write
+            # without its id spent, both leave the pair re-pointable — and the
+            # pair never expires, because the scheme carries no nonce.
+            bound = await tx.one(
+                "SELECT message_id FROM {dlr_events} WHERE event_id = ?",
                 [event_id],
-            ).fetchone()
+            )
             if bound is None:
                 # Bound even for a message id the roster does not know: an event
                 # spent against nothing must still be spent, or the pair stays
                 # re-pointable.
-                conn.execute(
-                    "INSERT INTO sms_dlr_events (event_id, message_id) VALUES (?, ?)"
+                await tx.none(
+                    "INSERT INTO {dlr_events} (event_id, message_id) VALUES (?, ?)"
                     " ON CONFLICT DO NOTHING",
                     [event_id, message_id],
                 )
@@ -1912,18 +2015,18 @@ class CustomersMixin:
                 raise DlrEventRebound(event_id, bound[0], message_id)
 
             if delivered is True:
-                conn.execute(
+                await tx.none(
                     """
-                    UPDATE sms_campaign_members
+                    UPDATE {members}
                     SET delivery_status = ?, delivered = ?, delivered_at = ?
                     WHERE message_id = ?
                     """,
                     [status, True, delivered_at or datetime.now(), message_id],
                 )
             elif delivered is False:
-                conn.execute(
+                await tx.none(
                     """
-                    UPDATE sms_campaign_members
+                    UPDATE {members}
                     SET delivery_status = ?, delivered = ?, delivered_at = ?
                     WHERE message_id = ?
                       AND (delivered IS NULL OR delivered = FALSE)
@@ -1931,19 +2034,19 @@ class CustomersMixin:
                     [status, False, delivered_at or datetime.now(), message_id],
                 )
             else:
-                conn.execute(
+                await tx.none(
                     """
-                    UPDATE sms_campaign_members SET delivery_status = ?
+                    UPDATE {members} SET delivery_status = ?
                     WHERE message_id = ?
                       AND (delivered IS NULL OR delivered = FALSE)
                     """,
                     [status, message_id],
                 )
 
-            found = conn.execute(
-                "SELECT COUNT(*) FROM sms_campaign_members WHERE message_id = ?",
+            found = (await tx.one(
+                "SELECT COUNT(*) FROM {members} WHERE message_id = ?",
                 [message_id],
-            ).fetchone()[0]
+            ))[0]
 
         return bool(found)
 
