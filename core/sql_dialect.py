@@ -64,6 +64,12 @@ class Dialect:
     buyers: str
     offer_stocks: str
     marketing_optouts: str
+    # The SMS tab's own state (revision 0013). Operational, and irreplaceable
+    # in `stock_movements`' sense — a frozen roster cannot be recomputed.
+    sms_campaigns: str
+    sms_campaign_members: str
+    sms_audience_presets: str
+    sms_dlr_events: str
     # A format template with one `{column}` hole. Not a function, so the whole
     # dialect stays comparable, printable and trivially frozen.
     date_template: str
@@ -86,6 +92,10 @@ DUCKDB = Dialect(
     buyers="buyers",
     offer_stocks="offer_stocks",
     marketing_optouts="marketing_optouts",
+    sms_campaigns="sms_campaigns",
+    sms_campaign_members="sms_campaign_members",
+    sms_audience_presets="sms_audience_presets",
+    sms_dlr_events="sms_dlr_events",
     # Byte-for-byte what `core.duckdb_constants._date_in_kyiv` has always
     # emitted. Changing it here changes stored Silver on the next rebuild.
     date_template="DATE(timezone('{zone}', {column}))",
@@ -107,6 +117,10 @@ POSTGRES = Dialect(
     buyers="bronze.buyers",
     offer_stocks="bronze.offer_stocks",
     marketing_optouts="app.marketing_optouts",
+    sms_campaigns="app.sms_campaigns",
+    sms_campaign_members="app.sms_campaign_members",
+    sms_audience_presets="app.sms_audience_presets",
+    sms_dlr_events="app.sms_dlr_events",
     # `DATE(x)` also exists in PostgreSQL, but the cast is what the rest of
     # this repository's Postgres SQL uses, so it reads the same as its
     # neighbours in `core/reconciliation_io.py`.

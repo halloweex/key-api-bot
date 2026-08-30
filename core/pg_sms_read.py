@@ -103,3 +103,39 @@ async def fetch_segments(sql: str, params: Sequence[Any]) -> List[Tuple]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, *params)
     return [tuple(row) for row in rows]
+
+
+# ─── The rest of the tab: short statements, either engine ───────────────────
+#
+# The audience query earned a shared body because it carries rules. The
+# statements below carry almost none — a preset is stored and read back, an
+# opt-out is upserted — so what they need is not a second SQL dialect but one
+# place that knows which engine is answering and how it spells a placeholder.
+#
+# The text is written once with `{table}` holes and `?` markers, exactly as the
+# audience body is, and `run` fills both. Two engines, one string, and the
+# statement is legible as SQL rather than as string-building.
+
+
+async def fetch(sql: str, params: Sequence[Any]) -> List[Tuple]:
+    """Rows as plain tuples — the shape DuckDB's `fetchall()` returns."""
+    return await fetch_segments(sql, params)
+
+
+async def fetch_one(sql: str, params: Sequence[Any]) -> Tuple | None:
+    from core.pg import get_pool, require_revision
+
+    pool = await get_pool()
+    await require_revision()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(sql, *params)
+    return tuple(row) if row is not None else None
+
+
+async def execute(sql: str, params: Sequence[Any]) -> None:
+    from core.pg import get_pool, require_revision
+
+    pool = await get_pool()
+    await require_revision()
+    async with pool.acquire() as conn:
+        await conn.execute(sql, *params)

@@ -187,7 +187,7 @@ class TestTheHalfSwitchRefuses:
         await store.connect()
         try:
             with pytest.raises(NotImplementedError, match="KS_SMS_STORE"):
-                await store.list_sms_campaigns()
+                await store.get_sms_campaign_targets("aug")
         finally:
             await store.close()
 
@@ -199,6 +199,9 @@ class TestTheHalfSwitchRefuses:
         store = DuckDBStore(db_path=tmp_path / "whole.duckdb")
         await store.connect()
         try:
-            assert await store.list_sms_campaigns() == []
+            # Reaches the store and answers on its own terms — an unknown
+            # campaign is a ValueError, not a refusal to use this engine.
+            with pytest.raises(ValueError, match="not frozen"):
+                await store.get_sms_campaign_targets("aug")
         finally:
             await store.close()

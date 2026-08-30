@@ -189,7 +189,8 @@ async def _seed_postgres(conn):
     await conn.execute(
         "TRUNCATE silver.orders, bronze.order_products, bronze.products,"
         " bronze.categories, bronze.buyers, bronze.offer_stocks,"
-        " app.marketing_optouts")
+        " app.marketing_optouts, app.sms_campaigns, app.sms_campaign_members,"
+        " app.sms_audience_presets, app.sms_dlr_events")
     await conn.executemany(
         "INSERT INTO bronze.categories (id, name, parent_id) VALUES ($1,$2,$3)",
         CATEGORIES)
@@ -335,3 +336,120 @@ class _PoolOf:
                 return False
 
         return _Ctx()
+
+
+class TestThePortedStatements:
+    """The short statements, run against both stores and compared.
+
+    They carry few rules, which is why they share one text rather than earning
+    a dialect — but "few" is not "none": the campaign list counts arms and
+    delivery states with `FILTER`, and it lost DuckDB's `GROUP BY ALL` on the
+    way, so it is worth executing rather than eyeballing.
+    """
+
+    @staticmethod
+    async def _both(store, conn, call, monkeypatch):
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        duck = await call()
+        monkeypatch.setenv("KS_SMS_STORE", "postgres")
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn))), \
+             patch("core.pg.require_revision", new=AsyncMock()):
+            postgres = await call()
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        return duck, postgres
+
+    @pytest.mark.asyncio
+    async def test_a_saved_preset_reads_back_the_same_from_either_store(
+        self, engines, monkeypatch,
+    ):
+        store, conn = engines
+        criteria = {"grouping": "single", "brands": ["Cosrx"], "city": "Київ"}
+
+        # Written to each store in turn, then read back from each.
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        await store.save_sms_audience_preset("осінь", criteria, created_by=7)
+        monkeypatch.setenv("KS_SMS_STORE", "postgres")
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn))), \
+             patch("core.pg.require_revision", new=AsyncMock()):
+            await store.save_sms_audience_preset("осінь", criteria, created_by=7)
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+
+        duck, postgres = await self._both(
+            store, conn, store.list_sms_audience_presets, monkeypatch,
+        )
+        # `createdAt` is each store's own clock and must not be compared.
+        strip = lambda rows: [   # noqa: E731
+            {k: v for k, v in row.items() if k not in ("createdAt", "updatedAt")}
+            for row in rows
+        ]
+        assert strip(duck) == strip(postgres)
+        saved = [r for r in duck if not r["builtin"]]
+        assert saved and saved[0]["criteria"] == criteria
+
+    @pytest.mark.asyncio
+    async def test_an_optout_upserts_the_same_way_in_both(self, engines, monkeypatch):
+        store, conn = engines
+
+        for flag in (None, "postgres"):
+            if flag is None:
+                monkeypatch.delenv("KS_SMS_STORE", raising=False)
+                first = await store.add_marketing_optout(77, phone=None)
+                second = await store.add_marketing_optout(77, phone="380509999999")
+            else:
+                monkeypatch.setenv("KS_SMS_STORE", flag)
+                with patch("core.pg.get_pool",
+                           new=AsyncMock(return_value=_PoolOf(conn))), \
+                     patch("core.pg.require_revision", new=AsyncMock()):
+                    first = await store.add_marketing_optout(77, phone=None)
+                    second = await store.add_marketing_optout(77, phone="380509999999")
+            # The refusal usually arrives before the number does; the repeat
+            # only ever fills a phone that was missing.
+            assert first["buyerId"] == 77
+            assert second["totalOptouts"] == first["totalOptouts"]
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_the_campaign_list_counts_the_same(self, engines, monkeypatch):
+        """`GROUP BY ALL` was DuckDB-only and had to be spelled out. The arm
+        and delivery counters are what would break if the grouping list drifted
+        from the projection."""
+        store, conn = engines
+        # `exported_at` is set explicitly rather than left to each store's
+        # `now()`: two independently stamped defaults differ by construction,
+        # and excluding the column would stop it being compared at all.
+        exported = datetime.fromisoformat("2026-08-20 09:00:00+00:00")
+        rows = [
+            ("aug", "revenue", "retail", 10, "{}", None, exported),
+        ]
+        async with store.connection() as duck:
+            for c, basis, stype, pct, crit, promo, when in rows:
+                duck.execute(
+                    "INSERT INTO sms_campaigns (campaign, ltv_basis, sales_type,"
+                    " holdout_pct, criteria, promocode, exported_at)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    [c, basis, stype, pct, crit, promo, when])
+            for buyer, arm, delivered in ((1, "target", True), (2, "target", False),
+                                          (3, "holdout", None)):
+                duck.execute(
+                    "INSERT INTO sms_campaign_members (campaign, buyer_id, phone,"
+                    " tier, assignment, orders_at_export, delivered)"
+                    " VALUES ('aug',?,?,'VIP',?,1,?)",
+                    [buyer, f"38050000000{buyer}", arm, delivered])
+        await conn.executemany(
+            "INSERT INTO app.sms_campaigns (campaign, ltv_basis, sales_type,"
+            " holdout_pct, criteria, promocode, exported_at)"
+            " VALUES ($1,$2,$3,$4,$5,$6,$7)", rows)
+        await conn.executemany(
+            "INSERT INTO app.sms_campaign_members (campaign, buyer_id, phone,"
+            " tier, assignment, orders_at_export, delivered)"
+            " VALUES ('aug',$1,$2,'VIP',$3,1,$4)",
+            [(1, "380500000001", "target", True), (2, "380500000002", "target", False),
+             (3, "380500000003", "holdout", None)])
+
+        duck_rows, pg_rows = await self._both(
+            store, conn, store.list_sms_campaigns, monkeypatch,
+        )
+        assert duck_rows == pg_rows
+        assert duck_rows[0]["members"] == 3
+        assert duck_rows[0]["target"] == 2 and duck_rows[0]["holdout"] == 1
+        assert duck_rows[0]["delivered"] == 1 and duck_rows[0]["undelivered"] == 1

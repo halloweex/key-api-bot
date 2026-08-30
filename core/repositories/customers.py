@@ -373,6 +373,28 @@ def _load_json(raw: Any) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _local_times(row: Sequence[Any]) -> tuple:
+    """asyncpg's UTC timestamps in the offset DuckDB would have used.
+
+    Both engines return the same *instant*; they disagree on how it is
+    rendered, because DuckDB hands back values in its session timezone and
+    asyncpg always returns UTC. Nothing downstream compares instants — the API
+    calls `.isoformat()` — so without this the same campaign would carry
+    `2026-08-20T13:00:00+04:00` from one store and `…T09:00:00+00:00` from the
+    other, and a frontend that slices the first ten characters off a timestamp
+    would show a different date either side of midnight.
+
+    Converting here rather than rendering everything in UTC keeps today's
+    responses byte-identical: the engine switch has to be invisible to the
+    page, which means matching what the page already receives rather than
+    picking the tidier convention.
+    """
+    return tuple(
+        v.astimezone() if isinstance(v, datetime) and v.tzinfo is not None else v
+        for v in row
+    )
+
+
 class CustomersMixin:
 
     async def get_customer_insights(
@@ -1363,6 +1385,54 @@ class CustomersMixin:
 
     # ─── Saved audiences ─────────────────────────────────────────────────
 
+    # ── one statement, whichever store owns /sms ────────────────────────────
+    #
+    # The audience query has a shared body because it carries rules. These
+    # statements carry almost none, so what they need is not a second dialect
+    # but one place that knows which engine is answering and how it spells a
+    # placeholder and a table name. The SQL below is written once, with
+    # `{table}` holes and `?` markers, exactly as the audience body is.
+    #
+    # `sms_store_is_postgres()` is read before any connection is taken, §34's
+    # invariant: the Postgres path must not queue behind DuckDB's single
+    # writer on its way to another engine.
+
+    async def _sms_run(self, sql: str, params: Optional[List[Any]] = None,
+                       *, mode: str = "all"):
+        """Run one SMS statement against the store that owns the tab."""
+        from core.sql_dialect import DUCKDB, POSTGRES
+
+        params = list(params or [])
+        dialect = POSTGRES if sms_store_is_postgres() else DUCKDB
+        rendered = sql.format(
+            campaigns=dialect.sms_campaigns,
+            members=dialect.sms_campaign_members,
+            presets=dialect.sms_audience_presets,
+            optouts=dialect.marketing_optouts,
+            dlr_events=dialect.sms_dlr_events,
+        )
+
+        if sms_store_is_postgres():
+            from core import pg_sms_read
+
+            rendered = pg_sms_read.numbered(rendered)
+            if mode == "all":
+                rows = await pg_sms_read.fetch(rendered, params)
+                return [_local_times(r) for r in rows]
+            if mode == "one":
+                row = await pg_sms_read.fetch_one(rendered, params)
+                return _local_times(row) if row is not None else None
+            await pg_sms_read.execute(rendered, params)
+            return None
+
+        async with self.connection() as conn:
+            cursor = conn.execute(rendered, params)
+            if mode == "all":
+                return cursor.fetchall()
+            if mode == "one":
+                return cursor.fetchone()
+            return None
+
     async def list_sms_audience_presets(self) -> List[Dict[str, Any]]:
         """Saved audiences, built-in ones first.
 
@@ -1371,14 +1441,11 @@ class CustomersMixin:
         describes — the classic RFM cohort is the reference every past campaign
         was built from, and it has to keep meaning the same thing.
         """
-        refuse_while_unported("list_sms_audience_presets")
-        rows = []
-        async with self.connection() as conn:
-            rows = conn.execute("""
-                SELECT name, criteria, created_by, created_at, updated_at
-                FROM sms_audience_presets
-                ORDER BY name
-            """).fetchall()
+        rows = await self._sms_run("""
+            SELECT name, criteria, created_by, created_at, updated_at
+            FROM {presets}
+            ORDER BY name
+        """)
 
         saved = [
             {
@@ -1412,33 +1479,30 @@ class CustomersMixin:
         Raises ValueError on a built-in name: shadowing "RFM tiers" with
         something else would make every conversation about it ambiguous.
         """
-        refuse_while_unported("save_sms_audience_preset")
         if name in BUILTIN_AUDIENCE_PRESETS:
             raise ValueError(f"{name!r} is a built-in audience and cannot be replaced")
 
         payload = json.dumps(criteria, ensure_ascii=False, default=str)
-        async with self.connection() as conn:
-            conn.execute("""
-                -- now(), not CURRENT_TIMESTAMP: inside an upsert DuckDB reads
-                -- the bare keyword as a column reference and fails to bind it.
-                INSERT INTO sms_audience_presets (name, criteria, created_by, updated_at)
-                VALUES (?, ?, ?, now())
-                ON CONFLICT (name) DO UPDATE SET
-                    criteria = excluded.criteria,
-                    updated_at = now()
-            """, [name, payload, created_by])
+        await self._sms_run("""
+            -- now(), not CURRENT_TIMESTAMP: inside an upsert DuckDB reads the
+            -- bare keyword as a column reference and fails to bind it. Both
+            -- engines take now().
+            INSERT INTO {presets} (name, criteria, created_by, updated_at)
+            VALUES (?, ?, ?, now())
+            ON CONFLICT (name) DO UPDATE SET
+                criteria = excluded.criteria,
+                updated_at = now()
+        """, [name, payload, created_by], mode="none")
         return {"name": name, "criteria": criteria, "builtin": False}
 
     async def delete_sms_audience_preset(self, name: str) -> bool:
         """Remove a saved audience. Returns False if there was none."""
-        refuse_while_unported("delete_sms_audience_preset")
         if name in BUILTIN_AUDIENCE_PRESETS:
             raise ValueError(f"{name!r} is a built-in audience and cannot be deleted")
 
-        async with self.connection() as conn:
-            row = conn.execute(
-                "DELETE FROM sms_audience_presets WHERE name = ? RETURNING name", [name],
-            ).fetchone()
+        row = await self._sms_run(
+            "DELETE FROM {presets} WHERE name = ? RETURNING name", [name], mode="one",
+        )
         return row is not None
 
     async def freeze_sms_campaign(
@@ -1902,20 +1966,18 @@ class CustomersMixin:
         with no undo. Everything else is left as first written, because the
         first refusal is the fact and its `source` is who to ask about it.
         """
-        refuse_while_unported("add_marketing_optout")
-        async with self.connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO marketing_optouts (buyer_id, channel, phone, reason, source)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (buyer_id, channel) DO UPDATE
-                    SET phone = COALESCE(EXCLUDED.phone, marketing_optouts.phone)
-                """,
-                [buyer_id, channel, phone, reason, source],
-            )
-            total = conn.execute(
-                "SELECT COUNT(*) FROM marketing_optouts WHERE channel = ?", [channel],
-            ).fetchone()[0]
+        await self._sms_run(
+            """
+            INSERT INTO {optouts} (buyer_id, channel, phone, reason, source)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (buyer_id, channel) DO UPDATE
+                SET phone = COALESCE(EXCLUDED.phone, {optouts}.phone)
+            """,
+            [buyer_id, channel, phone, reason, source], mode="none",
+        )
+        total = (await self._sms_run(
+            "SELECT COUNT(*) FROM {optouts} WHERE channel = ?", [channel], mode="one",
+        ))[0]
 
         return {"buyerId": buyer_id, "channel": channel, "totalOptouts": total}
 
@@ -2179,16 +2241,14 @@ class CustomersMixin:
         `notes` is where the provenance goes — restored by hand is not the same
         fact as recorded at send, and the page says which one it is looking at.
         """
-        refuse_while_unported("backfill_sms_campaign_record")
-        async with self.connection() as conn:
-            row = conn.execute("""
-                UPDATE sms_campaigns
-                SET message_text = ?, message_parts = ?, recipients_sent = ?,
-                    price_per_part = ?, cost_total = ?, notes = ?
-                WHERE campaign = ? AND message_text IS NULL
-                RETURNING campaign
-            """, [message_text, message_parts, recipients_sent, price_per_part,
-                  cost_total, notes, campaign]).fetchone()
+        row = await self._sms_run("""
+            UPDATE {campaigns}
+            SET message_text = ?, message_parts = ?, recipients_sent = ?,
+                price_per_part = ?, cost_total = ?, notes = ?
+            WHERE campaign = ? AND message_text IS NULL
+            RETURNING campaign
+        """, [message_text, message_parts, recipients_sent, price_per_part,
+              cost_total, notes, campaign], mode="one")
         return row is not None
 
     async def list_sms_campaigns(self) -> List[Dict[str, Any]]:
@@ -2200,26 +2260,28 @@ class CustomersMixin:
         — "which text went out in August, and to whom" had no answer short of a
         SQL prompt.
         """
-        refuse_while_unported("list_sms_campaigns")
-        async with self.connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT c.campaign, c.ltv_basis, c.sales_type, c.holdout_pct,
-                       c.promocode, c.exported_at, c.sent_at, c.notes,
-                       COUNT(m.buyer_id) AS members,
-                       COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'target') AS target,
-                       COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'holdout') AS holdout,
-                       c.criteria, c.message_text, c.message_parts,
-                       c.recipients_sent, c.price_per_part, c.cost_total,
-                       COUNT(m.buyer_id) FILTER (WHERE m.delivered) AS delivered,
-                       COUNT(m.buyer_id) FILTER (WHERE m.delivered IS FALSE)
-                           AS undelivered
-                FROM sms_campaigns c
-                LEFT JOIN sms_campaign_members m ON m.campaign = c.campaign
-                GROUP BY ALL
-                ORDER BY c.exported_at DESC
-                """
-            ).fetchall()
+        rows = await self._sms_run(
+            """
+            SELECT c.campaign, c.ltv_basis, c.sales_type, c.holdout_pct,
+                   c.promocode, c.exported_at, c.sent_at, c.notes,
+                   COUNT(m.buyer_id) AS members,
+                   COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'target') AS target,
+                   COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'holdout') AS holdout,
+                   c.criteria, c.message_text, c.message_parts,
+                   c.recipients_sent, c.price_per_part, c.cost_total,
+                   COUNT(m.buyer_id) FILTER (WHERE m.delivered) AS delivered,
+                   COUNT(m.buyer_id) FILTER (WHERE m.delivered IS FALSE)
+                       AS undelivered
+            FROM {campaigns} c
+            LEFT JOIN {members} m ON m.campaign = c.campaign
+            -- Spelled out rather than `GROUP BY ALL`, which only DuckDB has.
+            GROUP BY c.campaign, c.ltv_basis, c.sales_type, c.holdout_pct,
+                     c.promocode, c.exported_at, c.sent_at, c.notes,
+                     c.criteria, c.message_text, c.message_parts,
+                     c.recipients_sent, c.price_per_part, c.cost_total
+            ORDER BY c.exported_at DESC
+            """
+        )
 
         return [
             {
