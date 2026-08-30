@@ -648,3 +648,115 @@ class TestTheRosterAndTheDeliveryBinding:
             assert out["notSent"] == 1        # the one target, never answered for
         finally:
             monkeypatch.delenv("KS_SMS_STORE", raising=False)
+
+
+def _same_numbers(a, b, *, tol=1e-6, path="result"):
+    """Compare two result trees, allowing floats to differ by a hair.
+
+    Not laxity — the documented behaviour of two engines summing the same rows.
+    Revenue here is a pro-rata allocation summed per buyer, float addition is
+    not associative, and the two databases return rows in different orders, so
+    the last bit disagrees: `6433.333333333334` against `6433.333333333333`.
+    The Gold reconciliation carries the same tolerance for the same reason —
+    exact equality there would buy a daily discrepancy of two nanohryvnia.
+
+    Everything that is not a float is still compared exactly, which is what
+    keeps counts, arms and delivery states honest.
+    """
+    if isinstance(a, dict) and isinstance(b, dict):
+        assert a.keys() == b.keys(), f"{path}: different keys"
+        for key in a:
+            _same_numbers(a[key], b[key], tol=tol, path=f"{path}.{key}")
+    elif isinstance(a, list) and isinstance(b, list):
+        assert len(a) == len(b), f"{path}: {len(a)} vs {len(b)} items"
+        for i, (x, y) in enumerate(zip(a, b)):
+            _same_numbers(x, y, tol=tol, path=f"{path}[{i}]")
+    elif isinstance(a, float) or isinstance(b, float):
+        assert a == pytest.approx(b, abs=tol), f"{path}: {a} vs {b}"
+    else:
+        assert a == b, f"{path}: {a!r} vs {b!r}"
+
+
+
+class TestTheResultsMeasurement:
+    """The last path, and the one whose numbers a decision rests on.
+
+    A campaign's verdict is the target arm against the holdout, so a
+    measurement that differs by engine is worse than one that is merely wrong:
+    it would change its mind about whether the send worked, depending on which
+    store answered.
+    """
+
+    ROSTER = [
+        {"buyerId": 1, "phone": "380500000001", "tier": "VIP",
+         "assignment": "target", "orders": 3, "revenueLtv": 9000.0,
+         "marginLtv": 4000.0, "recencyDays": 12},
+        {"buyerId": 2, "phone": "380500000002", "tier": "VIP",
+         "assignment": "holdout", "orders": 2, "revenueLtv": 7000.0,
+         "marginLtv": 3000.0, "recencyDays": 30},
+        {"buyerId": 3, "phone": "380500000003", "tier": "VIP",
+         "assignment": "target", "orders": 1, "revenueLtv": 3000.0,
+         "marginLtv": 1000.0, "recencyDays": 40},
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("delivered_only", (False, True), ids=["all", "delivered"])
+    async def test_both_engines_measure_the_campaign_the_same(
+        self, engines, monkeypatch, delivered_only,
+    ):
+        store, conn = engines
+        sent = datetime.fromisoformat("2026-07-01 08:00:00+00:00")
+
+        # The same campaign in both stores, sent at the same instant, so the
+        # attribution window opens on the same moment.
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        await store.freeze_sms_campaign(
+            "res", self.ROSTER, {}, "revenue", "retail", 33, promocode="AUG")
+        await store.record_sms_send(
+            "res", accepted={1: "m-1", 3: "m-3"}, stoplisted=[], failed={},
+            sent_at=sent)
+        await store.record_sms_delivery(
+            message_id="m-1", status="DELIVRD", delivered=True,
+            delivered_at=None, event_id="e-1")
+
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn))), \
+             patch("core.pg.require_revision", new=AsyncMock()):
+            monkeypatch.setenv("KS_SMS_STORE", "postgres")
+            await store.freeze_sms_campaign(
+                "res", self.ROSTER, {}, "revenue", "retail", 33, promocode="AUG")
+            await store.record_sms_send(
+                "res", accepted={1: "m-1", 3: "m-3"}, stoplisted=[], failed={},
+                sent_at=sent)
+            await store.record_sms_delivery(
+                message_id="m-1", status="DELIVRD", delivered=True,
+                delivered_at=None, event_id="e-1")
+            postgres = await store.get_sms_campaign_results(
+                "res", window_days=90, delivered_only=delivered_only)
+
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        duck = await store.get_sms_campaign_results(
+            "res", window_days=90, delivered_only=delivered_only)
+
+        _same_numbers(duck, postgres)
+
+    @pytest.mark.asyncio
+    async def test_an_unsent_campaign_refuses_on_both(self, engines, monkeypatch):
+        """Without a send date the window would start anywhere, and a result
+        measured over an arbitrary window is a result invented."""
+        store, conn = engines
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        await store.freeze_sms_campaign(
+            "unsent", self.ROSTER, {}, "revenue", "retail", 10)
+        with pytest.raises(ValueError, match="no send date"):
+            await store.get_sms_campaign_results("unsent")
+
+        monkeypatch.setenv("KS_SMS_STORE", "postgres")
+        try:
+            with patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn))), \
+                 patch("core.pg.require_revision", new=AsyncMock()):
+                await store.freeze_sms_campaign(
+                    "unsent", self.ROSTER, {}, "revenue", "retail", 10)
+                with pytest.raises(ValueError, match="no send date"):
+                    await store.get_sms_campaign_results("unsent")
+        finally:
+            monkeypatch.delenv("KS_SMS_STORE", raising=False)

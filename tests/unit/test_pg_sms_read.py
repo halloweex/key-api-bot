@@ -41,6 +41,21 @@ class TestPlaceholders:
     def test_every_question_mark_becomes_its_own_number(self):
         assert numbered("a = ? AND b = ? AND c = ?") == "a = $1 AND b = $2 AND c = $3"
 
+    def test_a_question_mark_in_a_comment_is_not_a_placeholder(self):
+        """This cost a debugging round. A comment explaining a cast contained
+        the words `? + INTERVAL`; the scan counted it, and every real parameter
+        after it bound one argument to the left — into a query that still ran,
+        with the attribution window silently taken from the wrong value."""
+        sql = "a = ?\n-- see `? + INTERVAL` above\nAND b = ?"
+        assert numbered(sql) == "a = $1\n-- see `? + INTERVAL` above\nAND b = $2"
+
+    def test_a_question_mark_in_a_literal_is_not_a_placeholder(self):
+        assert numbered("a = ? AND note = 'why?'") == "a = $1 AND note = 'why?'"
+
+    def test_a_comment_ends_at_its_line(self):
+        """Otherwise the first `--` would swallow the rest of the statement."""
+        assert numbered("-- ?\nx = ?") == "-- ?\nx = $1"
+
     def test_the_body_has_no_question_mark_in_a_literal(self):
         """A plain scan is only correct while this holds. It holds because
         every value the audience filters on is bound, never interpolated.
@@ -135,19 +150,27 @@ class TestItDoesNotTakeTheDuckDbLock:
             await store.close()
 
 
-class TestTheHalfSwitchRefuses:
-    """`KS_SMS_STORE=postgres` moves the audience read and nothing else yet.
+class TestTheSwitchIsWhole:
+    """Nothing is left half-switched, and the guard that proved it still works.
 
-    A flag that moved the read without the roster would compute an audience
-    from Postgres and freeze the campaign it produced into DuckDB — the two
-    would drift apart in silence, and a campaign whose roster is not the
-    audience it was built from cannot be measured at all. So the unported half
-    refuses out loud instead of writing where the reader will not look.
+    `UNPORTED` is empty: every path `/sms` uses runs against whichever store
+    `KS_SMS_STORE` names. The mechanism stays rather than being deleted the day
+    it first reached empty — the next thing to move onto two engines wants the
+    same protection, and a guard removed at that moment is one nobody rebuilds
+    in time.
     """
 
-    def test_every_unported_name_is_actually_guarded(self):
-        """The list and the code must not drift. Parsed, not grepped: a
-        comment naming the function would satisfy a grep."""
+    def test_nothing_is_left_behind(self):
+        from core.pg_sms import UNPORTED
+
+        assert UNPORTED == (), (
+            f"still answered by DuckDB alone: {UNPORTED} — the flag would move "
+            f"the read and leave these writing to the other store"
+        )
+
+    def test_no_method_still_calls_the_guard(self):
+        """The list and the code must not drift apart in either direction.
+        Parsed, not grepped: a comment naming the function satisfies a grep."""
         import ast
         import inspect
 
@@ -169,39 +192,17 @@ class TestTheHalfSwitchRefuses:
             f"listed but not guarded: {set(UNPORTED) - guarded}"
         )
 
-    def test_every_unported_name_exists_on_the_store(self):
-        from core.duckdb_store import DuckDBStore
-        from core.pg_sms import UNPORTED
-
-        for name in UNPORTED:
-            assert hasattr(DuckDBStore, name), f"{name} is not a store method"
-
-    @pytest.mark.asyncio
-    async def test_freezing_a_campaign_refuses_while_the_flag_is_on(
-        self, tmp_path, monkeypatch,
-    ):
-        from core.duckdb_store import DuckDBStore
+    def test_the_guard_still_refuses_when_something_is_listed(self, monkeypatch):
+        """The mechanism itself, exercised on a name that is not real — so the
+        test keeps working after every method has moved."""
+        from core import pg_sms
 
         monkeypatch.setenv("KS_SMS_STORE", "postgres")
-        store = DuckDBStore(db_path=tmp_path / "half.duckdb")
-        await store.connect()
-        try:
-            with pytest.raises(NotImplementedError, match="KS_SMS_STORE"):
-                await store.get_sms_campaign_results("aug")
-        finally:
-            await store.close()
+        with pytest.raises(NotImplementedError, match="KS_SMS_STORE"):
+            pg_sms.refuse_while_unported("some_future_half_ported_thing")
 
-    @pytest.mark.asyncio
-    async def test_it_stays_out_of_the_way_by_default(self, tmp_path, monkeypatch):
-        from core.duckdb_store import DuckDBStore
+    def test_it_stays_silent_on_the_default_engine(self, monkeypatch):
+        from core import pg_sms
 
         monkeypatch.delenv("KS_SMS_STORE", raising=False)
-        store = DuckDBStore(db_path=tmp_path / "whole.duckdb")
-        await store.connect()
-        try:
-            # Reaches the store and answers on its own terms — an unknown
-            # campaign is its own error, not a refusal to use this engine.
-            with pytest.raises(ValueError):
-                await store.get_sms_campaign_results("aug")
-        finally:
-            await store.close()
+        pg_sms.refuse_while_unported("anything")

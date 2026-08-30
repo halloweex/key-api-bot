@@ -51,18 +51,44 @@ def numbered(sql: str) -> str:
     step, which is the whole reason the shared body keeps `?` rather than
     growing a per-driver placeholder hole.
 
-    Safe as a plain scan only because the body contains no `?` inside a string
-    literal, and cannot: every value the audience filters on travels as a bound
-    parameter. `test_pg_sms_read` pins that by counting.
+    **Comments and string literals are skipped, and that is not tidiness.** A
+    plain scan reads a `?` inside a `--` comment as a placeholder, consumes a
+    number for it, and shifts every real parameter after it by one — silently,
+    into a query that still runs. It cost a debugging round here: a comment
+    added to explain a cast contained the words `? + INTERVAL`, and the query
+    then bound the attribution window to the wrong argument. Nothing about the
+    failure pointed at the comment.
+
+    The same hazard in the other direction is why literals are skipped too,
+    though the bodies here bind every value rather than interpolating any.
     """
     out: List[str] = []
     n = 0
-    for char in sql:
-        if char == "?":
+    in_line_comment = False
+    in_literal = False
+    i = 0
+    while i < len(sql):
+        char = sql[i]
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+            out.append(char)
+        elif in_literal:
+            if char == "'":
+                in_literal = False
+            out.append(char)
+        elif char == "-" and sql[i:i + 2] == "--":
+            in_line_comment = True
+            out.append(char)
+        elif char == "'":
+            in_literal = True
+            out.append(char)
+        elif char == "?":
             n += 1
             out.append(f"${n}")
         else:
             out.append(char)
+        i += 1
     return "".join(out)
 
 

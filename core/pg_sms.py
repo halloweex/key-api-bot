@@ -322,11 +322,12 @@ def sms_store_is_postgres() -> bool:
     return value == "postgres"
 
 
-# The names still answered by DuckDB alone. `get_sms_segments` has moved; these
-# have not, and until they do the switch is half a switch.
-UNPORTED = (
-    "get_sms_campaign_results",
-)
+# The names still answered by DuckDB alone. Empty: every path `/sms` uses now
+# runs against whichever store `KS_SMS_STORE` names. The guard and this tuple
+# stay rather than being deleted — the next thing to move onto two engines will
+# want the same half-switch protection, and a mechanism removed the day it
+# first reaches empty is a mechanism nobody rebuilds in time.
+UNPORTED: Tuple[str, ...] = ()
 
 
 def refuse_while_unported(operation: str) -> None:

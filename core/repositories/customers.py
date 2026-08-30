@@ -413,6 +413,9 @@ class _SmsTx:
             presets=self._dialect.sms_audience_presets,
             optouts=self._dialect.marketing_optouts,
             dlr_events=self._dialect.sms_dlr_events,
+            lines=self._dialect.order_lines,
+            stocks=self._dialect.offer_stocks,
+            buyers=self._dialect.buyers,
         )
 
 
@@ -1505,6 +1508,9 @@ class CustomersMixin:
             presets=dialect.sms_audience_presets,
             optouts=dialect.marketing_optouts,
             dlr_events=dialect.sms_dlr_events,
+            lines=dialect.order_lines,
+            stocks=dialect.offer_stocks,
+            buyers=dialect.buyers,
         )
 
         if sms_store_is_postgres():
@@ -2130,140 +2136,144 @@ class CustomersMixin:
             ValueError: If the campaign is unknown or has no send date — an
                 unsent campaign has no window to measure over.
         """
-        refuse_while_unported("get_sms_campaign_results")
-        async with self.connection() as conn:
-            camp = conn.execute(
-                "SELECT sent_at, promocode, ltv_basis, holdout_pct, cost_total"
-                " FROM sms_campaigns WHERE campaign = ?", [campaign],
-            ).fetchone()
-            if camp is None:
-                raise ValueError(f"campaign {campaign!r} is not frozen")
-            sent_at, promocode, ltv_basis, holdout_pct, cost_total = camp
-            if sent_at is None:
-                raise ValueError(
-                    f"campaign {campaign!r} has no send date — mark it sent before "
-                    f"measuring, or results would cover an arbitrary window"
-                )
+        camp = await self._sms_run(
+            "SELECT sent_at, promocode, ltv_basis, holdout_pct, cost_total"
+            " FROM {campaigns} WHERE campaign = ?", [campaign], mode="one",
+        )
+        if camp is None:
+            raise ValueError(f"campaign {campaign!r} is not frozen")
+        sent_at, promocode, ltv_basis, holdout_pct, cost_total = camp
+        if sent_at is None:
+            raise ValueError(
+                f"campaign {campaign!r} has no send date — mark it sent before "
+                f"measuring, or results would cover an arbitrary window"
+            )
 
-            rows = conn.execute(
-                f"""
-                WITH linked AS (
-                    -- Every customer record that is the same person as a roster
-                    -- member, matched on the phone the message went to.
-                    --
-                    -- Responding to the campaign is itself a way to acquire a
-                    -- second customer record: the recipient follows the link,
-                    -- checks out on the storefront, and a fresh buyer row is
-                    -- created because the name is spelled differently
-                    -- ("Наталія Дяків" against "Дяків Наталія"). Matching the
-                    -- purchase back by buyer_id then misses it. On the first
-                    -- real campaign that hid 6 of 55 responses, ~27 700 UAH,
-                    -- every one of them in the target arm — the arm is the only
-                    -- one holding a link to click, so the loss is one-sided and
-                    -- always understates the campaign.
-                    --
-                    -- Last nine digits, because the roster stores 380XXXXXXXXX
-                    -- and buyers may carry a +, spaces or brackets.
-                    SELECT m.buyer_id AS member_id, b.id AS buyer_id
-                    FROM sms_campaign_members m
-                    JOIN buyers b
-                      ON right(regexp_replace(b.phone, '[^0-9]', '', 'g'), 9)
-                       = right(m.phone, 9)
-                    WHERE m.campaign = ?
-                    UNION  -- the member's own row, even with no usable phone
-                    SELECT buyer_id, buyer_id
-                    FROM sms_campaign_members WHERE campaign = ?
-                ),
-                window_orders AS (
-                    SELECT l.buyer_id, l.order_id, l.order_grand_total AS grand_total,
-                           l.promocode,
-                           l.line_amount AS line_revenue,
-                           CASE WHEN os.purchased_price > 0
-                                THEN os.purchased_price * l.quantity END AS line_cogs
-                    FROM silver_order_lines l
-                    LEFT JOIN offer_stocks os ON os.sku = l.sku
-                    WHERE NOT l.is_return
-                      AND l.is_active_source
-                      -- From the moment the message went out, not from midnight
-                      -- that day. Rounding the start down to a date credited
-                      -- the campaign with every purchase made earlier the same
-                      -- day — hours of ordinary trading, split at random
-                      -- between the two arms, which on day one is the whole
-                      -- reading. Both columns carry a timezone, so this
-                      -- compares instants.
-                      AND l.ordered_at >= ?
-                      AND l.ordered_at < ? + INTERVAL '{int(window_days)} days'
-                ),
-                alloc AS (
-                    SELECT buyer_id, order_id, promocode, line_cogs,
-                           COALESCE(grand_total * line_revenue
-                               / NULLIF(SUM(line_revenue) OVER (PARTITION BY order_id), 0),
-                             0) AS revenue
-                    FROM window_orders
-                ),
-                per_buyer AS (
-                    SELECT buyer_id,
-                           COUNT(DISTINCT order_id) AS orders,
-                           SUM(revenue) AS revenue,
-                           COALESCE(SUM(revenue - line_cogs)
-                               FILTER (WHERE line_cogs IS NOT NULL), 0) AS margin,
-                           COUNT(DISTINCT CASE WHEN promocode = ? THEN order_id END)
-                               AS promo_orders
-                    FROM alloc
-                    GROUP BY buyer_id
-                ),
-                per_member AS (
-                    -- Roll every linked record up onto the roster member, so a
-                    -- person counts once however many customer rows they have.
-                    -- Orders belong to exactly one buyer row and roster phones
-                    -- are unique, so nothing is double counted here.
-                    SELECT l.member_id,
-                           SUM(pb.orders) AS orders,
-                           SUM(pb.revenue) AS revenue,
-                           SUM(pb.margin) AS margin,
-                           SUM(pb.promo_orders) AS promo_orders
-                    FROM linked l
-                    JOIN per_buyer pb ON pb.buyer_id = l.buyer_id
-                    GROUP BY l.member_id
-                )
-                -- Members the gateway never took are excluded from the arm
-                -- itself. They could not respond to a message they never
-                -- received, so counting them as contacts understates the rate
-                -- on every reading. They stay visible as not_sent below.
-                SELECT m.tier, m.assignment,
-                       COUNT(*) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS contacts,
-                       COUNT(pb.member_id) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS converted,
-                       COALESCE(SUM(pb.orders) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS orders,
-                       COALESCE(SUM(pb.revenue) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS revenue,
-                       COALESCE(SUM(pb.margin) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS margin,
-                       COALESCE(SUM(pb.promo_orders) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0)
-                           AS promo_orders,
-                       COUNT(*) FILTER (WHERE m.delivered) AS delivered,
-                       COUNT(*) FILTER (WHERE m.delivered = FALSE) AS undelivered,
-                       -- Never handed to the gateway at all. Counted apart from
-                       -- undelivered because it is a different failure: these
-                       -- people were never treated, so leaving them in the
-                       -- target arm dilutes whatever the message did.
-                       COUNT(*) FILTER (WHERE m.delivery_status = 'NotSent')
-                           AS not_sent
-                FROM sms_campaign_members m
-                LEFT JOIN per_member pb ON pb.member_id = m.buyer_id
+        rows = await self._sms_run(
+            f"""
+            WITH linked AS (
+                -- Every customer record that is the same person as a roster
+                -- member, matched on the phone the message went to.
+                --
+                -- Responding to the campaign is itself a way to acquire a
+                -- second customer record: the recipient follows the link,
+                -- checks out on the storefront, and a fresh buyer row is
+                -- created because the name is spelled differently
+                -- ("Наталія Дяків" against "Дяків Наталія"). Matching the
+                -- purchase back by buyer_id then misses it. On the first
+                -- real campaign that hid 6 of 55 responses, ~27 700 UAH,
+                -- every one of them in the target arm — the arm is the only
+                -- one holding a link to click, so the loss is one-sided and
+                -- always understates the campaign.
+                --
+                -- Last nine digits, because the roster stores 380XXXXXXXXX
+                -- and buyers may carry a +, spaces or brackets.
+                SELECT m.buyer_id AS member_id, b.id AS buyer_id
+                FROM {{members}} m
+                JOIN {{buyers}} b
+                  ON right(regexp_replace(b.phone, '[^0-9]', '', 'g'), 9)
+                   = right(m.phone, 9)
                 WHERE m.campaign = ?
-                  -- The control arm was never sent to, so a delivery filter
-                  -- must not touch it, or the comparison loses its baseline.
-                  --
-                  -- IS NOT FALSE, not a bare truth test: delivered is NULL for
-                  -- everyone the gateway accepted but never reported on, and
-                  -- with the delivery webhook not reaching us those receipts
-                  -- never arrive. On the first campaign that was 246 people
-                  -- against 25 actual rejections — treating "in transit" as
-                  -- "undelivered" drops nine responders for every one refusal.
-                  {"AND (m.assignment = 'holdout' OR m.delivered IS NOT FALSE)"
-                   if delivered_only else ""}
-                GROUP BY m.tier, m.assignment
-                """,
-                [campaign, campaign, sent_at, sent_at, promocode, campaign],
-            ).fetchall()
+                UNION  -- the member's own row, even with no usable phone
+                SELECT buyer_id, buyer_id
+                FROM {{members}} WHERE campaign = ?
+            ),
+            window_orders AS (
+                SELECT l.buyer_id, l.order_id, l.order_grand_total AS grand_total,
+                       l.promocode,
+                       l.line_amount AS line_revenue,
+                       CASE WHEN os.purchased_price > 0
+                            THEN os.purchased_price * l.quantity END AS line_cogs
+                FROM {{lines}} l
+                LEFT JOIN {{stocks}} os ON os.sku = l.sku
+                WHERE NOT l.is_return
+                  AND l.is_active_source
+                  -- From the moment the message went out, not from midnight
+                  -- that day. Rounding the start down to a date credited
+                  -- the campaign with every purchase made earlier the same
+                  -- day — hours of ordinary trading, split at random
+                  -- between the two arms, which on day one is the whole
+                  -- reading. Both columns carry a timezone, so this
+                  -- compares instants.
+                  AND l.ordered_at >= ?
+                  -- The parameter is cast explicitly because PostgreSQL cannot
+                  -- infer its type from `? + INTERVAL` alone: it reads the sum
+                  -- as an interval, which then refuses to compare against a
+                  -- timestamp. DuckDB is happy either way, so the cast is the
+                  -- portable spelling rather than a concession to one engine.
+                  AND l.ordered_at < CAST(? AS TIMESTAMPTZ)
+                                     + INTERVAL '{int(window_days)} days'
+            ),
+            alloc AS (
+                SELECT buyer_id, order_id, promocode, line_cogs,
+                       COALESCE(grand_total * line_revenue
+                           / NULLIF(SUM(line_revenue) OVER (PARTITION BY order_id), 0),
+                         0) AS revenue
+                FROM window_orders
+            ),
+            per_buyer AS (
+                SELECT buyer_id,
+                       COUNT(DISTINCT order_id) AS orders,
+                       SUM(revenue) AS revenue,
+                       COALESCE(SUM(revenue - line_cogs)
+                           FILTER (WHERE line_cogs IS NOT NULL), 0) AS margin,
+                       COUNT(DISTINCT CASE WHEN promocode = ? THEN order_id END)
+                           AS promo_orders
+                FROM alloc
+                GROUP BY buyer_id
+            ),
+            per_member AS (
+                -- Roll every linked record up onto the roster member, so a
+                -- person counts once however many customer rows they have.
+                -- Orders belong to exactly one buyer row and roster phones
+                -- are unique, so nothing is double counted here.
+                SELECT l.member_id,
+                       SUM(pb.orders) AS orders,
+                       SUM(pb.revenue) AS revenue,
+                       SUM(pb.margin) AS margin,
+                       SUM(pb.promo_orders) AS promo_orders
+                FROM linked l
+                JOIN per_buyer pb ON pb.buyer_id = l.buyer_id
+                GROUP BY l.member_id
+            )
+            -- Members the gateway never took are excluded from the arm
+            -- itself. They could not respond to a message they never
+            -- received, so counting them as contacts understates the rate
+            -- on every reading. They stay visible as not_sent below.
+            SELECT m.tier, m.assignment,
+                   COUNT(*) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS contacts,
+                   COUNT(pb.member_id) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS converted,
+                   COALESCE(SUM(pb.orders) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS orders,
+                   COALESCE(SUM(pb.revenue) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS revenue,
+                   COALESCE(SUM(pb.margin) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS margin,
+                   COALESCE(SUM(pb.promo_orders) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0)
+                       AS promo_orders,
+                   COUNT(*) FILTER (WHERE m.delivered) AS delivered,
+                   COUNT(*) FILTER (WHERE m.delivered = FALSE) AS undelivered,
+                   -- Never handed to the gateway at all. Counted apart from
+                   -- undelivered because it is a different failure: these
+                   -- people were never treated, so leaving them in the
+                   -- target arm dilutes whatever the message did.
+                   COUNT(*) FILTER (WHERE m.delivery_status = 'NotSent')
+                       AS not_sent
+            FROM {{members}} m
+            LEFT JOIN per_member pb ON pb.member_id = m.buyer_id
+            WHERE m.campaign = ?
+              -- The control arm was never sent to, so a delivery filter
+              -- must not touch it, or the comparison loses its baseline.
+              --
+              -- IS NOT FALSE, not a bare truth test: delivered is NULL for
+              -- everyone the gateway accepted but never reported on, and
+              -- with the delivery webhook not reaching us those receipts
+              -- never arrive. On the first campaign that was 246 people
+              -- against 25 actual rejections — treating "in transit" as
+              -- "undelivered" drops nine responders for every one refusal.
+              {"AND (m.assignment = 'holdout' OR m.delivered IS NOT FALSE)"
+               if delivered_only else ""}
+            GROUP BY m.tier, m.assignment
+            """,
+            [campaign, campaign, sent_at, sent_at, promocode, campaign],
+        )
 
         by_tier: Dict[str, Dict[str, Dict[str, Any]]] = {}
         for (tier, assignment, contacts, converted, orders, revenue, margin,
