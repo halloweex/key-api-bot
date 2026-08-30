@@ -226,7 +226,7 @@ def render_digest_tail(
             if first.tzinfo is None:
                 first = first.replace(tzinfo=_tz.utc)
             hours = int((now - first).total_seconds() // 3600)
-            age = f"{hours}h" if hours < 48 else f"{hours // 24}d"
+            age = f"{hours}ч" if hours < 48 else f"{hours // 24}д"
             mark = " · эскалировано" if escalated else ""
             rendered.append(f"• {key} — {age}, ×{count}{mark}")
         lines.append("⏳ Горит:")

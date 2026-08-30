@@ -29,13 +29,13 @@ class TestRender:
             resolved_24h=0, acknowledged=0,
         )
         assert "Журнал тревог" in tail
-        assert "mirror_failing — 30h, ×3 · эскалировано" in tail
-        assert "disk:WARN — 2h, ×1" in tail
+        assert "mirror_failing — 30ч, ×3 · эскалировано" in tail
+        assert "disk:WARN — 2ч, ×1" in tail
         assert "Погашено" not in tail
 
     def test_old_conditions_age_in_days(self):
         tail = render_digest_tail([("k", _t(75), 9, False)], 0, 0)
-        assert "3d" in tail
+        assert "3д" in tail
 
     def test_resolved_and_acknowledged_lines_render_only_when_nonzero(self):
         tail = render_digest_tail([], resolved_24h=2, acknowledged=1)
@@ -51,7 +51,7 @@ class TestRender:
     def test_naive_timestamps_read_as_utc(self):
         tail = render_digest_tail(
             [("k", datetime.utcnow() - timedelta(hours=5), 1, False)], 0, 0)
-        assert "5h" in tail
+        assert "5ч" in tail
 
 
 class TestDigestWiring:

@@ -183,11 +183,11 @@ async def check_cert_expiry(
 # ─── Data-quality run-age check ─────────────────────────────────────────────
 
 def _format_age(seconds: int) -> str:
-    """Human-readable age: '3h', '2d 4h'."""
+    """Возраст по-русски: «3ч», «2д 4ч»."""
     hours = seconds // 3600
     if hours < 48:
-        return f"{hours}h"
-    return f"{hours // 24}d {hours % 24}h"
+        return f"{hours}ч"
+    return f"{hours // 24}д {hours % 24}ч"
 
 
 def check_dq_freshness(

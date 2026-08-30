@@ -155,7 +155,7 @@ def test_dq_freshness_flags_stale_reconciliation():
     failures, ages = canary.check_dq_freshness(payload)
     keys = [k for k, _ in failures]
     assert keys == ["dq_stale:reconciliation"]
-    assert "3d" in failures[0][1]
+    assert "3д" in failures[0][1]
     assert ages["reconciliation"] == 3 * 86400
 
 
@@ -381,10 +381,10 @@ def test_format_alert_includes_dq_ages():
     странице и живут в /api/health; тело несёт максимум пару ключевых цифр."""
     result = CanaryResult(
         ok=False, severity="warn",
-        failures=["reconciliation: молчит 2d 6h"],
+        failures=["reconciliation: молчит 2д 6ч"],
         failure_keys=["dq_stale:reconciliation"],
         dq_ages={"reconciliation": 2 * 86400 + 6 * 3600, "integrity": 1800},
     )
     msg = format_alert(result, DASHBOARD)
-    assert "reconciliation: молчит 2d 6h" in msg     # сам провал — да
+    assert "reconciliation: молчит 2д 6ч" in msg     # сам провал — да
     assert "integrity" not in msg                     # приборная панель — нет

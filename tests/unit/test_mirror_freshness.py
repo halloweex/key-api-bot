@@ -56,7 +56,7 @@ class TestTheVerdict:
         entry = _ok(age_seconds=9 * 3600)
         failures, _ = check_mirror_freshness(_payload(**{"bronze.orders": entry}))
         assert [k for k, _ in failures] == ["mirror_stale:bronze.orders"]
-        assert "9h" in failures[0][1]
+        assert "9ч" in failures[0][1]
 
     def test_a_quiet_night_is_not_a_failure(self):
         """Measured on production: the orders watermark legitimately stands

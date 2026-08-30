@@ -550,10 +550,10 @@ async def raise_alert(
 def _age(seconds: float) -> str:
     hours = int(seconds // 3600)
     if hours < 1:
-        return f"{int(seconds // 60)}m"
+        return f"{int(seconds // 60)}м"
     if hours < 48:
-        return f"{hours}h"
-    return f"{hours // 24}d {hours % 24}h"
+        return f"{hours}ч"
+    return f"{hours // 24}д {hours % 24}ч"
 
 
 async def resolve_group(
