@@ -31,32 +31,32 @@ pytestmark = pytest.mark.skipif(
     not os.getenv("KS_CH_URL"), reason="needs a live ClickHouse at KS_CH_URL",
 )
 
-# (id, buyer, order_date, sales_type, is_return)
+# (id, buyer, order_date, sales_type, is_return, grand_total)
 ORDERS = [
     # cohort 2026-05: two buyers, one of them comes back twice
-    (1, 1, "2026-05-04", "retail", False),
-    (2, 1, "2026-06-11", "retail", False),
-    (3, 1, "2026-08-02", "retail", False),
-    (4, 2, "2026-05-20", "retail", False),
+    (1, 1, "2026-05-04", "retail", False, 1200),
+    (2, 1, "2026-06-11", "retail", False, 800),
+    (3, 1, "2026-08-02", "retail", False, 1500),
+    (4, 2, "2026-05-20", "retail", False, 600),
     # cohort 2026-06: one buyer who never returns
-    (5, 3, "2026-06-07", "retail", False),
+    (5, 3, "2026-06-07", "retail", False, 900),
     # a return in a later month must not count as a purchase
-    (6, 2, "2026-07-01", "retail", True),
+    (6, 2, "2026-07-01", "retail", True, 400),
     # b2b is a different population entirely
-    (7, 4, "2026-05-09", "b2b", False),
+    (7, 4, "2026-05-09", "b2b", False, 5000),
 ]
 
 
 async def _seed_duckdb(store):
     async with store.connection() as conn:
-        for oid, buyer, day, stype, ret in ORDERS:
+        for oid, buyer, day, stype, ret, total in ORDERS:
             conn.execute(
                 "INSERT INTO silver_orders (id, source_id, status_id,"
                 " grand_total, ordered_at, buyer_id, manager_id, order_date,"
                 " is_return, sales_type, is_active_source, source_name,"
                 " is_new_customer, buyer_first_order_date, promocode)"
-                " VALUES (?,1,1,1000,?,?,NULL,?,?,?,TRUE,'src1',FALSE,?,NULL)",
-                [oid, f"{day} 10:00:00+00", buyer, day, ret, stype, day])
+                " VALUES (?,1,1,?,?,?,NULL,?,?,?,TRUE,'src1',FALSE,?,NULL)",
+                [oid, total, f"{day} 10:00:00+00", buyer, day, ret, stype, day])
 
 
 async def _seed_clickhouse():
@@ -67,12 +67,15 @@ async def _seed_clickhouse():
     await execute(
         "CREATE TABLE silver.orders ("
         " id Int64, buyer_id Nullable(Int64), order_date Date,"
-        " is_return UInt8, sales_type String"
+        " is_return UInt8, sales_type String, grand_total Decimal(14,2),"
+        " ordered_at DateTime64(3, 'UTC'), source_id Int32,"
+        " is_active_source UInt8, manager_id Nullable(Int64)"
         ") ENGINE = MergeTree ORDER BY id"
     )
     values = ", ".join(
-        f"({oid}, {buyer}, toDate('{day}'), {1 if ret else 0}, '{stype}')"
-        for oid, buyer, day, stype, ret in ORDERS
+        f"({oid}, {buyer}, toDate('{day}'), {1 if ret else 0}, '{stype}',"
+        f" {total}, toDateTime64('{day} 10:00:00', 3, 'UTC'), 1, 1, NULL)"
+        for oid, buyer, day, stype, ret, total in ORDERS
     )
     await execute(f"INSERT INTO silver.orders VALUES {values}")
 
@@ -144,5 +147,84 @@ async def test_the_fixture_would_notice_an_accidental_agreement(tmp_path):
         assert ("2026-06", 1) not in matrix
         # The b2b buyer is not in a retail cohort at all.
         assert all(size <= 2 for size, _ in matrix.values())
+    finally:
+        await store.close()
+
+
+# The other four bodies. Each is (render function, bound params, column types),
+# and they run through the same fixture as the retention matrix above.
+OTHER_BODIES = (
+    ("enhanced_cohort_retention_select", [12],
+     ("TEXT", "INT", "FLOAT", "INT", "INT", "FLOAT", "FLOAT", "FLOAT")),
+    ("days_to_second_purchase_select", [],
+     ("TEXT", "INT", "FLOAT", "FLOAT", "FLOAT", "INT")),
+    ("cohort_ltv_select", [12], ("TEXT", "INT", "INT", "FLOAT", "FLOAT")),
+    # Six bound values: the at-risk window and the churn threshold, reused
+    # across the five aggregates in the projection.
+    ("at_risk_customers_select", [90, 180, 90, 90, 90, 180],
+     ("TEXT", "INT", "INT", "FLOAT", "FLOAT", "FLOAT", "INT")),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fn_name,params,_types", OTHER_BODIES, ids=[b[0] for b in OTHER_BODIES],
+)
+async def test_the_other_four_bodies_run_on_both_engines(
+    tmp_path, fn_name, params, _types,
+):
+    """Executed on both, compared as text rather than typed.
+
+    The retention matrix above is compared through the typed reader, which is
+    what the tab actually uses. These four are checked one level lower: that
+    the *same body* parses and runs on ClickHouse at all, and returns the same
+    rows. Their typed readers land with their own routing; what would break
+    silently before then is a construct ClickHouse cannot parse, and that is
+    what this catches.
+    """
+    import core.sql_dialect as dialects
+    from core import ch_cohorts
+    from core.ch_common import execute
+
+    store = DuckDBStore(db_path=tmp_path / f"{fn_name}.duckdb")
+    await store.connect()
+    try:
+        await _seed_duckdb(store)
+        await _seed_clickhouse()
+
+        render = getattr(dialects, fn_name)
+        kw = dict(sales_type_filter="AND o.sales_type = 'retail'", months_back=24)
+
+        duck_sql = render(dialects.DUCKDB_ANALYTICS, **kw)
+        ch_sql = render(dialects.CLICKHOUSE_ANALYTICS, **kw)
+        for value in params:
+            duck_sql_bound = duck_sql
+            ch_sql = ch_sql.replace("?", str(int(value)), 1)
+        duck_sql_bound = duck_sql
+
+        async with store.connection() as conn:
+            duck = [tuple(r) for r in conn.execute(duck_sql_bound, params).fetchall()]
+
+        raw = await execute(ch_sql + "\nFORMAT TabSeparated")
+        rows = [line.split("\t") for line in raw.splitlines() if line]
+        clickhouse = [ch_cohorts._typed(r, _types) for r in rows]
+
+        assert len(duck) == len(clickhouse), (
+            f"{fn_name}: {len(duck)} rows from DuckDB, {len(clickhouse)} from "
+            f"ClickHouse"
+        )
+        # Typed, not textual. The two engines render the same number
+        # differently — DuckDB's DECIMAL prints `900.00` where ClickHouse
+        # prints `900` — which is exactly what the typed reader exists to undo,
+        # and comparing the text would fail on a difference that is not one.
+        for i, (a, b) in enumerate(zip(duck, clickhouse)):
+            assert len(a) == len(b), f"{fn_name} row {i}: different widths"
+            for j, (x, y) in enumerate(zip(a, b)):
+                if isinstance(x, (int, float)) or hasattr(x, "as_tuple"):
+                    assert float(x) == pytest.approx(float(y), abs=1e-6), (
+                        f"{fn_name} row {i} col {j}: {x} vs {y}"
+                    )
+                else:
+                    assert str(x) == str(y), f"{fn_name} row {i} col {j}"
     finally:
         await store.close()

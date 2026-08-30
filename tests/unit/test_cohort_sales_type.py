@@ -28,6 +28,14 @@ import pytest
 
 from core.repositories import customers as module
 
+BODIES = (
+    "cohort_retention_select",
+    "enhanced_cohort_retention_select",
+    "days_to_second_purchase_select",
+    "cohort_ltv_select",
+    "at_risk_customers_select",
+)
+
 FIVE = (
     "get_cohort_retention",
     "get_enhanced_cohort_retention",
@@ -121,22 +129,39 @@ class TestTheOneSpellingThatCannotBeShared:
     hole rather than a literal.
     """
 
-    def test_the_extracted_body_renders_each_engine_its_own_today(self):
-        """`cohort_retention_select` left the method, so the check follows it:
-        the hole exists precisely because no literal serves both."""
-        from core.sql_dialect import (
-            CLICKHOUSE_ANALYTICS, DUCKDB_ANALYTICS, cohort_retention_select,
+    @pytest.mark.parametrize("fn_name", BODIES)
+    def test_the_extracted_body_renders_each_engine_its_own_today(self, fn_name):
+        """All five queries left their methods, so the check follows them: the
+        hole exists precisely because no literal serves both engines, and the
+        table name must be the only *other* difference — that is what would
+        catch a sixth divergence sneaking in."""
+        import core.sql_dialect as dialects
+
+        render = getattr(dialects, fn_name)
+        kw = dict(sales_type_filter="AND o.sales_type = 'retail'", months_back=12)
+        duck = render(dialects.DUCKDB_ANALYTICS, **kw)
+        clickhouse = render(dialects.CLICKHOUSE_ANALYTICS, **kw)
+
+        assert duck != clickhouse, f"{fn_name}: the dialect does nothing"
+        assert "CURRENT_DATE()" not in duck
+        undone = clickhouse.replace("silver.orders", "silver_orders").replace(
+            "CURRENT_DATE()", "CURRENT_DATE")
+        assert undone == duck, (
+            f"{fn_name} differs between engines somewhere other than the table "
+            f"name and today's date"
         )
 
-        kw = dict(sales_type_filter="AND o.sales_type = 'retail'", months_back=12)
-        duck = cohort_retention_select(DUCKDB_ANALYTICS, **kw)
-        clickhouse = cohort_retention_select(CLICKHOUSE_ANALYTICS, **kw)
+    @pytest.mark.parametrize("fn_name", BODIES)
+    def test_no_body_carries_a_duckdb_only_spelling(self, fn_name):
+        import core.sql_dialect as dialects
 
-        assert "CURRENT_DATE)" in duck and "CURRENT_DATE()" not in duck
-        assert "CURRENT_DATE())" in clickhouse
-        # …and the table name is the only other difference.
-        assert clickhouse.replace("silver.orders", "silver_orders").replace(
-            "CURRENT_DATE()", "CURRENT_DATE") == duck
+        sql = getattr(dialects, fn_name)(
+            dialects.CLICKHOUSE_ANALYTICS,
+            sales_type_filter="", months_back=12,
+        )
+        code = "\n".join(line.split("--")[0] for line in sql.splitlines())
+        for banned in ("strftime", "QUALIFY", "list_slice", "GROUP BY ALL"):
+            assert banned not in code, f"{fn_name} still speaks DuckDB only"
 
     @pytest.mark.parametrize("name", FIVE)
     def test_the_cohort_queries_use_the_form_clickhouse_accepts(self, name):

@@ -129,10 +129,12 @@ def _compare_groups(
         "incrementalMarginTotal": round(margin_per_contact * t_n, 2),
     }
 
-from core.ch_cohorts import RETENTION_TYPES
+from core.ch_cohorts import FLOAT, INT, RETENTION_TYPES, TEXT
 from core.sms_holdout import assign_arm
 from core.sql_dialect import (
-    CLICKHOUSE_ANALYTICS, DUCKDB_ANALYTICS, cohort_retention_select,
+    CLICKHOUSE_ANALYTICS, DUCKDB_ANALYTICS, at_risk_customers_select,
+    cohort_ltv_select, cohort_retention_select, days_to_second_purchase_select,
+    enhanced_cohort_retention_select,
 )
 from core.pg_sms import refuse_while_unported, sms_store_is_postgres
 from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
@@ -761,177 +763,114 @@ class CustomersMixin:
         Returns:
             Dict with cohorts, customer retention, revenue retention, and summary
         """
-        async with self.connection() as conn:
-            # Build sales type filter
-            # Silver already carries `sales_type`, materialised per order by the
-            # one CASE in `refresh_warehouse_layers`. These five methods used to
-            # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
-            # was a second home for the rule and had gone stale in two ways:
-            # it required `source_id = 4` for a manager-less order where Silver
-            # requires nothing, and it read the *constant* list rather than
-            # `managers.is_retail`, which is what a human edits. Measured on
-            # production: 1,781 non-return orders are retail to every other tab
-            # and were invisible here, and 175 were the other way round.
-            #
-            # It is also the only spelling that can be asked of a third engine:
-            # a column, not a manager list rendered into SQL.
-            sales_type_filter = (
-                "" if sales_type == "all"
-                else f"AND o.sales_type = '{sales_type}'"
-            )
+        # Build sales type filter
+        # Silver already carries `sales_type`, materialised per order by the
+        # one CASE in `refresh_warehouse_layers`. These five methods used to
+        # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+        # was a second home for the rule and had gone stale in two ways:
+        # it required `source_id = 4` for a manager-less order where Silver
+        # requires nothing, and it read the *constant* list rather than
+        # `managers.is_retail`, which is what a human edits. Measured on
+        # production: 1,781 non-return orders are retail to every other tab
+        # and were invisible here, and 175 were the other way round.
+        #
+        # It is also the only spelling that can be asked of a third engine:
+        # a column, not a manager list rendered into SQL.
+        sales_type_filter = (
+            "" if sales_type == "all"
+            else f"AND o.sales_type = '{sales_type}'"
+        )
 
-            query = f"""
-            WITH customer_first_order AS (
-                -- Get each customer's first order month (cohort)
-                SELECT
-                    o.buyer_id,
-                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
-                FROM silver_orders o
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
-                  {sales_type_filter}
-                GROUP BY o.buyer_id
+        rows = await self._analytics_rows(
+            lambda d: enhanced_cohort_retention_select(
+                d, sales_type_filter=sales_type_filter,
+                months_back=months_back,
             ),
-            customer_cohorts AS (
-                -- Add first month revenue per customer
-                SELECT
-                    c.buyer_id,
-                    c.cohort_month,
-                    COALESCE(SUM(o.grand_total), 0) AS first_month_revenue
-                FROM customer_first_order c
-                LEFT JOIN silver_orders o ON c.buyer_id = o.buyer_id
-                    AND DATE_TRUNC('month', o.order_date) = c.cohort_month
-                    AND NOT o.is_return
-                GROUP BY c.buyer_id, c.cohort_month
-            ),
-            customer_orders AS (
-                -- Get all order months per customer with revenue
-                SELECT
-                    o.buyer_id,
-                    c.cohort_month,
-                    DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date)) AS months_since,
-                    o.grand_total AS revenue
-                FROM silver_orders o
-                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
-                WHERE NOT o.is_return
-                  {sales_type_filter}
-            ),
-            cohort_sizes AS (
-                SELECT
-                    cohort_month,
-                    COUNT(DISTINCT buyer_id) AS size,
-                    SUM(first_month_revenue) AS m0_revenue
-                FROM customer_cohorts
-                GROUP BY cohort_month
-            ),
-            retention_data AS (
-                SELECT
-                    r.cohort_month,
-                    r.months_since,
-                    COUNT(DISTINCT r.buyer_id) AS retained_customers,
-                    SUM(r.revenue) AS period_revenue
-                FROM customer_orders r
-                WHERE r.months_since <= ?
-                GROUP BY r.cohort_month, r.months_since
-            )
-            SELECT
-                substring(CAST(r.cohort_month AS VARCHAR), 1, 7) as cohort,
-                s.size as cohort_size,
-                s.m0_revenue,
-                r.months_since as month_number,
-                r.retained_customers,
-                ROUND(100.0 * r.retained_customers / s.size, 1) as retention_pct,
-                r.period_revenue,
-                ROUND(100.0 * r.period_revenue / NULLIF(s.m0_revenue, 0), 1) as revenue_retention_pct
-            FROM retention_data r
-            JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
-            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE()) - INTERVAL '{int(months_back)} months'
-            ORDER BY r.cohort_month DESC, r.months_since
-            """
+            [retention_months],
+            (TEXT, INT, FLOAT, INT, INT, FLOAT, FLOAT, FLOAT),
+        )
 
-            rows = conn.execute(query, [retention_months]).fetchall()
+        # Build cohort data structure
+        cohorts = {}
+        for cohort, size, m0_rev, month_num, retained, pct, rev, rev_pct in rows:
+            if cohort not in cohorts:
+                cohorts[cohort] = {
+                    "size": size,
+                    "m0_revenue": float(m0_rev or 0),
+                    "retention": {},
+                    "revenue_retention": {},
+                    "revenue": {}
+                }
+            cohorts[cohort]["retention"][month_num] = float(pct) if pct is not None else None
+            cohorts[cohort]["revenue_retention"][month_num] = float(rev_pct) if rev_pct is not None else None
+            cohorts[cohort]["revenue"][month_num] = float(rev or 0)
 
-            # Build cohort data structure
-            cohorts = {}
-            for cohort, size, m0_rev, month_num, retained, pct, rev, rev_pct in rows:
-                if cohort not in cohorts:
-                    cohorts[cohort] = {
-                        "size": size,
-                        "m0_revenue": float(m0_rev or 0),
-                        "retention": {},
-                        "revenue_retention": {},
-                        "revenue": {}
-                    }
-                cohorts[cohort]["retention"][month_num] = float(pct) if pct is not None else None
-                cohorts[cohort]["revenue_retention"][month_num] = float(rev_pct) if rev_pct is not None else None
-                cohorts[cohort]["revenue"][month_num] = float(rev or 0)
+        # Calculate summary metrics
+        total_cohort_size = sum(c["size"] for c in cohorts.values())
+        total_revenue = sum(c["m0_revenue"] for c in cohorts.values())
 
-            # Calculate summary metrics
-            total_cohort_size = sum(c["size"] for c in cohorts.values())
-            total_revenue = sum(c["m0_revenue"] for c in cohorts.values())
+        # Weighted average retention by month (weight = cohort size)
+        avg_customer_retention = {}
+        avg_revenue_retention = {}
+        for m in range(retention_months + 1):
+            cust_weighted_sum = 0
+            cust_total_weight = 0
+            rev_weighted_sum = 0
+            rev_total_weight = 0
+            for c in cohorts.values():
+                cust_pct = c["retention"].get(m)
+                if cust_pct is not None:
+                    cust_weighted_sum += cust_pct * c["size"]
+                    cust_total_weight += c["size"]
+                rev_pct = c["revenue_retention"].get(m)
+                if rev_pct is not None:
+                    rev_weighted_sum += rev_pct * c["size"]
+                    rev_total_weight += c["size"]
+            if cust_total_weight > 0:
+                avg_customer_retention[m] = round(cust_weighted_sum / cust_total_weight, 1)
+            if rev_total_weight > 0:
+                avg_revenue_retention[m] = round(rev_weighted_sum / rev_total_weight, 1)
 
-            # Weighted average retention by month (weight = cohort size)
-            avg_customer_retention = {}
-            avg_revenue_retention = {}
-            for m in range(retention_months + 1):
-                cust_weighted_sum = 0
-                cust_total_weight = 0
-                rev_weighted_sum = 0
-                rev_total_weight = 0
-                for c in cohorts.values():
-                    cust_pct = c["retention"].get(m)
-                    if cust_pct is not None:
-                        cust_weighted_sum += cust_pct * c["size"]
-                        cust_total_weight += c["size"]
-                    rev_pct = c["revenue_retention"].get(m)
-                    if rev_pct is not None:
-                        rev_weighted_sum += rev_pct * c["size"]
-                        rev_total_weight += c["size"]
-                if cust_total_weight > 0:
-                    avg_customer_retention[m] = round(cust_weighted_sum / cust_total_weight, 1)
-                if rev_total_weight > 0:
-                    avg_revenue_retention[m] = round(rev_weighted_sum / rev_total_weight, 1)
+        # ── Compute insights ──────────────────────────────────────
+        sorted_cohort_list = [
+            {"month": k, **v}
+            for k, v in sorted(cohorts.items())
+        ]
 
-            # ── Compute insights ──────────────────────────────────────
-            sorted_cohort_list = [
-                {"month": k, **v}
-                for k, v in sorted(cohorts.items())
-            ]
+        insights = self._compute_cohort_insights(
+            sorted_cohort_list, avg_customer_retention, retention_months
+        )
 
-            insights = self._compute_cohort_insights(
-                sorted_cohort_list, avg_customer_retention, retention_months
-            )
-
-            return {
-                "cohorts": [
-                    {
-                        "month": cohort,
-                        "size": data["size"],
-                        "retention": [
-                            data["retention"].get(m)
-                            for m in range(retention_months + 1)
-                        ],
-                        "revenueRetention": [
-                            data["revenue_retention"].get(m)
-                            for m in range(retention_months + 1)
-                        ] if include_revenue else None,
-                        "revenue": [
-                            round(data["revenue"].get(m, 0), 2)
-                            for m in range(retention_months + 1)
-                        ] if include_revenue else None
-                    }
-                    for cohort, data in sorted(cohorts.items(), reverse=True)
-                ],
-                "retentionMonths": retention_months,
-                "summary": {
-                    "totalCohorts": len(cohorts),
-                    "totalCustomers": total_cohort_size,
-                    "avgCustomerRetention": avg_customer_retention,
-                    "avgRevenueRetention": avg_revenue_retention if include_revenue else None,
-                    "totalRevenue": round(total_revenue, 2) if include_revenue else None
-                },
-                "insights": insights
-            }
+        return {
+            "cohorts": [
+                {
+                    "month": cohort,
+                    "size": data["size"],
+                    "retention": [
+                        data["retention"].get(m)
+                        for m in range(retention_months + 1)
+                    ],
+                    "revenueRetention": [
+                        data["revenue_retention"].get(m)
+                        for m in range(retention_months + 1)
+                    ] if include_revenue else None,
+                    "revenue": [
+                        round(data["revenue"].get(m, 0), 2)
+                        for m in range(retention_months + 1)
+                    ] if include_revenue else None
+                }
+                for cohort, data in sorted(cohorts.items(), reverse=True)
+            ],
+            "retentionMonths": retention_months,
+            "summary": {
+                "totalCohorts": len(cohorts),
+                "totalCustomers": total_cohort_size,
+                "avgCustomerRetention": avg_customer_retention,
+                "avgRevenueRetention": avg_revenue_retention if include_revenue else None,
+                "totalRevenue": round(total_revenue, 2) if include_revenue else None
+            },
+            "insights": insights
+        }
 
     @staticmethod
     def _compute_cohort_insights(
@@ -1096,113 +1035,57 @@ class CustomersMixin:
         Returns:
             Dict with buckets, customer counts, and summary statistics
         """
-        async with self.connection() as conn:
-            # Build sales type filter
-            # Silver already carries `sales_type`, materialised per order by the
-            # one CASE in `refresh_warehouse_layers`. These five methods used to
-            # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
-            # was a second home for the rule and had gone stale in two ways:
-            # it required `source_id = 4` for a manager-less order where Silver
-            # requires nothing, and it read the *constant* list rather than
-            # `managers.is_retail`, which is what a human edits. Measured on
-            # production: 1,781 non-return orders are retail to every other tab
-            # and were invisible here, and 175 were the other way round.
-            #
-            # It is also the only spelling that can be asked of a third engine:
-            # a column, not a manager list rendered into SQL.
-            sales_type_filter = (
-                "" if sales_type == "all"
-                else f"AND o.sales_type = '{sales_type}'"
-            )
+        # Build sales type filter
+        # Silver already carries `sales_type`, materialised per order by the
+        # one CASE in `refresh_warehouse_layers`. These five methods used to
+        # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+        # was a second home for the rule and had gone stale in two ways:
+        # it required `source_id = 4` for a manager-less order where Silver
+        # requires nothing, and it read the *constant* list rather than
+        # `managers.is_retail`, which is what a human edits. Measured on
+        # production: 1,781 non-return orders are retail to every other tab
+        # and were invisible here, and 175 were the other way round.
+        #
+        # It is also the only spelling that can be asked of a third engine:
+        # a column, not a manager list rendered into SQL.
+        sales_type_filter = (
+            "" if sales_type == "all"
+            else f"AND o.sales_type = '{sales_type}'"
+        )
 
-            query = f"""
-            WITH customer_orders_ranked AS (
-                SELECT
-                    o.buyer_id,
-                    o.order_date,
-                    ROW_NUMBER() OVER (PARTITION BY o.buyer_id ORDER BY o.order_date) AS order_num
-                FROM silver_orders o
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
-                  {sales_type_filter}
+        rows = await self._analytics_rows(
+            lambda d: days_to_second_purchase_select(
+                d, sales_type_filter=sales_type_filter,
+                months_back=months_back,
             ),
-            second_purchase AS (
-                SELECT
-                    c1.buyer_id,
-                    DATEDIFF('day', c1.order_date, c2.order_date) AS days_to_second
-                FROM customer_orders_ranked c1
-                JOIN customer_orders_ranked c2
-                    ON c1.buyer_id = c2.buyer_id
-                    AND c1.order_num = 1
-                    AND c2.order_num = 2
-                WHERE c1.order_date >= CURRENT_DATE() - INTERVAL '{int(months_back)} months'
-            ),
-            bucketed AS (
-                SELECT
-                    days_to_second,
-                    CASE
-                        WHEN days_to_second <= 30 THEN '0-30'
-                        WHEN days_to_second <= 60 THEN '31-60'
-                        WHEN days_to_second <= 90 THEN '61-90'
-                        WHEN days_to_second <= 120 THEN '91-120'
-                        WHEN days_to_second <= 180 THEN '121-180'
-                        ELSE '180+'
-                    END AS bucket,
-                    CASE
-                        WHEN days_to_second <= 30 THEN 1
-                        WHEN days_to_second <= 60 THEN 2
-                        WHEN days_to_second <= 90 THEN 3
-                        WHEN days_to_second <= 120 THEN 4
-                        WHEN days_to_second <= 180 THEN 5
-                        ELSE 6
-                    END AS bucket_order
-                FROM second_purchase
-            ),
-            global_stats AS (
-                SELECT
-                    MEDIAN(days_to_second) AS median_days,
-                    AVG(days_to_second) AS avg_days,
-                    COUNT(*) AS total_count
-                FROM second_purchase
-            )
-            SELECT
-                b.bucket,
-                COUNT(*) AS customers,
-                ROUND(AVG(b.days_to_second), 1) AS avg_days,
-                (SELECT median_days FROM global_stats) AS median_days,
-                (SELECT avg_days FROM global_stats) AS avg_days_overall,
-                (SELECT total_count FROM global_stats) AS total_count
-            FROM bucketed b
-            GROUP BY b.bucket, b.bucket_order
-            ORDER BY b.bucket_order
-            """
+            [],
+            (TEXT, INT, FLOAT, FLOAT, FLOAT, INT),
+        )
 
-            rows = conn.execute(query).fetchall()
+        # Extract global stats from first row
+        median_days = rows[0][3] if rows else None
+        avg_days_overall = rows[0][4] if rows else None
 
-            # Extract global stats from first row
-            median_days = rows[0][3] if rows else None
-            avg_days_overall = rows[0][4] if rows else None
+        # Calculate totals and percentages
+        total_repeat = sum(row[1] for row in rows)
+        buckets = []
+        for row in rows:
+            bucket, customers, avg_days = row[0], row[1], row[2]
+            buckets.append({
+                "bucket": bucket,
+                "customers": customers,
+                "avgDays": avg_days,
+                "percentage": round(100.0 * customers / total_repeat, 1) if total_repeat > 0 else 0
+            })
 
-            # Calculate totals and percentages
-            total_repeat = sum(row[1] for row in rows)
-            buckets = []
-            for row in rows:
-                bucket, customers, avg_days = row[0], row[1], row[2]
-                buckets.append({
-                    "bucket": bucket,
-                    "customers": customers,
-                    "avgDays": avg_days,
-                    "percentage": round(100.0 * customers / total_repeat, 1) if total_repeat > 0 else 0
-                })
-
-            return {
-                "buckets": buckets,
-                "summary": {
-                    "totalRepeatCustomers": total_repeat,
-                    "medianDays": round(median_days, 1) if median_days else None,
-                    "avgDays": round(avg_days_overall, 1) if avg_days_overall else None
-                }
+        return {
+            "buckets": buckets,
+            "summary": {
+                "totalRepeatCustomers": total_repeat,
+                "medianDays": round(median_days, 1) if median_days else None,
+                "avgDays": round(avg_days_overall, 1) if avg_days_overall else None
             }
+        }
 
     async def get_cohort_ltv(
         self,
@@ -1223,125 +1106,81 @@ class CustomersMixin:
         Returns:
             Dict with cohort LTV data and summary statistics
         """
-        async with self.connection() as conn:
-            # Build sales type filter
-            # Silver already carries `sales_type`, materialised per order by the
-            # one CASE in `refresh_warehouse_layers`. These five methods used to
-            # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
-            # was a second home for the rule and had gone stale in two ways:
-            # it required `source_id = 4` for a manager-less order where Silver
-            # requires nothing, and it read the *constant* list rather than
-            # `managers.is_retail`, which is what a human edits. Measured on
-            # production: 1,781 non-return orders are retail to every other tab
-            # and were invisible here, and 175 were the other way round.
-            #
-            # It is also the only spelling that can be asked of a third engine:
-            # a column, not a manager list rendered into SQL.
-            sales_type_filter = (
-                "" if sales_type == "all"
-                else f"AND o.sales_type = '{sales_type}'"
-            )
+        # Build sales type filter
+        # Silver already carries `sales_type`, materialised per order by the
+        # one CASE in `refresh_warehouse_layers`. These five methods used to
+        # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+        # was a second home for the rule and had gone stale in two ways:
+        # it required `source_id = 4` for a manager-less order where Silver
+        # requires nothing, and it read the *constant* list rather than
+        # `managers.is_retail`, which is what a human edits. Measured on
+        # production: 1,781 non-return orders are retail to every other tab
+        # and were invisible here, and 175 were the other way round.
+        #
+        # It is also the only spelling that can be asked of a third engine:
+        # a column, not a manager list rendered into SQL.
+        sales_type_filter = (
+            "" if sales_type == "all"
+            else f"AND o.sales_type = '{sales_type}'"
+        )
 
-            query = f"""
-            WITH customer_cohorts AS (
-                SELECT
-                    o.buyer_id,
-                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
-                FROM silver_orders o
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
-                  {sales_type_filter}
-                GROUP BY o.buyer_id
+        rows = await self._analytics_rows(
+            lambda d: cohort_ltv_select(
+                d, sales_type_filter=sales_type_filter,
+                months_back=months_back,
             ),
-            customer_revenue AS (
-                SELECT
-                    o.buyer_id,
-                    c.cohort_month,
-                    DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date)) AS months_since,
-                    SUM(o.grand_total) AS revenue
-                FROM silver_orders o
-                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
-                WHERE NOT o.is_return
-                  {sales_type_filter}
-                GROUP BY o.buyer_id, c.cohort_month, DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date))
-            ),
-            cohort_monthly AS (
-                SELECT
-                    cohort_month,
-                    months_since,
-                    SUM(revenue) AS total_revenue,
-                    COUNT(DISTINCT buyer_id) AS active_customers
-                FROM customer_revenue
-                WHERE months_since <= ?
-                GROUP BY cohort_month, months_since
-            ),
-            cohort_sizes AS (
-                SELECT cohort_month, COUNT(DISTINCT buyer_id) AS cohort_size
-                FROM customer_cohorts
-                GROUP BY cohort_month
-            )
-            SELECT
-                substring(CAST(cm.cohort_month AS VARCHAR), 1, 7) AS cohort,
-                cs.cohort_size,
-                cm.months_since,
-                cm.total_revenue,
-                cm.active_customers
-            FROM cohort_monthly cm
-            JOIN cohort_sizes cs ON cm.cohort_month = cs.cohort_month
-            WHERE cm.cohort_month >= DATE_TRUNC('month', CURRENT_DATE()) - INTERVAL '{int(months_back)} months'
-            ORDER BY cm.cohort_month DESC, cm.months_since
-            """
+            [retention_months],
+            (TEXT, INT, INT, FLOAT, FLOAT),
+        )
 
-            rows = conn.execute(query, [retention_months]).fetchall()
-
-            # Build cohort LTV structure with cumulative revenue
-            cohorts = {}
-            for cohort, size, months_since, revenue, active in rows:
-                if cohort not in cohorts:
-                    cohorts[cohort] = {
-                        "size": size,
-                        "monthly_revenue": {},
-                        "cumulative": []
-                    }
-                cohorts[cohort]["monthly_revenue"][months_since] = revenue or 0
-
-            # Calculate cumulative revenue for each cohort
-            for cohort_data in cohorts.values():
-                cumulative = 0
-                cumulative_list = []
-                for m in range(retention_months + 1):  # M0 to Mn
-                    cumulative += cohort_data["monthly_revenue"].get(m, 0)
-                    cumulative_list.append(round(cumulative, 2))
-                cohort_data["cumulative"] = cumulative_list
-
-            # Calculate weighted average LTV (weight = cohort size)
-            total_rev = sum(c["cumulative"][-1] for c in cohorts.values())
-            total_size = sum(c["size"] for c in cohorts.values())
-            avg_ltv = round(total_rev / total_size, 2) if total_size > 0 else 0
-
-            # Find best cohort
-            best_cohort = max(
-                cohorts.items(),
-                key=lambda x: x[1]["cumulative"][-1] / x[1]["size"] if x[1]["size"] > 0 else 0,
-                default=(None, {"cumulative": [0], "size": 1})
-            )
-
-            return {
-                "cohorts": [
-                    {
-                        "month": cohort,
-                        "customerCount": data["size"],
-                        "cumulativeRevenue": data["cumulative"],
-                        "avgLTV": round(data["cumulative"][-1] / data["size"], 2) if data["size"] > 0 else 0
-                    }
-                    for cohort, data in sorted(cohorts.items(), reverse=True)
-                ],
-                "summary": {
-                    "avgLTV": avg_ltv,
-                    "bestCohort": best_cohort[0],
-                    "bestCohortLTV": round(best_cohort[1]["cumulative"][-1] / best_cohort[1]["size"], 2) if best_cohort[1]["size"] > 0 else 0
+        # Build cohort LTV structure with cumulative revenue
+        cohorts = {}
+        for cohort, size, months_since, revenue, active in rows:
+            if cohort not in cohorts:
+                cohorts[cohort] = {
+                    "size": size,
+                    "monthly_revenue": {},
+                    "cumulative": []
                 }
+            cohorts[cohort]["monthly_revenue"][months_since] = revenue or 0
+
+        # Calculate cumulative revenue for each cohort
+        for cohort_data in cohorts.values():
+            cumulative = 0
+            cumulative_list = []
+            for m in range(retention_months + 1):  # M0 to Mn
+                cumulative += cohort_data["monthly_revenue"].get(m, 0)
+                cumulative_list.append(round(cumulative, 2))
+            cohort_data["cumulative"] = cumulative_list
+
+        # Calculate weighted average LTV (weight = cohort size)
+        total_rev = sum(c["cumulative"][-1] for c in cohorts.values())
+        total_size = sum(c["size"] for c in cohorts.values())
+        avg_ltv = round(total_rev / total_size, 2) if total_size > 0 else 0
+
+        # Find best cohort
+        best_cohort = max(
+            cohorts.items(),
+            key=lambda x: x[1]["cumulative"][-1] / x[1]["size"] if x[1]["size"] > 0 else 0,
+            default=(None, {"cumulative": [0], "size": 1})
+        )
+
+        return {
+            "cohorts": [
+                {
+                    "month": cohort,
+                    "customerCount": data["size"],
+                    "cumulativeRevenue": data["cumulative"],
+                    "avgLTV": round(data["cumulative"][-1] / data["size"], 2) if data["size"] > 0 else 0
+                }
+                for cohort, data in sorted(cohorts.items(), reverse=True)
+            ],
+            "summary": {
+                "avgLTV": avg_ltv,
+                "bestCohort": best_cohort[0],
+                "bestCohortLTV": round(best_cohort[1]["cumulative"][-1] / best_cohort[1]["size"], 2) if best_cohort[1]["size"] > 0 else 0
             }
+        }
 
     async def get_at_risk_customers(
         self,
@@ -1362,93 +1201,70 @@ class CustomersMixin:
         Returns:
             Dict with at-risk counts by cohort and summary statistics
         """
-        async with self.connection() as conn:
-            # Build sales type filter
-            # Silver already carries `sales_type`, materialised per order by the
-            # one CASE in `refresh_warehouse_layers`. These five methods used to
-            # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
-            # was a second home for the rule and had gone stale in two ways:
-            # it required `source_id = 4` for a manager-less order where Silver
-            # requires nothing, and it read the *constant* list rather than
-            # `managers.is_retail`, which is what a human edits. Measured on
-            # production: 1,781 non-return orders are retail to every other tab
-            # and were invisible here, and 175 were the other way round.
-            #
-            # It is also the only spelling that can be asked of a third engine:
-            # a column, not a manager list rendered into SQL.
-            sales_type_filter = (
-                "" if sales_type == "all"
-                else f"AND o.sales_type = '{sales_type}'"
-            )
+        # Build sales type filter
+        # Silver already carries `sales_type`, materialised per order by the
+        # one CASE in `refresh_warehouse_layers`. These five methods used to
+        # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+        # was a second home for the rule and had gone stale in two ways:
+        # it required `source_id = 4` for a manager-less order where Silver
+        # requires nothing, and it read the *constant* list rather than
+        # `managers.is_retail`, which is what a human edits. Measured on
+        # production: 1,781 non-return orders are retail to every other tab
+        # and were invisible here, and 175 were the other way round.
+        #
+        # It is also the only spelling that can be asked of a third engine:
+        # a column, not a manager list rendered into SQL.
+        sales_type_filter = (
+            "" if sales_type == "all"
+            else f"AND o.sales_type = '{sales_type}'"
+        )
 
-            churn_threshold = days_threshold * 2
+        churn_threshold = days_threshold * 2
 
-            query = f"""
-            WITH customer_activity AS (
-                SELECT
-                    o.buyer_id,
-                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month,
-                    MAX(o.order_date) AS last_order_date,
-                    DATEDIFF('day', MAX(o.order_date), CURRENT_DATE()) AS days_since_last,
-                    COUNT(*) AS total_orders,
-                    SUM(o.grand_total) AS total_revenue
-                FROM silver_orders o
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
-                  {sales_type_filter}
-                GROUP BY o.buyer_id
-            )
-            SELECT
-                substring(CAST(cohort_month AS VARCHAR), 1, 7) AS cohort,
-                COUNT(*) AS total_customers,
-                COUNT(*) FILTER (WHERE days_since_last > ? AND days_since_last <= ?) AS at_risk_count,
-                ROUND(100.0 * COUNT(*) FILTER (WHERE days_since_last > ?) / COUNT(*), 1) AS at_risk_pct,
-                SUM(total_revenue) FILTER (WHERE days_since_last > ?) AS at_risk_revenue,
-                AVG(total_orders) FILTER (WHERE days_since_last > ?) AS avg_orders_at_risk,
-                COUNT(*) FILTER (WHERE days_since_last > ?) AS churned_count
-            FROM customer_activity
-            WHERE cohort_month >= DATE_TRUNC('month', CURRENT_DATE()) - INTERVAL '{int(months_back)} months'
-            GROUP BY cohort_month
-            ORDER BY cohort_month DESC
-            """
+        rows = await self._analytics_rows(
+            lambda d: at_risk_customers_select(
+                d, sales_type_filter=sales_type_filter,
+                months_back=months_back,
+            ),
+            [
+            days_threshold, churn_threshold,  # at_risk_count (between threshold and 2x)
+            days_threshold,  # at_risk_pct (> threshold)
+            days_threshold,  # at_risk_revenue
+            days_threshold,  # avg_orders_at_risk
+            churn_threshold,  # churned_count (> 2x threshold)
+        ],
+            (INT, TEXT, TEXT, INT, INT, FLOAT),
+        )
 
-            rows = conn.execute(query, [
-                days_threshold, churn_threshold,  # at_risk_count (between threshold and 2x)
-                days_threshold,  # at_risk_pct (> threshold)
-                days_threshold,  # at_risk_revenue
-                days_threshold,  # avg_orders_at_risk
-                churn_threshold,  # churned_count (> 2x threshold)
-            ]).fetchall()
+        cohorts = []
+        total_at_risk = 0
+        total_churned = 0
+        total_customers = 0
+        for cohort, total, at_risk, pct, revenue, avg_orders, churned in rows:
+            cohorts.append({
+                "cohort": cohort,
+                "totalCustomers": total,
+                "atRiskCount": at_risk,
+                "atRiskPct": pct,
+                "atRiskRevenue": round(revenue, 2) if revenue else 0,
+                "avgOrdersAtRisk": round(avg_orders, 1) if avg_orders else 0,
+                "churnedCount": churned
+            })
+            total_at_risk += at_risk
+            total_churned += churned
+            total_customers += total
 
-            cohorts = []
-            total_at_risk = 0
-            total_churned = 0
-            total_customers = 0
-            for cohort, total, at_risk, pct, revenue, avg_orders, churned in rows:
-                cohorts.append({
-                    "cohort": cohort,
-                    "totalCustomers": total,
-                    "atRiskCount": at_risk,
-                    "atRiskPct": pct,
-                    "atRiskRevenue": round(revenue, 2) if revenue else 0,
-                    "avgOrdersAtRisk": round(avg_orders, 1) if avg_orders else 0,
-                    "churnedCount": churned
-                })
-                total_at_risk += at_risk
-                total_churned += churned
-                total_customers += total
-
-            return {
-                "cohorts": cohorts,
-                "daysThreshold": days_threshold,
-                "summary": {
-                    "totalAtRisk": total_at_risk,
-                    "totalCustomers": total_customers,
-                    "overallAtRiskPct": round(100.0 * total_at_risk / total_customers, 1) if total_customers > 0 else 0,
-                    "totalChurned": total_churned,
-                    "churnPct": round(100.0 * total_churned / total_customers, 1) if total_customers > 0 else 0
-                }
+        return {
+            "cohorts": cohorts,
+            "daysThreshold": days_threshold,
+            "summary": {
+                "totalAtRisk": total_at_risk,
+                "totalCustomers": total_customers,
+                "overallAtRiskPct": round(100.0 * total_at_risk / total_customers, 1) if total_customers > 0 else 0,
+                "totalChurned": total_churned,
+                "churnPct": round(100.0 * total_churned / total_customers, 1) if total_customers > 0 else 0
             }
+        }
 
     # ─── Saved audiences ─────────────────────────────────────────────────
 

@@ -539,3 +539,290 @@ def cohort_retention_select(
         sales_type_filter=sales_type_filter,
         months_back=int(months_back),
     )
+
+
+# ─── The other four analytics bodies ────────────────────────────────────────
+#
+# Same two holes as the retention body, same reason, and the same six
+# constructs verified on DuckDB 1.5.5 and ClickHouse 24.8.14.39.
+
+_ENHANCED_COHORT_RETENTION_SELECT_BODY = """            WITH customer_first_order AS (
+                -- Get each customer's first order month (cohort)
+                SELECT
+                    o.buyer_id,
+                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
+                FROM {silver_orders} o
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  {sales_type_filter}
+                GROUP BY o.buyer_id
+            ),
+            customer_cohorts AS (
+                -- Add first month revenue per customer
+                SELECT
+                    c.buyer_id,
+                    c.cohort_month,
+                    COALESCE(SUM(o.grand_total), 0) AS first_month_revenue
+                FROM customer_first_order c
+                LEFT JOIN {silver_orders} o ON c.buyer_id = o.buyer_id
+                    AND DATE_TRUNC('month', o.order_date) = c.cohort_month
+                    AND NOT o.is_return
+                GROUP BY c.buyer_id, c.cohort_month
+            ),
+            customer_orders AS (
+                -- Get all order months per customer with revenue
+                SELECT
+                    o.buyer_id,
+                    c.cohort_month,
+                    DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date)) AS months_since,
+                    o.grand_total AS revenue
+                FROM {silver_orders} o
+                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
+                WHERE NOT o.is_return
+                  {sales_type_filter}
+            ),
+            cohort_sizes AS (
+                SELECT
+                    cohort_month,
+                    COUNT(DISTINCT buyer_id) AS size,
+                    SUM(first_month_revenue) AS m0_revenue
+                FROM customer_cohorts
+                GROUP BY cohort_month
+            ),
+            retention_data AS (
+                SELECT
+                    r.cohort_month,
+                    r.months_since,
+                    COUNT(DISTINCT r.buyer_id) AS retained_customers,
+                    SUM(r.revenue) AS period_revenue
+                FROM customer_orders r
+                WHERE r.months_since <= ?
+                GROUP BY r.cohort_month, r.months_since
+            )
+            SELECT
+                substring(CAST(r.cohort_month AS VARCHAR), 1, 7) as cohort,
+                s.size as cohort_size,
+                s.m0_revenue,
+                r.months_since as month_number,
+                r.retained_customers,
+                ROUND(100.0 * r.retained_customers / s.size, 1) as retention_pct,
+                r.period_revenue,
+                ROUND(100.0 * r.period_revenue / NULLIF(s.m0_revenue, 0), 1) as revenue_retention_pct
+            FROM retention_data r
+            JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
+            WHERE r.cohort_month >= DATE_TRUNC('month', {today}) - INTERVAL '{months_back} months'
+            ORDER BY r.cohort_month DESC, r.months_since
+"""
+
+
+def enhanced_cohort_retention_select(
+    dialect: AnalyticsDialect, *, sales_type_filter: str, months_back: int,
+) -> str:
+    """The retention matrix with revenue and order counts per cell.
+
+    `months_back` is interpolated because an interval cannot be bound in
+    either engine; it is an int by construction and never user text.
+    """
+    return _ENHANCED_COHORT_RETENTION_SELECT_BODY.format(
+        silver_orders=dialect.silver_orders,
+        today=dialect.today,
+        sales_type_filter=sales_type_filter,
+        months_back=int(months_back),
+    )
+
+_DAYS_TO_SECOND_PURCHASE_SELECT_BODY = """            WITH customer_orders_ranked AS (
+                SELECT
+                    o.buyer_id,
+                    o.order_date,
+                    ROW_NUMBER() OVER (PARTITION BY o.buyer_id ORDER BY o.order_date) AS order_num
+                FROM {silver_orders} o
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  {sales_type_filter}
+            ),
+            second_purchase AS (
+                SELECT
+                    c1.buyer_id,
+                    DATEDIFF('day', c1.order_date, c2.order_date) AS days_to_second
+                FROM customer_orders_ranked c1
+                JOIN customer_orders_ranked c2
+                    ON c1.buyer_id = c2.buyer_id
+                    AND c1.order_num = 1
+                    AND c2.order_num = 2
+                WHERE c1.order_date >= {today} - INTERVAL '{months_back} months'
+            ),
+            bucketed AS (
+                SELECT
+                    days_to_second,
+                    CASE
+                        WHEN days_to_second <= 30 THEN '0-30'
+                        WHEN days_to_second <= 60 THEN '31-60'
+                        WHEN days_to_second <= 90 THEN '61-90'
+                        WHEN days_to_second <= 120 THEN '91-120'
+                        WHEN days_to_second <= 180 THEN '121-180'
+                        ELSE '180+'
+                    END AS bucket,
+                    CASE
+                        WHEN days_to_second <= 30 THEN 1
+                        WHEN days_to_second <= 60 THEN 2
+                        WHEN days_to_second <= 90 THEN 3
+                        WHEN days_to_second <= 120 THEN 4
+                        WHEN days_to_second <= 180 THEN 5
+                        ELSE 6
+                    END AS bucket_order
+                FROM second_purchase
+            ),
+            global_stats AS (
+                SELECT
+                    median(days_to_second) AS median_days,
+                    AVG(days_to_second) AS avg_days,
+                    COUNT(*) AS total_count
+                FROM second_purchase
+            )
+            SELECT
+                b.bucket,
+                COUNT(*) AS customers,
+                ROUND(AVG(b.days_to_second), 1) AS avg_days,
+                (SELECT median_days FROM global_stats) AS median_days,
+                (SELECT avg_days FROM global_stats) AS avg_days_overall,
+                (SELECT total_count FROM global_stats) AS total_count
+            FROM bucketed b
+            GROUP BY b.bucket, b.bucket_order
+            ORDER BY b.bucket_order
+"""
+
+
+def days_to_second_purchase_select(
+    dialect: AnalyticsDialect, *, sales_type_filter: str, months_back: int,
+) -> str:
+    """How long the second purchase takes, bucketed, with the median.
+
+    `months_back` is interpolated because an interval cannot be bound in
+    either engine; it is an int by construction and never user text.
+    """
+    return _DAYS_TO_SECOND_PURCHASE_SELECT_BODY.format(
+        silver_orders=dialect.silver_orders,
+        today=dialect.today,
+        sales_type_filter=sales_type_filter,
+        months_back=int(months_back),
+    )
+
+_COHORT_LTV_SELECT_BODY = """            WITH customer_cohorts AS (
+                SELECT
+                    o.buyer_id,
+                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
+                FROM {silver_orders} o
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  {sales_type_filter}
+                GROUP BY o.buyer_id
+            ),
+            customer_revenue AS (
+                SELECT
+                    o.buyer_id,
+                    c.cohort_month,
+                    DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date)) AS months_since,
+                    SUM(o.grand_total) AS revenue
+                FROM {silver_orders} o
+                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
+                WHERE NOT o.is_return
+                  {sales_type_filter}
+                GROUP BY o.buyer_id, c.cohort_month, DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date))
+            ),
+            cohort_monthly AS (
+                SELECT
+                    cohort_month,
+                    months_since,
+                    SUM(revenue) AS total_revenue,
+                    COUNT(DISTINCT buyer_id) AS active_customers
+                FROM customer_revenue
+                WHERE months_since <= ?
+                GROUP BY cohort_month, months_since
+            ),
+            cohort_sizes AS (
+                SELECT cohort_month, COUNT(DISTINCT buyer_id) AS cohort_size
+                FROM customer_cohorts
+                GROUP BY cohort_month
+            )
+            SELECT
+                substring(CAST(cm.cohort_month AS VARCHAR), 1, 7) AS cohort,
+                cs.cohort_size,
+                cm.months_since,
+                cm.total_revenue,
+                cm.active_customers
+            FROM cohort_monthly cm
+            JOIN cohort_sizes cs ON cm.cohort_month = cs.cohort_month
+            WHERE cm.cohort_month >= DATE_TRUNC('month', {today}) - INTERVAL '{months_back} months'
+            ORDER BY cm.cohort_month DESC, cm.months_since
+"""
+
+
+def cohort_ltv_select(
+    dialect: AnalyticsDialect, *, sales_type_filter: str, months_back: int,
+) -> str:
+    """Cumulative lifetime value per cohort month.
+
+    `months_back` is interpolated because an interval cannot be bound in
+    either engine; it is an int by construction and never user text.
+    """
+    return _COHORT_LTV_SELECT_BODY.format(
+        silver_orders=dialect.silver_orders,
+        today=dialect.today,
+        sales_type_filter=sales_type_filter,
+        months_back=int(months_back),
+    )
+
+_AT_RISK_CUSTOMERS_SELECT_BODY = """            WITH customer_activity AS (
+                SELECT
+                    o.buyer_id,
+                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month,
+                    MAX(o.order_date) AS last_order_date,
+                    DATEDIFF('day', MAX(o.order_date), {today}) AS days_since_last,
+                    COUNT(*) AS total_orders,
+                    SUM(o.grand_total) AS total_revenue
+                FROM {silver_orders} o
+                WHERE o.buyer_id IS NOT NULL
+                  AND NOT o.is_return
+                  {sales_type_filter}
+                GROUP BY o.buyer_id
+            )
+            SELECT
+                substring(CAST(cohort_month AS VARCHAR), 1, 7) AS cohort,
+                COUNT(*) AS total_customers,
+                -- `COUNT(*) FILTER (WHERE …)` rather than the CASE below is
+                -- what this said, and ClickHouse 24.8 rejects that spelling
+                -- when the aggregate reads a CTE: it parses the FILTER as a
+                -- second argument and complains that COUNT takes one. The
+                -- same expression against a subquery is accepted, which is
+                -- why this needed executing rather than reading. The CASE
+                -- form is plain SQL and means the same on all three engines.
+                COUNT(CASE WHEN days_since_last > ? AND days_since_last <= ?
+                           THEN 1 END) AS at_risk_count,
+                ROUND(100.0 * COUNT(CASE WHEN days_since_last > ? THEN 1 END)
+                      / COUNT(*), 1) AS at_risk_pct,
+                SUM(CASE WHEN days_since_last > ? THEN total_revenue END)
+                    AS at_risk_revenue,
+                AVG(CASE WHEN days_since_last > ? THEN total_orders END)
+                    AS avg_orders_at_risk,
+                COUNT(CASE WHEN days_since_last > ? THEN 1 END) AS churned_count
+            FROM customer_activity
+            WHERE cohort_month >= DATE_TRUNC('month', {today}) - INTERVAL '{months_back} months'
+            GROUP BY cohort_month
+            ORDER BY cohort_month DESC
+"""
+
+
+def at_risk_customers_select(
+    dialect: AnalyticsDialect, *, sales_type_filter: str, months_back: int,
+) -> str:
+    """Customers whose recency has drifted past their cohort's habit.
+
+    `months_back` is interpolated because an interval cannot be bound in
+    either engine; it is an int by construction and never user text.
+    """
+    return _AT_RISK_CUSTOMERS_SELECT_BODY.format(
+        silver_orders=dialect.silver_orders,
+        today=dialect.today,
+        sales_type_filter=sales_type_filter,
+        months_back=int(months_back),
+    )
