@@ -9,7 +9,9 @@ Three contracts, and each one has already been got wrong somewhere:
 * freezing a roster must be reachable without downloading a file of phone
   numbers, and must refuse the cases where the frozen list would be wrong.
 """
+import logging
 import time
+import urllib.parse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -210,6 +212,64 @@ class TestPresets:
         assert r.status_code == 400
         assert store.saved == []
 
+    # ─── Criteria are handed back, so what cannot be rendered is not stored ──
+    # Size and shape were the only checks, and nesting is neither. `json.loads`
+    # accepts hundreds of levels; the response serializer refuses past 254 —
+    # and the row is written before the response is rendered. So one PUT of
+    # 1 787 characters, well inside the 8 000-character cap, wrote a preset and
+    # then made `GET /sms-audience-presets` 500 for every `sms:view` reader,
+    # until somebody deleted it by a name the dead listing no longer showed.
+    # At 251 levels the write even answered 200, so nothing warned the author.
+
+    @staticmethod
+    def _nested(depth: int) -> dict:
+        top: dict = {}
+        node = top
+        for _ in range(depth):
+            node["a"] = {}
+            node = node["a"]
+        return top
+
+    @pytest.mark.parametrize("depth", [21, 251, 300])
+    def test_criteria_nested_past_the_bound_is_refused(self, client, store, depth):
+        r = client.put(
+            f"{PRESETS}/deep", json=self._nested(depth), headers=_headers(),
+        )
+        assert r.status_code == 400
+        assert store.saved == []
+
+    def test_the_page_can_still_save_the_shape_it_actually_builds(self, client, store):
+        # Form state is two levels — `filters` holding values — and three where
+        # a filter holds a list. The bound must not be near that.
+        body = {
+            "grouping": "single",
+            "filters": {"brands": ["Anua"], "cities": ["Kyiv"]},
+            "tierRules": {"coreMinOrders": 2},
+        }
+        r = client.put(f"{PRESETS}/Anua Kyiv", json=body, headers=_headers())
+        assert r.status_code == 200
+        assert store.saved[-1][1] == body
+
+    def test_the_bound_is_under_what_the_listing_can_be_rendered_at(self):
+        """The number is not a taste: past it the listing cannot be sent at all.
+
+        Rendered rather than asserted about, so this fails if the serializer's
+        own limit ever drops towards the bound instead of drifting away from it.
+        The listing envelope is what matters — it wraps `criteria` three levels
+        deeper than the PUT response does, which is why a preset that saved
+        with a 200 could still kill the listing.
+        """
+        from fastapi.responses import ORJSONResponse
+
+        from web.routes.api.customers import _PRESET_CRITERIA_MAX_DEPTH
+
+        def listing(depth: int) -> dict:
+            return {"presets": [{"name": "x", "criteria": self._nested(depth)}]}
+
+        ORJSONResponse(listing(_PRESET_CRITERIA_MAX_DEPTH))
+        with pytest.raises(TypeError):
+            ORJSONResponse(listing(300))
+
     def test_deleting_a_missing_audience_is_404(self, client, store):
         store.delete_result = False
         assert client.delete(f"{PRESETS}/ghost", headers=_headers()).status_code == 404
@@ -246,6 +306,84 @@ class TestPresets:
         assert ("sms", "edit") in gates(
             "/api/customers/sms-audience-presets/{name}", "DELETE")
         assert ("sms", "edit") in gates(CAMPAIGNS, "POST")
+
+    # ─── The {name} path parameter is validated ───────────────────────────
+    # A preset name is stored verbatim as a primary key, echoed back to the
+    # page, and interpolated into the audit log. Until it is validated, a name
+    # carrying a newline forges a second log line (`name=evil\nname` splits the
+    # record), control characters and markup ride into storage, and DELETE — a
+    # bare `.strip()` — accepts what PUT would have refused for length. The two
+    # verbs must apply the identical rule.
+
+    @staticmethod
+    def _enc(name: str) -> str:
+        return urllib.parse.quote(name, safe="")
+
+    def test_put_refuses_a_newline_in_the_name(self, client, store):
+        r = client.put(
+            f"{PRESETS}/{self._enc('evil\nname')}",
+            json={"grouping": "single"}, headers=_headers(),
+        )
+        assert r.status_code == 400
+        assert store.saved == []
+
+    @pytest.mark.parametrize("bad", [
+        "a\x01b",      # C0 control
+        "a\tb",        # tab
+        "a\x7fb",      # DEL
+        "a<script>b",  # markup
+        'a"b',         # double quote
+        "a{b}",        # brace / format metacharacter
+    ])
+    def test_put_refuses_control_and_markup_characters(self, client, store, bad):
+        r = client.put(
+            f"{PRESETS}/{self._enc(bad)}",
+            json={"grouping": "single"}, headers=_headers(),
+        )
+        assert r.status_code == 400, bad
+        assert store.saved == []
+
+    @pytest.mark.parametrize("good", [
+        "VIP клієнти",         # Cyrillic — a Ukrainian team names audiences too
+        "Winter-2026 (core)",
+        "50% off & more",
+        "Anua_buyers",
+    ])
+    def test_put_allows_readable_names(self, client, store, good):
+        r = client.put(
+            f"{PRESETS}/{self._enc(good)}",
+            json={"grouping": "single"}, headers=_headers(),
+        )
+        assert r.status_code == 200, good
+        assert store.saved[-1][0] == good
+
+    def test_delete_enforces_the_same_name_rules_as_put(self, client, store):
+        # A bad character DELETE must be refused the same way PUT refuses it,
+        # and must never reach the store.
+        r = client.delete(
+            f"{PRESETS}/{self._enc('a<script>b')}", headers=_headers(),
+        )
+        assert r.status_code == 400
+        assert store.deleted == []
+
+    def test_delete_refuses_an_over_long_name(self, client, store):
+        r = client.delete(
+            f"{PRESETS}/{self._enc('x' * 200)}", headers=_headers(),
+        )
+        assert r.status_code == 400
+        assert store.deleted == []
+
+    def test_delete_logs_who_removed_a_shared_preset(self, client, store, caplog):
+        # Presets are a shared resource — any sms:edit user can delete any
+        # preset — so removal has to leave an audit trail the way saving does.
+        with caplog.at_level(logging.INFO, logger="web.routes.api.customers"):
+            r = client.delete(f"{PRESETS}/temp audience", headers=_headers())
+        assert r.status_code == 200
+        assert any(
+            "preset deleted" in rec.getMessage().lower()
+            and "temp audience" in rec.getMessage()
+            for rec in caplog.records
+        )
 
 
 # ─── Creating a campaign without a CSV ────────────────────────────────────

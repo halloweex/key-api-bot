@@ -420,15 +420,23 @@ async def trigger_job(
     job_id: str,
     admin: dict = Depends(require_admin),
 ):
-    """Manually trigger a background job. Requires admin."""
+    """Manually trigger a background job. Requires admin.
+
+    `job_id` reaches nothing but the scheduler's own registry, which is the
+    whitelist. Neither refusal below used to be reachable: `get_scheduler`
+    constructs the singleton rather than answering None, and `trigger_job`
+    raises on an id it does not hold instead of returning it — so an unknown
+    job answered 500 and both branches read as behaviour that never ran.
+    """
     from core.scheduler import get_scheduler
 
     scheduler = get_scheduler()
-    if scheduler is None:
+    if not scheduler.is_running:
         raise HTTPException(status_code=503, detail="Scheduler not running")
 
-    result = await scheduler.trigger_job(job_id)
-    if result is None:
+    try:
+        result = await scheduler.trigger_job(job_id)
+    except ValueError:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
 
     return {"status": "triggered", "job_id": job_id, "result": result}

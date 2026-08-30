@@ -16,6 +16,21 @@ from core.observability import get_logger
 logger = get_logger(__name__)
 
 
+class ConversationAccessError(Exception):
+    """A conversation id did not resolve to one owned by the caller.
+
+    Raised for both a foreign conversation (owned by another user) and an
+    unknown id. The route translates it to a 404 — deliberately not
+    distinguishing the two, so a caller cannot probe which ids exist, and never
+    silently creating a new conversation under an id the caller supplied.
+    """
+
+
+def _normalize_owner(user_id: Optional[Any]) -> Optional[str]:
+    """Owner key. Session user_ids are ints; compare as strings throughout."""
+    return None if user_id is None else str(user_id)
+
+
 @dataclass
 class Conversation:
     """Represents a chat conversation."""
@@ -24,6 +39,9 @@ class Conversation:
     created_at: datetime = field(default_factory=datetime.now)
     context: Dict[str, Any] = field(default_factory=dict)
     total_tokens: int = 0
+    # The user who created the conversation. Every conversation is scoped to
+    # its owner; a request carrying someone else's conversation_id is refused.
+    user_id: Optional[str] = None
 
 
 class ChatService:
@@ -43,13 +61,16 @@ class ChatService:
 
     def create_conversation(
         self,
-        context: Optional[Dict[str, Any]] = None
+        context: Optional[Dict[str, Any]] = None,
+        user_id: Optional[Any] = None,
     ) -> str:
         """
-        Create a new conversation.
+        Create a new conversation owned by ``user_id``.
 
         Args:
             context: Optional context (period, sales_type, language)
+            user_id: The owner. Every conversation is scoped to its creator so
+                one user cannot resume another user's conversation.
 
         Returns:
             Conversation ID
@@ -57,19 +78,43 @@ class ChatService:
         conv_id = f"conv_{uuid.uuid4().hex[:12]}"
         self._conversations[conv_id] = Conversation(
             id=conv_id,
-            context=context or {}
+            context=context or {},
+            user_id=_normalize_owner(user_id),
         )
         logger.info(f"Created conversation {conv_id}")
         return conv_id
 
     def get_conversation(self, conv_id: str) -> Optional[Conversation]:
-        """Get conversation by ID."""
+        """Get conversation by ID (no ownership check — internal use only)."""
         return self._conversations.get(conv_id)
+
+    def resolve_owned(self, conv_id: str, user_id: Optional[Any]) -> Conversation:
+        """Return the conversation only if ``user_id`` owns it.
+
+        Raises ``ConversationAccessError`` when the id is unknown or is owned by
+        someone else — the two are indistinguishable to the caller by design.
+        This is the single ownership check every entry point routes through.
+
+        An absent owner on either side is refused rather than matched. Under a
+        plain ``==`` a conversation carrying no owner — the default of the
+        dataclass field, and the shape any caller omitting ``user_id`` would
+        produce — was returned to a caller whose own id was also None. No route
+        can reach that today because ``_resolve_session`` rejects a session
+        without a truthy user_id, but that is a guarantee in another module, and
+        the safe direction for a conversation nobody owns is that nobody reaches
+        it.
+        """
+        owner = _normalize_owner(user_id)
+        conv = self._conversations.get(conv_id)
+        if conv is None or owner is None or conv.user_id != owner:
+            raise ConversationAccessError(conv_id)
+        return conv
 
     async def chat(
         self,
         conv_id: str,
-        message: str
+        message: str,
+        user_id: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Send a message and get a response (non-streaming).
@@ -77,14 +122,18 @@ class ChatService:
         Args:
             conv_id: Conversation ID
             message: User message
+            user_id: The caller. Must own ``conv_id``.
 
         Returns:
             Response dict with content and metadata
+
+        Raises:
+            ConversationAccessError: ``conv_id`` is unknown or owned by someone
+                else. The caller must create a conversation first (or omit the
+                id at the route, which creates one for them); a foreign id is
+                never silently adopted.
         """
-        conv = self.get_conversation(conv_id)
-        if not conv:
-            conv_id = self.create_conversation()
-            conv = self._conversations[conv_id]
+        conv = self.resolve_owned(conv_id, user_id)
 
         # Add user message
         conv.messages.append({"role": "user", "content": message})
@@ -166,7 +215,8 @@ class ChatService:
     async def chat_stream(
         self,
         conv_id: str,
-        message: str
+        message: str,
+        user_id: Optional[Any] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Send a message and stream the response.
@@ -174,14 +224,18 @@ class ChatService:
         Args:
             conv_id: Conversation ID
             message: User message
+            user_id: The caller. Must own ``conv_id``.
 
         Yields:
             Event dicts with streaming content
+
+        Raises:
+            ConversationAccessError: ``conv_id`` is unknown or owned by someone
+                else. The route validates ownership before iterating so the
+                client gets a 404, but the check is repeated here so the service
+                is safe regardless of caller.
         """
-        conv = self.get_conversation(conv_id)
-        if not conv:
-            conv_id = self.create_conversation()
-            conv = self._conversations[conv_id]
+        conv = self.resolve_owned(conv_id, user_id)
 
         # Add user message
         conv.messages.append({"role": "user", "content": message})

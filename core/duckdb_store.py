@@ -943,6 +943,33 @@ class DuckDBStore(
         );
 
         -- ═══════════════════════════════════════════════════════════════════════
+        -- What each delivery-report event first said it was about.
+        --
+        -- TurboSMS signs SHA1(secret + id) and nothing else, so the signature on
+        -- a callback proves the caller knew the secret but says nothing about
+        -- which message the callback names. Without this table one captured
+        -- (id, signature) pair was a permanent write into any recipient's
+        -- delivery state — and delivery state is what a campaign's measured lift
+        -- is computed from.
+        --
+        -- Durable rather than in-process because the captured pair is durable:
+        -- the scheme carries no nonce and no timestamp, so a pair never expires,
+        -- while the web container restarts on every deploy and is stopped weekly
+        -- by the compact cron. A binding that forgets is a binding with a
+        -- published expiry.
+        --
+        -- Append-only, and never pruned. Pruning would hand old pairs their
+        -- window back, and DELETE against an ART-indexed table is the known
+        -- file-growth mechanism in this database; insert-only never enters it.
+        -- One row per event: a 5 000-recipient campaign is 5 000 rows.
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS sms_dlr_events (
+            event_id VARCHAR PRIMARY KEY,
+            message_id VARCHAR NOT NULL,
+            first_seen_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- ═══════════════════════════════════════════════════════════════════════
         -- Marketing opt-outs.
         --
         -- Segmentation looks only at purchases, so without this table someone

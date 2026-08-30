@@ -14,6 +14,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Request, HTTPException
 from starlette.requests import ClientDisconnect
 
+from core.repositories.customers import DlrEventRebound
 from core.turbosms import TurboSmsConfig, classify_dlr, match_webhook_signature
 from ._deps import limiter, get_store
 
@@ -72,6 +73,16 @@ _GUIDANCE: Dict[str, str] = {
         "<code>docker compose up -d</code> does not pick up a changed .env — "
         "that needs <code>--force-recreate</code>, which is how this hid once "
         "already."
+    ),
+    "event_rebound": (
+        "A callback reused an event id that had already reported on a "
+        "different message_id. The gateway signs the id and nothing else, so "
+        "this is what stops one captured (id, signature) pair from being "
+        "re-pointed at another recipient's message; its own retries carry the "
+        "same data and cannot trip it. Before assuming a replay, compare "
+        "data.message_id across two rejected callbacks — the other reading is "
+        "that TurboSMS has started reusing ids across messages, and that is a "
+        "revert, not a secret to rotate."
     ),
     "client_disconnected": (
         "Nothing here is misconfigured — the signature was never even read. "
@@ -137,6 +148,12 @@ async def turbosms_delivery_report(request: Request):
     measured lift. So an unsigned or wrongly-signed call is rejected before the
     payload is looked at, and a missing local secret fails closed.
 
+    The signature is not on its own an authorisation to write, because the
+    gateway signs the event id and nothing else: the message_id being written
+    is outside the proof. So the store binds each event id to the message it
+    first reported on, and a callback re-pointing a known id at a different
+    message is refused — see ``record_sms_delivery``.
+
     Returns 200 on anything it has genuinely finished with — including reports
     for message ids we do not know — because TurboSMS retries for 4.5 hours on
     any other status, and retrying an unknown id would never succeed.
@@ -176,7 +193,9 @@ async def turbosms_delivery_report(request: Request):
         # not parse are the same 401, and they need opposite fixes. The
         # signature's length is the tell — 40 hex chars is the documented
         # SHA1(secret + id), anything else is a different scheme. The signature
-        # itself is never logged; it is a secret-derived value.
+        # itself is not logged here (it is secret-derived); the opt-in debug
+        # branch below is the only place it appears, and only when explicitly
+        # enabled.
         if not event_id:
             kind = "no_event_id"
         elif not signature:
@@ -196,11 +215,17 @@ async def turbosms_delivery_report(request: Request):
         )
         if os.getenv("TURBOSMS_WEBHOOK_DEBUG", "").lower() in ("1", "true", "yes"):
             # Opt-in, off by default, and worth switching on for exactly one
-            # test callback from the panel: the (id, signature) pair it prints
-            # is what scripts/check_turbosms_signature.py needs to say which
-            # secret the gateway is actually signing with. The signature is
-            # derived from the shared secret — turn this back off afterwards.
-            logger.warning("TurboSMS webhook debug payload: %s", payload)
+            # test callback from the panel: the (id, signature) pair below is
+            # what scripts/check_turbosms_signature.py needs to say which secret
+            # the gateway is actually signing with. Only these diagnostic fields
+            # are logged, never the whole payload — it is attacker-controlled, so
+            # dumping it verbatim would let a caller inject log lines. The
+            # signature is derived from the shared secret — turn this back off
+            # afterwards.
+            logger.warning(
+                "TurboSMS webhook debug: id=%s signature=%s type=%s try=%s",
+                event_id, signature, payload.get("type"), payload.get("try"),
+            )
         raise HTTPException(status_code=401, detail="bad signature")
 
     data = payload.get("data") or {}
@@ -216,14 +241,38 @@ async def turbosms_delivery_report(request: Request):
     if _dlr_counts[scheme] == 0:
         logger.info("TurboSMS webhook signature scheme confirmed: %s", scheme)
     _dlr_counts[scheme] += 1
-    _dlr_counts["accepted"] += 1
+
     store = await get_store()
-    known = await store.record_sms_delivery(
-        message_id=message_id,
-        status=status,
-        delivered=classify_dlr(status),
-        delivered_at=_parse_dlr_time(data.get("dlr_date")),
-    )
+    try:
+        known = await store.record_sms_delivery(
+            message_id=message_id,
+            status=status,
+            delivered=classify_dlr(status),
+            delivered_at=_parse_dlr_time(data.get("dlr_date")),
+            event_id=event_id,
+        )
+    except DlrEventRebound as e:
+        # The signature proved the caller knew the secret; it did not prove
+        # anything about `message_id`, which is the object being written. The
+        # store binds each event id to the message it first named, and this is
+        # that binding refusing a re-pointed pair.
+        #
+        # 409 rather than 200 on purpose. A forger does not retry, so refusing
+        # costs nothing there; the gateway does, nine times over 4.5 hours, so
+        # if this ever fires on legitimate traffic the alert this counts toward
+        # has that long to reach a human and the reports survive a revert.
+        # Swallowing it with a 200 would consume them instead.
+        await _note_rejection(
+            "event_rebound",
+            event_id=event_id,
+            first_reported_on=e.bound_message_id,
+            now_claims=message_id,
+        )
+        raise HTTPException(
+            status_code=409, detail="event id already reported on another message",
+        )
+
+    _dlr_counts["accepted"] += 1
 
     if not known:
         # Acknowledge anyway — retrying will not make the id appear.

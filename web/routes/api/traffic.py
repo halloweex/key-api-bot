@@ -379,8 +379,15 @@ async def _run_backfill(days: int):
 async def backfill_utm_data(
     request: Request,
     days: int = Query(730, ge=30, le=1000),
+    user: dict = Depends(require_admin),
 ):
-    """Start UTM backfill as background task. Check status via GET."""
+    """Start UTM backfill as background task (admin only). Check status via GET.
+
+    Admin for the same reason as its two neighbours above, and one more: the
+    job walks up to `days` of KeyCRM through the process-wide circuit breaker
+    and takes the single DuckDB write lock once per chunk to UPDATE and
+    CHECKPOINT. Nothing stops it once started.
+    """
     if _backfill_status["running"]:
         return {"status": "already_running", "progress": _backfill_status["result"]}
 
@@ -391,8 +398,16 @@ async def backfill_utm_data(
 
 @router.get("/traffic/backfill-utm/status")
 @limiter.limit("30/minute")
-async def backfill_utm_status(request: Request):
-    """Check status of UTM backfill background task."""
+async def backfill_utm_status(
+    request: Request,
+    user: dict = Depends(require_admin),
+):
+    """Check status of UTM backfill background task (admin only).
+
+    The read half of an admin-only operation, with no frontend caller: it
+    reports how far the job has got and how many orders are still missing
+    attribution.
+    """
     return {
         "running": _backfill_status["running"],
         "result": _backfill_status["result"],

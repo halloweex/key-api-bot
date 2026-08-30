@@ -3,9 +3,10 @@ import csv
 import json
 import io
 import logging
+import re
 from datetime import date as _date, datetime as _datetime
 
-from fastapi import APIRouter, Query, Request, HTTPException, Depends
+from fastapi import APIRouter, Path, Query, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from typing import Optional
 
@@ -533,6 +534,74 @@ async def export_sms_segments_csv(
 _PRESET_NAME_MAX = 60
 _PRESET_CRITERIA_MAX = 8_000
 
+# Criteria are handed back to every reader of the listing, so what cannot be
+# rendered must not be stored — and size is not the whole of shape. `json.loads`
+# accepts hundreds of levels of nesting where the response serializer refuses
+# past 254, and the row is written before the response is rendered: 1 787
+# characters, well inside the cap above, wrote a preset and then made
+# `GET /sms-audience-presets` fail for every reader until somebody deleted it by
+# a name the dead listing no longer showed. Bounded here rather than at the
+# serializer's own limit because the listing wraps `criteria` three levels
+# deeper than the PUT response, so a body that renders on the way in can still
+# be unrenderable on the way out. The page's form state is two levels — three
+# where a filter holds a list — so this leaves it room it will never use.
+_PRESET_CRITERIA_MAX_DEPTH = 20
+
+# A preset name is shown to people, so it is deliberately softer than a campaign
+# id (`_CAMPAIGN_PATTERN`): letters of any script — a Ukrainian team names an
+# audience in Cyrillic — digits, spaces and a small readable punctuation set are
+# allowed. What is refused is anything outside that: control characters (a
+# newline in the name forges a second audit-log line), markup and quotes, path
+# and format metacharacters. `\w` already covers underscore and every script's
+# letters/digits. Anchoring on the character class rather than `^…$` sidesteps
+# the Python gotcha where `$` matches before a trailing newline.
+_PRESET_NAME_BAD = re.compile(r"[^\w .,'()&+%\-]", re.UNICODE)
+
+
+def _clean_preset_name(name: str) -> str:
+    """Validate and normalise the `{name}` path parameter for PUT and DELETE.
+
+    Trims edge whitespace, then enforces the same rule for both verbs so a name
+    that cannot be created cannot be addressed for deletion either — the two
+    used to disagree, DELETE being a bare `.strip()` that accepted names PUT
+    would reject.
+    """
+    name = name.strip()
+    if not name or len(name) > _PRESET_NAME_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"name must be 1..{_PRESET_NAME_MAX} characters",
+        )
+    if _PRESET_NAME_BAD.search(name):
+        raise HTTPException(
+            status_code=400,
+            detail="name may contain only letters, digits, spaces and . , ' ( ) & + % - _",
+        )
+    return name
+
+
+def _nested_deeper_than(value, limit: int) -> bool:
+    """Does `value` nest containers more than `limit` levels deep?
+
+    Walked with an explicit stack, not by recursion: the body is already parsed
+    by the time this runs, and a recursive walk would exhaust the interpreter's
+    own stack on exactly the input it is here to refuse. It stops at the first
+    level past the limit rather than measuring how deep the thing really goes.
+    """
+    stack = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if depth > limit:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
 
 @router.get("/customers/sms-audience-presets")
 @limiter.limit("30/minute")
@@ -558,12 +627,7 @@ async def save_sms_audience_preset(
     to the page, which is why the only checks here are on size and shape: this
     endpoint decides what a manager can save, not what the segmentation runs.
     """
-    name = name.strip()
-    if not name or len(name) > _PRESET_NAME_MAX:
-        raise HTTPException(
-            status_code=400,
-            detail=f"name must be 1..{_PRESET_NAME_MAX} characters",
-        )
+    name = _clean_preset_name(name)
 
     try:
         criteria = await request.json()
@@ -573,6 +637,8 @@ async def save_sms_audience_preset(
         raise HTTPException(status_code=400, detail="criteria must be a JSON object")
     if len(json.dumps(criteria, ensure_ascii=False, default=str)) > _PRESET_CRITERIA_MAX:
         raise HTTPException(status_code=400, detail="criteria is too large")
+    if _nested_deeper_than(criteria, _PRESET_CRITERIA_MAX_DEPTH):
+        raise HTTPException(status_code=400, detail="criteria is nested too deeply")
 
     store = await get_store()
     try:
@@ -595,13 +661,18 @@ async def delete_sms_audience_preset(
     user: dict = Depends(require_permission("sms", "edit")),
 ):
     """Remove a saved audience. Built-ins refuse."""
+    name = _clean_preset_name(name)
     store = await get_store()
     try:
-        removed = await store.delete_sms_audience_preset(name.strip())
+        removed = await store.delete_sms_audience_preset(name)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     if not removed:
         raise HTTPException(status_code=404, detail=f"no audience named {name!r}")
+    # Presets are a shared resource — any sms:edit user can remove another's —
+    # so a deletion leaves the same audit trail a save does.
+    logger.info("SMS audience preset deleted: user=%s name=%s",
+                user.get("user_id"), name)
     return {"deleted": name}
 
 
@@ -680,7 +751,7 @@ async def create_sms_campaign(
 @limiter.limit("20/minute")
 async def mark_sms_campaign_sent(
     request: Request,
-    campaign: str,
+    campaign: str = Path(..., pattern=_CAMPAIGN_PATTERN),
     sent_at: Optional[str] = Query(
         None, description="ISO timestamp; defaults to now",
     ),
@@ -718,7 +789,7 @@ async def mark_sms_campaign_sent(
 @limiter.limit("3/minute")
 async def send_sms_campaign(
     request: Request,
-    campaign: str,
+    campaign: str = Path(..., pattern=_CAMPAIGN_PATTERN),
     text: str = Query(..., min_length=1, max_length=600),
     channel: str = Query("sms", pattern="^(sms|viber_sms)$"),
     viber_text: Optional[str] = Query(None, max_length=1000),
@@ -742,6 +813,13 @@ async def send_sms_campaign(
 
     Sending twice is refused: the campaign is stamped sent on the first pass.
     """
+    # Assembled before the claim, because it is built from query parameters
+    # alone and can be rejected. Taking the claim first meant a caption with no
+    # URL answered 400 with the campaign stamped sent — and nothing clears that
+    # stamp again, so a typo cost the roster, which is the only control group
+    # the campaign will ever have.
+    viber = _build_viber(channel, text, viber_text, button_caption, button_url)
+
     store = await get_store()
     try:
         targets = await store.get_sms_campaign_targets(campaign)
@@ -750,10 +828,11 @@ async def send_sms_campaign(
         raise HTTPException(status_code=status, detail=str(e))
 
     if not targets:
+        # Only knowable after the claim, so it has to be handed back here.
+        await store.release_sms_campaign(campaign)
         raise HTTPException(status_code=409, detail="campaign has no target recipients")
 
     by_phone = {t["phone"]: t["buyerId"] for t in targets}
-    viber = _build_viber(channel, text, viber_text, button_caption, button_url)
 
     # A roster past the gateway's per-request limit is split, so a later batch
     # can fail with earlier ones already delivered. Those have to be recorded
@@ -868,6 +947,25 @@ async def get_sms_channels(request: Request, user: dict = Depends(require_permis
     }
 
 
+def _require_ua_phone(phone: str) -> str:
+    """Reduce a phone to the canonical 380+9-digit form, or reject it.
+
+    Segmentation only ever compares against this exact shape
+    (``length(phone) = 12 AND phone LIKE '380%'``), and the opt-out exclusion
+    matches ``o.phone = scored.phone`` — so a phone stored in any other format
+    can never suppress by phone. Normalising here is what makes a recorded
+    opt-out actually match, and it keeps the stoplist to numbers a campaign
+    could contain.
+    """
+    digits = "".join(c for c in phone if c.isdigit())
+    if len(digits) != 12 or not digits.startswith("380"):
+        raise HTTPException(
+            status_code=400,
+            detail="phone must be a full Ukrainian number: 380 followed by 9 digits",
+        )
+    return digits
+
+
 @router.post("/customers/sms/test-send")
 @limiter.limit("10/minute")
 async def send_test_sms(
@@ -896,14 +994,9 @@ async def send_test_sms(
     what Viber could not deliver. Both arms are worth testing, because they do
     not look alike — the Viber one carries a button, the SMS one cannot.
     """
-    digits = "".join(c for c in phone if c.isdigit())
     # Same rule the segmentation applies, so a number that passes here is one
     # that could actually appear in a campaign.
-    if len(digits) != 12 or not digits.startswith("380"):
-        raise HTTPException(
-            status_code=400,
-            detail="phone must be a full Ukrainian number: 380 followed by 9 digits",
-        )
+    digits = _require_ua_phone(phone)
 
     cost = count_segments(text)
     viber = _build_viber(channel, text, viber_text, button_caption, button_url)
@@ -949,10 +1042,17 @@ async def add_marketing_optout(
     reason: str = Query("manual", max_length=40),
     user: dict = Depends(require_permission("sms", "edit")),
 ):
-    """Record that a customer asked not to receive marketing SMS."""
+    """Record that a customer asked not to receive marketing SMS.
+
+    A phone, when given, is normalised to the canonical 380+9-digit form the
+    segmentation matches against. Stored in any other shape it would sit in the
+    stoplist and never suppress the number it names — the phone column exists
+    precisely to catch the same number under a second buyer record.
+    """
+    normalised_phone = _require_ua_phone(phone) if phone is not None else None
     store = await get_store()
     result = await store.add_marketing_optout(
-        buyer_id=buyer_id, phone=phone, reason=reason,
+        buyer_id=buyer_id, phone=normalised_phone, reason=reason,
         source=str(user.get("user_id") or "dashboard"),
     )
     logger.info("Marketing opt-out: user=%s buyer=%s reason=%s",
@@ -964,7 +1064,7 @@ async def add_marketing_optout(
 @limiter.limit("30/minute")
 async def get_sms_campaign_results(
     request: Request,
-    campaign: str,
+    campaign: str = Path(..., pattern=_CAMPAIGN_PATTERN),
     window_days: int = Query(30, ge=1, le=180),
     delivered_only: bool = Query(
         False,

@@ -130,14 +130,32 @@ async def health_check(request: Request):
     # to be able to see it without reading container logs, which is this.
     try:
         store = await get_store()
-        migrations = store.schema_status()
+        migrations = dict(store.schema_status())
     except Exception as e:
         migrations = {"status": "unknown", "error": str(e)}
+
+    # Same rule as the DuckDB block above, for the same reason: the ledger
+    # reports a failure to *read* it as raw exception text, which on this
+    # database means the file path, a pid and the user the container runs as.
+    # `status` still says "unknown", which is the part the reader acts on.
+    # `migrations["failed"]` is untouched — naming which migration blew up and
+    # why is what the ledger is for.
+    ledger_error = migrations.pop("error", None)
+    if ledger_error:
+        logger.warning(f"Health check schema ledger error: {ledger_error}")
 
     # The copy that carries the money. Its own watchdog lives in bot/canary.py,
     # out of this container — a mirror that stopped shipping used to wait for
     # the 07:30 comparison, which is a whole day of silence at the main copy.
     mirrors = await _mirror_freshness()
+
+    # The alerting machinery watching itself: consecutive transport failures
+    # in THIS process, judged by the canary from the other container. The one
+    # subsystem that had no dead-man's switch — which is how the certificate
+    # alert stayed undeliverable for months.
+    from core.telegram_alerts import transport_health
+
+    alerting = transport_health()
 
     # The alerting machinery watching itself: consecutive transport failures
     # in THIS process, judged by the canary from the other container. The one

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from core.duckdb_store import DuckDBStore
+from core.repositories.customers import DlrEventRebound
 
 SENT = datetime(2026, 8, 10, 9, 0)
 
@@ -137,6 +138,27 @@ async def test_stoplisted_recipients_become_optouts(tmp_path):
     await store.close()
 
 
+@pytest.mark.asyncio
+async def test_the_stoplist_completes_a_phoneless_optout(tmp_path):
+    """The gateway is where a hand-filed opt-out usually gets its number."""
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target")])
+    await store.add_marketing_optout(buyer_id=1, reason="complaint", source="ops")
+
+    await store.record_sms_send("aug", {}, [1], {}, SENT)
+
+    async with store.connection() as conn:
+        row = conn.execute(
+            "SELECT phone, reason, source FROM marketing_optouts WHERE buyer_id = 1"
+        ).fetchone()
+
+    assert row[0] == "3809" + f"{1:08d}", "the roster's phone lands on the row"
+    assert (row[1], row[2]) == ("complaint", "ops"), \
+        "the gateway confirms a refusal it did not receive; it does not reattribute it"
+
+    await store.close()
+
+
 # ─── delivery reports ────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -146,7 +168,7 @@ async def test_delivery_report_marks_the_member(tmp_path):
     await store.record_sms_send("aug", {1: "mid-1"}, [], {}, SENT)
 
     matched = await store.record_sms_delivery(
-        "mid-1", "DELIVRD", True, datetime(2026, 8, 10, 9, 5),
+        "mid-1", "DELIVRD", True, datetime(2026, 8, 10, 9, 5), event_id="evt-1",
     )
     assert matched is True
 
@@ -170,7 +192,7 @@ async def test_non_final_status_leaves_the_flag_alone(tmp_path):
     await _freeze(store, [_member(1, "target")])
     await store.record_sms_send("aug", {1: "mid-1"}, [], {}, SENT)
 
-    await store.record_sms_delivery("mid-1", "Sent", None)
+    await store.record_sms_delivery("mid-1", "Sent", None, event_id="evt-1")
 
     async with store.connection() as conn:
         row = conn.execute(
@@ -187,7 +209,157 @@ async def test_non_final_status_leaves_the_flag_alone(tmp_path):
 @pytest.mark.asyncio
 async def test_report_for_unknown_message_is_reported_as_unmatched(tmp_path):
     store = await _make_store(tmp_path)
-    assert await store.record_sms_delivery("never-seen", "DELIVRD", True) is False
+    assert await store.record_sms_delivery(
+        "never-seen", "DELIVRD", True, event_id="evt-1") is False
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_delivery_is_not_downgraded_by_a_later_failure(tmp_path):
+    """Delivery is terminal. A later UNDELIV for a message already reported
+    DELIVRD — a reordered or duplicate gateway callback, or a forged replay
+    built from one captured (id, signature) pair, since the signature covers
+    only the event id and never the delivery data — must not flip a real
+    delivery to a failure and drag the measured lift down.
+
+    The row still exists, so the report is still acknowledged (200): what is
+    refused is the corrupting write, not the callback.
+    """
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target")])
+    await store.record_sms_send("aug", {1: "mid-1"}, [], {}, SENT)
+
+    assert await store.record_sms_delivery(
+        "mid-1", "DELIVRD", True, datetime(2026, 8, 10, 9, 5),
+        event_id="evt-1") is True
+    # A contradicting report arrives afterwards, under its own event.
+    assert await store.record_sms_delivery(
+        "mid-1", "UNDELIV", False, datetime(2026, 8, 10, 9, 9),
+        event_id="evt-2") is True
+
+    async with store.connection() as conn:
+        row = conn.execute(
+            "SELECT delivery_status, delivered FROM sms_campaign_members"
+            " WHERE message_id='mid-1'"
+        ).fetchone()
+
+    assert row[1] is True, "a confirmed delivery must stay delivered"
+    assert row[0] == "DELIVRD", "and its status is not clobbered by the downgrade"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_delivery_is_not_reopened_by_a_later_nonfinal_status(tmp_path):
+    """A stale 'Sent' arriving after 'DELIVRD' (reorder, retry, or replay) must
+    not overwrite the ground-truth status of a delivered record."""
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target")])
+    await store.record_sms_send("aug", {1: "mid-1"}, [], {}, SENT)
+
+    await store.record_sms_delivery("mid-1", "DELIVRD", True,
+                                    datetime(2026, 8, 10, 9, 5), event_id="evt-1")
+    await store.record_sms_delivery("mid-1", "Sent", None, event_id="evt-2")
+
+    async with store.connection() as conn:
+        row = conn.execute(
+            "SELECT delivery_status, delivered FROM sms_campaign_members"
+            " WHERE message_id='mid-1'"
+        ).fetchone()
+
+    assert row == ("DELIVRD", True)
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_an_open_report_can_still_progress_to_delivered(tmp_path):
+    """The guard blocks downgrades only — a genuine Sent -> DELIVRD upgrade,
+    and a re-confirmation of the same delivery, must both still apply."""
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target")])
+    await store.record_sms_send("aug", {1: "mid-1"}, [], {}, SENT)
+
+    await store.record_sms_delivery("mid-1", "Sent", None, event_id="evt-1")
+    await store.record_sms_delivery("mid-1", "DELIVRD", True,
+                                    datetime(2026, 8, 10, 9, 5), event_id="evt-2")
+    # Duplicate delivered callback (gateway retries the same event) is idempotent.
+    await store.record_sms_delivery("mid-1", "READ", True,
+                                    datetime(2026, 8, 10, 9, 6), event_id="evt-3")
+
+    async with store.connection() as conn:
+        row = conn.execute(
+            "SELECT delivery_status, delivered FROM sms_campaign_members"
+            " WHERE message_id='mid-1'"
+        ).fetchone()
+
+    assert row == ("READ", True)
+    await store.close()
+
+
+# ─── an event id names one message, for good ─────────────────────────────
+
+@pytest.mark.asyncio
+async def test_an_event_id_cannot_be_re_pointed_at_another_message(tmp_path):
+    """The gateway signs the event id and nothing else, so the message_id in a
+    callback is unproven. Binding the id to the message it first reported on is
+    what stops a captured (id, signature) pair writing over somebody else."""
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target"), _member(2, "target")])
+    await store.record_sms_send("aug", {1: "mid-1", 2: "mid-2"}, [], {}, SENT)
+
+    await store.record_sms_delivery("mid-1", "Sent", None, event_id="evt-1")
+
+    with pytest.raises(DlrEventRebound) as caught:
+        await store.record_sms_delivery("mid-2", "UNDELIV", False, event_id="evt-1")
+
+    assert caught.value.bound_message_id == "mid-1"
+    async with store.connection() as conn:
+        row = conn.execute(
+            "SELECT delivery_status, delivered FROM sms_campaign_members"
+            " WHERE message_id='mid-2'"
+        ).fetchone()
+    assert row == ("Accepted", None), "the other recipient is untouched"
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_same_event_reported_nine_times_is_recorded_every_time(tmp_path):
+    """The gateway retries each event nine times over 4.5 hours and offers no
+    replay, so a refused callback is a delivery result lost for good. A retry
+    carries the same id and the same data and must never read as a replay."""
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target")])
+    await store.record_sms_send("aug", {1: "mid-1"}, [], {}, SENT)
+
+    for _ in range(9):
+        assert await store.record_sms_delivery(
+            "mid-1", "DELIVRD", True, datetime(2026, 8, 10, 9, 5),
+            event_id="evt-1") is True
+
+    async with store.connection() as conn:
+        row = conn.execute(
+            "SELECT delivery_status, delivered FROM sms_campaign_members"
+            " WHERE message_id='mid-1'"
+        ).fetchone()
+
+    assert row == ("DELIVRD", True)
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_an_event_spent_on_an_unknown_message_is_still_spent(tmp_path):
+    """An id burned against a message the roster does not hold must not stay
+    re-pointable — that is the whole pair, still usable, one call later."""
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target")])
+    await store.record_sms_send("aug", {1: "mid-1"}, [], {}, SENT)
+
+    assert await store.record_sms_delivery(
+        "never-seen", "DELIVRD", True, event_id="evt-1") is False
+
+    with pytest.raises(DlrEventRebound):
+        await store.record_sms_delivery("mid-1", "UNDELIV", False, event_id="evt-1")
+
     await store.close()
 
 
@@ -239,6 +411,62 @@ async def test_optout_is_idempotent(tmp_path):
     result = await store.add_marketing_optout(buyer_id=7, reason="complaint")
 
     assert result["totalOptouts"] == 1, "the same person is not recorded twice"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_later_optout_supplies_the_phone_the_first_one_lacked(tmp_path):
+    """The refusal usually arrives before the number does.
+
+    Someone phones in and is opted out by buyer id, because that is all the CRM
+    screen shows. The number turns up afterwards — the gateway stoplists them on
+    the next send, or the operator files it by hand. Until it lands, the phone
+    column suppresses nothing, and the same person under a second buyer record
+    (the one case that column exists for) keeps being messaged.
+    """
+    store = await _make_store(tmp_path)
+    shared = "380900000001"
+    async with store.connection() as conn:
+        conn.execute("INSERT INTO products (id, name, sku, price)"
+                     " VALUES (1, 'Cream', 'SKU-1', 1000)")
+        conn.execute("INSERT INTO offer_stocks (id, sku, price, purchased_price,"
+                     " quantity) VALUES (1, 'SKU-1', 1000, 400, 10)")
+        # 1 and 2 are one person under two buyer records; 3 is somebody else.
+        for bid, phone in ((1, shared), (2, shared), (3, "380900000003")):
+            conn.execute("INSERT INTO buyers (id, full_name, phone, city)"
+                         " VALUES (?, ?, ?, 'Kyiv')",
+                         [bid, f"Buyer {bid}", phone])
+            conn.execute(
+                """
+                INSERT INTO silver_orders (id, source_id, status_id, grand_total,
+                    ordered_at, buyer_id, manager_id, order_date, is_return,
+                    sales_type, is_active_source, source_name, is_new_customer)
+                VALUES (?, 4, 1, '9000.00', ?, ?, NULL, ?, FALSE, 'retail', TRUE,
+                        'Shopify', FALSE)
+                """,
+                [bid, date.today() - timedelta(days=10), bid,
+                 date.today() - timedelta(days=10)],
+            )
+            conn.execute("INSERT INTO order_products (id, order_id, product_id,"
+                         " name, quantity, price_sold) VALUES (?, ?, 1, 'Cream',"
+                         " 9, '1000.00')", [bid, bid])
+
+    await store.add_marketing_optout(buyer_id=1, reason="manual")
+    await store.add_marketing_optout(buyer_id=1, phone=shared, reason="stoplist")
+
+    async with store.connection() as conn:
+        stored = conn.execute(
+            "SELECT phone, reason FROM marketing_optouts WHERE buyer_id = 1"
+        ).fetchone()
+
+    assert stored[0] == shared, "the phone must land on the row already there"
+    assert stored[1] == "manual", \
+        "the first refusal is the fact; a later one must not restate why"
+
+    after = await store.get_sms_segments(include_customers=True, holdout_pct=0)
+    assert {c["buyerId"] for c in after["customers"]} == {3}, \
+        "the second buyer record carries the same number and must be suppressed too"
+
     await store.close()
 
 

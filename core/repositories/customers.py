@@ -8,6 +8,25 @@ from dataclasses import asdict, dataclass
 from typing import Optional, Dict, Any, List, Sequence, Union
 
 
+class DlrEventRebound(Exception):
+    """A delivery callback named a different message than its event id first did.
+
+    The gateway's signature covers the event id alone, so this is the only
+    thing that separates a genuine report from a captured (id, signature) pair
+    aimed at somebody else's message. It is raised rather than returned so a
+    caller that has not thought about it fails loudly instead of writing.
+    """
+
+    def __init__(self, event_id: str, bound_message_id: str, message_id: str):
+        super().__init__(
+            f"event {event_id} first reported on message {bound_message_id}, "
+            f"now claims {message_id}"
+        )
+        self.event_id = event_id
+        self.bound_message_id = bound_message_id
+        self.message_id = message_id
+
+
 def _norm_cdf(x: float) -> float:
     """Standard normal CDF, via erf — avoids pulling scipy in for one number."""
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
@@ -1697,7 +1716,10 @@ class CustomersMixin:
                     SELECT ?, 'sms', phone, 'stoplist', 'turbosms'
                     FROM sms_campaign_members
                     WHERE campaign = ? AND buyer_id = ?
-                    ON CONFLICT (buyer_id, channel) DO NOTHING
+                    -- The gateway is where a phone-less manual opt-out finally
+                    -- gets its number; see add_marketing_optout.
+                    ON CONFLICT (buyer_id, channel) DO UPDATE
+                        SET phone = COALESCE(EXCLUDED.phone, marketing_optouts.phone)
                     """,
                     [buyer_id, campaign, buyer_id],
                 )
@@ -1755,32 +1777,84 @@ class CustomersMixin:
         status: str,
         delivered: Optional[bool],
         delivered_at: Optional[datetime] = None,
+        *,
+        event_id: str,
     ) -> bool:
         """
         Apply one delivery report. Returns False if the message id is unknown.
 
         ``delivered=None`` means the operator has not reported a final state
         yet, so the flag is left untouched rather than guessed at.
+
+        Delivery is terminal: a report that would flip a message already
+        reported ``delivered=True`` to a failure, or reopen it with a non-final
+        status, is dropped. That keeps the campaign's ground truth intact
+        against a reordered or duplicated gateway callback. A ``True`` report
+        always applies, so the Sent -> DELIVRD upgrade and the gateway's
+        idempotent retries are untouched. The row still exists either way, so
+        the caller still learns the id is known and can acknowledge the
+        callback.
+
+        ``event_id`` is the gateway event this report arrived under, and it is
+        the reason this is not a free write. The webhook signature covers the
+        event id and nothing else, so the caller proves it knew the secret and
+        proves nothing about which message it is reporting on. The first report
+        under an event id binds that id to its message; a later one naming a
+        different message is a captured pair re-pointed at somebody else and
+        raises ``DlrEventRebound``. Keyword-only and required so it cannot be
+        left off by accident — a binding a caller can silently skip is not one.
+
+        The **status** is deliberately not bound. A gateway that re-renders
+        current state when it retries would then contradict its own first
+        attempt, and rejecting a legitimate retry is worse than what this
+        defends against: the gateway tries nine times over 4.5 hours and offers
+        no replay. The terminal-delivery rule above is what guards the status.
         """
         async with self.connection() as conn:
-            if delivered is None:
-                cur = conn.execute(
-                    """
-                    UPDATE sms_campaign_members SET delivery_status = ?
-                    WHERE message_id = ?
-                    """,
-                    [status, message_id],
+            bound = conn.execute(
+                "SELECT message_id FROM sms_dlr_events WHERE event_id = ?",
+                [event_id],
+            ).fetchone()
+            if bound is None:
+                # Bound even for a message id the roster does not know: an event
+                # spent against nothing must still be spent, or the pair stays
+                # re-pointable.
+                conn.execute(
+                    "INSERT INTO sms_dlr_events (event_id, message_id) VALUES (?, ?)"
+                    " ON CONFLICT DO NOTHING",
+                    [event_id, message_id],
                 )
-            else:
-                cur = conn.execute(
+            elif bound[0] != message_id:
+                raise DlrEventRebound(event_id, bound[0], message_id)
+
+            if delivered is True:
+                conn.execute(
                     """
                     UPDATE sms_campaign_members
                     SET delivery_status = ?, delivered = ?, delivered_at = ?
                     WHERE message_id = ?
                     """,
-                    [status, delivered, delivered_at or datetime.now(), message_id],
+                    [status, True, delivered_at or datetime.now(), message_id],
                 )
-            changed = cur.fetchall()
+            elif delivered is False:
+                conn.execute(
+                    """
+                    UPDATE sms_campaign_members
+                    SET delivery_status = ?, delivered = ?, delivered_at = ?
+                    WHERE message_id = ?
+                      AND (delivered IS NULL OR delivered = FALSE)
+                    """,
+                    [status, False, delivered_at or datetime.now(), message_id],
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE sms_campaign_members SET delivery_status = ?
+                    WHERE message_id = ?
+                      AND (delivered IS NULL OR delivered = FALSE)
+                    """,
+                    [status, message_id],
+                )
 
             found = conn.execute(
                 "SELECT COUNT(*) FROM sms_campaign_members WHERE message_id = ?",
@@ -1797,13 +1871,25 @@ class CustomersMixin:
         source: str = "dashboard",
         channel: str = "sms",
     ) -> Dict[str, Any]:
-        """Record that a customer asked not to receive marketing on this channel."""
+        """Record that a customer asked not to receive marketing on this channel.
+
+        A repeat only ever *adds* the phone, and only when the stored row has
+        none. The refusal usually arrives before the number does — opted out by
+        buyer id off the CRM screen, with the number turning up on the next
+        send's stoplist — and until it lands the phone column suppresses
+        nothing, so the same person under a second buyer record keeps being
+        selected. Overwriting a phone already there is the opposite mistake: it
+        would move one person's suppression onto another's number, on a write
+        with no undo. Everything else is left as first written, because the
+        first refusal is the fact and its `source` is who to ask about it.
+        """
         async with self.connection() as conn:
             conn.execute(
                 """
                 INSERT INTO marketing_optouts (buyer_id, channel, phone, reason, source)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (buyer_id, channel) DO NOTHING
+                ON CONFLICT (buyer_id, channel) DO UPDATE
+                    SET phone = COALESCE(EXCLUDED.phone, marketing_optouts.phone)
                 """,
                 [buyer_id, channel, phone, reason, source],
             )

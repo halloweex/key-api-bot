@@ -10,8 +10,9 @@ Getting a pair
 --------------
 1. Set ``TURBOSMS_WEBHOOK_DEBUG=1`` on the web container and restart it.
 2. Fire a test callback from the TurboSMS panel (or send one real SMS).
-3. ``docker logs keycrm-web | grep "webhook debug payload"`` — it prints the
-   whole rejected payload, ``id`` and ``signature`` included.
+3. ``docker logs keycrm-web | grep "webhook debug"`` — it prints the rejected
+   callback's ``id`` and ``signature`` (only those diagnostic fields, not the
+   whole payload).
 4. Run this script with them, then **turn the debug flag back off**: the
    signature is derived from the shared secret.
 
