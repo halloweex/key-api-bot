@@ -208,3 +208,21 @@ class TestEmitterWiring:
             )
         assert rg.await_args.kwargs.get("still_firing") == [] or \
                rg.await_args.args[1:] == ([],)
+
+
+class TestPageConditionsAreCriticalOnly:
+    """The first real night found this: a CRITICAL alert's conditions list
+    carried the WARN/INFO findings riding in the same run, and the resolve
+    that followed — still_firing being CRITICAL-only — instantly announced
+    '✅ mirror_retired_rows — stood 0m' about a standing INFO that had not
+    gone anywhere. The page is about what pages; the digest owns the rest."""
+
+    def test_the_five_dq_sites_pass_critical_only(self):
+        import pathlib
+
+        src = pathlib.Path("core/scheduler.py").read_text()
+        assert src.count(
+            "if i.severity == Severity.CRITICAL],"
+        ) == 5
+        # And the old unfiltered form is extinct.
+        assert "conditions=[i.check_name for i in issues]," not in src

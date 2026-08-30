@@ -1277,7 +1277,8 @@ class BackgroundScheduler:
                 await self._send_dq_alert_throttled(
                     "integrity", msg,
                     alert_fingerprint("integrity", sev, issues, []),
-                    conditions=[i.check_name for i in issues],
+                    conditions=[i.check_name for i in issues
+                                if i.severity == Severity.CRITICAL],
                 )
             await self._resolve_dq_layer("integrity", issues, error_message)
 
@@ -1428,7 +1429,8 @@ class BackgroundScheduler:
                 await self._send_dq_alert_throttled(
                     MIRROR_LAYER, msg,
                     alert_fingerprint(MIRROR_LAYER, sev, issues, []),
-                    conditions=[i.check_name for i in issues],
+                    conditions=[i.check_name for i in issues
+                                if i.severity == Severity.CRITICAL],
                 )
             await self._resolve_dq_layer(MIRROR_LAYER, issues, error_message)
 
@@ -1784,7 +1786,8 @@ class BackgroundScheduler:
             )
             await self._send_dq_alert_throttled(
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
-                conditions=[i.check_name for i in issues],
+                conditions=[i.check_name for i in issues
+                                if i.severity == Severity.CRITICAL],
             )
         await self._resolve_dq_layer(layer, issues, error_message)
 
@@ -1947,7 +1950,8 @@ class BackgroundScheduler:
             )
             await self._send_dq_alert_throttled(
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
-                conditions=[i.check_name for i in issues],
+                conditions=[i.check_name for i in issues
+                                if i.severity == Severity.CRITICAL],
             )
         await self._resolve_dq_layer(layer, issues, error_message)
 
@@ -2132,7 +2136,8 @@ class BackgroundScheduler:
                 await self._send_dq_alert_throttled(
                     "reconciliation", msg,
                     alert_fingerprint("reconciliation", sev, issues, discrepancies),
-                    conditions=[i.check_name for i in issues],
+                    conditions=[i.check_name for i in issues
+                                if i.severity == Severity.CRITICAL],
                 )
             await self._resolve_dq_layer("reconciliation", issues, error_message)
 
