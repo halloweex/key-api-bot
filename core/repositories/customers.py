@@ -1643,21 +1643,19 @@ class CustomersMixin:
         Raises:
             ValueError: If the campaign does not exist.
         """
-        refuse_while_unported("mark_sms_campaign_sent")
-        async with self.connection() as conn:
-            row = conn.execute(
-                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign]
-            ).fetchone()
-            if row is None:
-                raise ValueError(f"campaign {campaign!r} is not frozen")
+        row = await self._sms_run(
+            "SELECT sent_at FROM {campaigns} WHERE campaign = ?", [campaign],
+            mode="one",
+        )
+        if row is None:
+            raise ValueError(f"campaign {campaign!r} is not frozen")
 
-            conn.execute(
-                "UPDATE sms_campaigns SET sent_at = ? WHERE campaign = ?",
-                [sent_at or datetime.now(), campaign],
-            )
-            sent = conn.execute(
-                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign]
-            ).fetchone()[0]
+        updated = await self._sms_run(
+            "UPDATE {campaigns} SET sent_at = ? WHERE campaign = ? "
+            "RETURNING sent_at",
+            [sent_at or datetime.now(), campaign], mode="one",
+        )
+        sent = updated[0] if updated else None
 
         return {
             "campaign": campaign,
@@ -1677,8 +1675,13 @@ class CustomersMixin:
         roster of 5,550 went out twice because a client-side timeout made the
         operator press send again while the first call was still running.
 
-        The check and the claim share one connection block, and the store
-        serialises those, so the second caller now finds the campaign taken.
+        The claim is **one conditional UPDATE**, not a read followed by a
+        write. It used to be the latter, which was safe only because DuckDB
+        admits a single writer and serialised the pair; against a connection
+        pool two callers can interleave a read-then-write and both win, which
+        is precisely the incident this guard exists for. `WHERE sent_at IS
+        NULL` makes the claim atomic on either engine, and the row it returns
+        is the proof of who got it.
 
         Callers that end up sending nothing must hand it back with
         :meth:`release_sms_campaign`, or the campaign is stuck.
@@ -1686,33 +1689,33 @@ class CustomersMixin:
         Raises:
             ValueError: If the campaign is unknown or already claimed.
         """
-        refuse_while_unported("get_sms_campaign_targets")
-        async with self.connection() as conn:
-            camp = conn.execute(
-                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign],
-            ).fetchone()
+        claimed = await self._sms_run(
+            "UPDATE {campaigns} SET sent_at = ? "
+            "WHERE campaign = ? AND sent_at IS NULL RETURNING campaign",
+            [datetime.now(), campaign], mode="one",
+        )
+        if claimed is None:
+            # Nothing was claimed, and the two reasons need different words.
+            camp = await self._sms_run(
+                "SELECT sent_at FROM {campaigns} WHERE campaign = ?", [campaign],
+                mode="one",
+            )
             if camp is None:
                 raise ValueError(f"campaign {campaign!r} is not frozen")
-            if camp[0] is not None:
-                raise ValueError(
-                    f"campaign {campaign!r} was already sent on {camp[0]} — "
-                    f"sending twice would double-message the roster"
-                )
-
-            conn.execute(
-                "UPDATE sms_campaigns SET sent_at = ? WHERE campaign = ?",
-                [datetime.now(), campaign],
+            raise ValueError(
+                f"campaign {campaign!r} was already sent on {camp[0]} — "
+                f"sending twice would double-message the roster"
             )
 
-            rows = conn.execute(
-                """
-                SELECT buyer_id, phone, tier
-                FROM sms_campaign_members
-                WHERE campaign = ? AND assignment = 'target'
-                ORDER BY buyer_id
-                """,
-                [campaign],
-            ).fetchall()
+        rows = await self._sms_run(
+            """
+            SELECT buyer_id, phone, tier
+            FROM {members}
+            WHERE campaign = ? AND assignment = 'target'
+            ORDER BY buyer_id
+            """,
+            [campaign],
+        )
 
         return [{"buyerId": r[0], "phone": r[1], "tier": r[2]} for r in rows]
 
@@ -1723,12 +1726,10 @@ class CustomersMixin:
         Only safe when no message left: clearing the stamp makes the campaign
         sendable again, which is a double-send if anything did go out.
         """
-        refuse_while_unported("release_sms_campaign")
-        async with self.connection() as conn:
-            conn.execute(
-                "UPDATE sms_campaigns SET sent_at = NULL WHERE campaign = ?",
-                [campaign],
-            )
+        await self._sms_run(
+            "UPDATE {campaigns} SET sent_at = NULL WHERE campaign = ?",
+            [campaign], mode="none",
+        )
 
     async def record_sms_send(
         self,

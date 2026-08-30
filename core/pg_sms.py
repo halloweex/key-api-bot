@@ -325,8 +325,7 @@ def sms_store_is_postgres() -> bool:
 # The names still answered by DuckDB alone. `get_sms_segments` has moved; these
 # have not, and until they do the switch is half a switch.
 UNPORTED = (
-    "freeze_sms_campaign", "mark_sms_campaign_sent", "get_sms_campaign_targets",
-    "release_sms_campaign", "record_sms_send", "record_sms_delivery",
+    "freeze_sms_campaign", "record_sms_send", "record_sms_delivery",
     "get_sms_campaign_results",
 )
 

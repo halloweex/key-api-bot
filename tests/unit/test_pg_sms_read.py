@@ -187,7 +187,7 @@ class TestTheHalfSwitchRefuses:
         await store.connect()
         try:
             with pytest.raises(NotImplementedError, match="KS_SMS_STORE"):
-                await store.get_sms_campaign_targets("aug")
+                await store.get_sms_campaign_results("aug")
         finally:
             await store.close()
 
@@ -200,8 +200,8 @@ class TestTheHalfSwitchRefuses:
         await store.connect()
         try:
             # Reaches the store and answers on its own terms — an unknown
-            # campaign is a ValueError, not a refusal to use this engine.
-            with pytest.raises(ValueError, match="not frozen"):
-                await store.get_sms_campaign_targets("aug")
+            # campaign is its own error, not a refusal to use this engine.
+            with pytest.raises(ValueError):
+                await store.get_sms_campaign_results("aug")
         finally:
             await store.close()

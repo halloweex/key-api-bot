@@ -453,3 +453,94 @@ class TestThePortedStatements:
         assert duck_rows[0]["members"] == 3
         assert duck_rows[0]["target"] == 2 and duck_rows[0]["holdout"] == 1
         assert duck_rows[0]["delivered"] == 1 and duck_rows[0]["undelivered"] == 1
+
+
+class TestTheClaimIsAtomic:
+    """A campaign may be claimed once, on either engine.
+
+    This is the guard behind a real incident: a roster of 5,550 went out twice
+    because a client-side timeout made the operator press send again while the
+    first call was still running. It used to be a read followed by a write,
+    safe only because DuckDB admits one writer and serialised the pair. A
+    connection pool gives no such thing, so the claim became one conditional
+    UPDATE — and the point of this test is that two callers racing on the
+    *pooled* engine still produce exactly one winner.
+    """
+
+    @staticmethod
+    async def _frozen(store, conn):
+        async with store.connection() as duck:
+            duck.execute(
+                "INSERT INTO sms_campaigns (campaign, ltv_basis, sales_type,"
+                " holdout_pct, criteria) VALUES ('race','revenue','retail',10,'{}')")
+            duck.execute(
+                "INSERT INTO sms_campaign_members (campaign, buyer_id, phone,"
+                " tier, assignment, orders_at_export)"
+                " VALUES ('race',1,'380500000001','VIP','target',1)")
+        await conn.execute(
+            "INSERT INTO app.sms_campaigns (campaign, ltv_basis, sales_type,"
+            " holdout_pct, criteria) VALUES ('race','revenue','retail',10,'{}')")
+        await conn.execute(
+            "INSERT INTO app.sms_campaign_members (campaign, buyer_id, phone,"
+            " tier, assignment, orders_at_export)"
+            " VALUES ('race',1,'380500000001','VIP','target',1)")
+
+    @pytest.mark.asyncio
+    async def test_two_racing_claims_produce_one_winner_on_postgres(
+        self, engines, monkeypatch,
+    ):
+        import asyncio
+
+        store, conn = engines
+        await self._frozen(store, conn)
+
+        # A real pool, not the single-connection stand-in the other tests use:
+        # asyncpg forbids two queries on one connection, so a shared one would
+        # make the loser fail for the wrong reason and prove nothing about the
+        # claim. Two callers must be able to genuinely race.
+        pool = await asyncpg.create_pool(DSN, min_size=2, max_size=4)
+        monkeypatch.setenv("KS_SMS_STORE", "postgres")
+        try:
+            with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
+                 patch("core.pg.require_revision", new=AsyncMock()):
+                results = await asyncio.gather(
+                    store.get_sms_campaign_targets("race"),
+                    store.get_sms_campaign_targets("race"),
+                    return_exceptions=True,
+                )
+        finally:
+            await pool.close()
+            monkeypatch.delenv("KS_SMS_STORE", raising=False)
+
+        won = [r for r in results if not isinstance(r, Exception)]
+        lost = [r for r in results if isinstance(r, ValueError)]
+        assert len(won) == 1, f"the campaign was claimed {len(won)} times"
+        assert len(lost) == 1
+        assert "already sent" in str(lost[0])
+        assert won[0] == [{"buyerId": 1, "phone": "380500000001", "tier": "VIP"}]
+
+    @pytest.mark.asyncio
+    async def test_the_same_holds_on_duckdb(self, engines, monkeypatch):
+        store, conn = engines
+        await self._frozen(store, conn)
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+
+        first = await store.get_sms_campaign_targets("race")
+        assert first == [{"buyerId": 1, "phone": "380500000001", "tier": "VIP"}]
+        with pytest.raises(ValueError, match="already sent"):
+            await store.get_sms_campaign_targets("race")
+
+        # …and handing it back makes it sendable again.
+        await store.release_sms_campaign("race")
+        assert await store.get_sms_campaign_targets("race") == first
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_campaign_says_so_rather_than_claiming_nothing(
+        self, engines, monkeypatch,
+    ):
+        """The conditional UPDATE matches no row for a campaign that does not
+        exist *and* for one already claimed. The two need different words."""
+        store, conn = engines
+        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        with pytest.raises(ValueError, match="not frozen"):
+            await store.get_sms_campaign_targets("nope")
