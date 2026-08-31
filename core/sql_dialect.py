@@ -74,6 +74,11 @@ class Dialect:
     # mirrored — it is derived from state only DuckDB holds — which is why it
     # sits in `app` rather than `bronze` (revision 0008).
     sku_inventory_status: str
+    # The daily stock snapshot behind the trend chart. Replicated, not
+    # mirrored, and in `app` for `sku_inventory_status`' reason: the API
+    # serves current stock only, so a day the snapshot job did not run is a
+    # day that cannot be recovered from KeyCRM (revision 0008).
+    inventory_history: str
     # `/inventory`'s turnover KPIs read the revenue Gold directly, and this is
     # the one place the two Golds are not the same shape. DuckDB grains on
     # (date, sales_type) and splits channels into columns; Postgres grains on
@@ -115,6 +120,7 @@ DUCKDB = Dialect(
     sms_audience_presets="sms_audience_presets",
     sms_dlr_events="sms_dlr_events",
     sku_inventory_status="sku_inventory_status",
+    inventory_history="inventory_history",
     gold_daily_revenue="gold_daily_revenue",
     # Every row is a roll-up here: this Gold has no source dimension.
     gold_revenue_rollup="TRUE",
@@ -145,6 +151,7 @@ POSTGRES = Dialect(
     sms_audience_presets="app.sms_audience_presets",
     sms_dlr_events="app.sms_dlr_events",
     sku_inventory_status="app.sku_inventory_status",
+    inventory_history="app.inventory_history",
     gold_daily_revenue="gold.daily_revenue",
     gold_revenue_rollup="source_id IS NULL",
     inventory_views="gold.",

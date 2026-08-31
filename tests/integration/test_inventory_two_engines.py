@@ -119,6 +119,15 @@ GOLD = [
     (_d(70), "retail", None, 1300), (_d(70), "retail", 2, 1300),
 ]
 
+# (date, total_quantity, total_value, total_reserve, sku_count)
+# Two calendar months so the monthly granularity has more than one bucket, and
+# a gap, because the snapshot job can miss a day and the chart must not invent
+# one. Values chosen so AVG lands on a repeating decimal in both engines.
+HISTORY = [
+    (_d(n), 1000 + n, 100000 + n * 3, 100 + n, 890 + (n % 3))
+    for n in (1, 2, 3, 5, 8, 13, 21, 34, 55, 70)
+]
+
 CALLS = (
     ("get_inventory_summary_v2", {}),
     ("get_dead_stock_items_v2", {"limit": 5}),
@@ -130,6 +139,10 @@ CALLS = (
     ("get_inventory_turnover", {"days": 30}),
     ("get_abc_skus", {"abc_class": "A", "limit": 5}),
     ("get_abc_skus", {"abc_class": "C", "limit": 5}),
+    ("get_average_inventory", {"days": 30}),
+    ("get_average_inventory", {"days": 90}),
+    ("get_inventory_trend", {"days": 90, "granularity": "daily"}),
+    ("get_inventory_trend", {"days": 90, "granularity": "monthly"}),
 )
 
 
@@ -174,13 +187,18 @@ async def _seed_duckdb(store):
                 conn.execute(
                     "INSERT INTO gold_daily_revenue (date, sales_type, revenue)"
                     " VALUES (?,?,?)", [day, stype, revenue])
+        for day, qty, value, reserve, skus in HISTORY:
+            conn.execute(
+                "INSERT INTO inventory_history (date, total_quantity,"
+                " total_value, total_reserve, sku_count) VALUES (?,?,?,?,?)",
+                [day, qty, value, reserve, skus])
 
 
 async def _seed_postgres(conn):
     await conn.execute(
         "TRUNCATE gold.daily_revenue, silver.orders, bronze.order_products,"
         " bronze.products, bronze.categories, bronze.offer_stocks,"
-        " app.sku_inventory_status")
+        " app.sku_inventory_status, app.inventory_history")
     await conn.executemany(
         "INSERT INTO bronze.categories (id, name, parent_id) VALUES ($1,$2,$3)",
         CATEGORIES)
@@ -219,6 +237,9 @@ async def _seed_postgres(conn):
         " orders_count, unique_customers, new_customers, returning_customers,"
         " returns_count, returns_revenue, avg_order_value)"
         " VALUES ($1,$2,$3,$4,0,0,0,0,0,0,0)", GOLD)
+    await conn.executemany(
+        "INSERT INTO app.inventory_history (date, total_quantity, total_value,"
+        " total_reserve, sku_count) VALUES ($1,$2,$3,$4,$5)", HISTORY)
 
 
 @pytest_asyncio.fixture
@@ -310,6 +331,22 @@ async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
         both_engines, monkeypatch, "get_inventory_turnover", {"days": 30})
     assert turnover["turnover"]["totalRevenue"] > 0
     assert turnover["currentStock"]["valueSale"] > 0
+
+    trend, _ = await _both(
+        both_engines, monkeypatch, "get_inventory_trend",
+        {"days": 90, "granularity": "monthly"})
+    assert len(trend["labels"]) >= 2, (
+        "the monthly buckets must span more than one month or the grouping "
+        "is not being compared at all")
+    daily, _ = await _both(
+        both_engines, monkeypatch, "get_inventory_trend",
+        {"days": 90, "granularity": "daily"})
+    assert len(daily["labels"]) == len(HISTORY)
+
+    average, _ = await _both(
+        both_engines, monkeypatch, "get_average_inventory", {"days": 90})
+    assert average["dataPoints"] == len(HISTORY)
+    assert "message" not in average, "the no-history branch is not what ran"
 
 
 @pytest.mark.asyncio

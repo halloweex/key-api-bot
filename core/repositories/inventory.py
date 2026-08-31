@@ -21,6 +21,7 @@ def _render(sql: str, dialect: Dialect, **extra: Any) -> str:
     return sql.format(
         views=dialect.inventory_views,
         offer_stocks=dialect.offer_stocks,
+        inventory_history=dialect.inventory_history,
         gold_daily_revenue=dialect.gold_daily_revenue,
         gold_revenue_rollup=dialect.gold_revenue_rollup,
         **extra,
@@ -490,79 +491,81 @@ class InventoryMixin:
         Returns:
             Dict with average inventory metrics
         """
-        async with self.connection() as conn:
-            # Get beginning and ending inventory for the period
-            result = conn.execute(f"""
-                WITH period_data AS (
-                    SELECT
-                        date,
-                        total_quantity,
-                        total_value,
-                        ROW_NUMBER() OVER (ORDER BY date ASC) as rn_asc,
-                        ROW_NUMBER() OVER (ORDER BY date DESC) as rn_desc
-                    FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL '{int(days)} days'
-                )
+        rows = await self._inventory_rows("""
+            WITH period_data AS (
                 SELECT
-                    -- Beginning inventory (oldest in period)
-                    MAX(CASE WHEN rn_asc = 1 THEN total_quantity END) as beginning_qty,
-                    MAX(CASE WHEN rn_asc = 1 THEN total_value END) as beginning_value,
-                    MAX(CASE WHEN rn_asc = 1 THEN date END) as beginning_date,
-                    -- Ending inventory (most recent)
-                    MAX(CASE WHEN rn_desc = 1 THEN total_quantity END) as ending_qty,
-                    MAX(CASE WHEN rn_desc = 1 THEN total_value END) as ending_value,
-                    MAX(CASE WHEN rn_desc = 1 THEN date END) as ending_date,
-                    -- Daily averages
-                    AVG(total_quantity) as avg_daily_qty,
-                    AVG(total_value) as avg_daily_value,
-                    COUNT(*) as data_points
-                FROM period_data
-            """).fetchone()
+                    date,
+                    total_quantity,
+                    total_value,
+                    ROW_NUMBER() OVER (ORDER BY date ASC) as rn_asc,
+                    ROW_NUMBER() OVER (ORDER BY date DESC) as rn_desc
+                FROM {inventory_history}
+                WHERE date >= CURRENT_DATE - INTERVAL '{days} days'
+            )
+            SELECT
+                -- Beginning inventory (oldest in period)
+                MAX(CASE WHEN rn_asc = 1 THEN total_quantity END) as beginning_qty,
+                MAX(CASE WHEN rn_asc = 1 THEN total_value END) as beginning_value,
+                MAX(CASE WHEN rn_asc = 1 THEN date END) as beginning_date,
+                -- Ending inventory (most recent)
+                MAX(CASE WHEN rn_desc = 1 THEN total_quantity END) as ending_qty,
+                MAX(CASE WHEN rn_desc = 1 THEN total_value END) as ending_value,
+                MAX(CASE WHEN rn_desc = 1 THEN date END) as ending_date,
+                -- Daily averages
+                AVG(total_quantity) as avg_daily_qty,
+                AVG(total_value) as avg_daily_value,
+                COUNT(*) as data_points
+            FROM period_data
+        """, days=int(days))
+        result = rows[0] if rows else None
 
-            if not result or not result[0]:
-                # No historical data, use current snapshot (sale/retail price)
-                current = conn.execute("""
-                    SELECT
-                        COALESCE(SUM(quantity - reserve), 0),
-                        COALESCE(SUM((quantity - reserve) * price), 0)
-                    FROM offer_stocks
-                """).fetchone()
-
-                return {
-                    "averageQuantity": current[0] or 0,
-                    "averageValue": float(current[1] or 0),
-                    "beginningQuantity": None,
-                    "endingQuantity": current[0] or 0,
-                    "beginningValue": None,
-                    "endingValue": float(current[1] or 0),
-                    "dataPoints": 0,
-                    "periodDays": days,
-                    "message": "No historical data yet. Average based on current snapshot.",
-                }
-
-            beginning_qty = result[0] or 0
-            beginning_value = float(result[1] or 0)
-            ending_qty = result[3] or 0
-            ending_value = float(result[4] or 0)
-
-            # Calculate averages using (Beginning + Ending) / 2
-            avg_qty = (beginning_qty + ending_qty) / 2
-            avg_value = (beginning_value + ending_value) / 2
+        if not result or not result[0]:
+            # No historical data, use the current snapshot (sale/retail price).
+            # A second round trip rather than a batch: these two are
+            # alternatives, not a pair, so there is no shared snapshot to hold
+            # them inside.
+            current = (await self._inventory_rows("""
+                SELECT
+                    COALESCE(SUM(quantity - reserve), 0),
+                    COALESCE(SUM((quantity - reserve) * price), 0)
+                FROM {offer_stocks}
+            """))[0]
 
             return {
-                "averageQuantity": round(avg_qty),
-                "averageValue": round(avg_value, 2),
-                "beginningQuantity": beginning_qty,
-                "beginningValue": beginning_value,
-                "beginningDate": str(result[2]) if result[2] else None,
-                "endingQuantity": ending_qty,
-                "endingValue": ending_value,
-                "endingDate": str(result[5]) if result[5] else None,
-                "dailyAverageQuantity": round(float(result[6] or 0)),
-                "dailyAverageValue": round(float(result[7] or 0), 2),
-                "dataPoints": result[8] or 0,
+                "averageQuantity": current[0] or 0,
+                "averageValue": float(current[1] or 0),
+                "beginningQuantity": None,
+                "endingQuantity": current[0] or 0,
+                "beginningValue": None,
+                "endingValue": float(current[1] or 0),
+                "dataPoints": 0,
                 "periodDays": days,
+                "message": "No historical data yet. Average based on current snapshot.",
             }
+
+        beginning_qty = result[0] or 0
+        beginning_value = float(result[1] or 0)
+        ending_qty = result[3] or 0
+        ending_value = float(result[4] or 0)
+
+        # Calculate averages using (Beginning + Ending) / 2
+        avg_qty = (beginning_qty + ending_qty) / 2
+        avg_value = (beginning_value + ending_value) / 2
+
+        return {
+            "averageQuantity": round(avg_qty),
+            "averageValue": round(avg_value, 2),
+            "beginningQuantity": beginning_qty,
+            "beginningValue": beginning_value,
+            "beginningDate": str(result[2]) if result[2] else None,
+            "endingQuantity": ending_qty,
+            "endingValue": ending_value,
+            "endingDate": str(result[5]) if result[5] else None,
+            "dailyAverageQuantity": round(float(result[6] or 0)),
+            "dailyAverageValue": round(float(result[7] or 0), 2),
+            "dataPoints": result[8] or 0,
+            "periodDays": days,
+        }
 
     async def get_inventory_trend(
         self,
@@ -578,87 +581,88 @@ class InventoryMixin:
         Returns:
             Dict with labels, values, quantities for trend chart
         """
-        async with self.connection() as conn:
-            if granularity == "monthly":
-                # Monthly aggregation
-                result = conn.execute(f"""
-                    SELECT
-                        DATE_TRUNC('month', date) as period,
-                        AVG(total_quantity) as avg_quantity,
-                        AVG(total_value) as avg_value,
-                        AVG(total_reserve) as avg_reserve,
-                        MIN(total_quantity) as min_quantity,
-                        MAX(total_quantity) as max_quantity,
-                        MIN(total_value) as min_value,
-                        MAX(total_value) as max_value,
-                        COUNT(*) as data_points
-                    FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL '{int(days)} days'
-                    GROUP BY DATE_TRUNC('month', date)
-                    ORDER BY period
-                """).fetchall()
+        if granularity == "monthly":
+            # Monthly aggregation. `DATE_TRUNC` returns a DATE in DuckDB and a
+            # TIMESTAMP in Postgres, which `strftime` renders identically —
+            # the label is the same string either way.
+            result = await self._inventory_rows("""
+                SELECT
+                    DATE_TRUNC('month', date) as period,
+                    AVG(total_quantity) as avg_quantity,
+                    AVG(total_value) as avg_value,
+                    AVG(total_reserve) as avg_reserve,
+                    MIN(total_quantity) as min_quantity,
+                    MAX(total_quantity) as max_quantity,
+                    MIN(total_value) as min_value,
+                    MAX(total_value) as max_value,
+                    COUNT(*) as data_points
+                FROM {inventory_history}
+                WHERE date >= CURRENT_DATE - INTERVAL '{days} days'
+                GROUP BY DATE_TRUNC('month', date)
+                ORDER BY period
+            """, days=int(days))
 
-                labels = [row[0].strftime('%b %Y') for row in result if row[0]]
-                quantities = [round(row[1] or 0) for row in result]
-                values = [round(float(row[2] or 0), 2) for row in result]
-                reserves = [round(row[3] or 0) for row in result]
+            labels = [row[0].strftime('%b %Y') for row in result if row[0]]
+            quantities = [round(row[1] or 0) for row in result]
+            values = [round(float(row[2] or 0), 2) for row in result]
+            reserves = [round(row[3] or 0) for row in result]
 
-                return {
-                    "labels": labels,
-                    "quantity": quantities,
-                    "value": values,
-                    "reserve": reserves,
-                    "granularity": "monthly",
-                    "periodDays": days,
-                    "dataPoints": len(result),
-                }
+            return {
+                "labels": labels,
+                "quantity": quantities,
+                "value": values,
+                "reserve": reserves,
+                "granularity": "monthly",
+                "periodDays": days,
+                "dataPoints": len(result),
+            }
+
+        # Daily data
+        result = await self._inventory_rows("""
+            SELECT
+                date,
+                total_quantity,
+                total_value,
+                total_reserve,
+                sku_count
+            FROM {inventory_history}
+            WHERE date >= CURRENT_DATE - INTERVAL '{days} days'
+            ORDER BY date
+        """, days=int(days))
+
+        labels = [row[0].strftime('%d %b') for row in result if row[0]]
+        quantities = [row[1] or 0 for row in result]
+        values = [float(row[2] or 0) for row in result]
+        reserves = [row[3] or 0 for row in result]
+        sku_counts = [row[4] or 0 for row in result]
+
+        # Calculate changes
+        changes = []
+        for i, val in enumerate(values):
+            if i == 0:
+                changes.append(0)
             else:
-                # Daily data
-                result = conn.execute(f"""
-                    SELECT
-                        date,
-                        total_quantity,
-                        total_value,
-                        total_reserve,
-                        sku_count
-                    FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL '{int(days)} days'
-                    ORDER BY date
-                """).fetchall()
+                changes.append(round(val - values[i - 1], 2))
 
-                labels = [row[0].strftime('%d %b') for row in result if row[0]]
-                quantities = [row[1] or 0 for row in result]
-                values = [float(row[2] or 0) for row in result]
-                reserves = [row[3] or 0 for row in result]
-                sku_counts = [row[4] or 0 for row in result]
-
-                # Calculate changes
-                changes = []
-                for i, val in enumerate(values):
-                    if i == 0:
-                        changes.append(0)
-                    else:
-                        changes.append(round(val - values[i - 1], 2))
-
-                return {
-                    "labels": labels,
-                    "quantity": quantities,
-                    "value": values,
-                    "reserve": reserves,
-                    "skuCount": sku_counts,
-                    "valueChange": changes,
-                    "granularity": "daily",
-                    "periodDays": days,
-                    "dataPoints": len(result),
-                    "summary": {
-                        "startValue": values[0] if values else 0,
-                        "endValue": values[-1] if values else 0,
-                        "change": round(values[-1] - values[0], 2) if len(values) > 1 else 0,
-                        "changePercent": round((values[-1] - values[0]) / values[0] * 100, 1) if len(values) > 1 and values[0] > 0 else 0,
-                        "minValue": min(values) if values else 0,
-                        "maxValue": max(values) if values else 0,
-                    } if values else None,
-                }
+        return {
+            "labels": labels,
+            "quantity": quantities,
+            "value": values,
+            "reserve": reserves,
+            "skuCount": sku_counts,
+            "valueChange": changes,
+            "granularity": "daily",
+            "periodDays": days,
+            "dataPoints": len(result),
+            "summary": {
+                "startValue": values[0] if values else 0,
+                "endValue": values[-1] if values else 0,
+                "change": round(values[-1] - values[0], 2) if len(values) > 1 else 0,
+                "changePercent": round((values[-1] - values[0]) / values[0] * 100, 1) if len(values) > 1 and values[0] > 0 else 0,
+                "minValue": min(values) if values else 0,
+                "maxValue": max(values) if values else 0,
+            } if values else None,
+        }
 
     async def get_inventory_summary_v2(self) -> Dict[str, Any]:
         """Get inventory summary using Layer 3 views.

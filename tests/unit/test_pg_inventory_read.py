@@ -26,7 +26,9 @@ from core.duckdb_store import DuckDBStore
 
 TIMEOUT_S = 20
 
-# (method, kwargs) — every consumer of the eleven views.
+# (method, kwargs) — every consumer of the eleven views, plus the two that
+# read `inventory_history`. Nine of the tab's ten routes; `/stocks/summary`
+# stays on DuckDB because `offers` and `sync_metadata` are not in Postgres.
 CALLS = (
     ("get_inventory_summary_v2", {}),
     ("get_dead_stock_items_v2", {"limit": 10}),
@@ -36,6 +38,9 @@ CALLS = (
     ("get_restock_alerts", {"limit": 10}),
     ("get_inventory_turnover", {"days": 30}),
     ("get_abc_skus", {"abc_class": "A", "limit": 10}),
+    ("get_average_inventory", {"days": 30}),
+    ("get_inventory_trend", {"days": 90, "granularity": "daily"}),
+    ("get_inventory_trend", {"days": 90, "granularity": "monthly"}),
 )
 
 
@@ -139,7 +144,7 @@ class TestEveryMethodReturns:
     them, which is how that deadlock shipped."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("name,kwargs", CALLS, ids=[c[0] for c in CALLS])
+    @pytest.mark.parametrize("name,kwargs", CALLS, ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in CALLS])
     async def test_it_returns_rather_than_hanging(
         self, tmp_path, monkeypatch, name, kwargs,
     ):
@@ -208,3 +213,37 @@ class TestTheHelperIsNeverCalledUnderTheLock:
                     if "v_" in arg.value and "FROM" in arg.value.upper():
                         stragglers.append((node.lineno, arg.value.strip()[:60]))
         assert not stragglers, f"view read outside the routing helper: {stragglers}"
+
+    def test_only_get_stock_summary_still_reads_history_on_duckdb(self):
+        """The boundary of this port, stated so it cannot drift quietly.
+
+        `/api/stocks/summary` is the one read route left on DuckDB, and the
+        reason is specific: it joins `offers` and `sync_metadata`, neither of
+        which is in Postgres, so porting it needs new replication rather than
+        a table name. Everything else reading `inventory_history` goes through
+        the helper; the writer keeps its own connection, as a writer must.
+
+        If somebody replicates those two, this test is where they find out the
+        method is waiting for them.
+        """
+        source = Path("core/repositories/inventory.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        readers = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            body = ast.get_source_segment(source, node) or ""
+            if "FROM inventory_history" in body:
+                readers.add(node.name)
+        assert readers == {"get_stock_summary", "record_inventory_snapshot"}, readers
+
+        summary = ast.get_source_segment(
+            source,
+            next(n for n in ast.walk(tree)
+                 if isinstance(n, ast.AsyncFunctionDef)
+                 and n.name == "get_stock_summary"),
+        )
+        assert "JOIN offers o" in summary and "FROM sync_metadata" in summary, (
+            "get_stock_summary no longer needs the two unreplicated tables — "
+            "it can be ported now"
+        )
