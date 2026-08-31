@@ -148,8 +148,29 @@ services:
   # forcing five minutes means `archive_timeout=300`, which writes a padded
   # 16 MB segment every five minutes whether or not anything happened: about
   # 4.6 GB a day of mostly zeroes. Streaming writes what there is, when there
-  # is: measured WAL volume on this database is 23.3 MiB/day. And streaming
-  # needs no restart, where `archive_mode` would.
+  # is. And streaming needs no restart, where `archive_mode` would.
+  #
+  # This comment said "measured WAL volume on this database is 23.3 MiB/day"
+  # until 2026-08-31. `pg_stat_wal` says 16 GB since 2026-08-20 — **1.5 GB a
+  # day, 65x that** — and the argument above survives it unharmed: 1.5 GB of
+  # real WAL still beats 4.6 GB of padding. The figure was measured before
+  # Postgres began deriving anything. What generates it, from
+  # pg_stat_user_tables over the same window:
+  #
+  #   silver.orders        19.1M inserts + 18.9M updates over 46,982 live rows
+  #   app.customer_profile  5.2M inserts over 18,418
+  #   gold.daily_revenue    1.7M inserts over 5,714
+  #
+  # — i.e. ~400 whole-table rebuilds, and `silver.orders` pays twice because
+  # `rebuild_silver` follows its INSERT with a full-table pass-2 UPDATE, and an
+  # UPDATE here is a second row version. Folding pass 2 into pass 1 would
+  # roughly halve the largest contributor; it is not a free change, because
+  # that SQL body is shared with DuckDB, whose incremental path scopes pass 2
+  # by buyer and would not benefit the same way.
+  #
+  # Not urgent: with retention now anchored to a base backup
+  # (deploy/pg_basebackup.sh) the archive is bounded by the PITR window, so
+  # this sizes the window rather than threatening the disk.
   #
   # Read `max_slot_wal_keep_size` above before changing anything here: this
   # service is the slot's consumer, and the two are a pair.
