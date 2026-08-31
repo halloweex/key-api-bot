@@ -70,6 +70,14 @@ class Dialect:
     sms_campaign_members: str
     sms_audience_presets: str
     sms_dlr_events: str
+    # The `/inventory` layer. `sku_inventory_status` is replicated, not
+    # mirrored — it is derived from state only DuckDB holds — which is why it
+    # sits in `app` rather than `bronze` (revision 0008).
+    sku_inventory_status: str
+    # A namespace, not a name: the eleven inventory views reference each other,
+    # so one prefix does the work of eleven holes. Empty in DuckDB, which has
+    # no schemas to speak of; `gold.` in Postgres.
+    inventory_views: str
     # A format template with one `{column}` hole. Not a function, so the whole
     # dialect stays comparable, printable and trivially frozen.
     date_template: str
@@ -96,6 +104,8 @@ DUCKDB = Dialect(
     sms_campaign_members="sms_campaign_members",
     sms_audience_presets="sms_audience_presets",
     sms_dlr_events="sms_dlr_events",
+    sku_inventory_status="sku_inventory_status",
+    inventory_views="",
     # Byte-for-byte what `core.duckdb_constants._date_in_kyiv` has always
     # emitted. Changing it here changes stored Silver on the next rebuild.
     date_template="DATE(timezone('{zone}', {column}))",
@@ -121,6 +131,8 @@ POSTGRES = Dialect(
     sms_campaign_members="app.sms_campaign_members",
     sms_audience_presets="app.sms_audience_presets",
     sms_dlr_events="app.sms_dlr_events",
+    sku_inventory_status="app.sku_inventory_status",
+    inventory_views="gold.",
     # `DATE(x)` also exists in PostgreSQL, but the cast is what the rest of
     # this repository's Postgres SQL uses, so it reads the same as its
     # neighbours in `core/reconciliation_io.py`.
@@ -876,3 +888,474 @@ AT_RISK_TYPES: Tuple[str, ...] = (
     "float",  # avg_orders_at_risk — likewise
     "int",    # churned_count
 )
+
+
+# ─── The inventory analytics layer, one body for two engines ────────────────
+#
+# The `/inventory` tab reads no table directly. It reads eleven views, rooted
+# on `v_sku_analysis`, and eight repository methods are their only consumers.
+# Moving the tab to Postgres therefore means moving the views, and charter
+# rule 1 applies here exactly as it did to the Silver projection and the SMS
+# audience: one body, the table names the only difference.
+#
+# WHAT HAD TO CHANGE, AND WHY IT IS NOT A REWRITE
+#
+# Four of the eleven read `gold_daily_products`, which exists in DuckDB and has
+# no Postgres counterpart. The reconnaissance that opened this work recorded
+# the tab's sources as two tables, both already mirrored; that was wrong, and
+# seven of the eight methods depend on the table it missed.
+#
+# Deriving `gold.daily_products` in Postgres was the obvious repair and is the
+# wrong size. The views ask that 89,466-row table for one narrow thing: per
+# `product_id`, over 30 and 90 days, quantity and revenue. The order-lines
+# level already carries it in both engines, so the six subqueries read
+# `{order_lines}` and re-apply Gold's own predicate (`NOT is_return AND
+# is_active_source`) — which is what Gold applied when it materialised those
+# rows in the first place.
+#
+# **The numbers do not move, and that is measured rather than argued.** On the
+# production backup, the rollup from the line level and the rollup from
+# `gold_daily_products` agree on every product in both windows:
+#
+#     30d   0 differing on quantity, 0 on revenue, 0 on order_count
+#     90d   0 differing on quantity, 0 on revenue, 5 on order_count (max 9)
+#
+# Quantity and revenue are exact because nothing rounds on either path:
+# `price_sold` is DECIMAL(12,2) and `quantity` is an integer, so the products
+# and their sums stay exact at two decimal places in both engines.
+#
+# `order_count` is the one measure that differs, it differs by construction,
+# and **nothing reads it**. Gold stores `COUNT(DISTINCT order_id)` per
+# (date, sales_type, source_id, product) cell and the view sums those cells,
+# so an order carrying two lines of the same product under different sold-names
+# is counted twice on that day. `COUNT(DISTINCT order_id)` over the window is
+# the answer that was wanted. It surfaces as `orders_30d` on
+# `v_sku_sell_through`, and a search of the repository finds no consumer — not
+# a method, not a route, not the frontend.
+#
+# WHY A NAMESPACE HOLE AND NOT ELEVEN NAME HOLES
+#
+# The views reference each other, so their own names need a hole too. One
+# prefix hole (`{views}` → `` in DuckDB, `gold.` in Postgres) keeps the count
+# at one instead of eleven, and keeps the test that undoes every substitution
+# able to prove there is no twelfth divergence.
+#
+# WHY SCHEMA `gold` IN POSTGRES
+#
+# This is a derived reading layer over Silver and the replicated stock tables —
+# the same kind of thing `gold.daily_revenue` is. `app` is where what nothing
+# can decide again lives, and none of these eleven holds a fact: drop them all
+# and one migration puts them back.
+#
+# ORDER IS LOAD-BEARING. `v_sku_analysis` is the root; `v_sku_status` needs
+# `v_category_velocity`; `v_sku_dead_stock_v2` needs `v_abc_classification`.
+# They are created in the order below and no other.
+_INVENTORY_VIEWS: tuple[tuple[str, str], ...] = (
+    # ── Layer 3: analytics ──────────────────────────────────────────────
+    # The root. Current SKU state with the calculated fields everything
+    # downstream reads; the only view that touches the stock table directly.
+    (
+        "v_sku_analysis",
+        """SELECT
+    s.*,
+    c.name as category_name,
+    s.quantity - s.reserve as available,
+    s.quantity * s.price as stock_value,
+    (s.quantity - s.reserve) * s.price as available_value,
+    CURRENT_DATE - s.last_sale_date as days_since_sale,
+    CURRENT_DATE - s.first_seen_at as days_in_stock
+FROM {sku_inventory_status} s
+LEFT JOIN {categories} c ON s.category_id = c.id""",
+    ),
+    # Category velocity, which is what makes the dead-stock threshold
+    # dynamic instead of one number for a catalogue selling both cosmetics
+    # and appliances.
+    (
+        "v_category_velocity",
+        """SELECT
+    category_id,
+    category_name,
+    COUNT(*) as sample_size,
+    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY days_since_sale) as p50,
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY days_since_sale) as p75,
+    PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY days_since_sale) as p90,
+    LEAST(GREATEST(
+        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY days_since_sale),
+        90
+    ), 365) as threshold_days
+FROM {views}v_sku_analysis
+WHERE last_sale_date IS NOT NULL AND quantity > 0
+GROUP BY category_id, category_name
+HAVING COUNT(*) >= 5""",
+    ),
+    # Dead stock and overstock classification. `days_of_supply` uses the
+    # 90-day velocity rather than the 30-day one: more stable, and a single
+    # promo week must not reclassify half the catalogue.
+    (
+        "v_sku_status",
+        """SELECT
+    s.*,
+    COALESCE(cv.threshold_days, 180) as threshold_days,
+    CASE WHEN COALESCE(vel.qty_sold_90d, 0) > 0
+         THEN ROUND((s.quantity - s.reserve) / (vel.qty_sold_90d / 90.0), 0)
+         ELSE NULL
+    END as days_of_supply,
+    CASE
+        WHEN s.last_sale_date IS NULL THEN 'never_sold'
+        WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) THEN 'dead_stock'
+        WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) * 0.7 THEN 'at_risk'
+        WHEN COALESCE(vel.qty_sold_90d, 0) > 0
+             AND ROUND((s.quantity - s.reserve) / (vel.qty_sold_90d / 90.0), 0) > 90
+            THEN 'overstocked'
+        ELSE 'healthy'
+    END as status
+FROM {views}v_sku_analysis s
+LEFT JOIN {views}v_category_velocity cv ON s.category_id = cv.category_id
+LEFT JOIN (
+    SELECT product_id, SUM(quantity) as qty_sold_90d
+    FROM {order_lines}
+    WHERE NOT is_return AND is_active_source
+      AND order_date >= CURRENT_DATE - INTERVAL '90 days'
+    GROUP BY product_id
+) vel ON s.product_id = vel.product_id
+WHERE s.quantity > 0""",
+    ),
+    # Summary by status.
+    (
+        "v_inventory_summary",
+        """SELECT
+    status,
+    COUNT(*) as sku_count,
+    SUM(available) as total_units,
+    SUM(available_value) as total_value,
+    ROUND(100.0 * SUM(available_value) /
+        NULLIF(SUM(SUM(available_value)) OVER (), 0), 1) as value_pct
+FROM {views}v_sku_status
+GROUP BY status""",
+    ),
+    # Aging buckets.
+    (
+        "v_aging_buckets",
+        """SELECT
+    CASE
+        WHEN days_since_sale IS NULL THEN '6. Never sold'
+        WHEN days_since_sale <= 30 THEN '1. 0-30 days'
+        WHEN days_since_sale <= 90 THEN '2. 31-90 days'
+        WHEN days_since_sale <= 180 THEN '3. 91-180 days'
+        WHEN days_since_sale <= 365 THEN '4. 181-365 days'
+        ELSE '5. 365+ days'
+    END as bucket,
+    COUNT(*) as sku_count,
+    SUM(available) as units,
+    SUM(available_value) as value
+FROM {views}v_sku_analysis
+WHERE quantity > 0
+GROUP BY bucket
+ORDER BY bucket""",
+    ),
+    # ── Layer 3b: turnover and ABC ──────────────────────────────────────
+    # Per-SKU sell-through: inventory joined to what actually sold. Read the
+    # sales side from the order-lines level, not from `gold_daily_products` —
+    # see the note at the top of this section for why, and for the
+    # measurement that says the numbers are the same.
+    (
+        "v_sku_sell_through",
+        """SELECT
+    s.offer_id,
+    s.product_id,
+    s.sku,
+    s.name,
+    s.brand,
+    s.category_id,
+    s.category_name,
+    s.available,
+    s.available_value,
+    s.price,
+    s.purchased_price,
+    s.days_since_sale,
+    s.days_in_stock,
+    COALESCE(g30.qty_sold_30d, 0) as qty_sold_30d,
+    COALESCE(g30.revenue_30d, 0) as revenue_30d,
+    COALESCE(g30.orders_30d, 0) as orders_30d,
+    COALESCE(g90.qty_sold_90d, 0) as qty_sold_90d,
+    COALESCE(g90.revenue_90d, 0) as revenue_90d,
+    CASE WHEN (COALESCE(g30.qty_sold_30d, 0) + s.available) > 0
+         THEN ROUND(100.0 * COALESCE(g30.qty_sold_30d, 0) /
+              (COALESCE(g30.qty_sold_30d, 0) + s.available), 1)
+         ELSE 0
+    END as sell_through_rate_30d,
+    CASE WHEN COALESCE(g90.qty_sold_90d, 0) > 0
+         THEN ROUND(s.available / (g90.qty_sold_90d / 90.0), 0)
+         ELSE NULL
+    END as days_of_supply,
+    CASE WHEN COALESCE(g90.qty_sold_90d, 0) > 0
+         THEN ROUND(g90.qty_sold_90d / 90.0, 2)
+         ELSE 0
+    END as avg_daily_sales
+FROM {views}v_sku_analysis s
+LEFT JOIN (
+    SELECT product_id,
+           SUM(quantity) as qty_sold_30d,
+           SUM(quantity * price_sold) as revenue_30d,
+           COUNT(DISTINCT order_id) as orders_30d
+    FROM {order_lines}
+    WHERE NOT is_return AND is_active_source
+      AND order_date >= CURRENT_DATE - INTERVAL '30 days'
+    GROUP BY product_id
+) g30 ON s.product_id = g30.product_id
+LEFT JOIN (
+    SELECT product_id,
+           SUM(quantity) as qty_sold_90d,
+           SUM(quantity * price_sold) as revenue_90d
+    FROM {order_lines}
+    WHERE NOT is_return AND is_active_source
+      AND order_date >= CURRENT_DATE - INTERVAL '90 days'
+    GROUP BY product_id
+) g90 ON s.product_id = g90.product_id
+WHERE s.quantity > 0""",
+    ),
+    # ABC classification by cumulative revenue (Pareto).
+    (
+        "v_abc_classification",
+        """WITH product_revenue AS (
+    SELECT
+        product_id,
+        SUM(quantity * price_sold) as total_revenue,
+        SUM(quantity) as total_qty_sold
+    FROM {order_lines}
+    WHERE NOT is_return AND is_active_source
+      AND order_date >= CURRENT_DATE - INTERVAL '90 days'
+    GROUP BY product_id
+),
+ranked AS (
+    SELECT
+        s.offer_id,
+        s.product_id,
+        s.sku,
+        s.name,
+        s.brand,
+        s.category_name,
+        s.available,
+        s.available_value,
+        s.price,
+        COALESCE(pr.total_revenue, 0) as revenue_90d,
+        COALESCE(pr.total_qty_sold, 0) as qty_sold_90d,
+        SUM(COALESCE(pr.total_revenue, 0)) OVER () as grand_total_revenue,
+        SUM(COALESCE(pr.total_revenue, 0)) OVER (
+            ORDER BY COALESCE(pr.total_revenue, 0) DESC
+            ROWS UNBOUNDED PRECEDING
+        ) as cumulative_revenue
+    FROM {views}v_sku_analysis s
+    LEFT JOIN product_revenue pr ON s.product_id = pr.product_id
+    WHERE s.quantity > 0
+)
+SELECT
+    *,
+    CASE WHEN grand_total_revenue > 0
+         THEN ROUND(100.0 * cumulative_revenue / grand_total_revenue, 1)
+         ELSE 0
+    END as cumulative_pct,
+    CASE
+        WHEN grand_total_revenue > 0
+             AND cumulative_revenue - COALESCE(revenue_90d, 0) < grand_total_revenue * 0.8
+            THEN 'A'
+        WHEN grand_total_revenue > 0
+             AND cumulative_revenue - COALESCE(revenue_90d, 0) < grand_total_revenue * 0.95
+            THEN 'B'
+        ELSE 'C'
+    END as abc_class
+FROM ranked""",
+    ),
+    # ABC summary, aggregated per class.
+    (
+        "v_abc_summary",
+        """SELECT
+    abc_class,
+    COUNT(*) as sku_count,
+    SUM(available) as total_units,
+    SUM(available_value) as stock_value,
+    SUM(revenue_90d) as revenue,
+    ROUND(100.0 * SUM(available_value) /
+        NULLIF(SUM(SUM(available_value)) OVER (), 0), 1) as stock_value_pct,
+    ROUND(100.0 * SUM(revenue_90d) /
+        NULLIF(SUM(SUM(revenue_90d)) OVER (), 0), 1) as revenue_pct
+FROM {views}v_abc_classification
+GROUP BY abc_class
+ORDER BY abc_class""",
+    ),
+    # ── Layer 4: actions ────────────────────────────────────────────────
+    # Actionable recommendations.
+    (
+        "v_recommended_actions",
+        """SELECT
+    offer_id,
+    sku,
+    name,
+    brand,
+    category_name,
+    available as units,
+    available_value as value,
+    days_since_sale,
+    days_in_stock,
+    status,
+    CASE
+        WHEN status = 'never_sold' AND days_in_stock > 180 THEN 'Return to supplier'
+        WHEN status = 'never_sold' AND days_in_stock > 90 THEN 'Deep discount (70%+)'
+        WHEN status = 'dead_stock' AND available_value > 10000 THEN 'Discount 50%'
+        WHEN status = 'dead_stock' THEN 'Bundle with bestsellers'
+        WHEN status = 'at_risk' THEN 'Promote / Feature'
+        ELSE NULL
+    END as action
+FROM {views}v_sku_status
+WHERE status != 'healthy'
+ORDER BY available_value DESC""",
+    ),
+    # Low stock alerts.
+    (
+        "v_restock_alerts",
+        """SELECT
+    offer_id,
+    sku,
+    name,
+    brand,
+    available as units_left,
+    days_since_sale,
+    CASE
+        WHEN available = 0 THEN 'OUT_OF_STOCK'
+        WHEN available <= 3 THEN 'CRITICAL'
+        WHEN available <= 10 THEN 'LOW'
+    END as alert_level
+FROM {views}v_sku_analysis
+WHERE available <= 10
+  AND (days_since_sale IS NULL OR days_since_sale <= 90)
+ORDER BY available ASC""",
+    ),
+    # ── Layer 5: dead stock v2 ──────────────────────────────────────────
+    # Cost-basis ranking, velocity tiers, ABC and GMROI inputs. The NPV
+    # decision itself stays in Python, so the carrying rate and the
+    # liquidation discount can be tuned without rebuilding the view.
+    (
+        "v_sku_dead_stock_v2",
+        """WITH cost_ratio AS (
+    -- Portfolio-wide cost-to-sale ratio for fallback when purchased_price is missing
+    SELECT
+        COALESCE(
+            SUM(quantity * NULLIF(purchased_price, 0)) /
+            NULLIF(SUM(quantity * NULLIF(price, 0)), 0),
+            0.5
+        ) as ratio
+    FROM {offer_stocks}
+    WHERE quantity > 0
+),
+sales_90 AS (
+    SELECT product_id,
+           SUM(quantity) as qty_sold_90d,
+           SUM(quantity * price_sold) as revenue_90d
+    FROM {order_lines}
+    WHERE NOT is_return AND is_active_source
+      AND order_date >= CURRENT_DATE - INTERVAL '90 days'
+    GROUP BY product_id
+),
+sales_30 AS (
+    SELECT product_id,
+           SUM(quantity) as qty_sold_30d,
+           SUM(quantity * price_sold) as revenue_30d
+    FROM {order_lines}
+    WHERE NOT is_return AND is_active_source
+      AND order_date >= CURRENT_DATE - INTERVAL '30 days'
+    GROUP BY product_id
+),
+base AS (
+    SELECT
+        s.offer_id,
+        s.product_id,
+        s.sku,
+        s.name,
+        s.brand,
+        s.category_id,
+        s.category_name,
+        s.available,
+        s.price,
+        s.purchased_price,
+        s.days_since_sale,
+        s.days_in_stock,
+        s.last_sale_date,
+        COALESCE(
+            NULLIF(s.purchased_price, 0),
+            s.price * (SELECT ratio FROM cost_ratio)
+        ) as effective_unit_cost,
+        CASE
+            WHEN s.purchased_price IS NULL OR s.purchased_price = 0
+                THEN 'fallback'
+            ELSE 'actual'
+        END as cost_quality,
+        COALESCE(s90.qty_sold_90d, 0) as qty_sold_90d,
+        COALESCE(s90.revenue_90d, 0) as revenue_90d,
+        COALESCE(s30.qty_sold_30d, 0) as qty_sold_30d,
+        COALESCE(s30.revenue_30d, 0) as revenue_30d,
+        COALESCE(a.abc_class, 'C') as abc_class
+    FROM {views}v_sku_analysis s
+    LEFT JOIN sales_90 s90 ON s.product_id = s90.product_id
+    LEFT JOIN sales_30 s30 ON s.product_id = s30.product_id
+    LEFT JOIN {views}v_abc_classification a ON s.offer_id = a.offer_id
+    WHERE s.quantity > 0
+)
+SELECT
+    b.*,
+    b.available * b.price as sale_value,
+    b.available * b.effective_unit_cost as cost_basis,
+    CASE WHEN b.qty_sold_90d > 0
+         THEN ROUND(b.available / (b.qty_sold_90d / 90.0), 0)
+         ELSE NULL
+    END as days_of_supply,
+    CASE WHEN b.qty_sold_90d > 0 THEN ROUND(b.qty_sold_90d / 90.0, 3) ELSE 0 END as avg_daily_sales_90d,
+    CASE WHEN b.qty_sold_30d > 0 THEN ROUND(b.qty_sold_30d / 30.0, 3) ELSE 0 END as avg_daily_sales_30d,
+    CASE
+        WHEN b.qty_sold_90d = 0 THEN 'frozen'
+        WHEN b.available / (b.qty_sold_90d / 90.0) > 365 THEN 'frozen'
+        WHEN b.available / (b.qty_sold_90d / 90.0) > 180 THEN 'cold'
+        WHEN b.available / (b.qty_sold_90d / 90.0) > 90 THEN 'warm'
+        WHEN b.available / (b.qty_sold_90d / 90.0) > 30 THEN 'healthy'
+        ELSE 'hot'
+    END as velocity_tier,
+    -- Velocity decay: 30d rate vs 90d rate. <0.7 = slowing, >1.3 = accelerating
+    CASE WHEN b.qty_sold_90d > 0 AND (b.qty_sold_90d / 90.0) > 0
+         THEN ROUND((b.qty_sold_30d / 30.0) / (b.qty_sold_90d / 90.0), 2)
+         ELSE NULL
+    END as velocity_ratio_30_90,
+    -- Annualized gross profit per SKU (revenue × 4 × margin)
+    CASE WHEN b.price > 0
+         THEN b.revenue_90d * 4.0 * ((b.price - b.effective_unit_cost) / b.price)
+         ELSE 0
+    END as annual_gross_profit,
+    -- GMROI annualized: gross profit / cost_basis (avg inventory proxy = current)
+    CASE WHEN (b.available * b.effective_unit_cost) > 0 AND b.price > 0
+         THEN b.revenue_90d * 4.0 * ((b.price - b.effective_unit_cost) / b.price)
+              / (b.available * b.effective_unit_cost)
+         ELSE NULL
+    END as gmroi
+FROM base b""",
+    ),
+)
+
+
+def inventory_view_selects(dialect: Dialect) -> tuple[tuple[str, str], ...]:
+    """The eleven inventory views for one engine, in creation order.
+
+    Returns (qualified view name, SELECT body). The caller decides between
+    `CREATE OR REPLACE VIEW` (DuckDB, which rebuilds them on every connect)
+    and `CREATE VIEW` (migration 0014, which freezes this rendering once).
+    """
+    return tuple(
+        (
+            f"{dialect.inventory_views}{name}",
+            select.format(
+                views=dialect.inventory_views,
+                sku_inventory_status=dialect.sku_inventory_status,
+                categories=dialect.categories,
+                offer_stocks=dialect.offer_stocks,
+                order_lines=dialect.order_lines,
+            ),
+        )
+        for name, select in _INVENTORY_VIEWS
+    )
