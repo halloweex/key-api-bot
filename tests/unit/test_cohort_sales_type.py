@@ -105,28 +105,32 @@ def test_all_still_means_no_filter(name):
 
 
 class TestTheOneSpellingThatCannotBeShared:
-    """`CURRENT_DATE` has no form all three engines accept, and this pins which
-    half of the codebase uses which.
+    """`today` is a hole for two reasons, and the second is the one that bit.
 
-    Measured, not assumed:
+    **Spelling.** No form of `CURRENT_DATE` is accepted by all three engines —
+    measured, not assumed:
 
-        bare `CURRENT_DATE`      DuckDB ✓   PostgreSQL ✓   ClickHouse ✗
-        `CURRENT_DATE()`         DuckDB ✓   PostgreSQL ✗   ClickHouse ✓
+        bare `CURRENT_DATE`      DuckDB OK   PostgreSQL OK   ClickHouse no
+        `CURRENT_DATE()`         DuckDB OK   PostgreSQL no   ClickHouse OK
 
     PostgreSQL treats it as a reserved keyword and rejects the parentheses;
-    ClickHouse has no bare keyword and rejects their absence. So the "one body,
-    two engines" trick has a boundary, and it runs exactly between these two
-    groups of queries: the SMS audience targets DuckDB and PostgreSQL, the
-    cohort queries target DuckDB and ClickHouse.
+    ClickHouse has no bare keyword and rejects their absence.
+
+    **Meaning.** Neither keyword names the same *day* on both engines. The
+    `keycrm-web` container runs `TZ=Europe/Kyiv`, so DuckDB's day is Kyiv's;
+    `ks-clickhouse` answers in UTC. Between 21:00 and midnight UTC the two are
+    on different dates — moving `days_since_last` in the at-risk query by a day
+    for three hours every night, and moving four month-truncated cohort windows
+    by a whole month in the last three hours of a month. That was live for a
+    day after `KS_READ_COHORTS=clickhouse` went on.
+
+    A differential test cannot find it: under the gate both engines sit in one
+    timezone and are wrong together. So the check is not "do they agree" but
+    "does each rendering name the timezone rather than inherit one".
 
     Everything else in the cohort queries *is* shared — `DATE_TRUNC`,
     `DATEDIFF`, `median`, `FILTER (WHERE …)`, CTEs, `COUNT(DISTINCT …)` and
-    `ROUND` were each run on both engines and agree. Only `strftime` needed
-    replacing, with `substring(CAST(x AS VARCHAR), 1, 7)`, which gives the same
-    string on both.
-
-    If the cohort tab is ever wanted on PostgreSQL too, this becomes a dialect
-    hole rather than a literal.
+    `ROUND` were each run on both engines and agree.
     """
 
     @pytest.mark.parametrize("fn_name", BODIES)
@@ -143,9 +147,8 @@ class TestTheOneSpellingThatCannotBeShared:
         clickhouse = render(dialects.CLICKHOUSE_ANALYTICS, **kw)
 
         assert duck != clickhouse, f"{fn_name}: the dialect does nothing"
-        assert "CURRENT_DATE()" not in duck
         undone = clickhouse.replace("silver.orders", "silver_orders").replace(
-            "CURRENT_DATE()", "CURRENT_DATE")
+            dialects.CLICKHOUSE_ANALYTICS.today, dialects.DUCKDB_ANALYTICS.today)
         assert undone == duck, (
             f"{fn_name} differs between engines somewhere other than the table "
             f"name and today's date"
@@ -163,27 +166,53 @@ class TestTheOneSpellingThatCannotBeShared:
         for banned in ("strftime", "QUALIFY", "list_slice", "GROUP BY ALL"):
             assert banned not in code, f"{fn_name} still speaks DuckDB only"
 
-    @pytest.mark.parametrize("name", FIVE)
-    def test_the_cohort_queries_use_the_form_clickhouse_accepts(self, name):
-        code = _statements(name)
-        if "CURRENT_DATE" not in code:
-            pytest.skip("its query has moved to core/sql_dialect.py")
-        assert "CURRENT_DATE()" in code
-        bare = code.replace("CURRENT_DATE()", "")
-        assert "CURRENT_DATE" not in bare, (
-            f"{name} still carries a bare CURRENT_DATE, which ClickHouse "
-            f"cannot parse"
-        )
+    @pytest.mark.parametrize("fn_name", BODIES)
+    def test_neither_rendering_inherits_a_timezone(self, fn_name):
+        """The bug this replaced a spelling check with. A keyword that takes
+        its day from whatever timezone the engine happens to be in is the
+        defect; naming the zone is the fix."""
+        import core.sql_dialect as dialects
+        from core.duckdb_constants import DISPLAY_TIMEZONE
+
+        kw = dict(sales_type_filter="", months_back=12)
+        for dialect in (dialects.DUCKDB_ANALYTICS, dialects.CLICKHOUSE_ANALYTICS):
+            sql = getattr(dialects, fn_name)(dialect, **kw)
+            code = "\n".join(line.split("--")[0] for line in sql.splitlines())
+            assert "CURRENT_DATE" not in code, (
+                f"{fn_name} on {dialect.name} still takes its day from the "
+                f"engine's timezone"
+            )
+            assert DISPLAY_TIMEZONE in code, (
+                f"{fn_name} on {dialect.name} does not name the timezone"
+            )
+
+    def test_each_engine_keeps_the_spelling_it_can_parse(self):
+        """PostgreSQL rejects `AT TIME ZONE`'s absence of nothing, ClickHouse
+        rejects `AT TIME ZONE` outright — measured on 24.8.14.39, production's
+        version. So the hole survives the timezone fix; only its reason grew."""
+        import core.sql_dialect as dialects
+
+        assert "AT TIME ZONE" in dialects.DUCKDB_ANALYTICS.today
+        assert "toTimeZone" in dialects.CLICKHOUSE_ANALYTICS.today
+        assert "AT TIME ZONE" not in dialects.CLICKHOUSE_ANALYTICS.today
 
     def test_the_sms_predicate_keeps_the_form_postgres_accepts(self):
-        """The audience filter runs on DuckDB and PostgreSQL, where the
-        parenthesised form is a syntax error."""
+        """The audience filter runs on DuckDB and PostgreSQL, and both accept
+        the `AT TIME ZONE` form — which they must, because the bare keyword
+        would slide the window by a day for three hours a night once
+        `KS_SMS_STORE=postgres`."""
         from core.repositories.customers import SmsAudienceFilters
 
         sql, _params = SmsAudienceFilters(
             brands=("Cosrx",), bought_within_days=30,
         ).predicate("revenue_ltv", "retail")
-        assert "CURRENT_DATE " in sql or "CURRENT_DATE\n" in sql
+        from core.sql_dialect import TODAY_IN_KYIV
+
+        assert TODAY_IN_KYIV in sql
+        assert "CURRENT_DATE" not in sql, (
+            "the audience window takes its day from the engine's timezone, "
+            "which differs between the two once KS_SMS_STORE=postgres"
+        )
         assert "CURRENT_DATE()" not in sql
 
 

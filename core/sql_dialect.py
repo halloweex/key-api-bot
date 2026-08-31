@@ -414,7 +414,7 @@ _SMS_SEGMENTS_BODY = """
                         / NULLIF(SUM(revenue), 0) AS cost_coverage,
                     MAX(order_date) AS last_order_date,
                     MIN(order_date) AS first_order_date,
-                    (CURRENT_DATE - MAX(order_date)) AS recency
+                    ({today} - MAX(order_date)) AS recency
                 FROM allocated
                 GROUP BY buyer_id
             ),
@@ -530,6 +530,7 @@ def sms_segments_select(
     why the placeholders stay `?` here and are renumbered per driver.
     """
     return _SMS_SEGMENTS_BODY.format(
+        today=TODAY_IN_KYIV,
         order_lines=dialect.order_lines,
         offer_stocks=dialect.offer_stocks,
         buyers=dialect.buyers,
@@ -554,15 +555,34 @@ def sms_segments_select(
 # Reusing the big dialect would mean inventing names for tables the engine
 # cannot be asked about.
 #
-# `today` is a hole rather than a literal because `CURRENT_DATE` has **no
-# spelling all three engines accept** — measured, not assumed:
+# `today` is a hole for **two** reasons, and the second was found the hard way.
+#
+# Syntax first: `CURRENT_DATE` has no spelling all three engines accept —
+# measured, not assumed.
 #
 #     bare CURRENT_DATE     DuckDB ok   PostgreSQL ok   ClickHouse rejects
 #     CURRENT_DATE()        DuckDB ok   PostgreSQL rejects   ClickHouse ok
 #
 # PostgreSQL treats it as a reserved keyword and refuses the parentheses;
-# ClickHouse has no bare keyword and refuses their absence. It is the one place
-# where one body genuinely cannot serve three engines, so it is data.
+# ClickHouse has no bare keyword and refuses their absence.
+#
+# **And meaning second: neither keyword names the same day on both engines.**
+# The `keycrm-web` container runs `TZ=Europe/Kyiv`, so DuckDB's day is Kyiv's;
+# `ks-clickhouse` answers in UTC. Measured 2026-08-31. Between 21:00 and
+# midnight UTC the two are on different dates, which moved `days_since_last` in
+# the at-risk query by a day for three hours every night, and — because the
+# cohort windows are month-truncated — moved four cohort windows by a whole
+# *month* during the last three hours of a month. `KS_READ_COHORTS=clickhouse`
+# had been live for a day when this was found.
+#
+# A differential test could not have caught it: under the gate both engines sit
+# in one timezone and are wrong together. It was found by asking the two
+# production containers what day it was, while porting `/inventory`.
+#
+# So both renderings now name the timezone rather than inheriting one, and the
+# hole stays only because the *spelling* still differs. Verified by execution
+# on ClickHouse 24.8.14.39 — production's version — that `toTimeZone` survives
+# `DATE_TRUNC`, `DATEDIFF` and `- INTERVAL n month` unchanged.
 @dataclass(frozen=True)
 class AnalyticsDialect:
     """Where the order facts live for one engine, and how it says "today"."""
@@ -573,12 +593,13 @@ class AnalyticsDialect:
 
 
 DUCKDB_ANALYTICS = AnalyticsDialect(
-    name="duckdb", silver_orders="silver_orders", today="CURRENT_DATE",
+    name="duckdb", silver_orders="silver_orders", today=TODAY_IN_KYIV,
 )
 
 CLICKHOUSE_ANALYTICS = AnalyticsDialect(
     # `core/ch_silver.py` ships Silver under the same name Postgres uses.
-    name="clickhouse", silver_orders="silver.orders", today="CURRENT_DATE()",
+    name="clickhouse", silver_orders="silver.orders",
+    today=f"toDate(toTimeZone(now(), '{DISPLAY_TIMEZONE}'))",
 )
 
 

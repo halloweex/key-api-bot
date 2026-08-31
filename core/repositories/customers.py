@@ -138,7 +138,9 @@ from core.sql_dialect import (
     enhanced_cohort_retention_select,
 )
 from core.pg_sms import refuse_while_unported, sms_store_is_postgres
-from core.sql_dialect import DUCKDB, POSTGRES, numbered, sms_segments_select
+from core.sql_dialect import (
+    DUCKDB, POSTGRES, TODAY_IN_KYIV, numbered, sms_segments_select,
+)
 
 # Tier cut-offs per LTV basis for get_sms_segments.
 #
@@ -345,8 +347,13 @@ class SmsAudienceFilters:
             if self.bought_within_days is not None:
                 # Interval cannot be parameterised in DuckDB; the value is an
                 # int by construction, never user text.
+                #
+                # `TODAY_IN_KYIV` rather than `CURRENT_DATE`: the two engines
+                # are in different timezones on the production host, so the
+                # bare keyword would slide this window by a day for three
+                # hours every night once `KS_SMS_STORE=postgres`.
                 window = (
-                    f" AND cl.order_date >= CURRENT_DATE "
+                    f" AND cl.order_date >= {TODAY_IN_KYIV} "
                     f"- INTERVAL '{int(self.bought_within_days)} days'"
                 )
             sales_clause = "" if sales_type == "all" else "AND cl.sales_type = ?"
