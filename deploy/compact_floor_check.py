@@ -137,10 +137,19 @@ def evaluate_floors(history, window: int = WINDOW):
     # A floor that rose means something is now permanently retained. Say that,
     # because "the database grew" is the conclusion the last incident reached
     # and it sent the reader to the wrong place.
+    #
+    # So did the sentence that replaced it. On 2026-08-30 this fired at +15
+    # points and sent the reader to the data directory, which held 1.5 GB of a
+    # 30 GB disk: the ~11 GB was Docker images and build cache from the manual
+    # deploys, an uncapped journald, and the new WAL archive under backups/ —
+    # three accumulations, none of them in data/ and none in the database.
+    # Name the filesystem, not a directory, or this line keeps aiming one level
+    # too deep every time the culprit moves.
     return severity, (
         "; ".join(problems)
         + ". A floor that rises means something is being retained that was not "
-          "before — look at what is in the data directory, not at the database."
+          "before — measure the whole filesystem (du -sx /var /opt; "
+          "docker system df), not just the data directory or the database."
     )
 
 

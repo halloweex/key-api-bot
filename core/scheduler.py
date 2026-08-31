@@ -1494,8 +1494,9 @@ class BackgroundScheduler:
         """
         from core.disk_monitor import (
             BOOTSTRAP_STEP_GB,
-            evaluate_dir_growth,
+            UNATTRIBUTED,
             evaluate_disk_capacity,
+            evaluate_growth,
             fetch_dir_sample_at_age,
             fetch_sample_at_age,
             insert_dir_samples,
@@ -1514,7 +1515,19 @@ class BackgroundScheduler:
             # The whole directory, not just the database file. The 27 GB that
             # arrived in August 2026 sat next to analytics.duckdb, so a check
             # that sampled only the file could not see it — and blamed the file.
-            dir_now = sample_data_dir(str(store.db_path.parent))
+            #
+            # And the whole disk, not just the directory: only ./data and
+            # ./logs are mounted here, so the ~11 GB of Docker images, journald
+            # and WAL archive that filled the host on 2026-08-30 was in none of
+            # the groups above. `disk_used_bytes` turns that into a remainder
+            # this job can at least name.
+            # `.get`, not `[...]`: a sample without the key predates it, and a
+            # watchdog that raises rather than measuring one thing less is a
+            # watchdog that is off.
+            dir_now = sample_data_dir(
+                str(store.db_path.parent),
+                disk_used_bytes=sample.get("disk_used_bytes"),
+            )
 
             async with store.connection() as conn:
                 history = fetch_sample_at_age(conn, hours=24, slack_hours=2)
@@ -1528,14 +1541,17 @@ class BackgroundScheduler:
                     insert_dir_samples(conn, dir_now)
                     prune_old_dir_samples(conn, retention_days=21)
 
-            growth = evaluate_dir_growth(current=dir_now, baseline=dir_week_ago)
+            growth = evaluate_growth(current=dir_now, baseline=dir_week_ago)
             if growth is None and dir_week_ago is None:
                 # Bootstrap: no week of history yet. A step change is still a
                 # step change, and a detector silent for its first seven days is
                 # missing exactly when a fresh deploy is most likely to regress.
-                growth = evaluate_dir_growth(
+                # One GB in six hours is a step wherever it lands, so the
+                # remainder gets the same bootstrap limits as the directory.
+                growth = evaluate_growth(
                     current=dir_now, baseline=dir_six_ago, window_hours=6,
                     warn_gb=BOOTSTRAP_STEP_GB, critical_gb=BOOTSTRAP_STEP_GB * 2,
+                    fs_warn_gb=BOOTSTRAP_STEP_GB, fs_critical_gb=BOOTSTRAP_STEP_GB * 2,
                 )
 
             # A heartbeat something outside this process can read. The
@@ -1587,7 +1603,14 @@ class BackgroundScheduler:
                 "disk_free_gb": sample["disk_free_gb"],
                 "db_24h_ago_mb": db_24h_ago,
                 "db_growth_mb_24h": growth_mb_24h,
-                "data_dir_mb": round(sum(dir_now.values()) / (1024 ** 2)) if dir_now else None,
+                # The directory, not the disk: `dir_now` now carries the
+                # remainder too, and summing it here would report the whole
+                # filesystem under a key named for one folder.
+                "data_dir_mb": round(
+                    sum(b for g, b in dir_now.items() if g != UNATTRIBUTED) / (1024 ** 2)
+                ) if dir_now else None,
+                "unattributed_mb": round(dir_now[UNATTRIBUTED] / (1024 ** 2))
+                if dir_now.get(UNATTRIBUTED) is not None else None,
                 "data_dir_growth_gb_168h": growth.total_delta_gb if growth else None,
                 "pruned_old_samples": deleted,
                 "alert_fired": False,
@@ -1627,8 +1650,8 @@ class BackgroundScheduler:
                     f"{icon} <b>Disk: {alert.disk_pct_used:.0f}% used, "
                     f"{alert.disk_free_gb:.0f} GB free</b>\n"
                     f"{alert.reason}\n"
-                    "→ du -xd1 data; docker system df. Never trigger the "
-                    "compact — it stops the containers"
+                    "→ du -xd1 data; du -sx /var /opt; docker system df. "
+                    "Never trigger the compact — it stops the containers"
                 )
                 delivered = await raise_alert(
                     msg, conditions=[disk_key], bucket=disk_key, group="disk",

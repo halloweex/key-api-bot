@@ -632,3 +632,122 @@ class TestDirSampling:
             assert kept == 1
         finally:
             await store.close()
+
+
+from core.disk_monitor import (  # noqa: E402
+    FS_CRITICAL_GROWTH_GB_168H,
+    FS_WARN_GROWTH_GB_168H,
+    UNATTRIBUTED,
+    evaluate_growth,
+    sample_disk_state,
+)
+
+
+class TestUnattributedRemainder:
+    """The disk the container cannot walk.
+
+    Only ./data and ./logs are mounted, so Docker images, journald and
+    backups/ are unreachable from here. On 2026-08-30 all three grew and every
+    group this module can name held still.
+    """
+
+    def test_remainder_is_the_shortfall_against_the_filesystem(self, tmp_path):
+        (tmp_path / "analytics.duckdb").write_bytes(b"x" * 1000)
+        totals = sample_data_dir(str(tmp_path), disk_used_bytes=5000)
+        assert totals["live_db"] == 1000
+        assert totals[UNATTRIBUTED] == 4000
+
+    def test_absent_when_not_asked_for(self, tmp_path):
+        """Still usable as a plain directory sizer."""
+        (tmp_path / "analytics.duckdb").write_bytes(b"x" * 1000)
+        assert UNATTRIBUTED not in sample_data_dir(str(tmp_path))
+
+    def test_parts_exceeding_the_whole_clamp_to_zero(self, tmp_path):
+        """`du` sums apparent sizes, statvfs counts allocated blocks. A sparse
+        file makes the parts bigger than the whole; that is an artefact of two
+        measuring conventions, and must not read as a negative group."""
+        (tmp_path / "analytics.duckdb").write_bytes(b"x" * 10_000)
+        assert sample_data_dir(str(tmp_path), disk_used_bytes=5000)[UNATTRIBUTED] == 0
+
+    def test_unreadable_directory_reports_nothing_at_all(self, tmp_path):
+        """Not even a remainder: with no groups to subtract, the whole
+        filesystem would be booked as `unattributed` and read as a step."""
+        assert sample_data_dir(str(tmp_path / "nope"), disk_used_bytes=5000) == {}
+
+    def test_sample_disk_state_carries_used_bytes(self, tmp_path):
+        db = tmp_path / "analytics.duckdb"
+        db.write_bytes(b"x" * 1000)
+        sample = sample_disk_state(str(db), mount_path=str(tmp_path))
+        assert sample["disk_used_bytes"] > 0
+
+
+class TestSplitGrowth:
+    """Two comparisons, not one sum — the remainder moves with deploy churn."""
+
+    def _flat_dir(self):
+        return dict(HEALTHY_DIR)
+
+    def test_the_2026_08_30_week_is_caught(self):
+        """~11 GB arrived outside data/ while every named group held still.
+        This is the case the watchdog was blind to; the weekly floor check was
+        the only thing that saw it."""
+        before = dict(self._flat_dir(), **{UNATTRIBUTED: int(19.5 * _GB)})
+        after = dict(self._flat_dir(), **{UNATTRIBUTED: int(30.75 * _GB)})
+        alert = evaluate_growth(current=after, baseline=before)
+        assert alert is not None
+        assert alert.severity.value == "CRITICAL"
+        assert alert.top_group == UNATTRIBUTED
+        assert "disk outside data/" in alert.reason
+        assert "data dir grew" not in alert.reason
+
+    def test_deploy_churn_below_the_filesystem_line_stays_quiet(self):
+        """An ordinary week of image pulls is larger than the data directory's
+        own WARN line. Folding the two into one sum would either cry wolf here
+        or blind the directory; separate thresholds do neither."""
+        drift = int(1.2 * _GB)
+        assert drift / _GB > WARN_GROWTH_GB_168H
+        assert drift / _GB < FS_WARN_GROWTH_GB_168H
+        before = dict(self._flat_dir(), **{UNATTRIBUTED: int(19.5 * _GB)})
+        after = dict(self._flat_dir(), **{UNATTRIBUTED: int(19.5 * _GB) + drift})
+        assert evaluate_growth(current=after, baseline=before) is None
+
+    def test_the_directory_keeps_its_own_tighter_line(self):
+        """Adding the remainder must not raise the limits the data directory
+        was calibrated against."""
+        bump = int((WARN_GROWTH_GB_168H + 0.1) * _GB)
+        before = dict(self._flat_dir(), **{UNATTRIBUTED: int(19.5 * _GB)})
+        after = dict(before, live_db=before["live_db"] + bump)
+        alert = evaluate_growth(current=after, baseline=before)
+        assert alert is not None
+        assert "data dir grew" in alert.reason
+        assert alert.severity.value == "WARN"
+
+    def test_both_halves_breaching_names_both(self):
+        """Which of the two is the cause is what the reader has to decide.
+        Dropping the quieter one is how the wrong component gets named."""
+        before = dict(self._flat_dir(), **{UNATTRIBUTED: int(19.5 * _GB)})
+        after = dict(
+            before,
+            live_db=before["live_db"] + int(3 * _GB),
+            **{UNATTRIBUTED: int(19.5 * _GB) + int(6 * _GB)},
+        )
+        alert = evaluate_growth(current=after, baseline=before)
+        assert alert is not None
+        assert "data dir grew" in alert.reason
+        assert "disk outside data/" in alert.reason
+        assert alert.severity.value == "CRITICAL"
+
+    def test_a_baseline_from_before_this_existed_reports_nothing_new(self):
+        """The first sample after the deploy that added the remainder has a
+        baseline without it. Reading its absence as zero would file the entire
+        disk as one week's growth."""
+        before = self._flat_dir()
+        after = dict(self._flat_dir(), **{UNATTRIBUTED: int(30 * _GB)})
+        assert evaluate_growth(current=after, baseline=before) is None
+
+    def test_the_filesystem_line_is_the_looser_of_the_two(self):
+        """Deploy churn lives out there; the data directory's own drift is
+        ≈0.22 GB/week. Equal limits would make one of the two useless."""
+        assert FS_WARN_GROWTH_GB_168H < FS_CRITICAL_GROWTH_GB_168H
+        assert FS_WARN_GROWTH_GB_168H > WARN_GROWTH_GB_168H
+        assert FS_CRITICAL_GROWTH_GB_168H > CRITICAL_GROWTH_GB_168H
