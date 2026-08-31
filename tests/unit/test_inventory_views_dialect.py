@@ -18,8 +18,11 @@ from pathlib import Path
 import pytest
 
 from core.sql_dialect import DUCKDB, POSTGRES, inventory_view_selects
+from tests.sql_helper import strip_comments_and_literals as _strip_comments_and_literals
 
-# The names the two dialects put in front of the same body.
+# The names the two dialects put in front of the same body. Table names remain
+# the only difference — `TODAY_IN_KYIV` is one text for both engines, which is
+# what keeps that claim true after the timezone fix.
 _SUBSTITUTIONS = (
     ("app.sku_inventory_status", "sku_inventory_status"),
     ("bronze.categories", "categories"),
@@ -35,35 +38,6 @@ def _undo_postgres_names(sql: str) -> str:
     return sql
 
 
-def _strip_comments_and_literals(sql: str) -> str:
-    """SQL with `--` comments and `'…'` literals blanked out.
-
-    Prose is not structure. A comment naming a table would make a scan for
-    that table's name report a dependency the query does not have, and the
-    reverse mistake — a scanner tripping over an apostrophe in a comment —
-    has already cost this repository two debugging rounds
-    (`core.pg_sms_read.numbered`).
-    """
-    out: list[str] = []
-    in_comment = in_literal = False
-    i = 0
-    while i < len(sql):
-        char = sql[i]
-        if in_comment:
-            if char == "\n":
-                in_comment = False
-                out.append(char)
-        elif in_literal:
-            if char == "'":
-                in_literal = False
-        elif sql[i:i + 2] == "--":
-            in_comment = True
-        elif char == "'":
-            in_literal = True
-        else:
-            out.append(char)
-        i += 1
-    return "".join(out)
 
 
 class TestOneBodyTwoEngines:
@@ -189,16 +163,32 @@ class TestTheConsumersAreCovered:
         assert view in {n for n, _ in inventory_view_selects(DUCKDB)}
 
 
-class TestMigration0014FrozeExactlyThisRendering:
+class TestTheNewestMigrationFrozeExactlyThisRendering:
     """Revision 0011's contract, applied to the eleven: the migration holds a
     copy of the rendered text, so the copy has to be proven equal to what the
     body renders today. Without this the two drift the first time somebody
-    edits the body and the database keeps yesterday's view."""
+    edits the body and the database keeps yesterday's view.
 
-    MIGRATION = Path("migrations/versions/0014_inventory_views.py")
+    Pinned to the *newest* migration that carries these views rather than to a
+    fixed filename: 0014 froze them, 0015 re-froze them when `today` became a
+    hole, and a test still reading 0014 would have passed against a copy the
+    database no longer has.
+    """
+
+    MIGRATION = Path("migrations/versions/0015_inventory_views_today.py")
+
+    def test_it_is_the_newest_migration_that_carries_them(self):
+        carriers = sorted(
+            path.name for path in Path("migrations/versions").glob("0*.py")
+            if "CREATE VIEW gold.v_" in path.read_text(encoding="utf-8")
+        )
+        assert carriers[-1] == self.MIGRATION.name, (
+            f"a newer migration touches these views: {carriers}"
+        )
 
     def _frozen(self) -> list[tuple[str, str]]:
         text = self.MIGRATION.read_text(encoding="utf-8")
+        text = text[:text.index("def downgrade()")]
         return [
             (m.group(1), " ".join(m.group(2).split()))
             for m in re.finditer(
@@ -219,16 +209,62 @@ class TestMigration0014FrozeExactlyThisRendering:
         for name, frozen in self._frozen():
             assert frozen == rendered[name], name
 
-    def test_downgrade_drops_them_in_reverse(self):
+    def test_it_drops_them_in_reverse_before_recreating(self):
         text = self.MIGRATION.read_text(encoding="utf-8")
-        downgrade = text[text.index("def downgrade()"):]
-        dropped = re.findall(r'DROP VIEW IF EXISTS (gold\.v_[a-z0-9_]+)', downgrade)
-        assert dropped == [n for n, _ in reversed(inventory_view_selects(POSTGRES))]
+        order = re.findall(r'^    "(gold\.v_[a-z0-9_]+)",$', text, re.M)
+        assert order == [n for n, _ in inventory_view_selects(POSTGRES)]
+        assert "for name in reversed(_VIEWS_IN_DEPENDENCY_ORDER)" in text
 
-    def test_it_follows_the_sms_state_revision(self):
+    def test_it_follows_the_revision_that_created_them(self):
         text = self.MIGRATION.read_text(encoding="utf-8")
-        assert 'revision = "0014_inventory_views"' in text
-        assert 'down_revision = "0013_sms_state"' in text
+        assert 'revision = "0015_inventory_views_today"' in text
+        assert 'down_revision = "0014_inventory_views"' in text
+
+    def test_today_is_not_a_dialect_difference(self):
+        """Both engines accept the same expression and mean the same day by
+        it, so the timezone fix cost no hole. If it ever becomes one, the undo
+        test above stops proving that table names are the only difference."""
+        from core.sql_dialect import TODAY_IN_KYIV
+
+        for _name, sql in inventory_view_selects(DUCKDB):
+            assert "CURRENT_DATE" not in _strip_comments_and_literals(sql)
+        duckdb_sql = "\n".join(s for _, s in inventory_view_selects(DUCKDB))
+        postgres_sql = "\n".join(s for _, s in inventory_view_selects(POSTGRES))
+        assert TODAY_IN_KYIV in duckdb_sql
+        assert duckdb_sql.count(TODAY_IN_KYIV) == postgres_sql.count(TODAY_IN_KYIV)
+
+    def test_the_downgrade_restores_what_0014_froze(self):
+        """A downgrade has to leave the schema matching the revision it lands
+        on, and 0014 claims eleven views exist. Its bodies are this body with
+        the bare keyword back, so the restoring copy is proven rather than
+        transcribed."""
+        text = self.MIGRATION.read_text(encoding="utf-8")
+        down = text[text.index("def downgrade()"):]
+        restored = {
+            m.group(1): " ".join(m.group(2).split())
+            for m in re.finditer(
+                r'CREATE VIEW (gold\.v_[a-z0-9_]+) AS\n(.*?)\n\s*"""', down, re.S
+            )
+        }
+        from core.sql_dialect import TODAY_IN_KYIV
+
+        as_0014 = {
+            name: " ".join(sql.replace(TODAY_IN_KYIV, "CURRENT_DATE").split())
+            for name, sql in inventory_view_selects(POSTGRES)
+        }
+        assert restored == as_0014
+
+        original = Path("migrations/versions/0014_inventory_views.py").read_text(
+            encoding="utf-8")
+        frozen_0014 = {
+            m.group(1): " ".join(m.group(2).split())
+            for m in re.finditer(
+                r'CREATE VIEW (gold\.v_[a-z0-9_]+) AS\n(.*?)\n\s*"""', original, re.S
+            )
+        }
+        assert restored == frozen_0014, (
+            "the downgrade does not restore what 0014 actually created"
+        )
 
     # `core.pg.REQUIRED_REVISION` pins the head migration, and the assertion
     # that it moved lives in `tests/unit/test_order_versions.py` — one home,

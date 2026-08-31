@@ -350,6 +350,53 @@ async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_postgres_answers_in_kyivs_day_whatever_its_session_says(
+    both_engines, monkeypatch,
+):
+    """The bug this test exists for could not be caught by comparing engines.
+
+    Under the gate both run in the same timezone, so both were right together.
+    In production the `web` container runs `TZ=Europe/Kyiv` and the Postgres
+    server answers in UTC, and between 21:00 and midnight UTC the two name
+    different days — moving every `days_since_sale`, every aging bucket and
+    every 30/90-day window by one, for three hours a night, on one engine.
+
+    So this asks Postgres the question from a session deliberately set to the
+    wrong day and requires the Kyiv answer anyway. `Pacific/Kiritimati` is
+    UTC+14 and `Pacific/Midway` is UTC-11: between them, one of the two is
+    always on a different calendar day from Kyiv.
+    """
+    from core import pg
+
+    pool = await pg.get_pool()
+    async with pool.acquire() as conn:
+        kyiv = await conn.fetchval(
+            "SELECT (now() AT TIME ZONE 'Europe/Kyiv')::date")
+        answers = {}
+        for zone in ("Pacific/Kiritimati", "Pacific/Midway", "UTC"):
+            await conn.execute(f"SET TIME ZONE '{zone}'")
+            answers[zone] = (
+                await conn.fetchval("SELECT CURRENT_DATE"),
+                await conn.fetchval(
+                    "SELECT days_since_sale FROM gold.v_sku_analysis"
+                    " WHERE offer_id = 1"),
+            )
+        await conn.execute("SET TIME ZONE 'UTC'")
+
+    # The premise: at least one session really is on another day, or this
+    # test proves nothing about timezones at all.
+    assert any(day != kyiv for day, _ in answers.values()), (
+        f"no session disagreed with Kyiv ({kyiv}) — the test cannot bite: "
+        f"{answers}"
+    )
+    # The claim: the view's answer does not move with the session.
+    computed = {value for _day, value in answers.values()}
+    assert len(computed) == 1, (
+        f"days_since_sale followed the session timezone: {answers}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_the_gold_rollup_filter_is_load_bearing(both_engines, monkeypatch):
     """The fixture's Gold carries per-source rows as well as roll-ups, so a
     Postgres reader that forgot `source_id IS NULL` would double the revenue.

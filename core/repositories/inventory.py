@@ -5,7 +5,7 @@ import logging
 from datetime import date
 from typing import Any, Dict, List, Sequence, Tuple
 
-from core.sql_dialect import DUCKDB, POSTGRES, Dialect
+from core.sql_dialect import DUCKDB, POSTGRES, TODAY_IN_KYIV, Dialect
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ def _render(sql: str, dialect: Dialect, **extra: Any) -> str:
     """
     return sql.format(
         views=dialect.inventory_views,
+        today=TODAY_IN_KYIV,
         offer_stocks=dialect.offer_stocks,
         inventory_history=dialect.inventory_history,
         gold_daily_revenue=dialect.gold_daily_revenue,
@@ -500,7 +501,7 @@ class InventoryMixin:
                     ROW_NUMBER() OVER (ORDER BY date ASC) as rn_asc,
                     ROW_NUMBER() OVER (ORDER BY date DESC) as rn_desc
                 FROM {inventory_history}
-                WHERE date >= CURRENT_DATE - INTERVAL '{days} days'
+                WHERE date >= {today} - INTERVAL '{days} days'
             )
             SELECT
                 -- Beginning inventory (oldest in period)
@@ -597,7 +598,7 @@ class InventoryMixin:
                     MAX(total_value) as max_value,
                     COUNT(*) as data_points
                 FROM {inventory_history}
-                WHERE date >= CURRENT_DATE - INTERVAL '{days} days'
+                WHERE date >= {today} - INTERVAL '{days} days'
                 GROUP BY DATE_TRUNC('month', date)
                 ORDER BY period
             """, days=int(days))
@@ -626,7 +627,7 @@ class InventoryMixin:
                 total_reserve,
                 sku_count
             FROM {inventory_history}
-            WHERE date >= CURRENT_DATE - INTERVAL '{days} days'
+            WHERE date >= {today} - INTERVAL '{days} days'
             ORDER BY date
         """, days=int(days))
 
@@ -752,7 +753,9 @@ class InventoryMixin:
                 days_of_supply, status
             FROM {views}v_sku_status
             WHERE status != 'healthy'
-            ORDER BY available_value DESC
+            -- Two SKUs of equal value straddled the cut on real data, and each
+            -- engine picked its own order. `offer_id` decides it.
+            ORDER BY available_value DESC, offer_id
             LIMIT ?
         """, [limit])
 
@@ -1033,7 +1036,10 @@ class InventoryMixin:
             FROM {views}v_sku_dead_stock_v2
             GROUP BY 1
             HAVING COUNT(*) >= ?
-            ORDER BY cost_basis DESC
+            -- No LIMIT here, but the result is a list the page renders in
+            -- order, so two brands with equal cost basis must not swap
+            -- between engines. Column 1 is the brand, the group key.
+            ORDER BY cost_basis DESC, 1
         """, [min_skus])
 
         result = []
@@ -1175,7 +1181,7 @@ class InventoryMixin:
                 ("""
                     SELECT COALESCE(SUM(revenue), 0), COUNT(DISTINCT date)
                     FROM {gold_daily_revenue}
-                    WHERE date >= CURRENT_DATE - INTERVAL '{days} days'
+                    WHERE date >= {today} - INTERVAL '{days} days'
                       AND {gold_revenue_rollup}
                 """, ()),
                 # Q2: Current stock totals

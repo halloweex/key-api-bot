@@ -163,6 +163,28 @@ POSTGRES = Dialect(
 
 
 
+
+# ─── The day the business is in ─────────────────────────────────────────────
+#
+# `CURRENT_DATE` is not the same day in both engines, and the difference is
+# invisible for twenty-one hours out of twenty-four. The production `web`
+# container runs `TZ=Europe/Kyiv`, so DuckDB's `CURRENT_DATE` is Kyiv's day;
+# the Postgres server answers in UTC. Measured on production, 2026-08-31:
+# DuckDB `Europe/Kyiv`, Postgres `UTC`. **Between 21:00 and midnight UTC they
+# name different days**, and every `days_since_sale`, every aging bucket and
+# every 30/90-day window moves by one on whichever engine is answering.
+#
+# A differential test cannot find this: under the gate both engines sit in the
+# same timezone, so both are wrong together. It was found by asking the two
+# production containers what day it was.
+#
+# It is **not** a dialect hole, because both engines accept this expression and
+# mean the same thing by it — checked on DuckDB 1.5.5 and PostgreSQL 17.2,
+# including from a session pinned to UTC+14, where `CURRENT_DATE` is already
+# tomorrow and this is not. So the body keeps one text, and the answer stops
+# depending on an environment variable in a container.
+TODAY_IN_KYIV = f"(now() AT TIME ZONE '{DISPLAY_TIMEZONE}')::date"
+
 # ─── How each driver spells a bound parameter ───────────────────────────────
 #
 # The shared bodies keep DuckDB's `?` and are renumbered on their way to
@@ -1063,8 +1085,8 @@ _INVENTORY_VIEWS: tuple[tuple[str, str], ...] = (
     s.quantity - s.reserve as available,
     s.quantity * s.price as stock_value,
     (s.quantity - s.reserve) * s.price as available_value,
-    CURRENT_DATE - s.last_sale_date as days_since_sale,
-    CURRENT_DATE - s.first_seen_at as days_in_stock
+    {today} - s.last_sale_date as days_since_sale,
+    {today} - s.first_seen_at as days_in_stock
 FROM {sku_inventory_status} s
 LEFT JOIN {categories} c ON s.category_id = c.id""",
     ),
@@ -1116,7 +1138,7 @@ LEFT JOIN (
     SELECT product_id, SUM(quantity) as qty_sold_90d
     FROM {order_lines}
     WHERE NOT is_return AND is_active_source
-      AND order_date >= CURRENT_DATE - INTERVAL '90 days'
+      AND order_date >= {today} - INTERVAL '90 days'
     GROUP BY product_id
 ) vel ON s.product_id = vel.product_id
 WHERE s.quantity > 0""",
@@ -1201,7 +1223,7 @@ LEFT JOIN (
            COUNT(DISTINCT order_id) as orders_30d
     FROM {order_lines}
     WHERE NOT is_return AND is_active_source
-      AND order_date >= CURRENT_DATE - INTERVAL '30 days'
+      AND order_date >= {today} - INTERVAL '30 days'
     GROUP BY product_id
 ) g30 ON s.product_id = g30.product_id
 LEFT JOIN (
@@ -1210,7 +1232,7 @@ LEFT JOIN (
            SUM(quantity * price_sold) as revenue_90d
     FROM {order_lines}
     WHERE NOT is_return AND is_active_source
-      AND order_date >= CURRENT_DATE - INTERVAL '90 days'
+      AND order_date >= {today} - INTERVAL '90 days'
     GROUP BY product_id
 ) g90 ON s.product_id = g90.product_id
 WHERE s.quantity > 0""",
@@ -1225,7 +1247,7 @@ WHERE s.quantity > 0""",
         SUM(quantity) as total_qty_sold
     FROM {order_lines}
     WHERE NOT is_return AND is_active_source
-      AND order_date >= CURRENT_DATE - INTERVAL '90 days'
+      AND order_date >= {today} - INTERVAL '90 days'
     GROUP BY product_id
 ),
 ranked AS (
@@ -1354,7 +1376,7 @@ sales_90 AS (
            SUM(quantity * price_sold) as revenue_90d
     FROM {order_lines}
     WHERE NOT is_return AND is_active_source
-      AND order_date >= CURRENT_DATE - INTERVAL '90 days'
+      AND order_date >= {today} - INTERVAL '90 days'
     GROUP BY product_id
 ),
 sales_30 AS (
@@ -1363,7 +1385,7 @@ sales_30 AS (
            SUM(quantity * price_sold) as revenue_30d
     FROM {order_lines}
     WHERE NOT is_return AND is_active_source
-      AND order_date >= CURRENT_DATE - INTERVAL '30 days'
+      AND order_date >= {today} - INTERVAL '30 days'
     GROUP BY product_id
 ),
 base AS (
@@ -1452,6 +1474,7 @@ def inventory_view_selects(dialect: Dialect) -> tuple[tuple[str, str], ...]:
             f"{dialect.inventory_views}{name}",
             select.format(
                 views=dialect.inventory_views,
+                today=TODAY_IN_KYIV,
                 sku_inventory_status=dialect.sku_inventory_status,
                 categories=dialect.categories,
                 offer_stocks=dialect.offer_stocks,

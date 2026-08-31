@@ -145,10 +145,10 @@ class TestTheTableIsWhereItsMeaningPutsIt:
         """`REQUIRED_REVISION` is what makes deploying `web` before `migrate`
         fail closed instead of writing into a table that is not there.
 
-        The pin moves with the head migration — 0014 since the `/inventory`
-        views — and this assertion is the speed bump that makes the move a
-        decision rather than a side effect."""
-        assert pg.REQUIRED_REVISION == "0014_inventory_views"
+        The pin moves with the head migration — 0015 since the `/inventory`
+        views learned whose day today is — and this assertion is the speed
+        bump that makes the move a decision rather than a side effect."""
+        assert pg.REQUIRED_REVISION == "0015_inventory_views_today"
 
     def test_money_keeps_the_scale_it_has_everywhere_else(self):
         """NUMERIC(12,2), as in `bronze.orders` and as DECIMAL(12,2) in DuckDB.
