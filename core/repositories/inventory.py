@@ -1203,7 +1203,7 @@ class InventoryMixin:
                            sell_through_rate_30d, avg_daily_sales, revenue_90d
                     FROM {views}v_sku_sell_through
                     WHERE days_of_supply > 90 OR (avg_daily_sales = 0 AND available > 0)
-                    ORDER BY available_value DESC
+                    ORDER BY available_value DESC, offer_id
                     LIMIT 20
                 """, ()),
             ),
@@ -1345,7 +1345,10 @@ class InventoryMixin:
                    revenue_90d, qty_sold_90d
             FROM {views}v_abc_classification
             WHERE abc_class = ?
-            ORDER BY revenue_90d DESC
+            -- Class C is mostly SKUs with no revenue at all, so without a
+            -- tiebreak this LIMIT cuts through a tie group and returns a
+            -- different five on every engine and every plan change.
+            ORDER BY revenue_90d DESC, offer_id
             LIMIT ?
         """, [abc_class, limit])
 

@@ -1020,6 +1020,27 @@ AT_RISK_TYPES: Tuple[str, ...] = (
 # can decide again lives, and none of these eleven holds a fact: drop them all
 # and one migration puts them back.
 #
+# ONE DIVISION, NOT TWO — AND THIS IS NOT TIDINESS
+#
+# `available / (qty_sold_90d / 90.0)` divides twice, and the engines part
+# company on the second one. Measured, on 40 units against 20 sold in 90 days,
+# which is exactly 180 days of supply:
+#
+#     DuckDB      20 / 90.0 -> DOUBLE 0.2222222222222222
+#                 40 / that -> 180.0                     -> not > 180 -> warm
+#     PostgreSQL  20 / 90.0 -> NUMERIC 0.22222222222222222222 (truncated)
+#                 40 / that -> 180.00000000000000000180    ->     > 180 -> cold
+#
+# A SKU sitting on a tier boundary was classified differently by the two
+# engines, and that flows into `velocity_tier`, the NPV decision, the quadrant
+# matrix and the brand scorecard's frozen share. `available * 90.0 / qty` is
+# the same number with one division, and both engines then agree.
+#
+# It also corrects DuckDB. On the production backup the rewrite moves exactly
+# two values, both `velocity_ratio_30_90`: 10 sold in 30 days against 16 in 90
+# is 1.875 exactly, and the double division returned 1.8749999999999998, which
+# rounded to 1.87 instead of 1.88.
+#
 # ORDER IS LOAD-BEARING. `v_sku_analysis` is the root; `v_sku_status` needs
 # `v_category_velocity`; `v_sku_dead_stock_v2` needs `v_abc_classification`.
 # They are created in the order below and no other.
@@ -1070,7 +1091,7 @@ HAVING COUNT(*) >= 5""",
     s.*,
     COALESCE(cv.threshold_days, 180) as threshold_days,
     CASE WHEN COALESCE(vel.qty_sold_90d, 0) > 0
-         THEN ROUND((s.quantity - s.reserve) / (vel.qty_sold_90d / 90.0), 0)
+         THEN ROUND((s.quantity - s.reserve) * 90.0 / vel.qty_sold_90d, 0)
          ELSE NULL
     END as days_of_supply,
     CASE
@@ -1078,7 +1099,7 @@ HAVING COUNT(*) >= 5""",
         WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) THEN 'dead_stock'
         WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) * 0.7 THEN 'at_risk'
         WHEN COALESCE(vel.qty_sold_90d, 0) > 0
-             AND ROUND((s.quantity - s.reserve) / (vel.qty_sold_90d / 90.0), 0) > 90
+             AND ROUND((s.quantity - s.reserve) * 90.0 / vel.qty_sold_90d, 0) > 90
             THEN 'overstocked'
         ELSE 'healthy'
     END as status
@@ -1158,7 +1179,7 @@ ORDER BY bucket""",
          ELSE 0
     END as sell_through_rate_30d,
     CASE WHEN COALESCE(g90.qty_sold_90d, 0) > 0
-         THEN ROUND(s.available / (g90.qty_sold_90d / 90.0), 0)
+         THEN ROUND(s.available * 90.0 / g90.qty_sold_90d, 0)
          ELSE NULL
     END as days_of_supply,
     CASE WHEN COALESCE(g90.qty_sold_90d, 0) > 0
@@ -1378,22 +1399,22 @@ SELECT
     b.available * b.price as sale_value,
     b.available * b.effective_unit_cost as cost_basis,
     CASE WHEN b.qty_sold_90d > 0
-         THEN ROUND(b.available / (b.qty_sold_90d / 90.0), 0)
+         THEN ROUND(b.available * 90.0 / b.qty_sold_90d, 0)
          ELSE NULL
     END as days_of_supply,
     CASE WHEN b.qty_sold_90d > 0 THEN ROUND(b.qty_sold_90d / 90.0, 3) ELSE 0 END as avg_daily_sales_90d,
     CASE WHEN b.qty_sold_30d > 0 THEN ROUND(b.qty_sold_30d / 30.0, 3) ELSE 0 END as avg_daily_sales_30d,
     CASE
         WHEN b.qty_sold_90d = 0 THEN 'frozen'
-        WHEN b.available / (b.qty_sold_90d / 90.0) > 365 THEN 'frozen'
-        WHEN b.available / (b.qty_sold_90d / 90.0) > 180 THEN 'cold'
-        WHEN b.available / (b.qty_sold_90d / 90.0) > 90 THEN 'warm'
-        WHEN b.available / (b.qty_sold_90d / 90.0) > 30 THEN 'healthy'
+        WHEN b.available * 90.0 / b.qty_sold_90d > 365 THEN 'frozen'
+        WHEN b.available * 90.0 / b.qty_sold_90d > 180 THEN 'cold'
+        WHEN b.available * 90.0 / b.qty_sold_90d > 90 THEN 'warm'
+        WHEN b.available * 90.0 / b.qty_sold_90d > 30 THEN 'healthy'
         ELSE 'hot'
     END as velocity_tier,
     -- Velocity decay: 30d rate vs 90d rate. <0.7 = slowing, >1.3 = accelerating
     CASE WHEN b.qty_sold_90d > 0 AND (b.qty_sold_90d / 90.0) > 0
-         THEN ROUND((b.qty_sold_30d / 30.0) / (b.qty_sold_90d / 90.0), 2)
+         THEN ROUND(b.qty_sold_30d * 3.0 / b.qty_sold_90d, 2)
          ELSE NULL
     END as velocity_ratio_30_90,
     -- Annualized gross profit per SKU (revenue × 4 × margin)

@@ -105,7 +105,7 @@ def upgrade() -> None:
             s.*,
             COALESCE(cv.threshold_days, 180) as threshold_days,
             CASE WHEN COALESCE(vel.qty_sold_90d, 0) > 0
-                 THEN ROUND((s.quantity - s.reserve) / (vel.qty_sold_90d / 90.0), 0)
+                 THEN ROUND((s.quantity - s.reserve) * 90.0 / vel.qty_sold_90d, 0)
                  ELSE NULL
             END as days_of_supply,
             CASE
@@ -113,7 +113,7 @@ def upgrade() -> None:
                 WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) THEN 'dead_stock'
                 WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) * 0.7 THEN 'at_risk'
                 WHEN COALESCE(vel.qty_sold_90d, 0) > 0
-                     AND ROUND((s.quantity - s.reserve) / (vel.qty_sold_90d / 90.0), 0) > 90
+                     AND ROUND((s.quantity - s.reserve) * 90.0 / vel.qty_sold_90d, 0) > 90
                     THEN 'overstocked'
                 ELSE 'healthy'
             END as status
@@ -195,7 +195,7 @@ def upgrade() -> None:
                  ELSE 0
             END as sell_through_rate_30d,
             CASE WHEN COALESCE(g90.qty_sold_90d, 0) > 0
-                 THEN ROUND(s.available / (g90.qty_sold_90d / 90.0), 0)
+                 THEN ROUND(s.available * 90.0 / g90.qty_sold_90d, 0)
                  ELSE NULL
             END as days_of_supply,
             CASE WHEN COALESCE(g90.qty_sold_90d, 0) > 0
@@ -421,22 +421,22 @@ def upgrade() -> None:
             b.available * b.price as sale_value,
             b.available * b.effective_unit_cost as cost_basis,
             CASE WHEN b.qty_sold_90d > 0
-                 THEN ROUND(b.available / (b.qty_sold_90d / 90.0), 0)
+                 THEN ROUND(b.available * 90.0 / b.qty_sold_90d, 0)
                  ELSE NULL
             END as days_of_supply,
             CASE WHEN b.qty_sold_90d > 0 THEN ROUND(b.qty_sold_90d / 90.0, 3) ELSE 0 END as avg_daily_sales_90d,
             CASE WHEN b.qty_sold_30d > 0 THEN ROUND(b.qty_sold_30d / 30.0, 3) ELSE 0 END as avg_daily_sales_30d,
             CASE
                 WHEN b.qty_sold_90d = 0 THEN 'frozen'
-                WHEN b.available / (b.qty_sold_90d / 90.0) > 365 THEN 'frozen'
-                WHEN b.available / (b.qty_sold_90d / 90.0) > 180 THEN 'cold'
-                WHEN b.available / (b.qty_sold_90d / 90.0) > 90 THEN 'warm'
-                WHEN b.available / (b.qty_sold_90d / 90.0) > 30 THEN 'healthy'
+                WHEN b.available * 90.0 / b.qty_sold_90d > 365 THEN 'frozen'
+                WHEN b.available * 90.0 / b.qty_sold_90d > 180 THEN 'cold'
+                WHEN b.available * 90.0 / b.qty_sold_90d > 90 THEN 'warm'
+                WHEN b.available * 90.0 / b.qty_sold_90d > 30 THEN 'healthy'
                 ELSE 'hot'
             END as velocity_tier,
             -- Velocity decay: 30d rate vs 90d rate. <0.7 = slowing, >1.3 = accelerating
             CASE WHEN b.qty_sold_90d > 0 AND (b.qty_sold_90d / 90.0) > 0
-                 THEN ROUND((b.qty_sold_30d / 30.0) / (b.qty_sold_90d / 90.0), 2)
+                 THEN ROUND(b.qty_sold_30d * 3.0 / b.qty_sold_90d, 2)
                  ELSE NULL
             END as velocity_ratio_30_90,
             -- Annualized gross profit per SKU (revenue × 4 × margin)
