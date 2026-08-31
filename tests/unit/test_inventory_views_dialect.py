@@ -187,3 +187,49 @@ class TestTheConsumersAreCovered:
     ])
     def test_the_eleven_are_all_present(self, view):
         assert view in {n for n, _ in inventory_view_selects(DUCKDB)}
+
+
+class TestMigration0014FrozeExactlyThisRendering:
+    """Revision 0011's contract, applied to the eleven: the migration holds a
+    copy of the rendered text, so the copy has to be proven equal to what the
+    body renders today. Without this the two drift the first time somebody
+    edits the body and the database keeps yesterday's view."""
+
+    MIGRATION = Path("migrations/versions/0014_inventory_views.py")
+
+    def _frozen(self) -> list[tuple[str, str]]:
+        text = self.MIGRATION.read_text(encoding="utf-8")
+        return [
+            (m.group(1), " ".join(m.group(2).split()))
+            for m in re.finditer(
+                r'CREATE VIEW (gold\.v_[a-z0-9_]+) AS\n(.*?)\n\s*"""', text, re.S
+            )
+        ]
+
+    def test_it_creates_all_eleven_in_the_bodys_order(self):
+        assert [n for n, _ in self._frozen()] == [
+            n for n, _ in inventory_view_selects(POSTGRES)
+        ]
+
+    def test_each_frozen_body_is_what_the_shared_text_renders(self):
+        rendered = {
+            name: " ".join(sql.split())
+            for name, sql in inventory_view_selects(POSTGRES)
+        }
+        for name, frozen in self._frozen():
+            assert frozen == rendered[name], name
+
+    def test_downgrade_drops_them_in_reverse(self):
+        text = self.MIGRATION.read_text(encoding="utf-8")
+        downgrade = text[text.index("def downgrade()"):]
+        dropped = re.findall(r'DROP VIEW IF EXISTS (gold\.v_[a-z0-9_]+)', downgrade)
+        assert dropped == [n for n, _ in reversed(inventory_view_selects(POSTGRES))]
+
+    def test_it_follows_the_sms_state_revision(self):
+        text = self.MIGRATION.read_text(encoding="utf-8")
+        assert 'revision = "0014_inventory_views"' in text
+        assert 'down_revision = "0013_sms_state"' in text
+
+    # `core.pg.REQUIRED_REVISION` pins the head migration, and the assertion
+    # that it moved lives in `tests/unit/test_order_versions.py` — one home,
+    # and it is deliberately a speed bump rather than a convenience.
