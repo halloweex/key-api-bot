@@ -381,8 +381,19 @@ class TestAgainstARealPostgres:
         try:
             # Stand-ins with the production column types, so the comparison
             # under test runs against the types it will meet.
+            #
+            # Real tables in `app`, not TEMP ones. `postgres/initdb` does
+            # `REVOKE ALL ON DATABASE ks FROM PUBLIC` and grants only CONNECT
+            # back, which takes TEMP with it — `has_database_privilege(
+            # 'ks_app','ks','TEMP')` is false on production. This test was
+            # written with temp tables and skipped for want of a database, so
+            # nobody found out that it could not have passed against a
+            # correctly provisioned one. `ks_app` owns `app`, so it may create
+            # here; the finally below drops them.
+            await conn.execute("DROP TABLE IF EXISTS app.t_order_versions")
+            await conn.execute("DROP TABLE IF EXISTS app.t_bronze_orders")
             await conn.execute("""
-                CREATE TEMP TABLE bronze_orders (
+                CREATE TABLE app.t_bronze_orders (
                     id INTEGER PRIMARY KEY, source_id INTEGER,
                     status_id INTEGER, status_group_id INTEGER,
                     grand_total NUMERIC(12,2), ordered_at TIMESTAMPTZ,
@@ -391,7 +402,7 @@ class TestAgainstARealPostgres:
                     updated_at TIMESTAMPTZ)
             """)
             await conn.execute("""
-                CREATE TEMP TABLE order_versions (
+                CREATE TABLE app.t_order_versions (
                     id BIGSERIAL PRIMARY KEY, order_id INTEGER NOT NULL,
                     captured_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     kind TEXT NOT NULL, source_id INTEGER,
@@ -402,8 +413,8 @@ class TestAgainstARealPostgres:
                     updated_at TIMESTAMPTZ)
             """)
             sql = (CAPTURE_SQL
-                   .replace(TABLE, "order_versions")
-                   .replace("bronze.orders", "bronze_orders"))
+                   .replace(TABLE, "app.t_order_versions")
+                   .replace("bronze.orders", "app.t_bronze_orders"))
 
             async def capture():
                 return len(await conn.fetch(sql, [1]))
@@ -411,35 +422,42 @@ class TestAgainstARealPostgres:
             # A Shopify order: manager_id NULL, which is the case a NULL-unsafe
             # comparison would rewrite on every tick.
             await conn.execute(
-                "INSERT INTO bronze_orders VALUES "
+                "INSERT INTO app.t_bronze_orders VALUES "
                 "(1, 4, 12, NULL, 100.00, now(), 5, NULL, 'utm=x', NULL, now())"
             )
             assert await capture() == 1, "a first sighting must be recorded"
             assert await capture() == 0, "an unchanged order must write nothing"
             assert await capture() == 0, "and must keep writing nothing"
 
-            await conn.execute("UPDATE bronze_orders SET status_id = 20 WHERE id = 1")
+            await conn.execute("UPDATE app.t_bronze_orders SET status_id = 20 WHERE id = 1")
             assert await capture() == 1, "a status change is the point of the table"
             assert await capture() == 0
 
-            await conn.execute("UPDATE bronze_orders SET updated_at = now() WHERE id = 1")
+            await conn.execute("UPDATE app.t_bronze_orders SET updated_at = now() WHERE id = 1")
             assert await capture() == 0, (
                 "a moved updated_at with an identical header is an observation, "
                 "not a change"
             )
 
             await conn.execute(
-                "UPDATE bronze_orders SET manager_comment = NULL WHERE id = 1")
+                "UPDATE app.t_bronze_orders SET manager_comment = NULL WHERE id = 1")
             assert await capture() == 1, "losing the comment IS a change once stored"
 
-            await conn.execute("UPDATE bronze_orders SET grand_total = 100.00 WHERE id = 1")
+            await conn.execute("UPDATE app.t_bronze_orders SET grand_total = 100.00 WHERE id = 1")
             assert await capture() == 0, "same money, different literal, no row"
 
             kinds = [r[0] for r in await conn.fetch(
-                "SELECT kind FROM order_versions ORDER BY id")]
+                "SELECT kind FROM app.t_order_versions ORDER BY id")]
             assert kinds == ["create", "change", "change"]
 
-            total = await conn.fetchval("SELECT count(*) FROM order_versions")
+            total = await conn.fetchval("SELECT count(*) FROM app.t_order_versions")
             assert total == 3
         finally:
+            # Real tables outlive the connection, unlike the TEMP ones this
+            # used to make, so they are dropped rather than forgotten.
+            for table in ("app.t_order_versions", "app.t_bronze_orders"):
+                try:
+                    await conn.execute(f"DROP TABLE IF EXISTS {table}")
+                except Exception:  # noqa: BLE001 — teardown must not mask a failure
+                    pass
             await conn.close()
