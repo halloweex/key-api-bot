@@ -20,7 +20,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.pg_sms_read import numbered, render
+from core.pg_sms_read import render
+from core.sql_dialect import numbered
 from core.repositories.customers import SmsAudienceFilters
 from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
 

@@ -74,6 +74,16 @@ class Dialect:
     # mirrored — it is derived from state only DuckDB holds — which is why it
     # sits in `app` rather than `bronze` (revision 0008).
     sku_inventory_status: str
+    # `/inventory`'s turnover KPIs read the revenue Gold directly, and this is
+    # the one place the two Golds are not the same shape. DuckDB grains on
+    # (date, sales_type) and splits channels into columns; Postgres grains on
+    # (date, sales_type, source_id) with `source_id IS NULL` as the roll-up.
+    # So a bare `SUM(revenue)` reads correctly in DuckDB and **doubles** in
+    # Postgres — measured on production over 30 days: 11,107,040.50 against a
+    # true 5,553,520.25. The predicate is a hole rather than a name because
+    # that is exactly what differs.
+    gold_daily_revenue: str
+    gold_revenue_rollup: str
     # A namespace, not a name: the eleven inventory views reference each other,
     # so one prefix does the work of eleven holes. Empty in DuckDB, which has
     # no schemas to speak of; `gold.` in Postgres.
@@ -105,6 +115,9 @@ DUCKDB = Dialect(
     sms_audience_presets="sms_audience_presets",
     sms_dlr_events="sms_dlr_events",
     sku_inventory_status="sku_inventory_status",
+    gold_daily_revenue="gold_daily_revenue",
+    # Every row is a roll-up here: this Gold has no source dimension.
+    gold_revenue_rollup="TRUE",
     inventory_views="",
     # Byte-for-byte what `core.duckdb_constants._date_in_kyiv` has always
     # emitted. Changing it here changes stored Silver on the next rebuild.
@@ -132,6 +145,8 @@ POSTGRES = Dialect(
     sms_audience_presets="app.sms_audience_presets",
     sms_dlr_events="app.sms_dlr_events",
     sku_inventory_status="app.sku_inventory_status",
+    gold_daily_revenue="gold.daily_revenue",
+    gold_revenue_rollup="source_id IS NULL",
     inventory_views="gold.",
     # `DATE(x)` also exists in PostgreSQL, but the cast is what the rest of
     # this repository's Postgres SQL uses, so it reads the same as its
@@ -139,6 +154,64 @@ POSTGRES = Dialect(
     date_template="(timezone('{zone}', {column}))::date",
 )
 
+
+
+# ─── How each driver spells a bound parameter ───────────────────────────────
+#
+# The shared bodies keep DuckDB's `?` and are renumbered on their way to
+# asyncpg. That is a property of the drivers, not of any one query, so it
+# lives beside the dialects rather than inside the first module that needed
+# it — `/sms` wrote it, `/inventory` is the second caller, and an import of
+# the SMS module from the inventory one would be a dependency that means
+# nothing.
+
+def numbered(sql: str) -> str:
+    """`?` placeholders rewritten as `$1 … $n` for asyncpg.
+
+    Both drivers bind positionally, so the order the caller assembled the
+    parameters in is the order they bind in — there is no mapping to keep in
+    step, which is the whole reason the shared body keeps `?` rather than
+    growing a per-driver placeholder hole.
+
+    **Comments and string literals are skipped, and that is not tidiness.** A
+    plain scan reads a `?` inside a `--` comment as a placeholder, consumes a
+    number for it, and shifts every real parameter after it by one — silently,
+    into a query that still runs. It cost a debugging round here: a comment
+    added to explain a cast contained the words `? + INTERVAL`, and the query
+    then bound the attribution window to the wrong argument. Nothing about the
+    failure pointed at the comment.
+
+    The same hazard in the other direction is why literals are skipped too,
+    though the bodies here bind every value rather than interpolating any.
+    """
+    out: List[str] = []
+    n = 0
+    in_line_comment = False
+    in_literal = False
+    i = 0
+    while i < len(sql):
+        char = sql[i]
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+            out.append(char)
+        elif in_literal:
+            if char == "'":
+                in_literal = False
+            out.append(char)
+        elif char == "-" and sql[i:i + 2] == "--":
+            in_line_comment = True
+            out.append(char)
+        elif char == "'":
+            in_literal = True
+            out.append(char)
+        elif char == "?":
+            n += 1
+            out.append(f"${n}")
+        else:
+            out.append(char)
+        i += 1
+    return "".join(out)
 
 # ─── The order-lines level, one body for two engines ────────────────────────
 #

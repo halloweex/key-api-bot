@@ -138,7 +138,7 @@ from core.sql_dialect import (
     enhanced_cohort_retention_select,
 )
 from core.pg_sms import refuse_while_unported, sms_store_is_postgres
-from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
+from core.sql_dialect import DUCKDB, POSTGRES, numbered, sms_segments_select
 
 # Tier cut-offs per LTV basis for get_sms_segments.
 #
@@ -449,9 +449,7 @@ class _PgTx(_SmsTx):
         self._conn = conn
 
     def _sql(self, sql: str) -> str:
-        from core import pg_sms_read
-
-        return pg_sms_read.numbered(self._render(sql))
+        return numbered(self._render(sql))
 
     async def all(self, sql, params=None):
         rows = await self._conn.fetch(self._sql(sql), *(params or []))
@@ -1365,7 +1363,7 @@ class CustomersMixin:
         if sms_store_is_postgres():
             from core import pg_sms_read
 
-            rendered = pg_sms_read.numbered(rendered)
+            rendered = numbered(rendered)
             if mode == "all":
                 rows = await pg_sms_read.fetch(rendered, params)
                 return [_local_times(r) for r in rows]
