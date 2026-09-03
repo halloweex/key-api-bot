@@ -148,6 +148,25 @@ class MirroredTable:
         "so there is no arithmetic between them that could differ — a "
         "disagreement here is a defect in the write path, not drift."
     )
+    # Columns both stores hold, both stores ship, and no comparison can learn
+    # anything from. `app.sku_inventory_status.updated_at` is the case that
+    # forced this: the DuckDB refresh is a `DELETE`+`INSERT` that writes
+    # `CURRENT_TIMESTAMP` to every row (core/repositories/inventory.py:251),
+    # so the stamp records when the table was last rebuilt, not anything about
+    # the SKU. The replica is copied ~10 minutes before the next rebuild, so
+    # the two copies hold different stamps on every row, always — 891 of 891
+    # rows on 2026-09-01, screaming CRITICAL for days while the three rows
+    # that really did differ (`reserve`) sat invisible inside the number.
+    #
+    # `fetch_duckdb_rows` already promises the stamp is "read alongside but
+    # never compared". That promise silently fails when `synced_column` is
+    # also listed in `columns`, which is exactly this table's shape. This is
+    # the promise made explicit and per-column, rather than widened into a
+    # rule: `app.order_backfill_misses.checked_at` is deliberately both the
+    # clock and a compared value, and it is right to be, because it moves only
+    # when that row is genuinely re-recorded.
+    ignore_columns: Tuple[str, ...] = ()
+
     # True when the writer replaces the whole table rather than upserting.
     #
     # This decides what a row present in DuckDB and absent from Postgres
@@ -255,12 +274,22 @@ def _as_decimal(value: Any) -> Optional[Decimal]:
         return None
 
 
+# Substituted for a column both stores hold and neither can agree on — see
+# `MirroredTable.ignore_columns`. A sentinel rather than dropping the column,
+# because `_row_key` and `sample_index` address values by position and a
+# shorter tuple would silently move the key.
+_IGNORED = "<ignored>"
+
+
 def _normalise_row(
     row: Sequence[Any], columns: Sequence[str], numeric: Sequence[str],
+    ignored: Sequence[str] = (),
 ) -> Tuple[Any, ...]:
     numeric_set = set(numeric)
+    ignored_set = set(ignored)
     return tuple(
-        _as_decimal(v) if c in numeric_set else v
+        _IGNORED if c in ignored_set
+        else _as_decimal(v) if c in numeric_set else v
         for c, v in zip(columns, row)
     )
 
@@ -308,7 +337,9 @@ def fetch_duckdb_rows(
         if any(row[spec.columns.index(c)] is None for c in spec.key_columns):
             continue
         key = _row_key(spec, row)
-        values[key] = _normalise_row(row[:width], spec.columns, spec.numeric)
+        values[key] = _normalise_row(
+            row[:width], spec.columns, spec.numeric, spec.ignore_columns,
+        )
         synced[key] = row[width] if stamp else None
     return values, synced
 
@@ -324,7 +355,7 @@ async def fetch_pg_rows(pool, spec: MirroredTable) -> Dict[Any, Tuple[Any, ...]]
         if any(record[c] is None for c in spec.key_columns):
             continue
         out[_row_key(spec, row)] = _normalise_row(
-            row, spec.columns, spec.numeric,
+            row, spec.columns, spec.numeric, spec.ignore_columns,
         )
     return out
 
@@ -1763,6 +1794,10 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         columns=SKU_STATUS_COLUMNS,
         key_columns=("offer_id",),
         synced_column="updated_at",
+        # Still shipped, still the grace clock, never compared: it is stamped
+        # on all 891 rows by every rebuild, so comparing it asks the two copies
+        # to have been taken at the same instant, which they never are.
+        ignore_columns=("updated_at",),
         numeric=("price", "purchased_price"),
         full_replace=True,
     ),

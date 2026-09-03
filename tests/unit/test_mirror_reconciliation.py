@@ -349,3 +349,78 @@ class TestWiring:
         )
         assert spec.key_columns == ("manager_id", "valid_from")
         assert spec.synced_column == "set_at"
+
+
+class TestIgnoredBookkeepingColumns:
+    """A column that records when the copy was taken, not what it holds.
+
+    `app.sku_inventory_status.updated_at` is stamped on every row by every
+    DuckDB rebuild, and the replica is copied minutes before the next one — so
+    the two stores disagree on it for 891 of 891 rows, permanently. It fired
+    CRITICAL for days from 2026-09-01 while hiding the three rows that really
+    did differ.
+    """
+
+    def _spec(self, **kw):
+        from core.mirror_reconciliation import MirroredTable
+        base = dict(
+            pg_table="app.sku_inventory_status",
+            dk_table="sku_inventory_status",
+            columns=("offer_id", "quantity", "reserve", "updated_at"),
+            key_columns=("offer_id",),
+            synced_column="updated_at",
+            full_replace=True,
+        )
+        base.update(kw)
+        return MirroredTable(**base)
+
+    def test_the_stamp_alone_no_longer_makes_rows_differ(self):
+        from core.mirror_reconciliation import _normalise_row
+        spec = self._spec(ignore_columns=("updated_at",))
+        dk = _normalise_row((7, 5, 2, "2026-09-03T04:14"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        pg = _normalise_row((7, 5, 2, "2026-09-03T03:13"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        assert dk == pg
+
+    def test_a_real_difference_beside_the_stamp_still_shows(self):
+        """The three `reserve` rows are the signal the 891 was burying."""
+        from core.mirror_reconciliation import _normalise_row
+        spec = self._spec(ignore_columns=("updated_at",))
+        dk = _normalise_row((7, 5, 9, "2026-09-03T04:14"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        pg = _normalise_row((7, 5, 2, "2026-09-03T03:13"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        assert dk != pg
+
+    def test_without_the_setting_the_stamp_still_differs(self):
+        """Guards the default: this is opt-in per table, not a blanket rule."""
+        from core.mirror_reconciliation import _normalise_row
+        spec = self._spec()
+        dk = _normalise_row((7, 5, 2, "2026-09-03T04:14"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        pg = _normalise_row((7, 5, 2, "2026-09-03T03:13"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        assert dk != pg
+
+    def test_masking_does_not_move_the_key(self):
+        """`_row_key` and `sample_index` address by position, so the ignored
+        column is substituted rather than dropped."""
+        from core.mirror_reconciliation import _normalise_row, _row_key
+        spec = self._spec(ignore_columns=("updated_at",))
+        row = (7, 5, 2, "whenever")
+        assert len(_normalise_row(row, spec.columns, spec.numeric,
+                                  spec.ignore_columns)) == len(spec.columns)
+        assert _row_key(spec, row) == 7
+        assert spec.sample_index == 0
+
+    def test_the_live_spec_ignores_the_stamp_and_nothing_else(self):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+        by_table = {s.pg_table: s for s in OPERATIONAL_TABLES}
+        sku = by_table["app.sku_inventory_status"]
+        assert sku.ignore_columns == ("updated_at",)
+        assert "updated_at" in sku.columns, "still shipped and still the clock"
+        assert sku.synced_column == "updated_at"
+        # checked_at is deliberately both clock and compared value.
+        assert by_table["app.order_backfill_misses"].ignore_columns == ()
+        assert by_table["app.inventory_history"].ignore_columns == ()
