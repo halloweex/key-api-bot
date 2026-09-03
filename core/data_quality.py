@@ -29,7 +29,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -1761,6 +1761,96 @@ WATCHED_LAYERS: Tuple[str, ...] = (
     # that stops running must not hide behind a fresh sibling.
     "reconciliation_ch",
 )
+
+
+# ─── Evidence for the diagnostician ─────────────────────────────────────────
+#
+# The alert body carries a count. The finding carries the answer — its
+# `description` names the offending columns, and on 2026-09-01 that one line
+# ("Columns: updated_at (891), reserve (3), last_sale_date (3)") was the whole
+# diagnosis, sitting in `data_quality_issues` where nothing could reach it.
+#
+# The agent's runbook told it so: the DQ runs live in DuckDB, DuckDB is held
+# by the web container, and the agent's allowlist is read-only shell —
+# `psql -U ks_readonly`, `docker logs`, `curl` — with nothing that executes
+# code. It was sent to /api/health instead, which publishes ages and no
+# findings, and it twice produced a plausible, wrong story and advised
+# waiting.
+#
+# The answer is not to widen what the agent may run. It is to put the evidence
+# where its existing SELECT already reaches: `app.alert_events.context`, a
+# column revision 0012 created for exactly this and nothing has ever written.
+
+# Bounds, because this row is read by a person at 03:00 and by an agent on a
+# 300-second budget. Neither is served by an unbounded blob, and a run with
+# three thousand findings must not turn one INSERT into a megabyte.
+EVIDENCE_MAX_FINDINGS = 12
+EVIDENCE_MAX_DETAIL_CHARS = 400
+EVIDENCE_MAX_BYTES = 8192
+
+
+def evidence_for_agent(
+    layer: str,
+    issues: Sequence[IntegrityIssue],
+    discrepancies: Sequence[Discrepancy] = (),
+    *,
+    run_id: Optional[int] = None,
+) -> dict:
+    """What the alert could not say, in the shape a SELECT can read.
+
+    Ordered worst-first — CRITICAL before WARN, then by count — so that when
+    the bounds bite it is the trailing noise that goes, never the finding the
+    reader was sent here for.
+
+    Pure: builds a dict and touches nothing. The caller decides whether it
+    reaches the ledger, and a failure there must never cost an alert.
+    """
+    rank = {Severity.CRITICAL: 0, Severity.WARN: 1, Severity.INFO: 2}
+    ordered = sorted(
+        issues,
+        key=lambda i: (rank.get(i.severity, 3), -i.count, i.check_name),
+    )
+
+    findings = [
+        {
+            "check": i.check_name,
+            "table": i.table_name,
+            "severity": i.severity.value,
+            "count": i.count,
+            # Already capped at ten by the emitters; listed because "which
+            # rows" is the second question after "which columns".
+            "samples": list(i.sample_ids),
+            "detail": (i.description or "")[:EVIDENCE_MAX_DETAIL_CHARS],
+        }
+        for i in ordered[:EVIDENCE_MAX_FINDINGS]
+    ]
+
+    payload: dict = {"layer": layer, "findings": findings}
+    if run_id is not None:
+        # Lets the reader join back to data_quality_runs once somebody can
+        # open DuckDB — the ledger row is a pointer, not a replacement.
+        payload["run_id"] = run_id
+    if len(issues) > len(findings):
+        payload["findings_total"] = len(issues)
+
+    if discrepancies:
+        by_class: dict = {}
+        for d in discrepancies:
+            name = d.diff_class.value
+            by_class[name] = by_class.get(name, 0) + 1
+        payload["discrepancies"] = {"total": len(discrepancies), "by_class": by_class}
+
+    # Belt and braces: drop findings from the tail until it fits. Worst-first
+    # ordering is what makes this safe to do bluntly.
+    import json as _json
+
+    while findings and len(
+        _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    ) > EVIDENCE_MAX_BYTES:
+        findings.pop()
+        payload["findings_total"] = len(issues)
+
+    return payload
 
 
 def alert_fingerprint(

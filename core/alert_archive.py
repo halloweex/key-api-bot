@@ -27,6 +27,7 @@ invert its purpose.
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 import os
 from datetime import datetime
@@ -54,6 +55,7 @@ async def _write_fired(
     message: str,
     delivered: int,
     swallowed: int,
+    evidence: "Optional[dict]" = None,
 ) -> None:
     global _standing_down
     from core.alerting import Kind, spec_for
@@ -88,16 +90,24 @@ async def _write_fired(
                     """,
                     key, kind.value, state, swallowed if i == 0 else 0, instance,
                 )
+            # Serialised here rather than handed over as a dict: the pool
+            # registers no JSONB codec, so the cast is what makes this a
+            # document instead of a quoted string.
+            blob = _json.dumps(evidence, ensure_ascii=False) if evidence else None
             await conn.executemany(
                 """
                 INSERT INTO app.alert_events
-                    (condition_key, event_type, instance, delivered_to, message)
-                VALUES ($1, 'fired', $2, $3, $4)
+                    (condition_key, event_type, instance, delivered_to,
+                     message, context)
+                VALUES ($1, 'fired', $2, $3, $4, $5::jsonb)
                 """,
                 [
                     # The body rides the first condition's row; siblings share
                     # the moment by (at, instance) without duplicating ~4 KB.
-                    (key, instance, delivered, message if i == 0 else None)
+                    # The evidence rides with it for the same reason.
+                    (key, instance, delivered,
+                     message if i == 0 else None,
+                     blob if i == 0 else None)
                     for i, key in enumerate(conditions)
                 ],
             )
@@ -325,6 +335,7 @@ def record_fired(
     message: str,
     delivered: int,
     swallowed: int = 0,
+    evidence: "Optional[dict]" = None,
 ) -> "Optional[asyncio.Task]":
     """Archive a delivered alert. Returns the background task, or None.
 
@@ -339,7 +350,7 @@ def record_fired(
         global _standing_down
         try:
             await asyncio.wait_for(
-                _write_fired(keys, message, delivered, swallowed),
+                _write_fired(keys, message, delivered, swallowed, evidence),
                 timeout=WRITE_TIMEOUT_S,
             )
         except asyncio.CancelledError:

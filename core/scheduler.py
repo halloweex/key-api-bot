@@ -1203,6 +1203,7 @@ class BackgroundScheduler:
     async def _send_dq_alert_throttled(
         self, layer: str, message: str, key: Optional[str] = None,
         conditions: "Sequence[str]" = (),
+        evidence: Optional[dict] = None,
     ) -> bool:
         """Send a Data Quality alert through the Gate.
 
@@ -1224,7 +1225,7 @@ class BackgroundScheduler:
 
             return await raise_alert(
                 message, conditions=list(conditions), bucket=bucket,
-                group=f"dq:{layer}",
+                group=f"dq:{layer}", evidence=evidence,
             ) > 0
         except Exception as e:
             logger.warning(f"DQ alert send failed ({bucket}): {e}")
@@ -1236,6 +1237,7 @@ class BackgroundScheduler:
         from core.data_quality import (
             Severity,
             alert_fingerprint,
+            evidence_for_agent,
             check_internal_integrity,
             format_alert_message,
             machine_attempts_note,
@@ -1288,6 +1290,7 @@ class BackgroundScheduler:
                     alert_fingerprint("integrity", sev, issues, []),
                     conditions=[i.check_name for i in issues
                                 if i.severity == Severity.CRITICAL],
+                    evidence=evidence_for_agent("integrity", issues, run_id=run_id),
                 )
             await self._resolve_dq_layer("integrity", issues, error_message)
 
@@ -1321,6 +1324,7 @@ class BackgroundScheduler:
         from core.data_quality import (
             Severity,
             alert_fingerprint,
+            evidence_for_agent,
             format_alert_message,
             machine_attempts_note,
             overall_severity,
@@ -1448,6 +1452,7 @@ class BackgroundScheduler:
                     alert_fingerprint(MIRROR_LAYER, sev, issues, []),
                     conditions=[i.check_name for i in issues
                                 if i.severity == Severity.CRITICAL],
+                    evidence=evidence_for_agent(MIRROR_LAYER, issues, run_id=run_id),
                 )
             await self._resolve_dq_layer(MIRROR_LAYER, issues, error_message)
 
@@ -1781,6 +1786,7 @@ class BackgroundScheduler:
         from core.data_quality import (
             Severity,
             alert_fingerprint,
+            evidence_for_agent,
             format_alert_message,
             machine_attempts_note,
             overall_severity,
@@ -1822,6 +1828,8 @@ class BackgroundScheduler:
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
                 conditions=[i.check_name for i in issues
                                 if i.severity == Severity.CRITICAL],
+                evidence=evidence_for_agent(layer, issues, discrepancies,
+                                            run_id=run_id),
             )
         await self._resolve_dq_layer(layer, issues, error_message)
 
@@ -1947,6 +1955,7 @@ class BackgroundScheduler:
         from core.data_quality import (
             Severity,
             alert_fingerprint,
+            evidence_for_agent,
             format_alert_message,
             machine_attempts_note,
             overall_severity,
@@ -1986,6 +1995,8 @@ class BackgroundScheduler:
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
                 conditions=[i.check_name for i in issues
                                 if i.severity == Severity.CRITICAL],
+                evidence=evidence_for_agent(layer, issues, discrepancies,
+                                            run_id=run_id),
             )
         await self._resolve_dq_layer(layer, issues, error_message)
 
@@ -2001,6 +2012,7 @@ class BackgroundScheduler:
         from core.data_quality import (
             Severity,
             alert_fingerprint,
+            evidence_for_agent,
             classify_discrepancies,
             classify_order_discrepancies,
             format_alert_message,
@@ -2172,6 +2184,8 @@ class BackgroundScheduler:
                     alert_fingerprint("reconciliation", sev, issues, discrepancies),
                     conditions=[i.check_name for i in issues
                                 if i.severity == Severity.CRITICAL],
+                    evidence=evidence_for_agent("reconciliation", issues,
+                                                discrepancies, run_id=run_id),
                 )
             await self._resolve_dq_layer("reconciliation", issues, error_message)
 

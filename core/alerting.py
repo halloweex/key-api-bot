@@ -484,6 +484,7 @@ async def raise_alert(
     parse_mode: str = "HTML",
     group: "str | None" = None,
     spool_as: "str | None" = None,
+    evidence: "dict | None" = None,
 ) -> int:
     """Raise an alert about the named conditions. Returns admins reached.
 
@@ -496,6 +497,14 @@ async def raise_alert(
     `bucket` names the dedup identity — usually the single condition, for the
     DQ layers today still the fingerprint. `None` means no dedup at all: the
     caller has already decided this occurrence must go (the OOM path).
+
+    `evidence` is what the three-line message had no room for, archived into
+    `app.alert_events.context`. It exists because the diagnostician reads
+    Postgres and the DQ findings live in a DuckDB it cannot open: the answer
+    to the 2026-09-01 incident was one sentence in a finding nothing could
+    reach. Best-effort by construction — it rides the archive's
+    fire-and-forget task, so a malformed or oversized payload costs a ledger
+    column and never an alert.
     """
     import logging as _logging
 
@@ -524,7 +533,7 @@ async def raise_alert(
 
         record_fired(
             conditions, message=text + suffix,
-            delivered=delivered, swallowed=swallowed,
+            delivered=delivered, swallowed=swallowed, evidence=evidence,
         )
         if bucket is not None and suffix == "":
             # A fresh incident (an empty suffix is the first fire of a

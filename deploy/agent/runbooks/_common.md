@@ -16,6 +16,18 @@ DuckDB + Postgres + ClickHouse, FastAPI web + Telegram bot, docker compose в
   доступна в Postgres и в логах.
 - Бюджет: уложись в несколько минут и ~15 команд.
 
+ПЕРВЫЙ ХОД ДЛЯ dq_*/mirror_*/freshness_*-АЛЕРТОВ — находка уже записана:
+  docker exec -i ks-postgres psql -U ks_readonly -d ks -c \
+    "SELECT at, condition_key, jsonb_pretty(context) FROM app.alert_events \
+     WHERE context IS NOT NULL ORDER BY at DESC LIMIT 3;"
+  В context лежат находки прогона: check, table, count, samples и detail — и
+  detail НАЗЫВАЕТ КОЛОНКИ, по которым строки разошлись. Это ответ, а не
+  подсказка. 01.09.2026 «891 расхождение» решалось строкой «Columns:
+  updated_at (891), reserve (3), last_sale_date (3)», и два диагноза подряд
+  оказались неверны, потому что её искали в логах, где её нет. Смотри сюда
+  ДО построения гипотез. Пусто — алерт старше этой правки или не из DQ-слоя,
+  тогда работай логами и health как раньше.
+
 ДОСТУПНЫЕ ИСТОЧНИКИ:
 - docker logs keycrm-web / keycrm-bot (--tail, --since)
 - docker exec -i ks-postgres psql -U ks_readonly -d ks -c "SELECT ..."
