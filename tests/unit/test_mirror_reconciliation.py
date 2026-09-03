@@ -424,3 +424,75 @@ class TestIgnoredBookkeepingColumns:
         # checked_at is deliberately both clock and compared value.
         assert by_table["app.order_backfill_misses"].ignore_columns == ()
         assert by_table["app.inventory_history"].ignore_columns == ()
+
+
+class TestSyncedColumnDualRole:
+    """A stamp may be both the clock and a compared value — on one condition.
+
+    `synced_column` normally sits outside `columns` (landing's `synced_at`), and
+    `fetch_duckdb_rows` promises it is "read alongside but never compared". When
+    a spec lists it in `columns` too, that promise is only kept by the grace
+    window, and the grace window is per row.
+
+    So the rule is: **a dual-role stamp is safe exactly when the writer stamps
+    one row at a time.**
+
+      * `order_backfill_misses.checked_at` — moves when that id is re-recorded;
+      * `inventory_history.recorded_at`    — `DELETE ... WHERE date = ?` then
+        re-insert, so only today's row is ever restamped;
+      * `manager_classifications.set_at`   — a human's decision, carried
+        through the full replace.
+
+    `sku_inventory_status.updated_at` is the one that broke it: the refresh is
+    a whole-table DELETE+INSERT writing CURRENT_TIMESTAMP to all 891 rows, so
+    the grace stopped being per-row and became all-or-nothing — every row
+    forgiven, or every row reported. It reported 891 for days.
+
+    This test exists so the next spec with a dual-role stamp has to say which
+    kind it is, instead of finding out in production.
+    """
+
+    # Reviewed 2026-09-03. Adding a spec here is a claim that its writer
+    # stamps one row at a time; if it rewrites the table, it belongs in
+    # `ignore_columns` instead.
+    PER_ROW_STAMPS = {
+        "app.manager_classifications": "set_at",
+        "app.order_backfill_misses": "checked_at",
+        "app.inventory_history": "recorded_at",
+    }
+    WHOLE_TABLE_STAMPS = {
+        "app.sku_inventory_status": "updated_at",
+    }
+
+    def _dual_role(self):
+        from core.mirror_reconciliation import MIRRORED_TABLES, OPERATIONAL_TABLES
+        return {
+            s.pg_table: s
+            for s in tuple(MIRRORED_TABLES) + tuple(OPERATIONAL_TABLES)
+            if s.synced_column and s.synced_column in s.columns
+        }
+
+    def test_every_dual_role_spec_has_been_classified(self):
+        """The guard: a new one fails here until somebody decides which it is."""
+        known = set(self.PER_ROW_STAMPS) | set(self.WHOLE_TABLE_STAMPS)
+        found = set(self._dual_role())
+        assert found == known, (
+            "a spec now lists its synced_column in columns and is not "
+            f"classified: {found ^ known}. Decide whether its writer stamps "
+            "one row at a time (leave it compared) or the whole table (add it "
+            "to ignore_columns), then record the answer here."
+        )
+
+    def test_per_row_stamps_stay_compared(self):
+        """Not swept up by the fix: on these the comparison is meaningful."""
+        specs = self._dual_role()
+        for table, column in self.PER_ROW_STAMPS.items():
+            assert specs[table].synced_column == column
+            assert column not in specs[table].ignore_columns, table
+
+    def test_whole_table_stamps_are_never_compared(self):
+        specs = self._dual_role()
+        for table, column in self.WHOLE_TABLE_STAMPS.items():
+            assert specs[table].synced_column == column
+            assert column in specs[table].ignore_columns, table
+            assert column in specs[table].columns, "still shipped, still the clock"
