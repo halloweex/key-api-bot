@@ -374,6 +374,14 @@ class InventoryMixin:
         rebuild put fresh headline numbers above stale rows, with nothing on
         screen saying so.
 
+        THERE IS NO `outOfStock` LIST, AND THAT IS DELIBERATE
+
+        The response carried one — its own query, twenty rows joined three
+        ways — and no component ever read it; `outOfStockCount`, the number on
+        the card, is the only out-of-stock figure the page renders. It was
+        dropped rather than ported, because making dead payload work on a
+        second engine is a cost with no reader at the end of it.
+
         THE `sku` OF AN OFFER THAT HAS NONE
 
         `sku_inventory_status` substitutes the offer id when KeyCRM sends no
@@ -427,13 +435,6 @@ class InventoryMixin:
             ORDER BY quantity ASC, offer_id
             LIMIT 20
         """
-        out_sql = """
-            SELECT sku, price, name
-            FROM {sku_inventory_status}
-            WHERE quantity = 0
-            ORDER BY price DESC, offer_id
-            LIMIT 20
-        """
         avg_sql = """
             WITH period_data AS (
                 SELECT
@@ -453,12 +454,11 @@ class InventoryMixin:
             FROM period_data
         """
 
-        stats_rows, top_by_qty, low_stock, out_of_stock, avg_rows = (
+        stats_rows, top_by_qty, low_stock, avg_rows = (
             await self._inventory_batch([
                 (stats_sql, []),
                 (top_sql, [int(limit)]),
                 (low_sql, []),
-                (out_sql, []),
                 (avg_sql, []),
             ])
         )
@@ -514,10 +514,6 @@ class InventoryMixin:
                 {"sku": r[0], "quantity": r[1], "reserve": r[2],
                  "price": float(r[3] or 0), "name": r[4]}
                 for r in low_stock
-            ],
-            "outOfStock": [
-                {"sku": r[0], "price": float(r[1] or 0), "name": r[2]}
-                for r in out_of_stock
             ],
             # Both engines hand back an aware datetime; the field has always
             # been a string on the wire.

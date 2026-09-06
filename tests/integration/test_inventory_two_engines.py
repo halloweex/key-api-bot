@@ -371,11 +371,13 @@ async def test_the_summary_exercises_what_it_was_ported_for(both_engines, monkey
     summary, _ = await _both(
         both_engines, monkeypatch, "get_stock_summary", {"limit": 5})
 
-    # 1. The out-of-stock SKU reaches the counts. It is the row that
+    # 1. The out-of-stock SKU reaches the count. It is the row that
     #    `gold.v_sku_status` would have silently dropped — that view is
-    #    `WHERE quantity > 0`, which is why the port reads the table.
+    #    `WHERE quantity > 0`, which is why the port reads the table. The
+    #    count is the only out-of-stock figure the page renders; the list that
+    #    used to ride beside it had no reader and is gone.
     assert summary["summary"]["outOfStockCount"] >= 1
-    assert any(i["sku"] == "S-9" for i in summary["outOfStock"])
+    assert "outOfStock" not in summary
 
     # 2. `name` comes from the row itself now, not from a join to `offers`
     #    that Postgres does not have.

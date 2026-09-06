@@ -407,12 +407,6 @@ export interface StockItem {
   name: string | null
 }
 
-export interface OutOfStockItem {
-  sku: string
-  price: number
-  name: string | null
-}
-
 export interface StockSummaryResponse {
   summary: {
     totalOffers: number
@@ -429,7 +423,6 @@ export interface StockSummaryResponse {
   }
   topByQuantity: StockItem[]
   lowStock: StockItem[]
-  outOfStock: OutOfStockItem[]
   lastSync: string | null
 }
 
