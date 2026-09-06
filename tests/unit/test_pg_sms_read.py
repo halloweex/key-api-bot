@@ -207,3 +207,93 @@ class TestTheSwitchIsWhole:
 
         monkeypatch.delenv("KS_SMS_STORE", raising=False)
         pg_sms.refuse_while_unported("anything")
+
+
+class TestTheDeliveryWriteEscapesTheStoreLock:
+    """The webhook write must not queue behind DuckDB's single lock.
+
+    This is the §34 invariant again, but on the path where it costs money.
+    TurboSMS delivers ~1 000 callbacks in a 7-second burst — ~143/s — and
+    abandons a request at ~2.4 s, so anything that serialises the burst loses
+    reports for good: the gateway offers no replay and stops after 4.5 hours.
+
+    `DuckDBStore` is a singleton whose `connection()` takes one process-wide
+    `asyncio.Lock`, shared with every dashboard query and with the warehouse
+    rebuild that runs every two minutes and holds it for seconds. Measured on
+    2026-09-06, 500 callbacks at 50 in flight:
+
+        DuckDB, nothing competing              637 req/s
+        DuckDB, while something holds the lock  55 req/s   ← below arrival
+        Postgres, nothing competing           1416 req/s
+        Postgres, while something holds it    2965 req/s   ← unaffected
+
+    The 2026-08-27 investigation measured the DuckDB *write* at 0.334 ms and
+    concluded the database was not the bottleneck. It measured the work and
+    not the waiting, which is why four hypotheses were eliminated and the
+    cause was not found.
+
+    So this pins the property rather than the throughput: with the flag on,
+    the delivery write must not reach for the store's connection at all. A
+    timing test would be flaky; this one cannot be.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_writes_while_the_store_lock_is_fatal(self, tmp_path, monkeypatch):
+        from core.duckdb_store import DuckDBStore
+
+        monkeypatch.setenv("KS_SMS_STORE", "postgres")
+        store = DuckDBStore(db_path=tmp_path / "burst.duckdb")
+        await store.connect()
+
+        def _explode(*_a, **_k):
+            raise AssertionError(
+                "the delivery write reached for DuckDB's connection — under a "
+                "burst it would queue behind the warehouse rebuild"
+            )
+
+        statements = []
+
+        class _Tx:
+            """The Postgres transaction the flag routes to, answering the two
+            reads the method makes: no prior binding for this event id, then
+            one roster row carrying the message."""
+
+            async def one(self, sql, params=None):
+                # The `{table}` holes are still unfilled here: rendering lives
+                # inside the real transaction objects, which this stands in for.
+                statements.append(" ".join(sql.split()))
+                if "{dlr_events}" in sql:
+                    return None          # unbound: the first report for this id
+                return (1,)              # the COUNT of members with this message
+
+            async def none(self, sql, params=None):
+                statements.append(" ".join(sql.split()))
+
+            async def all(self, sql, params=None):
+                statements.append(" ".join(sql.split()))
+                return []
+
+        class _Ctx:
+            async def __aenter__(self):
+                return _Tx()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        try:
+            monkeypatch.setattr(type(store), "connection", _explode)
+            monkeypatch.setattr(type(store), "_sms_tx", lambda self: _Ctx())
+
+            known = await store.record_sms_delivery(
+                message_id="m-1", status="DELIVRD", delivered=True,
+                delivered_at=None, event_id="e-1")
+        finally:
+            monkeypatch.undo()
+            await store.close()
+
+        assert known is True, "the roster row was not reported as known"
+        joined = " | ".join(statements)
+        assert "INSERT INTO {dlr_events}" in joined, (
+            "the event id was not bound — a captured pair stays re-pointable"
+        )
+        assert "UPDATE {members}" in joined, "the delivery was not recorded"
