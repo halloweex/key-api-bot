@@ -609,12 +609,16 @@ in the interface and in the report alike. Telegram's `language_code` is
 deliberately not consulted: the default is a decision about this company, not
 about a phone's locale.
 
-The choice lives in `user_preferences.language` in the bot's SQLite, set from
+The choice lives in `user_preferences.language` in the bot's store, set from
 the bot's settings screen. The weekly report runs in the **web** container and
-reads it through `core/bot_prefs.py`, which opens `data/bot.db` read-only —
-both containers bind-mount `./data`. A locked, missing, or pre-migration
-database all mean the same thing there: fall back, and the report still goes.
-The job renders once per distinct language, not once per reader.
+reads it through `core/bot_prefs.py`, which asks the bot store port
+(`get_bot_store()`, the same `KS_BOT_STORE` engine the bot writes) — never the
+SQLite file directly. It did open `data/bot.db` until 2026-09-06, which was a
+frozen copy from the day the bot moved to Postgres: revoked users kept
+receiving the report and newly approved ones never did. An unreachable store
+means one thing there: fall back to the admins and the default language, and
+the report still goes. The job renders once per distinct language, not once
+per reader.
 
 **Everything user-facing is translated**: the weekly report and its card, and
 the whole bot — `/start`, `/help`, the report builder and its date picker,
@@ -1278,8 +1282,8 @@ lost, and copying it would report a discrepancy every time an entry expired
 between the copy and the comparison.
 
 **It runs in the web container and does not touch the bot.** `core/bot_prefs.py`
-already opens this file read-only from there for the weekly report; the copy
-does the same. So step 03's first half needs no environment variable on the
+opened this file read-only from there for the weekly report at the time (it
+reads through the store port since 2026-09-06); the copy still does. So step 03's first half needs no environment variable on the
 bot, no asyncpg on its path and no new way for it to fail — pinned by a test
 that no module under `bot/` imports `core.pg`.
 

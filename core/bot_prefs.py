@@ -1,84 +1,86 @@
-"""Reading the bot's settings from the container that does not own them.
+"""The bot's settings, read from the container that does not own them.
 
 The weekly report is built in the *web* container, because that is where
-DuckDB lives. Who may read it, and in what language, is recorded in the *bot*
-container's `data/bot.db`, because that is where the approval flow and the
-settings screen run. Both containers bind-mount `./data`, so the file is simply
-there, and this module is the one door to it from outside the bot.
+DuckDB lives. Who may read it, and in what language, is decided in the *bot*
+container — the approval flow and the settings screen. Both questions go
+through the bot store port (`core.bot_store.get_bot_store`), so this module
+asks the same engine the bot writes to: Postgres under `KS_BOT_STORE=postgres`,
+the SQLite file otherwise. Web instantiates that store at startup already.
 
-Mostly read-only, and forgiving where reading is all that is at stake.
-`write_language` is the exception and is deliberately not forgiving: it exists
-because the dashboard used to write the same setting into DuckDB instead, so a
-language chosen in one interface was invisible to the other and to the weekly
-report. A write that quietly fails would recreate that in a new shape, so it
-raises.
+Until 2026-09-06 this module opened `data/bot.db` directly, read-only. That
+was right while the file *was* the bot's store, and silently wrong from the
+day the bot switched to Postgres (2026-08-27): the file froze at that day's
+contents, so the weekly report kept going to people revoked since, never
+reached people approved since, ignored notifications muted since, and a
+language chosen on the dashboard reached nothing the bot reads. `BOT_DB_PATH`
+stays here only as the file's location, for the replication and comparison
+that copy it while SQLite is still the engine.
 
-Everything else here is read-only and forgiving on purpose. The bot's SQLite
-runs in its default
-rollback-journal mode, so a reader that arrives mid-write gets SQLITE_BUSY;
-a locked database, a missing file, a column that predates this feature, and a
-container started before the bot has ever run all mean the same thing here —
-fall back. An unreadable list falls back to the admins and an unreadable
-language to the caller's default. A report reaching fewer people, or one line
-in the wrong language, is a blemish. A report that does not go out is a
-failure.
+Readers are forgiving on purpose: a store that cannot be reached yields nobody
+or the default language, and the caller falls back to the admins. A report
+reaching fewer people, or one line in the wrong language, is a blemish. A
+report that does not go out is a failure. `write_language` is the exception
+and raises: a settings screen that reports success while storing nothing is
+the bug it replaced.
 """
 from __future__ import annotations
 
 import logging
-import sqlite3
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from core.i18n import DEFAULT_LANGUAGE, EN, UK, normalize
 
 logger = logging.getLogger(__name__)
 
-# Same path bot/database.py writes to, resolved from this file so it holds in
-# the container (/app/data/bot.db) and in a checkout alike.
+# Where the bot's SQLite lives, resolved from this file so it holds in the
+# container (/app/data/bot.db) and in a checkout alike. Not read here any more;
+# `core/pg_bot_state.py` and the bot-state comparison import it to copy the
+# file while SQLite is the engine.
 BOT_DB_PATH = Path(__file__).parent.parent / "data" / "bot.db"
 
-# Short. Nothing here is worth making a scheduler job wait on a lock.
-BUSY_TIMEOUT_SECONDS = 2.0
+
+def _store():
+    from core.bot_store import get_bot_store
+
+    return get_bot_store()
 
 
-def read_approved_user_ids(db_path: Optional[Path] = None) -> List[int]:
+def _notifications_on(value: Any) -> bool:
+    """NULL means on: the column defaults to on, and a user who has never
+    opened settings has no preferences row at all. Both adapters hand the
+    value back in SQLite's shape, 1/0, so `bool` reads either engine."""
+    return value is None or bool(value)
+
+
+def read_approved_user_ids() -> List[int]:
     """Everyone the bot has approved and who has not muted notifications.
 
     `notifications_enabled` is an existing setting whose entire purpose is
     this, so a user who switched it off is not written to. A toggle that some
     messages ignore is worse than no toggle. Users who have never opened
-    settings have no preferences row at all and are included — the column
-    defaults to on.
+    settings have no preferences row at all and are included.
 
-    Read-only and forgiving, like everything else here: a database that cannot
-    be read yields nobody, and the caller falls back to the admins.
+    Read through the port, so a revocation or an approval made in the bot a
+    minute ago is what this returns. Forgiving: a store that cannot be read
+    yields nobody, and the caller falls back to the admins.
     """
-    path = Path(db_path) if db_path is not None else BOT_DB_PATH
-    if not path.exists():
-        logger.debug("Bot preferences DB not found at %s", path)
-        return []
-
     try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True,
-                             timeout=BUSY_TIMEOUT_SECONDS) as conn:
-            rows = conn.execute("""
-                SELECT a.user_id
-                FROM authorized_users a
-                LEFT JOIN user_preferences p ON p.user_id = a.user_id
-                WHERE a.status = 'approved'
-                  AND COALESCE(p.notifications_enabled, 1) = 1
-            """).fetchall()
-    except sqlite3.Error as exc:
-        logger.info("Could not read approved users from bot DB: %s", exc)
+        store = _store()
+        ids: List[int] = []
+        for row in store.access.approved():
+            uid = int(row["user_id"])
+            prefs = store.preferences.get(uid)
+            if prefs is None or _notifications_on(prefs.get("notifications_enabled")):
+                ids.append(uid)
+        return ids
+    except Exception as exc:  # noqa: BLE001 — a reader here must never take the report down
+        logger.info("Could not read approved users from the bot store: %s", exc)
         return []
-
-    return [int(row[0]) for row in rows]
 
 
 def read_user_languages(
     user_ids: Iterable[int],
-    db_path: Optional[Path] = None,
     defaults: Optional[Mapping[int, str]] = None,
 ) -> Dict[int, str]:
     """Language per user id, falling back per user where nothing is stored.
@@ -98,85 +100,38 @@ def read_user_languages(
     if not ids:
         return languages
 
-    path = Path(db_path) if db_path is not None else BOT_DB_PATH
-    if not path.exists():
-        logger.debug("Bot preferences DB not found at %s", path)
-        return languages
-
     try:
-        # mode=ro so this can never create, migrate or lock the bot's database.
-        uri = f"file:{path}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=BUSY_TIMEOUT_SECONDS) as conn:
-            placeholders = ",".join("?" * len(ids))
-            rows = conn.execute(
-                f"SELECT user_id, language FROM user_preferences "
-                f"WHERE user_id IN ({placeholders})",
-                ids,
-            ).fetchall()
-    except sqlite3.Error as exc:
-        # Includes "no such column: language" on a bot that has not restarted
-        # into the migration yet — an ordinary state during a rolling deploy.
-        logger.info("Could not read languages from bot DB: %s", exc)
-        return languages
-
-    for user_id, language in rows:
-        if language:
-            languages[int(user_id)] = normalize(language)
+        prefs = _store().preferences
+        for uid in ids:
+            row = prefs.get(uid)
+            language = row.get("language") if row else None
+            if language:
+                languages[uid] = normalize(language)
+    except Exception as exc:  # noqa: BLE001 — see read_approved_user_ids
+        logger.info("Could not read languages from the bot store: %s", exc)
     return languages
 
 
-def read_language(
-    user_id: int,
-    default: str = DEFAULT_LANGUAGE,
-    db_path: Optional[Path] = None,
-) -> str:
+def read_language(user_id: int, default: str = DEFAULT_LANGUAGE) -> str:
     """One user's language, with a per-user fallback. See `read_user_languages`."""
     uid = int(user_id)
-    return read_user_languages([uid], db_path=db_path, defaults={uid: default})[uid]
+    return read_user_languages([uid], defaults={uid: default})[uid]
 
 
-def write_language(
-    user_id: int,
-    language: str,
-    db_path: Optional[Path] = None,
-) -> str:
+def write_language(user_id: int, language: str) -> str:
     """Store a user's language choice where every reader already looks.
 
-    This is the only writer in this module, and the only place outside the bot
-    that writes `bot.db`. It exists because the dashboard used to write language
-    into DuckDB's own `user_preferences` — a second table, with the same name and
-    columns, that the bot and the weekly report never read. The setting appeared
-    to work in whichever interface you last used and nowhere else.
-
-    Both containers bind-mount `./data`, so this is the same file the bot writes;
-    SQLite's own locking is what keeps the two apart, and BUSY_TIMEOUT_SECONDS is
-    what it waits.
+    The dashboard used to write this into DuckDB's own `user_preferences` — a
+    second table with the same name and columns that the bot and the weekly
+    report never read — and then into the SQLite file after the bot had moved
+    to Postgres, which was the same defect in a new shape. The port is the one
+    home, whichever engine is behind it.
 
     Unlike the readers here, this raises. A settings screen that reports success
     while storing nothing is the exact failure this function was written to end.
     """
-    path = Path(db_path) if db_path is not None else BOT_DB_PATH
-    if not path.exists():
-        raise FileNotFoundError(
-            f"bot database not found at {path}; the bot has never run here, and "
-            f"creating one without its schema would leave two half-databases"
-        )
-
     normalized = normalize(language)
-    with sqlite3.connect(str(path), timeout=BUSY_TIMEOUT_SECONDS) as conn:
-        # No ON CONFLICT: the bot has run this schema since long before upserts
-        # were available in every SQLite this may meet, and two statements are
-        # clear about what they do. The row may not exist — a user who has never
-        # opened the bot's settings has no preferences row at all.
-        conn.execute(
-            "INSERT OR IGNORE INTO user_preferences (user_id) VALUES (?)",
-            [int(user_id)],
-        )
-        conn.execute(
-            "UPDATE user_preferences SET language = ?, updated_at = CURRENT_TIMESTAMP "
-            "WHERE user_id = ?",
-            [normalized, int(user_id)],
-        )
+    _store().preferences.set(int(user_id), "language", normalized)
     return normalized
 
 
@@ -199,8 +154,9 @@ def group_by_language(
     however many people are on the list — the grouping exists so that nobody
     silently gets someone else's.
     """
-    languages = read_user_languages(user_ids, defaults=defaults)
+    ids = list(dict.fromkeys(int(uid) for uid in user_ids))
+    languages = read_user_languages(ids, defaults=defaults)
     buckets: Dict[str, List[int]] = {}
-    for user_id, language in languages.items():
-        buckets.setdefault(language, []).append(user_id)
+    for uid in ids:
+        buckets.setdefault(languages[uid], []).append(uid)
     return buckets

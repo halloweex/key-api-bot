@@ -478,14 +478,14 @@ class TestSchedulerJob:
               approved=None):
         """Point the job at this store, these admins, and a capturing transport.
 
-        `languages` and `approved` are written into a throwaway SQLite standing
-        in for the bot's — without it the job would read the developer's real
-        `data/bot.db` and the test would pass or fail by whatever happens to be
-        stored there.
+        `languages` and `approved` are written through the bot store port into
+        a throwaway SQLite adapter installed as the active store — without it
+        the job would read the developer's real bot state and the test would
+        pass or fail by whatever happens to be stored there.
         """
         import importlib
-        import sqlite3
 
+        from bot.store_sqlite import SqliteBotStore
         from core.scheduler import BackgroundScheduler
 
         # `core/__init__.py` re-exports the AppConfig instance as `config`, so
@@ -500,20 +500,19 @@ class TestSchedulerJob:
             sent.append(text)
             return len(kwargs.get("chat_ids") or self.ADMINS)
 
-        db = (tmp_path or store.db_path.parent) / "prefs.db"
-        with sqlite3.connect(db) as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS user_preferences "
-                         "(user_id INTEGER PRIMARY KEY, language TEXT, "
-                         " notifications_enabled INTEGER DEFAULT 1)")
-            conn.executemany(
-                "INSERT OR REPLACE INTO user_preferences (user_id, language) "
-                "VALUES (?, ?)", list((languages or {}).items()))
-            conn.execute("CREATE TABLE IF NOT EXISTS authorized_users "
-                         "(user_id INTEGER PRIMARY KEY, status TEXT)")
-            conn.executemany("INSERT OR REPLACE INTO authorized_users VALUES (?, ?)",
-                             [(uid, "approved") for uid in (approved or [])])
+        monkeypatch.setattr(
+            "bot.store_sqlite.DB_PATH",
+            (tmp_path or store.db_path.parent) / "prefs.db",
+        )
+        bot_store = SqliteBotStore()
+        bot_store.initialise()
+        monkeypatch.setattr("core.bot_store._store", bot_store)
+        for uid in (approved or []):
+            bot_store.access.request(uid, f"user{uid}", "First", "Last")
+            bot_store.access.approve(uid, self.ADMINS[0])
+        for uid, lang in (languages or {}).items():
+            bot_store.preferences.set(uid, "language", lang)
 
-        monkeypatch.setattr("core.bot_prefs.BOT_DB_PATH", db)
         monkeypatch.setattr(core_config, "ADMIN_USER_IDS", self.ADMINS)
         monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
         monkeypatch.setattr("core.telegram_alerts.send_admin_message_http", _send_text)
@@ -693,8 +692,12 @@ class TestSchedulerJob:
             await self._seed(store, complete=True)
             sent = []
             scheduler = self._wire(monkeypatch, store, sent, tmp_path)
-            monkeypatch.setattr("core.bot_prefs.BOT_DB_PATH",
-                                tmp_path / "does-not-exist.db")
+
+            class _Unreachable:
+                def __getattr__(self, name):
+                    raise RuntimeError("bot store unreachable")
+
+            monkeypatch.setattr("core.bot_store._store", _Unreachable())
 
             result = await scheduler._run_weekly_report()
 
