@@ -1,28 +1,127 @@
-"""DuckDBStore user management methods."""
+"""The dashboard's user list, on whichever store owns it.
+
+`KS_USER_STORE` (duckdb | postgres, a typo raises) decides. The bodies below
+are one text with two holes — `{users}` for the table and `{self}` for the name
+`ON CONFLICT DO UPDATE` may use to reach the existing row, which Postgres
+insists be unqualified. Everything else is spelled portably, so the table names
+stay the only difference and `core/pg_dashboard_users.py` carries the reason
+the writer moved rather than a replica being read.
+
+The permissions matrix at the bottom of this file has **not** moved. It is read
+once per role and cached in-process (`core/permissions._permissions_cache`), so
+it is not on the request path the switch exists to clear.
+"""
 from __future__ import annotations
 
 import logging
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
+
+MAX_DENIAL_COUNT = 5
 
 
 class UsersMixin:
 
-    async def get_user(self, user_id: int) -> Optional[Dict[str, Any]]:
-        """Get user by ID."""
+    # ─── which store answers ──────────────────────────────────────────────
+    #
+    # Chosen before any connection is taken, `/inventory`'s §34 invariant: a
+    # read bound for Postgres must not first queue behind DuckDB's single
+    # writer, or the switch has moved the bottleneck instead of leaving it.
+    #
+    # **Never call these from inside `self.connection()`.** The store lock is
+    # not reentrant and the deadlock does not raise — it simply never returns.
+
+    async def _users_run(self, sql: str, params: Optional[Sequence[Any]] = None,
+                         *, mode: str = "all"):
+        """Run one statement against the store that owns the user list."""
+        from core.pg_dashboard_users import user_store_is_postgres
+
+        params = list(params or [])
+        if user_store_is_postgres():
+            from core.pg_dashboard_users import (
+                TABLE, execute, fetch_row, fetch_rows,
+            )
+            from core.sql_dialect import numbered
+
+            rendered = numbered(
+                sql.format(users=TABLE, self=TABLE.split(".")[-1])
+            )
+            if mode == "all":
+                return await fetch_rows(rendered, params)
+            if mode == "one":
+                return await fetch_row(rendered, params)
+            await execute(rendered, params)
+            return None
+
+        rendered = sql.format(users="users", self="users")
         async with self.connection() as conn:
-            row = conn.execute("""
-                SELECT user_id, username, first_name, last_name, photo_url,
-                       role, status, requested_at, reviewed_at, reviewed_by,
-                       last_activity, denial_count, created_at
-                FROM users WHERE user_id = ?
-            """, [user_id]).fetchone()
+            cursor = conn.execute(rendered, params)
+            if mode == "all":
+                return cursor.fetchall()
+            if mode == "one":
+                return cursor.fetchone()
+            return None
 
-            if not row:
-                return None
+    @staticmethod
+    def _stamp(value) -> Optional[str]:
+        """A timestamp on its way out as text, pinned to UTC first.
 
-            return {
+        DuckDB renders a TIMESTAMPTZ in the session's timezone —
+        `Europe/Kyiv` in the web container — and asyncpg hands back UTC. The
+        same stored instant would leave as two different strings depending on
+        which store answered, which is the defect the `/inventory` port hit
+        with `lastSync` and the cohort tab hit a week earlier.
+        """
+        if value is None:
+            return None
+        from datetime import timezone
+
+        if getattr(value, "tzinfo", None) is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+
+    async def get_user(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Get user by ID. The read `_resolve_session` makes on every request."""
+        row = await self._users_run("""
+            SELECT user_id, username, first_name, last_name, photo_url,
+                   role, status, requested_at, reviewed_at, reviewed_by,
+                   last_activity, denial_count, created_at
+            FROM {users} WHERE user_id = ?
+        """, [user_id], mode="one")
+
+        if not row:
+            return None
+
+        return {
+            "user_id": row[0],
+            "username": row[1],
+            "first_name": row[2],
+            "last_name": row[3],
+            "photo_url": row[4],
+            "role": row[5],
+            "status": row[6],
+            "requested_at": self._stamp(row[7]),
+            "reviewed_at": self._stamp(row[8]),
+            "reviewed_by": row[9],
+            "last_activity": self._stamp(row[10]),
+            "denial_count": row[11],
+            "created_at": self._stamp(row[12]),
+        }
+
+    async def get_user_by_status(self, status: str) -> List[Dict[str, Any]]:
+        """Get all users with a given status."""
+        rows = await self._users_run("""
+            SELECT user_id, username, first_name, last_name, photo_url,
+                   role, status, requested_at, reviewed_at, last_activity
+            FROM {users} WHERE status = ?
+            -- `user_id` closes the sort: `requested_at` can tie, and two
+            -- engines break a tie differently.
+            ORDER BY requested_at DESC, user_id
+        """, [status])
+
+        return [
+            {
                 "user_id": row[0],
                 "username": row[1],
                 "first_name": row[2],
@@ -30,39 +129,12 @@ class UsersMixin:
                 "photo_url": row[4],
                 "role": row[5],
                 "status": row[6],
-                "requested_at": row[7].isoformat() if row[7] else None,
-                "reviewed_at": row[8].isoformat() if row[8] else None,
-                "reviewed_by": row[9],
-                "last_activity": row[10].isoformat() if row[10] else None,
-                "denial_count": row[11],
-                "created_at": row[12].isoformat() if row[12] else None,
+                "requested_at": self._stamp(row[7]),
+                "reviewed_at": self._stamp(row[8]),
+                "last_activity": self._stamp(row[9]),
             }
-
-    async def get_user_by_status(self, status: str) -> List[Dict[str, Any]]:
-        """Get all users with a given status."""
-        async with self.connection() as conn:
-            rows = conn.execute("""
-                SELECT user_id, username, first_name, last_name, photo_url,
-                       role, status, requested_at, reviewed_at, last_activity
-                FROM users WHERE status = ?
-                ORDER BY requested_at DESC
-            """, [status]).fetchall()
-
-            return [
-                {
-                    "user_id": row[0],
-                    "username": row[1],
-                    "first_name": row[2],
-                    "last_name": row[3],
-                    "photo_url": row[4],
-                    "role": row[5],
-                    "status": row[6],
-                    "requested_at": row[7].isoformat() if row[7] else None,
-                    "reviewed_at": row[8].isoformat() if row[8] else None,
-                    "last_activity": row[9].isoformat() if row[9] else None,
-                }
-                for row in rows
-            ]
+            for row in rows
+        ]
 
     async def list_users(
         self,
@@ -85,38 +157,40 @@ class UsersMixin:
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.extend([limit, offset])
 
-        async with self.connection() as conn:
-            rows = conn.execute(f"""
-                SELECT user_id, username, first_name, last_name, photo_url,
-                       role, status, requested_at, reviewed_at, last_activity
-                FROM users
-                {where_clause}
-                ORDER BY
-                    CASE status
-                        WHEN 'pending' THEN 1
-                        WHEN 'approved' THEN 2
-                        WHEN 'denied' THEN 3
-                        WHEN 'frozen' THEN 4
-                    END,
-                    requested_at DESC
-                LIMIT ? OFFSET ?
-            """, params).fetchall()
+        rows = await self._users_run(f"""
+            SELECT user_id, username, first_name, last_name, photo_url,
+                   role, status, requested_at, reviewed_at, last_activity
+            FROM {{users}}
+            {where_clause}
+            ORDER BY
+                CASE status
+                    WHEN 'pending' THEN 1
+                    WHEN 'approved' THEN 2
+                    WHEN 'denied' THEN 3
+                    WHEN 'frozen' THEN 4
+                END,
+                requested_at DESC,
+                -- The page is paged, so a tie under LIMIT/OFFSET would let the
+                -- two engines return different people on the same page.
+                user_id
+            LIMIT ? OFFSET ?
+        """, params)
 
-            return [
-                {
-                    "user_id": row[0],
-                    "username": row[1],
-                    "first_name": row[2],
-                    "last_name": row[3],
-                    "photo_url": row[4],
-                    "role": row[5],
-                    "status": row[6],
-                    "requested_at": row[7].isoformat() if row[7] else None,
-                    "reviewed_at": row[8].isoformat() if row[8] else None,
-                    "last_activity": row[9].isoformat() if row[9] else None,
-                }
-                for row in rows
-            ]
+        return [
+            {
+                "user_id": row[0],
+                "username": row[1],
+                "first_name": row[2],
+                "last_name": row[3],
+                "photo_url": row[4],
+                "role": row[5],
+                "status": row[6],
+                "requested_at": self._stamp(row[7]),
+                "reviewed_at": self._stamp(row[8]),
+                "last_activity": self._stamp(row[9]),
+            }
+            for row in rows
+        ]
 
     async def create_user(
         self,
@@ -129,16 +203,24 @@ class UsersMixin:
         role: str = "viewer"
     ) -> Dict[str, Any]:
         """Create a new user (access request)."""
-        async with self.connection() as conn:
-            conn.execute("""
-                INSERT INTO users (user_id, username, first_name, last_name, photo_url, status, role)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (user_id) DO UPDATE SET
-                    username = COALESCE(excluded.username, users.username),
-                    first_name = COALESCE(excluded.first_name, users.first_name),
-                    last_name = COALESCE(excluded.last_name, users.last_name),
-                    photo_url = COALESCE(excluded.photo_url, users.photo_url)
-            """, [user_id, username, first_name, last_name, photo_url, status, role])
+        # `{self}` and not `{users}`: PostgreSQL requires the *unqualified*
+        # relation name to reach the existing row in `DO UPDATE`, and
+        # `app.dashboard_users.username` is rejected there.
+        #
+        # The COALESCE is why a repeat login cannot clear a name Telegram
+        # stopped sending, and why it cannot reset a status or a role either —
+        # those two are absent from the update list on purpose.
+        await self._users_run("""
+            INSERT INTO {users}
+                (user_id, username, first_name, last_name, photo_url, status, role)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username = COALESCE(excluded.username, {self}.username),
+                first_name = COALESCE(excluded.first_name, {self}.first_name),
+                last_name = COALESCE(excluded.last_name, {self}.last_name),
+                photo_url = COALESCE(excluded.photo_url, {self}.photo_url)
+        """, [user_id, username, first_name, last_name, photo_url, status, role],
+            mode="none")
 
         return await self.get_user(user_id)
 
@@ -154,15 +236,14 @@ class UsersMixin:
         if role not in {r.value for r in Role}:
             raise ValueError(f"Invalid role: {role}")
 
-        async with self.connection() as conn:
-            result = conn.execute("""
-                UPDATE users
-                SET role = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
-                WHERE user_id = ?
-                RETURNING user_id
-            """, [role, changed_by, user_id]).fetchone()
+        result = await self._users_run("""
+            UPDATE {users}
+            SET role = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+            WHERE user_id = ?
+            RETURNING user_id
+        """, [role, changed_by, user_id], mode="one")
 
-            return result is not None
+        return result is not None
 
     async def update_user_status(
         self,
@@ -174,83 +255,78 @@ class UsersMixin:
         if status not in ("pending", "approved", "denied", "frozen"):
             raise ValueError(f"Invalid status: {status}")
 
-        async with self.connection() as conn:
-            # If approving, reset denial count
-            if status == "approved":
-                result = conn.execute("""
-                    UPDATE users
-                    SET status = ?, reviewed_at = CURRENT_TIMESTAMP,
-                        reviewed_by = ?, denial_count = 0
-                    WHERE user_id = ?
-                    RETURNING user_id
-                """, [status, reviewed_by, user_id]).fetchone()
-            else:
-                result = conn.execute("""
-                    UPDATE users
-                    SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
-                    WHERE user_id = ?
-                    RETURNING user_id
-                """, [status, reviewed_by, user_id]).fetchone()
+        # Approving clears the denial count, so five past refusals do not
+        # leave somebody one refusal from a thirty-day freeze.
+        if status == "approved":
+            result = await self._users_run("""
+                UPDATE {users}
+                SET status = ?, reviewed_at = CURRENT_TIMESTAMP,
+                    reviewed_by = ?, denial_count = 0
+                WHERE user_id = ?
+                RETURNING user_id
+            """, [status, reviewed_by, user_id], mode="one")
+        else:
+            result = await self._users_run("""
+                UPDATE {users}
+                SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+                WHERE user_id = ?
+                RETURNING user_id
+            """, [status, reviewed_by, user_id], mode="one")
 
-            return result is not None
+        return result is not None
 
     async def update_user_activity(self, user_id: int) -> bool:
         """Update user's last activity timestamp. Returns True if updated."""
-        async with self.connection() as conn:
-            result = conn.execute("""
-                UPDATE users
-                SET last_activity = CURRENT_TIMESTAMP
-                WHERE user_id = ?
-                RETURNING user_id
-            """, [user_id]).fetchone()
-            return result is not None
+        result = await self._users_run("""
+            UPDATE {users}
+            SET last_activity = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+            RETURNING user_id
+        """, [user_id], mode="one")
+        return result is not None
 
     async def deny_user(self, user_id: int, admin_id: int) -> Tuple[bool, bool]:
+        """Deny access, counting the refusal. Returns (found, is_frozen).
+
+        One statement, where it used to be a SELECT and then an UPDATE. Under
+        DuckDB those two ran inside one acquisition of the store lock, so
+        nothing could interleave; on a Postgres pool they are two round trips
+        and two admins refusing the same person at once would both read the
+        same count, write the same count, and lose a refusal on the way to the
+        freeze. The increment happens in the database now, and the new value
+        comes back rather than being computed here.
         """
-        Deny user access. Increments denial count.
-        Returns (success, is_frozen) tuple.
-        """
-        MAX_DENIAL_COUNT = 5
+        row = await self._users_run("""
+            UPDATE {users}
+            SET denial_count = COALESCE(denial_count, 0) + 1,
+                status = CASE
+                    WHEN COALESCE(denial_count, 0) + 1 >= ? THEN 'frozen'
+                    ELSE 'denied'
+                END,
+                reviewed_at = CURRENT_TIMESTAMP,
+                reviewed_by = ?
+            WHERE user_id = ?
+            RETURNING denial_count
+        """, [MAX_DENIAL_COUNT, admin_id, user_id], mode="one")
 
-        async with self.connection() as conn:
-            # Get current denial count
-            row = conn.execute(
-                "SELECT denial_count FROM users WHERE user_id = ?", [user_id]
-            ).fetchone()
-
-            if not row:
-                return False, False
-
-            new_count = (row[0] or 0) + 1
-            is_frozen = new_count >= MAX_DENIAL_COUNT
-            new_status = "frozen" if is_frozen else "denied"
-
-            conn.execute("""
-                UPDATE users
-                SET status = ?, denial_count = ?,
-                    reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
-                WHERE user_id = ?
-            """, [new_status, new_count, admin_id, user_id])
-
-            return True, is_frozen
+        if row is None:
+            return False, False
+        return True, (row[0] or 0) >= MAX_DENIAL_COUNT
 
     async def update_last_activity(self, user_id: int) -> None:
         """Update user's last activity timestamp."""
-        async with self.connection() as conn:
-            conn.execute("""
-                UPDATE users
-                SET last_activity = CURRENT_TIMESTAMP
-                WHERE user_id = ? AND status = 'approved'
-            """, [user_id])
+        await self._users_run("""
+            UPDATE {users}
+            SET last_activity = CURRENT_TIMESTAMP
+            WHERE user_id = ? AND status = 'approved'
+        """, [user_id], mode="none")
 
     async def is_user_authorized(self, user_id: int) -> bool:
         """Check if user is authorized (approved status)."""
-        async with self.connection() as conn:
-            row = conn.execute(
-                "SELECT status FROM users WHERE user_id = ?", [user_id]
-            ).fetchone()
-
-            return row is not None and row[0] == "approved"
+        row = await self._users_run(
+            "SELECT status FROM {users} WHERE user_id = ?", [user_id], mode="one",
+        )
+        return row is not None and row[0] == "approved"
 
     async def get_pending_users(self) -> List[Dict[str, Any]]:
         """Get all users with pending status."""

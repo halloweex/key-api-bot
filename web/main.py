@@ -184,10 +184,6 @@ async def startup_event():
         logger.warning(f"Serving stale data ({stats['orders']} orders) — sync will retry via scheduler")
 
     # Migrate users from SQLite to DuckDB (one-time, idempotent)
-    try:
-        await _migrate_sqlite_users_to_duckdb(store)
-    except Exception as e:
-        logger.warning(f"User migration from SQLite skipped: {e}")
 
     # ── One historical campaign, restored by hand ────────────────────────
     # `aug-promo-birthday-website` was sent on 2026-08-05, before the columns
@@ -250,49 +246,22 @@ async def startup_event():
     logger.info("Dashboard ready - all queries use DuckDB")
 
 
-async def _migrate_sqlite_users_to_duckdb(store):
-    """Migrate users from SQLite authorized_users to DuckDB users table (idempotent)."""
-    import sqlite3
-    from core.permissions import ADMIN_USER_IDS
-
-    db_path = "data/bot.db"
-    try:
-        conn = sqlite3.connect(db_path)
-        rows = conn.execute(
-            "SELECT user_id, username, first_name, last_name, status, requested_at, "
-            "reviewed_at, reviewed_by, last_activity, denial_count FROM authorized_users"
-        ).fetchall()
-        conn.close()
-    except Exception:
-        return  # SQLite not available or table doesn't exist
-
-    migrated = 0
-    for row in rows:
-        user_id, username, first_name, last_name, status, requested_at, \
-            reviewed_at, reviewed_by, last_activity, denial_count = row
-        existing = await store.get_user(user_id)
-        if not existing:
-            role = "admin" if user_id in ADMIN_USER_IDS else "viewer"
-            await store.create_user(
-                user_id=user_id,
-                username=username,
-                first_name=first_name,
-                last_name=last_name,
-                status=status,
-                role=role,
-            )
-            migrated += 1
-
-    if migrated:
-        logger.info(f"Migrated {migrated} users from SQLite to DuckDB")
-
-    # A "one-time repair" used to live here (070af9a, 2026-03-25): every boot
-    # set role='viewer' on any admin outside ADMIN_USER_IDS, to undo a
-    # migration bug of the day. It was never retired, so every promotion made
-    # through the admin page — which offers "admin", and which require_admin
-    # honours — lasted exactly until the next deploy, compact or OOM restart,
-    # with only a log line to say so. The repair is done; the page's promotion
-    # is the intended way to make an admin, and it now sticks.
+# `_migrate_sqlite_users_to_duckdb` lived here until 2026-09-07.
+#
+# It read `data/bot.db` with `sqlite3` on every boot and created any user the
+# DuckDB `users` table did not have. Two things retired it. The bot moved to
+# Postgres on 2026-08-27, so that file's `authorized_users` has been a frozen
+# artefact since — and it was already a no-op before that: measured the day it
+# was removed, the frozen file and the DuckDB table held the *same 24 people*,
+# so it had nothing to create. It also went round the seam
+# (`core/bot_store.py`) and, once `KS_USER_STORE=postgres` made Postgres the
+# writer, it would have been writing to the store nobody reads.
+#
+# The comment it carried is worth keeping, because the bug it describes is the
+# kind that comes back: a "one-time repair" (070af9a, 2026-03-25) set
+# role='viewer' on every boot for any admin outside ADMIN_USER_IDS. It was
+# never retired, so every promotion made through the admin page lasted exactly
+# until the next deploy, compact or OOM restart, with one log line to say so.
 
 
 async def _train_prediction_model():

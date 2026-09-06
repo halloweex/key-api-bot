@@ -71,7 +71,24 @@ def test_the_page_sends_only_what_the_click_changed():
 
 
 def test_boot_no_longer_demotes_admins():
+    """The repair that undid every promotion, and the function that carried it.
+
+    A "one-time repair" (070af9a) set `role='viewer'` on every boot for any
+    admin outside `ADMIN_USER_IDS`, so a promotion made through the admin page
+    lasted until the next restart. The repair went first; the function that
+    held it — `_migrate_sqlite_users_to_duckdb` — went on 2026-09-07, once it
+    was measured to be a no-op (the frozen `data/bot.db` and the DuckDB table
+    held the same 24 people) and once Postgres became the writer it would have
+    been writing behind.
+
+    So the assertion is now about the whole boot path rather than one
+    function: nothing there may write a role at all.
+    """
     from web import main
 
-    src = inspect.getsource(main._migrate_sqlite_users_to_duckdb)
-    assert "SET role = 'viewer'" not in src
+    src = inspect.getsource(main)
+    assert "_migrate_sqlite_users_to_duckdb" not in src.replace(
+        "# `_migrate_sqlite_users_to_duckdb` lived here until 2026-09-07.", "",
+    ), "the boot-time user migration is back"
+    assert "SET role" not in src, "startup writes a role"
+    assert "role=role" not in src, "startup creates users with a role"

@@ -892,6 +892,14 @@ class BackgroundScheduler:
             from core.pg_sms import replicate_sms
 
             result["sms_state"] = await replicate_sms(store)
+            # The dashboard's own user list rides here too, and for the same
+            # one-call-site reason. It carries the rows across before
+            # KS_USER_STORE=postgres moves the writer, and stands down after
+            # — a full replace out of a frozen DuckDB would roll back every
+            # approval and role change made since the switch.
+            from core.pg_dashboard_users import replicate_dashboard_users
+
+            result["dashboard_users"] = await replicate_dashboard_users(store)
             if "skipped" not in result:
                 logger.info("Operational replication: %s", result)
             return result
@@ -1455,6 +1463,11 @@ class BackgroundScheduler:
                 # KS_SMS_STORE=postgres freezes the DuckDB side.
                 from core.mirror_reconciliation import reconcile_sms
                 issues += await reconcile_sms(store)
+                # And who may open the dashboard (revision 0016). Same layer,
+                # so it cannot have an age of its own; stands down once
+                # KS_USER_STORE=postgres makes Postgres the writer.
+                from core.mirror_reconciliation import reconcile_dashboard_users
+                issues += await reconcile_dashboard_users(store)
                 # And the витрина, which rebuilds itself and then checks the
                 # materialisation against the same Silver snapshot.
                 from core.pg_vitrina import reconcile_customer_profile

@@ -97,6 +97,7 @@ from core.pg_operational import (
     OFFER_STOCK_COLUMNS,
     SKU_STATUS_COLUMNS,
 )
+from core.pg_dashboard_users import USER_COLUMNS
 from core.pg_replication import CLASSIFICATION_COLUMNS, MANAGER_COLUMNS
 from core.pg_sms import (
     CAMPAIGN_COLUMNS,
@@ -2243,6 +2244,70 @@ SMS_TABLES: Tuple[MirroredTable, ...] = (
         full_replace=True,
     ),
 )
+
+
+# ─── the dashboard's user list (revision 0016) ───────────────────────────────
+#
+# One table, compared whole — 24 rows. `full_replace=True` because the
+# replicator writes every row it holds, so "in DuckDB and not in Postgres"
+# means lost; there is no retired category for a person's access.
+#
+# Stands down with the switch, `reconcile_sms`' reason: once
+# `KS_USER_STORE=postgres` moves the writer, DuckDB is a frozen artefact and
+# every approval made since would read as a discrepancy this check created.
+DASHBOARD_USER_TABLES: Tuple[MirroredTable, ...] = (
+    MirroredTable(
+        pg_table="app.dashboard_users",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="users",
+        columns=USER_COLUMNS,
+        key_columns=("user_id",),
+        # `reviewed_at` moves on approve, deny and role change; `created_at`
+        # dates a row that has never been touched since. Neither is ideal
+        # alone, and together they are what says a row has had time to travel.
+        synced_column="COALESCE(reviewed_at, created_at)",
+        full_replace=True,
+    ),
+)
+
+
+async def reconcile_dashboard_users(
+    store,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = OPERATIONAL_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Compare who may open the dashboard, between the two stores.
+
+    Report-only, and more firmly than most: a "repair" here would be one store
+    silently granting or withdrawing somebody's access on the strength of the
+    other, which is a decision a human made and a check must not re-make.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+    from core.pg_dashboard_users import user_store_is_postgres
+
+    if not pg_landing.enabled() or user_store_is_postgres():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    async with store.connection() as conn:
+        dk_side = read_duckdb_side(conn, DASHBOARD_USER_TABLES)
+
+    issues: List[IntegrityIssue] = []
+    for spec in DASHBOARD_USER_TABLES:
+        dk_rows, dk_synced = dk_side[spec.pg_table]
+        pg_rows = await fetch_pg_rows(pool, spec)
+        issues += compare_table(
+            spec, dk_rows, dk_synced, pg_rows, watermarks.get(spec.pg_table),
+            now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+        )
+    return issues
 
 
 async def reconcile_sms(
