@@ -190,16 +190,23 @@ async def _row_pg(store, monkeypatch, user_id):
     return row
 
 
-def _comparable(row):
-    """Everything but the clocks the write sets itself.
+# The clocks a write sets itself. Each engine stamps its own `now()` at the
+# moment its copy of the call runs — measured 13 ms apart on the gate — so
+# comparing the values would be comparing two clocks, not two behaviours. That
+# they are *set at all* is asserted by
+# `test_a_created_user_gets_its_dates_on_both`, which is where the real defect
+# showed up: Postgres left them NULL until the migration learned DuckDB's
+# defaults.
+SELF_SET_CLOCKS = ("reviewed_at", "last_activity", "created_at", "requested_at")
 
-    `reviewed_at` is `CURRENT_TIMESTAMP` on each engine at the moment it runs,
-    so the two are minutes apart by construction. Its *presence* is asserted
-    separately; comparing the value would be comparing the two clocks.
-    """
+
+def _comparable(row):
+    """Everything but the clocks the write sets itself."""
     if row is None:
         return None
-    return {k: v for k, v in row.items() if k not in ("reviewed_at", "last_activity")}
+    if not isinstance(row, dict):
+        return row
+    return {k: v for k, v in row.items() if k not in SELF_SET_CLOCKS}
 
 
 @pytest.mark.asyncio
@@ -228,8 +235,43 @@ async def test_the_writes_leave_the_same_row(
     pg_returned = await getattr(store, method)(**call)
     pg_row = await _row_pg(store, monkeypatch, user_id)
 
-    assert pg_returned == duck_returned or _comparable(pg_returned) == _comparable(duck_returned)
+    assert _comparable(pg_returned) == _comparable(duck_returned)
     assert _comparable(pg_row) == _comparable(duck_row)
+
+    # Whatever the write touched, it must not have left a clock empty on one
+    # engine and filled on the other — that asymmetry is the shape of the
+    # defect this file found.
+    if duck_row is not None:
+        for column in SELF_SET_CLOCKS:
+            assert (duck_row.get(column) is None) == (pg_row.get(column) is None), (
+                f"{column} is set on one engine and not the other"
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_created_user_gets_its_dates_on_both(both_engines, monkeypatch):
+    """The defect this file was written to catch.
+
+    DuckDB defaults `requested_at` and `created_at`; the new Postgres table did
+    not, and `create_user` passes neither. A person who first signed in while
+    the switch was on carried no request date at all — a blank on the admin
+    page, and a NULL in `COALESCE(reviewed_at, created_at)`, which is the clock
+    the daily comparison forgives a row in flight by.
+
+    The values themselves are two different `now()`s and are not compared;
+    what must match is that both are there.
+    """
+    store = both_engines
+    for user_id, engine in ((81, "duckdb"), (82, "postgres")):
+        if engine == "postgres":
+            monkeypatch.setenv("KS_USER_STORE", "postgres")
+        else:
+            monkeypatch.delenv("KS_USER_STORE", raising=False)
+        row = await store.create_user(user_id=user_id, username=f"u{user_id}")
+        assert row["requested_at"], f"{engine} left requested_at empty"
+        assert row["created_at"], f"{engine} left created_at empty"
+        assert row["status"] == "pending" and row["role"] == "viewer"
+    monkeypatch.delenv("KS_USER_STORE", raising=False)
 
 
 @pytest.mark.asyncio
