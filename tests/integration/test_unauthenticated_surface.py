@@ -44,6 +44,7 @@ TestClient is built WITHOUT the context-manager form so no startup event
 repository is public.
 """
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -111,6 +112,47 @@ def store(monkeypatch):
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _a_frontend_to_serve():
+    """Give the module a built frontend when the checkout has none.
+
+    `web/static-v2/` is Vite's output and is gitignored, so a fresh checkout
+    — CI, or a laptop that has not run `npm run build` — holds no `index.html`
+    and no bundle. Three tests here compare what the app serves against those
+    bytes, and the traversal class needs one real asset to prove the guard has
+    not cost the branch its purpose. A placeholder shell and a single asset
+    satisfy every assertion in this module. Where the real build exists,
+    nothing is written; on teardown only what was planted is removed.
+    """
+    planted: list[Path] = []
+    made_dirs: list[Path] = []
+
+    def plant(path: Path, content: bytes) -> None:
+        if path.exists():
+            return
+        if not path.parent.exists():
+            path.parent.mkdir(parents=True)
+            made_dirs.append(path.parent)
+        path.write_bytes(content)
+        planted.append(path)
+
+    plant(
+        STATIC_V2_DIR / "index.html",
+        b"<!doctype html><title>placeholder shell (test suite)</title>\n",
+    )
+    if not any((STATIC_V2_DIR / "assets").glob("*.js")):
+        plant(
+            STATIC_V2_DIR / "assets" / "placeholder.js",
+            b"// planted by tests/integration/test_unauthenticated_surface.py\n",
+        )
+    yield
+    for path in planted:
+        path.unlink(missing_ok=True)
+    for directory in reversed(made_dirs):
+        if directory != STATIC_V2_DIR and not any(directory.iterdir()):
+            directory.rmdir()
 
 
 @pytest.fixture(autouse=True)
@@ -447,11 +489,7 @@ class TestTheCatchAllCannotReadOutsideTheBuild:
 
     def test_a_real_asset_is_still_served(self, client, store):
         """The guard must not cost the branch its purpose."""
-        asset = next(
-            (p for p in (STATIC_V2_DIR / "assets").glob("*.js")), None
-        )
-        if asset is None:
-            pytest.skip("no built frontend in this checkout")
+        asset = next((STATIC_V2_DIR / "assets").glob("*.js"))
         response = client.get(f"/assets/{asset.name}", headers=_cookie_header())
         assert response.status_code == 200
         assert response.content == asset.read_bytes()
