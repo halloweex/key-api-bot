@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.134
+
+- Stop the write comparison from comparing two clocks
+- Two defects the gate found, one of them a nightly flake
+- Give the dashboard's user list a Postgres home
+
+
 ## 3.0.133
 
 - Say what no-cache actually costs here
