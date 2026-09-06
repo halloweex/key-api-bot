@@ -1524,8 +1524,25 @@ class CustomersMixin:
                     )
                 await tx.none(
                     "DELETE FROM {members} WHERE campaign = ?", [campaign])
-                await tx.none(
-                    "DELETE FROM {campaigns} WHERE campaign = ?", [campaign])
+                # The delete carries the check the SELECT above made. Under
+                # Postgres another connection can claim the campaign for
+                # sending between the two statements; a plain DELETE then
+                # removed the claimed row, the re-freeze left the campaign
+                # unclaimed while its old roster was being messaged, and a
+                # second send could take the new one. A claim that committed
+                # first makes this delete match nothing, and the whole
+                # re-freeze — members already deleted above — rolls back.
+                replaced = await tx.one(
+                    "DELETE FROM {campaigns} WHERE campaign = ? AND sent_at IS NULL "
+                    "RETURNING campaign",
+                    [campaign],
+                )
+                if replaced is None:
+                    raise ValueError(
+                        f"campaign {campaign!r} was claimed for sending while "
+                        f"being re-frozen — its roster is the control group and "
+                        f"cannot be rewritten"
+                    )
 
             await tx.none(
                 """
@@ -1606,11 +1623,23 @@ class CustomersMixin:
         if row is None:
             raise ValueError(f"campaign {campaign!r} is not frozen")
 
+        # A campaign the gateway sent carries its own send time, written by
+        # `record_sms_send` with the message ids. Overwriting it by hand moved
+        # the window every result is measured from; refusing here is what
+        # keeps "mark sent" for the campaign that left as a file, which is
+        # what it was built for.
         updated = await self._sms_run(
             "UPDATE {campaigns} SET sent_at = ? WHERE campaign = ? "
+            "AND NOT EXISTS (SELECT 1 FROM {members} m "
+            "                WHERE m.campaign = ? AND m.message_id IS NOT NULL) "
             "RETURNING sent_at",
-            [sent_at or datetime.now(), campaign], mode="one",
+            [sent_at or datetime.now(), campaign, campaign], mode="one",
         )
+        if updated is None:
+            raise ValueError(
+                f"campaign {campaign!r} was sent through the gateway; its send "
+                f"time was recorded by the send itself and is not set by hand"
+            )
         sent = updated[0] if updated else None
 
         return {
@@ -1858,20 +1887,27 @@ class CustomersMixin:
             # should have: an event id spent without its write, or a write
             # without its id spent, both leave the pair re-pointable — and the
             # pair never expires, because the scheme carries no nonce.
+            # Insert first, read second — never check-then-insert. Under
+            # Postgres two concurrent callbacks carrying one captured event id
+            # and two different message ids both read "not bound", one insert
+            # won, the other's ON CONFLICT DO NOTHING did nothing, and the
+            # loser went on to write its message anyway: the binding stopped
+            # the second *binding*, not the second *write*. Inserting first
+            # makes the loser's read see the winner's row and refuse.
+            #
+            # Bound even for a message id the roster does not know: an event
+            # spent against nothing must still be spent, or the pair stays
+            # re-pointable.
+            await tx.none(
+                "INSERT INTO {dlr_events} (event_id, message_id) VALUES (?, ?)"
+                " ON CONFLICT DO NOTHING",
+                [event_id, message_id],
+            )
             bound = await tx.one(
                 "SELECT message_id FROM {dlr_events} WHERE event_id = ?",
                 [event_id],
             )
-            if bound is None:
-                # Bound even for a message id the roster does not know: an event
-                # spent against nothing must still be spent, or the pair stays
-                # re-pointable.
-                await tx.none(
-                    "INSERT INTO {dlr_events} (event_id, message_id) VALUES (?, ?)"
-                    " ON CONFLICT DO NOTHING",
-                    [event_id, message_id],
-                )
-            elif bound[0] != message_id:
+            if bound is not None and bound[0] != message_id:
                 raise DlrEventRebound(event_id, bound[0], message_id)
 
             if delivered is True:

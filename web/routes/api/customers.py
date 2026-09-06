@@ -776,7 +776,8 @@ async def mark_sms_campaign_sent(
     try:
         result = await store.mark_sms_campaign_sent(campaign, parsed)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        status = 409 if "through the gateway" in str(e) else 404
+        raise HTTPException(status_code=status, detail=str(e))
 
     logger.info(
         "SMS campaign marked sent: user=%s campaign=%s at=%s",

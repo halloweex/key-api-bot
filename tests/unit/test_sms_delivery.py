@@ -639,3 +639,69 @@ async def test_a_complete_send_marks_nobody_as_unsent(tmp_path):
     assert summary["notSent"] == 0, "a refusal is an answer, not a silence"
 
     await store.close()
+
+
+# ─── the hand-written send time and the gateway's ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_marking_sent_by_hand_is_refused_once_the_gateway_sent_it(tmp_path):
+    """The send itself records the time results are measured from; a later
+    manual stamp moved the window, and the API called that a correction."""
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target")])
+    await store.get_sms_campaign_targets("aug")
+    await store.record_sms_send("aug", accepted={1: "mid-1"}, stoplisted=[],
+                                failed={}, sent_at=SENT)
+
+    with pytest.raises(ValueError, match="through the gateway"):
+        await store.mark_sms_campaign_sent("aug", None)
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_marking_sent_by_hand_still_works_for_a_campaign_that_left_as_a_file(tmp_path):
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target")])
+    first = await store.mark_sms_campaign_sent("aug", None)
+    second = await store.mark_sms_campaign_sent("aug", None)
+    assert first["previouslySentAt"] is None
+    assert second["previouslySentAt"] is not None, "date correction is still allowed"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_re_freeze_after_a_claim_is_refused_and_the_roster_survives(tmp_path):
+    store = await _make_store(tmp_path)
+    await _freeze(store, [_member(1, "target"), _member(2, "holdout")])
+    await store.get_sms_campaign_targets("aug")          # the claim
+
+    with pytest.raises(ValueError):
+        await store.freeze_sms_campaign(
+            campaign="aug", customers=[_member(3, "target")], criteria={},
+            ltv_basis="margin", sales_type="retail", holdout_pct=10, overwrite=True,
+        )
+    async with store.connection() as conn:
+        ids = sorted(r[0] for r in conn.execute(
+            "SELECT buyer_id FROM sms_campaign_members WHERE campaign='aug'").fetchall())
+    assert ids == [1, 2], "the claimed roster is the control group; it must not move"
+    await store.close()
+
+
+def test_the_binding_is_written_before_it_is_read():
+    """Check-then-insert let two concurrent callbacks with one captured event
+    id both read 'not bound'; the loser's write landed anyway."""
+    import inspect
+
+    from core.repositories.customers import CustomersMixin
+
+    src = inspect.getsource(CustomersMixin.record_sms_delivery)
+    assert src.index("INSERT INTO {dlr_events}") < src.index("SELECT message_id FROM {dlr_events}")
+
+
+def test_the_re_freeze_delete_carries_the_claim_check():
+    import inspect
+
+    from core.repositories.customers import CustomersMixin
+
+    src = inspect.getsource(CustomersMixin.freeze_sms_campaign)
+    assert "DELETE FROM {campaigns} WHERE campaign = ? AND sent_at IS NULL" in src
