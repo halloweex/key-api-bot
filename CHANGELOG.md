@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.128
+
+- Keep shipping the one SMS table KeyCRM still fills
+
+
 ## 3.0.127
 
 - Give the disk-resolve test the ledger stub its siblings already use
