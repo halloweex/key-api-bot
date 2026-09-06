@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.132
+
+- Mount nginx/ in the gate, where its new reader needs it
+- Stop a deploy from breaking the tabs that are already open
+
+
 ## 3.0.131
 
 - Send only the stock figures the page draws
