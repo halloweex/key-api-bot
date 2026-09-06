@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.131
+
+- Send only the stock figures the page draws
+
+
 ## 3.0.130
 
 - Stop serving a stock list nothing renders
