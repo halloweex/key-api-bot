@@ -2778,61 +2778,55 @@ class DuckDBStore(
             ).fetchall()
             existing: Dict[int, Any] = {int(r[0]): r[1] for r in existing_rows}
 
+            # Decide before writing anything. The decision is a pure function
+            # of `existing` and the payload, and knowing the set up front is
+            # what allows the line items to go in before the headers below.
             success_ids: List[int] = []
-            updated_ids: List[int] = []
+            to_write: List[tuple] = []  # (params, is_update)
             skipped_count = 0
-            failed: List[tuple] = []  # (order_id, error_str)
             for params in insert_rows:
                 order_id = int(params[0])
                 incoming_updated_at = params[7]  # tuple index matches insert_sql
-                existing_updated_at = existing.get(order_id) if order_id in existing else None
-
-                try:
-                    if order_id in existing:
-                        if not should_update_order(
-                            existing_updated_at, incoming_updated_at,
-                            force=force_update,
-                        ):
-                            # Identity write — same updated_at, nothing to do.
-                            # Counts toward success because the row IS in the
-                            # desired state (just not freshly written).
-                            success_ids.append(order_id)
-                            skipped_count += 1
-                            continue
-                        conn.execute(update_sql, [
-                            params[1], params[2], params[3], params[4], params[5],
-                            params[6], params[7], params[8], params[9], params[10],
-                            params[11],
-                            order_id,
-                        ])
-                        updated_ids.append(order_id)
-                    else:
-                        conn.execute(insert_sql, list(params))
-                        updated_ids.append(order_id)
+                if order_id in existing and not should_update_order(
+                    existing.get(order_id), incoming_updated_at, force=force_update,
+                ):
+                    # Identity write — same updated_at, nothing to do.
+                    # Counts toward success because the row IS in the
+                    # desired state (just not freshly written).
                     success_ids.append(order_id)
-                except (duckdb.TransactionException, duckdb.ConstraintException) as e:
-                    failed.append((order_id, str(e)))
-                    try:
-                        conn.execute("ROLLBACK")
-                    except Exception:
-                        pass
+                    skipped_count += 1
+                    continue
+                to_write.append((params, order_id in existing))
+            write_ids = [int(p[0]) for p, _ in to_write]
 
-            # 2. Delete stale products ONLY for rows we actually wrote.
-            # Skipped rows (skip-if-unchanged) keep their existing products
-            # untouched — their order_products are already correct because the
-            # order itself didn't change. This was the bulk of the 1440x churn.
-            # Failed rows likewise keep their existing products for consistency.
-            if not skip_products and updated_ids:
-                placeholders = ",".join("?" * len(updated_ids))
+            # 1. Line items FIRST, headers LAST. The header carries the
+            # `updated_at` the skip-decider compares against, so with this
+            # order every partial state — a kill between the products COMMIT
+            # and the header loop, a header row that fails — leaves the header
+            # OLD, and the next sync's decider sees a newer payload and writes
+            # the row again. The reverse order (headers first, as it was) made
+            # a kill between the two leave a header newer than its line items:
+            # the decider then skipped the row for good, the half-written
+            # repair could not see it (it has line items), and the daily
+            # reconciliation compares status and total only — a permanently
+            # wrong product/brand/category picture for that order. Line items
+            # for a header not yet written are invisible: every reader joins
+            # through `orders`.
+            #
+            # Only for rows we actually write. Skipped rows (skip-if-unchanged)
+            # keep their existing products untouched — their order_products
+            # are already correct because the order itself didn't change. This
+            # was the bulk of the 1440x churn.
+            if not skip_products and write_ids:
+                placeholders = ",".join("?" * len(write_ids))
                 conn.execute(
                     f"DELETE FROM order_products WHERE order_id IN ({placeholders})",
-                    updated_ids,
+                    write_ids,
                 )
 
-            # 3. Insert products for actually-updated orders only
-            if not skip_products and product_rows and updated_ids:
-                updated_set = set(updated_ids)
-                products_to_insert = [p for p in product_rows if p.order_id in updated_set]
+            if not skip_products and product_rows and write_ids:
+                write_set = set(write_ids)
+                products_to_insert = [p for p in product_rows if p.order_id in write_set]
                 if products_to_insert:
                     conn.execute("BEGIN TRANSACTION")
                     try:
@@ -2851,6 +2845,35 @@ class DuckDBStore(
                         except Exception:
                             pass
                         raise
+
+            # 2. Headers, one by one in autocommit with row-level fault
+            # isolation (see the DuckDB 1.5 note above). A row that fails here
+            # already has its new line items and its old header; that is the
+            # recoverable direction — the 24h sync buffer offers the order
+            # again and the decider writes it, because the stored `updated_at`
+            # is still the older one.
+            updated_ids: List[int] = []
+            failed: List[tuple] = []  # (order_id, error_str)
+            for params, is_update in to_write:
+                order_id = int(params[0])
+                try:
+                    if is_update:
+                        conn.execute(update_sql, [
+                            params[1], params[2], params[3], params[4], params[5],
+                            params[6], params[7], params[8], params[9], params[10],
+                            params[11],
+                            order_id,
+                        ])
+                    else:
+                        conn.execute(insert_sql, list(params))
+                    updated_ids.append(order_id)
+                    success_ids.append(order_id)
+                except (duckdb.TransactionException, duckdb.ConstraintException) as e:
+                    failed.append((order_id, str(e)))
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
 
             if failed:
                 sample = ", ".join(str(oid) for oid, _ in failed[:5])
