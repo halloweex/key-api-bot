@@ -30,7 +30,6 @@ from core.pg_sms import (
     DLR_COLUMNS,
     MEMBER_COLUMNS,
     MEMBER_STAMP,
-    OFFER_STOCK_COLUMNS,
     OPTOUT_COLUMNS,
     PRESET_COLUMNS,
     _coerce,
@@ -60,10 +59,6 @@ async def _store(tmp_path: Path) -> DuckDBStore:
 async def _seed(store) -> None:
     """One campaign of two members, plus a row in every other table."""
     async with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO offer_stocks (id, sku, price, purchased_price, "
-            " quantity, reserve) VALUES (11, 'SKU-11', 100.00, 40.00, 5, 1)"
-        )
         conn.execute(
             "INSERT INTO marketing_optouts "
             "(buyer_id, channel, phone, reason, source, opted_out_at) VALUES "
@@ -146,7 +141,6 @@ async def _duckdb_columns(store, table: str) -> set[str]:
 
 
 _PAIRS = (
-    ("bronze.offer_stocks", "offer_stocks", OFFER_STOCK_COLUMNS),
     ("app.marketing_optouts", "marketing_optouts", OPTOUT_COLUMNS),
     ("app.sms_audience_presets", "sms_audience_presets", PRESET_COLUMNS),
     ("app.sms_campaigns", "sms_campaigns", CAMPAIGN_COLUMNS),
@@ -280,8 +274,11 @@ class TestReads:
             async with store.connection() as conn:
                 out = read_full_replace(conn)
 
-            assert out["bronze.offer_stocks"] == [(11, "SKU-11", 100.00, 40.00, 5, 1)]
             assert len(out["app.sms_campaign_members"]) == 2
+            assert "bronze.offer_stocks" not in out, (
+                "offer_stocks ships with the operational tables now — see "
+                "TestNothingUnderTheGuardIsStillWritten"
+            )
             # Column order is the contract's, not the table's.
             campaign = out["app.sms_campaigns"][0]
             assert campaign[CAMPAIGN_COLUMNS.index("ltv_basis")] == "revenue"
@@ -345,7 +342,7 @@ class TestASourceTableThatIsNotThereYet:
             assert "app.marketing_optouts" not in out
             # and everything else still came back
             assert len(out["app.sms_campaign_members"]) == 2
-            assert out["bronze.offer_stocks"]
+            assert out["app.sms_campaigns"]
         finally:
             await store.close()
 
@@ -355,10 +352,10 @@ class TestASourceTableThatIsNotThereYet:
         try:
             async with store.connection() as conn:
                 present = source_tables(conn)
-            # The five that are in committed code; the sixth may or may not be.
-            for table in ("offer_stocks", "marketing_optouts",
-                          "sms_audience_presets", "sms_campaigns",
-                          "sms_campaign_members"):
+            # The four that are in committed code; `sms_dlr_events` may or
+            # may not be.
+            for table in ("marketing_optouts", "sms_audience_presets",
+                          "sms_campaigns", "sms_campaign_members"):
                 assert table in present
         finally:
             await store.close()
@@ -410,6 +407,39 @@ class TestGuards:
             assert out == {"skipped": "KS_PG_DSN is not set"}
         finally:
             await store.close()
+
+    def test_nothing_under_the_guard_is_still_written_by_duckdb(self):
+        """The guard above turns off the copy for the *whole module*, on the
+        premise that DuckDB has stopped being the writer. That premise is true
+        of SMS state and false of landing, and the difference is visible in the
+        schema: `app.*` is written by this application, `bronze.*` arrives from
+        KeyCRM on every sync no matter which store the SMS tab reads.
+
+        `bronze.offer_stocks` shipped here until 2026-09-06 and froze the
+        moment the flag went on — 892 rows of `purchased_price`, which is the
+        entire cost side of `ltv_basis=margin`, silently stuck at 08:00:53 with
+        `reconcile_sms` standing down on the same flag so nothing would report
+        it. It ships with `replicate_operational` now.
+        """
+        from core.pg_sms import DLR_TABLE, _FULL_REPLACE
+
+        for pg_table, dk_table, _columns, _order in _FULL_REPLACE + (
+            (DLR_TABLE, "sms_dlr_events", (), ""),
+        ):
+            assert pg_table.startswith("app."), (
+                f"{pg_table} is not application state, so DuckDB does not stop "
+                f"writing {dk_table} when KS_SMS_STORE=postgres — it will "
+                f"freeze here. Ship it from core/pg_operational.py instead."
+            )
+
+    def test_offer_stocks_left_and_landed_somewhere_that_keeps_shipping(self):
+        """The other half of the move: gone from here, present there. Asserted
+        together so a revert of one side cannot look tidy."""
+        from core.pg_operational import _FULL_REPLACE as OPERATIONAL
+        from core.pg_sms import _FULL_REPLACE as SMS
+
+        assert "offer_stocks" not in {dk for _pg, dk, _c, _o in SMS}
+        assert "bronze.offer_stocks" in {pg for pg, _dk, _c, _o in OPERATIONAL}
 
     def test_a_typo_in_the_store_variable_raises(self, monkeypatch):
         """`KS_BOT_STORE`'s rule. Six thousand names and phone numbers are read

@@ -94,6 +94,7 @@ from core.pg_bot_state import (
 from core.pg_operational import (
     INVENTORY_HISTORY_COLUMNS,
     MISS_COLUMNS,
+    OFFER_STOCK_COLUMNS,
     SKU_STATUS_COLUMNS,
 )
 from core.pg_replication import CLASSIFICATION_COLUMNS, MANAGER_COLUMNS
@@ -102,7 +103,6 @@ from core.pg_sms import (
     DLR_COLUMNS,
     MEMBER_COLUMNS,
     MEMBER_STAMP,
-    OFFER_STOCK_COLUMNS,
     OPTOUT_COLUMNS,
     PRESET_COLUMNS,
 )
@@ -1750,12 +1750,15 @@ async def reconcile_gold(
 # schedule instead of the data.
 OPERATIONAL_GRACE_MINUTES = 90
 
-# ── the three replaced whole ─────────────────────────────────────────────────
+# ── the four replaced whole ──────────────────────────────────────────────────
 #
-# `full_replace=True` on all three, and it is not a formality. The replicator
+# `full_replace=True` on all four, and it is not a formality. The replicator
 # writes every row it holds, so "in DuckDB and not in Postgres" has exactly one
 # meaning here: lost. There is no retired category to excuse it with, which is
-# the whole reason revision 0005 added the flag.
+# the whole reason revision 0005 added the flag. `offer_stocks` is the one
+# place that reads oddly — landing data usually earns the retired category —
+# but it is replaced whole like the rest, so the flag describes the shipping
+# shape correctly.
 
 # Imported, never restated. The replicator owns the column list because it is
 # the thing that writes it; a second copy here would compare a set of columns
@@ -1763,6 +1766,20 @@ OPERATIONAL_GRACE_MINUTES = 90
 # report clean while doing it.
 
 OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
+    # Landing, not irreplaceable — and compared here rather than with the SMS
+    # tables because `reconcile_sms` stands down on `KS_SMS_STORE=postgres`,
+    # which would leave the one table on that list DuckDB still writes with no
+    # comparison at all. See `core/pg_operational.py`.
+    MirroredTable(
+        pg_table="bronze.offer_stocks",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="offer_stocks",
+        columns=OFFER_STOCK_COLUMNS,
+        key_columns=("id",),
+        synced_column="synced_at",
+        numeric=("price", "purchased_price"),
+        full_replace=True,
+    ),
     MirroredTable(
         pg_table="app.order_backfill_misses",
         origin_note=_COPIED_FROM_DUCKDB,
@@ -1888,7 +1905,7 @@ async def reconcile_operational(
     max_samples: int = 10,
     max_buckets: int = 20,
 ) -> List[IntegrityIssue]:
-    """Compare the five irreplaceable tables, whole ones then fingerprinted ones.
+    """Compare the six replicated tables, whole ones then fingerprinted ones.
 
     Gated on `last_ok_at` per table, like Silver and Gold: the replicator either
     replaces a table whole or writes strictly above what Postgres holds, so the
@@ -1914,7 +1931,7 @@ async def reconcile_operational(
     await require_revision()
     watermarks = await fetch_watermarks(pool)
 
-    # ── the three read whole ──
+    # ── the four read whole ──
     async with store.connection() as conn:
         dk_side = read_duckdb_side(conn, OPERATIONAL_TABLES)
 
@@ -2153,9 +2170,12 @@ async def reconcile_bot_state(
 
 # ─── the SMS tab's state (revision 0013) ─────────────────────────────────────
 #
-# Six tables, all compared whole, and the reason none of them is fingerprinted
+# Five tables, all compared whole, and the reason none of them is fingerprinted
 # is size rather than principle: a campaign is capped at 5 000 recipients and
-# the roster tables are a few thousand rows between them. Fingerprinting exists
+# the roster tables are a few thousand rows between them. (Revision 0013's
+# sixth, `bronze.offer_stocks`, is compared with the operational tables — it is
+# the only one of the six DuckDB still writes after the switch, and this list
+# stops being compared at all then.) Fingerprinting exists
 # in this file for `stock_movements` and `inventory_sku_history`, where pulling
 # 143 274 rows out of both stores every morning is the thing being avoided.
 # When `sms_dlr_events` passes ~50 000 rows — roughly ten campaigns, since it
@@ -2163,22 +2183,12 @@ async def reconcile_bot_state(
 # `BucketedTable` alongside them.
 #
 # `full_replace` answers "what does a row DuckDB has and Postgres does not
-# *mean*", and for all six the answer is the same: lost. Five are replaced
+# *mean*", and for all five the answer is the same: lost. Four are replaced
 # whole every hour. `sms_dlr_events` ships above a watermark instead, but it is
 # append-only at the source — nothing ever deletes a binding — so a missing row
 # still cannot be a retirement. The flag is set for the meaning, not the
 # shipping shape.
 SMS_TABLES: Tuple[MirroredTable, ...] = (
-    MirroredTable(
-        pg_table="bronze.offer_stocks",
-        origin_note=_COPIED_FROM_DUCKDB,
-        dk_table="offer_stocks",
-        columns=OFFER_STOCK_COLUMNS,
-        key_columns=("id",),
-        synced_column="synced_at",
-        numeric=("price", "purchased_price"),
-        full_replace=True,
-    ),
     MirroredTable(
         pg_table="app.marketing_optouts",
         origin_note=_COPIED_FROM_DUCKDB,
@@ -2242,7 +2252,7 @@ async def reconcile_sms(
     grace_minutes: int = OPERATIONAL_GRACE_MINUTES,
     max_samples: int = 10,
 ) -> List[IntegrityIssue]:
-    """Compare the SMS tab's six tables between DuckDB and Postgres.
+    """Compare the SMS tab's five state tables between DuckDB and Postgres.
 
     Stands down once `KS_SMS_STORE=postgres`, and not because the comparison
     would be expensive: after the switch DuckDB is a frozen artefact, so every

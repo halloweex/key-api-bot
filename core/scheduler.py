@@ -882,11 +882,13 @@ class BackgroundScheduler:
                 store, lock=self._heavy_job_lock,
             )
             # The SMS tab's own state rides here for the same reason as the
-            # rest: one call site. Five of its six tables are irreplaceable —
-            # a frozen roster cannot be recomputed, because the eligible
-            # population moves every day — and the sixth carries the cost
-            # side of margin. Stands down on its own once
-            # KS_SMS_STORE=postgres makes DuckDB no longer the writer.
+            # rest: one call site. All five tables are irreplaceable — a
+            # frozen roster cannot be recomputed, because the eligible
+            # population moves every day. Stands down on its own once
+            # KS_SMS_STORE=postgres makes DuckDB no longer the writer, which
+            # is why `bronze.offer_stocks` is no longer among them: DuckDB
+            # keeps receiving it from KeyCRM, so it ships with the
+            # operational tables above.
             from core.pg_sms import replicate_sms
 
             result["sms_state"] = await replicate_sms(store)

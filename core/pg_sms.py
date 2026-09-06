@@ -1,13 +1,17 @@
 """The SMS tab's state, copied into Postgres.
 
-Revision 0013's six tables, filled. Five are REPLICATED in
+Five of revision 0013's six tables, filled. All five are REPLICATED in
 `core/pg_operational.py`'s sense — derived from state only DuckDB holds, with
 no payload to re-parse, so a second computation here would diverge the first
-time either side missed a tick. The sixth, `bronze.offer_stocks`, is landing
-data and would be a legitimate mirror; it is replicated anyway, for the lesson
-`update_manager_stats` taught at the cost of a daily CRITICAL: **one scheduled
-job and exactly one call site**. Hooking the write path is how the next write
-path gets forgotten.
+time either side missed a tick.
+
+The sixth, `bronze.offer_stocks`, shipped here until 2026-09-06 and now rides
+`replicate_operational` instead. It is landing data, and the guard below
+correctly stands this whole module down once Postgres becomes the writer — so
+a table DuckDB *keeps receiving from KeyCRM* froze the moment the flag went on,
+with the comparison standing down beside it. The rule that fell out of it:
+**nothing under this guard may be a table DuckDB still writes.** Pinned by a
+test, because the next table added here will look just as harmless.
 
 WHY THIS EXISTS AT ALL, GIVEN THAT POSTGRES IS MEANT TO BECOME THE WRITER
 
@@ -48,7 +52,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-OFFER_STOCKS_TABLE = "bronze.offer_stocks"
 OPTOUTS_TABLE = "app.marketing_optouts"
 PRESETS_TABLE = "app.sms_audience_presets"
 CAMPAIGNS_TABLE = "app.sms_campaigns"
@@ -58,10 +61,6 @@ DLR_TABLE = "app.sms_dlr_events"
 # The shared contract per table: the columns both stores hold and compare.
 # Bookkeeping is excluded by construction — DuckDB stamps `synced_at`,
 # Postgres `mirrored_at`, and two correct copies differ on those.
-OFFER_STOCK_COLUMNS: Tuple[str, ...] = (
-    "id", "sku", "price", "purchased_price", "quantity", "reserve",
-)
-
 OPTOUT_COLUMNS: Tuple[str, ...] = (
     "buyer_id", "channel", "phone", "reason", "source", "opted_out_at",
 )
@@ -91,11 +90,13 @@ MEMBER_STAMP = (
 )
 
 # (postgres table, duckdb table, columns, ORDER BY). Spelled out rather than
-# derived by stripping the schema: `bronze.offer_stocks` and `offer_stocks`
-# happen to agree, `app.marketing_optouts` and `marketing_optouts` too, but a
-# rule that guesses a table name is a rule that will guess wrong.
+# derived by stripping the schema: `app.marketing_optouts` and
+# `marketing_optouts` happen to agree, but a rule that guesses a table name is
+# a rule that will guess wrong.
+#
+# Every entry must be a table DuckDB stops writing when the guard below fires —
+# see the module docstring, and `test_nothing_under_the_guard_is_still_written`.
 _FULL_REPLACE: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
-    (OFFER_STOCKS_TABLE, "offer_stocks", OFFER_STOCK_COLUMNS, "id"),
     (OPTOUTS_TABLE, "marketing_optouts", OPTOUT_COLUMNS, "buyer_id, channel"),
     (PRESETS_TABLE, "sms_audience_presets", PRESET_COLUMNS, "name"),
     (CAMPAIGNS_TABLE, "sms_campaigns", CAMPAIGN_COLUMNS, "campaign"),
@@ -189,7 +190,7 @@ def read_dlr_appends(conn, since) -> List[tuple]:
 
 
 async def replicate_sms(store, *, full: bool = False) -> Dict[str, Any]:
-    """Copy all six tables from DuckDB to Postgres. Never raises.
+    """Copy the five SMS-state tables from DuckDB to Postgres. Never raises.
 
     `full=True` ignores the delivery-report watermark and re-ships the whole
     binding table. It is the repair path for a finding the daily comparison

@@ -1,9 +1,13 @@
-"""The five tables with no source to be rebuilt from.
+"""The five tables with no source to be rebuilt from — and the sixth that has one.
 
 Everything else Postgres holds is recoverable: `bronze.*` can be re-fetched
-from KeyCRM, Silver and Gold can be recomputed. These five cannot, so the tests
-below are about the two ways a copy of an irreplaceable thing goes wrong —
+from KeyCRM, Silver and Gold can be recomputed. Five of these cannot, so the
+tests below are about the two ways a copy of an irreplaceable thing goes wrong —
 shipping less than it should, and claiming to have shipped when it did not.
+
+`bronze.offer_stocks` is the exception and rides here for a reason that is not
+about irreplaceability at all; `TestOfferStocksSurvivesTheSmsSwitch` is where
+that is pinned.
 
 The append-only claim is load-bearing and is checked rather than trusted:
 `TestTheyReallyAreAppendOnly` parses the repository for an `UPDATE` or `DELETE`
@@ -15,6 +19,7 @@ from __future__ import annotations
 import ast
 import inspect
 import re
+import textwrap
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -33,6 +38,8 @@ from core.mirror_reconciliation import (
 from core.pg_operational import (
     INVENTORY_HISTORY_COLUMNS,
     MISS_COLUMNS,
+    OFFER_STOCK_COLUMNS,
+    OFFER_STOCKS_TABLE,
     MOVEMENT_COLUMNS,
     MOVEMENTS_TABLE,
     SKU_HISTORY_COLUMNS,
@@ -61,6 +68,10 @@ async def _store(tmp_path: Path) -> DuckDBStore:
 async def _seed(store):
     """One row in each small table, three days of snapshots, four movements."""
     async with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO offer_stocks (id, sku, price, purchased_price, "
+            " quantity, reserve) VALUES (11, 'SKU-11', 100.00, 40.00, 5, 1)"
+        )
         conn.execute(
             "INSERT INTO order_backfill_misses (order_id, checked_at, reason) "
             "VALUES (7, TIMESTAMP '2026-08-01 10:00:00+00', 'not found')"
@@ -94,6 +105,26 @@ async def _seed(store):
                 f"VALUES (11, 3, 'stock_out', {60 - movement}, {59 - movement}, "
                 "-1, 0, 0)"
             )
+
+
+def _code_only(obj) -> str:
+    """`obj`'s source with comments and docstrings removed.
+
+    A grep over source is satisfied by prose that merely mentions the thing —
+    six defects in this repository were hidden or invented that way. `ast`
+    parses, `ast.unparse` re-renders without comments, and the docstrings are
+    popped explicitly because they are real string nodes.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(obj)))
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        first = body[0]
+        if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            body.pop(0)
+    return ast.unparse(tree)
 
 
 def _migration_columns(table: str) -> list[str]:
@@ -185,12 +216,13 @@ class TestTheyReallyAreAppendOnly:
 
 class TestReadingTheDuckDBSide:
     @pytest.mark.asyncio
-    async def test_the_three_small_tables_come_back_whole(self, tmp_path):
+    async def test_the_four_small_tables_come_back_whole(self, tmp_path):
         store = await _store(tmp_path)
         try:
             await _seed(store)
             async with store.connection() as conn:
                 out = read_full_replace(conn)
+            assert len(out[OFFER_STOCKS_TABLE]) == 1
             assert len(out["app.order_backfill_misses"]) == 1
             assert len(out["app.inventory_history"]) == 3
             assert len(out["app.sku_inventory_status"]) == 1
@@ -313,11 +345,106 @@ class TestItNeverRaises:
         )
 
 
+# ── the sixth table, and why it is here ──────────────────────────────────────
+
+
+class TestOfferStocksSurvivesTheSmsSwitch:
+    """`bronze.offer_stocks` is landing data on a list of irreplaceable ones.
+
+    It shipped inside `replicate_sms` until 2026-09-06, which was reasonable
+    while the SMS tab was its only Postgres reader. Then `KS_SMS_STORE=postgres`
+    made DuckDB no longer the writer of the SMS *state*, `replicate_sms`
+    correctly stood down as a whole — and took with it a table KeyCRM keeps
+    filling. It froze at 08:00:53 that morning; `reconcile_sms` stands down on
+    the same flag, so the drift would never have been reported. The tab would
+    have gone on computing margin from an ever-older `purchased_price`, with
+    new SKUs missing and their COGS therefore zero.
+
+    These tests are the two halves of "it cannot happen here": the table is
+    shipped and compared on this path, and this path has no writer-side switch
+    to stand down on.
+    """
+
+    def test_it_is_shipped_by_the_operational_replicator(self):
+        from core.pg_operational import _FULL_REPLACE
+
+        entry = next(
+            e for e in _FULL_REPLACE if e[0] == OFFER_STOCKS_TABLE
+        )
+        assert entry[1] == "offer_stocks"
+        assert entry[2] == OFFER_STOCK_COLUMNS
+
+    def test_it_is_compared_by_the_operational_reconciliation(self):
+        spec = next(
+            s for s in OPERATIONAL_TABLES if s.pg_table == OFFER_STOCKS_TABLE
+        )
+        assert spec.full_replace and spec.synced_column == "synced_at"
+        # The money columns are DECIMAL on one side and NUMERIC on the other.
+        assert set(spec.numeric) == {"price", "purchased_price"}
+
+    def test_this_path_has_no_writer_switch_to_stand_down_on(self):
+        """The actual defect was a guard with a wider blast radius than its
+        premise, so what is asserted is the *absence* of that check from these
+        two functions.
+
+        Over the code, never over the text: the first version of this test read
+        the raw source and failed on the paragraph above explaining the move —
+        [[feedback_assert_on_structure_not_prose]] scoring against its own
+        test. `ast.unparse` drops comments, and the docstrings are popped, so
+        what is left is what runs.
+        """
+        from core import pg_operational
+        from core.mirror_reconciliation import reconcile_operational
+
+        for obj in (pg_operational, reconcile_operational):
+            code = _code_only(obj)
+            assert "KS_SMS_STORE" not in code
+            assert "sms_store_is_postgres" not in code
+
+    @pytest.mark.asyncio
+    async def test_the_flag_does_not_stop_it_being_read(self, tmp_path, monkeypatch):
+        """The behaviour, not the wiring: with the switch on, the rows still
+        come back to be shipped."""
+        monkeypatch.setenv("KS_SMS_STORE", "postgres")
+        store = await _store(tmp_path)
+        try:
+            await _seed(store)
+            async with store.connection() as conn:
+                out = read_full_replace(conn)
+            assert out[OFFER_STOCKS_TABLE] == [(11, "SKU-11", 100.00, 40.00, 5, 1)]
+        finally:
+            await store.close()
+
+    def test_the_migration_that_declared_it_still_declares_it(self):
+        """It lives in 0013 with the SMS tables, not in 0008 with these — the
+        code moved and the schema did not, which is correct and confusing
+        enough to write down."""
+        ddl = (REPO / "migrations" / "versions" / "0013_sms_state.py").read_text(
+            encoding="utf-8",
+        )
+        body = ddl.split("CREATE TABLE bronze.offer_stocks (", 1)[1]
+        declared = []
+        for raw in body.splitlines():
+            line = raw.split("--")[0].strip()
+            if not line or line.startswith("PRIMARY KEY"):
+                continue
+            if line.startswith(")"):
+                break
+            match = re.match(
+                r"^([a-z_]+)\s+(TEXT|INTEGER|NUMERIC|TIMESTAMPTZ)", line,
+            )
+            if match:
+                declared.append(match.group(1))
+        assert set(OFFER_STOCK_COLUMNS) <= set(declared), (
+            set(OFFER_STOCK_COLUMNS) - set(declared)
+        )
+
+
 # ── the comparison ───────────────────────────────────────────────────────────
 
 
 class TestTheComparisonSpecs:
-    def test_all_three_whole_tables_are_full_replace(self):
+    def test_all_four_whole_tables_are_full_replace(self):
         """The replicator writes every row it holds, so "in DuckDB and not in
         Postgres" has one meaning: lost. There is no retired category to excuse
         it with."""
@@ -338,6 +465,7 @@ class TestTheComparisonSpecs:
         """Two lists a file apart. If the shipper gains a column the comparison
         does not read, the column is copied and never checked."""
         shipped = {
+            "bronze.offer_stocks": set(OFFER_STOCK_COLUMNS),
             "app.order_backfill_misses": set(MISS_COLUMNS),
             "app.inventory_history": set(INVENTORY_HISTORY_COLUMNS),
             "app.sku_inventory_status": set(SKU_STATUS_COLUMNS),
