@@ -208,6 +208,12 @@ async def rebuild_silver_from_scratch(
         max_date = conn.execute("SELECT MAX(order_date) FROM silver_orders").fetchone()[0]
 
     logger.info(f"Rebuilt silver_orders from scratch: {count} rows, max_date={max_date}")
+    # DROP/CREATE/INSERT are autocommit statements on purpose (this endpoint
+    # exists to bypass the transactional path when Silver is already
+    # misbehaving), so an INSERT that dies leaves Silver empty. Marking dirty
+    # hands the result to the next refresh tick, which validates it and, if it
+    # is half-done, rebuilds it.
+    await store.mark_warehouse_dirty(None)
     return {"status": "ok", "silver_rows": count, "max_order_date": str(max_date)}
 
 

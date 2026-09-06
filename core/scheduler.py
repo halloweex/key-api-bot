@@ -1048,8 +1048,19 @@ class BackgroundScheduler:
             from core.duckdb_store import get_store
             store = await get_store()
 
-            is_dirty, changed_ids = await store.consume_warehouse_dirty()
+            # Peek, work, then clear — not consume-then-work. A kill or a
+            # shutdown cancellation between the two used to lose the ids: the
+            # next sync found the same rows unchanged and never re-marked
+            # them. The clear is keyed on the row's stamp, so a marker that
+            # landed during the refresh keeps the flag and the next tick
+            # redoes the union.
+            is_dirty, changed_ids, marked_at = await store.peek_warehouse_dirty()
             if not is_dirty:
+                if BackgroundScheduler._pg_layers_pending:
+                    # A Postgres rebuild the floor deferred, with no new dirty
+                    # tick to carry it. Respects the floor itself.
+                    await self._rebuild_postgres_layers({"status": "success"})
+                    return {"skipped": True, "reason": "not dirty", "pg_layers": "deferred"}
                 return {"skipped": True, "reason": "not dirty"}
 
             with correlation_context() as corr_id:
@@ -1058,6 +1069,12 @@ class BackgroundScheduler:
                     trigger="dirty_flag",
                     changed_order_ids=changed_ids,
                 )
+                # Regardless of status: the refresh's own error paths re-mark
+                # the flag when a retry is wanted (which bumps the stamp and
+                # makes this a no-op), and stay silent once the retry bound is
+                # spent — exactly the two outcomes consume-then-do produced,
+                # minus the lost ids on a kill.
+                await store.clear_warehouse_dirty(marked_at)
                 logger.info("Warehouse refresh complete")
                 # Step 05. Postgres computes the same Silver from its own
                 # landing. Outside every `store.connection()` block — the
@@ -1082,6 +1099,12 @@ class BackgroundScheduler:
     # ten minutes — on this laptop the origin is machine uptime and the bug was
     # invisible, on a CI runner it fired immediately.
     _pg_silver_last_at = None
+    # A rebuild the floor turned away. The dirty flag was already consumed by
+    # the tick that asked, so without this the change reached Postgres only
+    # with the *next* dirty tick past the floor — on a quiet night, hours
+    # later, while `KS_READ_GOLD=postgres` served the older Gold and the
+    # 07:30 comparison filed the gap as a CRITICAL about the data.
+    _pg_layers_pending = False
 
     async def _rebuild_postgres_layers(self, refresh_result) -> None:
         """Recompute `silver.orders`, then `gold.daily_revenue`. Never raises.
@@ -1117,14 +1140,28 @@ class BackgroundScheduler:
             now = time.monotonic()
             last = BackgroundScheduler._pg_silver_last_at
             if last is not None and now - last < floor:
+                # Deferred, not dropped: the refresh job runs it on the first
+                # tick past the floor even when nothing new is dirty.
+                BackgroundScheduler._pg_layers_pending = True
                 return
-            BackgroundScheduler._pg_silver_last_at = now
 
             from core.pg_gold import rebuild_gold
             from core.pg_silver import PG_LAYER_LOCK, rebuild_silver
 
-            async with PG_LAYER_LOCK:
-                await self._rebuild_pg_layers(rebuild_silver, rebuild_gold)
+            # Owed until it succeeds: a rebuild that raises stays pending and
+            # is retried on the first tick past the floor, whether or not a new
+            # dirty tick arrives.
+            BackgroundScheduler._pg_layers_pending = True
+            try:
+                async with PG_LAYER_LOCK:
+                    await self._rebuild_pg_layers(rebuild_silver, rebuild_gold)
+                BackgroundScheduler._pg_layers_pending = False
+            finally:
+                # Stamped after the attempt, not before it: a rebuild that
+                # raised leaves `_pg_layers_pending` set, so it is retried on
+                # the first tick past the floor rather than on the next dirty
+                # tick past the floor.
+                BackgroundScheduler._pg_silver_last_at = time.monotonic()
         except Exception as e:
             # ERROR, not DEBUG. A mirror that fails quietly is the 2026-08-09
             # shape, and the watermark it did not move is what Reconciliation A

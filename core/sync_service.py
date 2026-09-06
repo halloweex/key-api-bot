@@ -805,6 +805,19 @@ class SyncService:
                 )
                 stats["orders"] = order_count
                 stats["expenses"] = expense_count
+                # Mark warehouse dirty only for orders that actually changed
+                # (separate job handles refresh), and mark it HERE, adjacent to
+                # the write. It used to happen at the end of the tick, after
+                # the hourly catalogue/manager/buyer/stock branches — so a 429
+                # on the products page skipped the mark and the orders just
+                # written stayed out of Silver/Gold until the 05:15 refresh.
+                #
+                # This used to key off stats["orders"], which counts a row
+                # already in the desired state as a success — so it was ~200
+                # every cycle forever and the warehouse was permanently dirty.
+                # Nothing changing now means nothing to rebuild.
+                if changed_ids:
+                    await self.store.mark_warehouse_dirty(changed_ids)
                 # Use max(updated_at) from SOURCE data, not now()
                 max_updated = _get_max_updated_at(orders)
                 # Guard against checkpoint rollback — never go backward
@@ -871,16 +884,6 @@ class SyncService:
 
                 # Emit inventory updated event
                 await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
-
-            # Mark warehouse dirty only for orders that actually changed
-            # (separate job handles refresh).
-            #
-            # This used to key off stats["orders"], which counts a row already in
-            # the desired state as a success — so it was ~200 every cycle forever
-            # and the warehouse was permanently dirty. Nothing changing now means
-            # nothing to rebuild.
-            if changed_ids:
-                await self.store.mark_warehouse_dirty(changed_ids)
 
             # Silver reads only `orders`, but Gold joins products and categories,
             # so a renamed product or a re-parented category changes gold rows

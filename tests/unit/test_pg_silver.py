@@ -164,6 +164,45 @@ class TestTheRefreshHook:
         assert rebuild.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_a_rebuild_the_floor_turned_away_is_deferred_not_dropped(self, monkeypatch):
+        """The dirty flag was consumed by the tick that asked, so without this
+        the change reached Postgres only with the next dirty tick past the
+        floor — hours, on a quiet night."""
+        import time
+
+        from core.scheduler import BackgroundScheduler
+
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "600")
+        scheduler = self._scheduler()
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_vitrina.rebuild_customer_profile", new=AsyncMock(return_value={})), \
+             patch("core.pg_silver.rebuild_silver",
+                   new=AsyncMock(return_value={"rows": 1})) as rebuild:
+            await scheduler._rebuild_postgres_layers({"status": "success"})
+            await scheduler._rebuild_postgres_layers({"status": "success"})
+            assert BackgroundScheduler._pg_layers_pending is True
+            BackgroundScheduler._pg_silver_last_at = time.monotonic() - 601
+            await scheduler._rebuild_postgres_layers({"status": "success"})
+        assert rebuild.await_count == 2
+        assert BackgroundScheduler._pg_layers_pending is False
+
+    @pytest.mark.asyncio
+    async def test_a_failed_rebuild_stays_pending_and_still_pays_the_floor(self, monkeypatch):
+        from core.scheduler import BackgroundScheduler
+
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "600")
+        scheduler = self._scheduler()
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_vitrina.rebuild_customer_profile", new=AsyncMock(return_value={})), \
+             patch("core.pg_silver.rebuild_silver",
+                   side_effect=RuntimeError("postgres is down")) as rebuild:
+            await scheduler._rebuild_postgres_layers({"status": "success"})
+            await scheduler._rebuild_postgres_layers({"status": "success"})
+        assert rebuild.await_count == 1, "the floor still applies after a failure"
+        assert BackgroundScheduler._pg_layers_pending is True
+        BackgroundScheduler._pg_layers_pending = False
+
+    @pytest.mark.asyncio
     async def test_a_postgres_fault_cannot_break_the_refresh(self, monkeypatch):
         """Rule 8: DuckDB is what the business looks at."""
         monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
@@ -189,6 +228,9 @@ class TestTheRefreshHook:
         # Position, not presence: the call's own comment names
         # `store.connection()` as the thing it stays outside of, so a grep for
         # that string matches the explanation. Sixth time in two days.
-        assert source.index("refresh_warehouse_layers") < source.index(
+        # `rindex`: the job also runs a *deferred* Postgres rebuild on a quiet
+        # tick, before any refresh in source order; that call is outside the
+        # store lock too (the job never opens `store.connection()` itself).
+        assert source.index("refresh_warehouse_layers") < source.rindex(
             "await self._rebuild_postgres_layers"
         )

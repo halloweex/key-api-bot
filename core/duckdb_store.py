@@ -2385,8 +2385,61 @@ class DuckDBStore(
             )
             return True
 
+    async def peek_warehouse_dirty(self) -> tuple[bool, list[int] | None, Any]:
+        """Read the dirty flag without clearing it.
+
+        Returns (is_dirty, changed_ids_or_None, marked_at). `marked_at` is the
+        row's `updated_at`, which every `mark_*` bumps; hand it back to
+        `clear_warehouse_dirty` once the work is done, and a marker that landed
+        in between makes the clear a no-op so the next tick redoes the union.
+
+        The refresh job used to *consume* the flag first and work second, so a
+        kill or a shutdown cancellation mid-refresh lost the ids for good: the
+        next sync found the same Bronze rows unchanged and never re-marked
+        them, and nothing rebuilt Silver/Gold for that batch until the 05:15
+        refresh happened to cover it.
+        """
+        import json
+        async with self.connection() as conn:
+            result = conn.execute(
+                "SELECT value, updated_at FROM sync_metadata WHERE key = 'warehouse_dirty'"
+            ).fetchone()
+            if not result or not result[0]:
+                return False, None, None
+            value, marked_at = result
+            if value == "full":
+                return True, None, marked_at
+            return True, json.loads(value), marked_at
+
+    async def clear_warehouse_dirty(self, marked_at: Any) -> bool:
+        """Clear the flag `peek_warehouse_dirty` returned — and only that one.
+
+        Conditioned on the stamp, so ids merged in during the refresh survive
+        to the next tick. Returns whether anything was cleared.
+        """
+        if marked_at is None:
+            return False
+        async with self.connection() as conn:
+            before = conn.execute(
+                "SELECT COUNT(*) FROM sync_metadata "
+                "WHERE key = 'warehouse_dirty' AND updated_at = ?",
+                [marked_at],
+            ).fetchone()[0]
+            if not before:
+                return False
+            conn.execute(
+                "DELETE FROM sync_metadata WHERE key = 'warehouse_dirty' AND updated_at = ?",
+                [marked_at],
+            )
+            return True
+
     async def consume_warehouse_dirty(self) -> tuple[bool, list[int] | None]:
-        """Atomically read and clear the dirty flag. Returns (is_dirty, changed_ids_or_None)."""
+        """Atomically read and clear the dirty flag. Returns (is_dirty, changed_ids_or_None).
+
+        Consume-then-do. The refresh job no longer uses it (see
+        `peek_warehouse_dirty`); it stays for callers that want the flag gone
+        regardless of what happens next.
+        """
         import json
         async with self.connection() as conn:
             result = conn.execute(
