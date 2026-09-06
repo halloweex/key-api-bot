@@ -374,13 +374,15 @@ class InventoryMixin:
         rebuild put fresh headline numbers above stale rows, with nothing on
         screen saying so.
 
-        THERE IS NO `outOfStock` LIST, AND THAT IS DELIBERATE
+        THE RESPONSE IS EXACTLY WHAT THE PAGE RENDERS
 
-        The response carried one — its own query, twenty rows joined three
-        ways — and no component ever read it; `outOfStockCount`, the number on
-        the card, is the only out-of-stock figure the page renders. It was
-        dropped rather than ported, because making dead payload work on a
-        second engine is a cost with no reader at the end of it.
+        It used to be more. An `outOfStock` list — its own query, twenty rows
+        joined three ways — that no component ever read, and four summary
+        fields in the same state: `totalOffers`, `averageQuantity`, `costValue`
+        and `reserveCostValue`. The last two were not even declared in the
+        frontend's `StockSummaryResponse`, which is how they went unnoticed
+        while being computed on every request. `outOfStockCount`, the number
+        on the card, is the only out-of-stock figure the page shows.
 
         THE `sku` OF AN OFFER THAT HAS NONE
 
@@ -392,9 +394,13 @@ class InventoryMixin:
         113 offers have a real SKU equal to their own id, so `NULLIF` would
         blank 113 to recover 7.
         """
+        # Every column here is rendered. `total_offers`, the two cost sums and
+        # the average *quantity* used to ride along and reach no component —
+        # two of them were not even declared in the frontend's type, which is
+        # how they stayed invisible. `tests/unit/test_stock_summary_contract.py`
+        # now compares the two sides so a field cannot go dead quietly again.
         stats_sql = """
             SELECT
-                COUNT(*)                                              AS total_offers,
                 COUNT(*) FILTER (WHERE quantity > 0)                  AS in_stock,
                 COUNT(*) FILTER (WHERE quantity = 0)                  AS out_of_stock,
                 COUNT(*) FILTER (WHERE quantity > 0
@@ -406,9 +412,6 @@ class InventoryMixin:
                 SUM(reserve)                                          AS total_reserve,
                 SUM(GREATEST(0, quantity - reserve) * price)          AS available_value,
                 SUM(reserve * price)                                  AS reserve_value,
-                SUM(GREATEST(0, quantity - reserve)
-                    * COALESCE(purchased_price, 0))                   AS available_cost,
-                SUM(reserve * COALESCE(purchased_price, 0))           AS reserve_cost,
                 -- The freshness of the rows on screen, and the reason it is
                 -- read from the data rather than from a sync log: every
                 -- rebuild stamps one value across the whole table, and it is
@@ -462,18 +465,25 @@ class InventoryMixin:
                 (avg_sql, []),
             ])
         )
-        stats = stats_rows[0]
+        # Unpacked rather than indexed. Dropping two columns from the SELECT
+        # above silently renumbered every index after them, and a shifted
+        # index is a wrong number on a dashboard rather than an error. A wrong
+        # arity here raises on the spot. (`low_stock` is already the list, so
+        # the counts are suffixed rather than shadowing it.)
+        (in_stock_count, out_of_stock_count, low_stock_count, available_qty,
+         total_reserve, available_value, reserve_value,
+         snapshot_at) = stats_rows[0]
         avg_inv = avg_rows[0] if avg_rows else None
 
         # Average inventory over the period, or the current snapshot when the
         # history has no usable pair yet.
+        # The gate stays on the two quantities even though only the value is
+        # reported: they are what says the history holds a usable pair.
         if avg_inv and avg_inv[0] and avg_inv[2]:
-            avg_quantity = (avg_inv[0] + avg_inv[2]) / 2
             avg_value = ((avg_inv[1] or 0) + (avg_inv[3] or 0)) / 2
             avg_data_points = avg_inv[4]
         else:
-            avg_quantity = stats[4] or 0
-            avg_value = float(stats[6] or 0)
+            avg_value = float(available_value or 0)
             avg_data_points = 0
 
         # Normalised to UTC before it becomes a string, and this is not
@@ -483,7 +493,6 @@ class InventoryMixin:
         # different strings for it, which is the shape of the ClickHouse
         # cohort defect of 2026-08-31. A naive value is read as UTC, the
         # convention `CURRENT_TIMESTAMP` writes it in.
-        snapshot_at = stats[10]
         if snapshot_at is not None:
             if snapshot_at.tzinfo is None:
                 snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
@@ -491,17 +500,13 @@ class InventoryMixin:
 
         return {
             "summary": {
-                "totalOffers": stats[0] or 0,
-                "inStockCount": stats[1] or 0,
-                "outOfStockCount": stats[2] or 0,
-                "lowStockCount": stats[3] or 0,
-                "totalQuantity": stats[4] or 0,
-                "totalReserve": stats[5] or 0,
-                "totalValue": float(stats[6] or 0),        # sale price
-                "reserveValue": float(stats[7] or 0),      # sale price
-                "costValue": float(stats[8] or 0),         # purchase price
-                "reserveCostValue": float(stats[9] or 0),  # purchase price
-                "averageQuantity": round(avg_quantity),
+                "inStockCount": in_stock_count or 0,
+                "outOfStockCount": out_of_stock_count or 0,
+                "lowStockCount": low_stock_count or 0,
+                "totalQuantity": available_qty or 0,
+                "totalReserve": total_reserve or 0,
+                "totalValue": float(available_value or 0),   # sale price
+                "reserveValue": float(reserve_value or 0),   # sale price
                 "averageValue": round(avg_value, 2),
                 "avgDataPoints": avg_data_points,
             },

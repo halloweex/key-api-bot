@@ -409,7 +409,6 @@ export interface StockItem {
 
 export interface StockSummaryResponse {
   summary: {
-    totalOffers: number
     inStockCount: number
     outOfStockCount: number
     lowStockCount: number
@@ -417,7 +416,6 @@ export interface StockSummaryResponse {
     totalReserve: number
     totalValue: number
     reserveValue: number
-    averageQuantity: number
     averageValue: number
     avgDataPoints: number
   }
