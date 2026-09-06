@@ -184,8 +184,16 @@ class TestEmitterWiring:
                         "db_size_mb": 2480, "disk_pct_used": pct,
                         "disk_free_gb": free}
 
+            # `_archived()` like every other test here that resolves for
+            # real. Without it this reaches the actual ledger, and
+            # `write_resolved_now` gives a pool it must *create* a one-second
+            # budget: alone on a quiet host that is enough, but inside the
+            # full suite on the deploy gate's box it is not, the write fails,
+            # and the resolution is held back exactly as designed — so the
+            # test failed on behaviour that was working.
             with patch("core.duckdb_store.get_store",
                        AsyncMock(return_value=store)), \
+                 _archived(), \
                  patch("bot.main.send_admin_message",
                        new=AsyncMock(return_value=2)) as send:
                 with patch("core.disk_monitor.sample_disk_state",
