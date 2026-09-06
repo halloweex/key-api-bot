@@ -3604,29 +3604,44 @@ class DuckDBStore(
             effective_from = datetime.now(ZoneInfo(DISPLAY_TIMEZONE)).date()
 
         async with self.connection() as conn:
-            # An interval already starting on this date is replaced, not
-            # stacked: two rows with the same valid_from would make the
-            # resolution ambiguous, and the PK would reject the second anyway.
-            conn.execute(
-                "DELETE FROM manager_classifications "
-                "WHERE manager_id = ? AND valid_from = ?",
-                [manager_id, effective_from],
-            )
-            conn.execute(
-                "UPDATE manager_classifications SET valid_to = ? "
-                "WHERE manager_id = ? AND valid_to IS NULL AND valid_from < ?",
-                [effective_from, manager_id, effective_from],
-            )
-            conn.execute(
-                "INSERT INTO manager_classifications "
-                "(manager_id, is_retail, valid_from, valid_to, set_by, note) "
-                "VALUES (?, ?, ?, NULL, ?, ?)",
-                [manager_id, is_retail, effective_from, set_by, note],
-            )
-            conn.execute(
-                "UPDATE managers SET is_retail = ? WHERE id = ?",
-                [is_retail, manager_id]
-            )
+            # One transaction. As four autocommit statements, a failure between
+            # closing the open interval and opening the new one left the
+            # manager with no open interval at all: every order from
+            # `effective_from` on resolved to `internal`, the decision an admin
+            # had just made silently did not take, and the replica carried the
+            # torn state to Postgres so the two stores agreed on it.
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                # An interval already starting on this date is replaced, not
+                # stacked: two rows with the same valid_from would make the
+                # resolution ambiguous, and the PK would reject the second anyway.
+                conn.execute(
+                    "DELETE FROM manager_classifications "
+                    "WHERE manager_id = ? AND valid_from = ?",
+                    [manager_id, effective_from],
+                )
+                conn.execute(
+                    "UPDATE manager_classifications SET valid_to = ? "
+                    "WHERE manager_id = ? AND valid_to IS NULL AND valid_from < ?",
+                    [effective_from, manager_id, effective_from],
+                )
+                conn.execute(
+                    "INSERT INTO manager_classifications "
+                    "(manager_id, is_retail, valid_from, valid_to, set_by, note) "
+                    "VALUES (?, ?, ?, NULL, ?, ?)",
+                    [manager_id, is_retail, effective_from, set_by, note],
+                )
+                conn.execute(
+                    "UPDATE managers SET is_retail = ? WHERE id = ?",
+                    [is_retail, manager_id]
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
             logger.info(
                 f"Manager {manager_id} retail status set to {is_retail} "
                 f"from {effective_from}"

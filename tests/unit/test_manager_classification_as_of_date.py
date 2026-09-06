@@ -196,3 +196,49 @@ class TestConsumersReadTheStoredAnswer:
             assert store._build_sales_type_filter("all") == "1=1"
         finally:
             await store.close()
+
+
+class TestTheClassificationWriteIsAllOrNothing:
+    """Four autocommit statements used to be able to close the open interval
+    and then fail to open the new one, leaving a manager with no open interval:
+    every order from that day on resolved to `internal`, and the admin's
+    decision silently did not take. The failure is injected for real — a value
+    DuckDB cannot store as BOOLEAN dies on the INSERT, after the UPDATE."""
+
+    @pytest.mark.asyncio
+    async def test_a_failed_write_leaves_the_open_interval_open(self, tmp_path):
+        store = await _make_store(tmp_path)
+        try:
+            await store.upsert_managers([_api_manager(UNLISTED)])
+            first = date(2026, 1, 1)
+            await store.set_manager_retail_status(UNLISTED, True, effective_from=first)
+
+            with pytest.raises(Exception):
+                await store.set_manager_retail_status(
+                    UNLISTED, "not-a-bool", effective_from=date(2026, 6, 1),
+                )
+
+            async with store.connection() as conn:
+                rows = conn.execute(
+                    "SELECT valid_from, valid_to, is_retail FROM manager_classifications "
+                    "WHERE manager_id = ? ORDER BY valid_from", [UNLISTED],
+                ).fetchall()
+                is_retail = conn.execute(
+                    "SELECT is_retail FROM managers WHERE id = ?", [UNLISTED],
+                ).fetchone()[0]
+
+            open_intervals = [r for r in rows if r[1] is None]
+            assert open_intervals == [(first, None, True)], rows
+            assert not any(r[0] == date(2026, 6, 1) for r in rows)
+            assert is_retail is True, "managers.is_retail must not move on a failed write"
+
+            # The next, valid write still works on the same connection.
+            await store.set_manager_retail_status(UNLISTED, False, effective_from=date(2026, 6, 1))
+            async with store.connection() as conn:
+                open_now = conn.execute(
+                    "SELECT valid_from, is_retail FROM manager_classifications "
+                    "WHERE manager_id = ? AND valid_to IS NULL", [UNLISTED],
+                ).fetchall()
+            assert open_now == [(date(2026, 6, 1), False)]
+        finally:
+            await store.close()
