@@ -140,19 +140,30 @@ async def escalate_due(
 
         text = format_escalation(due)
 
+        # Recorded first, whatever the delivery outcome, and awaited: the
+        # escalated row is the fact that stops the next fifteen-minute tick
+        # from re-judging the same cycle. Written after the send and
+        # fire-and-forget, a write that missed its budget re-sent the same
+        # escalation every tick until one landed. The write also refuses keys
+        # the web container resolved since the snapshot was taken, so a stray
+        # row cannot silence the next cycle's escalation.
+        from core.alert_archive import write_escalated_now
+
+        recorded = await write_escalated_now(
+            [d.condition_key for d in due], message=text,
+        )
+        if recorded is None:
+            logger.warning("Escalation held: the ledger could not record it")
+            return 0
+        due = [d for d in due if d.condition_key in set(recorded)]
+        if not due:
+            return 0
+        if len(recorded) != len(text.splitlines()):
+            text = format_escalation(due)
+
         from bot.main import send_admin_message
 
         delivered = await send_admin_message(text, pre_throttled=True)
-
-        # Recorded whatever the delivery outcome: an attempted escalation is
-        # the fact that stops the next fifteen-minute tick from re-judging
-        # the same cycle — a kill-switched dev instance must not try again
-        # every cycle forever.
-        from core.alert_archive import record_escalated
-
-        record_escalated(
-            [d.condition_key for d in due], delivered=delivered, message=text,
-        )
         logger.info(
             "Escalated %d standing condition(s), delivered to %d",
             len(due), delivered,

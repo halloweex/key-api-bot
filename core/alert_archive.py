@@ -31,7 +31,7 @@ import json as _json
 import logging
 import os
 from datetime import datetime
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Optional, Sequence, List
 
 logger = logging.getLogger(__name__)
 
@@ -179,27 +179,108 @@ def _spawn(coro) -> "Optional[asyncio.Task]":
         return None
 
 
-async def _write_escalated(keys, message, delivered) -> None:
+async def _write_escalated(keys, message, delivered) -> "List[str]":
+    """Record an escalation for each key whose series is still firing.
+
+    Returns the keys actually recorded. The insert reads the series row
+    under `FOR UPDATE`, so an escalation judged from a snapshot taken a
+    moment before the web container resolved the condition waits for that
+    commit and then inserts nothing — a stray `escalated` row after the
+    resolve used to be counted against the *next* firing cycle and silence
+    its escalation entirely.
+    """
     global _standing_down
     from core.pg import get_pool
 
     pool = await get_pool()
     instance = _instance()
+    recorded: "List[str]" = []
     async with pool.acquire() as conn:
-        await conn.executemany(
-            """
-            INSERT INTO app.alert_events
-                (condition_key, event_type, instance, delivered_to, message)
-            VALUES ($1, 'escalated', $2, $3, $4)
-            """,
-            [
-                (key, instance, delivered, message if i == 0 else None)
-                for i, key in enumerate(keys)
-            ],
-        )
+        async with conn.transaction():
+            for i, key in enumerate(keys):
+                landed = await conn.fetchval(
+                    """
+                    INSERT INTO app.alert_events
+                        (condition_key, event_type, instance, delivered_to, message)
+                    SELECT s.condition_key, 'escalated', $2, $3, $4
+                      FROM app.alert_series s
+                     WHERE s.condition_key = $1
+                       AND s.kind = 'condition'
+                       AND s.state = 'firing'
+                       AND s.acknowledged_at IS NULL
+                       FOR UPDATE
+                    RETURNING condition_key
+                    """,
+                    key, instance, delivered, message if i == 0 else None,
+                )
+                if landed is not None:
+                    recorded.append(key)
     if _standing_down:
         _standing_down = False
         logger.info("alert archive: writes succeeding again")
+    return recorded
+
+
+async def write_escalated_now(keys, message) -> "Optional[List[str]]":
+    """Awaited, bounded: the escalation is recorded *before* it is sent.
+
+    The row is what stops the next fifteen-minute tick from re-judging the
+    same cycle. Written after the send, and fire-and-forget, a write that
+    missed its budget meant the same escalation went out again every tick
+    until one landed. Returns the keys recorded (empty: everything resolved
+    meanwhile, nothing to send), or None when the ledger could not be
+    written — the caller then sends nothing and the next tick tries again.
+    """
+    global _standing_down
+    try:
+        recorded = await asyncio.wait_for(
+            _write_escalated(list(keys), message, None), timeout=WRITE_TIMEOUT_S,
+        )
+        return recorded
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if not _standing_down:
+            _standing_down = True
+            logger.warning(
+                "alert archive standing down (%s: %s) — the escalation is held "
+                "until the ledger can record it",
+                type(exc).__name__, exc,
+            )
+        return None
+
+
+async def write_resolved_now(keys, message, delivered) -> bool:
+    """Awaited, bounded: the resolution is recorded before it is announced.
+
+    Fire-and-forget with a one-second budget, a resolve whose write missed
+    the budget left the series `firing` for good: the key was already out of
+    the Gate's map, nothing retried the write, the digest showed the
+    condition standing for months and the escalator fired a phantom six
+    hours later. True when the row landed or there is no archive to write
+    (a host without Postgres runs unarchived by configuration); False when
+    the write failed, so the caller can put the key back and try again on
+    the next healthy pass.
+    """
+    global _standing_down
+    if not os.getenv("KS_PG_DSN", "").strip():
+        return True
+    try:
+        await asyncio.wait_for(
+            _write_resolved(list(keys), message, delivered), timeout=WRITE_TIMEOUT_S,
+        )
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if not _standing_down:
+            _standing_down = True
+            logger.warning(
+                "alert archive standing down (%s: %s) — the resolved notice is "
+                "held until the ledger can record it",
+                type(exc).__name__, exc,
+            )
+        return False
 
 
 # ─── The digest's tail (step 06) ────────────────────────────────────────────

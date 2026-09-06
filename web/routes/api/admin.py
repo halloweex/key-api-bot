@@ -179,8 +179,16 @@ async def refresh_warehouse(
     admin: dict = Depends(require_admin),
 ):
     """Manually trigger warehouse layer refresh (Silver -> Gold). Requires admin."""
+    from core.scheduler import get_scheduler
+
     store = await get_store()
-    return await store.refresh_warehouse_layers(trigger="manual")
+    # Under the heavy-job lock, like the two-minute job that runs the same
+    # code. Without it a manual refresh interleaved with the scheduled one:
+    # a validation reading Bronze/Silver across the other's commits reported
+    # a correct rebuild as failed, and the two raced each other's fired and
+    # resolved notices for the same alert group.
+    async with get_scheduler()._heavy_job_lock:
+        return await store.refresh_warehouse_layers(trigger="manual")
 
 
 @router.post("/warehouse/rebuild-silver")

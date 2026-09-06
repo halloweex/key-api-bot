@@ -473,6 +473,21 @@ class AlertGate:
         self._dirty = True
         self._save(now, force=True)
 
+    def restore_delivered(
+        self, entries: "Dict[str, float]", group: "str | None",
+        *, now: "float | None" = None,
+    ) -> None:
+        """Put back what `take_resolved` took, keeping the original
+        `first_delivered`, when the resolution could not be recorded. A key
+        that re-fired in between keeps its newer entry."""
+        now = _time.time() if now is None else now
+        for key, first in entries.items():
+            if key not in self._delivered:
+                self._delivered[key] = {"group": group, "first_delivered": first}
+        if entries:
+            self._dirty = True
+            self._save(now, force=True)
+
     def take_resolved(
         self, group: str, still_firing: "Sequence[str]" = (),
         *, now: "float | None" = None,
@@ -634,16 +649,30 @@ async def resolve_group(
     ]
     text = "✅ Resolved:\n" + "\n".join(lines)
 
+    # The ledger first, the notice second. A resolve whose fire-and-forget
+    # write missed its one-second budget left the series firing for good —
+    # the key was already out of the map and nothing retried — so the digest
+    # showed the condition standing for months and the escalator fired a
+    # phantom six hours later. If the row cannot be written, the keys go
+    # back and the next healthy pass tries again; nothing is announced that
+    # the ledger does not hold.
+    from core.alert_archive import write_resolved_now
+
+    if not await write_resolved_now(list(taken), delivered=None, message=text):
+        _gate.restore_delivered(taken, group)
+        _logging.getLogger(__name__).warning(
+            "resolved notice for %s held back: the ledger could not record it; "
+            "retrying on the next healthy pass", sorted(taken),
+        )
+        return 0
+
     from bot.main import send_admin_message
 
     delivered = await send_admin_message(text, pre_throttled=True)
-    from core.alert_archive import record_resolved
-
-    record_resolved(list(taken), delivered=delivered, message=text)
     if not delivered:
         _logging.getLogger(__name__).info(
             "resolved notice for %s reached nobody (suppressed or failed); "
-            "the series still closes in the archive", sorted(taken),
+            "the series is closed in the archive", sorted(taken),
         )
     return delivered
 

@@ -57,29 +57,60 @@ class TestPolicy:
     async def test_due_conditions_escalate_in_one_message(self, monkeypatch):
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x@y/z")
         rows = [_due("mirror_failing", 7, 3), _due("disk:CRITICAL", 9, 2)]
+        keys = ["mirror_failing", "disk:CRITICAL"]
         with patch("bot.main.send_admin_message",
                    new=AsyncMock(return_value=2)) as send, \
-             patch("core.alert_archive.record_escalated") as rec:
+             patch("core.alert_archive.write_escalated_now",
+                   new=AsyncMock(return_value=keys)) as rec:
             assert await escalate_due(web_alive=True, _due=rows) == 2
         text = send.await_args.args[0]
         assert "mirror_failing — 7h, fired ×3" in text
         assert "disk:CRITICAL — 9h" in text
         assert send.await_args.kwargs["pre_throttled"] is True
-        assert sorted(rec.call_args.args[0]) == [
+        assert sorted(rec.await_args.args[0]) == [
             "disk:CRITICAL", "mirror_failing"]
 
     @pytest.mark.asyncio
-    async def test_recorded_even_when_delivery_fails(self, monkeypatch):
+    async def test_recorded_before_delivery_whatever_its_outcome(self, monkeypatch):
         """The escalated event is what stops the next 15-minute tick from
         re-judging the same cycle — a kill-switched dev instance must not
-        retry forever."""
+        retry forever. Written first and awaited, so a slow ledger cannot
+        leave the row missing behind a message that already went."""
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x@y/z")
-        with patch("bot.main.send_admin_message",
-                   new=AsyncMock(return_value=0)), \
-             patch("core.alert_archive.record_escalated") as rec:
+        order = []
+
+        async def _write(keys, message):
+            order.append("write")
+            return list(keys)
+
+        async def _send(*a, **kw):
+            order.append("send")
+            return 0
+
+        with patch("bot.main.send_admin_message", new=AsyncMock(side_effect=_send)), \
+             patch("core.alert_archive.write_escalated_now", new=AsyncMock(side_effect=_write)):
             assert await escalate_due(web_alive=True, _due=[_due()]) == 0
-        rec.assert_called_once()
-        assert rec.call_args.kwargs["delivered"] == 0
+        assert order == ["write", "send"]
+
+    @pytest.mark.asyncio
+    async def test_a_ledger_that_cannot_record_holds_the_escalation(self, monkeypatch):
+        """Better a late escalation than the same one every fifteen minutes."""
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://x@y/z")
+        with patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send, \
+             patch("core.alert_archive.write_escalated_now", new=AsyncMock(return_value=None)):
+            assert await escalate_due(web_alive=True, _due=[_due()]) == 0
+        send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_condition_resolved_since_the_snapshot_is_not_escalated(self, monkeypatch):
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://x@y/z")
+        rows = [_due("mirror_failing", 7, 3), _due("disk:CRITICAL", 9, 2)]
+        with patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)) as send, \
+             patch("core.alert_archive.write_escalated_now",
+                   new=AsyncMock(return_value=["disk:CRITICAL"])):
+            assert await escalate_due(web_alive=True, _due=rows) == 2
+        text = send.await_args.args[0]
+        assert "disk:CRITICAL" in text and "mirror_failing" not in text
 
     @pytest.mark.asyncio
     async def test_a_broken_archive_never_takes_the_canary_down(

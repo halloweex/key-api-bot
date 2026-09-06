@@ -26,7 +26,8 @@ def _sent(n=2):
 
 
 def _archived():
-    return patch("core.alert_archive.record_resolved")
+    return patch("core.alert_archive.write_resolved_now",
+                 new=AsyncMock(return_value=True))
 
 
 class TestTheDeliveryGate:
@@ -111,8 +112,29 @@ class TestTheDeliveryGate:
         with patch("bot.main.send_admin_message",
                    new=AsyncMock(return_value=0)), _archived() as rec:
             assert await resolve_group("disk") == 0
-        rec.assert_called_once()
-        assert rec.call_args.kwargs["delivered"] == 0
+        rec.assert_awaited_once()
+        assert rec.await_args.args[0] == ["disk:WARN"]
+
+    @pytest.mark.asyncio
+    async def test_a_ledger_that_cannot_record_holds_the_notice_and_keeps_the_key(self):
+        """Fire-and-forget left the series firing for good when the write
+        missed its budget: the key was gone from the map and nothing retried.
+        Now nothing is announced that the ledger does not hold, and the next
+        healthy pass tries again."""
+        with _sent():
+            await raise_alert("x", conditions=["disk:WARN"],
+                              bucket="disk:WARN", group="disk")
+        with _sent() as send, patch("core.alert_archive.write_resolved_now",
+                                    new=AsyncMock(return_value=False)):
+            assert await resolve_group("disk") == 0
+        send.assert_not_awaited()
+        # The ledger is back: the same resolution is recorded and announced.
+        with _sent(2) as send, _archived() as rec:
+            assert await resolve_group("disk") == 2
+        rec.assert_awaited_once()
+        # And only once.
+        with _sent(2) as send, _archived():
+            assert await resolve_group("disk") == 0
 
 
 class TestDeliveredMapDurability:

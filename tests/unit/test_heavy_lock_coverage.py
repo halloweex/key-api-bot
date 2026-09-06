@@ -30,6 +30,12 @@ def test_the_manual_status_refresh_holds_the_lock():
     assert "_heavy_job_lock" in _source(admin, "refresh_order_statuses")
 
 
+def test_the_manual_warehouse_refresh_holds_the_lock():
+    """Interleaved with the two-minute job it produced false validation
+    failures and raced its fired/resolved notices."""
+    assert "_heavy_job_lock" in _source(admin, "refresh_warehouse")
+
+
 def test_the_backfill_route_passes_the_lock():
     src = inspect.getsource(admin)
     assert "lock=get_scheduler()._heavy_job_lock" in src
