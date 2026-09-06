@@ -78,6 +78,17 @@ def _duckdb_order_ids(conn) -> set:
     return {int(r[0]) for r in conn.execute("SELECT id FROM orders").fetchall()}
 
 
+async def _postgres_orders_with_items(pool) -> set:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT DISTINCT order_id FROM bronze.order_products")
+    return {int(r[0]) for r in rows}
+
+
+def _duckdb_orders_with_items(conn) -> set:
+    return {int(r[0]) for r in conn.execute(
+        "SELECT DISTINCT order_id FROM order_products").fetchall()}
+
+
 def _read_chunk(conn, ids: Sequence[int]) -> tuple:
     """One chunk's headers and line items, in the stores' shared column order."""
     placeholders = ", ".join("?" for _ in ids)
@@ -188,6 +199,28 @@ async def backfill_orders(
             shipped_orders, len(missing),
         )
 
+    # Header-only orders: present on both sides by id, line items only here.
+    # The 05:15 status refresh re-ships headers of recent orders and none of
+    # their items, so an order whose original mirror write was lost lands in
+    # Postgres as a header and is then invisible to the ids-diff above — the
+    # only repair nothing else offered. Same lock, same writer.
+    repaired_items = 0
+    if max_chunks is None or len(chunks) < max_chunks:
+        pg_with_items = await _postgres_orders_with_items(pool)
+        async with store.connection() as conn:
+            dk_with_items = _duckdb_orders_with_items(conn)
+        header_only = sorted((dk_with_items - pg_with_items) & existing)
+        for start in range(0, len(header_only), chunk_size):
+            ids = header_only[start:start + chunk_size]
+            async with held:
+                async with store.connection() as conn:
+                    orders, products = _read_chunk(conn, ids)
+                await write_orders(orders, products, replace_products=True)
+            repaired_items += len(ids)
+        if repaired_items:
+            logger.info("Backfill: re-shipped line items for %d header-only order(s)",
+                        repaired_items)
+
     remaining = len(missing) - shipped_orders
     if remaining == 0:
         # The gate Reconciliation A reads. Written only on a run that left
@@ -204,6 +237,7 @@ async def backfill_orders(
         "chunks_run": len(chunks),
         "orders_shipped": shipped_orders,
         "line_items_shipped": shipped_products,
+        "header_only_repaired": repaired_items,
         "remaining": remaining,
         "complete": remaining == 0,
     }
@@ -245,7 +279,7 @@ async def hourly_orders_ids_diff(store, *, lock: "asyncio.Lock | None" = None) -
                 ORDERS_TABLE,
             )
         result = await backfill_orders(store, lock=lock)
-        if result.get("orders_shipped"):
+        if result.get("orders_shipped") or result.get("header_only_repaired"):
             if had_history:
                 logger.warning("pg_backfill: hourly ids-diff healed missing orders: %s", result)
             else:

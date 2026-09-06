@@ -11,6 +11,7 @@ Features:
 - Request correlation IDs for tracing
 """
 import asyncio
+import threading
 import os
 from typing import Dict, List, Any, Optional, AsyncGenerator
 
@@ -652,6 +653,14 @@ class SyncKeyCRMClient:
         timeout: float = REQUEST_TIMEOUT
     ):
         self._async_client = KeyCRMClient(api_key, base_url, timeout)
+        # One caller at a time. The bot shares a single instance between
+        # worker threads (a report handler and the nightly milestone job),
+        # each running its own event loop through asyncio.run(): the inner
+        # client's httpx pool and `__aexit__` are per loop, and the process
+        # circuit breaker's asyncio.Lock binds itself to the first loop that
+        # contends it — a loop asyncio.run() closes seconds later, after which
+        # every contended acquire raises until the bot restarts.
+        self._lock = threading.Lock()
 
     def _run(self, coro):
         """Run coroutine in event loop."""
@@ -665,7 +674,7 @@ class SyncKeyCRMClient:
             import nest_asyncio
             nest_asyncio.apply()
             return asyncio.get_event_loop().run_until_complete(coro)
-        else:
+        with self._lock:
             return asyncio.run(coro)
 
     def get_orders(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

@@ -14,6 +14,7 @@ Domain-specific query methods are organized into repository mixins:
 - RevenueMixin: Revenue trends, sales analytics, products
 """
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -63,6 +64,7 @@ class UpsertResult:
     changed_ids: List[int]      # rows this call actually wrote
     skipped_unchanged: int      # rows already in the desired state
     failed: int                 # rows rejected by a constraint/transaction error
+    deferred_to_full_sync: int = 0  # unknown ids a header-only refresh left for a full writer
 
     def __len__(self) -> int:
         return self.count
@@ -579,10 +581,20 @@ class DuckDBStore(
                 def _run():
                     return conn.execute(query, params or []).fetchone()
 
-                return await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, _run),
-                    timeout=timeout
-                )
+                future = loop.run_in_executor(self._executor, _run)
+                try:
+                    return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+                except asyncio.TimeoutError:
+                    # The executor thread is still inside conn.execute(). The
+                    # lock this block holds exists so that no two threads
+                    # touch the one connection; leaving now would release it
+                    # while the thread is on it. Interrupt the query and wait
+                    # for the thread to come off before raising.
+                    with contextlib.suppress(Exception):
+                        conn.interrupt()
+                    with contextlib.suppress(BaseException):
+                        await future
+                    raise
             except asyncio.TimeoutError:
                 raise QueryTimeoutError(query, timeout, "Fetch one failed")
 
@@ -616,10 +628,20 @@ class DuckDBStore(
                 def _run():
                     return conn.execute(query, params or []).fetchall()
 
-                return await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, _run),
-                    timeout=timeout
-                )
+                future = loop.run_in_executor(self._executor, _run)
+                try:
+                    return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+                except asyncio.TimeoutError:
+                    # The executor thread is still inside conn.execute(). The
+                    # lock this block holds exists so that no two threads
+                    # touch the one connection; leaving now would release it
+                    # while the thread is on it. Interrupt the query and wait
+                    # for the thread to come off before raising.
+                    with contextlib.suppress(Exception):
+                        conn.interrupt()
+                    with contextlib.suppress(BaseException):
+                        await future
+                    raise
             except asyncio.TimeoutError:
                 raise QueryTimeoutError(query, timeout, "Fetch all failed")
 
@@ -2587,6 +2609,18 @@ class DuckDBStore(
         final_path = dest / f"{src.stem}-{stamp}.duckdb"
         tmp_path = dest / f".{src.stem}-{stamp}.duckdb.tmp"
 
+        # A copy interrupted by a shutdown cancellation, a kill or an OOM
+        # leaves its temp file — a database-sized orphan on the volume the
+        # backup protects, and nothing pruned them. A `finally` alone would
+        # not do: SIGKILL skips it, and unlinking while copy2 still holds the
+        # descriptor frees nothing until the thread ends.
+        for stale in dest.glob(f".{src.stem}-*.duckdb.tmp"):
+            try:
+                stale.unlink()
+                logger.warning("Removed stale backup temp file %s", stale.name)
+            except OSError:
+                pass
+
         # Disk-space guard: need room for a full second copy (+10% margin).
         src_size = src.stat().st_size
         free = shutil.disk_usage(dest).free
@@ -2837,9 +2871,19 @@ class DuckDBStore(
             success_ids: List[int] = []
             to_write: List[tuple] = []  # (params, is_update)
             skipped_count = 0
+            deferred = 0
             for params in insert_rows:
                 order_id = int(params[0])
                 incoming_updated_at = params[7]  # tuple index matches insert_sql
+                if skip_products and order_id not in existing:
+                    # A header-only refresh must never *create* an order: it
+                    # carries no line items, and the decider would then skip
+                    # the full payload the minute sync brings seconds later
+                    # (same updated_at) — a header-only order for good, or
+                    # until the half-written repair happens to catch it, and
+                    # never for a zero-total one. Left for a full writer.
+                    deferred += 1
+                    continue
                 if order_id in existing and not should_update_order(
                     existing.get(order_id), incoming_updated_at, force=force_update,
                 ):
@@ -2939,13 +2983,15 @@ class DuckDBStore(
             n_written = len(updated_ids)
             logger.info(
                 f"Upserted {count}/{len(insert_rows)} orders to DuckDB "
-                f"(written={n_written}, skipped_unchanged={skipped_count})"
+                f"(written={n_written}, skipped_unchanged={skipped_count}"
+                + (f", deferred_to_full_sync={deferred}" if deferred else "") + ")"
             )
             result = UpsertResult(
                 count=count,
                 changed_ids=updated_ids,
                 skipped_unchanged=skipped_count,
                 failed=len(failed),
+                deferred_to_full_sync=deferred,
             )
 
         # Step 05. The mirror ships exactly what this store wrote — `updated_ids`

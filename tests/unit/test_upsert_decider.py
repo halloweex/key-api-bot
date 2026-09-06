@@ -23,12 +23,19 @@ def _ts(year=2026, month=4, day=1, hour=10, minute=0):
 
 
 class TestForceFlag:
-    """force=True bypasses every other check — used by status_refresh."""
+    """force=True writes an equal-or-newer payload — used by status_refresh,
+    whose payloads carry the same updated_at as the stored row."""
 
-    def test_force_always_returns_true_even_if_stale(self):
+    def test_force_refuses_a_strictly_older_snapshot(self):
+        """A repair or manual refresh fetches, awaits the network, then
+        writes; a sync that wrote a fresher row in between must not be
+        overwritten by the older snapshot."""
         existing = _ts(hour=12)
         incoming = _ts(hour=10)  # older
-        assert should_update_order(existing, incoming, force=True) is True
+        assert should_update_order(existing, incoming, force=True) is False
+
+    def test_force_writes_a_newer_payload(self):
+        assert should_update_order(_ts(hour=10), _ts(hour=12), force=True) is True
 
     def test_force_true_with_equal_timestamps(self):
         ts = _ts()

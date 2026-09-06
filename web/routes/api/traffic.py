@@ -251,8 +251,24 @@ async def reclassify_traffic(
 _backfill_status: dict = {"running": False, "result": None}
 
 
+_BACKGROUND_TASKS: set = set()
+
+
 async def _run_backfill(days: int):
-    """Background task: backfill manager_comment from KeyCRM API."""
+    """Background task: backfill manager_comment from KeyCRM API.
+
+    The `running` flag is cleared on every way out. It used to be set before
+    the two awaits that open the store and the client, and only the body's
+    own handlers reset it — a failure in either, or a cancellation at a
+    deploy, left the endpoint answering "already running" until a restart.
+    """
+    try:
+        await _run_backfill_inner(days)
+    finally:
+        _backfill_status["running"] = False
+
+
+async def _run_backfill_inner(days: int):
     from core.keycrm import get_async_client
 
     store = await get_store()
@@ -392,7 +408,11 @@ async def backfill_utm_data(
         return {"status": "already_running", "progress": _backfill_status["result"]}
 
     _backfill_status.update(running=True, result={"status": "started"})
-    asyncio.create_task(_run_backfill(days))
+    task = asyncio.create_task(_run_backfill(days))
+    # A strong reference: the loop holds tasks weakly, and a collected task
+    # is a backfill that stops without a trace.
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
     return {"status": "started", "message": "Backfill started in background. GET /traffic/backfill-utm/status to check."}
 
 

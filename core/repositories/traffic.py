@@ -226,7 +226,7 @@ class TrafficMixin:
         # Step 1: fetch IDs + comments that need parsing (short lock)
         async with self.connection() as conn:
             orders = conn.execute("""
-                SELECT o.id, o.manager_comment
+                SELECT o.id, o.manager_comment, o.updated_at
                 FROM orders o
                 LEFT JOIN silver_order_utm u ON u.order_id = o.id
                 WHERE o.manager_comment IS NOT NULL
@@ -241,8 +241,15 @@ class TrafficMixin:
             return set()
 
         # Step 2: parse UTM in Python — no lock held
+        # `parsed_at` is the order's `updated_at` as it was when the comment
+        # was read — not the wall clock at write time. The lock is released
+        # between the read above and the write below, so a comment rewritten
+        # by the sync in between used to be stamped with a *later* parse time
+        # than its own `updated_at`, and the predicate above never picked it
+        # up again. Stamped with the value it was parsed from, a later change
+        # still compares greater.
         utm_rows = []
-        for order_id, comment in orders:
+        for order_id, comment, updated_at in orders:
             utm_data = self._parse_utm_from_comment(comment)
 
             if not utm_data:
@@ -251,6 +258,7 @@ class TrafficMixin:
                 utm_rows.append((
                     order_id, None, None, None, None, None,
                     None, None, None, None, None, None, None,
+                    updated_at,
                 ))
                 continue
 
@@ -263,6 +271,7 @@ class TrafficMixin:
                 utm_data.get('_fbp'), utm_data.get('_fbc'),
                 utm_data.get('ttp'), utm_data.get('fbclid'),
                 traffic_type, platform,
+                updated_at,
             ))
 
         # Step 3: write in batches, releasing lock between each
@@ -275,13 +284,13 @@ class TrafficMixin:
                         (order_id, utm_source, utm_medium, utm_campaign, utm_content,
                          utm_term, utm_lang, fbp, fbc, ttp, fbclid,
                          traffic_type, platform, parsed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
                 """, batch)
             total += len(batch)
 
         num_batches = (len(utm_rows) + self._UTM_BATCH_SIZE - 1) // self._UTM_BATCH_SIZE
         logger.info(f"Parsed UTM data for {total} orders ({num_batches} batches)")
-        return {order_id for order_id, _ in orders}
+        return {order_id for order_id, _, _ in orders}
 
     async def refresh_traffic_gold_layer(
         self, affected_dates: set[date] | None = None,

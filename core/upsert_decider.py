@@ -25,10 +25,16 @@ def should_update_order(
 
     Semantics:
 
-    - ``force=True``        — always UPDATE. Required for the status-refresh
-      path because KeyCRM does NOT bump ``updated_at`` when only the order
-      status changes (a known KeyCRM behaviour). Callers who detect status
-      drift out-of-band must pass force.
+    - ``force=True``        — UPDATE unless the payload is *strictly older*
+      than what is stored. Required for the status-refresh path because
+      KeyCRM does NOT bump ``updated_at`` when only the order status changes
+      (a known KeyCRM behaviour), so equal timestamps still write. A strictly
+      older payload is a snapshot fetched before a concurrent sync wrote a
+      fresher one — the repair jobs and the manual refreshes fetch, await
+      the network, then write — and writing it regressed the row and
+      archived two false transitions. Nothing writes ``orders.updated_at``
+      locally except from the payload, so "older than stored" can only mean
+      "older than the source".
 
     - existing is None      — UPDATE. We don't have a stored timestamp to
       compare against (legacy row pre-migration), so be safe and write.
@@ -50,8 +56,8 @@ def should_update_order(
     Returns:
         True = issue UPDATE. False = skip (and skip line-item DELETE+INSERT).
     """
-    if force:
-        return True
     if existing_updated_at is None or incoming_updated_at is None:
         return True
+    if force:
+        return incoming_updated_at >= existing_updated_at
     return incoming_updated_at > existing_updated_at

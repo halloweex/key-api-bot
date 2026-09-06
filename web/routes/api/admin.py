@@ -594,13 +594,20 @@ async def set_manager_retail_status(
     # Postgres would carry yesterday's answer for up to a day.
     from core.pg_replication import replicate_managers
 
-    await replicate_managers(store)
+    replica = await replicate_managers(store)
+    if replica and replica.get("ok") is False:
+        # The classification is stored and the warehouse marked dirty; only
+        # the Postgres copy is behind, until the next manager sync. Said in
+        # the response rather than discovered in the 09:00 digest.
+        logger.warning("Manager %s classified, but the Postgres replica failed: %s",
+                       manager_id, replica.get("error"))
 
     logger.info(
         "Manager %s retail status set to %s from %s by admin %s",
         manager_id, is_retail, effective_from or "today", admin.get("user_id"),
     )
     return {
+        "replica": replica,
         "status": "ok",
         "manager_id": manager_id,
         "is_retail": is_retail,

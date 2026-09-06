@@ -1401,8 +1401,13 @@ def persist_run(
 
     Returns: the new run_id.
 
-    The connection must already be in the caller's transaction context
-    (we don't open/close — the store wrapper handles that).
+    The transaction is opened and closed here. This docstring used to say the
+    store wrapper handled it; the wrapper only holds a lock, and every
+    statement autocommitted — a kill between the run row and its findings
+    left a run with counts and no children, which the next run's delta then
+    read as "every standing finding is new". A failed statement inside an
+    open DuckDB transaction poisons the shared connection, so the ROLLBACK is
+    not optional.
     """
     summary = summarize_discrepancies(discrepancies)
     issue_sev = summarize_issues(issues)
@@ -1423,6 +1428,32 @@ def persist_run(
 
     duration_ms = int((ended_at - started_at).total_seconds() * 1000)
 
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        run_id = _persist_run_rows(
+            conn, started_at=started_at, ended_at=ended_at, as_of=as_of,
+            window_start=window_start, window_end=window_end, layer=layer,
+            status=status, issues=issues, discrepancies=discrepancies,
+            critical_count=critical_count, warn_count=warn_count,
+            api_calls_used=api_calls_used, duration_ms=duration_ms,
+            error_message=error_message,
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    return run_id
+
+
+def _persist_run_rows(
+    conn, *, started_at, ended_at, as_of, window_start, window_end, layer,
+    status, issues, discrepancies, critical_count, warn_count,
+    api_calls_used, duration_ms, error_message,
+) -> int:
+    """The three INSERTs; `persist_run` owns the transaction around them."""
     row = conn.execute("""
         INSERT INTO data_quality_runs (
             started_at, ended_at, as_of, window_start, window_end,

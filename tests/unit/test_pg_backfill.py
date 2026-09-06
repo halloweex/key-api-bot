@@ -56,13 +56,16 @@ class _Ships:
         ))
 
 
-async def _run(store, *, already_in_pg=(), **kwargs):
+async def _run(store, *, already_in_pg=(), pg_with_items=None, **kwargs):
     ships = _Ships()
     marked = AsyncMock()
+    with_items = set(already_in_pg) if pg_with_items is None else set(pg_with_items)
     with patch("core.pg_landing.write_orders", new=ships), \
          patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
          patch("core.pg.require_revision", new=AsyncMock()), \
          patch("core.pg_backfill._mark_backfilled", new=marked), \
+         patch("core.pg_backfill._postgres_orders_with_items",
+               new=AsyncMock(return_value=with_items)), \
          patch("core.pg_backfill._postgres_order_ids",
                new=AsyncMock(return_value=set(already_in_pg))):
         result = await backfill_orders(store, **kwargs)
@@ -195,6 +198,8 @@ class TestEachChunkIsWrittenUnderTheHeavyLock:
                  patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
                  patch("core.pg.require_revision", new=AsyncMock()), \
                  patch("core.pg_backfill._mark_backfilled", new=AsyncMock()), \
+                 patch("core.pg_backfill._postgres_orders_with_items",
+                       new=AsyncMock(return_value=set())), \
                  patch("core.pg_backfill._postgres_order_ids", new=_pg_ids):
                 await backfill_orders(store, chunk_size=1, lock=lock)
         finally:
@@ -263,3 +268,30 @@ class TestTheHourlyOrdersDiff:
                 result = await hourly_orders_ids_diff(object(), lock=None)
         assert result["orders_shipped"] == 3
         assert "healed missing orders" in caplog.text
+
+
+class TestHeaderOnlyOrdersGetTheirLineItems:
+    """The 05:15 refresh re-ships headers and no items, so an order whose
+    original mirror write was lost lands in Postgres as a header — present by
+    id, invisible to the ids-diff, and repaired by nothing."""
+
+    @pytest.mark.asyncio
+    async def test_present_by_id_but_without_items_is_re_shipped_whole(self, tmp_path):
+        store = await _store_with(tmp_path, [1, 2, 3])
+        try:
+            result, ships = await _run(store, already_in_pg={1, 2, 3}, pg_with_items={1, 3})
+        finally:
+            await store.close()
+        assert result["missing"] == 0
+        assert result["header_only_repaired"] == 1
+        assert ships.chunks == [([2], [2000, 2001], True)]
+        assert result["complete"] is True
+
+    @pytest.mark.asyncio
+    async def test_nothing_header_only_ships_nothing(self, tmp_path):
+        store = await _store_with(tmp_path, [1])
+        try:
+            result, ships = await _run(store, already_in_pg={1})
+        finally:
+            await store.close()
+        assert result["header_only_repaired"] == 0 and ships.chunks == []
