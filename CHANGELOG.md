@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.127
+
+- Give the disk-resolve test the ledger stub its siblings already use
+- Close the remaining LOW findings of the race audit
+- Record a resolution or an escalation before announcing it
+- Close the three Postgres-only gaps in the SMS state
+- Stop the throughput benchmark from being able to destroy anything
+- Write permission toggles column by column, and let a promotion to admin stick
+- Make the bot's verdict buttons answer the pending request
+- Stop the read paths and the b2b pass from rewriting the goals tables
+- Keep the dirty flag until the refresh has run, and defer the Postgres rebuild
+- Hold the heavy-job lock on every mirror writer and re-ship lost orders hourly
+- Write a manager's classification in one transaction
+- Admit one send per alert bucket at a time
+- Make force_resync rewrite the window in place
+- Read the weekly report's audience from the store the bot writes
+- Write an order's line items before its header
+- Rebuild sku_inventory_status in one transaction
+- Refuse a delivery report for an id we do not hold yet
+- Keep the SMS claim when the gateway's answer is unknown
+
+
 ## 3.0.126
 
 - Name the mechanism behind the lost delivery reports, and guard against it
