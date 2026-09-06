@@ -234,39 +234,48 @@ class PostgresAccessControl:
         logger.info(f"Access request created for user {user_id} (@{username})")
         return True
 
-    def approve(self, user_id: int, admin_id: int) -> bool:
-        return self._run(self._approve(user_id, admin_id))
+    def approve(
+        self, user_id: int, admin_id: int, *, expected_status: Optional[str] = None,
+    ) -> bool:
+        return self._run(self._approve(user_id, admin_id, expected_status))
 
-    async def _approve(self, user_id: int, admin_id: int) -> bool:
+    async def _approve(self, user_id: int, admin_id: int, expected_status) -> bool:
         async with self._pool.acquire() as conn:
             tag = await conn.execute(
                 f"""
                 UPDATE {AUTHORIZED}
                 SET status = $1, reviewed_at = now(), reviewed_by = $2,
                     denial_count = 0
-                WHERE user_id = $3
+                WHERE user_id = $3 AND ($4::text IS NULL OR status = $4)
                 """,
-                STATUS_APPROVED, admin_id, user_id,
+                STATUS_APPROVED, admin_id, user_id, expected_status,
             )
         success = _written(tag)
         if success:
             logger.info(f"User {user_id} approved by admin {admin_id}")
         return success
 
-    def deny(self, user_id: int, admin_id: int) -> Tuple[bool, bool]:
-        return self._run(self._deny(user_id, admin_id))
+    def deny(
+        self, user_id: int, admin_id: int, *, expected_status: Optional[str] = None,
+    ) -> Tuple[bool, bool]:
+        return self._run(self._deny(user_id, admin_id, expected_status))
 
-    async def _deny(self, user_id: int, admin_id: int) -> Tuple[bool, bool]:
+    async def _deny(self, user_id: int, admin_id: int, expected_status) -> Tuple[bool, bool]:
         async with self._pool.acquire() as conn:
             # One transaction, unlike SQLite's read-then-write: the count is
             # what decides the freeze, and two admins denying at once must not
             # both read the same number.
             async with conn.transaction():
-                current = await conn.fetchval(
-                    f"SELECT denial_count FROM {AUTHORIZED} "
+                row = await conn.fetchrow(
+                    f"SELECT denial_count, status FROM {AUTHORIZED} "
                     "WHERE user_id = $1 FOR UPDATE",
                     user_id,
                 )
+                if expected_status is not None and (
+                    row is None or row["status"] != expected_status
+                ):
+                    return False, False
+                current = row["denial_count"] if row else None
                 new_count = (current or 0) + 1
                 if new_count >= MAX_DENIAL_COUNT:
                     new_status, is_frozen = STATUS_FROZEN, True
@@ -330,9 +339,9 @@ class PostgresAccessControl:
                 UPDATE {AUTHORIZED}
                 SET status = $1, requested_at = now(),
                     reviewed_at = NULL, reviewed_by = NULL
-                WHERE user_id = $2 AND status <> $3
+                WHERE user_id = $2 AND status = $3
                 """,
-                STATUS_PENDING, user_id, STATUS_FROZEN,
+                STATUS_PENDING, user_id, STATUS_DENIED,
             )
         success = _written(tag)
         if success:
@@ -447,7 +456,7 @@ class PostgresPreferences:
                        (user_id, default_source, default_report_type, timezone,
                         default_date_range, notifications_enabled,
                         created_at, updated_at, language)
-                VALUES ($1, $2, $3, $4, $5, $6, now(), now(), 'en')
+                VALUES ($1, $2, $3, $4, $5, $6, now(), now(), NULL)
                 ON CONFLICT (user_id) DO UPDATE SET
                     default_source = EXCLUDED.default_source,
                     default_report_type = EXCLUDED.default_report_type,

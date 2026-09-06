@@ -819,6 +819,11 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "admin.user_unfrozen": {EN: "User unfrozen", UK: "Користувача розморожено", RU: "Пользователь разморожен"},
     "admin.user_not_found": {EN: "User not found", UK: "Користувача не знайдено", RU: "Пользователь не найден"},
     "admin.action_failed": {EN: "Action failed", UK: "Дія не вдалася", RU: "Действие не удалось"},
+    "admin.already_decided": {
+        EN: "This request was already decided",
+        UK: "Цей запит уже вирішено",
+        RU: "Этот запрос уже решён",
+    },
     "msg.request_failed": {
         EN: "⚠️ Could not send the request. Try /start again.",
         UK: "⚠️ Не вдалося надіслати запит. Спробуйте /start ще раз.",

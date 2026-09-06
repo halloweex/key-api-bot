@@ -1304,8 +1304,9 @@ async def auth_approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Extract user_id from callback data
     target_user_id = int(query.data.split('_')[-1])
 
-    # Approve user
-    success = database.approve_user(target_user_id, admin.id)
+    # Approve the *request*: if another admin already decided, say so
+    # instead of overwriting their verdict and telling the person twice.
+    success = database.approve_user(target_user_id, admin.id, expected_status="pending")
 
     if success:
         await query.answer(t("admin.user_approved", _lang(update)))
@@ -1333,7 +1334,7 @@ async def auth_approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except Exception as e:
             logger.error(f"Failed to notify user {target_user_id} about approval: {e}")
     else:
-        await query.answer(t("admin.action_failed", _lang(update)), show_alert=True)
+        await query.answer(t("admin.already_decided", _lang(update)), show_alert=True)
 
 
 async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1352,8 +1353,11 @@ async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_info = database.get_user_auth_status(target_user_id)
     denial_count = (user_info.get('denial_count') or 0) + 1
 
-    # Deny user
-    success, is_frozen = database.deny_user(target_user_id, admin.id)
+    # Deny the *request* — see auth_approve_user.
+    success, is_frozen = database.deny_user(
+        target_user_id, admin.id, expected_status="pending",
+    )
+    target_lang = database.get_user_language(target_user_id)
 
     if success:
         if is_frozen:
@@ -1373,7 +1377,7 @@ async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             try:
                 await context.bot.send_message(
                     chat_id=target_user_id,
-                    text=t(ACCESS_FROZEN_MESSAGE, _lang(update)),
+                    text=t(ACCESS_FROZEN_MESSAGE, target_lang),
                     parse_mode="HTML"
                 )
             except Exception as e:
@@ -1398,14 +1402,18 @@ async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 ]]
                 await context.bot.send_message(
                     chat_id=target_user_id,
-                    text=ACCESS_DENIED_MESSAGE + f"\n\n<i>({denial_count}/{database.MAX_DENIAL_COUNT} denials)</i>\n\nYou can request access again:",
+                    text=(
+                        t(ACCESS_DENIED_MESSAGE, target_lang)
+                        + f"\n\n<i>({denial_count}/{database.MAX_DENIAL_COUNT})</i>\n\n"
+                        + t("access.request_again", target_lang)
+                    ),
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="HTML"
                 )
             except Exception as e:
                 logger.error(f"Failed to notify user {target_user_id} about denial: {e}")
     else:
-        await query.answer(t("admin.action_failed", _lang(update)), show_alert=True)
+        await query.answer(t("admin.already_decided", _lang(update)), show_alert=True)
 
 
 async def auth_request_again(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1551,18 +1559,23 @@ async def admin_revoke_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if success:
         await query.answer("Access revoked!")
         # Refresh the user list (silent revoke - no notification to user)
-        await show_updated_user_list(query, admin.id)
+        await show_updated_user_list(query, admin.id, _lang(update))
     else:
         await query.answer(t("admin.action_failed", _lang(update)), show_alert=True)
 
 
-async def show_updated_user_list(query, admin_id: int) -> None:
-    """Show updated user list after revocation/unfreeze."""
-    message, keyboard = _build_user_list_ui(_lang(update))
+async def show_updated_user_list(query, admin_id: int, lang: str = DEFAULT_LANGUAGE) -> None:
+    """Show updated user list after revocation/unfreeze.
+
+    `lang` is passed in: this helper has no `update`, and resolving it here
+    raised NameError after every successful revoke and unfreeze — after the
+    write had committed — so the admin's list simply never refreshed.
+    """
+    message, keyboard = _build_user_list_ui(lang)
 
     if message is None:
         await query.edit_message_text(
-            t("admin.no_users", _lang(update)),
+            t("admin.no_users", lang),
             parse_mode="HTML"
         )
         return
@@ -1613,7 +1626,7 @@ async def admin_unfreeze_user(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error(f"Failed to notify user {target_user_id} about unfreeze: {e}")
 
         # Refresh the user list
-        await show_updated_user_list(query, admin.id)
+        await show_updated_user_list(query, admin.id, _lang(update))
     else:
         await query.answer(t("admin.action_failed", _lang(update)), show_alert=True)
 

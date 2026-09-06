@@ -122,14 +122,26 @@ def request_access(
     )
 
 
-def approve_user(user_id: int, admin_id: int) -> bool:
-    """Approve user access. Resets denial count. True if successful."""
-    return get_bot_store().access.approve(user_id, admin_id)
+def approve_user(
+    user_id: int, admin_id: int, *, expected_status: str | None = None,
+) -> bool:
+    """Approve user access. Resets denial count. True if successful.
+
+    `expected_status="pending"` from the admin's Approve button: the verdict
+    is for the request, not for whatever state a faster admin left behind.
+    """
+    return get_bot_store().access.approve(
+        user_id, admin_id, expected_status=expected_status,
+    )
 
 
-def deny_user(user_id: int, admin_id: int) -> tuple[bool, bool]:
+def deny_user(
+    user_id: int, admin_id: int, *, expected_status: str | None = None,
+) -> tuple[bool, bool]:
     """Deny user access. Increments denial count. Returns (success, is_frozen)."""
-    return get_bot_store().access.deny(user_id, admin_id)
+    return get_bot_store().access.deny(
+        user_id, admin_id, expected_status=expected_status,
+    )
 
 
 def revoke_user(user_id: int, admin_id: int) -> bool:

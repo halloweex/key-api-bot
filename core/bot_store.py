@@ -78,16 +78,32 @@ class AccessControl(Protocol):
         """Record a first request. False when the person already has a row —
         of any status. Coming back after a refusal is `reset_to_pending`."""
 
-    def approve(self, user_id: int, admin_id: int) -> bool: ...
+    def approve(
+        self, user_id: int, admin_id: int, *, expected_status: Optional[str] = None,
+    ) -> bool:
+        """`expected_status` makes the verdict conditional on the row still
+        being in that state — the admin's Approve button answers a *pending*
+        request, and two admins tapping Approve and Deny on the same request
+        in the same second used to be last-write-wins, with the person told
+        both. Left None, the write is unconditional: the auto-approval of an
+        admin, and `deny` as a revocation, act on whatever state is there."""
 
-    def deny(self, user_id: int, admin_id: int) -> Tuple[bool, bool]:
-        """`(written, now_frozen)`. The count is what freezes, not the verdict."""
+    def deny(
+        self, user_id: int, admin_id: int, *, expected_status: Optional[str] = None,
+    ) -> Tuple[bool, bool]:
+        """`(written, now_frozen)`. The count is what freezes, not the verdict.
+        `expected_status` as for `approve`."""
 
     def unfreeze(self, user_id: int, admin_id: int) -> bool:
         """An admin lifting a freeze, which also forgives the count."""
 
     def reset_to_pending(self, user_id: int) -> Tuple[bool, bool]:
-        """`(written, was_frozen)`. A frozen person cannot let themselves back in."""
+        """`(written, was_frozen)`. A frozen person cannot let themselves back
+        in, and only a *denied* person is let back to pending: the "Request
+        again" button lives on an old denial message, and pressed after an
+        approval it used to demote the person to pending and re-page the
+        admins. Deny, the inactivity sweep and the auto-unfreeze all land on
+        `denied`, so that is the one state a re-request starts from."""
 
     def touch(self, user_id: int) -> None:
         """Record activity — for approved people only, so that a pending or

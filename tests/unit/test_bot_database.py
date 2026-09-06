@@ -562,3 +562,73 @@ class TestCache:
         database.cache_set("fresh", 2, ttl_minutes=10)
         assert database.cache_cleanup() == 1
         assert database.cache_get("fresh") == 2
+
+
+# ── a verdict is for a pending request ───────────────────────────────────────
+
+class TestAVerdictIsForThePendingRequest:
+    """Two admins tapping Approve and Deny on the same request in the same
+    second used to be last-write-wins, with the person told both. The buttons
+    now answer the *request*: a verdict lands only while the row is pending."""
+
+    def test_the_second_verdict_is_refused(self, db):
+        database.request_access(1, "u", "F", "L")
+        assert database.approve_user(1, 999, expected_status="pending") is True
+        assert database.deny_user(1, 999, expected_status="pending") == (False, False)
+        assert db.row(1)["status"] == "approved"
+        assert db.row(1)["denial_count"] == 0
+
+    def test_deny_then_approve_is_refused_too(self, db):
+        database.request_access(1, "u", "F", "L")
+        assert database.deny_user(1, 999, expected_status="pending") == (True, False)
+        assert database.approve_user(1, 999, expected_status="pending") is False
+        assert db.row(1)["status"] == "denied"
+
+    def test_without_an_expectation_the_write_is_unconditional(self, db):
+        """`revoke_user` is a deny on an approved row, and the admin
+        auto-approval re-approves a swept admin; both must keep working."""
+        database.request_access(1, "u", "F", "L")
+        database.approve_user(1, 999)
+        assert database.revoke_user(1, 999) is True
+        assert db.row(1)["status"] == "denied"
+        assert database.approve_user(1, 999) is True
+
+
+class TestRequestAgainStartsFromADenial:
+    def test_a_denied_person_may_ask_again(self, db):
+        database.request_access(1, "u", "F", "L")
+        database.deny_user(1, 999)
+        assert database.reset_user_to_pending(1) == (True, False)
+        assert db.row(1)["status"] == "pending"
+
+    def test_a_stale_button_does_not_demote_an_approved_person(self, db):
+        """The button lives on an old denial message; pressed after an
+        approval it used to put the person back to pending and page the
+        admins again."""
+        database.request_access(1, "u", "F", "L")
+        database.deny_user(1, 999)
+        database.approve_user(1, 999)
+        assert database.reset_user_to_pending(1) == (False, False)
+        assert db.row(1)["status"] == "approved"
+
+
+class TestTheFirstSettingDoesNotChooseALanguage:
+    def test_a_new_row_carries_no_language(self, db, monkeypatch):
+        """Changing a timezone used to create the row with the column's
+        DEFAULT 'en', which the reader then treated as a choice — switching
+        a Ukrainian-default user to English in the bot and the report."""
+        monkeypatch.setattr("bot.config.ADMIN_USER_IDS", [999])
+        database.update_user_preference(1, "timezone", "UTC")
+        assert database.get_user_preferences(1)["timezone"] == "UTC"
+        assert database.get_user_preferences(1)["language"] is None
+        assert database.get_user_language(1) == "uk"
+
+    def test_save_does_not_choose_either(self, db, monkeypatch):
+        monkeypatch.setattr("bot.config.ADMIN_USER_IDS", [999])
+        database.save_user_preferences(1, timezone="Europe/Kyiv")
+        assert database.get_user_language(1) == "uk"
+
+    def test_a_choice_survives_a_later_save(self, db):
+        database.update_user_preference(1, "language", "ru")
+        database.save_user_preferences(1, timezone="UTC")
+        assert database.get_user_language(1) == "ru"

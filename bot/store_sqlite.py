@@ -165,16 +165,18 @@ class SqliteAccessControl:
         logger.info(f"Access request created for user {user_id} (@{username})")
         return True
 
-    def approve(self, user_id: int, admin_id: int) -> bool:
+    def approve(
+        self, user_id: int, admin_id: int, *, expected_status: Optional[str] = None,
+    ) -> bool:
         with db_connection() as conn:
             cursor = conn.execute(
                 """
                 UPDATE authorized_users
                 SET status = ?, reviewed_at = CURRENT_TIMESTAMP,
                     reviewed_by = ?, denial_count = 0
-                WHERE user_id = ?
+                WHERE user_id = ? AND (? IS NULL OR status = ?)
                 """,
-                (STATUS_APPROVED, admin_id, user_id),
+                (STATUS_APPROVED, admin_id, user_id, expected_status, expected_status),
             )
             success = cursor.rowcount > 0
 
@@ -182,12 +184,16 @@ class SqliteAccessControl:
             logger.info(f"User {user_id} approved by admin {admin_id}")
         return success
 
-    def deny(self, user_id: int, admin_id: int) -> Tuple[bool, bool]:
+    def deny(
+        self, user_id: int, admin_id: int, *, expected_status: Optional[str] = None,
+    ) -> Tuple[bool, bool]:
         with db_connection() as conn:
             row = conn.execute(
-                "SELECT denial_count FROM authorized_users WHERE user_id = ?",
+                "SELECT denial_count, status FROM authorized_users WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
+            if expected_status is not None and (row is None or row[1] != expected_status):
+                return False, False
             current_count = (row[0] or 0) if row else 0
             new_count = current_count + 1
 
@@ -250,9 +256,9 @@ class SqliteAccessControl:
                 UPDATE authorized_users
                 SET status = ?, requested_at = CURRENT_TIMESTAMP,
                     reviewed_at = NULL, reviewed_by = NULL
-                WHERE user_id = ? AND status != ?
+                WHERE user_id = ? AND status = ?
                 """,
-                (STATUS_PENDING, user_id, STATUS_FROZEN),
+                (STATUS_PENDING, user_id, STATUS_DENIED),
             )
             success = cursor.rowcount > 0
 
@@ -343,13 +349,20 @@ class SqlitePreferences:
         default_report_type: str = "summary", timezone: str = "Europe/Kyiv",
         default_date_range: str = "week", notifications_enabled: bool = True,
     ) -> None:
+        # `language` is written as NULL on insert and never touched on
+        # conflict. The column's DEFAULT 'en' used to fill it the first time
+        # somebody changed a timezone or muted notifications, and the reader
+        # treats a stored value as a *choice* — so that first action silently
+        # switched a Ukrainian-default user to English, in the bot and in the
+        # weekly report.
         with db_connection() as conn:
             conn.execute(
                 """
                 INSERT INTO user_preferences
                        (user_id, default_source, default_report_type, timezone,
-                        default_date_range, notifications_enabled, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        default_date_range, notifications_enabled, updated_at,
+                        language)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL)
                 ON CONFLICT(user_id) DO UPDATE SET
                     default_source = excluded.default_source,
                     default_report_type = excluded.default_report_type,
