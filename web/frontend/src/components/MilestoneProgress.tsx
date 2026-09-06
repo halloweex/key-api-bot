@@ -1,4 +1,5 @@
-import { memo, useMemo, useEffect, useRef, useState, useCallback, lazy, Suspense } from 'react'
+import { memo, useMemo, useEffect, useRef, useState, useCallback, Suspense } from 'react'
+import { lazyChunk } from '../utils/lazyChunk'
 import { useTranslation } from 'react-i18next'
 import { CheckCircle } from 'lucide-react'
 import { InfoPopover } from './InfoPopover'
@@ -7,7 +8,7 @@ import { formatCurrency } from '../utils/formatters'
 import { useSmartGoals, useRevenueTrend } from '../hooks'
 import confettiAnimation from '../assets/animations/confetti-burst.json'
 
-const LottiePlayer = lazy(() => import('lottie-react'))
+const LottiePlayer = lazyChunk(() => import('lottie-react'))
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

@@ -1,4 +1,5 @@
-import { lazy, Suspense } from 'react'
+import { Suspense } from 'react'
+import { lazyChunk } from './utils/lazyChunk'
 import { Dashboard } from './components/Dashboard'
 import { AppShell } from './components/AppShell'
 import { AdminGuard, PermissionGuard } from './components/RouteGuard'
@@ -6,15 +7,15 @@ import { Spinner } from './components/Spinner'
 import { useRouter } from './hooks/useRouter'
 
 // Lazy load pages
-const AdminUsersPage = lazy(() => import('./components/AdminUsersPage').then(m => ({ default: m.AdminUsersPage })))
-const AdminPermissionsPage = lazy(() => import('./components/AdminPermissionsPage').then(m => ({ default: m.AdminPermissionsPage })))
-const TrafficPage = lazy(() => import('./components/TrafficPage'))
-const ProductIntelPage = lazy(() => import('./components/ProductIntelPage'))
-const InventoryPage = lazy(() => import('./components/InventoryPage'))
-const ReportsPage = lazy(() => import('./components/ReportsPage'))
-const MarketingPage = lazy(() => import('./components/MarketingPage'))
-const MarginPage = lazy(() => import('./components/MarginPage'))
-const SmsCampaignsPage = lazy(() => import('./components/SmsCampaignsPage'))
+const AdminUsersPage = lazyChunk(() => import('./components/AdminUsersPage').then(m => ({ default: m.AdminUsersPage })))
+const AdminPermissionsPage = lazyChunk(() => import('./components/AdminPermissionsPage').then(m => ({ default: m.AdminPermissionsPage })))
+const TrafficPage = lazyChunk(() => import('./components/TrafficPage'))
+const ProductIntelPage = lazyChunk(() => import('./components/ProductIntelPage'))
+const InventoryPage = lazyChunk(() => import('./components/InventoryPage'))
+const ReportsPage = lazyChunk(() => import('./components/ReportsPage'))
+const MarketingPage = lazyChunk(() => import('./components/MarketingPage'))
+const MarginPage = lazyChunk(() => import('./components/MarginPage'))
+const SmsCampaignsPage = lazyChunk(() => import('./components/SmsCampaignsPage'))
 
 // ─── App Component ───────────────────────────────────────────────────────────
 

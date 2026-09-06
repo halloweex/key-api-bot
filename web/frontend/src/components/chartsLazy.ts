@@ -3,82 +3,82 @@
  * Reduces initial bundle size by loading charts on demand.
  */
 
-import { lazy } from 'react'
+import { lazyChunk } from '../utils/lazyChunk'
 
 // ─── Lazy Chart Components ───────────────────────────────────────────────────
 
-export const LazyRevenueTrendChart = lazy(() =>
+export const LazyRevenueTrendChart = lazyChunk(() =>
   import('./RevenueTrendChart').then(m => ({ default: m.RevenueTrendChart }))
 )
 
-export const LazySalesBySourceChart = lazy(() =>
+export const LazySalesBySourceChart = lazyChunk(() =>
   import('./SalesBySourceChart').then(m => ({ default: m.SalesBySourceChart }))
 )
 
-export const LazyOrdersBySourceChart = lazy(() =>
+export const LazyOrdersBySourceChart = lazyChunk(() =>
   import('./OrdersBySourceChart').then(m => ({ default: m.OrdersBySourceChart }))
 )
 
-export const LazyRevenueBySourceChart = lazy(() =>
+export const LazyRevenueBySourceChart = lazyChunk(() =>
   import('./RevenueBySourceChart').then(m => ({ default: m.RevenueBySourceChart }))
 )
 
-export const LazyTopProductsChart = lazy(() =>
+export const LazyTopProductsChart = lazyChunk(() =>
   import('./TopProductsChart').then(m => ({ default: m.TopProductsChart }))
 )
 
-export const LazyTopProductsByRevenueChart = lazy(() =>
+export const LazyTopProductsByRevenueChart = lazyChunk(() =>
   import('./TopProductsByRevenueChart').then(m => ({ default: m.TopProductsByRevenueChart }))
 )
 
-export const LazyCategoryChart = lazy(() =>
+export const LazyCategoryChart = lazyChunk(() =>
   import('./CategoryChart').then(m => ({ default: m.CategoryChart }))
 )
 
-export const LazyCustomerInsightsChart = lazy(() =>
+export const LazyCustomerInsightsChart = lazyChunk(() =>
   import('./CustomerInsightsChart').then(m => ({ default: m.CustomerInsightsChart }))
 )
 
-export const LazyCohortRetentionChart = lazy(() =>
+export const LazyCohortRetentionChart = lazyChunk(() =>
   import('./CohortRetentionChart').then(m => ({ default: m.CohortRetentionChart }))
 )
 
-export const LazyBrandAnalyticsChart = lazy(() =>
+export const LazyBrandAnalyticsChart = lazyChunk(() =>
   import('./BrandAnalyticsChart').then(m => ({ default: m.BrandAnalyticsChart }))
 )
 
-export const LazyExpensesChart = lazy(() =>
+export const LazyExpensesChart = lazyChunk(() =>
   import('./ExpensesChart').then(m => ({ default: m.ExpensesChart }))
 )
 
-export const LazyStockSummaryChart = lazy(() =>
+export const LazyStockSummaryChart = lazyChunk(() =>
   import('./StockSummaryChart').then(m => ({ default: m.StockSummaryChart }))
 )
 
-export const LazyDeadStockChart = lazy(() =>
+export const LazyDeadStockChart = lazyChunk(() =>
   import('./DeadStockChart').then(m => ({ default: m.DeadStockChart }))
 )
 
-export const LazyInventoryTrendChart = lazy(() =>
+export const LazyInventoryTrendChart = lazyChunk(() =>
   import('./InventoryTrendChart').then(m => ({ default: m.InventoryTrendChart }))
 )
 
-export const LazyInventoryTurnoverChart = lazy(() =>
+export const LazyInventoryTurnoverChart = lazyChunk(() =>
   import('./InventoryTurnoverChart').then(m => ({ default: m.InventoryTurnoverChart }))
 )
 
-export const LazyBrandRotationCard = lazy(() =>
+export const LazyBrandRotationCard = lazyChunk(() =>
   import('./BrandRotationCard').then(m => ({ default: m.BrandRotationCard }))
 )
 
-export const LazySkuRotationTable = lazy(() =>
+export const LazySkuRotationTable = lazyChunk(() =>
   import('./SkuRotationTable').then(m => ({ default: m.SkuRotationTable }))
 )
 
-export const LazyPromocodeAnalyticsChart = lazy(() =>
+export const LazyPromocodeAnalyticsChart = lazyChunk(() =>
   import('./PromocodeAnalyticsChart').then(m => ({ default: m.PromocodeAnalyticsChart }))
 )
 
-export const LazyManualExpensesTable = lazy(() =>
+export const LazyManualExpensesTable = lazyChunk(() =>
   import('./ManualExpensesTable').then(m => ({ default: m.ManualExpensesTable }))
 )

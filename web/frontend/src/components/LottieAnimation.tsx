@@ -1,11 +1,12 @@
-import { lazy, Suspense } from 'react'
+import { Suspense } from 'react'
+import { lazyChunk } from '../utils/lazyChunk'
 
 // ─── LottieAnimation ─────────────────────────────────────────────────────────
 //
 // Renders a Lottie JSON animation at one of three preset sizes. Sizing is the
 // only "visual" knob exposed; layout (margins, alignment) is the parent's job.
 
-const LottiePlayer = lazy(() => import('lottie-react'))
+const LottiePlayer = lazyChunk(() => import('lottie-react'))
 
 type LottieSize = 'sm' | 'md' | 'lg'
 
