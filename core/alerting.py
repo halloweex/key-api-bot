@@ -310,6 +310,15 @@ class AlertGate:
         # fired notice that actually reached someone — otherwise the first
         # thing a human hears about a condition is that it went away.
         self._delivered: Dict[str, Dict] = {}
+        # Buckets whose send is in flight right now. `decide` commits nothing
+        # — the cooldown is paid by `record_delivery`, after the transport
+        # returns — so between the two a second raise for the same bucket used
+        # to look fresh and go out too: the two-minute refresh and a manual
+        # one failing validation inside one Telegram round trip produced two
+        # messages and two agent diagnoses. Process-local and deliberately not
+        # on `_BucketState`: that dataclass is persisted, and a marker that
+        # survived a crash would silence its bucket for good.
+        self._in_flight: set = set()
         self._path = state_path
         self._last_save = 0.0
         self._dirty = False
@@ -409,6 +418,28 @@ class AlertGate:
             parts.append("next reminder in 24h")
         return True, ("\n⏳ " + " · ".join(parts) if parts else "")
 
+    def claim(self, bucket: str) -> bool:
+        """Mark the send `decide` admitted as in flight; False if one already is.
+
+        Separate from `decide` so that the cooldown logic stays a pure
+        function of the bucket's history: a second raise that loses the claim
+        is the same news as the one in flight and rides its repeat counter,
+        exactly as a raise inside the cooldown would.
+        """
+        if bucket in self._in_flight:
+            st = self._state.get(bucket)
+            if st is not None:
+                st.suppressed += 1
+            return False
+        self._in_flight.add(bucket)
+        return True
+
+    def release(self, bucket: str) -> None:
+        """The send that `claim` admitted has returned, delivered or not.
+        Must run on every exit of that send — a bucket left in flight would
+        be silent until the process restarts."""
+        self._in_flight.discard(bucket)
+
     def record_delivery(self, bucket: str, *, now: "float | None" = None) -> int:
         """Commit the cooldown; returns the swallowed count this delivery
         flushed, which is what the archive records against the series."""
@@ -465,6 +496,7 @@ class AlertGate:
     def reset(self) -> None:
         self._state.clear()
         self._delivered.clear()
+        self._in_flight.clear()
         self._dirty = False
 
 
@@ -520,39 +552,48 @@ async def raise_alert(
         if not should_send:
             log.debug("Alert suppressed by gate (bucket=%s)", bucket)
             return 0
+        if not _gate.claim(bucket):
+            log.debug("Alert already in flight (bucket=%s)", bucket)
+            return 0
 
     from bot.main import send_admin_message
 
-    delivered = await send_admin_message(
-        text + suffix, parse_mode, pre_throttled=True,
-    )
-    if delivered:
-        swallowed = _gate.record_delivery(bucket) if bucket is not None else 0
-        _gate.note_delivered_conditions(conditions, group)
-        from core.alert_archive import record_fired
-
-        record_fired(
-            conditions, message=text + suffix,
-            delivered=delivered, swallowed=swallowed, evidence=evidence,
+    try:
+        delivered = await send_admin_message(
+            text + suffix, parse_mode, pre_throttled=True,
         )
-        if bucket is not None and suffix == "":
-            # A fresh incident (an empty suffix is the first fire of a
-            # bucket, including one returning after the quiet-hour reset) —
-            # the moment worth a diagnosis. Reminders and standing repeats
-            # never re-summon the agent; the host runner adds a daily budget
-            # on top.
-            from core.alert_agent_spool import drop_task
+        if delivered:
+            swallowed = _gate.record_delivery(bucket) if bucket is not None else 0
+            _gate.note_delivered_conditions(conditions, group)
+            from core.alert_archive import record_fired
 
-            drop_task(conditions, bucket, text)
-        elif spool_as is not None:
-            # The bucket-less emitters — memory keeps its own pre-Gate
-            # cooldown as the pre-OOM exception — still deserve a
-            # diagnostician. `spool_as` names the task explicitly, and the
-            # upstream cooldown is what keeps this from re-summoning the
-            # agent every tick.
-            from core.alert_agent_spool import drop_task
+            record_fired(
+                conditions, message=text + suffix,
+                delivered=delivered, swallowed=swallowed, evidence=evidence,
+            )
+            if bucket is not None and suffix == "":
+                # A fresh incident (an empty suffix is the first fire of a
+                # bucket, including one returning after the quiet-hour reset) —
+                # the moment worth a diagnosis. Reminders and standing repeats
+                # never re-summon the agent; the host runner adds a daily budget
+                # on top.
+                from core.alert_agent_spool import drop_task
 
-            drop_task(list(conditions) or [spool_as], spool_as, text)
+                drop_task(conditions, bucket, text)
+            elif spool_as is not None:
+                # The bucket-less emitters — memory keeps its own pre-Gate
+                # cooldown as the pre-OOM exception — still deserve a
+                # diagnostician. `spool_as` names the task explicitly, and the
+                # upstream cooldown is what keeps this from re-summoning the
+                # agent every tick.
+                from core.alert_agent_spool import drop_task
+
+                drop_task(list(conditions) or [spool_as], spool_as, text)
+    finally:
+        # Whatever the transport did — delivered, returned 0, or raised into
+        # a caller that swallows it — the bucket is no longer in flight.
+        if bucket is not None:
+            _gate.release(bucket)
     return delivered
 
 

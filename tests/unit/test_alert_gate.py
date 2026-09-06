@@ -86,6 +86,68 @@ class TestTheEscalatingCooldown:
         assert ok  # the escalation the old shared float used to mute
 
 
+class TestOneSendPerBucketAtATime:
+    """`decide` commits nothing and `record_delivery` runs after the transport
+    returns, so two raises for one bucket inside a single Telegram round trip
+    both used to look fresh: the two-minute refresh and a manual one failing
+    validation together produced two messages and two agent diagnoses."""
+
+    def test_a_bucket_in_flight_is_not_claimed_twice(self):
+        gate = AlertGate()
+        assert gate.decide("b", has_condition=True, now=1000.0) == (True, "")
+        assert gate.claim("b") is True
+        # No delivery recorded yet — `decide` still says yes, and did before.
+        assert gate.decide("b", has_condition=True, now=1001.0)[0] is True
+        assert gate.claim("b") is False
+        assert gate._state["b"].suppressed == 1, "it rides the repeat counter"
+
+    def test_release_reopens_the_bucket(self):
+        gate = AlertGate()
+        gate.decide("b", has_condition=True, now=1000.0)
+        gate.claim("b")
+        gate.release("b")
+        assert gate.claim("b") is True
+
+    def test_other_buckets_are_unaffected(self):
+        gate = AlertGate()
+        gate.claim("b")
+        assert gate.claim("c") is True
+
+    @pytest.mark.asyncio
+    async def test_two_concurrent_raises_send_once(self):
+        import asyncio
+
+        reset_gate()
+        try:
+            async def _slow_send(*args, **kwargs):
+                await asyncio.sleep(0.05)
+                return 2
+
+            with patch("bot.main.send_admin_message", new=AsyncMock(side_effect=_slow_send)) as send:
+                results = await asyncio.gather(
+                    raise_alert("x", conditions=["disk:WARN"], bucket="disk:WARN"),
+                    raise_alert("x", conditions=["disk:WARN"], bucket="disk:WARN"),
+                )
+            assert sorted(results) == [0, 2]
+            assert send.await_count == 1
+        finally:
+            reset_gate()
+
+    @pytest.mark.asyncio
+    async def test_a_transport_that_raises_does_not_leave_the_bucket_stuck(self):
+        reset_gate()
+        try:
+            with patch("bot.main.send_admin_message",
+                       new=AsyncMock(side_effect=RuntimeError("telegram down"))):
+                with pytest.raises(RuntimeError):
+                    await raise_alert("x", conditions=["disk:WARN"], bucket="disk:WARN")
+            with patch("bot.main.send_admin_message", new=AsyncMock(return_value=2)):
+                assert await raise_alert(
+                    "x", conditions=["disk:WARN"], bucket="disk:WARN") == 2
+        finally:
+            reset_gate()
+
+
 class TestRaiseAlert:
     def setup_method(self):
         reset_gate()
