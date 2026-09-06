@@ -1,5 +1,6 @@
 """Tests for winsorized LightGBM revenue prediction."""
 import json
+import pathlib
 import tempfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -203,7 +204,10 @@ class TestSaveLoadClipRatio:
              patch("core.prediction_service.MODEL_PATH", model_path), \
              patch("core.prediction_service.MODEL_DIR", tmp_path), \
              patch("core.prediction_service.DOW_CORRECTIONS_PATH", dow_path), \
-             patch("joblib.dump"):  # Skip actual model pickle
+             patch("joblib.dump",   # Skip the actual pickle, but leave a file:
+                   # the writer dumps to a sibling temp path and os.replace()s
+                   # it over MODEL_PATH, so the stub has to produce something.
+                   side_effect=lambda obj, path: pathlib.Path(path).touch()):
             service._save_model()
 
         # Verify clip_ratio file content

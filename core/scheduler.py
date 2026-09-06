@@ -952,21 +952,22 @@ class BackgroundScheduler:
             from core.duckdb_store import get_store
             store = await get_store()
 
-            # Calculate for retail
+            # Retail only. `seasonal_indices` and `growth_metrics` are keyed
+            # on month / metric type with no sales_type, so the b2b pass that
+            # used to follow wrote b2b values over the retail ones every
+            # Monday — and the retail goal on every dashboard was then built
+            # from b2b seasonality (where b2b cleared the sample threshold)
+            # and from b2b's overall YoY (always; it has no threshold and
+            # falls back to a hard-coded 0.10). Nothing read the b2b rows as
+            # b2b: a b2b caller got the same shared rows. Until sales_type is
+            # part of the keys, the shared rows mean retail.
             retail_indices = await store.calculate_seasonality_indices("retail")
             retail_goals = await store.calculate_suggested_goals(sales_type="retail", growth_factor=1.10)
             await store.calculate_yoy_growth("retail")
 
-            # Calculate for b2b
-            b2b_indices = await store.calculate_seasonality_indices("b2b")
-            b2b_goals = await store.calculate_suggested_goals(sales_type="b2b", growth_factor=1.10)
-            await store.calculate_yoy_growth("b2b")
-
             result = {
                 "retail_months": len(retail_indices),
-                "b2b_months": len(b2b_indices),
                 "retail_goals": retail_goals,
-                "b2b_goals": b2b_goals,
             }
             logger.info(
                 "Seasonality calculation job complete",

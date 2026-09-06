@@ -331,7 +331,9 @@ class GoalsMixin:
 
     # ─── Smart Seasonality Methods ─────────────────────────────────────────────
 
-    async def calculate_seasonality_indices(self, sales_type: str = "retail") -> Dict[int, Dict[str, Any]]:
+    async def calculate_seasonality_indices(
+        self, sales_type: str = "retail", *, persist: bool = True,
+    ) -> Dict[int, Dict[str, Any]]:
         """
         Calculate monthly seasonality indices from historical data.
 
@@ -424,7 +426,11 @@ class GoalsMixin:
                  data["confidence"], now]
                 for month, data in indices.items()
             ]
-            if rows_to_upsert:
+            # `persist=False` is the read path: the tables are keyed on month
+            # alone, with no sales_type, so a GET that stored what it computed
+            # for one sales_type replaced the rows every user's retail goal is
+            # built from — and any viewer could do it with a query parameter.
+            if rows_to_upsert and persist:
                 conn.executemany("""
                     INSERT INTO seasonal_indices
                     (month, seasonality_index, sample_size, avg_revenue, min_revenue, max_revenue, confidence, updated_at)
@@ -442,7 +448,9 @@ class GoalsMixin:
             logger.info(f"Calculated seasonality indices for {len(indices)} months")
             return indices
 
-    async def calculate_yoy_growth(self, sales_type: str = "retail") -> Dict[str, Any]:
+    async def calculate_yoy_growth(
+        self, sales_type: str = "retail", *, persist: bool = True,
+    ) -> Dict[str, Any]:
         """
         Calculate year-over-year growth rate.
 
@@ -544,29 +552,30 @@ class GoalsMixin:
                     weighted = sum(r * w for r, w in zip(rates, weights)) / sum(weights)
                     monthly_yoy[month_num] = round(weighted, 4)
 
-            # Store metrics
-            min_date = conn.execute(f"SELECT MIN({_date_in_kyiv('ordered_at')}) FROM orders").fetchone()[0]
-            max_date = conn.execute(f"SELECT MAX({_date_in_kyiv('ordered_at')}) FROM orders").fetchone()[0]
-            now = datetime.now(DEFAULT_TZ)
+            # Store metrics — see calculate_seasonality_indices for `persist`.
+            if persist:
+                min_date = conn.execute(f"SELECT MIN({_date_in_kyiv('ordered_at')}) FROM orders").fetchone()[0]
+                max_date = conn.execute(f"SELECT MAX({_date_in_kyiv('ordered_at')}) FROM orders").fetchone()[0]
+                now = datetime.now(DEFAULT_TZ)
 
-            conn.execute("""
-                INSERT INTO growth_metrics (metric_type, value, period_start, period_end, sample_size, updated_at)
-                VALUES ('yoy_overall', ?, ?, ?, ?, ?)
-                ON CONFLICT (metric_type) DO UPDATE SET
-                    value = excluded.value,
-                    period_start = excluded.period_start,
-                    period_end = excluded.period_end,
-                    sample_size = excluded.sample_size,
-                    updated_at = excluded.updated_at
-            """, [overall_yoy, min_date, max_date, len(yoy_rates), now])
-
-            # Update seasonal_indices with monthly YoY
-            for month, yoy in monthly_yoy.items():
                 conn.execute("""
-                    UPDATE seasonal_indices
-                    SET yoy_growth = ?, updated_at = ?
-                    WHERE month = ?
-                """, [yoy, now, month])
+                    INSERT INTO growth_metrics (metric_type, value, period_start, period_end, sample_size, updated_at)
+                    VALUES ('yoy_overall', ?, ?, ?, ?, ?)
+                    ON CONFLICT (metric_type) DO UPDATE SET
+                        value = excluded.value,
+                        period_start = excluded.period_start,
+                        period_end = excluded.period_end,
+                        sample_size = excluded.sample_size,
+                        updated_at = excluded.updated_at
+                """, [overall_yoy, min_date, max_date, len(yoy_rates), now])
+
+                # Update seasonal_indices with monthly YoY
+                for month, yoy in monthly_yoy.items():
+                    conn.execute("""
+                        UPDATE seasonal_indices
+                        SET yoy_growth = ?, updated_at = ?
+                        WHERE month = ?
+                    """, [yoy, now, month])
 
             logger.info(f"Calculated YoY growth: {overall_yoy:.2%}")
             return {
@@ -579,7 +588,9 @@ class GoalsMixin:
                 "sample_size": len(yoy_rates)
             }
 
-    async def calculate_weekly_patterns(self, sales_type: str = "retail") -> Dict[int, Dict[int, float]]:
+    async def calculate_weekly_patterns(
+        self, sales_type: str = "retail", *, persist: bool = True,
+    ) -> Dict[int, Dict[int, float]]:
         """
         Calculate how revenue distributes across weeks within each month.
 
@@ -646,8 +657,9 @@ class GoalsMixin:
                 patterns[month][week] = round(weight, 4)
                 pattern_rows.append([month, week, weight, sample_size, now])
 
-            # Batch upsert to avoid row-by-row lock hold
-            if pattern_rows:
+            # Batch upsert to avoid row-by-row lock hold — see
+            # calculate_seasonality_indices for `persist`.
+            if pattern_rows and persist:
                 conn.executemany("""
                     INSERT INTO weekly_patterns (month, week_of_month, weight, sample_size, updated_at)
                     VALUES (?, ?, ?, ?, ?)
@@ -1101,25 +1113,35 @@ class GoalsMixin:
         wape = metrics.get('wape', 0) if metrics else 0
 
         async with self.connection() as conn:
-            # Delete existing predictions for this sales_type in the date range
             dates = [p['date'] for p in predictions]
             min_date = min(dates)
             max_date = max(dates)
 
-            conn.execute(
-                """DELETE FROM revenue_predictions
-                   WHERE sales_type = ? AND prediction_date >= ? AND prediction_date <= ?""",
-                [sales_type, min_date, max_date]
-            )
-
-            # Batch insert new predictions
-            conn.executemany(
-                """INSERT INTO revenue_predictions
-                   (prediction_date, sales_type, predicted_revenue, model_mae, model_mape, model_wape)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                [[pred['date'], sales_type, pred['predicted_revenue'], mae, mape, wape]
-                 for pred in predictions]
-            )
+            # One transaction: as two autocommit statements, a kill between the
+            # DELETE and the INSERT — at peak memory, right after training —
+            # left the range empty, the month view lost its forecast, and boot
+            # did not repair it because the model file was still there.
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                conn.execute(
+                    """DELETE FROM revenue_predictions
+                       WHERE sales_type = ? AND prediction_date >= ? AND prediction_date <= ?""",
+                    [sales_type, min_date, max_date]
+                )
+                conn.executemany(
+                    """INSERT INTO revenue_predictions
+                       (prediction_date, sales_type, predicted_revenue, model_mae, model_mape, model_wape)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    [[pred['date'], sales_type, pred['predicted_revenue'], mae, mape, wape]
+                     for pred in predictions]
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
 
             logger.info(f"Stored {len(predictions)} predictions for {sales_type}")
             return len(predictions)

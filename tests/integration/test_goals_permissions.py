@@ -38,6 +38,9 @@ WRITERS = [
     ("DELETE", "/api/goals/daily"),
     ("POST", "/api/goals?period_type=daily&amount=1000"),
     ("POST", "/api/goals/recalculate"),
+    # A GET, but `recalculate=true` rewrites the shared seasonality tables the
+    # way the POST does, so it is gated the same way.
+    ("GET", "/api/goals/forecast?year=2026&month=9&recalculate=true"),
 ]
 
 

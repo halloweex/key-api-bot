@@ -6,6 +6,7 @@ Runs nightly via scheduler, stores predictions in DuckDB.
 """
 import asyncio
 import json
+import os
 import logging
 from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +19,29 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+def _write_json_atomically(path, payload) -> None:
+    """Write `payload` to `path` whole or not at all.
+
+    A sibling temp file plus `os.replace`, which is atomic on the same
+    filesystem. Readers only ever see the previous file or the new one.
+    """
+    import tempfile
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(payload, handle, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
@@ -1156,9 +1180,7 @@ def _tune_hyperparameters(df: pd.DataFrame) -> Dict[str, Any]:
     default_wape = float(np.sum(np.abs(actuals_arr - preds_arr)) / total_actual * 100) if total_actual > 0 else 0.0
 
     # Save best params
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    with open(TUNED_PARAMS_PATH, 'w') as f:
-        json.dump(best_combo, f, indent=2)
+    _write_json_atomically(TUNED_PARAMS_PATH, best_combo)
     logger.info(f"Saved tuned params to {TUNED_PARAMS_PATH}: {best_combo} (WAPE={best_wape:.2f}%)")
 
     return {
@@ -1575,23 +1597,29 @@ class PredictionService:
         return float(result[0]) if result else 0.0
 
     def _save_model(self) -> None:
-        """Save model, DOW corrections, and clip_ratio to disk."""
+        """Save model, DOW corrections, and clip_ratio to disk.
+
+        Each file lands whole or not at all (`os.replace` of a sibling temp
+        file). A plain `open('w')` truncates first, and a kill mid-write left
+        a half file that the next boot read as "no corrections" or "default
+        hyperparameters" — silently, because loading degrades gracefully.
+        """
         import joblib
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
-        joblib.dump(self._model, MODEL_PATH)
+        tmp = MODEL_PATH.with_name(MODEL_PATH.name + ".tmp")
+        joblib.dump(self._model, tmp)
+        os.replace(tmp, MODEL_PATH)
         logger.info(f"Model saved to {MODEL_PATH}")
 
         # Save DOW corrections
         if self._dow_corrections:
             # JSON keys must be strings
             corrections_str_keys = {str(k): v for k, v in self._dow_corrections.items()}
-            with open(DOW_CORRECTIONS_PATH, 'w') as f:
-                json.dump(corrections_str_keys, f, indent=2)
+            _write_json_atomically(DOW_CORRECTIONS_PATH, corrections_str_keys)
             logger.info(f"DOW corrections saved to {DOW_CORRECTIONS_PATH}")
 
         # Save clip_ratio
-        with open(CLIP_RATIO_PATH, 'w') as f:
-            json.dump({"clip_ratio": self._clip_ratio}, f, indent=2)
+        _write_json_atomically(CLIP_RATIO_PATH, {"clip_ratio": self._clip_ratio})
         logger.info(f"Clip ratio saved to {CLIP_RATIO_PATH}: {self._clip_ratio:.4f}")
 
     def _load_model(self) -> bool:
