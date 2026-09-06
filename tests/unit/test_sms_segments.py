@@ -3,7 +3,7 @@
 Builds a small DuckDB instance, writes `silver_orders` + `buyers` directly so
 recency/frequency/LTV are exact, then asserts the segmentation output.
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -49,6 +49,25 @@ def _seed_catalogue(conn) -> None:
         )
 
 
+def _today() -> date:
+    """Kyiv's date, because that is the one the query measures against.
+
+    The audience body dates recency from `TODAY_IN_KYIV` —
+    `(now() AT TIME ZONE 'Europe/Kyiv')::date` — while `date.today()` is the
+    process's, which is UTC in the gate's container. Between 21:00 and
+    midnight UTC the two are different days, so every `days_ago` here came out
+    one short and `recencyDays` came back 31 where the test said 30.
+
+    Found by the gate at 22:28 UTC on 2026-09-06, after this module had passed
+    every run before it. A three-hours-a-night flake, and the same timezone
+    class as the defect `core/sql_dialect.TODAY_IN_KYIV` exists to prevent —
+    this time in the fixture rather than in the query.
+    """
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("Europe/Kyiv")).date()
+
+
 def _add_order(
     conn,
     *,
@@ -68,7 +87,7 @@ def _add_order(
     `line_price` defaults to `total`, so line revenue matches grand_total. Pass
     a higher value to model an order-level discount.
     """
-    order_date = date.today() - timedelta(days=days_ago)
+    order_date = _today() - timedelta(days=days_ago)
     conn.execute(
         """
         INSERT INTO silver_orders (

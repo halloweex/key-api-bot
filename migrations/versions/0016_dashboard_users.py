@@ -76,12 +76,22 @@ def upgrade() -> None:
             -- pending | approved | denied | frozen
             status        TEXT NOT NULL DEFAULT 'pending',
 
-            requested_at  TIMESTAMPTZ,
+            -- Defaulted, because DuckDB's table defaults them and
+            -- `create_user` inserts neither: a user created on this side would
+            -- otherwise carry no request date at all, the admin page would
+            -- show a blank, and `COALESCE(reviewed_at, created_at)` — the
+            -- clock the daily comparison forgives a row in flight by — would
+            -- be NULL. Caught by the differential test, which created a user
+            -- on each engine and compared the rows.
+            --
+            -- Replication passes both columns explicitly, so the default never
+            -- overwrites a carried value.
+            requested_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
             reviewed_at   TIMESTAMPTZ,
             reviewed_by   BIGINT,
             last_activity TIMESTAMPTZ,
             denial_count  INTEGER NOT NULL DEFAULT 0,
-            created_at    TIMESTAMPTZ,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
 
             -- Not shared with DuckDB, and not compared. Two correct copies
             -- differ on when each of them wrote the row.
