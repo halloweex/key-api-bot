@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timezone
 from typing import Any, Dict, List, Sequence, Tuple
 
 from core.sql_dialect import DUCKDB, POSTGRES, TODAY_IN_KYIV, Dialect
@@ -22,6 +22,7 @@ def _render(sql: str, dialect: Dialect, **extra: Any) -> str:
         views=dialect.inventory_views,
         today=TODAY_IN_KYIV,
         offer_stocks=dialect.offer_stocks,
+        sku_inventory_status=dialect.sku_inventory_status,
         inventory_history=dialect.inventory_history,
         gold_daily_revenue=dialect.gold_daily_revenue,
         gold_revenue_rollup=dialect.gold_revenue_rollup,
@@ -349,127 +350,179 @@ class InventoryMixin:
             return True
 
     async def get_stock_summary(self, limit: int = 20) -> Dict[str, Any]:
-        """Get stock summary for dashboard display.
+        """The stock cards at the top of `/inventory`, from whichever engine.
 
-        Returns:
-            Dict with total stats and top items by quantity and low stock alerts
+        WHY THIS READS `sku_inventory_status` AND NOT `offer_stocks`
+
+        It read `offer_stocks` joined to `offers` and `products` for the
+        product name, and that join is the only reason it was the last route
+        on the tab still tied to DuckDB: `offers` is not in Postgres. It never
+        needed to be. `sku_inventory_status` is rebuilt from exactly those
+        three tables, takes `p.name` through the identical two LEFT JOINs, and
+        is already replicated — so the name was on the row all along.
+
+        Proven on the production catalogue before the change, not assumed: the
+        same 892 offers on both sides, `quantity`, `reserve`, `price` and
+        `purchased_price` differing on zero rows, and every one of the eight
+        aggregates below identical — 303 in stock, 583 out, 61 low, 17 172
+        available, ₴15 544 143.00.
+
+        One source rather than two also gives the page one clock. The rebuild
+        follows the stock sync in the same block, so the two tables agree
+        within a tick, but they are separately committed: reading the summary
+        from one and the lists below it from the other would let a failed
+        rebuild put fresh headline numbers above stale rows, with nothing on
+        screen saying so.
+
+        THE `sku` OF AN OFFER THAT HAS NONE
+
+        `sku_inventory_status` substitutes the offer id when KeyCRM sends no
+        SKU (`COALESCE(os.sku, CAST(os.id AS VARCHAR))`) — seven offers today.
+        So those rows gain a label here where they used to render blank, and
+        the summary now agrees with every other list on the same tab, which
+        has always shown them that way. Restoring the blank is not available:
+        113 offers have a real SKU equal to their own id, so `NULLIF` would
+        blank 113 to recover 7.
         """
-        async with self.connection() as conn:
-            # Overall stats
-            # Note: available = MAX(0, quantity - reserve) to match KeyCRM display
-            stats = conn.execute("""
+        stats_sql = """
+            SELECT
+                COUNT(*)                                              AS total_offers,
+                COUNT(*) FILTER (WHERE quantity > 0)                  AS in_stock,
+                COUNT(*) FILTER (WHERE quantity = 0)                  AS out_of_stock,
+                COUNT(*) FILTER (WHERE quantity > 0
+                                   AND quantity <= 5)                 AS low_stock,
+                -- available = MAX(0, quantity - reserve), matching what KeyCRM
+                -- displays. One offer is oversold (1 in stock, 3 reserved), so
+                -- the floor is load-bearing rather than defensive.
+                SUM(GREATEST(0, quantity - reserve))                  AS available_qty,
+                SUM(reserve)                                          AS total_reserve,
+                SUM(GREATEST(0, quantity - reserve) * price)          AS available_value,
+                SUM(reserve * price)                                  AS reserve_value,
+                SUM(GREATEST(0, quantity - reserve)
+                    * COALESCE(purchased_price, 0))                   AS available_cost,
+                SUM(reserve * COALESCE(purchased_price, 0))           AS reserve_cost,
+                -- The freshness of the rows on screen, and the reason it is
+                -- read from the data rather than from a sync log: every
+                -- rebuild stamps one value across the whole table, and it is
+                -- carried into Postgres verbatim. So it reads the same from
+                -- either engine, and when the mirror stalls it stays where it
+                -- was instead of claiming the copy is as new as the source.
+                MAX(updated_at)                                       AS snapshot_at
+            FROM {sku_inventory_status}
+        """
+        # `offer_id` closes every ORDER BY: two engines break a tie differently,
+        # and where a LIMIT falls inside the tied group they return different
+        # rows rather than the same rows reordered.
+        top_sql = """
+            SELECT sku, quantity, reserve, price, name
+            FROM {sku_inventory_status}
+            WHERE quantity > 0
+            ORDER BY quantity DESC, offer_id
+            LIMIT ?
+        """
+        low_sql = """
+            SELECT sku, quantity, reserve, price, name
+            FROM {sku_inventory_status}
+            WHERE quantity > 0 AND quantity <= 5
+            ORDER BY quantity ASC, offer_id
+            LIMIT 20
+        """
+        out_sql = """
+            SELECT sku, price, name
+            FROM {sku_inventory_status}
+            WHERE quantity = 0
+            ORDER BY price DESC, offer_id
+            LIMIT 20
+        """
+        avg_sql = """
+            WITH period_data AS (
                 SELECT
-                    COUNT(*) as total_offers,
-                    COUNT(*) FILTER (WHERE quantity > 0) as in_stock_count,
-                    COUNT(*) FILTER (WHERE quantity = 0) as out_of_stock_count,
-                    COUNT(*) FILTER (WHERE quantity > 0 AND quantity <= 5) as low_stock_count,
-                    SUM(GREATEST(0, quantity - reserve)) as available_quantity,
-                    SUM(reserve) as total_reserve,
-                    SUM(GREATEST(0, quantity - reserve) * price) as available_value_sale,
-                    SUM(reserve * price) as reserve_value_sale,
-                    SUM(GREATEST(0, quantity - reserve) * COALESCE(purchased_price, 0)) as available_value_cost,
-                    SUM(reserve * COALESCE(purchased_price, 0)) as reserve_value_cost
-                FROM offer_stocks
-            """).fetchone()
+                    total_quantity,
+                    total_value,
+                    ROW_NUMBER() OVER (ORDER BY date ASC) as rn_asc,
+                    ROW_NUMBER() OVER (ORDER BY date DESC) as rn_desc
+                FROM {inventory_history}
+                WHERE date >= {today} - INTERVAL '30 days'
+            )
+            SELECT
+                MAX(CASE WHEN rn_asc = 1 THEN total_quantity END) as beginning_qty,
+                MAX(CASE WHEN rn_asc = 1 THEN total_value END) as beginning_value,
+                MAX(CASE WHEN rn_desc = 1 THEN total_quantity END) as ending_qty,
+                MAX(CASE WHEN rn_desc = 1 THEN total_value END) as ending_value,
+                COUNT(*) as data_points
+            FROM period_data
+        """
 
-            # Top items by quantity (with product names via offers table)
-            top_by_qty = conn.execute(f"""
-                SELECT os.sku, os.quantity, os.reserve, os.price, p.name
-                FROM offer_stocks os
-                LEFT JOIN offers o ON os.id = o.id
-                LEFT JOIN products p ON o.product_id = p.id
-                WHERE os.quantity > 0
-                ORDER BY os.quantity DESC
-                LIMIT {limit}
-            """).fetchall()
+        stats_rows, top_by_qty, low_stock, out_of_stock, avg_rows = (
+            await self._inventory_batch([
+                (stats_sql, []),
+                (top_sql, [int(limit)]),
+                (low_sql, []),
+                (out_sql, []),
+                (avg_sql, []),
+            ])
+        )
+        stats = stats_rows[0]
+        avg_inv = avg_rows[0] if avg_rows else None
 
-            # Low stock items (1-5 units, excluding 0)
-            low_stock = conn.execute("""
-                SELECT os.sku, os.quantity, os.reserve, os.price, p.name
-                FROM offer_stocks os
-                LEFT JOIN offers o ON os.id = o.id
-                LEFT JOIN products p ON o.product_id = p.id
-                WHERE os.quantity > 0 AND os.quantity <= 5
-                ORDER BY os.quantity ASC
-                LIMIT 20
-            """).fetchall()
+        # Average inventory over the period, or the current snapshot when the
+        # history has no usable pair yet.
+        if avg_inv and avg_inv[0] and avg_inv[2]:
+            avg_quantity = (avg_inv[0] + avg_inv[2]) / 2
+            avg_value = ((avg_inv[1] or 0) + (avg_inv[3] or 0)) / 2
+            avg_data_points = avg_inv[4]
+        else:
+            avg_quantity = stats[4] or 0
+            avg_value = float(stats[6] or 0)
+            avg_data_points = 0
 
-            # Out of stock items
-            out_of_stock = conn.execute("""
-                SELECT os.sku, os.price, p.name
-                FROM offer_stocks os
-                LEFT JOIN offers o ON os.id = o.id
-                LEFT JOIN products p ON o.product_id = p.id
-                WHERE os.quantity = 0
-                ORDER BY os.price DESC
-                LIMIT 20
-            """).fetchall()
+        # Normalised to UTC before it becomes a string, and this is not
+        # cosmetic: DuckDB renders a TIMESTAMPTZ in the session's timezone —
+        # `Europe/Kyiv` in the web container — while asyncpg hands back UTC.
+        # The two engines hold the same instant and would have returned
+        # different strings for it, which is the shape of the ClickHouse
+        # cohort defect of 2026-08-31. A naive value is read as UTC, the
+        # convention `CURRENT_TIMESTAMP` writes it in.
+        snapshot_at = stats[10]
+        if snapshot_at is not None:
+            if snapshot_at.tzinfo is None:
+                snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
+            snapshot_at = snapshot_at.astimezone(timezone.utc)
 
-            # Last sync time
-            last_sync = conn.execute("""
-                SELECT value FROM sync_metadata WHERE key = 'stocks_last_sync'
-            """).fetchone()
-
-            # Get average inventory (30 days)
-            avg_inv = conn.execute("""
-                WITH period_data AS (
-                    SELECT
-                        total_quantity,
-                        total_value,
-                        ROW_NUMBER() OVER (ORDER BY date ASC) as rn_asc,
-                        ROW_NUMBER() OVER (ORDER BY date DESC) as rn_desc
-                    FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL 30 DAY
-                )
-                SELECT
-                    MAX(CASE WHEN rn_asc = 1 THEN total_quantity END) as beginning_qty,
-                    MAX(CASE WHEN rn_asc = 1 THEN total_value END) as beginning_value,
-                    MAX(CASE WHEN rn_desc = 1 THEN total_quantity END) as ending_qty,
-                    MAX(CASE WHEN rn_desc = 1 THEN total_value END) as ending_value,
-                    COUNT(*) as data_points
-                FROM period_data
-            """).fetchone()
-
-            # Calculate average inventory
-            if avg_inv and avg_inv[0] and avg_inv[2]:
-                avg_quantity = (avg_inv[0] + avg_inv[2]) / 2
-                avg_value = ((avg_inv[1] or 0) + (avg_inv[3] or 0)) / 2
-                avg_data_points = avg_inv[4]
-            else:
-                avg_quantity = stats[4] or 0  # Use current as fallback
-                avg_value = float(stats[6] or 0)
-                avg_data_points = 0
-
-            return {
-                "summary": {
-                    "totalOffers": stats[0] or 0,
-                    "inStockCount": stats[1] or 0,
-                    "outOfStockCount": stats[2] or 0,
-                    "lowStockCount": stats[3] or 0,
-                    "totalQuantity": stats[4] or 0,
-                    "totalReserve": stats[5] or 0,
-                    "totalValue": float(stats[6] or 0),  # Sale price
-                    "reserveValue": float(stats[7] or 0),  # Sale price
-                    "costValue": float(stats[8] or 0),  # Purchase/cost price
-                    "reserveCostValue": float(stats[9] or 0),  # Purchase/cost price
-                    "averageQuantity": round(avg_quantity),
-                    "averageValue": round(avg_value, 2),
-                    "avgDataPoints": avg_data_points,
-                },
-                "topByQuantity": [
-                    {"sku": r[0], "quantity": r[1], "reserve": r[2], "price": float(r[3] or 0), "name": r[4]}
-                    for r in top_by_qty
-                ],
-                "lowStock": [
-                    {"sku": r[0], "quantity": r[1], "reserve": r[2], "price": float(r[3] or 0), "name": r[4]}
-                    for r in low_stock
-                ],
-                "outOfStock": [
-                    {"sku": r[0], "price": float(r[1] or 0), "name": r[2]}
-                    for r in out_of_stock
-                ],
-                "lastSync": last_sync[0] if last_sync else None,
-            }
+        return {
+            "summary": {
+                "totalOffers": stats[0] or 0,
+                "inStockCount": stats[1] or 0,
+                "outOfStockCount": stats[2] or 0,
+                "lowStockCount": stats[3] or 0,
+                "totalQuantity": stats[4] or 0,
+                "totalReserve": stats[5] or 0,
+                "totalValue": float(stats[6] or 0),        # sale price
+                "reserveValue": float(stats[7] or 0),      # sale price
+                "costValue": float(stats[8] or 0),         # purchase price
+                "reserveCostValue": float(stats[9] or 0),  # purchase price
+                "averageQuantity": round(avg_quantity),
+                "averageValue": round(avg_value, 2),
+                "avgDataPoints": avg_data_points,
+            },
+            "topByQuantity": [
+                {"sku": r[0], "quantity": r[1], "reserve": r[2],
+                 "price": float(r[3] or 0), "name": r[4]}
+                for r in top_by_qty
+            ],
+            "lowStock": [
+                {"sku": r[0], "quantity": r[1], "reserve": r[2],
+                 "price": float(r[3] or 0), "name": r[4]}
+                for r in low_stock
+            ],
+            "outOfStock": [
+                {"sku": r[0], "price": float(r[1] or 0), "name": r[2]}
+                for r in out_of_stock
+            ],
+            # Both engines hand back an aware datetime; the field has always
+            # been a string on the wire.
+            "lastSync": snapshot_at.isoformat() if snapshot_at else None,
+        }
 
     async def record_inventory_snapshot(self, force: bool = False) -> bool:
         """Record daily inventory snapshot for average calculation.

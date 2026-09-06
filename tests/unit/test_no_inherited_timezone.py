@@ -29,6 +29,16 @@ WHAT IS DELIBERATELY NOT FLAGGED
 *instant*, and an instant is the same number on every engine no matter how it
 is rendered. Only the calendar day is ambiguous, so only the calendar day is
 policed here.
+
+THE CORNER THAT EXEMPTION MISSED
+
+"No matter how it is rendered" stops being true the moment the instant leaves
+the process **as a string**. DuckDB renders a `TIMESTAMPTZ` in the session's
+timezone — `Europe/Kyiv` in the web container — and asyncpg hands back UTC, so
+the same stored instant reaches the browser as `…T14:50:45+03:00` from one
+engine and `…T11:50:45+00:00` from the other. Found on 2026-09-06 while
+porting `get_stock_summary`, by running it against a real DuckDB rather than
+by reading it. `TestAnInstantOnTheWireIsNormalised` is the guard.
 """
 from __future__ import annotations
 
@@ -160,3 +170,47 @@ class TestTheRoutedQueriesToo:
         ).predicate("revenue_ltv", "retail")
         assert TODAY_IN_KYIV in sql
         assert "CURRENT_DATE" not in strip_comments_and_literals(sql)
+
+
+class TestAnInstantOnTheWireIsNormalised:
+    """A timestamp that becomes a string must be pinned to UTC first.
+
+    Behavioural, not structural: the failure is in what the driver renders, so
+    nothing in the source distinguishes a safe `.isoformat()` from an unsafe
+    one. Driving one engine under two session timezones is enough to catch it
+    and needs no second engine — which matters, because the differential test
+    that would also catch it only runs where a PostgreSQL is available.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("session_tz", ("UTC", "Europe/Kyiv",
+                                            "Pacific/Kiritimati"))
+    async def test_the_stock_summary_stamp_does_not_move_with_the_session(
+        self, tmp_path, session_tz,
+    ):
+        from datetime import date, datetime, timezone
+
+        from core.duckdb_store import DuckDBStore
+
+        stamp = datetime(2026, 9, 6, 11, 50, 45, tzinfo=timezone.utc)
+        store = DuckDBStore(db_path=tmp_path / f"tz-{session_tz.replace('/', '-')}.duckdb")
+        await store.connect()
+        try:
+            async with store.connection() as conn:
+                conn.execute(f"SET TimeZone='{session_tz}'")
+                conn.execute(
+                    "INSERT INTO offer_stocks (id, sku, price, purchased_price,"
+                    " quantity, reserve) VALUES (1, 'S-1', 500, 250, 7, 0)")
+                conn.execute(
+                    "INSERT INTO sku_inventory_status (offer_id, product_id, sku,"
+                    " name, brand, category_id, quantity, reserve, price,"
+                    " purchased_price, first_seen_at, updated_at)"
+                    " VALUES (1, 101, 'S-1', 'Name', 'B', 1, 7, 0, 500, 250, ?, ?)",
+                    [date(2026, 1, 1), stamp])
+
+            summary = await store.get_stock_summary(limit=5)
+            assert summary["lastSync"] == "2026-09-06T11:50:45+00:00", (
+                f"the session timezone reached the wire: {summary['lastSync']}"
+            )
+        finally:
+            await store.close()

@@ -56,6 +56,15 @@ def _d(days_ago: int) -> date:
     return TODAY - timedelta(days=days_ago)
 
 
+# `sku_inventory_status.updated_at` is stamped once per rebuild and *carried*
+# into Postgres by the replication — the two stores hold the same instant, and
+# `get_stock_summary` reports it as `lastSync`. Seeded explicitly here because
+# the column defaults to `CURRENT_TIMESTAMP` on both sides, which would have
+# the fixture disagree by however long the two seeds took and make a real
+# comparison look like a flake.
+SNAPSHOT_AT = datetime(2026, 9, 6, 11, 50, 45, tzinfo=timezone.utc)
+
+
 CATEGORIES = [(10, "Догляд", None), (11, "Очищення", 10), (12, "Порожня", None)]
 
 # (offer_id, product_id, sku, name, brand, category_id, quantity, reserve,
@@ -129,6 +138,7 @@ HISTORY = [
 ]
 
 CALLS = (
+    ("get_stock_summary", {"limit": 5}),
     ("get_inventory_summary_v2", {}),
     ("get_dead_stock_items_v2", {"limit": 5}),
     ("get_dead_stock_deep", {"limit": 5}),
@@ -164,10 +174,10 @@ async def _seed_duckdb(store):
             conn.execute(
                 "INSERT INTO sku_inventory_status (offer_id, product_id, sku,"
                 " name, brand, category_id, quantity, reserve, price,"
-                " purchased_price, last_sale_date, first_seen_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " purchased_price, last_sale_date, first_seen_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [oid, pid, sku, name, brand, cat, qty, res, price, cost,
-                 last_sale, first_seen])
+                 last_sale, first_seen, SNAPSHOT_AT])
         for oid, day, stype, ret, active, src in ORDERS:
             conn.execute(
                 "INSERT INTO silver_orders (id, source_id, status_id,"
@@ -214,9 +224,9 @@ async def _seed_postgres(conn):
     await conn.executemany(
         "INSERT INTO app.sku_inventory_status (offer_id, product_id, sku, name,"
         " brand, category_id, quantity, reserve, price, purchased_price,"
-        " last_sale_date, first_seen_at)"
-        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-        [(o, p, s, n, b, c, q, r, pr, co, ls, fs)
+        " last_sale_date, first_seen_at, updated_at)"
+        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+        [(o, p, s, n, b, c, q, r, pr, co, ls, fs, SNAPSHOT_AT)
          for o, p, s, n, b, c, q, r, pr, co, ls, fs in SKUS])
     await conn.executemany(
         "INSERT INTO silver.orders (id, source_id, status_id, grand_total,"
@@ -347,6 +357,41 @@ async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
         both_engines, monkeypatch, "get_average_inventory", {"days": 90})
     assert average["dataPoints"] == len(HISTORY)
     assert "message" not in average, "the no-history branch is not what ran"
+
+
+@pytest.mark.asyncio
+async def test_the_summary_exercises_what_it_was_ported_for(both_engines, monkeypatch):
+    """The three things `get_stock_summary` gained on the way to Postgres.
+
+    Comparing two engines proves they agree; it does not prove they agree
+    about anything interesting. These are the parts of the answer that were
+    new or changed, asserted on the DuckDB side and compared on both by the
+    parametrised test above.
+    """
+    summary, _ = await _both(
+        both_engines, monkeypatch, "get_stock_summary", {"limit": 5})
+
+    # 1. The out-of-stock SKU reaches the counts. It is the row that
+    #    `gold.v_sku_status` would have silently dropped — that view is
+    #    `WHERE quantity > 0`, which is why the port reads the table.
+    assert summary["summary"]["outOfStockCount"] >= 1
+    assert any(i["sku"] == "S-9" for i in summary["outOfStock"])
+
+    # 2. `name` comes from the row itself now, not from a join to `offers`
+    #    that Postgres does not have.
+    assert all(i["name"] for i in summary["topByQuantity"])
+
+    # 3. `lastSync` is the snapshot the rows were built in — the same instant
+    #    in both stores, because the replication carries the column rather
+    #    than restamping it. It used to read a `sync_metadata` key nothing has
+    #    ever written, so it was NULL for the life of the feature.
+    assert summary["lastSync"] == SNAPSHOT_AT.isoformat()
+
+    # 4. The tie the fixture plants: S-11 and S-12 are both 3 units at 500, so
+    #    the low-stock list's ORDER BY has to break it on `offer_id` or the two
+    #    engines are free to disagree about which one a LIMIT keeps.
+    tied = [i["sku"] for i in summary["lowStock"] if i["sku"] in ("S-11", "S-12")]
+    assert tied == ["S-11", "S-12"], tied
 
 
 @pytest.mark.asyncio

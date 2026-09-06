@@ -28,10 +28,11 @@ from core.duckdb_store import DuckDBStore
 
 TIMEOUT_S = 20
 
-# (method, kwargs) — every consumer of the eleven views, plus the two that
-# read `inventory_history`. Nine of the tab's ten routes; `/stocks/summary`
-# stays on DuckDB because `offers` and `sync_metadata` are not in Postgres.
+# (method, kwargs) — every consumer of the eleven views, plus the three that
+# read `inventory_history` or `sku_inventory_status` directly. All ten of the
+# tab's read routes: `/stocks/summary` joined the rest on 2026-09-06.
 CALLS = (
+    ("get_stock_summary", {"limit": 10}),
     ("get_inventory_summary_v2", {}),
     ("get_dead_stock_items_v2", {"limit": 10}),
     ("get_dead_stock_deep", {"limit": 10}),
@@ -309,18 +310,49 @@ class TestTheHelperIsNeverCalledUnderTheLock:
                         stragglers.append((node.lineno, arg.value.strip()[:60]))
         assert not stragglers, f"view read outside the routing helper: {stragglers}"
 
-    def test_only_get_stock_summary_still_reads_history_on_duckdb(self):
-        """The boundary of this port, stated so it cannot drift quietly.
+    def test_no_reader_names_an_unrouted_table(self):
+        """The boundary this test used to guard is gone, and this is what
+        replaced it.
 
-        `/api/stocks/summary` is the one read route left on DuckDB, and the
-        reason is specific: it joins `offers` and `sync_metadata`, neither of
-        which is in Postgres, so porting it needs new replication rather than
-        a table name. Everything else reading `inventory_history` goes through
-        the helper; the writer keeps its own connection, as a writer must.
+        Until 2026-09-06 `/api/stocks/summary` was the one read route left on
+        DuckDB, and the recorded reason was that it joined `offers` and
+        `sync_metadata`, neither of which is in Postgres. Both halves turned
+        out to be avoidable rather than blocking — the join to `offers` existed
+        only to fetch `p.name`, which `sku_inventory_status` already carries
+        from the identical joins, and the `sync_metadata` row was a key nothing
+        in the repository has ever written, so `lastSync` had been NULL since
+        the feature shipped. The port needed no replication at all.
 
-        If somebody replicates those two, this test is where they find out the
-        method is waiting for them.
+        So the check is now the general one: no read method may name a table
+        that exists only in DuckDB. A writer may — it writes there.
         """
+        source = Path("core/repositories/inventory.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        # Tables DuckDB has and Postgres does not. `offers` and `sync_metadata`
+        # are landing/control state nobody replicated; adding one here is how
+        # the next port learns it has a dependency to resolve first.
+        DUCKDB_ONLY = ("FROM offers", "JOIN offers", "FROM sync_metadata")
+
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            if not node.name.startswith("get_"):
+                continue          # writers and refreshers keep their own store
+            body = ast.get_source_segment(source, node) or ""
+            for name in DUCKDB_ONLY:
+                if name in body:
+                    offenders.append((node.name, name))
+        assert not offenders, (
+            f"read method naming a table Postgres does not have: {offenders} — "
+            f"the flag cannot switch it, and it will answer from DuckDB while "
+            f"the rest of the tab answers from Postgres"
+        )
+
+    def test_the_summary_reads_history_through_the_helper(self):
+        """`inventory_history` has two readers and only one may hold a
+        connection: the writer that records the snapshot."""
         source = Path("core/repositories/inventory.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         readers = set()
@@ -328,17 +360,14 @@ class TestTheHelperIsNeverCalledUnderTheLock:
             if not isinstance(node, ast.AsyncFunctionDef):
                 continue
             body = ast.get_source_segment(source, node) or ""
-            if "FROM inventory_history" in body:
+            if "{inventory_history}" in body or "FROM inventory_history" in body:
                 readers.add(node.name)
-        assert readers == {"get_stock_summary", "record_inventory_snapshot"}, readers
-
-        summary = ast.get_source_segment(
-            source,
-            next(n for n in ast.walk(tree)
-                 if isinstance(n, ast.AsyncFunctionDef)
-                 and n.name == "get_stock_summary"),
-        )
-        assert "JOIN offers o" in summary and "FROM sync_metadata" in summary, (
-            "get_stock_summary no longer needs the two unreplicated tables — "
-            "it can be ported now"
-        )
+        assert "get_stock_summary" in readers
+        assert "get_average_inventory" in readers
+        # The writer is the only one allowed to name it unrendered.
+        unrendered = {
+            n.name for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef)
+            and "FROM inventory_history" in (ast.get_source_segment(source, n) or "")
+        }
+        assert unrendered == {"record_inventory_snapshot"}, unrendered
