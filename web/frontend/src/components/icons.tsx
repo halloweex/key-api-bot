@@ -1,6 +1,16 @@
+import type { ComponentType } from 'react'
+
 /**
  * Shared icon components — Lucide re-exports with backward-compatible aliases.
+ *
+ * IconComponent is the project-wide icon contract: components accept the icon
+ * as a *component* (`icon={Users}`), never as a pre-styled element
+ * (`icon={<Users className="w-4 h-4" />}`). Size and colour are cosmetics and
+ * belong to the component that renders the icon — the call site only names
+ * which glyph to use. Lucide icons satisfy this contract as-is.
  */
+export type IconComponent = ComponentType<{ className?: string; 'aria-hidden'?: boolean }>
+
 export {
   UserPlus,
   Users,

@@ -8,13 +8,14 @@ Provides:
 """
 import json
 from typing import Optional
-from fastapi import APIRouter, Query, HTTPException, Request
+from fastapi import APIRouter, Query, HTTPException, Request, Depends
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from web.ratelimit import limiter  # single app-wide limiter instance
+from web.routes.auth import require_admin
 from web.services.search_service import get_search_service
-from web.services.chat_service import get_chat_service
+from web.services.chat_service import get_chat_service, ConversationAccessError
 from core.observability import get_logger
 
 logger = get_logger(__name__)
@@ -57,6 +58,7 @@ class ChatResponse(BaseModel):
 async def chat(
     request: Request,
     body: ChatRequest,
+    user: dict = Depends(require_admin),
 ):
     """
     Send a message to the AI assistant.
@@ -72,13 +74,19 @@ async def chat(
             detail="Chat service is not available. Please configure ANTHROPIC_API_KEY."
         )
 
-    # Get or create conversation
+    user_id = user.get("user_id")
+
+    # Get or create conversation. A conversation_id the caller does not own
+    # (foreign or unknown) is a 404 — never silently adopted or recreated.
     conv_id = body.conversation_id
     if not conv_id:
-        conv_id = service.create_conversation(body.context)
+        conv_id = service.create_conversation(body.context, user_id=user_id)
 
     # Get response
-    result = await service.chat(conv_id, body.message)
+    try:
+        result = await service.chat(conv_id, body.message, user_id=user_id)
+    except ConversationAccessError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
     return ChatResponse(
         conversation_id=result["conversation_id"],
@@ -94,6 +102,7 @@ async def chat_stream(
     request: Request,
     message: str = Query(..., min_length=1, max_length=2000),
     conversation_id: Optional[str] = Query(None),
+    user: dict = Depends(require_admin),
 ):
     """
     Stream chat response using Server-Sent Events (SSE).
@@ -115,14 +124,23 @@ async def chat_stream(
             }
         return EventSourceResponse(error_generator())
 
-    # Get or create conversation
+    user_id = user.get("user_id")
+
+    # Get or create conversation. Validate ownership *before* opening the SSE
+    # stream so a foreign or unknown conversation_id fails with a 404 the client
+    # can see, rather than an in-band error event on a 200 response.
     conv_id = conversation_id
     if not conv_id:
-        conv_id = service.create_conversation()
+        conv_id = service.create_conversation(user_id=user_id)
+    else:
+        try:
+            service.resolve_owned(conv_id, user_id)
+        except ConversationAccessError:
+            raise HTTPException(status_code=404, detail="Conversation not found")
 
     async def event_generator():
         try:
-            async for event in service.chat_stream(conv_id, message):
+            async for event in service.chat_stream(conv_id, message, user_id=user_id):
                 event_type = event.get("type", "chunk")
 
                 if event_type == "chunk":

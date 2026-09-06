@@ -40,6 +40,31 @@ os.environ["DASHBOARD_SECRET_KEY"] = "test-signing-key-not-a-real-secret"
 os.environ["BOT_TOKEN"] = "123456:test-bot-token-not-a-real-secret"
 os.environ["KEYCRM_API_KEY"] = "test-keycrm-key-not-a-real-secret"
 
+# The dev kill switch is a property of a *machine*, not of the suite, and a
+# developer laptop sets it in `.env`. Left in place it silences the transports
+# before they are reached, so nine tests that assert an alert was delivered
+# passed on CI and failed on the machine that had switched alerts off — the
+# opposite of what a kill switch should cost. Neutralised here rather than in
+# each test: what stops the suite reaching Telegram is the autouse fixture
+# below, never this variable. A test that wants suppression sets it with
+# monkeypatch.
+#
+# Assigned "0" rather than deleted, for the reason the block above turns on:
+# `load_dotenv()` only declines to overwrite a name that is *present*, so
+# popping this one just clears the way for `.env` to put it back.
+os.environ["KS_ALERTS_DISABLED"] = "0"
+
+# Same shape, different reason: every message signs itself with the instance
+# name, which without this is the developer's hostname and makes any assertion
+# about a rendered message machine-dependent.
+os.environ["KS_INSTANCE"] = "test-instance"
+
+# The Gate persists its decision state under data/ by default; two thousand
+# tests taking turns rewriting a real file would be both slow and a way for
+# one run to poison the next. Empty means disabled; tests that exercise
+# persistence construct AlertGate(state_path=tmp_path/...) explicitly.
+os.environ["KS_ALERT_GATE_STATE_DIR"] = ""
+
 import pytest  # noqa: E402  — must follow the environment block above
 
 
@@ -69,6 +94,17 @@ def _no_telegram_from_tests(monkeypatch):
         monkeypatch.setattr(
             f"core.telegram_alerts.{name}", _blocked, raising=False,
         )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_alert_gate():
+    """The Gate is a module singleton with per-bucket cooldown state; without
+    this, one test's alert buys thirty minutes of silence in the next."""
+    from core.alerting import reset_gate
+
+    reset_gate()
+    yield
+    reset_gate()
 
 
 @pytest.fixture(autouse=True)

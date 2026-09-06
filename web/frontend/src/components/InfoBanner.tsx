@@ -1,5 +1,6 @@
 import { memo, type ReactNode } from 'react'
 import { Wrapper } from './Wrapper'
+import type { IconComponent } from './icons'
 
 // ─── InfoBanner ──────────────────────────────────────────────────────────────
 //
@@ -14,13 +15,13 @@ import { Wrapper } from './Wrapper'
 
 interface InfoBannerProps {
   children: ReactNode
-  /** Optional leading icon (rendered on the left at the same baseline as title/body). */
-  icon?: ReactNode
+  /** Optional leading icon (rendered on the left at the same baseline as title/body). Sized by the banner. */
+  icon?: IconComponent
   /** Optional bold title rendered above the body. */
   title?: string
 }
 
-export const InfoBanner = memo(function InfoBanner({ children, icon, title }: InfoBannerProps) {
+export const InfoBanner = memo(function InfoBanner({ children, icon: Icon, title }: InfoBannerProps) {
   const body = title ? (
     <div className="text-sm text-blue-800">
       <p className="font-medium">{title}</p>
@@ -32,9 +33,11 @@ export const InfoBanner = memo(function InfoBanner({ children, icon, title }: In
 
   return (
     <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg" role="note">
-      {icon ? (
+      {Icon ? (
         <Wrapper dir="row" gap="md" align="start">
-          <span className="text-blue-500 flex-shrink-0 mt-0.5">{icon}</span>
+          <span className="text-blue-500 flex-shrink-0 mt-0.5">
+            <Icon className="w-4 h-4" aria-hidden />
+          </span>
           {body}
         </Wrapper>
       ) : (

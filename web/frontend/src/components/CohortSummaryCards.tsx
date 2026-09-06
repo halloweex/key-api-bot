@@ -5,6 +5,8 @@ import { formatNumber, formatPercent, formatCurrency } from '../utils/formatters
 import { MetricCard } from './MetricCard'
 import { Badge } from './Badge'
 import type { TabId } from './cohortTabsConfig'
+import { TileGrid } from './TileGrid'
+import { Wrapper } from './Wrapper'
 
 interface CohortSummaryCardsProps {
   data: EnhancedCohortRetentionResponse
@@ -32,12 +34,12 @@ export function CohortSummaryCards({ data, activeTab, monthsBack, m1Trend }: Coh
       : undefined
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+    <Wrapper marginBottom="xl"><TileGrid columns={4}>
       <MetricCard
         surface="tile-gradient"
         tone="neutral"
         iconStyle="watermark"
-        icon={<Users size={28} />}
+        icon={Users}
         label={t('retention.totalCohorts')}
         value={formatNumber(data.summary.totalCohorts)}
         sub={t('retention.lastMonths', { count: monthsBack })}
@@ -46,7 +48,7 @@ export function CohortSummaryCards({ data, activeTab, monthsBack, m1Trend }: Coh
         surface="tile-gradient"
         tone="neutral"
         iconStyle="watermark"
-        icon={<Repeat size={28} />}
+        icon={Repeat}
         label={t('customer.totalCustomers')}
         value={formatNumber(data.summary.totalCustomers)}
         sub={t('retention.inAnalyzedCohorts')}
@@ -55,7 +57,7 @@ export function CohortSummaryCards({ data, activeTab, monthsBack, m1Trend }: Coh
         surface="tile-gradient"
         tone="green"
         iconStyle="watermark"
-        icon={<TrendingUp size={28} />}
+        icon={TrendingUp}
         label={activeTab === 'revenue' ? t('retention.avgM1RevRetention') : t('retention.avgM1Retention')}
         value={avgRetention?.[1] ? formatPercent(avgRetention[1]) : '-'}
         sub={t('retention.returnIn2ndMonth')}
@@ -79,6 +81,6 @@ export function CohortSummaryCards({ data, activeTab, monthsBack, m1Trend }: Coh
           sub={t('retention.returnIn4thMonth')}
         />
       )}
-    </div>
+    </TileGrid></Wrapper>
   )
 }

@@ -9,7 +9,7 @@ Provides:
 """
 import asyncio
 import time
-from typing import Callable
+from typing import Any, Callable, Mapping
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
@@ -40,6 +40,69 @@ SLOW_ENDPOINTS = {
     "/api/revenue/forecast/tune",
     "/api/traffic/reclassify",
 }
+
+
+UNMATCHED_METRIC_KEY = "<unmatched>"
+
+
+def _templated(path: str, path_params: Mapping[str, Any]) -> str:
+    """`path` with every value the router bound to a parameter put back as its name."""
+    names_by_value: dict[str, str] = {}
+    for name, value in path_params.items():
+        text = str(value)
+        # An empty value matches between every character; it names nothing.
+        if text:
+            names_by_value.setdefault(text, name)
+    if not names_by_value:
+        return path
+
+    # A `:path` converter spans several segments, so its value has to go before
+    # the segment walk below can recognise the segments either side of it.
+    for text in sorted((v for v in names_by_value if "/" in v), key=len, reverse=True):
+        path = path.replace(text, "{%s}" % names_by_value[text], 1)
+
+    return "/".join(
+        "{%s}" % names_by_value[segment] if segment in names_by_value else segment
+        for segment in path.split("/")
+    )
+
+
+def request_metric_key(method: str, path: str, scope: Any) -> str:
+    """The metric name for one request — the route, never the identifiers in it.
+
+    `metrics.get_stats()` is returned verbatim by `GET /api/metrics`, which any
+    approved viewer may read. Keyed on the path as asked, that dictionary was a
+    directory of the ids other people had used — buyer ids, the Telegram id of
+    an admin whose role was changed, campaign and preset names — which turns
+    "you must know a valid id" into "here is the list of valid ids". Refused
+    requests are recorded too, so a 403 published the id it had just refused.
+    It was also unbounded: one entry per distinct id for the life of the
+    process, each with its own list of latency samples.
+
+    Templated from the request's own path and `scope["path_params"]` rather
+    than from `route.path_format`, which would be the obvious source: the
+    parameters are Starlette-level and read the same on every version, while a
+    route reached through an included router carries an un-prefixed path (see
+    tests/routes_helper), so its `path_format` loses the `/api` on the FastAPI
+    generation production runs.
+
+    A request that matched no route has no template — a mounted application
+    (`/static`) publishes none, and neither does a 404. It is counted under its
+    mount or under one sentinel, never under the path that was asked for, which
+    is the same attacker-chosen key by another name.
+    """
+    # This runs on every request, including the health checks Docker and nginx
+    # depend on. Nothing here is worth a 500, and the fallback discloses
+    # nothing, so an unreadable scope costs the breakdown and not the request.
+    try:
+        if not isinstance(scope, Mapping):
+            return f"{method} {UNMATCHED_METRIC_KEY}"
+        if scope.get("route") is None:
+            mount = scope.get("root_path") or ""
+            return f"{method} {mount}/*" if mount else f"{method} {UNMATCHED_METRIC_KEY}"
+        return f"{method} {_templated(path, scope.get('path_params') or {})}"
+    except Exception:  # noqa: BLE001 — see above
+        return f"{method} {UNMATCHED_METRIC_KEY}"
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
@@ -114,8 +177,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 }
             )
 
-        # Record metrics
-        endpoint = f"{method} {path}"
+        # Record metrics. The scope is read only now, after `call_next`: the
+        # router writes the matched route and its parameters into it, and
+        # before the call there is nothing there to template with.
+        endpoint = request_metric_key(method, path, request.scope)
         metrics.record_request(endpoint)
         metrics.record_timing(endpoint, duration_ms)
 

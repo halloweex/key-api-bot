@@ -44,6 +44,19 @@ class DataQualityFreshness(BaseModel):
     age_seconds: Optional[int] = Field(None, description="Seconds since that run; null means never succeeded")
 
 
+class MirrorFreshness(BaseModel):
+    """When a mirrored table last shipped successfully, and whether it is failing.
+
+    Both are needed. The watermark only moves when there was something to ship,
+    so age alone cannot separate a quiet night from a dead mirror; and a mirror
+    that is switched off never raises, so a failure count alone cannot see it.
+    """
+    last_ok_at: Optional[str] = Field(None, description="ISO timestamp of the last successful shipment")
+    age_seconds: Optional[int] = Field(None, description="Seconds since that shipment; null means never shipped")
+    failures_since_ok: Optional[int] = Field(None, description="Consecutive failed attempts since the last success")
+    failing: bool = Field(False, description="Whether the last attempt recorded an error")
+
+
 class SyncStatus(BaseModel):
     """Background sync service status."""
     status: str = Field(description="Sync status: active, idle, or error")
@@ -72,6 +85,23 @@ class HealthResponse(BaseModel):
             "Schema ledger as of connect: how many steps are applied, which are "
             "pending, and which failed. Named `migrations` rather than `schema` "
             "because Pydantic already owns that word."
+        ),
+    )
+    alerting: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "The alerting machinery's own health: consecutive transport "
+            "failures in this process and the last successful delivery. "
+            "Judged by the canary — the one subsystem that had no dead-man's "
+            "switch on itself."
+        ),
+    )
+    mirrors: Optional[Dict[str, MirrorFreshness]] = Field(
+        None,
+        description=(
+            "Per-table freshness of the Postgres copy of landing. Null — not an "
+            "empty object — when it could not be read, so a watchdog can tell "
+            "'nothing is watching' from 'nothing is wrong'."
         ),
     )
 

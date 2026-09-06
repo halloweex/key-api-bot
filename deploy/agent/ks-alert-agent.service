@@ -1,0 +1,11 @@
+[Unit]
+Description=Diagnose a fired alert with a read-only Claude agent
+# Never pile up: one diagnosis at a time, the runner drains the queue itself.
+
+[Service]
+Type=oneshot
+ExecStart=/opt/key-api-bot/deploy/agent/run_agent.sh
+Environment=HOME=/root
+# The runner's own hard ceiling is 300s per task; this is the belt for the
+# whole drain loop.
+TimeoutStartSec=1800

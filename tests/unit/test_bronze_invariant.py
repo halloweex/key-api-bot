@@ -106,8 +106,6 @@ class TestSchedulerInvariantJob:
         from core.scheduler import BackgroundScheduler
 
         scheduler = BackgroundScheduler()
-        # Reset throttle.
-        BackgroundScheduler._bronze_invariant_last_alert = 0.0
 
         fake_store = AsyncMock()
         fake_store.get_bronze_stats = AsyncMock(
@@ -142,7 +140,6 @@ class TestSchedulerInvariantJob:
         from core.scheduler import BackgroundScheduler
 
         scheduler = BackgroundScheduler()
-        BackgroundScheduler._bronze_invariant_last_alert = 0.0
 
         fake_store = AsyncMock()
         fake_store.get_bronze_stats = AsyncMock(
@@ -172,9 +169,11 @@ class TestSchedulerInvariantJob:
         from core.scheduler import BackgroundScheduler
 
         scheduler = BackgroundScheduler()
-        # Pretend we alerted 1 minute ago.
-        import time as _time
-        BackgroundScheduler._bronze_invariant_last_alert = _time.time() - 60
+        # A delivery 1 minute ago, recorded where the policy now lives:
+        # the Gate (step 02 killed the private 6h float).
+        from core.alerting import _gate
+        _gate.decide("bronze:invariant_violated", has_condition=True)
+        _gate.record_delivery("bronze:invariant_violated")
 
         fake_store = AsyncMock()
         fake_store.get_bronze_stats = AsyncMock(

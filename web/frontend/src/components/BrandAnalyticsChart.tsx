@@ -114,21 +114,21 @@ export const BrandAnalyticsChart = memo(function BrandAnalyticsChart() {
           <MetricCard
             surface="tile-gradient"
             tone="blue"
-            icon={<TagIcon />}
+            icon={TagIcon}
             label={t('chart.totalBrands')}
             value={formatNumber(metrics.totalBrands ?? 0)}
           />
           <MetricCard
             surface="tile-gradient"
             tone="purple"
-            icon={<TrophyIcon />}
+            icon={TrophyIcon}
             label={t('chart.topBrand')}
             value={metrics.topBrand ?? t('chart.na')}
           />
           <MetricCard
             surface="tile-gradient"
             tone="green"
-            icon={<ChartPieIcon />}
+            icon={ChartPieIcon}
             label={t('chart.topBrandShare')}
             value={formatPercent(metrics.topBrandShare ?? 0)}
           />

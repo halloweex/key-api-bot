@@ -876,7 +876,7 @@ export interface AtRiskResponse {
 
 // ─── User & Permissions Types ─────────────────────────────────────────────────
 
-export type UserRole = 'admin' | 'editor' | 'viewer'
+export type UserRole = 'admin' | 'editor' | 'marketer' | 'viewer'
 
 export interface User {
   id: number
@@ -901,6 +901,7 @@ export interface Permissions {
   customers: FeaturePermissions
   reports: FeaturePermissions
   user_management: FeaturePermissions
+  sms: FeaturePermissions
 }
 
 export interface UserPreferences {
@@ -1304,7 +1305,77 @@ export interface MarketingReportResponse {
 // ─── SMS Campaigns ───────────────────────────────────────────────────────────
 
 export type SmsLtvBasis = 'revenue' | 'margin'
-export type SmsTier = 'VIP' | 'CORE' | 'REACTIVATION'
+/** 'ALL' is the single arm a filtered audience produces. */
+export type SmsTier = 'VIP' | 'CORE' | 'REACTIVATION' | 'ALL'
+/** How the audience is split into arms: three value tiers, or one group. */
+export type SmsGrouping = 'rfm' | 'single'
+
+/**
+ * The audience, as the wizard holds it.
+ *
+ * Everything is optional and an unset field is not a filter — an empty object
+ * selects what the tier rules alone selected before filters existed. Sent as
+ * flat query parameters, and saved verbatim as a preset.
+ */
+export interface SmsAudienceFilters {
+  recencyMin?: number | null
+  recencyMax?: number | null
+  ordersMin?: number | null
+  ordersMax?: number | null
+  ltvMin?: number | null
+  ltvMax?: number | null
+  aovMin?: number | null
+  aovMax?: number | null
+  firstOrderFrom?: string | null
+  firstOrderTo?: string | null
+  cities?: string[]
+  brands?: string[]
+  categoryIds?: number[]
+  sourceIds?: number[]
+  promocodeUsed?: string | null
+  boughtWithinDays?: number | null
+}
+
+/**
+ * The cut-offs that assign a customer to a value tier.
+ *
+ * They are conditions in their own right, not decoration: the cascade runs
+ * VIP → Core → Reactivation and whoever matches none of them is dropped from
+ * the audience entirely. Unset means the server's defaults for the chosen
+ * basis (margin 5 500 / 2 750, revenue 10 000 / 5 000).
+ */
+export interface SmsTierRules {
+  vipLtv?: number | null
+  coreLtv?: number | null
+  coreMinOrders?: number | null
+  reactivationMaxRecency?: number | null
+}
+
+/** The whole audience definition: how it is split, ranked, and narrowed. */
+export interface SmsAudienceCriteria {
+  grouping: SmsGrouping
+  ltvBasis: SmsLtvBasis
+  holdoutPct: number
+  /** The base window: nobody whose last order is older than this is considered. */
+  maxRecencyDays: number
+  tiers: SmsTier[]
+  tierRules: SmsTierRules
+  filters: SmsAudienceFilters
+}
+
+/** A saved audience. Built-ins ship with the page and cannot be edited. */
+export interface SmsAudiencePreset {
+  name: string
+  criteria: Partial<SmsAudienceCriteria> & Record<string, unknown>
+  createdBy: number | null
+  createdAt: string | null
+  updatedAt: string | null
+  builtin: boolean
+}
+
+export interface SmsAudiencePresetsResponse {
+  presets: SmsAudiencePreset[]
+}
 
 export interface SmsSegment {
   tier: SmsTier
@@ -1324,6 +1395,7 @@ export interface SmsSegment {
 export type SmsFunnelStage =
   | 'customers'
   | 'inWindow'
+  | 'filtered'
   | 'tiered'
   | 'phone'
   | 'subscribed'
@@ -1346,7 +1418,11 @@ export interface SmsSegmentsResponse {
     coreMinOrders: number
     reactivationMaxRecency: number
     holdoutPct: number
+    /** Absent on responses from before audience filters shipped. */
+    grouping?: SmsGrouping
+    filters?: Record<string, unknown>
   }
+  grouping?: SmsGrouping
   funnel: SmsFunnelStep[]
   segments: SmsSegment[]
   totals: { customers: number; target: number; holdout: number }
@@ -1365,10 +1441,30 @@ export interface SmsCampaignSummary {
   members: number
   target: number
   holdout: number
+  /** The audience as frozen, in the shape the store recorded it. */
+  criteria?: Record<string, unknown>
+  /** What went out, and what it cost. Null on campaigns sent before these
+   *  were recorded — the page must then say nothing rather than guess. */
+  messageText?: string | null
+  messageParts?: number | null
+  recipientsSent?: number | null
+  pricePerPart?: number | null
+  costTotal?: number | null
+  delivered?: number | null
+  undelivered?: number | null
 }
 
 export interface SmsCampaignsResponse {
   campaigns: SmsCampaignSummary[]
+}
+
+/** What creating a campaign returns: the roster is frozen at this moment. */
+export interface SmsCreateCampaignResponse {
+  campaign: string
+  frozen: { campaign: string; frozen: boolean }
+  segments: SmsSegment[]
+  totals: { customers: number; target: number; holdout: number }
+  funnel: SmsFunnelStep[]
 }
 
 export interface SmsGroupStats {
@@ -1449,6 +1545,8 @@ export interface SmsChannelsResponse {
   viber: boolean
   smsSender: string | null
   viberSender: string | null
+  /** Gateway tariff per message part, in ₴. Absent on older deployments. */
+  pricePerPart?: number
 }
 
 export type SmsChannel = 'sms' | 'viber_sms'

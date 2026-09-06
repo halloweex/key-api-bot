@@ -3,8 +3,29 @@ from __future__ import annotations
 
 import json
 import math
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
+from dataclasses import asdict, dataclass
 from typing import Optional, Dict, Any, List, Sequence, Union
+
+
+class DlrEventRebound(Exception):
+    """A delivery callback named a different message than its event id first did.
+
+    The gateway's signature covers the event id alone, so this is the only
+    thing that separates a genuine report from a captured (id, signature) pair
+    aimed at somebody else's message. It is raised rather than returned so a
+    caller that has not thought about it fails loudly instead of writing.
+    """
+
+    def __init__(self, event_id: str, bound_message_id: str, message_id: str):
+        super().__init__(
+            f"event {event_id} first reported on message {bound_message_id}, "
+            f"now claims {message_id}"
+        )
+        self.event_id = event_id
+        self.bound_message_id = bound_message_id
+        self.message_id = message_id
 
 
 def _norm_cdf(x: float) -> float:
@@ -108,7 +129,18 @@ def _compare_groups(
         "incrementalMarginTotal": round(margin_per_contact * t_n, 2),
     }
 
-from core.duckdb_constants import B2B_MANAGER_ID, RETAIL_MANAGER_IDS
+from core.sms_holdout import assign_arm
+from core.sql_dialect import (
+    AT_RISK_TYPES, CLICKHOUSE_ANALYTICS, COHORT_LTV_TYPES,
+    COHORT_RETENTION_TYPES, DAYS_TO_SECOND_TYPES, DUCKDB_ANALYTICS,
+    ENHANCED_RETENTION_TYPES, at_risk_customers_select,
+    cohort_ltv_select, cohort_retention_select, days_to_second_purchase_select,
+    enhanced_cohort_retention_select,
+)
+from core.pg_sms import refuse_while_unported, sms_store_is_postgres
+from core.sql_dialect import (
+    DUCKDB, POSTGRES, TODAY_IN_KYIV, numbered, sms_segments_select,
+)
 
 # Tier cut-offs per LTV basis for get_sms_segments.
 #
@@ -123,6 +155,322 @@ SMS_TIER_DEFAULTS = {
     "revenue": {"vip": 10000.0, "core": 5000.0},
     "margin": {"vip": 5500.0, "core": 2750.0},
 }
+
+
+# How a campaign's audience is split into arms.
+#
+# `rfm` is the historical behaviour: three tiers by lifetime value and order
+# count, and anyone who falls in none of them is dropped. It answers "who is
+# worth what", which is the right question for a blanket offer and the wrong
+# one for "everybody who bought this brand" — under `rfm` half of that audience
+# would silently fall out for being a one-order buyer past the reactivation
+# window.
+#
+# `single` puts everyone the filters kept into one arm named ALL. One arm is
+# also the only honest split for a small cohort: three arms of 200 measure
+# nothing at all.
+SMS_GROUPINGS = ("rfm", "single")
+
+# Audiences that ship with the page.
+#
+# The first one is the cohort every campaign before 2026-08 was sent to,
+# written down: a 270-day window, three value tiers, 10% withheld. It was a
+# set of defaults nobody could see or name, which made "the usual list" a
+# thing only the code knew. Naming it costs nothing and makes the alternative
+# — a filtered audience — an obvious choice rather than an unknown one.
+BUILTIN_AUDIENCE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "RFM tiers": {
+        "grouping": "rfm",
+        "ltvBasis": "margin",
+        "maxRecencyDays": 270,
+        "coreMinOrders": 2,
+        "reactivationMaxRecency": 120,
+        "salesType": "retail",
+        "holdoutPct": 10,
+        "filters": {},
+    },
+    "Everyone reachable": {
+        "grouping": "single",
+        "ltvBasis": "margin",
+        "maxRecencyDays": 270,
+        "salesType": "retail",
+        "holdoutPct": 20,
+        "filters": {},
+    },
+}
+
+SINGLE_GROUP_NAME = "ALL"
+
+
+@dataclass(frozen=True)
+class SmsAudienceFilters:
+    """Who the campaign is for, beyond the tier rules.
+
+    Every field is optional and an unset field is not a predicate — an empty
+    filter set has to select exactly what the page selected before this
+    existed, or every past campaign becomes unreproducible.
+
+    Two families, and they read the customer differently:
+
+    * aggregate — recency, order count, lifetime value, average order, when
+      they first bought. Computed over the customer's whole history, so they
+      narrow *who* is in the audience without changing what anyone is worth.
+    * content — brand, category, source, promocode, optionally inside a
+      window. These ask whether the customer ever bought a particular thing,
+      as an EXISTS over their orders. Deliberately not a join: filtering the
+      line items would recompute LTV from the matching lines alone, and a
+      customer's value is not "what they spent on this brand".
+    """
+
+    recency_min_days: Optional[int] = None
+    recency_max_days: Optional[int] = None
+    orders_min: Optional[int] = None
+    orders_max: Optional[int] = None
+    ltv_min: Optional[float] = None
+    ltv_max: Optional[float] = None
+    aov_min: Optional[float] = None
+    aov_max: Optional[float] = None
+    first_order_from: Optional[date] = None
+    first_order_to: Optional[date] = None
+    cities: Sequence[str] = ()
+    brands: Sequence[str] = ()
+    category_ids: Sequence[int] = ()
+    source_ids: Sequence[int] = ()
+    promocode: Optional[str] = None
+    bought_within_days: Optional[int] = None
+
+    @property
+    def content_only(self) -> tuple:
+        """The content predicates, if any — the ones needing an EXISTS."""
+        return (self.brands, self.category_ids, self.source_ids, self.promocode)
+
+    def is_empty(self) -> bool:
+        """No predicate at all, so no filtering stage to speak of."""
+        return not any(
+            v not in (None, (), [], "") for v in (
+                self.recency_min_days, self.recency_max_days,
+                self.orders_min, self.orders_max,
+                self.ltv_min, self.ltv_max, self.aov_min, self.aov_max,
+                self.first_order_from, self.first_order_to,
+                tuple(self.cities), tuple(self.brands), tuple(self.category_ids),
+                tuple(self.source_ids), self.promocode,
+            )
+        )
+
+    def as_dict(self) -> Dict[str, Any]:
+        """JSON-safe echo, unset fields dropped.
+
+        Frozen with the campaign, so it has to survive a round trip: this is
+        what tells a reader six months later which audience was messaged.
+        """
+        out: Dict[str, Any] = {}
+        for key, value in asdict(self).items():
+            if value in (None, (), [], ""):
+                continue
+            if isinstance(value, (list, tuple)):
+                out[key] = list(value)
+            elif isinstance(value, date):
+                out[key] = value.isoformat()
+            else:
+                out[key] = value
+        return out
+
+    def predicate(
+        self, ltv_column: str, sales_type: str, order_lines: str = "silver_order_lines",
+    ) -> tuple:
+        """SQL boolean over one row of `scored`, plus its bound parameters.
+
+        Returns ``("TRUE", [])`` when nothing is set, which keeps the funnel
+        stage present and equal to the stage before it rather than making the
+        whole query shape conditional.
+
+        `order_lines` is the only engine-dependent thing in here — every
+        operator used below means the same in both. It comes from the dialect
+        rather than being hardcoded, because this fragment is spliced into a
+        query that may be running against either store.
+        """
+        parts: List[str] = []
+        params: List[Any] = []
+
+        def between(column: str, lo, hi):
+            if lo is not None:
+                parts.append(f"{column} >= ?")
+                params.append(lo)
+            if hi is not None:
+                parts.append(f"{column} <= ?")
+                params.append(hi)
+
+        # Recency runs backwards: "at least 30 days ago" is a *minimum* on the
+        # number of days, and reads as the older edge of the window.
+        between("recency", self.recency_min_days, self.recency_max_days)
+        between("orders", self.orders_min, self.orders_max)
+        between(ltv_column, self.ltv_min, self.ltv_max)
+        # AOV is derived, not stored; orders is never zero here (a customer
+        # exists because they ordered), but NULLIF keeps that honest.
+        between(f"({ltv_column} / NULLIF(orders, 0))", self.aov_min, self.aov_max)
+        between("first_order_date", self.first_order_from, self.first_order_to)
+
+        if self.cities:
+            placeholders = ", ".join("?" * len(self.cities))
+            # Cities are free text from KeyCRM: "Київ" and "київ" are the same
+            # city and neither spelling is canonical.
+            parts.append(f"lower(city) IN ({placeholders})")
+            params += [c.strip().lower() for c in self.cities]
+
+        content: List[str] = []
+        content_params: List[Any] = []
+        if self.brands:
+            placeholders = ", ".join("?" * len(self.brands))
+            content.append(f"cl.brand IN ({placeholders})")
+            content_params += list(self.brands)
+        if self.category_ids:
+            placeholders = ", ".join("?" * len(self.category_ids))
+            # A parent category means the whole branch: picking "Face care"
+            # and getting nothing because every product hangs off a child of
+            # it is the kind of empty result nobody debugs, they just stop
+            # trusting the filter.
+            content.append(
+                f"(cl.category_id IN ({placeholders}) "
+                f"OR cl.parent_category_id IN ({placeholders}))"
+            )
+            content_params += list(self.category_ids) + list(self.category_ids)
+        if self.source_ids:
+            placeholders = ", ".join("?" * len(self.source_ids))
+            content.append(f"cl.source_id IN ({placeholders})")
+            content_params += list(self.source_ids)
+        if self.promocode:
+            content.append("upper(cl.promocode) = upper(?)")
+            content_params.append(self.promocode.strip())
+
+        if content:
+            window = ""
+            if self.bought_within_days is not None:
+                # Interval cannot be parameterised in DuckDB; the value is an
+                # int by construction, never user text.
+                #
+                # `TODAY_IN_KYIV` rather than `CURRENT_DATE`: the two engines
+                # are in different timezones on the production host, so the
+                # bare keyword would slide this window by a day for three
+                # hours every night once `KS_SMS_STORE=postgres`.
+                window = (
+                    f" AND cl.order_date >= {TODAY_IN_KYIV} "
+                    f"- INTERVAL '{int(self.bought_within_days)} days'"
+                )
+            sales_clause = "" if sales_type == "all" else "AND cl.sales_type = ?"
+            exists_params: List[Any] = []
+            if sales_type != "all":
+                exists_params.append(sales_type)
+            parts.append(f"""EXISTS (
+                    SELECT 1 FROM {order_lines} cl
+                    WHERE cl.buyer_id = scored.buyer_id
+                      AND NOT cl.is_return
+                      AND cl.is_active_source
+                      {sales_clause}
+                      AND {' AND '.join(content)}
+                      {window}
+                )""")
+            params += exists_params + content_params
+
+        if not parts:
+            return "TRUE", []
+        return "(" + " AND ".join(parts) + ")", params
+
+
+def _load_json(raw: Any) -> Dict[str, Any]:
+    """A stored JSON snapshot, or nothing. Never raises on a bad row."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _local_times(row: Sequence[Any]) -> tuple:
+    """asyncpg's UTC timestamps in the offset DuckDB would have used.
+
+    Both engines return the same *instant*; they disagree on how it is
+    rendered, because DuckDB hands back values in its session timezone and
+    asyncpg always returns UTC. Nothing downstream compares instants — the API
+    calls `.isoformat()` — so without this the same campaign would carry
+    `2026-08-20T13:00:00+04:00` from one store and `…T09:00:00+00:00` from the
+    other, and a frontend that slices the first ten characters off a timestamp
+    would show a different date either side of midnight.
+
+    Converting here rather than rendering everything in UTC keeps today's
+    responses byte-identical: the engine switch has to be invisible to the
+    page, which means matching what the page already receives rather than
+    picking the tidier convention.
+    """
+    return tuple(
+        v.astimezone() if isinstance(v, datetime) and v.tzinfo is not None else v
+        for v in row
+    )
+
+
+class _SmsTx:
+    """Statements inside one transaction, rendered for one engine.
+
+    The `{table}` holes and `?` markers are the same ones `_sms_run` fills, so
+    a statement reads identically whether it runs alone or in a transaction.
+    """
+
+    def __init__(self, dialect):
+        self._dialect = dialect
+
+    def _render(self, sql: str) -> str:
+        return sql.format(
+            campaigns=self._dialect.sms_campaigns,
+            members=self._dialect.sms_campaign_members,
+            presets=self._dialect.sms_audience_presets,
+            optouts=self._dialect.marketing_optouts,
+            dlr_events=self._dialect.sms_dlr_events,
+            lines=self._dialect.order_lines,
+            stocks=self._dialect.offer_stocks,
+            buyers=self._dialect.buyers,
+        )
+
+
+class _DuckTx(_SmsTx):
+    def __init__(self, conn, dialect):
+        super().__init__(dialect)
+        self._conn = conn
+
+    async def all(self, sql, params=None):
+        return self._conn.execute(self._render(sql), list(params or [])).fetchall()
+
+    async def one(self, sql, params=None):
+        return self._conn.execute(self._render(sql), list(params or [])).fetchone()
+
+    async def none(self, sql, params=None):
+        self._conn.execute(self._render(sql), list(params or []))
+
+    async def many(self, sql, rows):
+        self._conn.executemany(self._render(sql), [list(r) for r in rows])
+
+
+class _PgTx(_SmsTx):
+    def __init__(self, conn, dialect):
+        super().__init__(dialect)
+        self._conn = conn
+
+    def _sql(self, sql: str) -> str:
+        return numbered(self._render(sql))
+
+    async def all(self, sql, params=None):
+        rows = await self._conn.fetch(self._sql(sql), *(params or []))
+        return [_local_times(r) for r in rows]
+
+    async def one(self, sql, params=None):
+        row = await self._conn.fetchrow(self._sql(sql), *(params or []))
+        return _local_times(row) if row is not None else None
+
+    async def none(self, sql, params=None):
+        await self._conn.execute(self._sql(sql), *(params or []))
+
+    async def many(self, sql, rows):
+        await self._conn.executemany(self._sql(sql), [tuple(r) for r in rows])
 
 
 class CustomersMixin:
@@ -323,117 +671,82 @@ class CustomersMixin:
         Returns:
             Dict with cohorts, retention matrix, and summary metrics
         """
-        async with self.connection() as conn:
-            # Build sales type filter
-            sales_type_filter = ""
-            if sales_type == "retail":
-                sales_type_filter = f"""
-                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
-                         OR (o.manager_id IS NULL AND o.source_id = 4))
-                """
-            elif sales_type == "b2b":
-                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+        # Build sales type filter
+        # Silver already carries `sales_type`, materialised per order by the
+        # one CASE in `refresh_warehouse_layers`. These five methods used to
+        # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+        # was a second home for the rule and had gone stale in two ways:
+        # it required `source_id = 4` for a manager-less order where Silver
+        # requires nothing, and it read the *constant* list rather than
+        # `managers.is_retail`, which is what a human edits. Measured on
+        # production: 1,781 non-return orders are retail to every other tab
+        # and were invisible here, and 175 were the other way round.
+        #
+        # It is also the only spelling that can be asked of a third engine:
+        # a column, not a manager list rendered into SQL.
+        sales_type_filter = (
+            "" if sales_type == "all"
+            else f"AND o.sales_type = '{sales_type}'"
+        )
 
-            query = f"""
-            WITH customer_cohorts AS (
-                -- Get each customer's first order month (their cohort)
-                SELECT
-                    o.buyer_id,
-                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
-                FROM silver_orders o
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
-                  {sales_type_filter}
-                GROUP BY o.buyer_id
+        rows = await self._analytics_rows(
+            lambda d: cohort_retention_select(
+                d, sales_type_filter=sales_type_filter,
+                months_back=months_back,
             ),
-            customer_orders AS (
-                -- Get all order months per customer
-                SELECT DISTINCT
-                    o.buyer_id,
-                    c.cohort_month,
-                    DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date)) AS months_since
-                FROM silver_orders o
-                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
-                WHERE NOT o.is_return
-                  {sales_type_filter}
-            ),
-            cohort_sizes AS (
-                SELECT cohort_month, COUNT(DISTINCT buyer_id) AS size
-                FROM customer_cohorts
-                GROUP BY cohort_month
-            ),
-            retention_data AS (
-                SELECT
-                    r.cohort_month,
-                    r.months_since,
-                    COUNT(DISTINCT r.buyer_id) AS retained_customers
-                FROM customer_orders r
-                WHERE r.months_since <= ?
-                GROUP BY r.cohort_month, r.months_since
-            )
-            SELECT
-                strftime(r.cohort_month, '%Y-%m') as cohort,
-                s.size as cohort_size,
-                r.months_since as month_number,
-                r.retained_customers,
-                ROUND(100.0 * r.retained_customers / s.size, 1) as retention_pct
-            FROM retention_data r
-            JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
-            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
-            ORDER BY r.cohort_month DESC, r.months_since
-            """
+            [retention_months],
+            COHORT_RETENTION_TYPES,
+        )
 
-            rows = conn.execute(query, [retention_months]).fetchall()
-
-            # Build cohort data structure
-            cohorts = {}
-            for cohort, size, month_num, retained, pct in rows:
-                if cohort not in cohorts:
-                    cohorts[cohort] = {
-                        "size": size,
-                        "retention": {}
-                    }
-                cohorts[cohort]["retention"][month_num] = {
-                    "count": retained,
-                    "percent": pct
+        # Build cohort data structure
+        cohorts = {}
+        for cohort, size, month_num, retained, pct in rows:
+            if cohort not in cohorts:
+                cohorts[cohort] = {
+                    "size": size,
+                    "retention": {}
                 }
-
-            # Calculate summary metrics
-            total_cohort_size = sum(c["size"] for c in cohorts.values())
-
-            # Weighted average retention by month (weight = cohort size)
-            avg_retention = {}
-            for m in range(retention_months + 1):
-                weighted_sum = 0
-                total_weight = 0
-                for c in cohorts.values():
-                    entry = c["retention"].get(m)
-                    if entry is not None:
-                        pct = entry.get("percent", 0)
-                        weighted_sum += pct * c["size"]
-                        total_weight += c["size"]
-                if total_weight > 0:
-                    avg_retention[m] = round(weighted_sum / total_weight, 1)
-
-            return {
-                "cohorts": [
-                    {
-                        "month": cohort,
-                        "size": data["size"],
-                        "retention": [
-                            data["retention"].get(m, {}).get("percent", None)
-                            for m in range(retention_months + 1)
-                        ]
-                    }
-                    for cohort, data in sorted(cohorts.items(), reverse=True)
-                ],
-                "retentionMonths": retention_months,
-                "summary": {
-                    "totalCohorts": len(cohorts),
-                    "totalCustomers": total_cohort_size,
-                    "avgRetention": avg_retention
-                }
+            cohorts[cohort]["retention"][month_num] = {
+                "count": retained,
+                "percent": pct
             }
+
+        # Calculate summary metrics
+        total_cohort_size = sum(c["size"] for c in cohorts.values())
+
+        # Weighted average retention by month (weight = cohort size)
+        avg_retention = {}
+        for m in range(retention_months + 1):
+            weighted_sum = 0
+            total_weight = 0
+            for c in cohorts.values():
+                entry = c["retention"].get(m)
+                if entry is not None:
+                    pct = entry.get("percent", 0)
+                    weighted_sum += pct * c["size"]
+                    total_weight += c["size"]
+            if total_weight > 0:
+                avg_retention[m] = round(weighted_sum / total_weight, 1)
+
+        return {
+            "cohorts": [
+                {
+                    "month": cohort,
+                    "size": data["size"],
+                    "retention": [
+                        data["retention"].get(m, {}).get("percent", None)
+                        for m in range(retention_months + 1)
+                    ]
+                }
+                for cohort, data in sorted(cohorts.items(), reverse=True)
+            ],
+            "retentionMonths": retention_months,
+            "summary": {
+                "totalCohorts": len(cohorts),
+                "totalCustomers": total_cohort_size,
+                "avgRetention": avg_retention
+            }
+        }
 
     async def get_enhanced_cohort_retention(
         self,
@@ -456,169 +769,114 @@ class CustomersMixin:
         Returns:
             Dict with cohorts, customer retention, revenue retention, and summary
         """
-        async with self.connection() as conn:
-            # Build sales type filter
-            sales_type_filter = ""
-            if sales_type == "retail":
-                sales_type_filter = f"""
-                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
-                         OR (o.manager_id IS NULL AND o.source_id = 4))
-                """
-            elif sales_type == "b2b":
-                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+        # Build sales type filter
+        # Silver already carries `sales_type`, materialised per order by the
+        # one CASE in `refresh_warehouse_layers`. These five methods used to
+        # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+        # was a second home for the rule and had gone stale in two ways:
+        # it required `source_id = 4` for a manager-less order where Silver
+        # requires nothing, and it read the *constant* list rather than
+        # `managers.is_retail`, which is what a human edits. Measured on
+        # production: 1,781 non-return orders are retail to every other tab
+        # and were invisible here, and 175 were the other way round.
+        #
+        # It is also the only spelling that can be asked of a third engine:
+        # a column, not a manager list rendered into SQL.
+        sales_type_filter = (
+            "" if sales_type == "all"
+            else f"AND o.sales_type = '{sales_type}'"
+        )
 
-            query = f"""
-            WITH customer_first_order AS (
-                -- Get each customer's first order month (cohort)
-                SELECT
-                    o.buyer_id,
-                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
-                FROM silver_orders o
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
-                  {sales_type_filter}
-                GROUP BY o.buyer_id
+        rows = await self._analytics_rows(
+            lambda d: enhanced_cohort_retention_select(
+                d, sales_type_filter=sales_type_filter,
+                months_back=months_back,
             ),
-            customer_cohorts AS (
-                -- Add first month revenue per customer
-                SELECT
-                    c.buyer_id,
-                    c.cohort_month,
-                    COALESCE(SUM(o.grand_total), 0) AS first_month_revenue
-                FROM customer_first_order c
-                LEFT JOIN silver_orders o ON c.buyer_id = o.buyer_id
-                    AND DATE_TRUNC('month', o.order_date) = c.cohort_month
-                    AND NOT o.is_return
-                GROUP BY c.buyer_id, c.cohort_month
-            ),
-            customer_orders AS (
-                -- Get all order months per customer with revenue
-                SELECT
-                    o.buyer_id,
-                    c.cohort_month,
-                    DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date)) AS months_since,
-                    o.grand_total AS revenue
-                FROM silver_orders o
-                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
-                WHERE NOT o.is_return
-                  {sales_type_filter}
-            ),
-            cohort_sizes AS (
-                SELECT
-                    cohort_month,
-                    COUNT(DISTINCT buyer_id) AS size,
-                    SUM(first_month_revenue) AS m0_revenue
-                FROM customer_cohorts
-                GROUP BY cohort_month
-            ),
-            retention_data AS (
-                SELECT
-                    r.cohort_month,
-                    r.months_since,
-                    COUNT(DISTINCT r.buyer_id) AS retained_customers,
-                    SUM(r.revenue) AS period_revenue
-                FROM customer_orders r
-                WHERE r.months_since <= ?
-                GROUP BY r.cohort_month, r.months_since
-            )
-            SELECT
-                strftime(r.cohort_month, '%Y-%m') as cohort,
-                s.size as cohort_size,
-                s.m0_revenue,
-                r.months_since as month_number,
-                r.retained_customers,
-                ROUND(100.0 * r.retained_customers / s.size, 1) as retention_pct,
-                r.period_revenue,
-                ROUND(100.0 * r.period_revenue / NULLIF(s.m0_revenue, 0), 1) as revenue_retention_pct
-            FROM retention_data r
-            JOIN cohort_sizes s ON r.cohort_month = s.cohort_month
-            WHERE r.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
-            ORDER BY r.cohort_month DESC, r.months_since
-            """
+            [retention_months],
+            ENHANCED_RETENTION_TYPES,
+        )
 
-            rows = conn.execute(query, [retention_months]).fetchall()
+        # Build cohort data structure
+        cohorts = {}
+        for cohort, size, m0_rev, month_num, retained, pct, rev, rev_pct in rows:
+            if cohort not in cohorts:
+                cohorts[cohort] = {
+                    "size": size,
+                    "m0_revenue": float(m0_rev or 0),
+                    "retention": {},
+                    "revenue_retention": {},
+                    "revenue": {}
+                }
+            cohorts[cohort]["retention"][month_num] = float(pct) if pct is not None else None
+            cohorts[cohort]["revenue_retention"][month_num] = float(rev_pct) if rev_pct is not None else None
+            cohorts[cohort]["revenue"][month_num] = float(rev or 0)
 
-            # Build cohort data structure
-            cohorts = {}
-            for cohort, size, m0_rev, month_num, retained, pct, rev, rev_pct in rows:
-                if cohort not in cohorts:
-                    cohorts[cohort] = {
-                        "size": size,
-                        "m0_revenue": float(m0_rev or 0),
-                        "retention": {},
-                        "revenue_retention": {},
-                        "revenue": {}
-                    }
-                cohorts[cohort]["retention"][month_num] = float(pct) if pct is not None else None
-                cohorts[cohort]["revenue_retention"][month_num] = float(rev_pct) if rev_pct is not None else None
-                cohorts[cohort]["revenue"][month_num] = float(rev or 0)
+        # Calculate summary metrics
+        total_cohort_size = sum(c["size"] for c in cohorts.values())
+        total_revenue = sum(c["m0_revenue"] for c in cohorts.values())
 
-            # Calculate summary metrics
-            total_cohort_size = sum(c["size"] for c in cohorts.values())
-            total_revenue = sum(c["m0_revenue"] for c in cohorts.values())
+        # Weighted average retention by month (weight = cohort size)
+        avg_customer_retention = {}
+        avg_revenue_retention = {}
+        for m in range(retention_months + 1):
+            cust_weighted_sum = 0
+            cust_total_weight = 0
+            rev_weighted_sum = 0
+            rev_total_weight = 0
+            for c in cohorts.values():
+                cust_pct = c["retention"].get(m)
+                if cust_pct is not None:
+                    cust_weighted_sum += cust_pct * c["size"]
+                    cust_total_weight += c["size"]
+                rev_pct = c["revenue_retention"].get(m)
+                if rev_pct is not None:
+                    rev_weighted_sum += rev_pct * c["size"]
+                    rev_total_weight += c["size"]
+            if cust_total_weight > 0:
+                avg_customer_retention[m] = round(cust_weighted_sum / cust_total_weight, 1)
+            if rev_total_weight > 0:
+                avg_revenue_retention[m] = round(rev_weighted_sum / rev_total_weight, 1)
 
-            # Weighted average retention by month (weight = cohort size)
-            avg_customer_retention = {}
-            avg_revenue_retention = {}
-            for m in range(retention_months + 1):
-                cust_weighted_sum = 0
-                cust_total_weight = 0
-                rev_weighted_sum = 0
-                rev_total_weight = 0
-                for c in cohorts.values():
-                    cust_pct = c["retention"].get(m)
-                    if cust_pct is not None:
-                        cust_weighted_sum += cust_pct * c["size"]
-                        cust_total_weight += c["size"]
-                    rev_pct = c["revenue_retention"].get(m)
-                    if rev_pct is not None:
-                        rev_weighted_sum += rev_pct * c["size"]
-                        rev_total_weight += c["size"]
-                if cust_total_weight > 0:
-                    avg_customer_retention[m] = round(cust_weighted_sum / cust_total_weight, 1)
-                if rev_total_weight > 0:
-                    avg_revenue_retention[m] = round(rev_weighted_sum / rev_total_weight, 1)
+        # ── Compute insights ──────────────────────────────────────
+        sorted_cohort_list = [
+            {"month": k, **v}
+            for k, v in sorted(cohorts.items())
+        ]
 
-            # ── Compute insights ──────────────────────────────────────
-            sorted_cohort_list = [
-                {"month": k, **v}
-                for k, v in sorted(cohorts.items())
-            ]
+        insights = self._compute_cohort_insights(
+            sorted_cohort_list, avg_customer_retention, retention_months
+        )
 
-            insights = self._compute_cohort_insights(
-                sorted_cohort_list, avg_customer_retention, retention_months
-            )
-
-            return {
-                "cohorts": [
-                    {
-                        "month": cohort,
-                        "size": data["size"],
-                        "retention": [
-                            data["retention"].get(m)
-                            for m in range(retention_months + 1)
-                        ],
-                        "revenueRetention": [
-                            data["revenue_retention"].get(m)
-                            for m in range(retention_months + 1)
-                        ] if include_revenue else None,
-                        "revenue": [
-                            round(data["revenue"].get(m, 0), 2)
-                            for m in range(retention_months + 1)
-                        ] if include_revenue else None
-                    }
-                    for cohort, data in sorted(cohorts.items(), reverse=True)
-                ],
-                "retentionMonths": retention_months,
-                "summary": {
-                    "totalCohorts": len(cohorts),
-                    "totalCustomers": total_cohort_size,
-                    "avgCustomerRetention": avg_customer_retention,
-                    "avgRevenueRetention": avg_revenue_retention if include_revenue else None,
-                    "totalRevenue": round(total_revenue, 2) if include_revenue else None
-                },
-                "insights": insights
-            }
+        return {
+            "cohorts": [
+                {
+                    "month": cohort,
+                    "size": data["size"],
+                    "retention": [
+                        data["retention"].get(m)
+                        for m in range(retention_months + 1)
+                    ],
+                    "revenueRetention": [
+                        data["revenue_retention"].get(m)
+                        for m in range(retention_months + 1)
+                    ] if include_revenue else None,
+                    "revenue": [
+                        round(data["revenue"].get(m, 0), 2)
+                        for m in range(retention_months + 1)
+                    ] if include_revenue else None
+                }
+                for cohort, data in sorted(cohorts.items(), reverse=True)
+            ],
+            "retentionMonths": retention_months,
+            "summary": {
+                "totalCohorts": len(cohorts),
+                "totalCustomers": total_cohort_size,
+                "avgCustomerRetention": avg_customer_retention,
+                "avgRevenueRetention": avg_revenue_retention if include_revenue else None,
+                "totalRevenue": round(total_revenue, 2) if include_revenue else None
+            },
+            "insights": insights
+        }
 
     @staticmethod
     def _compute_cohort_insights(
@@ -783,105 +1041,57 @@ class CustomersMixin:
         Returns:
             Dict with buckets, customer counts, and summary statistics
         """
-        async with self.connection() as conn:
-            # Build sales type filter
-            sales_type_filter = ""
-            if sales_type == "retail":
-                sales_type_filter = f"""
-                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
-                         OR (o.manager_id IS NULL AND o.source_id = 4))
-                """
-            elif sales_type == "b2b":
-                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+        # Build sales type filter
+        # Silver already carries `sales_type`, materialised per order by the
+        # one CASE in `refresh_warehouse_layers`. These five methods used to
+        # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+        # was a second home for the rule and had gone stale in two ways:
+        # it required `source_id = 4` for a manager-less order where Silver
+        # requires nothing, and it read the *constant* list rather than
+        # `managers.is_retail`, which is what a human edits. Measured on
+        # production: 1,781 non-return orders are retail to every other tab
+        # and were invisible here, and 175 were the other way round.
+        #
+        # It is also the only spelling that can be asked of a third engine:
+        # a column, not a manager list rendered into SQL.
+        sales_type_filter = (
+            "" if sales_type == "all"
+            else f"AND o.sales_type = '{sales_type}'"
+        )
 
-            query = f"""
-            WITH customer_orders_ranked AS (
-                SELECT
-                    o.buyer_id,
-                    o.order_date,
-                    ROW_NUMBER() OVER (PARTITION BY o.buyer_id ORDER BY o.order_date) AS order_num
-                FROM silver_orders o
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
-                  {sales_type_filter}
+        rows = await self._analytics_rows(
+            lambda d: days_to_second_purchase_select(
+                d, sales_type_filter=sales_type_filter,
+                months_back=months_back,
             ),
-            second_purchase AS (
-                SELECT
-                    c1.buyer_id,
-                    DATEDIFF('day', c1.order_date, c2.order_date) AS days_to_second
-                FROM customer_orders_ranked c1
-                JOIN customer_orders_ranked c2
-                    ON c1.buyer_id = c2.buyer_id
-                    AND c1.order_num = 1
-                    AND c2.order_num = 2
-                WHERE c1.order_date >= CURRENT_DATE - INTERVAL '{int(months_back)} months'
-            ),
-            bucketed AS (
-                SELECT
-                    days_to_second,
-                    CASE
-                        WHEN days_to_second <= 30 THEN '0-30'
-                        WHEN days_to_second <= 60 THEN '31-60'
-                        WHEN days_to_second <= 90 THEN '61-90'
-                        WHEN days_to_second <= 120 THEN '91-120'
-                        WHEN days_to_second <= 180 THEN '121-180'
-                        ELSE '180+'
-                    END AS bucket,
-                    CASE
-                        WHEN days_to_second <= 30 THEN 1
-                        WHEN days_to_second <= 60 THEN 2
-                        WHEN days_to_second <= 90 THEN 3
-                        WHEN days_to_second <= 120 THEN 4
-                        WHEN days_to_second <= 180 THEN 5
-                        ELSE 6
-                    END AS bucket_order
-                FROM second_purchase
-            ),
-            global_stats AS (
-                SELECT
-                    MEDIAN(days_to_second) AS median_days,
-                    AVG(days_to_second) AS avg_days,
-                    COUNT(*) AS total_count
-                FROM second_purchase
-            )
-            SELECT
-                b.bucket,
-                COUNT(*) AS customers,
-                ROUND(AVG(b.days_to_second), 1) AS avg_days,
-                (SELECT median_days FROM global_stats) AS median_days,
-                (SELECT avg_days FROM global_stats) AS avg_days_overall,
-                (SELECT total_count FROM global_stats) AS total_count
-            FROM bucketed b
-            GROUP BY b.bucket, b.bucket_order
-            ORDER BY b.bucket_order
-            """
+            [],
+            DAYS_TO_SECOND_TYPES,
+        )
 
-            rows = conn.execute(query).fetchall()
+        # Extract global stats from first row
+        median_days = rows[0][3] if rows else None
+        avg_days_overall = rows[0][4] if rows else None
 
-            # Extract global stats from first row
-            median_days = rows[0][3] if rows else None
-            avg_days_overall = rows[0][4] if rows else None
+        # Calculate totals and percentages
+        total_repeat = sum(row[1] for row in rows)
+        buckets = []
+        for row in rows:
+            bucket, customers, avg_days = row[0], row[1], row[2]
+            buckets.append({
+                "bucket": bucket,
+                "customers": customers,
+                "avgDays": avg_days,
+                "percentage": round(100.0 * customers / total_repeat, 1) if total_repeat > 0 else 0
+            })
 
-            # Calculate totals and percentages
-            total_repeat = sum(row[1] for row in rows)
-            buckets = []
-            for row in rows:
-                bucket, customers, avg_days = row[0], row[1], row[2]
-                buckets.append({
-                    "bucket": bucket,
-                    "customers": customers,
-                    "avgDays": avg_days,
-                    "percentage": round(100.0 * customers / total_repeat, 1) if total_repeat > 0 else 0
-                })
-
-            return {
-                "buckets": buckets,
-                "summary": {
-                    "totalRepeatCustomers": total_repeat,
-                    "medianDays": round(median_days, 1) if median_days else None,
-                    "avgDays": round(avg_days_overall, 1) if avg_days_overall else None
-                }
+        return {
+            "buckets": buckets,
+            "summary": {
+                "totalRepeatCustomers": total_repeat,
+                "medianDays": round(median_days, 1) if median_days else None,
+                "avgDays": round(avg_days_overall, 1) if avg_days_overall else None
             }
+        }
 
     async def get_cohort_ltv(
         self,
@@ -902,117 +1112,81 @@ class CustomersMixin:
         Returns:
             Dict with cohort LTV data and summary statistics
         """
-        async with self.connection() as conn:
-            # Build sales type filter
-            sales_type_filter = ""
-            if sales_type == "retail":
-                sales_type_filter = f"""
-                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
-                         OR (o.manager_id IS NULL AND o.source_id = 4))
-                """
-            elif sales_type == "b2b":
-                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+        # Build sales type filter
+        # Silver already carries `sales_type`, materialised per order by the
+        # one CASE in `refresh_warehouse_layers`. These five methods used to
+        # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+        # was a second home for the rule and had gone stale in two ways:
+        # it required `source_id = 4` for a manager-less order where Silver
+        # requires nothing, and it read the *constant* list rather than
+        # `managers.is_retail`, which is what a human edits. Measured on
+        # production: 1,781 non-return orders are retail to every other tab
+        # and were invisible here, and 175 were the other way round.
+        #
+        # It is also the only spelling that can be asked of a third engine:
+        # a column, not a manager list rendered into SQL.
+        sales_type_filter = (
+            "" if sales_type == "all"
+            else f"AND o.sales_type = '{sales_type}'"
+        )
 
-            query = f"""
-            WITH customer_cohorts AS (
-                SELECT
-                    o.buyer_id,
-                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month
-                FROM silver_orders o
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
-                  {sales_type_filter}
-                GROUP BY o.buyer_id
+        rows = await self._analytics_rows(
+            lambda d: cohort_ltv_select(
+                d, sales_type_filter=sales_type_filter,
+                months_back=months_back,
             ),
-            customer_revenue AS (
-                SELECT
-                    o.buyer_id,
-                    c.cohort_month,
-                    DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date)) AS months_since,
-                    SUM(o.grand_total) AS revenue
-                FROM silver_orders o
-                JOIN customer_cohorts c ON o.buyer_id = c.buyer_id
-                WHERE NOT o.is_return
-                  {sales_type_filter}
-                GROUP BY o.buyer_id, c.cohort_month, DATEDIFF('month', c.cohort_month, DATE_TRUNC('month', o.order_date))
-            ),
-            cohort_monthly AS (
-                SELECT
-                    cohort_month,
-                    months_since,
-                    SUM(revenue) AS total_revenue,
-                    COUNT(DISTINCT buyer_id) AS active_customers
-                FROM customer_revenue
-                WHERE months_since <= ?
-                GROUP BY cohort_month, months_since
-            ),
-            cohort_sizes AS (
-                SELECT cohort_month, COUNT(DISTINCT buyer_id) AS cohort_size
-                FROM customer_cohorts
-                GROUP BY cohort_month
-            )
-            SELECT
-                strftime(cm.cohort_month, '%Y-%m') AS cohort,
-                cs.cohort_size,
-                cm.months_since,
-                cm.total_revenue,
-                cm.active_customers
-            FROM cohort_monthly cm
-            JOIN cohort_sizes cs ON cm.cohort_month = cs.cohort_month
-            WHERE cm.cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
-            ORDER BY cm.cohort_month DESC, cm.months_since
-            """
+            [retention_months],
+            COHORT_LTV_TYPES,
+        )
 
-            rows = conn.execute(query, [retention_months]).fetchall()
-
-            # Build cohort LTV structure with cumulative revenue
-            cohorts = {}
-            for cohort, size, months_since, revenue, active in rows:
-                if cohort not in cohorts:
-                    cohorts[cohort] = {
-                        "size": size,
-                        "monthly_revenue": {},
-                        "cumulative": []
-                    }
-                cohorts[cohort]["monthly_revenue"][months_since] = revenue or 0
-
-            # Calculate cumulative revenue for each cohort
-            for cohort_data in cohorts.values():
-                cumulative = 0
-                cumulative_list = []
-                for m in range(retention_months + 1):  # M0 to Mn
-                    cumulative += cohort_data["monthly_revenue"].get(m, 0)
-                    cumulative_list.append(round(cumulative, 2))
-                cohort_data["cumulative"] = cumulative_list
-
-            # Calculate weighted average LTV (weight = cohort size)
-            total_rev = sum(c["cumulative"][-1] for c in cohorts.values())
-            total_size = sum(c["size"] for c in cohorts.values())
-            avg_ltv = round(total_rev / total_size, 2) if total_size > 0 else 0
-
-            # Find best cohort
-            best_cohort = max(
-                cohorts.items(),
-                key=lambda x: x[1]["cumulative"][-1] / x[1]["size"] if x[1]["size"] > 0 else 0,
-                default=(None, {"cumulative": [0], "size": 1})
-            )
-
-            return {
-                "cohorts": [
-                    {
-                        "month": cohort,
-                        "customerCount": data["size"],
-                        "cumulativeRevenue": data["cumulative"],
-                        "avgLTV": round(data["cumulative"][-1] / data["size"], 2) if data["size"] > 0 else 0
-                    }
-                    for cohort, data in sorted(cohorts.items(), reverse=True)
-                ],
-                "summary": {
-                    "avgLTV": avg_ltv,
-                    "bestCohort": best_cohort[0],
-                    "bestCohortLTV": round(best_cohort[1]["cumulative"][-1] / best_cohort[1]["size"], 2) if best_cohort[1]["size"] > 0 else 0
+        # Build cohort LTV structure with cumulative revenue
+        cohorts = {}
+        for cohort, size, months_since, revenue, active in rows:
+            if cohort not in cohorts:
+                cohorts[cohort] = {
+                    "size": size,
+                    "monthly_revenue": {},
+                    "cumulative": []
                 }
+            cohorts[cohort]["monthly_revenue"][months_since] = revenue or 0
+
+        # Calculate cumulative revenue for each cohort
+        for cohort_data in cohorts.values():
+            cumulative = 0
+            cumulative_list = []
+            for m in range(retention_months + 1):  # M0 to Mn
+                cumulative += cohort_data["monthly_revenue"].get(m, 0)
+                cumulative_list.append(round(cumulative, 2))
+            cohort_data["cumulative"] = cumulative_list
+
+        # Calculate weighted average LTV (weight = cohort size)
+        total_rev = sum(c["cumulative"][-1] for c in cohorts.values())
+        total_size = sum(c["size"] for c in cohorts.values())
+        avg_ltv = round(total_rev / total_size, 2) if total_size > 0 else 0
+
+        # Find best cohort
+        best_cohort = max(
+            cohorts.items(),
+            key=lambda x: x[1]["cumulative"][-1] / x[1]["size"] if x[1]["size"] > 0 else 0,
+            default=(None, {"cumulative": [0], "size": 1})
+        )
+
+        return {
+            "cohorts": [
+                {
+                    "month": cohort,
+                    "customerCount": data["size"],
+                    "cumulativeRevenue": data["cumulative"],
+                    "avgLTV": round(data["cumulative"][-1] / data["size"], 2) if data["size"] > 0 else 0
+                }
+                for cohort, data in sorted(cohorts.items(), reverse=True)
+            ],
+            "summary": {
+                "avgLTV": avg_ltv,
+                "bestCohort": best_cohort[0],
+                "bestCohortLTV": round(best_cohort[1]["cumulative"][-1] / best_cohort[1]["size"], 2) if best_cohort[1]["size"] > 0 else 0
             }
+        }
 
     async def get_at_risk_customers(
         self,
@@ -1033,85 +1207,258 @@ class CustomersMixin:
         Returns:
             Dict with at-risk counts by cohort and summary statistics
         """
-        async with self.connection() as conn:
-            # Build sales type filter
-            sales_type_filter = ""
-            if sales_type == "retail":
-                sales_type_filter = f"""
-                    AND (o.manager_id IN ({','.join(map(str, RETAIL_MANAGER_IDS))})
-                         OR (o.manager_id IS NULL AND o.source_id = 4))
-                """
-            elif sales_type == "b2b":
-                sales_type_filter = f"AND o.manager_id = {B2B_MANAGER_ID}"
+        # Build sales type filter
+        # Silver already carries `sales_type`, materialised per order by the
+        # one CASE in `refresh_warehouse_layers`. These five methods used to
+        # re-derive it from `manager_id` against RETAIL_MANAGER_IDS, which
+        # was a second home for the rule and had gone stale in two ways:
+        # it required `source_id = 4` for a manager-less order where Silver
+        # requires nothing, and it read the *constant* list rather than
+        # `managers.is_retail`, which is what a human edits. Measured on
+        # production: 1,781 non-return orders are retail to every other tab
+        # and were invisible here, and 175 were the other way round.
+        #
+        # It is also the only spelling that can be asked of a third engine:
+        # a column, not a manager list rendered into SQL.
+        sales_type_filter = (
+            "" if sales_type == "all"
+            else f"AND o.sales_type = '{sales_type}'"
+        )
 
-            churn_threshold = days_threshold * 2
+        churn_threshold = days_threshold * 2
 
-            query = f"""
-            WITH customer_activity AS (
-                SELECT
-                    o.buyer_id,
-                    DATE_TRUNC('month', MIN(o.order_date)) AS cohort_month,
-                    MAX(o.order_date) AS last_order_date,
-                    DATEDIFF('day', MAX(o.order_date), CURRENT_DATE) AS days_since_last,
-                    COUNT(*) AS total_orders,
-                    SUM(o.grand_total) AS total_revenue
-                FROM silver_orders o
-                WHERE o.buyer_id IS NOT NULL
-                  AND NOT o.is_return
-                  {sales_type_filter}
-                GROUP BY o.buyer_id
-            )
-            SELECT
-                strftime(cohort_month, '%Y-%m') AS cohort,
-                COUNT(*) AS total_customers,
-                COUNT(*) FILTER (WHERE days_since_last > ? AND days_since_last <= ?) AS at_risk_count,
-                ROUND(100.0 * COUNT(*) FILTER (WHERE days_since_last > ?) / COUNT(*), 1) AS at_risk_pct,
-                SUM(total_revenue) FILTER (WHERE days_since_last > ?) AS at_risk_revenue,
-                AVG(total_orders) FILTER (WHERE days_since_last > ?) AS avg_orders_at_risk,
-                COUNT(*) FILTER (WHERE days_since_last > ?) AS churned_count
-            FROM customer_activity
-            WHERE cohort_month >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '{int(months_back)} months'
-            GROUP BY cohort_month
-            ORDER BY cohort_month DESC
-            """
+        rows = await self._analytics_rows(
+            lambda d: at_risk_customers_select(
+                d, sales_type_filter=sales_type_filter,
+                months_back=months_back,
+            ),
+            [
+            days_threshold, churn_threshold,  # at_risk_count (between threshold and 2x)
+            days_threshold,  # at_risk_pct (> threshold)
+            days_threshold,  # at_risk_revenue
+            days_threshold,  # avg_orders_at_risk
+            churn_threshold,  # churned_count (> 2x threshold)
+        ],
+            AT_RISK_TYPES,
+        )
 
-            rows = conn.execute(query, [
-                days_threshold, churn_threshold,  # at_risk_count (between threshold and 2x)
-                days_threshold,  # at_risk_pct (> threshold)
-                days_threshold,  # at_risk_revenue
-                days_threshold,  # avg_orders_at_risk
-                churn_threshold,  # churned_count (> 2x threshold)
-            ]).fetchall()
+        cohorts = []
+        total_at_risk = 0
+        total_churned = 0
+        total_customers = 0
+        for cohort, total, at_risk, pct, revenue, avg_orders, churned in rows:
+            cohorts.append({
+                "cohort": cohort,
+                "totalCustomers": total,
+                "atRiskCount": at_risk,
+                "atRiskPct": pct,
+                "atRiskRevenue": round(revenue, 2) if revenue else 0,
+                "avgOrdersAtRisk": round(avg_orders, 1) if avg_orders else 0,
+                "churnedCount": churned
+            })
+            total_at_risk += at_risk
+            total_churned += churned
+            total_customers += total
 
-            cohorts = []
-            total_at_risk = 0
-            total_churned = 0
-            total_customers = 0
-            for cohort, total, at_risk, pct, revenue, avg_orders, churned in rows:
-                cohorts.append({
-                    "cohort": cohort,
-                    "totalCustomers": total,
-                    "atRiskCount": at_risk,
-                    "atRiskPct": pct,
-                    "atRiskRevenue": round(revenue, 2) if revenue else 0,
-                    "avgOrdersAtRisk": round(avg_orders, 1) if avg_orders else 0,
-                    "churnedCount": churned
-                })
-                total_at_risk += at_risk
-                total_churned += churned
-                total_customers += total
-
-            return {
-                "cohorts": cohorts,
-                "daysThreshold": days_threshold,
-                "summary": {
-                    "totalAtRisk": total_at_risk,
-                    "totalCustomers": total_customers,
-                    "overallAtRiskPct": round(100.0 * total_at_risk / total_customers, 1) if total_customers > 0 else 0,
-                    "totalChurned": total_churned,
-                    "churnPct": round(100.0 * total_churned / total_customers, 1) if total_customers > 0 else 0
-                }
+        return {
+            "cohorts": cohorts,
+            "daysThreshold": days_threshold,
+            "summary": {
+                "totalAtRisk": total_at_risk,
+                "totalCustomers": total_customers,
+                "overallAtRiskPct": round(100.0 * total_at_risk / total_customers, 1) if total_customers > 0 else 0,
+                "totalChurned": total_churned,
+                "churnPct": round(100.0 * total_churned / total_customers, 1) if total_customers > 0 else 0
             }
+        }
+
+    # ─── Saved audiences ─────────────────────────────────────────────────
+
+    # ── one statement, whichever store owns /sms ────────────────────────────
+    #
+    # The audience query has a shared body because it carries rules. These
+    # statements carry almost none, so what they need is not a second dialect
+    # but one place that knows which engine is answering and how it spells a
+    # placeholder and a table name. The SQL below is written once, with
+    # `{table}` holes and `?` markers, exactly as the audience body is.
+    #
+    # `sms_store_is_postgres()` is read before any connection is taken, §34's
+    # invariant: the Postgres path must not queue behind DuckDB's single
+    # writer on its way to another engine.
+
+    async def _analytics_rows(self, render, params, types):
+        """Rows for one customer-analytics query, from whichever engine answers.
+
+        ClickHouse when `KS_READ_COHORTS` says so and the store is configured,
+        DuckDB otherwise — and DuckDB again if ClickHouse faults, with an ERROR
+        in the log. That fallback is right here and wrong for `/sms`: nothing
+        diverges between these two, because ClickHouse holds a copy of Silver
+        and both engines read the same derived facts. ClickHouse is an optional
+        store in this architecture, so nothing may depend on it being up.
+
+        The engine is chosen before any connection is taken — a read bound for
+        another engine must not queue behind DuckDB's single writer (§34).
+
+        `render` takes an `AnalyticsDialect` and returns the SQL; one function
+        for both, so neither engine gets a body of its own.
+        """
+        from core import ch_cohorts
+
+        if ch_cohorts.enabled() and ch_cohorts.available():
+            try:
+                return await ch_cohorts.fetch(
+                    render(CLICKHOUSE_ANALYTICS), params, types,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "customer analytics: ClickHouse failed, falling back to "
+                    "DuckDB: %s", exc, exc_info=True,
+                )
+
+        async with self.connection() as conn:
+            return conn.execute(render(DUCKDB_ANALYTICS), list(params)).fetchall()
+
+    @asynccontextmanager
+    async def _sms_tx(self):
+        """Several SMS statements, one transaction, on either engine.
+
+        The freeze writes a campaign and its roster, and a failure between the
+        two would leave a campaign whose control group does not exist — which
+        looks like a campaign and cannot be measured. DuckDB's `connection()`
+        only takes the store lock, so until now that pair was autocommitted one
+        statement at a time; both engines get a real transaction here.
+        """
+        from core.sql_dialect import DUCKDB, POSTGRES
+
+        if sms_store_is_postgres():
+            from core.pg import get_pool, require_revision
+
+            pool = await get_pool()
+            await require_revision()
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    yield _PgTx(conn, POSTGRES)
+            return
+
+        async with self.connection() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                yield _DuckTx(conn, DUCKDB)
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+
+    async def _sms_run(self, sql: str, params: Optional[List[Any]] = None,
+                       *, mode: str = "all"):
+        """Run one SMS statement against the store that owns the tab."""
+        from core.sql_dialect import DUCKDB, POSTGRES
+
+        params = list(params or [])
+        dialect = POSTGRES if sms_store_is_postgres() else DUCKDB
+        rendered = sql.format(
+            campaigns=dialect.sms_campaigns,
+            members=dialect.sms_campaign_members,
+            presets=dialect.sms_audience_presets,
+            optouts=dialect.marketing_optouts,
+            dlr_events=dialect.sms_dlr_events,
+            lines=dialect.order_lines,
+            stocks=dialect.offer_stocks,
+            buyers=dialect.buyers,
+        )
+
+        if sms_store_is_postgres():
+            from core import pg_sms_read
+
+            rendered = numbered(rendered)
+            if mode == "all":
+                rows = await pg_sms_read.fetch(rendered, params)
+                return [_local_times(r) for r in rows]
+            if mode == "one":
+                row = await pg_sms_read.fetch_one(rendered, params)
+                return _local_times(row) if row is not None else None
+            await pg_sms_read.execute(rendered, params)
+            return None
+
+        async with self.connection() as conn:
+            cursor = conn.execute(rendered, params)
+            if mode == "all":
+                return cursor.fetchall()
+            if mode == "one":
+                return cursor.fetchone()
+            return None
+
+    async def list_sms_audience_presets(self) -> List[Dict[str, Any]]:
+        """Saved audiences, built-in ones first.
+
+        The built-ins live in code rather than in the table so they cannot be
+        deleted or edited into something that no longer matches what the page
+        describes — the classic RFM cohort is the reference every past campaign
+        was built from, and it has to keep meaning the same thing.
+        """
+        rows = await self._sms_run("""
+            SELECT name, criteria, created_by, created_at, updated_at
+            FROM {presets}
+            ORDER BY name
+        """)
+
+        saved = [
+            {
+                "name": name,
+                "criteria": json.loads(criteria) if criteria else {},
+                "createdBy": created_by,
+                "createdAt": created_at.isoformat() if created_at else None,
+                "updatedAt": updated_at.isoformat() if updated_at else None,
+                "builtin": False,
+            }
+            for name, criteria, created_by, created_at, updated_at in rows
+        ]
+        builtin = [
+            {
+                "name": name,
+                "criteria": dict(criteria),
+                "createdBy": None,
+                "createdAt": None,
+                "updatedAt": None,
+                "builtin": True,
+            }
+            for name, criteria in BUILTIN_AUDIENCE_PRESETS.items()
+        ]
+        return builtin + saved
+
+    async def save_sms_audience_preset(
+        self, name: str, criteria: Dict[str, Any], created_by: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Store or replace a saved audience.
+
+        Raises ValueError on a built-in name: shadowing "RFM tiers" with
+        something else would make every conversation about it ambiguous.
+        """
+        if name in BUILTIN_AUDIENCE_PRESETS:
+            raise ValueError(f"{name!r} is a built-in audience and cannot be replaced")
+
+        payload = json.dumps(criteria, ensure_ascii=False, default=str)
+        await self._sms_run("""
+            -- now(), not CURRENT_TIMESTAMP: inside an upsert DuckDB reads the
+            -- bare keyword as a column reference and fails to bind it. Both
+            -- engines take now().
+            INSERT INTO {presets} (name, criteria, created_by, updated_at)
+            VALUES (?, ?, ?, now())
+            ON CONFLICT (name) DO UPDATE SET
+                criteria = excluded.criteria,
+                updated_at = now()
+        """, [name, payload, created_by], mode="none")
+        return {"name": name, "criteria": criteria, "builtin": False}
+
+    async def delete_sms_audience_preset(self, name: str) -> bool:
+        """Remove a saved audience. Returns False if there was none."""
+        if name in BUILTIN_AUDIENCE_PRESETS:
+            raise ValueError(f"{name!r} is a built-in audience and cannot be deleted")
+
+        row = await self._sms_run(
+            "DELETE FROM {presets} WHERE name = ? RETURNING name", [name], mode="one",
+        )
+        return row is not None
 
     async def freeze_sms_campaign(
         self,
@@ -1159,10 +1506,10 @@ class CustomersMixin:
                 "refusing to freeze an empty roster — nothing could be measured"
             )
 
-        async with self.connection() as conn:
-            exists = conn.execute(
-                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign]
-            ).fetchone()
+        async with self._sms_tx() as tx:
+            exists = await tx.one(
+                "SELECT sent_at FROM {campaigns} WHERE campaign = ?", [campaign]
+            )
 
             if exists is not None:
                 if not overwrite:
@@ -1175,12 +1522,14 @@ class CustomersMixin:
                         f"campaign {campaign!r} was already sent on {exists[0]} — "
                         f"its roster is the control group and cannot be rewritten"
                     )
-                conn.execute("DELETE FROM sms_campaign_members WHERE campaign = ?", [campaign])
-                conn.execute("DELETE FROM sms_campaigns WHERE campaign = ?", [campaign])
+                await tx.none(
+                    "DELETE FROM {members} WHERE campaign = ?", [campaign])
+                await tx.none(
+                    "DELETE FROM {campaigns} WHERE campaign = ?", [campaign])
 
-            conn.execute(
+            await tx.none(
                 """
-                INSERT INTO sms_campaigns
+                INSERT INTO {campaigns}
                     (campaign, ltv_basis, sales_type, holdout_pct, criteria,
                      promocode, notes)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1189,9 +1538,9 @@ class CustomersMixin:
                  json.dumps(criteria, ensure_ascii=False), promocode, notes],
             )
 
-            conn.executemany(
+            await tx.many(
                 """
-                INSERT INTO sms_campaign_members
+                INSERT INTO {members}
                     (campaign, buyer_id, phone, tier, assignment, orders_at_export,
                      revenue_ltv_at_export, margin_ltv_at_export, recency_at_export)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1203,20 +1552,20 @@ class CustomersMixin:
                 ],
             )
 
-            rows = conn.execute(
+            rows = await tx.all(
                 """
                 SELECT tier,
                        COUNT(*) AS total,
                        COUNT(*) FILTER (WHERE assignment = 'target') AS target,
                        COUNT(*) FILTER (WHERE assignment = 'holdout') AS holdout
-                FROM sms_campaign_members
+                FROM {members}
                 WHERE campaign = ?
                 GROUP BY tier
                 """,
                 [campaign],
-            ).fetchall()
+            )
 
-        tier_order = {"VIP": 0, "CORE": 1, "REACTIVATION": 2}
+        tier_order = {SINGLE_GROUP_NAME: 0, "VIP": 0, "CORE": 1, "REACTIVATION": 2}
         segments = [
             {"tier": t, "total": total, "target": target, "holdout": holdout}
             for t, total, target, holdout in
@@ -1250,20 +1599,19 @@ class CustomersMixin:
         Raises:
             ValueError: If the campaign does not exist.
         """
-        async with self.connection() as conn:
-            row = conn.execute(
-                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign]
-            ).fetchone()
-            if row is None:
-                raise ValueError(f"campaign {campaign!r} is not frozen")
+        row = await self._sms_run(
+            "SELECT sent_at FROM {campaigns} WHERE campaign = ?", [campaign],
+            mode="one",
+        )
+        if row is None:
+            raise ValueError(f"campaign {campaign!r} is not frozen")
 
-            conn.execute(
-                "UPDATE sms_campaigns SET sent_at = ? WHERE campaign = ?",
-                [sent_at or datetime.now(), campaign],
-            )
-            sent = conn.execute(
-                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign]
-            ).fetchone()[0]
+        updated = await self._sms_run(
+            "UPDATE {campaigns} SET sent_at = ? WHERE campaign = ? "
+            "RETURNING sent_at",
+            [sent_at or datetime.now(), campaign], mode="one",
+        )
+        sent = updated[0] if updated else None
 
         return {
             "campaign": campaign,
@@ -1283,8 +1631,13 @@ class CustomersMixin:
         roster of 5,550 went out twice because a client-side timeout made the
         operator press send again while the first call was still running.
 
-        The check and the claim share one connection block, and the store
-        serialises those, so the second caller now finds the campaign taken.
+        The claim is **one conditional UPDATE**, not a read followed by a
+        write. It used to be the latter, which was safe only because DuckDB
+        admits a single writer and serialised the pair; against a connection
+        pool two callers can interleave a read-then-write and both win, which
+        is precisely the incident this guard exists for. `WHERE sent_at IS
+        NULL` makes the claim atomic on either engine, and the row it returns
+        is the proof of who got it.
 
         Callers that end up sending nothing must hand it back with
         :meth:`release_sms_campaign`, or the campaign is stuck.
@@ -1292,32 +1645,33 @@ class CustomersMixin:
         Raises:
             ValueError: If the campaign is unknown or already claimed.
         """
-        async with self.connection() as conn:
-            camp = conn.execute(
-                "SELECT sent_at FROM sms_campaigns WHERE campaign = ?", [campaign],
-            ).fetchone()
+        claimed = await self._sms_run(
+            "UPDATE {campaigns} SET sent_at = ? "
+            "WHERE campaign = ? AND sent_at IS NULL RETURNING campaign",
+            [datetime.now(), campaign], mode="one",
+        )
+        if claimed is None:
+            # Nothing was claimed, and the two reasons need different words.
+            camp = await self._sms_run(
+                "SELECT sent_at FROM {campaigns} WHERE campaign = ?", [campaign],
+                mode="one",
+            )
             if camp is None:
                 raise ValueError(f"campaign {campaign!r} is not frozen")
-            if camp[0] is not None:
-                raise ValueError(
-                    f"campaign {campaign!r} was already sent on {camp[0]} — "
-                    f"sending twice would double-message the roster"
-                )
-
-            conn.execute(
-                "UPDATE sms_campaigns SET sent_at = ? WHERE campaign = ?",
-                [datetime.now(), campaign],
+            raise ValueError(
+                f"campaign {campaign!r} was already sent on {camp[0]} — "
+                f"sending twice would double-message the roster"
             )
 
-            rows = conn.execute(
-                """
-                SELECT buyer_id, phone, tier
-                FROM sms_campaign_members
-                WHERE campaign = ? AND assignment = 'target'
-                ORDER BY buyer_id
-                """,
-                [campaign],
-            ).fetchall()
+        rows = await self._sms_run(
+            """
+            SELECT buyer_id, phone, tier
+            FROM {members}
+            WHERE campaign = ? AND assignment = 'target'
+            ORDER BY buyer_id
+            """,
+            [campaign],
+        )
 
         return [{"buyerId": r[0], "phone": r[1], "tier": r[2]} for r in rows]
 
@@ -1328,11 +1682,10 @@ class CustomersMixin:
         Only safe when no message left: clearing the stamp makes the campaign
         sendable again, which is a double-send if anything did go out.
         """
-        async with self.connection() as conn:
-            conn.execute(
-                "UPDATE sms_campaigns SET sent_at = NULL WHERE campaign = ?",
-                [campaign],
-            )
+        await self._sms_run(
+            "UPDATE {campaigns} SET sent_at = NULL WHERE campaign = ?",
+            [campaign], mode="none",
+        )
 
     async def record_sms_send(
         self,
@@ -1364,46 +1717,54 @@ class CustomersMixin:
         but without them the results page cannot say whether the campaign paid
         for itself.
         """
-        async with self.connection() as conn:
-            for buyer_id, message_id in accepted.items():
-                conn.execute(
+        async with self._sms_tx() as tx:
+            # Batched rather than one statement per recipient: a send is up to
+            # 5,000 people, and against a connection pool that was 5,000 round
+            # trips where DuckDB paid none.
+            if accepted:
+                await tx.many(
                     """
-                    UPDATE sms_campaign_members
+                    UPDATE {members}
                     SET message_id = ?, delivery_status = 'Accepted'
                     WHERE campaign = ? AND buyer_id = ?
                     """,
-                    [message_id, campaign, buyer_id],
+                    [[message_id, campaign, buyer_id]
+                     for buyer_id, message_id in accepted.items()],
                 )
 
-            for buyer_id, status in failed.items():
-                conn.execute(
+            if failed:
+                await tx.many(
                     """
-                    UPDATE sms_campaign_members
+                    UPDATE {members}
                     SET delivery_status = ?, delivered = FALSE
                     WHERE campaign = ? AND buyer_id = ?
                     """,
-                    [status, campaign, buyer_id],
+                    [[status, campaign, buyer_id]
+                     for buyer_id, status in failed.items()],
                 )
 
-            for buyer_id in stoplisted:
-                conn.execute(
+            if stoplisted:
+                await tx.many(
                     """
-                    UPDATE sms_campaign_members
+                    UPDATE {members}
                     SET delivery_status = 'Stoplist', delivered = FALSE
                     WHERE campaign = ? AND buyer_id = ?
                     """,
-                    [campaign, buyer_id],
+                    [[campaign, buyer_id] for buyer_id in stoplisted],
                 )
-                conn.execute(
+                await tx.many(
                     """
-                    INSERT INTO marketing_optouts
+                    INSERT INTO {optouts}
                         (buyer_id, channel, phone, reason, source)
                     SELECT ?, 'sms', phone, 'stoplist', 'turbosms'
-                    FROM sms_campaign_members
+                    FROM {members}
                     WHERE campaign = ? AND buyer_id = ?
-                    ON CONFLICT (buyer_id, channel) DO NOTHING
+                    -- The gateway is where a phone-less manual opt-out finally
+                    -- gets its number; see add_marketing_optout.
+                    ON CONFLICT (buyer_id, channel) DO UPDATE
+                        SET phone = COALESCE(EXCLUDED.phone, {optouts}.phone)
                     """,
-                    [buyer_id, campaign, buyer_id],
+                    [[buyer_id, campaign, buyer_id] for buyer_id in stoplisted],
                 )
 
             # Whoever the gateway never answered for was never messaged. A send
@@ -1415,16 +1776,16 @@ class CustomersMixin:
             # fact, which meant the exclusion was dead code resting on a manual
             # step. A member with neither a message id nor a status is exactly
             # the one nobody heard about.
-            not_sent = conn.execute(
+            not_sent = await tx.all(
                 """
-                UPDATE sms_campaign_members
+                UPDATE {members}
                 SET delivery_status = 'NotSent', delivered = FALSE
                 WHERE campaign = ? AND assignment = 'target'
                   AND message_id IS NULL AND delivery_status IS NULL
                 RETURNING buyer_id
                 """,
                 [campaign],
-            ).fetchall()
+            )
 
             # The cost is recorded here, from what actually left, rather than
             # estimated later from the roster: only the gateway knows how many
@@ -1434,9 +1795,9 @@ class CustomersMixin:
                 if message_parts and price_per_part is not None
                 else None
             )
-            conn.execute(
+            await tx.none(
                 """
-                UPDATE sms_campaigns
+                UPDATE {campaigns}
                 SET sent_at = ?, message_text = ?, message_parts = ?,
                     recipients_sent = ?, price_per_part = ?, cost_total = ?
                 WHERE campaign = ?
@@ -1459,37 +1820,93 @@ class CustomersMixin:
         status: str,
         delivered: Optional[bool],
         delivered_at: Optional[datetime] = None,
+        *,
+        event_id: str,
     ) -> bool:
         """
         Apply one delivery report. Returns False if the message id is unknown.
 
         ``delivered=None`` means the operator has not reported a final state
         yet, so the flag is left untouched rather than guessed at.
+
+        Delivery is terminal: a report that would flip a message already
+        reported ``delivered=True`` to a failure, or reopen it with a non-final
+        status, is dropped. That keeps the campaign's ground truth intact
+        against a reordered or duplicated gateway callback. A ``True`` report
+        always applies, so the Sent -> DELIVRD upgrade and the gateway's
+        idempotent retries are untouched. The row still exists either way, so
+        the caller still learns the id is known and can acknowledge the
+        callback.
+
+        ``event_id`` is the gateway event this report arrived under, and it is
+        the reason this is not a free write. The webhook signature covers the
+        event id and nothing else, so the caller proves it knew the secret and
+        proves nothing about which message it is reporting on. The first report
+        under an event id binds that id to its message; a later one naming a
+        different message is a captured pair re-pointed at somebody else and
+        raises ``DlrEventRebound``. Keyword-only and required so it cannot be
+        left off by accident — a binding a caller can silently skip is not one.
+
+        The **status** is deliberately not bound. A gateway that re-renders
+        current state when it retries would then contradict its own first
+        attempt, and rejecting a legitimate retry is worse than what this
+        defends against: the gateway tries nine times over 4.5 hours and offers
+        no replay. The terminal-delivery rule above is what guards the status.
         """
-        async with self.connection() as conn:
-            if delivered is None:
-                cur = conn.execute(
-                    """
-                    UPDATE sms_campaign_members SET delivery_status = ?
-                    WHERE message_id = ?
-                    """,
-                    [status, message_id],
+        async with self._sms_tx() as tx:
+            # The binding and the write share one transaction. They always
+            # should have: an event id spent without its write, or a write
+            # without its id spent, both leave the pair re-pointable — and the
+            # pair never expires, because the scheme carries no nonce.
+            bound = await tx.one(
+                "SELECT message_id FROM {dlr_events} WHERE event_id = ?",
+                [event_id],
+            )
+            if bound is None:
+                # Bound even for a message id the roster does not know: an event
+                # spent against nothing must still be spent, or the pair stays
+                # re-pointable.
+                await tx.none(
+                    "INSERT INTO {dlr_events} (event_id, message_id) VALUES (?, ?)"
+                    " ON CONFLICT DO NOTHING",
+                    [event_id, message_id],
                 )
-            else:
-                cur = conn.execute(
+            elif bound[0] != message_id:
+                raise DlrEventRebound(event_id, bound[0], message_id)
+
+            if delivered is True:
+                await tx.none(
                     """
-                    UPDATE sms_campaign_members
+                    UPDATE {members}
                     SET delivery_status = ?, delivered = ?, delivered_at = ?
                     WHERE message_id = ?
                     """,
-                    [status, delivered, delivered_at or datetime.now(), message_id],
+                    [status, True, delivered_at or datetime.now(), message_id],
                 )
-            changed = cur.fetchall()
+            elif delivered is False:
+                await tx.none(
+                    """
+                    UPDATE {members}
+                    SET delivery_status = ?, delivered = ?, delivered_at = ?
+                    WHERE message_id = ?
+                      AND (delivered IS NULL OR delivered = FALSE)
+                    """,
+                    [status, False, delivered_at or datetime.now(), message_id],
+                )
+            else:
+                await tx.none(
+                    """
+                    UPDATE {members} SET delivery_status = ?
+                    WHERE message_id = ?
+                      AND (delivered IS NULL OR delivered = FALSE)
+                    """,
+                    [status, message_id],
+                )
 
-            found = conn.execute(
-                "SELECT COUNT(*) FROM sms_campaign_members WHERE message_id = ?",
+            found = (await tx.one(
+                "SELECT COUNT(*) FROM {members} WHERE message_id = ?",
                 [message_id],
-            ).fetchone()[0]
+            ))[0]
 
         return bool(found)
 
@@ -1501,19 +1918,30 @@ class CustomersMixin:
         source: str = "dashboard",
         channel: str = "sms",
     ) -> Dict[str, Any]:
-        """Record that a customer asked not to receive marketing on this channel."""
-        async with self.connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO marketing_optouts (buyer_id, channel, phone, reason, source)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (buyer_id, channel) DO NOTHING
-                """,
-                [buyer_id, channel, phone, reason, source],
-            )
-            total = conn.execute(
-                "SELECT COUNT(*) FROM marketing_optouts WHERE channel = ?", [channel],
-            ).fetchone()[0]
+        """Record that a customer asked not to receive marketing on this channel.
+
+        A repeat only ever *adds* the phone, and only when the stored row has
+        none. The refusal usually arrives before the number does — opted out by
+        buyer id off the CRM screen, with the number turning up on the next
+        send's stoplist — and until it lands the phone column suppresses
+        nothing, so the same person under a second buyer record keeps being
+        selected. Overwriting a phone already there is the opposite mistake: it
+        would move one person's suppression onto another's number, on a write
+        with no undo. Everything else is left as first written, because the
+        first refusal is the fact and its `source` is who to ask about it.
+        """
+        await self._sms_run(
+            """
+            INSERT INTO {optouts} (buyer_id, channel, phone, reason, source)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (buyer_id, channel) DO UPDATE
+                SET phone = COALESCE(EXCLUDED.phone, {optouts}.phone)
+            """,
+            [buyer_id, channel, phone, reason, source], mode="none",
+        )
+        total = (await self._sms_run(
+            "SELECT COUNT(*) FROM {optouts} WHERE channel = ?", [channel], mode="one",
+        ))[0]
 
         return {"buyerId": buyer_id, "channel": channel, "totalOptouts": total}
 
@@ -1562,139 +1990,144 @@ class CustomersMixin:
             ValueError: If the campaign is unknown or has no send date — an
                 unsent campaign has no window to measure over.
         """
-        async with self.connection() as conn:
-            camp = conn.execute(
-                "SELECT sent_at, promocode, ltv_basis, holdout_pct, cost_total"
-                " FROM sms_campaigns WHERE campaign = ?", [campaign],
-            ).fetchone()
-            if camp is None:
-                raise ValueError(f"campaign {campaign!r} is not frozen")
-            sent_at, promocode, ltv_basis, holdout_pct, cost_total = camp
-            if sent_at is None:
-                raise ValueError(
-                    f"campaign {campaign!r} has no send date — mark it sent before "
-                    f"measuring, or results would cover an arbitrary window"
-                )
+        camp = await self._sms_run(
+            "SELECT sent_at, promocode, ltv_basis, holdout_pct, cost_total"
+            " FROM {campaigns} WHERE campaign = ?", [campaign], mode="one",
+        )
+        if camp is None:
+            raise ValueError(f"campaign {campaign!r} is not frozen")
+        sent_at, promocode, ltv_basis, holdout_pct, cost_total = camp
+        if sent_at is None:
+            raise ValueError(
+                f"campaign {campaign!r} has no send date — mark it sent before "
+                f"measuring, or results would cover an arbitrary window"
+            )
 
-            rows = conn.execute(
-                f"""
-                WITH linked AS (
-                    -- Every customer record that is the same person as a roster
-                    -- member, matched on the phone the message went to.
-                    --
-                    -- Responding to the campaign is itself a way to acquire a
-                    -- second customer record: the recipient follows the link,
-                    -- checks out on the storefront, and a fresh buyer row is
-                    -- created because the name is spelled differently
-                    -- ("Наталія Дяків" against "Дяків Наталія"). Matching the
-                    -- purchase back by buyer_id then misses it. On the first
-                    -- real campaign that hid 6 of 55 responses, ~27 700 UAH,
-                    -- every one of them in the target arm — the arm is the only
-                    -- one holding a link to click, so the loss is one-sided and
-                    -- always understates the campaign.
-                    --
-                    -- Last nine digits, because the roster stores 380XXXXXXXXX
-                    -- and buyers may carry a +, spaces or brackets.
-                    SELECT m.buyer_id AS member_id, b.id AS buyer_id
-                    FROM sms_campaign_members m
-                    JOIN buyers b
-                      ON right(regexp_replace(b.phone, '[^0-9]', '', 'g'), 9)
-                       = right(m.phone, 9)
-                    WHERE m.campaign = ?
-                    UNION  -- the member's own row, even with no usable phone
-                    SELECT buyer_id, buyer_id
-                    FROM sms_campaign_members WHERE campaign = ?
-                ),
-                window_orders AS (
-                    SELECT l.buyer_id, l.order_id, l.order_grand_total AS grand_total,
-                           l.promocode,
-                           l.line_amount AS line_revenue,
-                           CASE WHEN os.purchased_price > 0
-                                THEN os.purchased_price * l.quantity END AS line_cogs
-                    FROM silver_order_lines l
-                    LEFT JOIN offer_stocks os ON os.sku = l.sku
-                    WHERE NOT l.is_return
-                      AND l.is_active_source
-                      -- From the moment the message went out, not from midnight
-                      -- that day. Rounding the start down to a date credited
-                      -- the campaign with every purchase made earlier the same
-                      -- day — hours of ordinary trading, split at random
-                      -- between the two arms, which on day one is the whole
-                      -- reading. Both columns carry a timezone, so this
-                      -- compares instants.
-                      AND l.ordered_at >= ?
-                      AND l.ordered_at < ? + INTERVAL '{int(window_days)} days'
-                ),
-                alloc AS (
-                    SELECT buyer_id, order_id, promocode, line_cogs,
-                           COALESCE(grand_total * line_revenue
-                               / NULLIF(SUM(line_revenue) OVER (PARTITION BY order_id), 0),
-                             0) AS revenue
-                    FROM window_orders
-                ),
-                per_buyer AS (
-                    SELECT buyer_id,
-                           COUNT(DISTINCT order_id) AS orders,
-                           SUM(revenue) AS revenue,
-                           COALESCE(SUM(revenue - line_cogs)
-                               FILTER (WHERE line_cogs IS NOT NULL), 0) AS margin,
-                           COUNT(DISTINCT CASE WHEN promocode = ? THEN order_id END)
-                               AS promo_orders
-                    FROM alloc
-                    GROUP BY buyer_id
-                ),
-                per_member AS (
-                    -- Roll every linked record up onto the roster member, so a
-                    -- person counts once however many customer rows they have.
-                    -- Orders belong to exactly one buyer row and roster phones
-                    -- are unique, so nothing is double counted here.
-                    SELECT l.member_id,
-                           SUM(pb.orders) AS orders,
-                           SUM(pb.revenue) AS revenue,
-                           SUM(pb.margin) AS margin,
-                           SUM(pb.promo_orders) AS promo_orders
-                    FROM linked l
-                    JOIN per_buyer pb ON pb.buyer_id = l.buyer_id
-                    GROUP BY l.member_id
-                )
-                -- Members the gateway never took are excluded from the arm
-                -- itself. They could not respond to a message they never
-                -- received, so counting them as contacts understates the rate
-                -- on every reading. They stay visible as not_sent below.
-                SELECT m.tier, m.assignment,
-                       COUNT(*) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS contacts,
-                       COUNT(pb.member_id) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS converted,
-                       COALESCE(SUM(pb.orders) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS orders,
-                       COALESCE(SUM(pb.revenue) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS revenue,
-                       COALESCE(SUM(pb.margin) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS margin,
-                       COALESCE(SUM(pb.promo_orders) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0)
-                           AS promo_orders,
-                       COUNT(*) FILTER (WHERE m.delivered) AS delivered,
-                       COUNT(*) FILTER (WHERE m.delivered = FALSE) AS undelivered,
-                       -- Never handed to the gateway at all. Counted apart from
-                       -- undelivered because it is a different failure: these
-                       -- people were never treated, so leaving them in the
-                       -- target arm dilutes whatever the message did.
-                       COUNT(*) FILTER (WHERE m.delivery_status = 'NotSent')
-                           AS not_sent
-                FROM sms_campaign_members m
-                LEFT JOIN per_member pb ON pb.member_id = m.buyer_id
+        rows = await self._sms_run(
+            f"""
+            WITH linked AS (
+                -- Every customer record that is the same person as a roster
+                -- member, matched on the phone the message went to.
+                --
+                -- Responding to the campaign is itself a way to acquire a
+                -- second customer record: the recipient follows the link,
+                -- checks out on the storefront, and a fresh buyer row is
+                -- created because the name is spelled differently
+                -- ("Наталія Дяків" against "Дяків Наталія"). Matching the
+                -- purchase back by buyer_id then misses it. On the first
+                -- real campaign that hid 6 of 55 responses, ~27 700 UAH,
+                -- every one of them in the target arm — the arm is the only
+                -- one holding a link to click, so the loss is one-sided and
+                -- always understates the campaign.
+                --
+                -- Last nine digits, because the roster stores 380XXXXXXXXX
+                -- and buyers may carry a +, spaces or brackets.
+                SELECT m.buyer_id AS member_id, b.id AS buyer_id
+                FROM {{members}} m
+                JOIN {{buyers}} b
+                  ON right(regexp_replace(b.phone, '[^0-9]', '', 'g'), 9)
+                   = right(m.phone, 9)
                 WHERE m.campaign = ?
-                  -- The control arm was never sent to, so a delivery filter
-                  -- must not touch it, or the comparison loses its baseline.
-                  --
-                  -- IS NOT FALSE, not a bare truth test: delivered is NULL for
-                  -- everyone the gateway accepted but never reported on, and
-                  -- with the delivery webhook not reaching us those receipts
-                  -- never arrive. On the first campaign that was 246 people
-                  -- against 25 actual rejections — treating "in transit" as
-                  -- "undelivered" drops nine responders for every one refusal.
-                  {"AND (m.assignment = 'holdout' OR m.delivered IS NOT FALSE)"
-                   if delivered_only else ""}
-                GROUP BY m.tier, m.assignment
-                """,
-                [campaign, campaign, sent_at, sent_at, promocode, campaign],
-            ).fetchall()
+                UNION  -- the member's own row, even with no usable phone
+                SELECT buyer_id, buyer_id
+                FROM {{members}} WHERE campaign = ?
+            ),
+            window_orders AS (
+                SELECT l.buyer_id, l.order_id, l.order_grand_total AS grand_total,
+                       l.promocode,
+                       l.line_amount AS line_revenue,
+                       CASE WHEN os.purchased_price > 0
+                            THEN os.purchased_price * l.quantity END AS line_cogs
+                FROM {{lines}} l
+                LEFT JOIN {{stocks}} os ON os.sku = l.sku
+                WHERE NOT l.is_return
+                  AND l.is_active_source
+                  -- From the moment the message went out, not from midnight
+                  -- that day. Rounding the start down to a date credited
+                  -- the campaign with every purchase made earlier the same
+                  -- day — hours of ordinary trading, split at random
+                  -- between the two arms, which on day one is the whole
+                  -- reading. Both columns carry a timezone, so this
+                  -- compares instants.
+                  AND l.ordered_at >= ?
+                  -- The parameter is cast explicitly because PostgreSQL cannot
+                  -- infer its type from `? + INTERVAL` alone: it reads the sum
+                  -- as an interval, which then refuses to compare against a
+                  -- timestamp. DuckDB is happy either way, so the cast is the
+                  -- portable spelling rather than a concession to one engine.
+                  AND l.ordered_at < CAST(? AS TIMESTAMPTZ)
+                                     + INTERVAL '{int(window_days)} days'
+            ),
+            alloc AS (
+                SELECT buyer_id, order_id, promocode, line_cogs,
+                       COALESCE(grand_total * line_revenue
+                           / NULLIF(SUM(line_revenue) OVER (PARTITION BY order_id), 0),
+                         0) AS revenue
+                FROM window_orders
+            ),
+            per_buyer AS (
+                SELECT buyer_id,
+                       COUNT(DISTINCT order_id) AS orders,
+                       SUM(revenue) AS revenue,
+                       COALESCE(SUM(revenue - line_cogs)
+                           FILTER (WHERE line_cogs IS NOT NULL), 0) AS margin,
+                       COUNT(DISTINCT CASE WHEN promocode = ? THEN order_id END)
+                           AS promo_orders
+                FROM alloc
+                GROUP BY buyer_id
+            ),
+            per_member AS (
+                -- Roll every linked record up onto the roster member, so a
+                -- person counts once however many customer rows they have.
+                -- Orders belong to exactly one buyer row and roster phones
+                -- are unique, so nothing is double counted here.
+                SELECT l.member_id,
+                       SUM(pb.orders) AS orders,
+                       SUM(pb.revenue) AS revenue,
+                       SUM(pb.margin) AS margin,
+                       SUM(pb.promo_orders) AS promo_orders
+                FROM linked l
+                JOIN per_buyer pb ON pb.buyer_id = l.buyer_id
+                GROUP BY l.member_id
+            )
+            -- Members the gateway never took are excluded from the arm
+            -- itself. They could not respond to a message they never
+            -- received, so counting them as contacts understates the rate
+            -- on every reading. They stay visible as not_sent below.
+            SELECT m.tier, m.assignment,
+                   COUNT(*) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS contacts,
+                   COUNT(pb.member_id) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent') AS converted,
+                   COALESCE(SUM(pb.orders) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS orders,
+                   COALESCE(SUM(pb.revenue) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS revenue,
+                   COALESCE(SUM(pb.margin) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0) AS margin,
+                   COALESCE(SUM(pb.promo_orders) FILTER (WHERE m.delivery_status IS DISTINCT FROM 'NotSent'), 0)
+                       AS promo_orders,
+                   COUNT(*) FILTER (WHERE m.delivered) AS delivered,
+                   COUNT(*) FILTER (WHERE m.delivered = FALSE) AS undelivered,
+                   -- Never handed to the gateway at all. Counted apart from
+                   -- undelivered because it is a different failure: these
+                   -- people were never treated, so leaving them in the
+                   -- target arm dilutes whatever the message did.
+                   COUNT(*) FILTER (WHERE m.delivery_status = 'NotSent')
+                       AS not_sent
+            FROM {{members}} m
+            LEFT JOIN per_member pb ON pb.member_id = m.buyer_id
+            WHERE m.campaign = ?
+              -- The control arm was never sent to, so a delivery filter
+              -- must not touch it, or the comparison loses its baseline.
+              --
+              -- IS NOT FALSE, not a bare truth test: delivered is NULL for
+              -- everyone the gateway accepted but never reported on, and
+              -- with the delivery webhook not reaching us those receipts
+              -- never arrive. On the first campaign that was 246 people
+              -- against 25 actual rejections — treating "in transit" as
+              -- "undelivered" drops nine responders for every one refusal.
+              {"AND (m.assignment = 'holdout' OR m.delivered IS NOT FALSE)"
+               if delivered_only else ""}
+            GROUP BY m.tier, m.assignment
+            """,
+            [campaign, campaign, sent_at, sent_at, promocode, campaign],
+        )
 
         by_tier: Dict[str, Dict[str, Dict[str, Any]]] = {}
         for (tier, assignment, contacts, converted, orders, revenue, margin,
@@ -1718,7 +2151,7 @@ class CustomersMixin:
         def _blank() -> Dict[str, Any]:
             return dict(empty)
 
-        tier_order = {"VIP": 0, "CORE": 1, "REACTIVATION": 2}
+        tier_order = {SINGLE_GROUP_NAME: 0, "VIP": 0, "CORE": 1, "REACTIVATION": 2}
         segments = []
         overall_t, overall_h = _blank(), _blank()
 
@@ -1756,22 +2189,67 @@ class CustomersMixin:
             },
         }
 
+    async def backfill_sms_campaign_record(
+        self,
+        campaign: str,
+        message_text: str,
+        message_parts: int,
+        recipients_sent: int,
+        price_per_part: float,
+        cost_total: float,
+        notes: str,
+    ) -> bool:
+        """Fill in what a campaign sent, for one that predates the recording.
+
+        Writes **only columns that are still NULL**, and returns False if the
+        campaign already carries a record. The text of a sent campaign is
+        evidence of what reached people's phones; a path that can overwrite it
+        is a path by which every card stops being trustworthy.
+
+        `notes` is where the provenance goes — restored by hand is not the same
+        fact as recorded at send, and the page says which one it is looking at.
+        """
+        row = await self._sms_run("""
+            UPDATE {campaigns}
+            SET message_text = ?, message_parts = ?, recipients_sent = ?,
+                price_per_part = ?, cost_total = ?, notes = ?
+            WHERE campaign = ? AND message_text IS NULL
+            RETURNING campaign
+        """, [message_text, message_parts, recipients_sent, price_per_part,
+              cost_total, notes, campaign], mode="one")
+        return row is not None
+
     async def list_sms_campaigns(self) -> List[Dict[str, Any]]:
-        """List frozen campaigns, newest export first."""
-        async with self.connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT c.campaign, c.ltv_basis, c.sales_type, c.holdout_pct,
-                       c.promocode, c.exported_at, c.sent_at, c.notes,
-                       COUNT(m.buyer_id) AS members,
-                       COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'target') AS target,
-                       COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'holdout') AS holdout
-                FROM sms_campaigns c
-                LEFT JOIN sms_campaign_members m ON m.campaign = c.campaign
-                GROUP BY ALL
-                ORDER BY c.exported_at DESC
-                """
-            ).fetchall()
+        """List frozen campaigns, newest export first.
+
+        Carries what a campaign *was*, not only how big it was: the audience as
+        it was frozen, the text as it went out, and what the gateway billed.
+        All three were recorded from the start and none were readable anywhere
+        — "which text went out in August, and to whom" had no answer short of a
+        SQL prompt.
+        """
+        rows = await self._sms_run(
+            """
+            SELECT c.campaign, c.ltv_basis, c.sales_type, c.holdout_pct,
+                   c.promocode, c.exported_at, c.sent_at, c.notes,
+                   COUNT(m.buyer_id) AS members,
+                   COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'target') AS target,
+                   COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'holdout') AS holdout,
+                   c.criteria, c.message_text, c.message_parts,
+                   c.recipients_sent, c.price_per_part, c.cost_total,
+                   COUNT(m.buyer_id) FILTER (WHERE m.delivered) AS delivered,
+                   COUNT(m.buyer_id) FILTER (WHERE m.delivered IS FALSE)
+                       AS undelivered
+            FROM {campaigns} c
+            LEFT JOIN {members} m ON m.campaign = c.campaign
+            -- Spelled out rather than `GROUP BY ALL`, which only DuckDB has.
+            GROUP BY c.campaign, c.ltv_basis, c.sales_type, c.holdout_pct,
+                     c.promocode, c.exported_at, c.sent_at, c.notes,
+                     c.criteria, c.message_text, c.message_parts,
+                     c.recipients_sent, c.price_per_part, c.cost_total
+            ORDER BY c.exported_at DESC
+            """
+        )
 
         return [
             {
@@ -1786,6 +2264,17 @@ class CustomersMixin:
                 "members": r[8],
                 "target": r[9],
                 "holdout": r[10],
+                # The audience as frozen. Stored as JSON because it snapshots a
+                # form, not a schema; handed back as an object so the page can
+                # say it in words.
+                "criteria": _load_json(r[11]),
+                "messageText": r[12],
+                "messageParts": r[13],
+                "recipientsSent": r[14],
+                "pricePerPart": float(r[15]) if r[15] is not None else None,
+                "costTotal": float(r[16]) if r[16] is not None else None,
+                "delivered": r[17],
+                "undelivered": r[18],
             }
             for r in rows
         ]
@@ -1802,6 +2291,8 @@ class CustomersMixin:
         holdout_pct: int = 10,
         campaign: str = "default",
         tier: Optional[Union[str, Sequence[str]]] = None,
+        filters: Optional["SmsAudienceFilters"] = None,
+        grouping: str = "rfm",
         include_customers: bool = False,
         limit: int = 20000,
     ) -> Dict[str, Any]:
@@ -1850,8 +2341,17 @@ class CustomersMixin:
             ltv_basis: revenue or margin — which LTV drives tier assignment.
             holdout_pct: Percent of each tier withheld as control (0 disables).
             campaign: Campaign label; also seeds the holdout split.
-            tier: Restrict to these tiers (VIP / CORE / REACTIVATION). A
-                single name or a sequence; None keeps all three.
+            tier: Restrict the audience to these value levels (VIP / CORE /
+                REACTIVATION). A filter on who is messaged, independent of how
+                the result is measured — it applies under either grouping.
+            filters: Extra audience predicates (recency, order count, LTV,
+                average order, first purchase, city, brand, category, source,
+                promocode). None or an empty set selects what the tier rules
+                alone select.
+            grouping: "rfm" for the three value tiers, "single" for one arm
+                holding everyone the filters kept. A filtered audience usually
+                wants "single": under "rfm" anyone outside all three tiers is
+                dropped, which quietly removes most one-order buyers.
             include_customers: Include the customer rows, not just the summary.
             limit: Max customer rows returned when include_customers is set.
 
@@ -1866,6 +2366,11 @@ class CustomersMixin:
             raise ValueError(
                 f"ltv_basis must be one of {', '.join(SMS_LTV_BASES)}, got {ltv_basis!r}"
             )
+        if grouping not in SMS_GROUPINGS:
+            raise ValueError(
+                f"grouping must be one of {', '.join(SMS_GROUPINGS)}, got {grouping!r}"
+            )
+        filters = filters or SmsAudienceFilters()
 
         defaults = SMS_TIER_DEFAULTS[ltv_basis]
         if vip_ltv is None:
@@ -1880,221 +2385,99 @@ class CustomersMixin:
             tier = [tier]
         tiers = [t.upper() for t in tier] if tier else None
 
-        async with self.connection() as conn:
-            # Silver already classifies each order, so filter on the column
-            # rather than re-deriving retail/b2b from manager_id here.
-            sales_type_filter = "" if sales_type == "all" else "AND l.sales_type = ?"
+        # Silver already classifies each order, so filter on the column
+        # rather than re-deriving retail/b2b from manager_id here.
+        sales_type_filter = "" if sales_type == "all" else "AND l.sales_type = ?"
 
-            # Phones are stored as free text; normalise to digits and keep only
-            # full Ukrainian MSISDNs (380 + 9 digits). Everything shorter is a
-            # partial record that no SMS gateway will accept.
-            # Which lifetime value drives tiering. Both are always computed.
-            ltv_column = "revenue_ltv" if ltv_basis == "revenue" else "margin_ltv"
+        # Phones are stored as free text; normalise to digits and keep only
+        # full Ukrainian MSISDNs (380 + 9 digits). Everything shorter is a
+        # partial record that no SMS gateway will accept.
+        # Which lifetime value drives tiering. Both are always computed.
+        ltv_column = "revenue_ltv" if ltv_basis == "revenue" else "margin_ltv"
 
-            query = f"""
-            WITH line_items AS (
-                SELECT
-                    l.order_id,
-                    l.buyer_id,
-                    l.order_date,
-                    l.order_grand_total AS grand_total,
-                    l.line_amount AS line_revenue,
-                    CASE WHEN os.purchased_price > 0
-                         THEN os.purchased_price * l.quantity END AS line_cogs
-                FROM silver_order_lines l
-                LEFT JOIN offer_stocks os ON os.sku = l.sku
-                WHERE l.buyer_id IS NOT NULL
-                  AND NOT l.is_return
-                  -- Same revenue definition the Gold layer uses: deprecated
-                  -- sources (Opencart et al.) must not inflate LTV or recency.
-                  AND l.is_active_source
-                  {sales_type_filter}
-            ),
-            allocated AS (
-                -- Order-level discounts live in grand_total, not in the line
-                -- prices (line totals run ~1.5% above grand_total), so spread
-                -- each order's grand_total across its lines pro rata. That
-                -- charges the discount to margin, which is where it belongs:
-                -- a customer who only ever buys on discount is worth less.
-                SELECT
-                    buyer_id, order_id, order_date, line_cogs,
-                    COALESCE(
-                        grand_total * line_revenue
-                            / NULLIF(SUM(line_revenue) OVER (PARTITION BY order_id), 0),
-                        0
-                    ) AS revenue
-                FROM line_items
-            ),
-            order_totals AS (
-                SELECT buyer_id, order_id, order_date, SUM(revenue) AS order_total
-                FROM allocated
-                GROUP BY buyer_id, order_id, order_date
-            ),
-            last_order AS (
-                -- What the customer bought last: the hook an SMS is written around.
-                SELECT buyer_id, order_id, order_total
-                FROM order_totals
-                QUALIFY ROW_NUMBER() OVER (
-                    PARTITION BY buyer_id ORDER BY order_date DESC, order_id DESC
-                ) = 1
-            ),
-            last_order_items AS (
-                -- Names run long (up to ~4k chars per order), so keep the three
-                -- biggest lines, truncate each, and note how many were left out.
-                SELECT
-                    lo.buyer_id,
-                    lo.order_id AS last_order_id,
-                    lo.order_total AS last_order_total,
-                    COUNT(*) AS last_order_item_count,
-                    array_to_string(
-                        list_transform(
-                            list_slice(
-                                array_agg(l.product_name ORDER BY l.quantity DESC, l.product_name), 1, 3
-                            ),
-                            x -> CASE WHEN length(x) > 60
-                                      THEN left(x, 57) || chr(8230) ELSE x END
-                        ), ' | '
-                    ) AS last_order_items
-                FROM last_order lo
-                JOIN silver_order_lines l ON l.order_id = lo.order_id
-                GROUP BY lo.buyer_id, lo.order_id, lo.order_total
-            ),
-            cust AS (
-                SELECT
-                    buyer_id,
-                    COUNT(DISTINCT order_id) AS orders,
-                    SUM(revenue) AS revenue_ltv,
-                    -- Uncosted lines drop out of margin but stay in revenue;
-                    -- cost_coverage exposes how much of the customer is costed.
-                    COALESCE(SUM(revenue - line_cogs) FILTER (WHERE line_cogs IS NOT NULL), 0)
-                        AS margin_ltv,
-                    COALESCE(SUM(revenue) FILTER (WHERE line_cogs IS NOT NULL), 0)
-                        / NULLIF(SUM(revenue), 0) AS cost_coverage,
-                    MAX(order_date) AS last_order_date,
-                    MIN(order_date) AS first_order_date,
-                    DATEDIFF('day', MAX(order_date), CURRENT_DATE) AS recency
-                FROM allocated
-                GROUP BY buyer_id
-            ),
-            scored AS (
-                SELECT
-                    c.*,
-                    lo.last_order_id,
-                    lo.last_order_total,
-                    lo.last_order_item_count,
-                    lo.last_order_items,
-                    b.full_name,
-                    b.city,
-                    regexp_replace(COALESCE(b.phone, ''), '[^0-9]', '', 'g') AS phone,
-                    CASE
-                        WHEN c.{ltv_column} >= ? THEN 'VIP'
-                        WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
-                        WHEN c.recency <= ? THEN 'REACTIVATION'
-                    END AS tier
-                FROM cust c
-                JOIN buyers b ON b.id = c.buyer_id
-                LEFT JOIN last_order_items lo ON lo.buyer_id = c.buyer_id
-                WHERE c.recency <= ?
-            ),
-            flagged AS (
-                -- Each eligibility rule as its own column rather than a WHERE
-                -- clause, so the same pass can both filter and report how many
-                -- customers each rule removed.
-                SELECT
-                    *,
-                    tier IS NOT NULL AS ok_tier,
-                    length(phone) = 12 AND phone LIKE '380%' AS ok_phone,
-                    -- Opted out stays out. Matched on buyer AND on phone, because
-                    -- the same number can reach us under a second buyer record.
-                    NOT EXISTS (
-                        SELECT 1 FROM marketing_optouts o
-                        WHERE o.channel = 'sms'
-                          AND (o.buyer_id = scored.buyer_id OR o.phone = scored.phone)
-                    ) AS ok_subscribed
-                FROM scored
-            ),
-            eligible AS (
-                SELECT *
-                FROM flagged
-                WHERE ok_tier AND ok_phone AND ok_subscribed
-                -- One SMS per phone number: shared numbers across buyer records
-                -- would otherwise be messaged twice.
-                QUALIFY ROW_NUMBER() OVER (
-                    PARTITION BY phone ORDER BY {ltv_column} DESC, buyer_id
-                ) = 1
-            ),
-            selected AS (
-                -- Tier filter applies after de-duplication so asking for a
-                -- subset cannot change which buyer wins a shared phone number.
-                SELECT * FROM eligible
-                {f"WHERE tier IN ({', '.join('?' * len(tiers))})" if tiers else ""}
-            ),
-            funnel AS (
-                -- The selection, stage by stage. Counted in the order the rules
-                -- are applied above, so each figure is "still in after this rule".
-                SELECT
-                    (SELECT COUNT(*) FROM cust) AS f_customers,
-                    COUNT(*) AS f_in_window,
-                    COUNT(*) FILTER (ok_tier) AS f_tiered,
-                    COUNT(*) FILTER (ok_tier AND ok_phone) AS f_phone,
-                    COUNT(*) FILTER (ok_tier AND ok_phone AND ok_subscribed) AS f_subscribed,
-                    (SELECT COUNT(*) FROM eligible) AS f_eligible
-                FROM flagged
-            )
-            SELECT
-                buyer_id, full_name, phone, city, tier, orders,
-                ROUND({ltv_column}, 2) AS ltv,
-                ROUND({ltv_column} / orders, 2) AS aov,
-                ROUND(revenue_ltv, 2) AS revenue_ltv,
-                ROUND(margin_ltv, 2) AS margin_ltv,
-                ROUND(100.0 * margin_ltv / NULLIF(revenue_ltv, 0), 1) AS margin_pct,
-                ROUND(100.0 * COALESCE(cost_coverage, 0), 1) AS cost_coverage,
-                recency, last_order_date, first_order_date,
-                last_order_id,
-                ROUND(last_order_total, 2) AS last_order_total,
-                last_order_item_count,
-                CASE WHEN last_order_item_count > 3
-                     THEN last_order_items || ' +' || (last_order_item_count - 3) || ' ещё'
-                     ELSE last_order_items END AS last_order_items,
-                CASE WHEN hash(buyer_id::VARCHAR || '|' || ?) % 100 < ?
-                     THEN 'holdout' ELSE 'target' END AS assignment,
-                f_customers, f_in_window, f_tiered, f_phone, f_subscribed, f_eligible
-            -- RIGHT JOIN, not CROSS: when nothing survives the filters the
-            -- funnel is the only thing left to explain why, so its single row
-            -- has to come back regardless.
-            FROM selected RIGHT JOIN funnel ON TRUE
-            ORDER BY tier, ltv DESC, buyer_id
-            """
+        # The value level is always computed, because it does two separate
+        # jobs and only one of them is splitting. As a *filter* — "send to
+        # VIP only" — it applies whether or not the campaign is measured in
+        # arms; tying it to the split is what made three tier cards read as
+        # three audiences.
+        tier_case = f"""CASE
+                    WHEN c.{ltv_column} >= ? THEN 'VIP'
+                    WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
+                    WHEN c.recency <= ? THEN 'REACTIVATION'
+                END"""
 
-            # Bound in textual order of the `?` placeholders above.
-            params: list = []
-            if sales_type != "all":
-                params.append(sales_type)
-            params += [
-                vip_ltv, core_min_orders, core_ltv, reactivation_max_recency,
-                max_recency_days,
-            ]
-            if tiers:
-                params += tiers
-            params += [campaign, holdout_pct]
+        # The arm is what the result is measured on. Under "single" there
+        # is one, and nobody is dropped for belonging to no level; under
+        # "rfm" the arm is the level, and whoever has none falls out.
+        if grouping == "single":
+            arm_expr = f"'{SINGLE_GROUP_NAME}'"
+            ok_tier_expr = "TRUE"
+        else:
+            arm_expr = "tier_level"
+            ok_tier_expr = "tier_level IS NOT NULL"
 
-            rows = conn.execute(query, params).fetchall()
+        # Which store answers. Decided out here on purpose: the Postgres path
+        # must not take DuckDB's connection at all — §34's invariant, because a
+        # read that queues behind the warehouse rebuild has moved the
+        # bottleneck rather than left it behind.
+        use_postgres = sms_store_is_postgres()
+        dialect = POSTGRES if use_postgres else DUCKDB
+
+        filter_sql, filter_params = filters.predicate(
+            ltv_column, sales_type, dialect.order_lines,
+        )
+        fragments = dict(
+            ltv_column=ltv_column,
+            sales_type_filter=sales_type_filter,
+            tier_case=tier_case,
+            arm_expr=arm_expr,
+            ok_tier_expr=ok_tier_expr,
+            filter_sql=filter_sql,
+            tier_subset=(
+                f"WHERE tier_level IN ({', '.join('?' * len(tiers))})"
+                if tiers else ""
+            ),
+        )
+
+        # Bound in textual order of the `?` placeholders: the line-items
+        # filter, the level CASE, the recency window, the audience predicate,
+        # then the level subset. The holdout split is not among them — it is
+        # `core.sms_holdout`, in Python, so that this store and Postgres cannot
+        # disagree about who was withheld.
+        params: list = []
+        if sales_type != "all":
+            params.append(sales_type)
+        params += [vip_ltv, core_min_orders, core_ltv, reactivation_max_recency]
+        params.append(max_recency_days)
+        params += filter_params
+        if tiers:
+            params += tiers
+
+        if use_postgres:
+            from core.pg_sms_read import fetch_segments, render
+            rows = await fetch_segments(render(**fragments), params)
+        else:
+            # One body, two engines — `core/sql_dialect.py`.
+            query = sms_segments_select(DUCKDB, **fragments)
+            async with self.connection() as conn:
+                rows = conn.execute(query, params).fetchall()
 
         tiers: Dict[str, Dict[str, Any]] = {}
         customers = []
-        funnel_counts = (0, 0, 0, 0, 0, 0)
+        funnel_counts = (0, 0, 0, 0, 0, 0, 0)
         for (buyer_id, full_name, phone, city, row_tier, orders, ltv, aov,
              revenue_ltv, margin_ltv, margin_pct, cost_coverage,
              recency, last_order, first_order,
              last_order_id, last_order_total, last_order_item_count, last_order_items,
-             assignment,
-             f_customers, f_in_window, f_tiered, f_phone, f_subscribed,
+             f_customers, f_in_window, f_filtered, f_tiered, f_phone, f_subscribed,
              f_eligible) in rows:
-            funnel_counts = (f_customers, f_in_window, f_tiered, f_phone,
-                             f_subscribed, f_eligible)
+            funnel_counts = (f_customers, f_in_window, f_filtered, f_tiered,
+                             f_phone, f_subscribed, f_eligible)
             # The funnel row survives the RIGHT JOIN even when no customer does.
             if buyer_id is None:
                 continue
+
+            assignment = assign_arm(buyer_id, campaign, holdout_pct)
 
             stats = tiers.setdefault(row_tier, {
                 "tier": row_tier, "total": 0, "target": 0, "holdout": 0,
@@ -2133,7 +2516,7 @@ class CustomersMixin:
                     "assignment": assignment,
                 })
 
-        tier_order = {"VIP": 0, "CORE": 1, "REACTIVATION": 2}
+        tier_order = {SINGLE_GROUP_NAME: 0, "VIP": 0, "CORE": 1, "REACTIVATION": 2}
         summary = []
         for stats in sorted(tiers.values(), key=lambda s: tier_order.get(s["tier"], 9)):
             total = stats["total"]
@@ -2153,11 +2536,13 @@ class CustomersMixin:
             })
 
         total_customers = sum(s["total"] for s in summary)
-        f_customers, f_in_window, f_tiered, f_phone, f_subscribed, f_eligible = funnel_counts
+        (f_customers, f_in_window, f_filtered, f_tiered, f_phone, f_subscribed,
+         f_eligible) = funnel_counts
         return {
             "campaign": campaign,
             "salesType": sales_type,
             "ltvBasis": ltv_basis,
+            "grouping": grouping,
             "criteria": {
                 "maxRecencyDays": max_recency_days,
                 "ltvBasis": ltv_basis,
@@ -2166,6 +2551,10 @@ class CustomersMixin:
                 "coreMinOrders": core_min_orders,
                 "reactivationMaxRecency": reactivation_max_recency,
                 "holdoutPct": holdout_pct,
+                "grouping": grouping,
+                # Frozen with the campaign. Without it a filtered roster is a
+                # list of phone numbers nobody can explain a month later.
+                "filters": filters.as_dict(),
             },
             # How the base narrowed, rule by rule, in the order the query
             # applies them. Published because the tier sizes on their own look
@@ -2174,6 +2563,7 @@ class CustomersMixin:
             "funnel": [
                 {"stage": "customers", "remaining": int(f_customers or 0)},
                 {"stage": "inWindow", "remaining": int(f_in_window or 0)},
+                {"stage": "filtered", "remaining": int(f_filtered or 0)},
                 {"stage": "tiered", "remaining": int(f_tiered or 0)},
                 {"stage": "phone", "remaining": int(f_phone or 0)},
                 {"stage": "subscribed", "remaining": int(f_subscribed or 0)},

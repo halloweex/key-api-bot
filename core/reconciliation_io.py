@@ -55,6 +55,93 @@ MONEY_FIELDS = frozenset({"grand_total", "line_amount"})
 OrderFacts = Dict[int, Dict[str, object]]
 
 
+# The header-only slice of ORDER_FIELDS: what ClickHouse's silver can answer
+# for. Silver is order-grain by design — no line items — so the third arm
+# compares everything except n_lines/qty/line_amount, and says so rather than
+# pretending the missing columns matched.
+CH_HEADER_FIELDS = (
+    "status_id", "source_id", "manager_id", "buyer_id",
+    "grand_total", "order_date",
+)
+
+
+async def clickhouse_orders_in_window(
+    window_start: date,
+    window_end: date,
+    *,
+    exclude_ids: "set[int] | frozenset[int] | None" = None,
+) -> OrderFacts:
+    """The same per-order facts — header grain — from ClickHouse's silver.
+
+    The third arm of the source reconciliation, and a transliteration of the
+    other two extractors with two deliberate differences, both forced by what
+    ClickHouse actually holds:
+
+    **No line items.** `silver.orders` is order-grain; the arm compares
+    `CH_HEADER_FIELDS` and never the three line-level fields.
+
+    **No `updated_at`, so no watermark clause of its own.** The other stores
+    exclude orders modified after the watermark with their own column;
+    ClickHouse's copy does not carry one. The caller computes that exclusion
+    set where `updated_at` lives — Postgres bronze, the store this copy ships
+    from — and passes it in. Skipping this is not an optimisation: the 05:15
+    status refresh force-rewrites ~1,400 orders an hour before the 05:30 run,
+    and every one of them would read as a ghost in ClickHouse.
+
+    Silver has no row filter (every bronze order lands, returns and inactive
+    sources flagged), so the source filter here mirrors the KeyCRM snapshot's.
+    """
+    from core import ch_common
+
+    excluded = sorted(int(i) for i in (exclude_ids or ()))
+    sources = ", ".join(str(s) for s in ACTIVE_SOURCES)
+    not_in = f"AND id NOT IN ({', '.join(map(str, excluded))})" if excluded else ""
+    sql = (
+        "SELECT id, status_id, source_id, manager_id, buyer_id, "
+        "toFloat64(grand_total), order_date "
+        "FROM silver.orders "
+        f"WHERE order_date BETWEEN '{window_start.isoformat()}' "
+        f"AND '{window_end.isoformat()}' "
+        f"AND source_id IN ({sources}) "
+        f"{not_in} "
+        "FORMAT TabSeparated"
+    )
+    text = await ch_common.execute(sql)
+    columns = ("id", "status_id", "source_id", "manager_id", "buyer_id",
+               "grand_total", "order_date")
+    types = {"id": "int", "status_id": "int", "source_id": "int",
+             "manager_id": "int", "buyer_id": "int",
+             "grand_total": "decimal", "order_date": "date"}
+    out: OrderFacts = {}
+    for row in ch_common.parse_tsv(text, columns, types):
+        out[int(row[0])] = {
+            "status_id": row[1], "source_id": row[2],
+            "manager_id": row[3], "buyer_id": row[4],
+            "grand_total": float(row[5] or 0), "order_date": row[6],
+        }
+    return out
+
+
+async def pg_ids_updated_since(
+    pool, window_start: date, window_end: date, watermark: datetime,
+) -> "set[int]":
+    """Order ids the watermark rule excludes, computed where `updated_at`
+    lives. Postgres bronze is the authority for what ClickHouse's copy has
+    seen — the copy ships from it."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id FROM bronze.orders
+            WHERE (ordered_at AT TIME ZONE 'Europe/Kyiv')::date
+                      BETWEEN $1::date AND $2::date
+              AND updated_at IS NOT NULL
+              AND updated_at >= $3::timestamptz
+            """,
+            window_start, window_end, watermark.astimezone(timezone.utc),
+        )
+    return {int(r[0]) for r in rows}
+
+
 def rollup_from_orders(orders: OrderFacts) -> Rollup:
     """Group per-order facts into the (month, source_id) rollup.
 

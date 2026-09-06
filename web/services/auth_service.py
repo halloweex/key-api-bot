@@ -23,6 +23,24 @@ AUTH_DATA_MAX_AGE = 86400
 WEBAPP_DATA_MAX_AGE = 3600
 
 
+def _hash_matches(calculated: str, received: Any) -> bool:
+    """Constant-time compare of a computed digest against a received one.
+
+    `hmac.compare_digest` raises TypeError when a str argument holds any
+    non-ASCII character, and `received` arrived in a query string — so
+    comparing it directly turned "invalid authentication data" into an
+    unhandled 500 on the two endpoints anyone may call without a session.
+
+    Which values are *accepted* is unchanged: `calculated` is always 64
+    lowercase hex characters from `hexdigest()`, so every input this returns
+    False for is one compare_digest would have rejected had it not raised.
+    """
+    try:
+        return hmac.compare_digest(calculated, received)
+    except TypeError:
+        return False
+
+
 def verify_webapp_auth(init_data: str) -> Dict[str, Any] | None:
     """
     Verify Telegram WebApp initData.
@@ -85,7 +103,7 @@ def verify_webapp_auth(init_data: str) -> Dict[str, Any] | None:
         ).hexdigest()
 
         # Compare hashes (constant-time to avoid timing side-channels)
-        if not hmac.compare_digest(calculated_hash, received_hash):
+        if not _hash_matches(calculated_hash, received_hash):
             logger.warning("WebApp hash mismatch - invalid initData")
             return None
 
@@ -157,7 +175,7 @@ def verify_telegram_auth(auth_data: Dict[str, Any]) -> bool:
     ).hexdigest()
 
     # Compare hashes (constant-time to avoid timing side-channels)
-    if not hmac.compare_digest(calculated_hash, received_hash):
+    if not _hash_matches(calculated_hash, received_hash):
         logger.warning("Hash mismatch - invalid auth data")
         return False
 

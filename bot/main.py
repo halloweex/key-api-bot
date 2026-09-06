@@ -22,7 +22,8 @@ from core.keycrm import SyncKeyCRMClient as KeyCRMClient
 from bot.services import ReportService
 from bot import handlers, handlers_legacy
 from bot import database
-from bot.canary import CanaryState, run_canary, format_alert, format_recovery
+from bot.canary import format_alert, run_canary
+from bot.heartbeat import BEAT_INTERVAL_SECONDS, beat_job
 from core.config import validate_config, ConfigurationError
 
 # Configure logging
@@ -57,8 +58,9 @@ CONVERSATION_TIMEOUT_SECONDS = 30 * 60
 
 async def send_admin_message(
     text: str, parse_mode: str = "HTML", *, key: str | None = None,
-) -> None:
-    """Broadcast `text` to every admin in ADMIN_USER_IDS.
+    pre_throttled: bool = False,
+) -> int:
+    """Broadcast `text` to every admin. Returns how many it actually reached.
 
     Imported by core/scheduler.py, core/duckdb_store.py and
     core/prediction_service.py — all of which run inside the *web* container,
@@ -72,27 +74,77 @@ async def send_admin_message(
     one people learn to swipe away. Pass `key` to name the condition: bodies
     that carry live checksums or attempt counters are never twice the same
     string, so text-keyed throttling does not touch them.
-    """
-    from core.telegram_alerts import throttle_check
 
-    should_send, text = throttle_check(text, key)
-    if not should_send:
-        return
+    The return value used to be None, which made "delivered" and "silently
+    dropped" indistinguishable to every caller — and the digest advanced its
+    weekly beat on the strength of that blindness. 0 means suppressed,
+    throttled, or failed; a caller that must know pays attention, the rest
+    ignore it as before.
+    """
+    from core.telegram_alerts import alerts_disabled, throttle_check
+
+    if alerts_disabled():
+        # The dev-instance kill switch — see core/telegram_alerts.py. Gated
+        # before the throttle so a suppressed condition does not silently
+        # consume its cooldown slot.
+        logger.info("admin message suppressed (KS_ALERTS_DISABLED): %.80s", text)
+        return 0
+
+    if not pre_throttled:
+        should_send, text = throttle_check(text, key)
+        if not should_send:
+            return 0
+    # pre_throttled: the AlertGate (core/alerting.py) already made the
+    # suppression decision with its own condition-aware policy; running the
+    # 30-minute text/key throttle on top would double-throttle. The kill
+    # switch above still applies — policy may be upstream, the channel is not.
 
     if _application is None:
+        # Unsigned on purpose: the HTTP transport signs, and signing here too
+        # would either double the line or rely on `sign` staying idempotent.
         from core.telegram_alerts import send_admin_message_http
-        await send_admin_message_http(text, parse_mode)
-        return
+        return await send_admin_message_http(text, parse_mode)
     if not ADMIN_USER_IDS:
-        return
+        return 0
+
+    # The Application path never reaches core/telegram_alerts, so it is the one
+    # place outside the two transports that has to sign, clamp, and degrade
+    # for itself.
+    from core.telegram_alerts import _signature_reserve, clamp_message, sign
+
+    text = sign(clamp_message(text, reserve=_signature_reserve()))
+    delivered = 0
     for admin_id in ADMIN_USER_IDS:
         try:
-            await _application.bot.send_message(
-                chat_id=admin_id, text=text, parse_mode=parse_mode,
-                disable_web_page_preview=True,
-            )
+            try:
+                await _application.bot.send_message(
+                    chat_id=admin_id, text=text, parse_mode=parse_mode,
+                    disable_web_page_preview=True,
+                )
+            except Exception as exc:
+                # Same degradation the HTTP transport applies: markup Telegram
+                # cannot parse costs formatting, never delivery. This is the
+                # path that silently ate the certificate alert — the one the
+                # canary was written for.
+                if parse_mode and "can't parse entities" in str(exc).lower():
+                    logger.warning(
+                        "Admin message to %s rejected as unparseable %s; "
+                        "resending as plain text", admin_id, parse_mode,
+                    )
+                    await _application.bot.send_message(
+                        chat_id=admin_id, text=text,
+                        disable_web_page_preview=True,
+                    )
+                else:
+                    raise
+            delivered += 1
         except Exception as exc:
             logger.warning("Failed to send admin message to %s: %s", admin_id, exc)
+
+    from core.telegram_alerts import record_transport_outcome
+
+    record_transport_outcome(delivered, len(ADMIN_USER_IDS))
+    return delivered
 
 
 async def setup_command_menu(application: Application) -> None:
@@ -310,34 +362,71 @@ def main() -> None:
             logger.info(f"Revoked {revoked_count} inactive users (45+ days)")
 
     # Internal canary: probe the public dashboard from the bot every 15 min.
-    # Runs in a separate container, so it catches outages a self-check would miss.
-    canary_state = CanaryState()
+    # Runs in a separate container, so it catches outages a self-check would
+    # miss. Since step 07 its policy is the shared Gate — CanaryState, the
+    # sixth and last private throttle, is gone: the compound bucket gives the
+    # same "a new problem is never masked by an old one's cooldown" (a changed
+    # failure set is a new bucket, which fires immediately), the Gate adds the
+    # standing-condition decay CanaryState never had, and recovery is the
+    # standard per-key "✅ Resolved" — which announces partial recoveries,
+    # something the old all-or-nothing transition never could.
+
+    canary_prev_failures: set = set()
 
     async def canary_job(context):
+        nonlocal canary_prev_failures
         try:
             result = await run_canary(DASHBOARD_URL)
         except Exception as exc:
             logger.error("Canary job crashed: %s", exc, exc_info=True)
             return
 
-        decision = canary_state.decide(result)
-        if decision == "alert":
-            logger.warning("Canary alerting: %s", result.failures)
-            # Key on which problems are failing, not on the text: the body
-            # carries ages and cert days that differ on every probe.
-            await send_admin_message(
-                format_alert(result, DASHBOARD_URL),
-                key="canary:" + ",".join(sorted(result.failure_keys or ["unkeyed"])),
+        from bot.canary import defer_flaky
+        from core.alerting import raise_alert, resolve_group
+
+        defer, canary_prev_failures = defer_flaky(
+            list(result.failure_keys), canary_prev_failures,
+        )
+        if result.failures and defer:
+            # A first-probe health blip: the 05:15 freeze window, a nginx
+            # reload, a GC pause. Confirmed by the next probe or forgotten.
+            logger.warning(
+                "Canary blip, confirming next tick: %s", result.failures,
             )
-        elif decision == "recovery":
-            logger.info("Canary recovery")
-            await send_admin_message(format_recovery(result, DASHBOARD_URL))
+        elif result.failures:
+            logger.warning("Canary alerting: %s", result.failures)
+            keys = list(result.failure_keys or ["unkeyed"])
+            await raise_alert(
+                format_alert(result, DASHBOARD_URL),
+                conditions=keys,
+                bucket="canary:" + ",".join(sorted(keys)),
+                group="canary",
+            )
         else:
             logger.debug(
                 "Canary OK: cert_days=%s sync_age=%s dq_ages=%s",
                 result.cert_days_remaining, result.sync_seconds_since,
                 result.dq_ages,
             )
+
+        # Every tick, not only the clean ones: with still_firing excluded,
+        # a problem that dropped out of the failing set announces its own
+        # recovery even while its siblings still burn.
+        try:
+            await resolve_group("canary", still_firing=result.failure_keys)
+        except Exception as exc:
+            logger.warning("Canary resolve failed: %s", exc)
+
+        # Step 05: the escalator rides the same tick, judging the archive for
+        # standing unacknowledged conditions. Gated on what this very probe
+        # just measured — a dead web is already its own page, and every
+        # series goes stale together during one.
+        try:
+            from core.alert_escalator import escalate_due
+
+            await escalate_due(web_alive=(result.http_code == 200))
+        except Exception as exc:
+            logger.warning("Escalator failed on canary tick: %s", exc)
 
     # Set up command menu at startup
     application.job_queue.run_once(set_commands, 1)
@@ -353,6 +442,15 @@ def main() -> None:
     )
     logger.info(f"Milestone check scheduled daily at {milestone_time}")
 
+    # The container's healthcheck reads what this writes. On the loop, so it
+    # only happens if the loop that answers Telegram is turning, and it probes
+    # the store first so an unreachable database goes stale rather than
+    # reporting healthy — which is what the old `bot.db` file check did after
+    # the move to Postgres. See bot/heartbeat.py.
+    application.job_queue.run_repeating(
+        beat_job, interval=BEAT_INTERVAL_SECONDS, first=1, name="heartbeat",
+    )
+
     # Run session cleanup every 10 minutes
     application.job_queue.run_repeating(cleanup_sessions, interval=600, first=60)
 
@@ -364,6 +462,17 @@ def main() -> None:
 
     # Run canary every 15 minutes; first probe 90s after startup so the web
     # container has time to come up after a co-deploy.
+    # The bot watching its own 512 MB — the container nobody was watching
+    # until 29.08: the web monitor reads its own cgroup, and this limit is
+    # fourteen times smaller. Same evaluator, own JSON persistence.
+    async def bot_memory_job(context):
+        from bot.memory_watch import check_bot_memory
+
+        await check_bot_memory()
+
+    application.job_queue.run_repeating(
+        bot_memory_job, interval=1800, first=120, name="bot_memory_watch",
+    )
     application.job_queue.run_repeating(
         canary_job, interval=900, first=90, name="dashboard_canary"
     )

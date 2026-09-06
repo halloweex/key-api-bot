@@ -3,12 +3,91 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Sequence, Tuple
+
+from core.sql_dialect import DUCKDB, POSTGRES, TODAY_IN_KYIV, Dialect
 
 logger = logging.getLogger(__name__)
 
 
+def _render(sql: str, dialect: Dialect, **extra: Any) -> str:
+    """One query's template, filled for one engine.
+
+    The holes are the only difference between the two renderings, the contract
+    the eleven views themselves keep (`core.sql_dialect.inventory_view_selects`).
+    `gold_revenue_rollup` is the one that is a predicate rather than a name,
+    because the two Golds genuinely differ in shape there.
+    """
+    return sql.format(
+        views=dialect.inventory_views,
+        today=TODAY_IN_KYIV,
+        offer_stocks=dialect.offer_stocks,
+        inventory_history=dialect.inventory_history,
+        gold_daily_revenue=dialect.gold_daily_revenue,
+        gold_revenue_rollup=dialect.gold_revenue_rollup,
+        **extra,
+    )
+
+
 class InventoryMixin:
+
+    # ─── Which engine answers /inventory ─────────────────────────────────────
+    #
+    # Eight methods, eleven views, one flag. The bodies are shared
+    # (`core.sql_dialect.inventory_view_selects`, migration 0014), so what is
+    # left here is choosing an engine and rendering the table names.
+    #
+    # The choice is made BEFORE any connection is taken — §34's invariant: a
+    # read bound for Postgres must not first queue behind DuckDB's single
+    # writer. Two tests enforce it, one making the lock raise and demanding an
+    # answer anyway, and its mirror so the first cannot pass by being broken in
+    # both directions.
+    #
+    # **Never call these from inside `self.connection()`.** The store lock is
+    # not reentrant, and the deadlock does not raise — the call simply never
+    # returns, which is how the cohort port shipped one that no test called.
+    # `tests/unit/test_inventory_smoke.py` calls every one of the eight.
+
+    async def _inventory_batch(
+        self, queries: Sequence[Tuple[str, Sequence[Any]]], **extra: Any
+    ) -> List[List[Tuple]]:
+        """Several inventory queries against one connection, either engine.
+
+        One connection rather than one per query, because `get_inventory_turnover`
+        combines five results into one set of KPIs and `get_inventory_summary_v2`
+        four into one summary. DuckDB's `connection()` is a lock, so today those
+        queries cannot have a writer interleaved between them; taking the lock
+        per query would quietly give that up.
+
+        A Postgres fault falls back to DuckDB with an ERROR in the log. Nothing
+        diverges between the two — this tab writes nothing, and every view is a
+        projection over tables Postgres receives from DuckDB.
+        """
+        from core import pg_inventory_read
+
+        if pg_inventory_read.enabled() and pg_inventory_read.available():
+            try:
+                return await pg_inventory_read.fetch_many(
+                    [(_render(sql, POSTGRES, **extra), params) for sql, params in queries]
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "inventory: Postgres failed, falling back to DuckDB: %s",
+                    exc, exc_info=True,
+                )
+
+        async with self.connection() as conn:
+            return [
+                conn.execute(_render(sql, DUCKDB, **extra), list(params)).fetchall()
+                for sql, params in queries
+            ]
+
+    async def _inventory_rows(
+        self, sql: str, params: Sequence[Any] = (), **extra: Any
+    ) -> List[Tuple]:
+        """One inventory query, from whichever engine answers."""
+        batch = await self._inventory_batch([(sql, params)], **extra)
+        return batch[0]
 
     async def upsert_offers(self, offers: List[Dict[str, Any]]) -> int:
         """Insert or update offers from KeyCRM API response.
@@ -413,79 +492,81 @@ class InventoryMixin:
         Returns:
             Dict with average inventory metrics
         """
-        async with self.connection() as conn:
-            # Get beginning and ending inventory for the period
-            result = conn.execute(f"""
-                WITH period_data AS (
-                    SELECT
-                        date,
-                        total_quantity,
-                        total_value,
-                        ROW_NUMBER() OVER (ORDER BY date ASC) as rn_asc,
-                        ROW_NUMBER() OVER (ORDER BY date DESC) as rn_desc
-                    FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL '{int(days)} days'
-                )
+        rows = await self._inventory_rows("""
+            WITH period_data AS (
                 SELECT
-                    -- Beginning inventory (oldest in period)
-                    MAX(CASE WHEN rn_asc = 1 THEN total_quantity END) as beginning_qty,
-                    MAX(CASE WHEN rn_asc = 1 THEN total_value END) as beginning_value,
-                    MAX(CASE WHEN rn_asc = 1 THEN date END) as beginning_date,
-                    -- Ending inventory (most recent)
-                    MAX(CASE WHEN rn_desc = 1 THEN total_quantity END) as ending_qty,
-                    MAX(CASE WHEN rn_desc = 1 THEN total_value END) as ending_value,
-                    MAX(CASE WHEN rn_desc = 1 THEN date END) as ending_date,
-                    -- Daily averages
-                    AVG(total_quantity) as avg_daily_qty,
-                    AVG(total_value) as avg_daily_value,
-                    COUNT(*) as data_points
-                FROM period_data
-            """).fetchone()
+                    date,
+                    total_quantity,
+                    total_value,
+                    ROW_NUMBER() OVER (ORDER BY date ASC) as rn_asc,
+                    ROW_NUMBER() OVER (ORDER BY date DESC) as rn_desc
+                FROM {inventory_history}
+                WHERE date >= {today} - INTERVAL '{days} days'
+            )
+            SELECT
+                -- Beginning inventory (oldest in period)
+                MAX(CASE WHEN rn_asc = 1 THEN total_quantity END) as beginning_qty,
+                MAX(CASE WHEN rn_asc = 1 THEN total_value END) as beginning_value,
+                MAX(CASE WHEN rn_asc = 1 THEN date END) as beginning_date,
+                -- Ending inventory (most recent)
+                MAX(CASE WHEN rn_desc = 1 THEN total_quantity END) as ending_qty,
+                MAX(CASE WHEN rn_desc = 1 THEN total_value END) as ending_value,
+                MAX(CASE WHEN rn_desc = 1 THEN date END) as ending_date,
+                -- Daily averages
+                AVG(total_quantity) as avg_daily_qty,
+                AVG(total_value) as avg_daily_value,
+                COUNT(*) as data_points
+            FROM period_data
+        """, days=int(days))
+        result = rows[0] if rows else None
 
-            if not result or not result[0]:
-                # No historical data, use current snapshot (sale/retail price)
-                current = conn.execute("""
-                    SELECT
-                        COALESCE(SUM(quantity - reserve), 0),
-                        COALESCE(SUM((quantity - reserve) * price), 0)
-                    FROM offer_stocks
-                """).fetchone()
-
-                return {
-                    "averageQuantity": current[0] or 0,
-                    "averageValue": float(current[1] or 0),
-                    "beginningQuantity": None,
-                    "endingQuantity": current[0] or 0,
-                    "beginningValue": None,
-                    "endingValue": float(current[1] or 0),
-                    "dataPoints": 0,
-                    "periodDays": days,
-                    "message": "No historical data yet. Average based on current snapshot.",
-                }
-
-            beginning_qty = result[0] or 0
-            beginning_value = float(result[1] or 0)
-            ending_qty = result[3] or 0
-            ending_value = float(result[4] or 0)
-
-            # Calculate averages using (Beginning + Ending) / 2
-            avg_qty = (beginning_qty + ending_qty) / 2
-            avg_value = (beginning_value + ending_value) / 2
+        if not result or not result[0]:
+            # No historical data, use the current snapshot (sale/retail price).
+            # A second round trip rather than a batch: these two are
+            # alternatives, not a pair, so there is no shared snapshot to hold
+            # them inside.
+            current = (await self._inventory_rows("""
+                SELECT
+                    COALESCE(SUM(quantity - reserve), 0),
+                    COALESCE(SUM((quantity - reserve) * price), 0)
+                FROM {offer_stocks}
+            """))[0]
 
             return {
-                "averageQuantity": round(avg_qty),
-                "averageValue": round(avg_value, 2),
-                "beginningQuantity": beginning_qty,
-                "beginningValue": beginning_value,
-                "beginningDate": str(result[2]) if result[2] else None,
-                "endingQuantity": ending_qty,
-                "endingValue": ending_value,
-                "endingDate": str(result[5]) if result[5] else None,
-                "dailyAverageQuantity": round(float(result[6] or 0)),
-                "dailyAverageValue": round(float(result[7] or 0), 2),
-                "dataPoints": result[8] or 0,
+                "averageQuantity": current[0] or 0,
+                "averageValue": float(current[1] or 0),
+                "beginningQuantity": None,
+                "endingQuantity": current[0] or 0,
+                "beginningValue": None,
+                "endingValue": float(current[1] or 0),
+                "dataPoints": 0,
                 "periodDays": days,
+                "message": "No historical data yet. Average based on current snapshot.",
             }
+
+        beginning_qty = result[0] or 0
+        beginning_value = float(result[1] or 0)
+        ending_qty = result[3] or 0
+        ending_value = float(result[4] or 0)
+
+        # Calculate averages using (Beginning + Ending) / 2
+        avg_qty = (beginning_qty + ending_qty) / 2
+        avg_value = (beginning_value + ending_value) / 2
+
+        return {
+            "averageQuantity": round(avg_qty),
+            "averageValue": round(avg_value, 2),
+            "beginningQuantity": beginning_qty,
+            "beginningValue": beginning_value,
+            "beginningDate": str(result[2]) if result[2] else None,
+            "endingQuantity": ending_qty,
+            "endingValue": ending_value,
+            "endingDate": str(result[5]) if result[5] else None,
+            "dailyAverageQuantity": round(float(result[6] or 0)),
+            "dailyAverageValue": round(float(result[7] or 0), 2),
+            "dataPoints": result[8] or 0,
+            "periodDays": days,
+        }
 
     async def get_inventory_trend(
         self,
@@ -501,87 +582,88 @@ class InventoryMixin:
         Returns:
             Dict with labels, values, quantities for trend chart
         """
-        async with self.connection() as conn:
-            if granularity == "monthly":
-                # Monthly aggregation
-                result = conn.execute(f"""
-                    SELECT
-                        DATE_TRUNC('month', date) as period,
-                        AVG(total_quantity) as avg_quantity,
-                        AVG(total_value) as avg_value,
-                        AVG(total_reserve) as avg_reserve,
-                        MIN(total_quantity) as min_quantity,
-                        MAX(total_quantity) as max_quantity,
-                        MIN(total_value) as min_value,
-                        MAX(total_value) as max_value,
-                        COUNT(*) as data_points
-                    FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL '{int(days)} days'
-                    GROUP BY DATE_TRUNC('month', date)
-                    ORDER BY period
-                """).fetchall()
+        if granularity == "monthly":
+            # Monthly aggregation. `DATE_TRUNC` returns a DATE in DuckDB and a
+            # TIMESTAMP in Postgres, which `strftime` renders identically —
+            # the label is the same string either way.
+            result = await self._inventory_rows("""
+                SELECT
+                    DATE_TRUNC('month', date) as period,
+                    AVG(total_quantity) as avg_quantity,
+                    AVG(total_value) as avg_value,
+                    AVG(total_reserve) as avg_reserve,
+                    MIN(total_quantity) as min_quantity,
+                    MAX(total_quantity) as max_quantity,
+                    MIN(total_value) as min_value,
+                    MAX(total_value) as max_value,
+                    COUNT(*) as data_points
+                FROM {inventory_history}
+                WHERE date >= {today} - INTERVAL '{days} days'
+                GROUP BY DATE_TRUNC('month', date)
+                ORDER BY period
+            """, days=int(days))
 
-                labels = [row[0].strftime('%b %Y') for row in result if row[0]]
-                quantities = [round(row[1] or 0) for row in result]
-                values = [round(float(row[2] or 0), 2) for row in result]
-                reserves = [round(row[3] or 0) for row in result]
+            labels = [row[0].strftime('%b %Y') for row in result if row[0]]
+            quantities = [round(row[1] or 0) for row in result]
+            values = [round(float(row[2] or 0), 2) for row in result]
+            reserves = [round(row[3] or 0) for row in result]
 
-                return {
-                    "labels": labels,
-                    "quantity": quantities,
-                    "value": values,
-                    "reserve": reserves,
-                    "granularity": "monthly",
-                    "periodDays": days,
-                    "dataPoints": len(result),
-                }
+            return {
+                "labels": labels,
+                "quantity": quantities,
+                "value": values,
+                "reserve": reserves,
+                "granularity": "monthly",
+                "periodDays": days,
+                "dataPoints": len(result),
+            }
+
+        # Daily data
+        result = await self._inventory_rows("""
+            SELECT
+                date,
+                total_quantity,
+                total_value,
+                total_reserve,
+                sku_count
+            FROM {inventory_history}
+            WHERE date >= {today} - INTERVAL '{days} days'
+            ORDER BY date
+        """, days=int(days))
+
+        labels = [row[0].strftime('%d %b') for row in result if row[0]]
+        quantities = [row[1] or 0 for row in result]
+        values = [float(row[2] or 0) for row in result]
+        reserves = [row[3] or 0 for row in result]
+        sku_counts = [row[4] or 0 for row in result]
+
+        # Calculate changes
+        changes = []
+        for i, val in enumerate(values):
+            if i == 0:
+                changes.append(0)
             else:
-                # Daily data
-                result = conn.execute(f"""
-                    SELECT
-                        date,
-                        total_quantity,
-                        total_value,
-                        total_reserve,
-                        sku_count
-                    FROM inventory_history
-                    WHERE date >= CURRENT_DATE - INTERVAL '{int(days)} days'
-                    ORDER BY date
-                """).fetchall()
+                changes.append(round(val - values[i - 1], 2))
 
-                labels = [row[0].strftime('%d %b') for row in result if row[0]]
-                quantities = [row[1] or 0 for row in result]
-                values = [float(row[2] or 0) for row in result]
-                reserves = [row[3] or 0 for row in result]
-                sku_counts = [row[4] or 0 for row in result]
-
-                # Calculate changes
-                changes = []
-                for i, val in enumerate(values):
-                    if i == 0:
-                        changes.append(0)
-                    else:
-                        changes.append(round(val - values[i - 1], 2))
-
-                return {
-                    "labels": labels,
-                    "quantity": quantities,
-                    "value": values,
-                    "reserve": reserves,
-                    "skuCount": sku_counts,
-                    "valueChange": changes,
-                    "granularity": "daily",
-                    "periodDays": days,
-                    "dataPoints": len(result),
-                    "summary": {
-                        "startValue": values[0] if values else 0,
-                        "endValue": values[-1] if values else 0,
-                        "change": round(values[-1] - values[0], 2) if len(values) > 1 else 0,
-                        "changePercent": round((values[-1] - values[0]) / values[0] * 100, 1) if len(values) > 1 and values[0] > 0 else 0,
-                        "minValue": min(values) if values else 0,
-                        "maxValue": max(values) if values else 0,
-                    } if values else None,
-                }
+        return {
+            "labels": labels,
+            "quantity": quantities,
+            "value": values,
+            "reserve": reserves,
+            "skuCount": sku_counts,
+            "valueChange": changes,
+            "granularity": "daily",
+            "periodDays": days,
+            "dataPoints": len(result),
+            "summary": {
+                "startValue": values[0] if values else 0,
+                "endValue": values[-1] if values else 0,
+                "change": round(values[-1] - values[0], 2) if len(values) > 1 else 0,
+                "changePercent": round((values[-1] - values[0]) / values[0] * 100, 1) if len(values) > 1 and values[0] > 0 else 0,
+                "minValue": min(values) if values else 0,
+                "maxValue": max(values) if values else 0,
+            } if values else None,
+        }
 
     async def get_inventory_summary_v2(self) -> Dict[str, Any]:
         """Get inventory summary using Layer 3 views.
@@ -589,63 +671,73 @@ class InventoryMixin:
         Returns:
             Dict with summary by status, aging buckets, and category velocity
         """
-        async with self.connection() as conn:
-            # Summary by status
-            summary = conn.execute("SELECT * FROM v_inventory_summary").fetchall()
-            summary_dict = {}
-            for row in summary:
-                status, sku_count, units, value, pct = row
-                summary_dict[status] = {
-                    "skuCount": sku_count,
-                    "quantity": units or 0,
-                    "value": float(value or 0),
-                    "valuePercent": float(pct or 0),
-                }
-
-            # Total
-            total = conn.execute("""
+        summary, total_rows, aging, velocity = await self._inventory_batch((
+            ("SELECT * FROM {views}v_inventory_summary", ()),
+            ("""
                 SELECT COUNT(*), SUM(available), SUM(available_value)
-                FROM v_sku_status
-            """).fetchone()
+                FROM {views}v_sku_status
+            """, ()),
+            # Both of these become a list the page renders in order, so the
+            # order is part of the answer and cannot be left to the planner.
+            # `v_aging_buckets` sorts inside the view, but a view's ORDER BY is
+            # not contractual through an outer SELECT in either engine.
+            ("SELECT * FROM {views}v_aging_buckets ORDER BY bucket", ()),
+            # `v_category_velocity` never had one at all: the eleven rows came
+            # back in whatever order the plan produced, which is why moving the
+            # rollup to the line level permuted them. NULL is the uncategorised
+            # bucket and both engines default to NULLS LAST for ASC — stated
+            # rather than relied on.
+            ("""
+                SELECT * FROM {views}v_category_velocity
+                ORDER BY category_id NULLS LAST
+            """, ()),
+        ))
+        total = total_rows[0]
 
-            # Aging buckets
-            aging = conn.execute("SELECT * FROM v_aging_buckets").fetchall()
-            aging_buckets = [
-                {"bucket": row[0], "skuCount": row[1], "units": row[2], "value": float(row[3] or 0)}
-                for row in aging
-            ]
-
-            # Category velocity
-            velocity = conn.execute("SELECT * FROM v_category_velocity").fetchall()
-            category_thresholds = [
-                {
-                    "categoryId": row[0],
-                    "categoryName": row[1] or "Uncategorized",
-                    "sampleSize": row[2],
-                    "p50": int(row[3]) if row[3] else None,
-                    "p75": int(row[4]) if row[4] else None,
-                    "p90": int(row[5]) if row[5] else None,
-                    "thresholdDays": int(row[6]) if row[6] else 180,
-                }
-                for row in velocity
-            ]
-
-            return {
-                "summary": {
-                    "healthy": summary_dict.get("healthy", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
-                    "overstocked": summary_dict.get("overstocked", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
-                    "atRisk": summary_dict.get("at_risk", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
-                    "deadStock": summary_dict.get("dead_stock", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
-                    "neverSold": summary_dict.get("never_sold", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
-                    "total": {
-                        "skuCount": total[0] or 0,
-                        "quantity": total[1] or 0,
-                        "value": float(total[2] or 0),
-                    },
-                },
-                "agingBuckets": aging_buckets,
-                "categoryThresholds": category_thresholds,
+        summary_dict = {}
+        for row in summary:
+            status, sku_count, units, value, pct = row
+            summary_dict[status] = {
+                "skuCount": sku_count,
+                "quantity": units or 0,
+                "value": float(value or 0),
+                "valuePercent": float(pct or 0),
             }
+
+        aging_buckets = [
+            {"bucket": row[0], "skuCount": row[1], "units": row[2], "value": float(row[3] or 0)}
+            for row in aging
+        ]
+
+        category_thresholds = [
+            {
+                "categoryId": row[0],
+                "categoryName": row[1] or "Uncategorized",
+                "sampleSize": row[2],
+                "p50": int(row[3]) if row[3] else None,
+                "p75": int(row[4]) if row[4] else None,
+                "p90": int(row[5]) if row[5] else None,
+                "thresholdDays": int(row[6]) if row[6] else 180,
+            }
+            for row in velocity
+        ]
+
+        return {
+            "summary": {
+                "healthy": summary_dict.get("healthy", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
+                "overstocked": summary_dict.get("overstocked", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
+                "atRisk": summary_dict.get("at_risk", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
+                "deadStock": summary_dict.get("dead_stock", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
+                "neverSold": summary_dict.get("never_sold", {"skuCount": 0, "quantity": 0, "value": 0, "valuePercent": 0}),
+                "total": {
+                    "skuCount": total[0] or 0,
+                    "quantity": total[1] or 0,
+                    "value": float(total[2] or 0),
+                },
+            },
+            "agingBuckets": aging_buckets,
+            "categoryThresholds": category_thresholds,
+        }
 
     async def get_dead_stock_items_v2(self, limit: int = 100) -> List[Dict[str, Any]]:
         """Get dead stock and at-risk items using Layer 3 views.
@@ -653,37 +745,38 @@ class InventoryMixin:
         Returns:
             List of items with status != healthy
         """
-        async with self.connection() as conn:
-            items = conn.execute(f"""
-                SELECT
-                    offer_id, sku, name, brand, category_name,
-                    available, available_value, price,
-                    days_since_sale, days_in_stock, threshold_days,
-                    days_of_supply, status
-                FROM v_sku_status
-                WHERE status != 'healthy'
-                ORDER BY available_value DESC
-                LIMIT {limit}
-            """).fetchall()
+        items = await self._inventory_rows("""
+            SELECT
+                offer_id, sku, name, brand, category_name,
+                available, available_value, price,
+                days_since_sale, days_in_stock, threshold_days,
+                days_of_supply, status
+            FROM {views}v_sku_status
+            WHERE status != 'healthy'
+            -- Two SKUs of equal value straddled the cut on real data, and each
+            -- engine picked its own order. `offer_id` decides it.
+            ORDER BY available_value DESC, offer_id
+            LIMIT ?
+        """, [limit])
 
-            return [
-                {
-                    "id": row[0],
-                    "sku": row[1],
-                    "name": row[2],
-                    "brand": row[3],
-                    "categoryName": row[4],
-                    "quantity": row[5],
-                    "value": float(row[6] or 0),
-                    "price": float(row[7] or 0),
-                    "daysSinceSale": row[8],
-                    "daysInStock": row[9],
-                    "thresholdDays": row[10],
-                    "daysOfSupply": int(row[11]) if row[11] is not None else None,
-                    "status": row[12],
-                }
-                for row in items
-            ]
+        return [
+            {
+                "id": row[0],
+                "sku": row[1],
+                "name": row[2],
+                "brand": row[3],
+                "categoryName": row[4],
+                "quantity": row[5],
+                "value": float(row[6] or 0),
+                "price": float(row[7] or 0),
+                "daysSinceSale": row[8],
+                "daysInStock": row[9],
+                "thresholdDays": row[10],
+                "daysOfSupply": int(row[11]) if row[11] is not None else None,
+                "status": row[12],
+            }
+            for row in items
+        ]
 
     async def get_all_skus_deep(
         self,
@@ -723,19 +816,22 @@ class InventoryMixin:
         ABCS = ["A", "B", "C"]
         OPTIMAL_DAYS = 60  # baseline for excess_capital_cost
 
-        async with self.connection() as conn:
-            rows = conn.execute("""
-                SELECT
-                    offer_id, sku, name, brand, category_name,
-                    available, price, purchased_price, effective_unit_cost, cost_quality,
-                    sale_value, cost_basis,
-                    days_since_sale, days_in_stock, last_sale_date,
-                    qty_sold_30d, qty_sold_90d, revenue_30d, revenue_90d,
-                    avg_daily_sales_30d, avg_daily_sales_90d,
-                    days_of_supply, velocity_tier, velocity_ratio_30_90,
-                    abc_class, annual_gross_profit, gmroi
-                FROM v_sku_dead_stock_v2
-            """).fetchall()
+        rows = await self._inventory_rows("""
+            SELECT
+                offer_id, sku, name, brand, category_name,
+                available, price, purchased_price, effective_unit_cost, cost_quality,
+                sale_value, cost_basis,
+                days_since_sale, days_in_stock, last_sale_date,
+                qty_sold_30d, qty_sold_90d, revenue_30d, revenue_90d,
+                avg_daily_sales_30d, avg_daily_sales_90d,
+                days_of_supply, velocity_tier, velocity_ratio_30_90,
+                abc_class, annual_gross_profit, gmroi
+            FROM {views}v_sku_dead_stock_v2
+            -- Python sorts these by excess capital, and `sorted` is stable, so
+            -- without a key here every tie — every SKU with no excess at all —
+            -- would land in whatever order the engine chose.
+            ORDER BY offer_id
+        """)
 
         items_full: List[Dict[str, Any]] = []
         for r in rows:
@@ -926,23 +1022,25 @@ class InventoryMixin:
         Each brand: rotation days, GMROI, cost basis, sale value, 90d revenue,
         SKU count, frozen SKU share.
         """
-        async with self.connection() as conn:
-            rows = conn.execute("""
-                SELECT
-                    COALESCE(NULLIF(brand, ''), '—') as brand,
-                    COUNT(*) as sku_count,
-                    SUM(CASE WHEN velocity_tier IN ('frozen','cold') THEN 1 ELSE 0 END) as frozen_skus,
-                    SUM(available) as units,
-                    SUM(cost_basis) as cost_basis,
-                    SUM(sale_value) as sale_value,
-                    SUM(revenue_90d) as revenue_90d,
-                    SUM(qty_sold_90d) as qty_sold_90d,
-                    SUM(annual_gross_profit) as annual_gross_profit
-                FROM v_sku_dead_stock_v2
-                GROUP BY 1
-                HAVING COUNT(*) >= ?
-                ORDER BY cost_basis DESC
-            """, [min_skus]).fetchall()
+        rows = await self._inventory_rows("""
+            SELECT
+                COALESCE(NULLIF(brand, ''), '—') as brand,
+                COUNT(*) as sku_count,
+                SUM(CASE WHEN velocity_tier IN ('frozen','cold') THEN 1 ELSE 0 END) as frozen_skus,
+                SUM(available) as units,
+                SUM(cost_basis) as cost_basis,
+                SUM(sale_value) as sale_value,
+                SUM(revenue_90d) as revenue_90d,
+                SUM(qty_sold_90d) as qty_sold_90d,
+                SUM(annual_gross_profit) as annual_gross_profit
+            FROM {views}v_sku_dead_stock_v2
+            GROUP BY 1
+            HAVING COUNT(*) >= ?
+            -- No LIMIT here, but the result is a list the page renders in
+            -- order, so two brands with equal cost basis must not swap
+            -- between engines. Column 1 is the brand, the group key.
+            ORDER BY cost_basis DESC, 1
+        """, [min_skus])
 
         result = []
         for r in rows:
@@ -993,29 +1091,32 @@ class InventoryMixin:
         Returns:
             List of items with recommended actions
         """
-        async with self.connection() as conn:
-            items = conn.execute(f"""
-                SELECT * FROM v_recommended_actions
-                WHERE action IS NOT NULL
-                LIMIT {limit}
-            """).fetchall()
+        items = await self._inventory_rows("""
+            SELECT * FROM {views}v_recommended_actions
+            WHERE action IS NOT NULL
+            -- The view sorts by value, but this LIMIT decides *which* rows
+            -- come back, and an outer SELECT is not obliged to honour a view's
+            -- ORDER BY. `offer_id` breaks ties so the cut is reproducible.
+            ORDER BY value DESC, offer_id
+            LIMIT ?
+        """, [limit])
 
-            return [
-                {
-                    "offerId": row[0],
-                    "sku": row[1],
-                    "name": row[2],
-                    "brand": row[3],
-                    "categoryName": row[4],
-                    "units": row[5],
-                    "value": float(row[6] or 0),
-                    "daysSinceSale": row[7],
-                    "daysInStock": row[8],
-                    "status": row[9],
-                    "action": row[10],
-                }
-                for row in items
-            ]
+        return [
+            {
+                "offerId": row[0],
+                "sku": row[1],
+                "name": row[2],
+                "brand": row[3],
+                "categoryName": row[4],
+                "units": row[5],
+                "value": float(row[6] or 0),
+                "daysSinceSale": row[7],
+                "daysInStock": row[8],
+                "status": row[9],
+                "action": row[10],
+            }
+            for row in items
+        ]
 
     async def get_restock_alerts(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get low stock alerts using Layer 4 view.
@@ -1023,25 +1124,25 @@ class InventoryMixin:
         Returns:
             List of items that need restocking
         """
-        async with self.connection() as conn:
-            items = conn.execute(f"""
-                SELECT * FROM v_restock_alerts
-                WHERE alert_level IS NOT NULL
-                LIMIT {limit}
-            """).fetchall()
+        items = await self._inventory_rows("""
+            SELECT * FROM {views}v_restock_alerts
+            WHERE alert_level IS NOT NULL
+            ORDER BY units_left, offer_id
+            LIMIT ?
+        """, [limit])
 
-            return [
-                {
-                    "offerId": row[0],
-                    "sku": row[1],
-                    "name": row[2],
-                    "brand": row[3],
-                    "unitsLeft": row[4],
-                    "daysSinceSale": row[5],
-                    "alertLevel": row[6],
-                }
-                for row in items
-            ]
+        return [
+            {
+                "offerId": row[0],
+                "sku": row[1],
+                "name": row[2],
+                "brand": row[3],
+                "unitsLeft": row[4],
+                "daysSinceSale": row[5],
+                "alertLevel": row[6],
+            }
+            for row in items
+        ]
 
 
     # ─── Inventory Turnover & Optimal Stock ──────────────────────────────────
@@ -1071,55 +1172,64 @@ class InventoryMixin:
             Dict with turnover, currentStock, kpis, optimal, excess,
             sellThrough, abc, and topExcess sections
         """
-        async with self.connection() as conn:
-            # Q1: Revenue over period (all sales types combined)
-            rev = conn.execute(f"""
-                SELECT COALESCE(SUM(revenue), 0), COUNT(DISTINCT date)
-                FROM gold_daily_revenue
-                WHERE date >= CURRENT_DATE - INTERVAL '{int(days)} days'
-            """).fetchone()
-            total_revenue = float(rev[0])
-            actual_days = rev[1] or 1
+        rev_rows, stock_rows, abc_rows, st_rows, excess_rows = await self._inventory_batch(
+            (
+                # Q1: Revenue over period (all sales types combined).
+                # `{gold_revenue_rollup}` is the hole that keeps this honest:
+                # Postgres grains this table by source as well, so a bare SUM
+                # there returns exactly twice the revenue.
+                ("""
+                    SELECT COALESCE(SUM(revenue), 0), COUNT(DISTINCT date)
+                    FROM {gold_daily_revenue}
+                    WHERE date >= {today} - INTERVAL '{days} days'
+                      AND {gold_revenue_rollup}
+                """, ()),
+                # Q2: Current stock totals
+                ("""
+                    SELECT
+                        COALESCE(SUM(GREATEST(0, quantity - reserve) * price), 0),
+                        COALESCE(SUM(GREATEST(0, quantity - reserve) * COALESCE(purchased_price, 0)), 0),
+                        COALESCE(SUM(GREATEST(0, quantity - reserve)), 0),
+                        COUNT(*) FILTER (WHERE quantity > 0)
+                    FROM {offer_stocks}
+                """, ()),
+                # Q3: ABC summary
+                ("SELECT * FROM {views}v_abc_summary", ()),
+                # Q4: Sell-through distribution
+                ("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE sell_through_rate_30d >= 20),
+                        COUNT(*) FILTER (WHERE sell_through_rate_30d > 0 AND sell_through_rate_30d < 20),
+                        COUNT(*) FILTER (WHERE sell_through_rate_30d = 0 AND available > 0),
+                        AVG(sell_through_rate_30d) FILTER (WHERE sell_through_rate_30d > 0),
+                        PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY days_of_supply)
+                            FILTER (WHERE days_of_supply IS NOT NULL)
+                    FROM {views}v_sku_sell_through
+                """, ()),
+                # Q5: Top excess SKUs (biggest capital traps)
+                ("""
+                    SELECT offer_id, sku, name, brand, category_name,
+                           available, available_value, days_of_supply,
+                           sell_through_rate_30d, avg_daily_sales, revenue_90d
+                    FROM {views}v_sku_sell_through
+                    WHERE days_of_supply > 90 OR (avg_daily_sales = 0 AND available > 0)
+                    ORDER BY available_value DESC, offer_id
+                    LIMIT 20
+                """, ()),
+            ),
+            days=int(days),
+        )
+        rev = rev_rows[0]
+        total_revenue = float(rev[0])
+        actual_days = rev[1] or 1
 
-            # Q2: Current stock totals
-            stock = conn.execute("""
-                SELECT
-                    COALESCE(SUM(GREATEST(0, quantity - reserve) * price), 0),
-                    COALESCE(SUM(GREATEST(0, quantity - reserve) * COALESCE(purchased_price, 0)), 0),
-                    COALESCE(SUM(GREATEST(0, quantity - reserve)), 0),
-                    COUNT(*) FILTER (WHERE quantity > 0)
-                FROM offer_stocks
-            """).fetchone()
-            stock_value_sale = float(stock[0])
-            stock_value_cost = float(stock[1])
-            stock_units = int(stock[2])
-            active_skus = int(stock[3])
+        stock = stock_rows[0]
+        stock_value_sale = float(stock[0])
+        stock_value_cost = float(stock[1])
+        stock_units = int(stock[2])
+        active_skus = int(stock[3])
 
-            # Q3: ABC summary
-            abc_rows = conn.execute("SELECT * FROM v_abc_summary").fetchall()
-
-            # Q4: Sell-through distribution
-            st = conn.execute("""
-                SELECT
-                    COUNT(*) FILTER (WHERE sell_through_rate_30d >= 20),
-                    COUNT(*) FILTER (WHERE sell_through_rate_30d > 0 AND sell_through_rate_30d < 20),
-                    COUNT(*) FILTER (WHERE sell_through_rate_30d = 0 AND available > 0),
-                    AVG(sell_through_rate_30d) FILTER (WHERE sell_through_rate_30d > 0),
-                    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY days_of_supply)
-                        FILTER (WHERE days_of_supply IS NOT NULL)
-                FROM v_sku_sell_through
-            """).fetchone()
-
-            # Q5: Top excess SKUs (biggest capital traps)
-            excess_rows = conn.execute("""
-                SELECT offer_id, sku, name, brand, category_name,
-                       available, available_value, days_of_supply,
-                       sell_through_rate_30d, avg_daily_sales, revenue_90d
-                FROM v_sku_sell_through
-                WHERE days_of_supply > 90 OR (avg_daily_sales = 0 AND available > 0)
-                ORDER BY available_value DESC
-                LIMIT 20
-            """).fetchall()
+        st = st_rows[0]
 
         # ── Python computations ──────────────────────────────────────────────
         daily_revenue = total_revenue / actual_days if actual_days > 0 else 0
@@ -1239,16 +1349,18 @@ class InventoryMixin:
 
     async def get_abc_skus(self, abc_class: str, limit: int = 50) -> List[Dict[str, Any]]:
         """Get SKUs for a specific ABC class, sorted by revenue descending."""
-        async with self.connection() as conn:
-            rows = conn.execute("""
-                SELECT offer_id, sku, name, brand, category_name,
-                       available, available_value, price,
-                       revenue_90d, qty_sold_90d
-                FROM v_abc_classification
-                WHERE abc_class = ?
-                ORDER BY revenue_90d DESC
-                LIMIT ?
-            """, [abc_class, limit]).fetchall()
+        rows = await self._inventory_rows("""
+            SELECT offer_id, sku, name, brand, category_name,
+                   available, available_value, price,
+                   revenue_90d, qty_sold_90d
+            FROM {views}v_abc_classification
+            WHERE abc_class = ?
+            -- Class C is mostly SKUs with no revenue at all, so without a
+            -- tiebreak this LIMIT cuts through a tie group and returns a
+            -- different five on every engine and every plan change.
+            ORDER BY revenue_90d DESC, offer_id
+            LIMIT ?
+        """, [abc_class, limit])
 
         return [
             {

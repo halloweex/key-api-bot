@@ -1,4 +1,5 @@
 import { memo, type ReactNode } from 'react'
+import type { IconComponent } from './icons'
 
 // ─── MetricCard ──────────────────────────────────────────────────────────────
 //
@@ -40,8 +41,10 @@ interface MetricCardProps {
   tone?: MetricTone
   /** Optional secondary line beneath the value (small, muted). */
   sub?: string
-  /** Optional icon. Layout depends on `iconStyle`. */
-  icon?: ReactNode
+  /** Optional icon. Sized by the card; layout depends on `iconStyle`. */
+  icon?: IconComponent
+  /** Emoji alternative to `icon` — rendered in the same badge tile. */
+  emoji?: string
   /**
    * How to render the icon:
    *   `badge`     — coloured tile to the left of label/value (default)
@@ -153,10 +156,12 @@ export const MetricCard = memo(function MetricCard({
   surface = 'card',
   tone = 'neutral',
   sub,
-  icon,
+  icon: Icon,
+  emoji,
   iconStyle = 'badge',
   valueExtra,
 }: MetricCardProps) {
+  const hasGlyph = Boolean(Icon) || Boolean(emoji)
   const valueClass =
     surface === 'tile-dark' ? valueToneDark[tone]
     : surface === 'tile-tinted' ? valueToneTinted[tone]
@@ -164,7 +169,7 @@ export const MetricCard = memo(function MetricCard({
 
   const containerClass =
     surface === 'tile-tinted'
-      ? `${surfaceClass[surface]} ${tintedBgClass[tone]} ${icon && iconStyle === 'badge' ? '' : 'text-center'}`
+      ? `${surfaceClass[surface]} ${tintedBgClass[tone]} ${hasGlyph && iconStyle === 'badge' ? '' : 'text-center'}`
       : surface === 'tile-gradient'
       ? `${surfaceClass[surface]} ${gradientBgClass[tone]}`
       : surfaceClass[surface]
@@ -179,11 +184,11 @@ export const MetricCard = memo(function MetricCard({
   )
 
   // Watermark icon — decorative, in the corner; main layout stays vertical
-  if (icon && iconStyle === 'watermark') {
+  if (Icon && iconStyle === 'watermark') {
     return (
       <div className={`relative ${containerClass}`}>
         <div className="absolute top-3 right-3 opacity-[0.15] pointer-events-none">
-          {icon}
+          <Icon className="w-7 h-7" aria-hidden />
         </div>
         <p className={labelClass[surface]}>{label}</p>
         {valueRow}
@@ -192,12 +197,12 @@ export const MetricCard = memo(function MetricCard({
     )
   }
 
-  if (icon) {
+  if (hasGlyph) {
     return (
       <div className={containerClass}>
         <div className="flex items-start gap-3">
-          <div className={`p-2 rounded-lg ${iconBgClass[tone]} ${valueClass} [&_svg]:w-5 [&_svg]:h-5 text-lg flex-shrink-0`}>
-            {icon}
+          <div className={`p-2 rounded-lg ${iconBgClass[tone]} ${valueClass} text-lg flex-shrink-0`}>
+            {Icon ? <Icon className="w-5 h-5" aria-hidden /> : emoji}
           </div>
           <div className="flex-1 min-w-0">
             <p className={labelClass[surface]}>{label}</p>

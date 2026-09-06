@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Megaphone, Sparkles, Monitor, CircleHelp, User, Info } from 'lucide-react'
 import { StatCard, StatCardSkeleton } from './StatCard'
+import { TileGrid } from './TileGrid'
 import { useTrafficAnalytics } from '../hooks/useApi'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 
@@ -67,13 +68,13 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+      <TileGrid columns={5}>
         <StatCardSkeleton />
         <StatCardSkeleton />
         <StatCardSkeleton />
         <StatCardSkeleton />
         <StatCardSkeleton />
-      </div>
+      </TileGrid>
     )
   }
 
@@ -120,12 +121,12 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
       )}
 
       {/* Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+      <TileGrid columns={5}>
       <StatCard
         label={t('traffic.paidAds')}
         value={summary?.paid?.revenue ?? 0}
         formatter={formatCurrency}
-        icon={<Megaphone className="w-5 h-5" />}
+        icon={Megaphone}
         variant="blue"
         subtitle={`${formatNumber(summary?.paid?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.paidAds')}: ${formatCurrency(summary?.paid?.revenue ?? 0)}`}
@@ -136,7 +137,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.organic')}
         value={summary?.organic?.revenue ?? 0}
         formatter={formatCurrency}
-        icon={<Sparkles className="w-5 h-5" />}
+        icon={Sparkles}
         variant="green"
         subtitle={`${formatNumber(summary?.organic?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.organic')}: ${formatCurrency(summary?.organic?.revenue ?? 0)}`}
@@ -145,7 +146,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.salesManager')}
         value={summary?.manager?.revenue ?? 0}
         formatter={formatCurrency}
-        icon={<User className="w-5 h-5" />}
+        icon={User}
         variant="cyan"
         subtitle={`${formatNumber(summary?.manager?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.salesManager')}: ${formatCurrency(summary?.manager?.revenue ?? 0)}`}
@@ -154,7 +155,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.pixelOnly')}
         value={summary?.pixel_only?.revenue ?? 0}
         formatter={formatCurrency}
-        icon={<Monitor className="w-5 h-5" />}
+        icon={Monitor}
         variant="orange"
         subtitle={`${formatNumber(summary?.pixel_only?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.pixelOnly')}: ${formatCurrency(summary?.pixel_only?.revenue ?? 0)}`}
@@ -163,12 +164,12 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         label={t('traffic.unknown')}
         value={summary?.unknown?.revenue ?? 0}
         formatter={formatCurrency}
-        icon={<CircleHelp className="w-5 h-5" />}
+        icon={CircleHelp}
         variant="purple"
         subtitle={`${formatNumber(summary?.unknown?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.unknown')}: ${formatCurrency(summary?.unknown?.revenue ?? 0)}`}
       />
-      </div>
+      </TileGrid>
 
       {/* Paid Ads Breakdown */}
       {showPaidBreakdown && (

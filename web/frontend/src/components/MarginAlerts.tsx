@@ -19,7 +19,7 @@ export const MarginAlerts = memo(function MarginAlerts() {
       title={t('margin.alerts')}
       titleExtra={
         data && data.length > 0 ? (
-          <Badge tone="red" icon={<AlertTriangle className="w-3 h-3" />}>
+          <Badge tone="red" icon={AlertTriangle}>
             {data.length}
           </Badge>
         ) : null

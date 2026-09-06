@@ -78,6 +78,9 @@ import type {
   SmsChannel,
   SmsChannelsResponse,
   SmsViberOptions,
+  SmsAudiencePreset,
+  SmsAudiencePresetsResponse,
+  SmsCreateCampaignResponse,
 } from '../types/api'
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -285,7 +288,7 @@ async function fetchApi<T>(
 
 async function fetchApiMutation<T>(
   endpoint: string,
-  method: 'POST' | 'DELETE' | 'PATCH',
+  method: 'POST' | 'PUT' | 'DELETE' | 'PATCH',
   options?: FetchOptions
 ): Promise<T> {
   const { timeout = DEFAULT_TIMEOUT, signal: externalSignal } = options || {}
@@ -333,7 +336,7 @@ async function fetchApiMutation<T>(
 
 async function fetchApiMutationWithBody<T>(
   endpoint: string,
-  method: 'POST' | 'DELETE' | 'PATCH',
+  method: 'POST' | 'PUT' | 'DELETE' | 'PATCH',
   body: unknown,
   options?: FetchOptions
 ): Promise<T> {
@@ -812,6 +815,36 @@ export const api = {
 
   getSmsChannels: (options?: FetchOptions) =>
     fetchApi<SmsChannelsResponse>('/customers/sms/channels', undefined, options),
+
+  getSmsAudiencePresets: (options?: FetchOptions) =>
+    fetchApi<SmsAudiencePresetsResponse>(
+      '/customers/sms-audience-presets', undefined, options,
+    ),
+
+  saveSmsAudiencePreset: (name: string, criteria: unknown) =>
+    fetchApiMutationWithBody<SmsAudiencePreset>(
+      `/customers/sms-audience-presets/${encodeURIComponent(name)}`,
+      'PUT',
+      criteria,
+    ),
+
+  deleteSmsAudiencePreset: (name: string) =>
+    fetchApiMutation<{ deleted: string }>(
+      `/customers/sms-audience-presets/${encodeURIComponent(name)}`,
+      'DELETE',
+    ),
+
+  // Freezing the roster. The audience travels as query parameters, the same
+  // ones the preview and the CSV use, so what is frozen is exactly what was
+  // on screen.
+  createSmsCampaign: (params: string) =>
+    fetchApiMutation<SmsCreateCampaignResponse>(
+      `/customers/sms-campaigns?${params}`,
+      'POST',
+      // Freezing walks the whole roster; on a large audience that is seconds,
+      // not milliseconds.
+      { timeout: 120 * 1000 },
+    ),
 }
 
 /**

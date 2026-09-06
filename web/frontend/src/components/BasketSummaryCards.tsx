@@ -5,6 +5,7 @@ import { StatCard, StatCardSkeleton } from './StatCard'
 import { useBasketSummary } from '../hooks/useApi'
 import { formatNumber, formatCurrency } from '../utils/formatters'
 import { InfoPopover } from './InfoPopover'
+import { TileGrid } from './TileGrid'
 
 export const BasketSummaryCards = memo(function BasketSummaryCards() {
   const { t } = useTranslation()
@@ -12,19 +13,19 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
 
   if (isLoading || !data) {
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+      <TileGrid columns={4}>
         {Array.from({ length: 4 }).map((_, i) => <StatCardSkeleton key={i} />)}
-      </div>
+      </TileGrid>
     )
   }
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+    <TileGrid columns={4}>
       <StatCard
         label={t('products.avgBasketSize')}
         value={data.avgBasketSize}
         formatter={(v) => `${v.toFixed(1)} ${t('products.items')}`}
-        icon={<ShoppingCart className="w-5 h-5" />}
+        icon={ShoppingCart}
         variant="blue"
         subtitle={`${formatNumber(data.totalOrders)} ${t('products.orders')}`}
         labelExtra={
@@ -37,7 +38,7 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         label={t('products.multiItemOrders')}
         value={data.multiItemPct}
         formatter={(v) => `${v.toFixed(1)}%`}
-        icon={<Layers className="w-5 h-5" />}
+        icon={Layers}
         variant="purple"
         subtitle={`${formatNumber(data.multiItemOrders)} ${t('products.of')} ${formatNumber(data.totalOrders)}`}
         labelExtra={
@@ -50,7 +51,7 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         label={t('products.aovUplift')}
         value={data.aovUplift}
         formatter={(v) => `${v.toFixed(1)}x`}
-        icon={<TrendingUp className="w-5 h-5" />}
+        icon={TrendingUp}
         variant="green"
         subtitle={`${formatCurrency(data.multiAov)} ${t('products.vs')} ${formatCurrency(data.singleAov)}`}
         labelExtra={
@@ -63,7 +64,7 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
         label={t('products.topPair')}
         value={data.topPairCount}
         formatter={formatNumber}
-        icon={<Link className="w-5 h-5" />}
+        icon={Link}
         variant="orange"
         subtitle={data.topPair}
         labelExtra={
@@ -72,6 +73,6 @@ export const BasketSummaryCards = memo(function BasketSummaryCards() {
           </InfoPopover>
         }
       />
-    </div>
+    </TileGrid>
   )
 })

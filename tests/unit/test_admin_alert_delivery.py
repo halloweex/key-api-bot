@@ -44,7 +44,12 @@ class TestHttpTransport:
         assert urls == {"https://api.telegram.org/bot123:ABC/sendMessage"}
         chat_ids = [call.kwargs["json"]["chat_id"] for call in client.post.call_args_list]
         assert chat_ids == [111, 222]
-        assert client.post.call_args_list[0].kwargs["json"]["text"] == "boom"
+        # The transport signs on the way out (rule 6 of the alerts charter), so
+        # the body is the caller's text plus one instance line — not a rewrite
+        # of it.
+        text = client.post.call_args_list[0].kwargs["json"]["text"]
+        assert text.startswith("boom")
+        assert text.splitlines()[-1] == "· test-instance"
 
     @pytest.mark.asyncio
     async def test_one_failing_admin_does_not_block_the_others(self):

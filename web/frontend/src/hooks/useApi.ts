@@ -67,6 +67,8 @@ import type {
   SmsChannel,
   SmsChannelsResponse,
   SmsViberOptions,
+  SmsAudiencePresetsResponse,
+  SmsCreateCampaignResponse,
   MarketingReportResponse,
 } from '../types/api'
 
@@ -960,6 +962,46 @@ export function useSendSmsCampaign() {
       queryClient.invalidateQueries({ queryKey: ['smsCampaigns'] })
       queryClient.invalidateQueries({ queryKey: ['smsSegments'] })
     },
+  })
+}
+
+export function useSmsAudiencePresets(enabled = true) {
+  return useQuery<SmsAudiencePresetsResponse>({
+    queryKey: ['smsAudiencePresets'] as const,
+    queryFn: () => api.getSmsAudiencePresets(),
+    staleTime: CACHE_TTL.STANDARD,
+    enabled,
+  })
+}
+
+export function useSaveSmsAudiencePreset() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ name, criteria }: { name: string; criteria: unknown }) =>
+      api.saveSmsAudiencePreset(name, criteria),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ['smsAudiencePresets'] }),
+  })
+}
+
+export function useDeleteSmsAudiencePreset() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (name: string) => api.deleteSmsAudiencePreset(name),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ['smsAudiencePresets'] }),
+  })
+}
+
+/** Freeze the audience as a campaign. The roster is recorded at this instant. */
+export function useCreateSmsCampaign() {
+  const queryClient = useQueryClient()
+
+  return useMutation<SmsCreateCampaignResponse, Error, string>({
+    mutationFn: (params: string) => api.createSmsCampaign(params),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['smsCampaigns'] }),
   })
 }
 

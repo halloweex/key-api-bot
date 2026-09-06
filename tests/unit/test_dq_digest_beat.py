@@ -170,8 +170,8 @@ async def test_a_week_of_silence_ends_in_a_restatement(tmp_path, monkeypatch):
         result = await BackgroundScheduler()._run_dq_digest()
 
         assert result["sent"] is True
-        assert "Repeated weekly" in outbox.messages[0]
-        assert "headline_vs_line_items: 414" in outbox.messages[0]
+        assert "weekly restatement" in outbox.messages[0]
+        assert "headline_vs_line_items): 414" in outbox.messages[0]
     finally:
         await store.close()
 

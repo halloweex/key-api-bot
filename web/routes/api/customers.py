@@ -1,19 +1,24 @@
 """Customer insights, cohort retention, purchase timing, LTV, at-risk endpoints."""
 import csv
+import json
 import io
 import logging
+import re
 from datetime import date as _date, datetime as _datetime
 
-from fastapi import APIRouter, Query, Request, HTTPException, Depends
+from fastapi import APIRouter, Path, Query, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from typing import Optional
 
-from core.repositories.customers import SMS_LTV_BASES, SMS_TIER_DEFAULTS
+from core.repositories.customers import (
+    BUILTIN_AUDIENCE_PRESETS, SMS_GROUPINGS, SMS_LTV_BASES, SMS_TIER_DEFAULTS,
+    SmsAudienceFilters,
+)
 from core.turbosms import (
     PartialSendError, TurboSmsClient, TurboSmsConfig, TurboSmsError,
     ViberMessage, count_segments,
 )
-from web.routes.auth import require_admin
+from web.routes.auth import has_permission, require_permission
 from web.services import dashboard_service
 from ._deps import (
     limiter, get_store,
@@ -145,12 +150,53 @@ async def get_at_risk_customers(
 
 
 # ─── SMS campaign segments ───────────────────────────────────────────────
-# These expose customer names and phone numbers, so both endpoints stack
-# require_admin on top of the api_gate session check.
+# These expose customer names and phone numbers and spend real money, so every
+# one of them stacks the `sms` permission on top of the api_gate session check.
+# The split between the two actions is deliberate:
+#
+#   view — roster sizes and past results, figures about people;
+#   edit — the CSV of names and phone numbers, and anything that reaches a
+#          customer's handset or the gateway's balance.
+#
+# It used to be require_admin throughout, which meant the only way to let
+# somebody run a campaign was to hand over user management, expenses, margin
+# and the internal sales_type with it. `marketer` is that grant without the
+# rest; admins keep it through the same matrix.
 
 _SMS_TIERS = ("VIP", "CORE", "REACTIVATION")
 
 _CAMPAIGN_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$"
+
+
+def _int_list(raw: Optional[str], label: str) -> list:
+    """Parse a comma-separated list of ids from a query parameter."""
+    if not raw:
+        return []
+    out = []
+    for piece in raw.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        try:
+            out.append(int(piece))
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail=f"{label} must be a comma-separated list of ids",
+            )
+    return out
+
+
+def _text_list(raw: Optional[str]) -> list:
+    """Parse a comma-separated list of names, dropping blanks and duplicates."""
+    if not raw:
+        return []
+    seen, out = set(), []
+    for piece in raw.split(","):
+        piece = piece.strip()
+        if piece and piece.lower() not in seen:
+            seen.add(piece.lower())
+            out.append(piece)
+    return out
 
 
 def _sms_segment_params(
@@ -168,11 +214,38 @@ def _sms_segment_params(
         description="CORE cut-off; defaults to 5000 (revenue) / 2750 (margin)",
     ),
     core_min_orders: int = Query(2, ge=2, le=50),
-    reactivation_max_recency: int = Query(120, ge=7, le=730),
+    # Optional so a window narrower than the default does not become an error:
+    # only a value somebody actually typed can contradict the window.
+    reactivation_max_recency: Optional[int] = Query(None, ge=7, le=730),
     sales_type: Optional[str] = Query("retail"),
     holdout_pct: int = Query(10, ge=0, le=50),
     campaign: str = Query("default", pattern=_CAMPAIGN_PATTERN),
     tier: Optional[str] = Query(None),
+    # ─── Audience filters ────────────────────────────────────────────────
+    # Flat query parameters rather than a JSON body, and deliberately so: the
+    # CSV download is a plain link the browser follows, and `api_gate` reads
+    # `sales_type` from the query string. A body would have broken both.
+    grouping: str = Query(
+        "rfm",
+        description="rfm — three value tiers; single — one arm of everyone the "
+                    "filters kept",
+    ),
+    recency_min: Optional[int] = Query(None, ge=0, le=3650),
+    recency_max: Optional[int] = Query(None, ge=0, le=3650),
+    orders_min: Optional[int] = Query(None, ge=0, le=1000),
+    orders_max: Optional[int] = Query(None, ge=0, le=1000),
+    ltv_min: Optional[float] = Query(None, ge=-1_000_000, le=100_000_000),
+    ltv_max: Optional[float] = Query(None, ge=-1_000_000, le=100_000_000),
+    aov_min: Optional[float] = Query(None, ge=0, le=100_000_000),
+    aov_max: Optional[float] = Query(None, ge=0, le=100_000_000),
+    first_order_from: Optional[_date] = Query(None),
+    first_order_to: Optional[_date] = Query(None),
+    city: Optional[str] = Query(None, max_length=500),
+    brand: Optional[str] = Query(None, max_length=500),
+    category_id: Optional[str] = Query(None, max_length=500),
+    source_id: Optional[str] = Query(None, max_length=200),
+    promocode_used: Optional[str] = Query(None, max_length=40),
+    bought_within_days: Optional[int] = Query(None, ge=1, le=3650),
 ) -> dict:
     """Validate and normalise the segmentation criteria shared by both endpoints."""
     try:
@@ -217,11 +290,56 @@ def _sms_segment_params(
         raise HTTPException(
             status_code=400, detail="core_ltv must not exceed vip_ltv",
         )
+    if reactivation_max_recency is None:
+        # The reactivation window cannot outlast the base window it lives in.
+        # Pinning it at 120 made "last 60 days" a 400 rather than a narrower
+        # audience, which is the opposite of what the control is for.
+        reactivation_max_recency = min(120, max_recency_days)
+
     if reactivation_max_recency > max_recency_days:
         raise HTTPException(
             status_code=400,
             detail="reactivation_max_recency must not exceed max_recency_days",
         )
+
+    if grouping not in SMS_GROUPINGS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"grouping must be one of {', '.join(SMS_GROUPINGS)}",
+        )
+
+    # A window whose edges are the wrong way round returns nothing and looks
+    # like a data problem, so it is refused with the reason instead.
+    for lo, hi, label in (
+        (recency_min, recency_max, "recency"),
+        (orders_min, orders_max, "orders"),
+        (ltv_min, ltv_max, "ltv"),
+        (aov_min, aov_max, "aov"),
+        (first_order_from, first_order_to, "first_order"),
+    ):
+        if lo is not None and hi is not None and lo > hi:
+            raise HTTPException(
+                status_code=400, detail=f"{label}_min must not exceed {label}_max",
+            )
+
+    filters = SmsAudienceFilters(
+        recency_min_days=recency_min,
+        recency_max_days=recency_max,
+        orders_min=orders_min,
+        orders_max=orders_max,
+        ltv_min=ltv_min,
+        ltv_max=ltv_max,
+        aov_min=aov_min,
+        aov_max=aov_max,
+        first_order_from=first_order_from,
+        first_order_to=first_order_to,
+        cities=tuple(_text_list(city)),
+        brands=tuple(_text_list(brand)),
+        category_ids=tuple(_int_list(category_id, "category_id")),
+        source_ids=tuple(_int_list(source_id, "source_id")),
+        promocode=(promocode_used or "").strip() or None,
+        bought_within_days=bought_within_days,
+    )
 
     return {
         "max_recency_days": max_recency_days,
@@ -234,17 +352,23 @@ def _sms_segment_params(
         "holdout_pct": holdout_pct,
         "campaign": campaign,
         "tier": tiers,
+        "grouping": grouping,
+        "filters": filters,
     }
 
 
 @router.get("/customers/sms-segments")
-@limiter.limit("20/minute")
+# The wizard previews the audience live, so a manager adjusting filters spends
+# these quickly even with the typing debounced. It is an admin-only read of
+# aggregates, and the cost of refusing one is a page that stops counting
+# mid-campaign.
+@limiter.limit("60/minute")
 async def get_sms_segments(
     request: Request,
     criteria: dict = Depends(_sms_segment_params),
     include_customers: bool = Query(False),
     limit: int = Query(20000, ge=1, le=100000),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "view")),
 ):
     """
     RFM segments for an SMS campaign, split into VIP / CORE / REACTIVATION.
@@ -257,7 +381,15 @@ async def get_sms_segments(
     Returns per-tier sizes by default. Pass `include_customers=true` for the
     rows themselves (names and phone numbers), or use the `/export/csv`
     variant to download them.
+
+    `view` covers the sizes; the rows themselves need `edit`, the same
+    permission the CSV download needs, because they are the same data.
     """
+    if include_customers and not await has_permission(user, "sms", "edit"):
+        raise HTTPException(
+            status_code=403,
+            detail="Customer rows require edit access to SMS campaigns",
+        )
     store = await get_store()
     return await store.get_sms_segments(
         include_customers=include_customers, limit=limit, **criteria,
@@ -281,7 +413,7 @@ async def export_sms_segments_csv(
         None, max_length=40,
         description="Code carried by this campaign, for direct attribution",
     ),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """
     Export the SMS campaign list as CSV.
@@ -328,7 +460,7 @@ async def export_sms_segments_csv(
     # Exports carry customer PII — record who pulled which list.
     logger.info(
         "SMS segment export: user=%s campaign=%s tier=%s rows=%d holdout=%s",
-        admin.get("user_id"), criteria["campaign"], criteria["tier"] or "all",
+        user.get("user_id"), criteria["campaign"], criteria["tier"] or "all",
         len(rows), include_holdout,
     )
 
@@ -393,15 +525,237 @@ async def export_sms_segments_csv(
     )
 
 
+# ─── Saved audiences ──────────────────────────────────────────────────────
+# A preset is the wizard's form state under a name. It is never executed: the
+# page reads it, fills its controls, and sends the values back through
+# `_sms_segment_params` like any hand-built audience. So a preset cannot widen
+# what the segmentation accepts, however it was stored.
+
+_PRESET_NAME_MAX = 60
+_PRESET_CRITERIA_MAX = 8_000
+
+# Criteria are handed back to every reader of the listing, so what cannot be
+# rendered must not be stored — and size is not the whole of shape. `json.loads`
+# accepts hundreds of levels of nesting where the response serializer refuses
+# past 254, and the row is written before the response is rendered: 1 787
+# characters, well inside the cap above, wrote a preset and then made
+# `GET /sms-audience-presets` fail for every reader until somebody deleted it by
+# a name the dead listing no longer showed. Bounded here rather than at the
+# serializer's own limit because the listing wraps `criteria` three levels
+# deeper than the PUT response, so a body that renders on the way in can still
+# be unrenderable on the way out. The page's form state is two levels — three
+# where a filter holds a list — so this leaves it room it will never use.
+_PRESET_CRITERIA_MAX_DEPTH = 20
+
+# A preset name is shown to people, so it is deliberately softer than a campaign
+# id (`_CAMPAIGN_PATTERN`): letters of any script — a Ukrainian team names an
+# audience in Cyrillic — digits, spaces and a small readable punctuation set are
+# allowed. What is refused is anything outside that: control characters (a
+# newline in the name forges a second audit-log line), markup and quotes, path
+# and format metacharacters. `\w` already covers underscore and every script's
+# letters/digits. Anchoring on the character class rather than `^…$` sidesteps
+# the Python gotcha where `$` matches before a trailing newline.
+_PRESET_NAME_BAD = re.compile(r"[^\w .,'()&+%\-]", re.UNICODE)
+
+
+def _clean_preset_name(name: str) -> str:
+    """Validate and normalise the `{name}` path parameter for PUT and DELETE.
+
+    Trims edge whitespace, then enforces the same rule for both verbs so a name
+    that cannot be created cannot be addressed for deletion either — the two
+    used to disagree, DELETE being a bare `.strip()` that accepted names PUT
+    would reject.
+    """
+    name = name.strip()
+    if not name or len(name) > _PRESET_NAME_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"name must be 1..{_PRESET_NAME_MAX} characters",
+        )
+    if _PRESET_NAME_BAD.search(name):
+        raise HTTPException(
+            status_code=400,
+            detail="name may contain only letters, digits, spaces and . , ' ( ) & + % - _",
+        )
+    return name
+
+
+def _nested_deeper_than(value, limit: int) -> bool:
+    """Does `value` nest containers more than `limit` levels deep?
+
+    Walked with an explicit stack, not by recursion: the body is already parsed
+    by the time this runs, and a recursive walk would exhaust the interpreter's
+    own stack on exactly the input it is here to refuse. It stops at the first
+    level past the limit rather than measuring how deep the thing really goes.
+    """
+    stack = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if depth > limit:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
+@router.get("/customers/sms-audience-presets")
+@limiter.limit("30/minute")
+async def list_sms_audience_presets(
+    request: Request,
+    user: dict = Depends(require_permission("sms", "view")),
+):
+    """Saved audiences, built-ins first."""
+    store = await get_store()
+    return {"presets": await store.list_sms_audience_presets()}
+
+
+@router.put("/customers/sms-audience-presets/{name}")
+@limiter.limit("20/minute")
+async def save_sms_audience_preset(
+    request: Request,
+    name: str,
+    user: dict = Depends(require_permission("sms", "edit")),
+):
+    """Store or replace a saved audience under `name`.
+
+    The body is the form state as JSON. It is stored verbatim and handed back
+    to the page, which is why the only checks here are on size and shape: this
+    endpoint decides what a manager can save, not what the segmentation runs.
+    """
+    name = _clean_preset_name(name)
+
+    try:
+        criteria = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="expected a JSON body")
+    if not isinstance(criteria, dict):
+        raise HTTPException(status_code=400, detail="criteria must be a JSON object")
+    if len(json.dumps(criteria, ensure_ascii=False, default=str)) > _PRESET_CRITERIA_MAX:
+        raise HTTPException(status_code=400, detail="criteria is too large")
+    if _nested_deeper_than(criteria, _PRESET_CRITERIA_MAX_DEPTH):
+        raise HTTPException(status_code=400, detail="criteria is nested too deeply")
+
+    store = await get_store()
+    try:
+        saved = await store.save_sms_audience_preset(
+            name, criteria, created_by=user.get("user_id"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    logger.info("SMS audience preset saved: user=%s name=%s",
+                user.get("user_id"), name)
+    return saved
+
+
+@router.delete("/customers/sms-audience-presets/{name}")
+@limiter.limit("20/minute")
+async def delete_sms_audience_preset(
+    request: Request,
+    name: str,
+    user: dict = Depends(require_permission("sms", "edit")),
+):
+    """Remove a saved audience. Built-ins refuse."""
+    name = _clean_preset_name(name)
+    store = await get_store()
+    try:
+        removed = await store.delete_sms_audience_preset(name)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"no audience named {name!r}")
+    # Presets are a shared resource — any sms:edit user can remove another's —
+    # so a deletion leaves the same audit trail a save does.
+    logger.info("SMS audience preset deleted: user=%s name=%s",
+                user.get("user_id"), name)
+    return {"deleted": name}
+
+
+@router.post("/customers/sms-campaigns")
+@limiter.limit("10/minute")
+async def create_sms_campaign(
+    request: Request,
+    criteria: dict = Depends(_sms_segment_params),
+    limit: int = Query(50000, ge=1, le=100000),
+    overwrite: bool = Query(False, description="Replace an existing frozen roster"),
+    promocode: Optional[str] = Query(
+        None, max_length=40,
+        description="Code carried by this campaign, for direct attribution",
+    ),
+    user: dict = Depends(require_permission("sms", "edit")),
+):
+    """Freeze this audience as a campaign, without downloading anything.
+
+    Freezing used to be a side effect of the CSV export, so creating a campaign
+    meant taking a file of phone numbers whether or not anybody wanted one —
+    the send goes through the gateway, and the file was pure ceremony. The
+    roster still has to be recorded at this instant for the campaign to be
+    measurable at all; that is what this endpoint is for.
+    """
+    if criteria["campaign"] == "default":
+        raise HTTPException(
+            status_code=400,
+            detail="name the campaign — 'default' is the placeholder the preview uses",
+        )
+
+    store = await get_store()
+    data = await store.get_sms_segments(include_customers=True, limit=limit, **criteria)
+
+    if data["truncated"]:
+        raise HTTPException(
+            status_code=400,
+            detail="refusing to freeze a truncated roster — raise `limit` so the "
+                   "whole audience is recorded",
+        )
+    if not data["customers"]:
+        raise HTTPException(
+            status_code=400,
+            detail="this audience is empty — nothing to freeze",
+        )
+
+    try:
+        frozen = await store.freeze_sms_campaign(
+            campaign=criteria["campaign"],
+            customers=data["customers"],
+            criteria=data["criteria"],
+            ltv_basis=criteria["ltv_basis"],
+            sales_type=criteria["sales_type"],
+            holdout_pct=criteria["holdout_pct"],
+            promocode=promocode,
+            overwrite=overwrite,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    logger.info(
+        "SMS campaign created: user=%s campaign=%s grouping=%s target=%d holdout=%d",
+        user.get("user_id"), criteria["campaign"], criteria["grouping"],
+        data["totals"]["target"], data["totals"]["holdout"],
+    )
+    return {
+        "campaign": criteria["campaign"],
+        "frozen": frozen,
+        "segments": data["segments"],
+        "totals": data["totals"],
+        "funnel": data["funnel"],
+        "criteria": data["criteria"],
+    }
+
+
 @router.post("/customers/sms-campaigns/{campaign}/sent")
 @limiter.limit("20/minute")
 async def mark_sms_campaign_sent(
     request: Request,
-    campaign: str,
+    campaign: str = Path(..., pattern=_CAMPAIGN_PATTERN),
     sent_at: Optional[str] = Query(
         None, description="ISO timestamp; defaults to now",
     ),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """
     Record when the campaign file actually went to the SMS provider.
@@ -426,7 +780,7 @@ async def mark_sms_campaign_sent(
 
     logger.info(
         "SMS campaign marked sent: user=%s campaign=%s at=%s",
-        admin.get("user_id"), campaign, result["sentAt"],
+        user.get("user_id"), campaign, result["sentAt"],
     )
     return result
 
@@ -435,13 +789,13 @@ async def mark_sms_campaign_sent(
 @limiter.limit("3/minute")
 async def send_sms_campaign(
     request: Request,
-    campaign: str,
+    campaign: str = Path(..., pattern=_CAMPAIGN_PATTERN),
     text: str = Query(..., min_length=1, max_length=600),
     channel: str = Query("sms", pattern="^(sms|viber_sms)$"),
     viber_text: Optional[str] = Query(None, max_length=1000),
     button_caption: Optional[str] = Query(None, max_length=30),
     button_url: Optional[str] = Query(None, max_length=300),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """
     Send the campaign's target group through TurboSMS.
@@ -459,6 +813,13 @@ async def send_sms_campaign(
 
     Sending twice is refused: the campaign is stamped sent on the first pass.
     """
+    # Assembled before the claim, because it is built from query parameters
+    # alone and can be rejected. Taking the claim first meant a caption with no
+    # URL answered 400 with the campaign stamped sent — and nothing clears that
+    # stamp again, so a typo cost the roster, which is the only control group
+    # the campaign will ever have.
+    viber = _build_viber(channel, text, viber_text, button_caption, button_url)
+
     store = await get_store()
     try:
         targets = await store.get_sms_campaign_targets(campaign)
@@ -467,10 +828,11 @@ async def send_sms_campaign(
         raise HTTPException(status_code=status, detail=str(e))
 
     if not targets:
+        # Only knowable after the claim, so it has to be handed back here.
+        await store.release_sms_campaign(campaign)
         raise HTTPException(status_code=409, detail="campaign has no target recipients")
 
     by_phone = {t["phone"]: t["buyerId"] for t in targets}
-    viber = _build_viber(channel, text, viber_text, button_caption, button_url)
 
     # A roster past the gateway's per-request limit is split, so a later batch
     # can fail with earlier ones already delivered. Those have to be recorded
@@ -519,7 +881,7 @@ async def send_sms_campaign(
     logger.info(
         "SMS campaign sent: user=%s campaign=%s channel=%s accepted=%d "
         "stoplisted=%d failed=%d unsent=%d",
-        admin.get("user_id"), campaign, channel,
+        user.get("user_id"), campaign, channel,
         summary["accepted"], summary["stoplisted"], summary["failed"],
         partial.unsent if partial else 0,
     )
@@ -563,7 +925,7 @@ def _build_viber(
 
 @router.get("/customers/sms/channels")
 @limiter.limit("30/minute")
-async def get_sms_channels(request: Request, admin: dict = Depends(require_admin)):
+async def get_sms_channels(request: Request, user: dict = Depends(require_permission("sms", "view"))):
     """
     Which channels this deployment can actually send on.
 
@@ -577,7 +939,31 @@ async def get_sms_channels(request: Request, admin: dict = Depends(require_admin
         "viber": config.viber_configured,
         "smsSender": config.sender or None,
         "viberSender": config.viber_sender or None,
+        # The tariff the send will be billed at, so the page can price a
+        # campaign before it goes out. Read from config rather than restated in
+        # the frontend: the two drifting apart would put one number on screen
+        # and charge another.
+        "pricePerPart": config.price_per_part,
     }
+
+
+def _require_ua_phone(phone: str) -> str:
+    """Reduce a phone to the canonical 380+9-digit form, or reject it.
+
+    Segmentation only ever compares against this exact shape
+    (``length(phone) = 12 AND phone LIKE '380%'``), and the opt-out exclusion
+    matches ``o.phone = scored.phone`` — so a phone stored in any other format
+    can never suppress by phone. Normalising here is what makes a recorded
+    opt-out actually match, and it keeps the stoplist to numbers a campaign
+    could contain.
+    """
+    digits = "".join(c for c in phone if c.isdigit())
+    if len(digits) != 12 or not digits.startswith("380"):
+        raise HTTPException(
+            status_code=400,
+            detail="phone must be a full Ukrainian number: 380 followed by 9 digits",
+        )
+    return digits
 
 
 @router.post("/customers/sms/test-send")
@@ -590,7 +976,7 @@ async def send_test_sms(
     viber_text: Optional[str] = Query(None, max_length=1000),
     button_caption: Optional[str] = Query(None, max_length=30),
     button_url: Optional[str] = Query(None, max_length=300),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
     """
     Send one message to one number, to check the creative before a campaign.
@@ -608,14 +994,9 @@ async def send_test_sms(
     what Viber could not deliver. Both arms are worth testing, because they do
     not look alike — the Viber one carries a button, the SMS one cannot.
     """
-    digits = "".join(c for c in phone if c.isdigit())
     # Same rule the segmentation applies, so a number that passes here is one
     # that could actually appear in a campaign.
-    if len(digits) != 12 or not digits.startswith("380"):
-        raise HTTPException(
-            status_code=400,
-            detail="phone must be a full Ukrainian number: 380 followed by 9 digits",
-        )
+    digits = _require_ua_phone(phone)
 
     cost = count_segments(text)
     viber = _build_viber(channel, text, viber_text, button_caption, button_url)
@@ -624,7 +1005,7 @@ async def send_test_sms(
         async with TurboSmsClient() as client:
             results = await client.send([digits], text, viber=viber)
     except TurboSmsError as e:
-        logger.error("Test SMS failed: user=%s error=%s", admin.get("user_id"), e)
+        logger.error("Test SMS failed: user=%s error=%s", user.get("user_id"), e)
         raise HTTPException(status_code=502, detail=str(e))
 
     if not results:
@@ -633,7 +1014,7 @@ async def send_test_sms(
     result = results[0]
     logger.info(
         "Test SMS: user=%s phone=%s channel=%s accepted=%s code=%s parts=%d",
-        admin.get("user_id"), digits, channel, result.accepted, result.code,
+        user.get("user_id"), digits, channel, result.accepted, result.code,
         cost.parts,
     )
     return {
@@ -659,16 +1040,23 @@ async def add_marketing_optout(
     buyer_id: int = Query(..., ge=1),
     phone: Optional[str] = Query(None, max_length=20),
     reason: str = Query("manual", max_length=40),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "edit")),
 ):
-    """Record that a customer asked not to receive marketing SMS."""
+    """Record that a customer asked not to receive marketing SMS.
+
+    A phone, when given, is normalised to the canonical 380+9-digit form the
+    segmentation matches against. Stored in any other shape it would sit in the
+    stoplist and never suppress the number it names — the phone column exists
+    precisely to catch the same number under a second buyer record.
+    """
+    normalised_phone = _require_ua_phone(phone) if phone is not None else None
     store = await get_store()
     result = await store.add_marketing_optout(
-        buyer_id=buyer_id, phone=phone, reason=reason,
-        source=str(admin.get("user_id") or "dashboard"),
+        buyer_id=buyer_id, phone=normalised_phone, reason=reason,
+        source=str(user.get("user_id") or "dashboard"),
     )
     logger.info("Marketing opt-out: user=%s buyer=%s reason=%s",
-                admin.get("user_id"), buyer_id, reason)
+                user.get("user_id"), buyer_id, reason)
     return result
 
 
@@ -676,14 +1064,14 @@ async def add_marketing_optout(
 @limiter.limit("30/minute")
 async def get_sms_campaign_results(
     request: Request,
-    campaign: str,
+    campaign: str = Path(..., pattern=_CAMPAIGN_PATTERN),
     window_days: int = Query(30, ge=1, le=180),
     delivered_only: bool = Query(
         False,
         description="Restrict the target arm to confirmed deliveries. Optimistic "
                     "bound, not a clean randomised comparison — see the docs.",
     ),
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "view")),
 ):
     """
     Measure a campaign: the messaged group against the control.
@@ -713,7 +1101,7 @@ async def get_sms_campaign_results(
 @limiter.limit("30/minute")
 async def list_sms_campaigns(
     request: Request,
-    admin: dict = Depends(require_admin),
+    user: dict = Depends(require_permission("sms", "view")),
 ):
     """List frozen campaigns with their roster sizes and send dates."""
     store = await get_store()

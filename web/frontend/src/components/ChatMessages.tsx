@@ -16,7 +16,7 @@ export const ChatMessages = memo(function ChatMessages() {
   }, [messages])
 
   if (messages.length === 0) {
-    return <EmptyState />
+    return <ChatWelcome />
   }
 
   return (
@@ -36,9 +36,9 @@ export const ChatMessages = memo(function ChatMessages() {
 })
 
 /**
- * Empty state with welcome message and suggestions.
+ * Welcome scene shown before the first message: avatar, capabilities, suggestions.
  */
-const EmptyState = memo(function EmptyState() {
+const ChatWelcome = memo(function ChatWelcome() {
   const { addMessage, setLoading, setConversationId, appendToLastMessage, setStreaming } = useChatStore()
 
   const handleSuggestion = async (text: string) => {

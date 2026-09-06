@@ -4,11 +4,41 @@ import logging
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
+from core.permissions import is_hardcoded_admin
 from web.routes.auth import require_admin
 from ._deps import limiter, get_store
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _refuse_if_ineffective(user_id: int, field: str, value: str, enforced: str) -> None:
+    """Refuse a change to an account whose access is pinned in source.
+
+    ``_resolve_session`` short-circuits on ``is_hardcoded_admin`` before it
+    reads either column (web/routes/auth.py), so for those ids the stored role
+    and status decide nothing. Denying one used to answer 200 having changed
+    no access at all, and the admin page then showed "denied" beside an account
+    that still had everything — a control reporting a revocation it did not
+    perform is worse than one that is absent.
+
+    Refused rather than enforced: the hardcoded set is the way back in when the
+    users table or the permissions system is unusable, so honouring a stored
+    status there would put the only recovery path behind one click of a
+    dropdown, undoable only by editing source and redeploying. Writing the
+    value the code already enforces stays allowed, so a row this once corrupted
+    can be corrected back into agreement.
+    """
+    if not is_hardcoded_admin(user_id) or value == enforced:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"This account's admin access is pinned in source; its {field} is "
+            f"always '{enforced}' whatever is stored. Changing it here would "
+            f"report a change that does not happen."
+        ),
+    )
 
 
 # ─── User Management ──────────────────────────────────────────────────────────
@@ -49,12 +79,18 @@ async def get_user(
 async def update_user_role(
     request: Request,
     user_id: int,
-    role: str = Query(..., description="New role: admin, editor, viewer"),
+    role: str = Query(..., description="New role: admin, editor, marketer, viewer"),
     user: dict = Depends(require_admin),
 ):
     """Update user role (admin only)."""
-    if role not in ("admin", "editor", "viewer"):
+    # The list of roles lives in core.permissions; restating it here is how a
+    # role becomes settable everywhere except through the admin page.
+    from core.permissions import Role
+
+    if role not in {r.value for r in Role}:
         raise HTTPException(status_code=400, detail="Invalid role")
+
+    _refuse_if_ineffective(user_id, "role", role, Role.ADMIN.value)
 
     store = await get_store()
     admin_id = user.get("user_id")
@@ -77,6 +113,8 @@ async def update_user_status(
     """Update user status (admin only)."""
     if status not in ("approved", "denied", "frozen", "pending"):
         raise HTTPException(status_code=400, detail="Invalid status")
+
+    _refuse_if_ineffective(user_id, "status", status, "approved")
 
     store = await get_store()
     admin_id = user.get("user_id")

@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch the alert-agent spool for diagnosis tasks
+
+[Path]
+DirectoryNotEmpty=/opt/key-api-bot/data/alert-tasks/pending
+Unit=ks-alert-agent.service
+
+[Install]
+WantedBy=multi-user.target

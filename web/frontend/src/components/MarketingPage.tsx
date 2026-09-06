@@ -1,8 +1,9 @@
-import { memo, Suspense } from 'react'
+import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { PageShell } from './PageShell'
+import { PageHeading } from './PageHeading'
+import { ChartSection } from './ChartSection'
 import { ROICalculator } from './ROICalculator'
-import { SkeletonChart } from './Skeleton'
 import { LazyPromocodeAnalyticsChart } from './chartsLazy'
 import { MonthlyReport } from './MonthlyReport'
 
@@ -11,17 +12,13 @@ export const MarketingPage = memo(function MarketingPage() {
 
   return (
     <PageShell variant="feature">
-      <h1 className="text-xl sm:text-2xl font-bold text-slate-800">
-        {t('nav.marketing')}
-      </h1>
+      <PageHeading title={t('nav.marketing')} />
       <section>
         <MonthlyReport />
       </section>
-      <section>
-        <Suspense fallback={<SkeletonChart />}>
-          <LazyPromocodeAnalyticsChart />
-        </Suspense>
-      </section>
+      <ChartSection>
+        <LazyPromocodeAnalyticsChart />
+      </ChartSection>
       <section>
         <ROICalculator />
       </section>

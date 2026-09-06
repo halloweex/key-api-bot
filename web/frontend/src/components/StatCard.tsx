@@ -1,6 +1,7 @@
 import { memo } from 'react'
 import { TrendingUp, TrendingDown, Minus, ChevronDown } from 'lucide-react'
 import { useAnimatedNumber } from '../hooks/useAnimatedNumber'
+import type { IconComponent } from './icons'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -13,8 +14,8 @@ export interface StatCardProps {
   value: number
   /** Function to format the value for display */
   formatter: (value: number) => string
-  /** Optional icon to display on the left */
-  icon?: React.ReactNode
+  /** Optional icon to display on the left. Sized by the card itself. */
+  icon?: IconComponent
   /** Optional subtitle below the value */
   subtitle?: string
   /** Color variant for the value */
@@ -85,7 +86,7 @@ export const StatCard = memo(function StatCard({
   label,
   value,
   formatter,
-  icon,
+  icon: Icon,
   subtitle,
   variant = 'blue',
   trend,
@@ -119,21 +120,21 @@ export const StatCard = memo(function StatCard({
         )}
         <article
           aria-label={ariaLabel || `${label}: ${formatter(value)}`}
-          className={icon ? "flex items-start gap-3" : "text-center"}
+          className={Icon ? "flex items-start gap-3" : "text-center"}
         >
           {/* Icon */}
-          {icon && (
-            <div className={`p-2 lg:p-3 rounded-lg ${iconBgStyles[variant]} ${variantStyles[variant]} [&_svg]:w-5 [&_svg]:h-5 lg:[&_svg]:w-6 lg:[&_svg]:h-6`}>
-              {icon}
+          {Icon && (
+            <div className={`p-2 lg:p-3 rounded-lg ${iconBgStyles[variant]} ${variantStyles[variant]}`}>
+              <Icon className="w-5 h-5 lg:w-6 lg:h-6" aria-hidden />
             </div>
           )}
 
-          <div className={icon ? "flex-1 min-w-0" : ""}>
+          <div className={Icon ? "flex-1 min-w-0" : ""}>
             {/* Label */}
             <h3 className="text-xs lg:text-sm text-slate-600 font-medium mb-1 flex items-center gap-1">{label}{labelExtra}</h3>
 
             {/* Value with animation */}
-            <div className={`flex items-baseline gap-2 ${icon ? "" : "justify-center"} min-w-0`}>
+            <div className={`flex items-baseline gap-2 ${Icon ? "" : "justify-center"} min-w-0`}>
               <span
                 aria-live="polite"
                 className={`text-lg sm:text-xl lg:text-2xl font-bold tracking-tight truncate ${variantStyles[variant]}`}

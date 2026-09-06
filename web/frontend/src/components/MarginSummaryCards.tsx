@@ -5,6 +5,7 @@ import { useMarginOverview } from '../hooks'
 import { formatCurrency, formatPercent, formatNumber } from '../utils/formatters'
 import { SkeletonChart } from './Skeleton'
 import { MetricCard } from './MetricCard'
+import { TileGrid } from './TileGrid'
 
 export const MarginSummaryCards = memo(function MarginSummaryCards() {
   const { t } = useTranslation()
@@ -15,11 +16,11 @@ export const MarginSummaryCards = memo(function MarginSummaryCards() {
 
   return (
     <section aria-label={t('margin.overview')}>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <TileGrid columns={4}>
         <MetricCard
           surface="tile-gradient"
           tone="blue"
-          icon={<CircleDollarSign className="w-5 h-5" />}
+          icon={CircleDollarSign}
           label={t('margin.costedRevenue')}
           value={formatCurrency(data.costed_revenue)}
           sub={`${t('margin.totalRevenue')}: ${formatCurrency(data.total_revenue)}`}
@@ -27,7 +28,7 @@ export const MarginSummaryCards = memo(function MarginSummaryCards() {
         <MetricCard
           surface="tile-gradient"
           tone="orange"
-          icon={<Package className="w-5 h-5" />}
+          icon={Package}
           label={t('margin.cogs')}
           value={formatCurrency(data.cogs)}
           sub={`${formatNumber(data.total_units)} ${t('margin.units')}`}
@@ -35,7 +36,7 @@ export const MarginSummaryCards = memo(function MarginSummaryCards() {
         <MetricCard
           surface="tile-gradient"
           tone="green"
-          icon={<TrendingUp className="w-5 h-5" />}
+          icon={TrendingUp}
           label={t('margin.grossProfit')}
           value={formatCurrency(data.profit)}
           sub={`${t('margin.margin')}: ${formatPercent(data.margin_pct)}`}
@@ -43,12 +44,12 @@ export const MarginSummaryCards = memo(function MarginSummaryCards() {
         <MetricCard
           surface="tile-gradient"
           tone="purple"
-          icon={<ShieldCheck className="w-5 h-5" />}
+          icon={ShieldCheck}
           label={t('margin.costCoverage')}
           value={formatPercent(data.coverage_pct)}
           sub={`${data.skus_with_cost}/${data.total_skus} ${t('margin.skus')}`}
         />
-      </div>
+      </TileGrid>
     </section>
   )
 })

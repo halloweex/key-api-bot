@@ -20,25 +20,13 @@ log() {
     echo "[$(date -Iseconds)] $*" | tee -a "$LOG"
 }
 
-# Telegram alert via the bot's credentials in .env (best-effort, never fails the script)
-notify() {
-    local msg="$1"
-    [ -f "$COMPOSE_DIR/.env" ] || return 0
-    local token ids id
-    token=$(grep -E '^BOT_TOKEN=' "$COMPOSE_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"')
-    # Every admin, not the first. Technical messages are an admin concern and
-    # all admins are admins; the business channel (the weekly report) picks its
-    # own audience and does not come through here.
-    ids=$(grep -E '^ADMIN_USER_IDS=' "$COMPOSE_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"' | tr ',' ' ')
-    if [ -n "$token" ] && [ -n "$ids" ]; then
-        for id in $ids; do
-            curl -fsS --max-time 10 \
-                "https://api.telegram.org/bot${token}/sendMessage" \
-                -d "chat_id=${id}" \
-                -d "text=${msg}" > /dev/null 2>&1 || true
-        done
-    fi
-}
+# Step 07 of the alerts rework: the shared notifier — kill switch, instance
+# signature, best-effort row in the alert archive. Notably, this script is
+# THE argument for the archive living in Postgres: while the compact has web
+# and bot stopped, ks-postgres is the one store still standing to record
+# what the cron said.
+ENV_FILE="$COMPOSE_DIR/.env"
+source "$COMPOSE_DIR/deploy/notify.sh"
 
 cleanup_artifacts() {
     rm -f "$DATA_DIR/analytics_clean.duckdb" "$DATA_DIR/analytics_clean.duckdb.wal" 2>/dev/null

@@ -344,7 +344,7 @@ async def test_funnel_survives_an_empty_segmentation(tmp_path):
     assert result["segments"] == []
     assert result["totals"]["customers"] == 0
     assert _funnel(result) == {
-        "customers": 1, "inWindow": 0, "tiered": 0,
+        "customers": 1, "inWindow": 0, "filtered": 0, "tiered": 0,
         "phone": 0, "subscribed": 0, "uniquePhone": 0,
     }
 

@@ -23,6 +23,38 @@ _stats_cache: dict = {"data": None, "expires_at": 0}
 _stats_cache_lock = asyncio.Lock()
 _STATS_CACHE_TTL = 60
 
+# The mirror watermarks ride their own cache on the same TTL. Separate from the
+# stats cache above because they come from a different database: folding them in
+# would mean one Postgres hiccup blanking the DuckDB block, or the reverse.
+_mirror_cache: dict = {"data": None, "expires_at": 0}
+_mirror_cache_lock = asyncio.Lock()
+
+
+async def _mirror_freshness() -> "dict | None":
+    """Age of the last successful shipment per watched mirror table.
+
+    Returns None — never an empty dict — when it cannot be told, because the
+    canary treats a missing block as a failure (rule 3: silence is not health)
+    and an empty dict would read as "asked, nothing watched".
+    """
+    now = time.time()
+    async with _mirror_cache_lock:
+        if _mirror_cache["data"] is not None and now < _mirror_cache["expires_at"]:
+            return _mirror_cache["data"]
+        try:
+            from core.mirror_reconciliation import fetch_mirror_freshness
+            from core.pg import get_pool
+
+            data = await fetch_mirror_freshness(await get_pool())
+        except Exception as e:
+            # A host with no Postgres configured raises here on every call, and
+            # that is not an error worth a warning every minute.
+            logger.debug(f"Mirror freshness unavailable: {e}")
+            return None
+        _mirror_cache["data"] = data
+        _mirror_cache["expires_at"] = now + _STATS_CACHE_TTL
+        return data
+
 
 @router.get("/health", response_model=HealthResponse)
 @limiter.limit("60/minute")
@@ -98,9 +130,40 @@ async def health_check(request: Request):
     # to be able to see it without reading container logs, which is this.
     try:
         store = await get_store()
-        migrations = store.schema_status()
+        migrations = dict(store.schema_status())
     except Exception as e:
         migrations = {"status": "unknown", "error": str(e)}
+
+    # Same rule as the DuckDB block above, for the same reason: the ledger
+    # reports a failure to *read* it as raw exception text, which on this
+    # database means the file path, a pid and the user the container runs as.
+    # `status` still says "unknown", which is the part the reader acts on.
+    # `migrations["failed"]` is untouched — naming which migration blew up and
+    # why is what the ledger is for.
+    ledger_error = migrations.pop("error", None)
+    if ledger_error:
+        logger.warning(f"Health check schema ledger error: {ledger_error}")
+
+    # The copy that carries the money. Its own watchdog lives in bot/canary.py,
+    # out of this container — a mirror that stopped shipping used to wait for
+    # the 07:30 comparison, which is a whole day of silence at the main copy.
+    mirrors = await _mirror_freshness()
+
+    # The alerting machinery watching itself: consecutive transport failures
+    # in THIS process, judged by the canary from the other container. The one
+    # subsystem that had no dead-man's switch — which is how the certificate
+    # alert stayed undeliverable for months.
+    from core.telegram_alerts import transport_health
+
+    alerting = transport_health()
+
+    # The alerting machinery watching itself: consecutive transport failures
+    # in THIS process, judged by the canary from the other container. The one
+    # subsystem that had no dead-man's switch — which is how the certificate
+    # alert stayed undeliverable for months.
+    from core.telegram_alerts import transport_health
+
+    alerting = transport_health()
 
     return {
         "status": (
@@ -119,6 +182,8 @@ async def health_check(request: Request):
         "migrations": migrations,
         "sync": sync_status,
         "data_quality": data_quality,
+        "mirrors": mirrors,
+        "alerting": alerting,
     }
 
 
@@ -263,6 +328,25 @@ async def get_data_quality_health(request: Request):
                     conn, integrity["run_id"], limit=20,
                 )
 
+            # The two layers that arrived after this endpoint was written.
+            # Found by an audit standing exactly where on-call would stand: a
+            # WARN verdict in the mirror-landing log line, and no way to see
+            # WHICH findings without opening the database — which the
+            # single-writer rule forbids from outside the process. The layer
+            # holding the most comparisons must not be the one invisible here.
+            mirror_landing = fetch_latest_run(conn, layer="mirror_landing")
+            mirror_issues = []
+            if mirror_landing:
+                mirror_issues = fetch_run_issues(
+                    conn, mirror_landing["run_id"], limit=20,
+                )
+            reconciliation_pg = fetch_latest_run(conn, layer="reconciliation_pg")
+            reconciliation_pg_diffs = []
+            if reconciliation_pg:
+                reconciliation_pg_diffs = fetch_run_diffs(
+                    conn, reconciliation_pg["run_id"], limit=20,
+                )
+
         return {
             "integrity": {
                 "last_run": integrity,
@@ -271,6 +355,14 @@ async def get_data_quality_health(request: Request):
             "reconciliation": {
                 "last_run": reconciliation,
                 "diffs": reconciliation_diffs,
+            },
+            "mirror_landing": {
+                "last_run": mirror_landing,
+                "issues": mirror_issues,
+            },
+            "reconciliation_pg": {
+                "last_run": reconciliation_pg,
+                "diffs": reconciliation_pg_diffs,
             },
         }
     except Exception as e:

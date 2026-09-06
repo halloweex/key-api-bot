@@ -344,6 +344,22 @@ async def write_orders(
                     _ORDER_UPSERT, [_order_params(r) for r in orders],
                 )
 
+                # Step 0. Archive a version of every header that actually
+                # moved — here, and not in `mirror_orders`, because this is
+                # the transaction that wrote the row being described and
+                # because the value to archive is the one COALESCE settled on,
+                # not the one that arrived. `core/pg_order_versions.py` has the
+                # argument in full; the short version is that the mirror can
+                # afford to lose a write and the archive cannot.
+                from core.pg_order_versions import capture_versions
+
+                versions = await capture_versions(conn, order_ids)
+                if versions:
+                    logger.info(
+                        f"order_versions: {versions} new version(s) "
+                        f"from {len(order_ids)} written order(s)"
+                    )
+
             if replace_products and order_ids:
                 # Delete first, then insert: the ids are positional, so the
                 # only way to lose a dropped line item is to remove the whole

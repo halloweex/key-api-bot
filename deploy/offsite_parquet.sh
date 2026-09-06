@@ -106,29 +106,15 @@ alert_chat_ids() {
         printf '%s' "$BACKUP_ALERT_CHAT_ID" | tr ',' '\n'
         return 0
     fi
-    _env_value ADMIN_USER_IDS | tr ',' '\n' | tr -d '[:space:]' || true
+    # tr -d '[:space:]' ел и переводы строк — оба id склеивались в один
+    # невалидный chat_id; BACKUP_ALERT_CHAT_ID это маскировал. Найдено 29.08.
+    _env_value ADMIN_USER_IDS | tr ',' '\n' | tr -d ' \t\r' || true
 }
 
-notify() {
-    local text="$1" token chat sent=0
-    token="$(_env_value BOT_TOKEN)"
-    if [ -z "$token" ]; then
-        echo "cannot alert: BOT_TOKEN missing from .env" >&2
-        return 0
-    fi
-    while read -r chat; do
-        [ -n "$chat" ] || continue
-        sent=1
-        # Never let a failed notification change the script's own outcome, and
-        # never let one unreachable admin stop the others being told.
-        curl -sS -m 15 -o /dev/null \
-            --data-urlencode "chat_id=$chat" \
-            --data-urlencode "text=$text" \
-            "https://api.telegram.org/bot${token}/sendMessage" || \
-            echo "alert delivery failed for one recipient" >&2
-    done <<< "$(alert_chat_ids)"
-    [ "$sent" -eq 1 ] || echo "cannot alert: ADMIN_USER_IDS is empty" >&2
-}
+# Step 07 of the alerts rework: one notifier for all host-cron shell —
+# the kill switch, the instance signature, and a best-effort row in the
+# alert archive. deploy/notify.sh owns the implementation.
+source deploy/notify.sh
 
 _where() { printf '%s · %s' "$(hostname)" "$(date '+%F %H:%M')"; }
 

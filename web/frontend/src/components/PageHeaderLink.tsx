@@ -1,4 +1,5 @@
 import { memo, type ReactNode } from 'react'
+import type { IconComponent } from './icons'
 
 // ─── PageHeaderLink ──────────────────────────────────────────────────────────
 //
@@ -8,13 +9,14 @@ import { memo, type ReactNode } from 'react'
 
 interface PageHeaderLinkProps {
   href: string
-  icon: ReactNode
+  /** Leading icon. Sized by the link itself. */
+  icon: IconComponent
   children: ReactNode
 }
 
 export const PageHeaderLink = memo(function PageHeaderLink({
   href,
-  icon,
+  icon: Icon,
   children,
 }: PageHeaderLinkProps) {
   return (
@@ -22,7 +24,7 @@ export const PageHeaderLink = memo(function PageHeaderLink({
       href={href}
       className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
     >
-      {icon}
+      <Icon className="w-4 h-4" aria-hidden />
       {children}
     </a>
   )

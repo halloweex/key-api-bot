@@ -106,6 +106,32 @@ class TestTheGate:
         assert res.status_code == 403
         assert "admin" in res.json()["detail"].lower()
 
+    @pytest.mark.parametrize(
+        "sales_type",
+        ["Internal", "INTERNAL", "InTeRnAl", " internal", "internal ", "  internal  "],
+    )
+    def test_a_viewer_cannot_bypass_the_gate_with_casing_or_whitespace(
+        self, as_viewer, sales_type
+    ):
+        """The gate must normalise exactly as `validate_sales_type` does.
+
+        The gate reads the raw query value; the endpoint later runs it through
+        `validate_sales_type`, which does `.lower().strip()`. Any spelling the
+        validator folds into `internal` (case, surrounding whitespace) reaches
+        the internal-sales query, so the gate has to reject the same spellings —
+        otherwise `?sales_type=Internal` is an authorization bypass.
+        """
+        # Sanity: every variant the test sends really does normalise to internal.
+        assert validate_sales_type(sales_type) == "internal"
+        res = as_viewer.get(
+            "/api/summary", params={"period": "today", "sales_type": sales_type}
+        )
+        assert res.status_code == 403, (
+            f"viewer reached sales_type={sales_type!r} without admin — the gate "
+            f"compared the raw value while the endpoint normalised it"
+        )
+        assert "admin" in res.json()["detail"].lower()
+
     @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])
     def test_a_viewer_keeps_the_other_categories(self, as_viewer, sales_type):
         res = as_viewer.get(f"/api/summary?period=today&sales_type={sales_type}")

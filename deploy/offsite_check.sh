@@ -51,29 +51,15 @@ alert_chat_ids() {
         printf '%s' "$BACKUP_ALERT_CHAT_ID" | tr ',' '\n'
         return 0
     fi
-    _env_value ADMIN_USER_IDS | tr ',' '\n' | tr -d '[:space:]' || true
+    # tr -d '[:space:]' ел и переводы строк — оба id склеивались в один
+    # невалидный chat_id; BACKUP_ALERT_CHAT_ID это маскировал. Найдено 29.08.
+    _env_value ADMIN_USER_IDS | tr ',' '\n' | tr -d ' \t\r' || true
 }
 
-notify() {
-    local text="$1" token chat sent=0
-    token="$(_env_value BOT_TOKEN)"
-    if [ -z "$token" ]; then
-        echo "cannot alert: BOT_TOKEN missing from .env" >&2
-        return 0
-    fi
-    while read -r chat; do
-        [ -n "$chat" ] || continue
-        sent=1
-        # Never let a failed notification change the script's own outcome, and
-        # never let one unreachable admin stop the others being told.
-        curl -sS -m 15 -o /dev/null \
-            --data-urlencode "chat_id=$chat" \
-            --data-urlencode "text=$text" \
-            "https://api.telegram.org/bot${token}/sendMessage" || \
-            echo "alert delivery failed for one recipient" >&2
-    done <<< "$(alert_chat_ids)"
-    [ "$sent" -eq 1 ] || echo "cannot alert: ADMIN_USER_IDS is empty" >&2
-}
+# Step 07 of the alerts rework: one notifier for all host-cron shell —
+# the kill switch, the instance signature, and a best-effort row in the
+# alert archive. deploy/notify.sh owns the implementation.
+source deploy/notify.sh
 
 _where() { printf '%s · %s' "$(hostname)" "$(date '+%F %H:%M')"; }
 
@@ -139,7 +125,15 @@ fi
 # wrong teaches nobody what its silence means, and its own absence becomes
 # invisible — which is the failure it is here to prevent, applied to itself.
 echo "instruments ok: off-site ${AGE_HOURS}h, watchdog ${WD_LINE}"
-notify "$(printf '%s\n%s\n%s' \
-    "🫀 Приборы в порядке" \
-    "внешняя копия: ${AGE_HOURS}ч назад (порог ${MAX_AGE_HOURS}ч)" \
-    "сторож диска: ${WD_LINE} (порог ${WATCHDOG_MAX_AGE_HOURS}ч)")"
+# Weekly, not daily (owner's no-noise pass, 30.08): a daily "all fine" is
+# noise the reader learns to swipe, but this heartbeat is also the only
+# dead-man's switch on the off-site path itself — so it survives, on
+# Mondays. Failures above still alert every day. (Historical note: until
+# 29.08 this message reached nobody at all — the delivery bug in the old
+# notify(); the first heartbeat anyone actually receives is a weekly one.)
+if [ "$(date +%u)" = "1" ]; then
+    notify "$(printf '%s\n%s\n%s' \
+        "🫀 Приборы в порядке (недельный)" \
+        "внешняя копия: ${AGE_HOURS}ч назад (порог ${MAX_AGE_HOURS}ч)" \
+        "сторож диска: ${WD_LINE} (порог ${WATCHDOG_MAX_AGE_HOURS}ч)")"
+fi

@@ -26,8 +26,11 @@ router = APIRouter()
 
 @router.get("/expense-types")
 @limiter.limit("60/minute")
-async def get_expense_types(request: Request):
-    """Get list of expense types for filter dropdown."""
+async def get_expense_types(
+    request: Request,
+    _=Depends(require_permission("expenses", "view")),
+):
+    """Get list of expense types for filter dropdown. Requires expenses:view."""
     return await dashboard_service.get_expense_types()
 
 
@@ -41,8 +44,9 @@ async def get_expense_summary(
     source_id: Optional[int] = Query(None),
     expense_type_id: Optional[int] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _=Depends(require_permission("expenses", "view")),
 ):
-    """Get expense summary: breakdown by type, daily trend."""
+    """Get expense summary: breakdown by type, daily trend. Requires expenses:view."""
     try:
         validate_period(period)
         validate_source_id(source_id)
@@ -65,8 +69,9 @@ async def get_profit_analysis(
     end_date: Optional[str] = Query(None),
     source_id: Optional[int] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _=Depends(require_permission("expenses", "view")),
 ):
-    """Get profit analysis: revenue vs expenses comparison."""
+    """Get profit analysis: revenue vs expenses comparison. Requires expenses:view."""
     try:
         validate_period(period)
         validate_source_id(source_id)
@@ -87,8 +92,9 @@ async def get_expenses(
     period: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
+    _=Depends(require_permission("expenses", "view")),
 ):
-    """Get manual expenses list with optional filters."""
+    """Get manual expenses list with optional filters. Requires expenses:view."""
     from datetime import date, timedelta, datetime
     from zoneinfo import ZoneInfo
 

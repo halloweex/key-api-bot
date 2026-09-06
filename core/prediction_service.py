@@ -1379,13 +1379,15 @@ class PredictionService:
     ) -> None:
         """Notify admins that a freshly trained model was rejected (best-effort)."""
         try:
-            from bot.main import send_admin_message
-            await send_admin_message(
+            from core.alerting import raise_alert
+
+            condition = f"prediction:retrain_rejected:{sales_type}"
+            await raise_alert(
                 f"⚠️ Revenue model retrain REJECTED ({sales_type}).\n"
                 f"Reason: {reason}\n"
                 f"Holdout metrics: {metrics}\n"
                 "Previous model kept; forecast unchanged.",
-                key=f"prediction:retrain_rejected:{sales_type}",
+                conditions=[condition], bucket=condition,
             )
         except Exception as e:
             logger.warning(f"Failed to send model-rejected alert: {e}")

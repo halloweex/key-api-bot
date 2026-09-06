@@ -22,12 +22,14 @@ Vocabulary
 """
 from __future__ import annotations
 
+import html as html_module
+import importlib
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -1507,6 +1509,130 @@ def fetch_run_issues(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]
     return out
 
 
+# ─── What to do about it ─────────────────────────────────────────────────────
+#
+# Rule 1 of the alerts charter is "a page is an action". A CRITICAL that names
+# a check and a count still leaves the reader to work out which lever exists,
+# and the levers are not guessable: some of these conditions are repaired by a
+# job that is already running, some by one admin POST, and some — the archive
+# and the stock movements — must never be "repaired" at all, because the only
+# record of the fact is the thing that would be overwritten.
+#
+# Matched by longest prefix, because half of the check names are generated
+# (`fk_orphan_<child>_<fk>`, `freshness_<entity>`, `pk_uniqueness_<table>`) and
+# a table keyed on exact names would silently miss every one of them.
+REMEDIATION: Tuple[Tuple[str, str], ...] = (
+    ("mirror_", "Wait for the hourly re-ship; check meta.mirror_state. Never copy rows by hand"),
+    ("mirror_never_shipped", "Normal before Sunday (weekly sync writes it); after — a defect"),
+    ("mirror_backfill_pending", "POST /api/mirror/backfill/orders, then wait for 07:30"),
+    ("ch_", "Wait for the hourly ch_sync; stuck — check KS_CH_URL and the grant"),
+    ("ch_history_", "Lost in PG and CH at once is unrepairable — a human decides"),
+    ("order_versions_", "Do not repair: the archive is the only chronicle. Check the writer is alive"),
+    ("silver_", "Survived two ticks = real. POST /api/warehouse/refresh"),
+    ("gold_", "POST /api/warehouse/refresh rebuilds both layers"),
+    ("customer_profile_", "Rebuilt on the same tick; survives one — suspect Silver"),
+    ("freshness_", "The sync, not the warehouse: see the sync block in /api/health"),
+    ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),
+    ("pk_uniqueness_", "Duplicate primary key — a human with a query only"),
+    ("fk_orphan_", "Re-sync the parent first; never delete the children"),
+    ("not_null_", "Find the sync path that wrote it, then fix the rows"),
+    ("value_domain_", "The reader assuming the domain is at risk, not the row"),
+    ("headline_vs_line_items", "Standing (certificates); the signal is growth, not level"),
+    ("goods_shipped_without_sale", "By design (bloggers/seeding); the signal is growth"),
+    ("status_group_vs_return_list", "The source's status group wins over the legacy list"),
+    ("inventory_snapshot_gaps", "A missed day is gone for good; check the snapshot job"),
+    ("ch_reconcile_pending", "Wait for a fresh ch_sync — never reconcile a lagging copy"),
+)
+
+DEFAULT_REMEDIATION = (
+    "No lever written down — see CLAUDE.md «How a failure reaches a human», add one"
+)
+
+
+# Что находка значит для читателя — по-русски, коротко. Имя проверки в
+# скобках остаётся ключом для поиска; без перевода алерт говорит на языке
+# кода, а страница, которую не понять за три секунды, — шум.
+HUMAN_CHECK_NAMES: Dict[str, str] = {
+    "mirror_missing_rows": "rows missing from the copy",
+    "mirror_orphan_rows": "extra rows in the copy",
+    "mirror_row_values": "rows differ between copies",
+    "mirror_retired_rows": "retired in KeyCRM, copy remembers",
+    "mirror_never_shipped": "table never shipped",
+    "mirror_backfill_pending": "history not carried over yet",
+    "mirror_failing": "mirror failing",
+    "orders_without_line_items": "orders without line items",
+    "headline_vs_line_items": "order total ≠ line items",
+    "goods_shipped_without_sale": "shipments without a sale",
+    "gold_missing_cells": "days missing from Gold",
+    "gold_cell_values": "Gold cells differ",
+    "silver_row_values": "Silver differs between engines",
+    "order_versions_stalled": "version archive went silent",
+    "ch_engines_gold_mismatch": "two engines' Gold differ",
+    "ch_silver_roundtrip": "ClickHouse copy differs",
+    "ch_reconcile_pending": "ClickHouse copy lagging",
+    "freshness_orders": "orders not arriving",
+}
+
+
+def human_check_name(name: str) -> str:
+    label = HUMAN_CHECK_NAMES.get(name)
+    return f"{label} ({name})" if label else name
+
+
+def remediation_for(check_names: Iterable[str]) -> List[str]:
+    """The distinct "what to do" lines for a set of check names.
+
+    Longest prefix wins, so `mirror_never_shipped` gets its own sentence
+    rather than the generic `mirror_` one. Deduplicated and order-stable: an
+    alert naming eight `fk_orphan_*` checks should say the one useful thing
+    once.
+    """
+    lines: List[str] = []
+    for name in check_names:
+        best = ""
+        chosen = DEFAULT_REMEDIATION
+        for prefix, line in REMEDIATION:
+            if name.startswith(prefix) and len(prefix) > len(best):
+                best, chosen = prefix, line
+        if chosen not in lines:
+            lines.append(chosen)
+    return lines
+
+
+def machine_attempts_note(now: Optional[datetime] = None) -> Optional[str]:
+    """What the self-healing machinery has already tried in the last 24 h.
+
+    Rule 5 of the charter: an alert must not *trigger* a repair, but it owes
+    the reader the count. Without it the honest reading of a CRITICAL is "and
+    nothing is being done", which is false for every mirror finding — the
+    hourly ids-diffs have usually already re-shipped rows by the time the
+    07:30 comparison speaks.
+
+    Reads the two in-process heal ledgers. Returns None when neither has run,
+    which is the common case and must not produce an empty line.
+    """
+    reference = now or datetime.now(timezone.utc)
+    parts: List[str] = []
+    for label, module in (
+        ("buyers", "core.pg_buyers"), ("archive", "core.ch_history"),
+    ):
+        try:
+            heal = importlib.import_module(module).last_heal
+        except Exception:  # pragma: no cover - import failure is not an alert
+            continue
+        if not heal or "at" not in heal:
+            continue
+        age = (reference - heal["at"]).total_seconds()
+        if 0 <= age < 24 * 3600:
+            parts.append(
+                f"{label}: auto re-shipped {int(heal.get('shipped', 0))} "
+                f"rows {int(age // 60)}m ago"
+            )
+    if not parts:
+        return None
+    return "🤖 " + "; ".join(parts)
+
+
 def format_alert_message(
     layer: str,
     severity: Severity,
@@ -1515,43 +1641,63 @@ def format_alert_message(
     *,
     window: Optional[Tuple[date, date]] = None,
     max_lines: int = 12,
+    machine_note: Optional[str] = None,
 ) -> str:
-    """Build a Telegram-friendly summary. Pure function — no I/O.
+    """Три строки, по-русски: что случилось · сколько · что делать.
 
-    Shape:
-        🚨 Data Quality CRITICAL (reconciliation)
-        Window: 2026-02 .. 2026-05
-        ── Issues (1) ──
-        • fk_orphan_order_products_order_id: 3 orphans (sample: 88888)
-        ── Discrepancies (2) ──
-        • 2026-04 / src=1: orders DK=565 KC=566 (MISSING_IN_DK)
-        ...
+    Формат — ответ на прямую правку владельца 30.08: «коротко — ясно и по
+    сути». Обоснования рычагов живут в CLAUDE.md; детали — в журнале и у
+    агента-диагноста, который приходит вторым сообщением. Чистая функция.
+
+    Пример:
+        🚨 <b>Сверка копий: строки расходятся между копиями — 891</b>
+        • товар снят в KeyCRM, копия помнит — 1
+        → Жди часовой пере-шип; смотри meta.mirror_state
     """
     icon = {"CRITICAL": "🚨", "WARN": "⚠️", "INFO": "ℹ️"}[severity.value]
-    lines: List[str] = [f"{icon} *Data Quality {severity.value}* ({layer})"]
-    if window:
-        lines.append(f"Window: {window[0].isoformat()} .. {window[1].isoformat()}")
+    titles = {
+        "integrity": "Integrity",
+        "reconciliation": "KeyCRM check",
+        "mirror_landing": "Mirror check",
+        "reconciliation_pg": "Postgres vs KeyCRM",
+        "reconciliation_ch": "ClickHouse vs KeyCRM",
+    }
+    title = titles.get(layer, layer)
 
-    if issues:
-        lines.append(f"── Issues ({len(issues)}) ──")
-        for i in issues[:max_lines // 2]:
-            samples = (
-                f" (sample: {', '.join(str(s) for s in i.sample_ids[:3])})"
-                if i.sample_ids else ""
-            )
-            lines.append(f"• {i.check_name}: {i.count}{samples}")
-        if len(issues) > max_lines // 2:
-            lines.append(f"  …and {len(issues) - max_lines // 2} more")
-
-    if discrepancies:
-        lines.append(f"── Discrepancies ({len(discrepancies)}) ──")
-        for d in discrepancies[:max_lines]:
+    lines: List[str] = []
+    shown = sorted(issues, key=lambda i: (-i.severity.rank(), -i.count))
+    if shown:
+        first = shown[0]
+        head = f"{icon} <b>{title}: {human_check_name(first.check_name)} — {first.count}</b>"
+        lines.append(head)
+        for i in shown[1:4]:
+            lines.append(f"• {human_check_name(i.check_name)} — {i.count}")
+        if len(shown) > 4:
+            lines.append(f"• …+{len(shown) - 4} more")
+    elif discrepancies:
+        total_ids = sum(len(d.order_ids) for d in discrepancies)
+        lines.append(
+            f"{icon} <b>{title}: {len(discrepancies)} mismatches, "
+            f"~{total_ids or len(discrepancies)} orders</b>"
+        )
+        for d in discrepancies[:3]:
             lines.append(
-                f"• {d.month} / src={d.source_id}: {d.field} "
-                f"DK={d.dk_value:.0f} KC={d.kc_value:.0f} ({d.diff_class.value})"
+                f"• {d.month}/src{d.source_id} {d.field}: "
+                f"{d.dk_value:.0f}≠{d.kc_value:.0f}"
             )
-        if len(discrepancies) > max_lines:
-            lines.append(f"  …and {len(discrepancies) - max_lines} more")
+        if len(discrepancies) > 3:
+            lines.append(f"• …+{len(discrepancies) - 3} more")
+    else:
+        lines.append(f"{icon} <b>{title}: {severity.value}</b>")
+
+    if severity is not Severity.INFO:
+        actions = remediation_for(i.check_name for i in shown)
+        if not actions and discrepancies:
+            actions = ["Hand-check one order against KeyCRM before any rebuilds"]
+        for a in actions[:2]:
+            lines.append(f"→ {a}")
+        if machine_note:
+            lines.append(machine_note)
 
     return "\n".join(lines)
 
@@ -1603,14 +1749,108 @@ def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, An
 # A layer absent from this tuple has a null age forever, which the catch-up
 # reads as "never succeeded" and re-queues on every single restart.
 #
-# It is deliberately NOT in `bot/canary.py`'s `DQ_MAX_AGE_S` yet: that dict is
-# the paging path, it is opted into by name, and a layer with no track record
-# would page during the first deploy window — the canary's first probe is 90 s
-# after the bot starts, before the catch-up run has finished. The digest already
-# says a layer went silent, every morning it stays silent.
+# It was opted into `bot/canary.py`'s `DQ_MAX_AGE_S` on 28.08, once the layer
+# had a track record and had grown the step-2/5/6 comparisons; the worry it
+# was held back for — the canary's first probe firing 90 s after a restart,
+# before the catch-up run finishes — only bites when the layer is already past
+# 30 h at that restart, which is a genuine outage worth one page.
 WATCHED_LAYERS: Tuple[str, ...] = (
     "integrity", "reconciliation", "mirror_landing", "reconciliation_pg",
+    # The third arm of the source reconciliation: ClickHouse against the same
+    # 05:30 snapshot. Its own layer for reconciliation_pg's reason — an arm
+    # that stops running must not hide behind a fresh sibling.
+    "reconciliation_ch",
 )
+
+
+# ─── Evidence for the diagnostician ─────────────────────────────────────────
+#
+# The alert body carries a count. The finding carries the answer — its
+# `description` names the offending columns, and on 2026-09-01 that one line
+# ("Columns: updated_at (891), reserve (3), last_sale_date (3)") was the whole
+# diagnosis, sitting in `data_quality_issues` where nothing could reach it.
+#
+# The agent's runbook told it so: the DQ runs live in DuckDB, DuckDB is held
+# by the web container, and the agent's allowlist is read-only shell —
+# `psql -U ks_readonly`, `docker logs`, `curl` — with nothing that executes
+# code. It was sent to /api/health instead, which publishes ages and no
+# findings, and it twice produced a plausible, wrong story and advised
+# waiting.
+#
+# The answer is not to widen what the agent may run. It is to put the evidence
+# where its existing SELECT already reaches: `app.alert_events.context`, a
+# column revision 0012 created for exactly this and nothing has ever written.
+
+# Bounds, because this row is read by a person at 03:00 and by an agent on a
+# 300-second budget. Neither is served by an unbounded blob, and a run with
+# three thousand findings must not turn one INSERT into a megabyte.
+EVIDENCE_MAX_FINDINGS = 12
+EVIDENCE_MAX_DETAIL_CHARS = 400
+EVIDENCE_MAX_BYTES = 8192
+
+
+def evidence_for_agent(
+    layer: str,
+    issues: Sequence[IntegrityIssue],
+    discrepancies: Sequence[Discrepancy] = (),
+    *,
+    run_id: Optional[int] = None,
+) -> dict:
+    """What the alert could not say, in the shape a SELECT can read.
+
+    Ordered worst-first — CRITICAL before WARN, then by count — so that when
+    the bounds bite it is the trailing noise that goes, never the finding the
+    reader was sent here for.
+
+    Pure: builds a dict and touches nothing. The caller decides whether it
+    reaches the ledger, and a failure there must never cost an alert.
+    """
+    rank = {Severity.CRITICAL: 0, Severity.WARN: 1, Severity.INFO: 2}
+    ordered = sorted(
+        issues,
+        key=lambda i: (rank.get(i.severity, 3), -i.count, i.check_name),
+    )
+
+    findings = [
+        {
+            "check": i.check_name,
+            "table": i.table_name,
+            "severity": i.severity.value,
+            "count": i.count,
+            # Already capped at ten by the emitters; listed because "which
+            # rows" is the second question after "which columns".
+            "samples": list(i.sample_ids),
+            "detail": (i.description or "")[:EVIDENCE_MAX_DETAIL_CHARS],
+        }
+        for i in ordered[:EVIDENCE_MAX_FINDINGS]
+    ]
+
+    payload: dict = {"layer": layer, "findings": findings}
+    if run_id is not None:
+        # Lets the reader join back to data_quality_runs once somebody can
+        # open DuckDB — the ledger row is a pointer, not a replacement.
+        payload["run_id"] = run_id
+    if len(issues) > len(findings):
+        payload["findings_total"] = len(issues)
+
+    if discrepancies:
+        by_class: dict = {}
+        for d in discrepancies:
+            name = d.diff_class.value
+            by_class[name] = by_class.get(name, 0) + 1
+        payload["discrepancies"] = {"total": len(discrepancies), "by_class": by_class}
+
+    # Belt and braces: drop findings from the tail until it fits. Worst-first
+    # ordering is what makes this safe to do bluntly.
+    import json as _json
+
+    while findings and len(
+        _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    ) > EVIDENCE_MAX_BYTES:
+        findings.pop()
+        payload["findings_total"] = len(issues)
+
+    return payload
 
 
 def alert_fingerprint(
@@ -1695,6 +1935,7 @@ DIGEST_MAX_AGE_HOURS = {
     # and therefore its limit. A `reconciliation_pg` older than the
     # `reconciliation` beside it means the Postgres half stopped while the
     # DuckDB half kept going — which is precisely why it is a layer of its own.
+    "reconciliation_ch": 30,
     "reconciliation_pg": 30,
 }
 
@@ -1717,13 +1958,18 @@ class DigestSection:
 
 
 def _delta_note(check_name: str, count: int, previous: List[Dict[str, Any]]) -> str:
-    """'new', 'unchanged', or '+12 since the last run'."""
+    """«новое», «=», или «+12».
+
+    «=» вместо слова: дельта — самое частое, что читатель сканирует, и один
+    символ читается быстрее слова. Логика `news` в build_digest сверяется с
+    этим значением — меняются вместе.
+    """
     for p in previous:
         if p["check_name"] == check_name:
             diff = count - int(p["count"])
             if diff == 0:
-                return "unchanged"
-            return f"{diff:+d} since the last run"
+                return "="
+            return f"{diff:+d}"
     return "new"
 
 
@@ -1795,16 +2041,16 @@ def build_digest(
 
     for s in sorted(sections, key=lambda x: x.layer):
         if s.run is None:
-            body.append(f"*{s.layer}* — no successful run on record")
+            body.append(f"<b>{s.layer}</b> — no successful run")
             news = True
             continue
 
         limit = DIGEST_MAX_AGE_HOURS.get(s.layer)
         stale = limit is not None and s.age_hours is not None and s.age_hours > limit
         when = (s.run.get("started_at") or "")[:16].replace("T", " ")
-        head = f"*{s.layer}* · {s.run.get('status')} · {when}"
+        head = f"<b>{s.layer}</b> · {s.run.get('status')} · {when}"
         if stale:
-            head += f" · ⏳ {s.age_hours:.0f}h old (>{limit}h)"
+            head += f" · ⏳ silent {s.age_hours:.0f}h"
             news = True
         body.append(head)
 
@@ -1817,14 +2063,17 @@ def build_digest(
                 note = _delta_note(i["check_name"], int(i["count"]), s.previous_issues)
                 if i.get("severity") != "INFO":
                     standing = True
-                    if note != "unchanged":
+                    if note != "=":
                         news = True
-                body.append(f"• {i['check_name']}: {i['count']:,} ({note})")
-                desc = (i.get("description") or "").strip()
-                if desc:
-                    body.append(f"  ↳ {desc[:200]}")
+                # Одна строка на находку, человеческим именем и с дельтой.
+                # 200-символьные описания владелец назвал визуальным шумом —
+                # их дом теперь журнал и дашборд, не телефон.
+                body.append(
+                    f"• {human_check_name(i['check_name'])}: "
+                    f"{i['count']:,} ({note})"
+                )
             if len(s.issues) > max_issue_lines:
-                body.append(f"  …and {len(s.issues) - max_issue_lines} more")
+                body.append(f"  …+{len(s.issues) - max_issue_lines} more")
                 # A finding past the cut has no line and so no delta of its
                 # own. Suppressing on a "quiet" the reader cannot see would be
                 # a guess; say the digest and let them scroll.
@@ -1848,13 +2097,13 @@ def build_digest(
                     f"DK={d['dk_value']:,.0f} KC={d['kc_value']:,.0f} ({d['diff_class']})"
                 )
             if len(s.diffs) > max_diff_lines:
-                body.append(f"  …and {len(s.diffs) - max_diff_lines} more")
+                body.append(f"  …+{len(s.diffs) - max_diff_lines} more")
 
         if not s.issues and not s.diffs and not stale:
             body.append("• clean")
 
     if news:
-        return "\n".join(["📋 *Data quality digest*", ""] + body)
+        return "\n".join(["📋 <b>Data quality</b>", ""] + body)
 
     if not standing:
         return None
@@ -1867,17 +2116,10 @@ def build_digest(
         if now - since < restate_after:
             return None
         days = max(1, int((now - since).days))
-        footer = (
-            f"_Nothing has changed since the last digest {days}d ago. "
-            "Repeated weekly so a standing finding is not forgotten; "
-            "the days in between stay quiet._"
-        )
+        footer = f"<i>Unchanged for {days}d; weekly restatement.</i>"
     else:
-        footer = (
-            "_Standing findings, restated. The digest is quiet on days "
-            "nothing changes._"
-        )
-    return "\n".join(["📋 *Data quality digest*", ""] + body + ["", footer])
+        footer = "<i>Standing findings; quiet on unchanged days.</i>"
+    return "\n".join(["📋 <b>Data quality</b>", ""] + body + ["", footer])
 
 
 def fetch_last_success_ages(

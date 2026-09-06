@@ -16,7 +16,6 @@ from web.main import app
 from web.routes.auth import (
     session_serializer,
     create_session_data,
-    require_admin,
     SESSION_COOKIE,
 )
 from core.permissions import ADMIN_USER_IDS
@@ -28,6 +27,7 @@ CSV_PATH = "/api/customers/sms-segments/export/csv"
 RESULTS_PATH = "/api/customers/sms-campaigns/aug/results"
 TEST_SEND_PATH = "/api/customers/sms/test-send"
 CHANNELS_PATH = "/api/customers/sms/channels"
+OPTOUT_PATH = "/api/customers/sms-campaigns/optout"
 
 
 def _make_cookie(user_id: int, role: str = "admin") -> str:
@@ -77,6 +77,45 @@ def _deps(path: str, method: str = "GET") -> set:
     return set(route_dependencies(app, path, method))
 
 
+def _permission_gates(path: str, method: str = "GET") -> set:
+    """The (feature, action) pairs a route's permission dependencies demand.
+
+    Read out of the closure `require_permission` builds rather than matched by
+    name: a dependency that stopped checking anything would still be called
+    `check_permission`, and the point of this assertion is that the check is
+    really there.
+    """
+    gates = set()
+    for dep in _deps(path, method):
+        code = getattr(dep, "__code__", None)
+        closure = getattr(dep, "__closure__", None)
+        if code is None or not closure:
+            continue
+        cells = dict(zip(code.co_freevars, closure))
+        if "feature" not in cells or "action" not in cells:
+            continue
+        gates.add((cells["feature"].cell_contents, cells["action"].cell_contents))
+    return gates
+
+
+def _role_store(role: str):
+    """A store stub that reports one role and knows nothing else.
+
+    Having no `seed_default_permissions` is deliberate: the permission lookup
+    falls back to the hardcoded matrix, which is what this file is asserting
+    about.
+    """
+
+    class _Store:
+        async def get_user(self, uid):
+            return {"status": "approved", "role": role}
+
+    async def _fake_get_store():
+        return _Store()
+
+    return _fake_get_store
+
+
 def _customer(buyer_id: int, tier: str, assignment: str) -> dict:
     return {
         "buyerId": buyer_id,
@@ -112,6 +151,12 @@ class _FakeStore:
         self.truncated = False
         self.result_calls = []
         self.results_error = None
+        self.optouts = []
+
+    async def add_marketing_optout(self, **kwargs):
+        self.optouts.append(kwargs)
+        return {"buyerId": kwargs.get("buyer_id"), "channel": "sms",
+                "totalOptouts": len(self.optouts)}
 
     async def get_sms_campaign_results(self, campaign, window_days=30,
                                        delivered_only=False):
@@ -194,38 +239,80 @@ def store(monkeypatch):
 # ─── Authorization ────────────────────────────────────────────────────────
 
 class TestSmsSegmentsAuth:
-    """PII endpoints must be admin-only, not merely session-gated."""
+    """PII endpoints need the `sms` permission, not merely a session.
+
+    They stopped being admin-only on purpose: running a campaign is grantable
+    without user management, expenses, margin and internal sales attached. What
+    must not slip is the other direction — a plain viewer reaching the roster.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_permission_cache(self):
+        from core.permissions import invalidate_permissions_cache
+
+        invalidate_permissions_cache()
+        yield
+        invalidate_permissions_cache()
 
     @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH, RESULTS_PATH])
     def test_requires_session(self, client, path):
         assert client.get(path).status_code == 401
 
-    @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH])
-    def test_requires_admin_dependency(self, path):
-        route = _route(path)
-        assert route is not None, f"{path} is not registered"
-        assert require_admin in _deps(path), \
-            f"{path} exports phone numbers and must keep require_admin"
+    # The method is spelled out rather than derived from the path: the rule
+    # that derived it read "send" out of the path, and "/sent" does not contain
+    # it — so the one gate that decides where every measurement window starts
+    # would have been looked up as a GET and silently found nothing.
+    @pytest.mark.parametrize("method,path,gate", [
+        ("GET", SEGMENTS_PATH, ("sms", "view")),
+        ("GET", CSV_PATH, ("sms", "edit")),
+        # The templated form: routes are looked up by declaration, not by a
+        # filled-in campaign name.
+        ("GET", "/api/customers/sms-campaigns/{campaign}/results", ("sms", "view")),
+        ("POST", "/api/customers/sms-campaigns/{campaign}/send", ("sms", "edit")),
+        ("POST", "/api/customers/sms-campaigns/{campaign}/sent", ("sms", "edit")),
+        ("GET", "/api/customers/sms-campaigns", ("sms", "view")),
+    ])
+    def test_permission_gate(self, method, path, gate):
+        assert _route(path, method) is not None, f"{path} is not registered"
+        assert gate in _permission_gates(path, method), \
+            f"{path} must be gated on {gate}, found {_permission_gates(path, method)}"
 
     @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH])
     def test_viewer_is_forbidden(self, client, monkeypatch, path):
         viewer_id = 555_000_222
         assert viewer_id not in ADMIN_USER_IDS
 
-        class _Store:
-            async def get_user(self, uid):
-                return {"status": "approved", "role": "viewer"}
-
-        async def _fake_get_store():
-            return _Store()
-
-        monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
+        monkeypatch.setattr("core.duckdb_store.get_store", _role_store("viewer"))
 
         r = client.get(
             path,
             headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(viewer_id, role='viewer')}"},
         )
         assert r.status_code == 403
+
+    @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH])
+    def test_marketer_is_allowed(self, client, store, monkeypatch, path):
+        marketer_id = 555_000_333
+        assert marketer_id not in ADMIN_USER_IDS
+
+        monkeypatch.setattr("core.duckdb_store.get_store", _role_store("marketer"))
+
+        r = client.get(
+            path,
+            params={"campaign": "aug-promo"},
+            headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(marketer_id, role='marketer')}"},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_viewer_cannot_pull_customer_rows(self, client, store, monkeypatch):
+        """`view` is sizes. The rows themselves are names and phone numbers."""
+        monkeypatch.setattr("core.duckdb_store.get_store", _role_store("viewer"))
+
+        headers = {"Cookie": f"{SESSION_COOKIE}={_make_cookie(555_000_444, role='viewer')}"}
+        assert client.get(SEGMENTS_PATH, headers=headers).status_code == 403
+        assert client.get(
+            SEGMENTS_PATH, params={"include_customers": "true"}, headers=headers,
+        ).status_code == 403
 
 
 # ─── JSON endpoint ────────────────────────────────────────────────────────
@@ -528,10 +615,10 @@ def gateway(monkeypatch):
 class TestTestSend:
     """A rehearsal must reach the gateway and touch nothing else."""
 
-    def test_requires_admin_dependency(self):
+    def test_sending_needs_edit_permission(self):
         assert _route(TEST_SEND_PATH, "POST") is not None, \
             "test-send is not registered"
-        assert require_admin in _deps(TEST_SEND_PATH, "POST")
+        assert ("sms", "edit") in _permission_gates(TEST_SEND_PATH, "POST")
 
     def test_requires_session(self, client):
         assert client.post(
@@ -600,6 +687,65 @@ class TestTestSend:
         assert "not configured" in r.json()["detail"]
 
 
+# ─── Opt-out ──────────────────────────────────────────────────────────────
+
+class TestOptout:
+    """Recording an opt-out must store a phone the segmentation can match.
+
+    Segmentation suppresses a customer when their buyer_id OR their phone is in
+    ``marketing_optouts`` (customers.py exclusion: ``o.phone = scored.phone``),
+    and the phone it compares against is the canonical 380+9-digit form
+    (``length(phone)=12 AND phone LIKE '380%'``). So a phone stored in any other
+    shape silently never suppresses by phone — the very case the phone column
+    exists for (the same number under a second buyer record).
+    """
+
+    def test_optout_needs_edit_permission(self):
+        assert _route(OPTOUT_PATH, "POST") is not None, \
+            "optout is not registered"
+        assert ("sms", "edit") in _permission_gates(OPTOUT_PATH, "POST")
+
+    def test_requires_session(self, client):
+        assert client.post(
+            OPTOUT_PATH, params={"buyer_id": 1},
+        ).status_code == 401
+
+    def test_normalises_the_phone(self, client, store):
+        r = client.post(
+            OPTOUT_PATH,
+            params={"buyer_id": 1, "phone": "+38 (096) 111-11-11"},
+            headers=_admin_headers(),
+        )
+
+        assert r.status_code == 200
+        assert store.optouts == [
+            {"buyer_id": 1, "phone": "380961111111", "reason": "manual",
+             "source": str(ADMIN_ID)},
+        ], "a phone that isn't canonical can never suppress by phone"
+
+    def test_buyer_only_optout_still_works(self, client, store):
+        r = client.post(
+            OPTOUT_PATH, params={"buyer_id": 7}, headers=_admin_headers(),
+        )
+
+        assert r.status_code == 200
+        assert store.optouts == [
+            {"buyer_id": 7, "phone": None, "reason": "manual",
+             "source": str(ADMIN_ID)},
+        ]
+
+    @pytest.mark.parametrize("phone", ["0961111111", "380961111", "123456789012"])
+    def test_rejects_a_phone_a_campaign_could_not_contain(self, client, store, phone):
+        r = client.post(
+            OPTOUT_PATH, params={"buyer_id": 1, "phone": phone},
+            headers=_admin_headers(),
+        )
+
+        # 400 from the 380-prefix rule, 422 when too short/long for the field.
+        assert r.status_code in (400, 422)
+        assert store.optouts == [], "garbage must not reach the stoplist"
+
+
 class TestChannelSelection:
     """Viber is a different message, not a nicer SMS — the route has to say so."""
 
@@ -613,9 +759,9 @@ class TestChannelSelection:
         assert body["sms"] is True
         assert body["viber"] is False
 
-    def test_channels_endpoint_is_admin_only(self):
+    def test_channels_endpoint_needs_sms_permission(self):
         assert _route(CHANNELS_PATH) is not None
-        assert require_admin in _deps(CHANNELS_PATH)
+        assert ("sms", "view") in _permission_gates(CHANNELS_PATH)
 
     def test_hybrid_send_passes_a_viber_message(self, client, gateway):
         client.post(
@@ -854,3 +1000,139 @@ class TestPartialSend:
         client.post(self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers())
 
         assert "released" not in sending_store
+
+
+class TestSendClaimIsNotAbandoned:
+    """Every way out of /send that sends nothing must hand the claim back.
+
+    `get_sms_campaign_targets` stamps `sent_at` before a single message leaves,
+    which is what stops two requests both messaging the roster. The cost of
+    stamping first is that the route now owns a claim, and the store's contract
+    says so in as many words: a caller that ends up sending nothing must
+    release it or the campaign is stuck.
+
+    Stuck is not a temporary state. Nothing clears `sent_at` again — a second
+    send is refused as a double-send, re-freezing is refused because the roster
+    is the control group, and `mark_sms_campaign_sent` only ever writes another
+    timestamp. The roster is the only control group that campaign will ever
+    have, so abandoning the claim destroys the measurement outright, and
+    `/results` goes on reporting a window that starts at a send that never
+    happened.
+    """
+
+    SEND_PATH = "/api/customers/sms-campaigns/aug/send"
+
+    class _ClaimingStore:
+        """Claims and releases the way the real store does.
+
+        A stub that ignored the stamp would let an abandoned claim pass
+        unnoticed, which is the whole defect.
+        """
+
+        def __init__(self, targets):
+            self._targets = targets
+            self.sent_at = None
+
+        async def get_sms_campaign_targets(self, campaign):
+            if self.sent_at is not None:
+                raise ValueError(
+                    f"campaign {campaign!r} was already sent on {self.sent_at} — "
+                    f"sending twice would double-message the roster"
+                )
+            self.sent_at = "2026-08-28T12:00:00"
+            return list(self._targets)
+
+        async def release_sms_campaign(self, campaign):
+            self.sent_at = None
+
+        async def record_sms_send(self, campaign, accepted, stoplisted, failed, **kw):
+            return {"campaign": campaign, "accepted": len(accepted),
+                    "stoplisted": len(stoplisted), "failed": len(failed)}
+
+    @pytest.fixture
+    def claiming(self, monkeypatch, request):
+        targets = getattr(request, "param", [
+            {"buyerId": 1, "phone": "380961111111", "tier": "CORE"},
+        ])
+        store = self._ClaimingStore(targets)
+
+        async def _fake_get_store():
+            return store
+
+        monkeypatch.setattr("web.routes.api.customers.get_store", _fake_get_store)
+
+        class _Unreachable:
+            async def __aenter__(self):
+                raise AssertionError("the gateway must not be reached")
+
+            async def __aexit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(
+            "web.routes.api.customers.TurboSmsClient", lambda *a, **kw: _Unreachable()
+        )
+        return store
+
+    def test_a_rejected_viber_button_does_not_burn_the_campaign(
+        self, client, claiming,
+    ):
+        """A caption with no URL is caller error, caught after the claim.
+
+        The Viber message is assembled from query parameters alone and knows
+        nothing about the roster, so a 400 here means nothing was ever going to
+        be sent — and the campaign has to survive it.
+        """
+        r = client.post(
+            self.SEND_PATH,
+            params={"text": "hi", "channel": "viber_sms", "button_caption": "Shop"},
+            headers=_admin_headers(),
+        )
+
+        assert r.status_code == 400
+        assert claiming.sent_at is None, \
+            "a campaign nothing was sent for must stay sendable"
+
+    def test_the_campaign_can_still_be_sent_after_a_rejected_button(
+        self, client, claiming, monkeypatch,
+    ):
+        """The consequence, stated as the operator meets it."""
+        client.post(
+            self.SEND_PATH,
+            params={"text": "hi", "channel": "viber_sms", "button_caption": "Shop"},
+            headers=_admin_headers(),
+        )
+
+        from core.turbosms import SendResult
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def send(self, phones, text, viber=None):
+                return [SendResult(phone=p, message_id=f"m-{p}", code=0, status="OK")
+                        for p in phones]
+
+        monkeypatch.setattr(
+            "web.routes.api.customers.TurboSmsClient", lambda *a, **kw: _Client()
+        )
+
+        r = client.post(self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers())
+
+        assert r.status_code == 200, \
+            f"the corrected send must go through, got {r.status_code}: {r.text}"
+
+    @pytest.mark.parametrize("claiming", [[]], indirect=True)
+    def test_a_roster_with_no_targets_does_not_burn_the_campaign(
+        self, client, claiming,
+    ):
+        """Emptiness is only knowable after the claim, so it must be released."""
+        r = client.post(
+            self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers(),
+        )
+
+        assert r.status_code == 409
+        assert claiming.sent_at is None, \
+            "nothing was sent, so the stamp is a lie that cannot be undone"

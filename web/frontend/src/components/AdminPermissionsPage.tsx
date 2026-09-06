@@ -24,11 +24,12 @@ import { Badge } from './Badge'
 import { DataTable, Tr, Th } from './DataTable'
 import { Wrapper } from './Wrapper'
 
-type RoleTone = 'purple' | 'blue' | 'slate'
+type RoleTone = 'purple' | 'blue' | 'green' | 'slate'
 
 const roleConfig: Record<UserRole, { label: string; tone: RoleTone }> = {
   admin: { label: 'Admin', tone: 'purple' },
   editor: { label: 'Editor', tone: 'blue' },
+  marketer: { label: 'Marketer', tone: 'green' },
   viewer: { label: 'Viewer', tone: 'slate' },
 }
 
@@ -145,10 +146,10 @@ export function AdminPermissionsPage() {
         subtitle="Configure feature access for each role"
         actions={
           <>
-            <PageHeaderLink href="/admin/users" icon={<Users className="w-4 h-4" />}>
+            <PageHeaderLink href="/admin/users" icon={Users}>
               Users
             </PageHeaderLink>
-            <PageHeaderLink href="/" icon={<ArrowLeft className="w-4 h-4" />}>
+            <PageHeaderLink href="/" icon={ArrowLeft}>
               Dashboard
             </PageHeaderLink>
           </>
@@ -217,7 +218,7 @@ export function AdminPermissionsPage() {
       </Card>
 
       <Wrapper marginTop="lg">
-        <InfoBanner icon={<Info className="w-5 h-5" />} title="How permissions work">
+        <InfoBanner icon={Info} title="How permissions work">
           <ul className="space-y-1">
             <li><strong>View</strong> - User can see this feature in the dashboard</li>
             <li><strong>Edit</strong> - User can create and modify data (requires View)</li>

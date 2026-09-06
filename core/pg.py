@@ -39,9 +39,18 @@ VERSION_TABLE_SCHEMA = "meta"
 VERSION_TABLE = "alembic_version"
 
 # The revision this code requires. Bumped in the same commit as the migration
-# that introduces it, so a deploy carrying new reads and an un-migrated database
-# is a startup failure rather than a runtime surprise.
-REQUIRED_REVISION = "0006_silver_orders"
+# that introduces it.
+#
+# `require_revision` is called by each Postgres operation, **not at startup** —
+# the comment here used to claim otherwise, and `web/main.py` does not import
+# this module at all. So a deploy carrying new reads against an un-migrated
+# database starts normally and then: the mirror of landing keeps working (it
+# does not gate), while `rebuild_silver`, `rebuild_gold`, the backfill and all
+# three reconciliations raise `SchemaVersionError`. The rebuilds are swallowed
+# and logged, the checks persist failed runs, and the layer ages go stale —
+# which is what the digest and the canary read. It fails closed and it is not
+# silent, but it is the next morning's message, not a crash loop.
+REQUIRED_REVISION = "0015_inventory_views_today"
 
 _pool: Optional[Any] = None
 _pool_lock = asyncio.Lock()

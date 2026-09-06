@@ -349,3 +349,150 @@ class TestWiring:
         )
         assert spec.key_columns == ("manager_id", "valid_from")
         assert spec.synced_column == "set_at"
+
+
+class TestIgnoredBookkeepingColumns:
+    """A column that records when the copy was taken, not what it holds.
+
+    `app.sku_inventory_status.updated_at` is stamped on every row by every
+    DuckDB rebuild, and the replica is copied minutes before the next one — so
+    the two stores disagree on it for 891 of 891 rows, permanently. It fired
+    CRITICAL for days from 2026-09-01 while hiding the three rows that really
+    did differ.
+    """
+
+    def _spec(self, **kw):
+        from core.mirror_reconciliation import MirroredTable
+        base = dict(
+            pg_table="app.sku_inventory_status",
+            dk_table="sku_inventory_status",
+            columns=("offer_id", "quantity", "reserve", "updated_at"),
+            key_columns=("offer_id",),
+            synced_column="updated_at",
+            full_replace=True,
+        )
+        base.update(kw)
+        return MirroredTable(**base)
+
+    def test_the_stamp_alone_no_longer_makes_rows_differ(self):
+        from core.mirror_reconciliation import _normalise_row
+        spec = self._spec(ignore_columns=("updated_at",))
+        dk = _normalise_row((7, 5, 2, "2026-09-03T04:14"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        pg = _normalise_row((7, 5, 2, "2026-09-03T03:13"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        assert dk == pg
+
+    def test_a_real_difference_beside_the_stamp_still_shows(self):
+        """The three `reserve` rows are the signal the 891 was burying."""
+        from core.mirror_reconciliation import _normalise_row
+        spec = self._spec(ignore_columns=("updated_at",))
+        dk = _normalise_row((7, 5, 9, "2026-09-03T04:14"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        pg = _normalise_row((7, 5, 2, "2026-09-03T03:13"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        assert dk != pg
+
+    def test_without_the_setting_the_stamp_still_differs(self):
+        """Guards the default: this is opt-in per table, not a blanket rule."""
+        from core.mirror_reconciliation import _normalise_row
+        spec = self._spec()
+        dk = _normalise_row((7, 5, 2, "2026-09-03T04:14"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        pg = _normalise_row((7, 5, 2, "2026-09-03T03:13"), spec.columns,
+                            spec.numeric, spec.ignore_columns)
+        assert dk != pg
+
+    def test_masking_does_not_move_the_key(self):
+        """`_row_key` and `sample_index` address by position, so the ignored
+        column is substituted rather than dropped."""
+        from core.mirror_reconciliation import _normalise_row, _row_key
+        spec = self._spec(ignore_columns=("updated_at",))
+        row = (7, 5, 2, "whenever")
+        assert len(_normalise_row(row, spec.columns, spec.numeric,
+                                  spec.ignore_columns)) == len(spec.columns)
+        assert _row_key(spec, row) == 7
+        assert spec.sample_index == 0
+
+    def test_the_live_spec_ignores_the_stamp_and_nothing_else(self):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+        by_table = {s.pg_table: s for s in OPERATIONAL_TABLES}
+        sku = by_table["app.sku_inventory_status"]
+        assert sku.ignore_columns == ("updated_at",)
+        assert "updated_at" in sku.columns, "still shipped and still the clock"
+        assert sku.synced_column == "updated_at"
+        # checked_at is deliberately both clock and compared value.
+        assert by_table["app.order_backfill_misses"].ignore_columns == ()
+        assert by_table["app.inventory_history"].ignore_columns == ()
+
+
+class TestSyncedColumnDualRole:
+    """A stamp may be both the clock and a compared value — on one condition.
+
+    `synced_column` normally sits outside `columns` (landing's `synced_at`), and
+    `fetch_duckdb_rows` promises it is "read alongside but never compared". When
+    a spec lists it in `columns` too, that promise is only kept by the grace
+    window, and the grace window is per row.
+
+    So the rule is: **a dual-role stamp is safe exactly when the writer stamps
+    one row at a time.**
+
+      * `order_backfill_misses.checked_at` — moves when that id is re-recorded;
+      * `inventory_history.recorded_at`    — `DELETE ... WHERE date = ?` then
+        re-insert, so only today's row is ever restamped;
+      * `manager_classifications.set_at`   — a human's decision, carried
+        through the full replace.
+
+    `sku_inventory_status.updated_at` is the one that broke it: the refresh is
+    a whole-table DELETE+INSERT writing CURRENT_TIMESTAMP to all 891 rows, so
+    the grace stopped being per-row and became all-or-nothing — every row
+    forgiven, or every row reported. It reported 891 for days.
+
+    This test exists so the next spec with a dual-role stamp has to say which
+    kind it is, instead of finding out in production.
+    """
+
+    # Reviewed 2026-09-03. Adding a spec here is a claim that its writer
+    # stamps one row at a time; if it rewrites the table, it belongs in
+    # `ignore_columns` instead.
+    PER_ROW_STAMPS = {
+        "app.manager_classifications": "set_at",
+        "app.order_backfill_misses": "checked_at",
+        "app.inventory_history": "recorded_at",
+    }
+    WHOLE_TABLE_STAMPS = {
+        "app.sku_inventory_status": "updated_at",
+    }
+
+    def _dual_role(self):
+        from core.mirror_reconciliation import MIRRORED_TABLES, OPERATIONAL_TABLES
+        return {
+            s.pg_table: s
+            for s in tuple(MIRRORED_TABLES) + tuple(OPERATIONAL_TABLES)
+            if s.synced_column and s.synced_column in s.columns
+        }
+
+    def test_every_dual_role_spec_has_been_classified(self):
+        """The guard: a new one fails here until somebody decides which it is."""
+        known = set(self.PER_ROW_STAMPS) | set(self.WHOLE_TABLE_STAMPS)
+        found = set(self._dual_role())
+        assert found == known, (
+            "a spec now lists its synced_column in columns and is not "
+            f"classified: {found ^ known}. Decide whether its writer stamps "
+            "one row at a time (leave it compared) or the whole table (add it "
+            "to ignore_columns), then record the answer here."
+        )
+
+    def test_per_row_stamps_stay_compared(self):
+        """Not swept up by the fix: on these the comparison is meaningful."""
+        specs = self._dual_role()
+        for table, column in self.PER_ROW_STAMPS.items():
+            assert specs[table].synced_column == column
+            assert column not in specs[table].ignore_columns, table
+
+    def test_whole_table_stamps_are_never_compared(self):
+        specs = self._dual_role()
+        for table, column in self.WHOLE_TABLE_STAMPS.items():
+            assert specs[table].synced_column == column
+            assert column in specs[table].ignore_columns, table
+            assert column in specs[table].columns, "still shipped, still the clock"

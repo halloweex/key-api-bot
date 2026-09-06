@@ -3,17 +3,20 @@ import { type ReactNode } from 'react'
 // ─── PageShell ───────────────────────────────────────────────────────────────
 //
 // The <main> wrapper for top-level pages. Two variants:
-//   feature  — page inside the AppShell sidebar layout (Traffic, Reports,
-//              Marketing, Inventory, ProductIntel, Margin). Fills the flex
-//              parent, scrolls internally, centred content column with
-//              vertical rhythm between sections.
+//   feature  — any page inside the AppShell sidebar layout (Dashboard,
+//              Traffic, Reports, Marketing, Inventory, ProductIntel, Margin,
+//              SMS). Fills the flex parent, scrolls internally, centred
+//              content column with the page rhythm between sections.
 //   admin    — standalone admin page (no AppShell). Centred narrower max
 //              width, generous padding, no internal rhythm.
 //
 // Page-level layout/visual chrome is owned entirely by this primitive. Pages
-// just compose: <PageShell><Heading/><Card/>...</PageShell>. The `feature`
-// variant wraps children in a centred content column with consistent
-// section spacing; consumers don't repeat that wrapper.
+// just compose: <PageShell><Heading/><Card/>...</PageShell>.
+//
+// THE PAGE RHYTHM: 16px → 24px (sm+) between top-level blocks — one value on
+// every tab, owned here (vertically) and by <ChartGrid> (side-by-side).
+// Pages never write their own section spacing; if two tabs disagree about a
+// gap, one of them is bypassing this component.
 
 type Variant = 'feature' | 'admin'
 

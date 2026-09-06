@@ -88,10 +88,10 @@ export function AdminUsersPage() {
         subtitle="Manage user roles and access permissions"
         actions={
           <>
-            <PageHeaderLink href="/admin/permissions" icon={<ShieldCheck className="w-4 h-4" />}>
+            <PageHeaderLink href="/admin/permissions" icon={ShieldCheck}>
               Permissions
             </PageHeaderLink>
-            <PageHeaderLink href="/" icon={<ArrowLeft className="w-4 h-4" />}>
+            <PageHeaderLink href="/" icon={ArrowLeft}>
               Dashboard
             </PageHeaderLink>
           </>

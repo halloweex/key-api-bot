@@ -358,8 +358,16 @@ def require_admin_for_internal(user: dict, sales_type: str | None) -> None:
 
     Note `sales_type=all` still spans every category, as it always has; it
     reveals a total, not who is inside it.
+
+    The value is normalised the same way ``validate_sales_type`` normalises it
+    (``.lower().strip()``) *before* the comparison. The gate reads the raw query
+    string, but the endpoint downstream folds ``Internal``/`` internal `` into
+    ``internal`` — so without matching that folding here, casing or surrounding
+    whitespace would slip an internal request past the gate only to be run as
+    internal. ``None`` and the empty string stay non-``internal`` and pass.
     """
-    if sales_type != "internal":
+    normalized = sales_type.lower().strip() if isinstance(sales_type, str) else sales_type
+    if normalized != "internal":
         return
     user_id = user.get("user_id")
     if user.get("role") != "admin" and not is_hardcoded_admin(user_id):
@@ -386,6 +394,25 @@ async def require_admin(request: Request) -> dict:
         raise HTTPException(status_code=403, detail="Admin access required")
 
     return user
+
+
+async def has_permission(user: dict, feature: str, action: str = "view") -> bool:
+    """Does this user hold `action` on `feature`? Never raises.
+
+    The counterpart to ``require_permission`` for the cases a dependency
+    cannot express — one endpoint whose *arguments* decide how much access it
+    needs, such as an SMS roster that returns sizes to a viewer and names and
+    phone numbers to whoever may send.
+    """
+    from core.permissions import get_permissions_for_role_async
+
+    if is_hardcoded_admin(user.get("user_id")):
+        return True
+    try:
+        permissions = await get_permissions_for_role_async(user.get("role", "viewer"))
+    except Exception:  # noqa: BLE001 — an unreadable matrix must deny, not crash
+        return False
+    return bool(permissions.get(feature, {}).get(action, False))
 
 
 def require_permission(feature: str, action: str = "view"):

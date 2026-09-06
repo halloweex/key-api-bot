@@ -15,9 +15,9 @@ networks:
   # exists on the host:  docker network create ks-data
   #
   # THE TRAP, and it now lives in this file: the moment a service here gains a
-  # `networks:` key it stops joining `default` implicitly. `postgres` below
-  # therefore lists BOTH. Do not add a `networks:` key to web, bot, nginx or
-  # meilisearch without also listing `default` — nginx would lose
+  # `networks:` key it stops joining `default` implicitly. `postgres` and
+  # `web` below therefore list BOTH. Do not add a `networks:` key to bot,
+  # nginx or meilisearch without also listing `default` — nginx would lose
   # `proxy_pass http://web` and fail silently, because it only resolves the
   # name when a request arrives, so nothing complains at startup.
   ks-data:
@@ -52,11 +52,14 @@ services:
       KS_APP_PASSWORD: ${KS_APP_PASSWORD:?set it in .env}
       KS_READONLY_PASSWORD: ${KS_READONLY_PASSWORD:?set it in .env}
     # Sized for a host with 7.7 GiB total that already peaks near 5 GiB during
-    # the nightly export.
+    # the nightly export. 128 → 256 MB on 28.08: the database crossed 140 MB
+    # (the order-versions baseline alone is 25 MB), so the working set no
+    # longer fit — and the standing rule is that this is the cheap answer to
+    # «объём», not a ClickHouse trigger.
     command:
       - postgres
       - -c
-      - shared_buffers=128MB
+      - shared_buffers=256MB
       - -c
       - work_mem=8MB
       - -c
@@ -145,8 +148,29 @@ services:
   # forcing five minutes means `archive_timeout=300`, which writes a padded
   # 16 MB segment every five minutes whether or not anything happened: about
   # 4.6 GB a day of mostly zeroes. Streaming writes what there is, when there
-  # is: measured WAL volume on this database is 23.3 MiB/day. And streaming
-  # needs no restart, where `archive_mode` would.
+  # is. And streaming needs no restart, where `archive_mode` would.
+  #
+  # This comment said "measured WAL volume on this database is 23.3 MiB/day"
+  # until 2026-08-31. `pg_stat_wal` says 16 GB since 2026-08-20 — **1.5 GB a
+  # day, 65x that** — and the argument above survives it unharmed: 1.5 GB of
+  # real WAL still beats 4.6 GB of padding. The figure was measured before
+  # Postgres began deriving anything. What generates it, from
+  # pg_stat_user_tables over the same window:
+  #
+  #   silver.orders        19.1M inserts + 18.9M updates over 46,982 live rows
+  #   app.customer_profile  5.2M inserts over 18,418
+  #   gold.daily_revenue    1.7M inserts over 5,714
+  #
+  # — i.e. ~400 whole-table rebuilds, and `silver.orders` pays twice because
+  # `rebuild_silver` follows its INSERT with a full-table pass-2 UPDATE, and an
+  # UPDATE here is a second row version. Folding pass 2 into pass 1 would
+  # roughly halve the largest contributor; it is not a free change, because
+  # that SQL body is shared with DuckDB, whose incremental path scopes pass 2
+  # by buyer and would not benefit the same way.
+  #
+  # Not urgent: with retention now anchored to a base backup
+  # (deploy/pg_basebackup.sh) the archive is bounded by the PITR window, so
+  # this sizes the window rather than threatening the disk.
   #
   # Read `max_slot_wal_keep_size` above before changing anything here: this
   # service is the slot's consumer, and the two are a pair.
@@ -269,27 +293,64 @@ services:
       - .env
     environment:
       - TZ=Europe/Kyiv
+      # Step 03: the bot's own state moves to Postgres. `app.*` has held
+      # an hourly copy of data/bot.db since revision 0009; this is what
+      # makes the bot read and write it instead.
+      #
+      # Removing KS_BOT_STORE rolls back to SQLite, but anything written
+      # to Postgres in between does not come back: the copy is one-way and
+      # stands down while this is set.
+      - KS_PG_DSN=postgresql://ks_app:${KS_APP_PASSWORD:?set it in .env}@postgres:5432/ks
+      - KS_BOT_STORE=postgres
+      # Who signs every outbound Telegram. Set here rather than left to the
+      # hostname default, which inside a container is the short container id
+      # and changes on every recreate. A dev instance that forgets
+      # KS_ALERTS_DISABLED at least says whose laptop it is.
+      - KS_INSTANCE=${KS_INSTANCE:-prod-vps}
+      # Names this process's slice of shared state (both containers mount
+      # ./data): the alert gate's decision file is alert-gate-{role}.json.
+      - KS_ROLE=bot
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
     mem_limit: 512m
     cpus: 0.5
     healthcheck:
-      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/data/bot.db') else 1)"]
+      # Reads the heartbeat the bot writes on its own event loop after a real
+      # read through its store. The previous check was
+      # `os.path.exists('/app/data/bot.db')`, which said nothing about whether
+      # the bot was polling and became a lie on 2026-08-27, when the bot moved
+      # to Postgres and that file was frozen in place.
+      #
+      # The check must not touch the database itself: under
+      # KS_BOT_STORE=postgres it would build a pool and a loop thread every
+      # thirty seconds. See bot/heartbeat.py.
+      test: ["CMD", "python", "-m", "bot.heartbeat"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      # Four beats. A fresh container has no heartbeat at all and is unhealthy
+      # until it writes one, which is correct and is what this window is for.
+      start_period: 60s
 
   web:
     image: halloweex/keycrm-web:latest
     container_name: keycrm-web
     restart: unless-stopped
     logging: *default-logging
+    # `default` is listed explicitly because naming any network drops the
+    # implicit membership (the trap above) — nginx reaches web over it.
+    # `ks-data` is how this container reaches `ks-clickhouse`, which lives in
+    # the platform's compose project and publishes no ports (rule 12).
+    networks: [default, ks-data]
     env_file:
       - .env
     environment:
       - TZ=Europe/Kyiv
+      # The same store the bot uses: web/services/auth_service.py reads it
+      # to decide who may open the dashboard. The two must agree, or one
+      # of them is answering from a database nobody is writing.
+      - KS_BOT_STORE=postgres
       # DuckDB's own ceiling, well under mem_limit so Python/pandas/Meili keep
       # room. Raise before a full warehouse rebuild; 3GB is what OOM'd on
       # 2026-08-02 and truncated the Gold layer.
@@ -299,6 +360,25 @@ services:
       # error on every sync instead of writing — which is why it is set here
       # rather than left to whoever remembers.
       - KS_PG_DSN=postgresql://ks_app:${KS_APP_PASSWORD:?set it in .env}@postgres:5432/ks
+      # Step 4 of «Одна бронза»: gold copied into ClickHouse hourly. Both come
+      # from .env and both may be absent — the shipper and its reconciliation
+      # stand down silently without KS_CH_URL, so a host without ClickHouse
+      # runs unchanged. The password is the platform's `ks_app` CH user.
+      - KS_CH_URL=${KS_CH_URL:-}
+      - KS_CH_PASSWORD=${KS_CH_PASSWORD:-}
+      # Step 1 of «Одна бронза»: which engine serves the Gold-only reads of
+      # /api/summary and /api/revenue/trend. `duckdb` (default) or `postgres`;
+      # a typo raises on the first read rather than serving the old store.
+      # Rollback is flipping it back — no rebuild, no recreate.
+      - KS_READ_GOLD=${KS_READ_GOLD:-duckdb}
+      # Who signs every outbound Telegram. Set here rather than left to the
+      # hostname default, which inside a container is the short container id
+      # and changes on every recreate. A dev instance that forgets
+      # KS_ALERTS_DISABLED at least says whose laptop it is.
+      - KS_INSTANCE=${KS_INSTANCE:-prod-vps}
+      # Names this process's slice of shared state (both containers mount
+      # ./data): the alert gate's decision file is alert-gate-{role}.json.
+      - KS_ROLE=web
     volumes:
       - ./data:/app/data
     expose:

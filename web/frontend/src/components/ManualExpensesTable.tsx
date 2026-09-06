@@ -8,6 +8,8 @@ import { formatCurrency } from '../utils/formatters'
 import { useFilterStore } from '../store/filterStore'
 import { CurrencyIcon, TrashIcon } from './icons'
 import { Select } from './Select'
+import { TileGrid } from './TileGrid'
+import { Wrapper } from './Wrapper'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -60,8 +62,8 @@ const CategoryBadge = memo(function CategoryBadge({ category }: { category: stri
   const config = categoryConfig[category] || categoryConfig.other
   const displayName = category.charAt(0).toUpperCase() + category.slice(1)
   return (
-    <Badge tone={config.tone} icon={<span>{config.icon}</span>}>
-      {displayName}
+    <Badge tone={config.tone}>
+      {config.icon} {displayName}
     </Badge>
   )
 })
@@ -249,20 +251,20 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
     >
       {/* Summary Cards */}
       {data?.summary && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+        <Wrapper marginBottom="xl"><TileGrid columns={4}>
           <MetricCard
             surface="tile-gradient"
             tone="red"
             label={t('chart.totalExpenses')}
             value={formatCurrency(data.summary.total)}
-            icon="💰"
+            emoji="💰"
           />
           <MetricCard
             surface="tile-gradient"
             tone="neutral"
             label={t('chart.transactions')}
             value={String(data.summary.count)}
-            icon="📝"
+            emoji="📝"
           />
           {topCategories.slice(0, 2).map((cat) => {
             const config = categoryConfig[cat.category] || categoryConfig.other
@@ -273,11 +275,11 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
                 tone={config.tone}
                 label={cat.category.charAt(0).toUpperCase() + cat.category.slice(1)}
                 value={formatCurrency(cat.total)}
-                icon={config.icon}
+                emoji={config.icon}
               />
             )
           })}
-        </div>
+        </TileGrid></Wrapper>
       )}
 
       {/* Table */}

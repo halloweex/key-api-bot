@@ -23,11 +23,16 @@ weeks, and when a real regression finally arrived it named the database
 as the cause — while what had actually consumed the space was a pile of
 files alongside it that `sample_disk_state` does not look at.
 
-Its replacement is absolute growth (MB/day) measured over the whole data
-directory with per-path attribution, so an alert can name what grew. That
-is not written yet: its thresholds depend on the backup retention design,
-which is changing. Until then this module measures the 24h delta and logs
-it (`BackgroundScheduler._run_disk_watchdog`) but pages on capacity only.
+Its replacement is absolute growth measured over a whole directory with
+per-path attribution, so an alert can name what grew. That is written and
+live — `evaluate_dir_growth` below, differenced at the compact's own 168h
+period so the sawtooth cancels and only trend survives.
+
+It reaches past the directory as well. Only `./data` and `./logs` are
+mounted into this container, so three of the largest things on the host
+are unwalkable from here; `statvfs` still sees the filesystem, and the
+shortfall between it and the walked groups is carried as `unattributed`
+with thresholds of its own. See FS_WARN_GROWTH_GB_168H.
 
 The evaluator is pure (no I/O). Sample storage + scheduler job live
 elsewhere; this file owns only the contract.
@@ -115,7 +120,10 @@ def sample_disk_state(db_path: str, mount_path: str = "/") -> dict:
         mount_path: the filesystem to measure (defaults to root).
 
     Returns:
-        {sampled_at, db_size_mb, disk_pct_used, disk_free_gb}.
+        {sampled_at, db_size_mb, disk_pct_used, disk_free_gb, disk_used_bytes}.
+        `disk_used_bytes` is not persisted in `disk_samples` — it is what
+        `sample_data_dir` subtracts the walked groups from, and storing a
+        second copy of the same quantity would invite the two to disagree.
     """
     import os
     import shutil
@@ -131,6 +139,7 @@ def sample_disk_state(db_path: str, mount_path: str = "/") -> dict:
         "db_size_mb": round(db_size_mb, 2),
         "disk_pct_used": round(100.0 * used / total, 2) if total else 0.0,
         "disk_free_gb": round(free / (1024 ** 3), 2),
+        "disk_used_bytes": used,
     }
 
 
@@ -236,6 +245,32 @@ def _classify_path(name: str) -> str:
 WARN_GROWTH_GB_168H = 0.75
 CRITICAL_GROWTH_GB_168H = 2.0
 
+# The rest of the filesystem, which `data/` does not contain and this container
+# cannot walk. Only `./data` and `./logs` are bind-mounted, so Docker images,
+# journald and `backups/` are all invisible to `sample_data_dir` — and on
+# 2026-08-30 that was the entire event: ~11 GB accumulated in one week across
+# Docker images and build cache from the manual deploys, an uncapped journald,
+# and the new WAL archive, while every group this module could name held still.
+# The weekly floor check caught it; this one could not, and a 6-hourly detector
+# that reports a subset of the disk it is guarding is the same
+# name-the-wrong-component failure the module docstring above is about.
+#
+# `statvfs` sees the whole filesystem from inside the container, so the
+# unattributable remainder is measurable even when the paths are not. It gets
+# its own thresholds rather than being folded into the total: this figure moves
+# with ordinary deploy churn, and putting it in the same sum would raise the
+# data directory's own limits to cover somebody else's noise.
+#
+# **Provisional, and deliberately so.** There is no history for this number yet
+# — the change that adds it is what starts collecting it. Sized so the 11 GB
+# week would have been CRITICAL and an ordinary deploy week stays quiet;
+# re-derive once `data_dir_samples` holds a few weeks of `unattributed` rows.
+FS_WARN_GROWTH_GB_168H = 2.0
+FS_CRITICAL_GROWTH_GB_168H = 5.0
+
+# Not a path — the remainder, so it can never collide with `_classify_path`.
+UNATTRIBUTED = "unattributed"
+
 # Until a week of history exists there is nothing to difference against, and a
 # detector that says nothing for its first seven days is a detector that is
 # absent exactly when a fresh deploy is most likely to regress. So: any single
@@ -264,6 +299,7 @@ def evaluate_dir_growth(
     window_hours: int = 168,
     warn_gb: float = WARN_GROWTH_GB_168H,
     critical_gb: float = CRITICAL_GROWTH_GB_168H,
+    subject: str = "data dir",
 ) -> Optional[GrowthAlert]:
     """Compare two per-group byte counts and return an alert, or None.
 
@@ -273,6 +309,10 @@ def evaluate_dir_growth(
         window_hours: the lag the baseline was taken at. Passed in rather than
             assumed so the bootstrap path can reuse this with a 6h window.
         warn_gb / critical_gb: thresholds for this window.
+        subject: what grew, for the message. The caller names it because this
+            function is used twice against different halves of the disk, and a
+            message that says "data dir" about the rest of the filesystem is
+            the same wrong-component error the module docstring warns about.
 
     Returns:
         GrowthAlert when the total grew past a threshold, else None. Shrinkage
@@ -307,7 +347,7 @@ def evaluate_dir_growth(
     return GrowthAlert(
         severity=severity,
         reason=(
-            f"data dir grew {total_gb:+.2f} GB in {window_hours}h "
+            f"{subject} grew {total_gb:+.2f} GB in {window_hours}h "
             f"(>= {threshold:.2f} GB); mostly {top_group} "
             f"{top_delta / _GB:+.2f} GB" + (f" [{movers}]" if movers else "")
         ),
@@ -318,12 +358,81 @@ def evaluate_dir_growth(
     )
 
 
-def sample_data_dir(data_dir: str) -> dict:
+def evaluate_growth(
+    *,
+    current: dict,
+    baseline: Optional[dict],
+    window_hours: int = 168,
+    warn_gb: float = WARN_GROWTH_GB_168H,
+    critical_gb: float = CRITICAL_GROWTH_GB_168H,
+    fs_warn_gb: float = FS_WARN_GROWTH_GB_168H,
+    fs_critical_gb: float = FS_CRITICAL_GROWTH_GB_168H,
+) -> Optional[GrowthAlert]:
+    """Judge the data directory and the rest of the disk, each on its own terms.
+
+    Two comparisons rather than one sum, for the reason the thresholds carry:
+    the remainder moves with deploy churn, and adding it to the total would
+    mean raising the data directory's limits until they no longer catch what
+    they were calibrated to catch.
+
+    When both halves breach, both are reported — which of the two is "the"
+    cause is exactly what the reader is being asked to decide, and dropping
+    the quieter one has historically been how the wrong component got named.
+    """
+    if not baseline:
+        return None
+
+    inside_now = {g: b for g, b in current.items() if g != UNATTRIBUTED}
+    inside_was = {g: b for g, b in baseline.items() if g != UNATTRIBUTED}
+    outside_now = {g: b for g, b in current.items() if g == UNATTRIBUTED}
+    outside_was = {g: b for g, b in baseline.items() if g == UNATTRIBUTED}
+
+    inside = evaluate_dir_growth(
+        current=inside_now, baseline=inside_was, window_hours=window_hours,
+        warn_gb=warn_gb, critical_gb=critical_gb, subject="data dir",
+    )
+    # Only when both samples carry the remainder. A baseline taken before this
+    # existed has no `unattributed` key, and treating its absence as zero would
+    # report the whole disk as one week's growth on the first run after deploy.
+    outside = None
+    if outside_now and outside_was:
+        outside = evaluate_dir_growth(
+            current=outside_now, baseline=outside_was, window_hours=window_hours,
+            warn_gb=fs_warn_gb, critical_gb=fs_critical_gb,
+            subject="disk outside data/",
+        )
+
+    if inside is None:
+        return outside
+    if outside is None:
+        return inside
+
+    worst = max(inside, outside, key=lambda a: a.severity.rank())
+    louder = max(inside, outside, key=lambda a: a.top_delta_gb)
+    return GrowthAlert(
+        severity=worst.severity,
+        reason=f"{inside.reason} | {outside.reason}",
+        total_delta_gb=round(inside.total_delta_gb + outside.total_delta_gb, 3),
+        top_group=louder.top_group,
+        top_delta_gb=louder.top_delta_gb,
+        window_hours=window_hours,
+    )
+
+
+def sample_data_dir(data_dir: str, disk_used_bytes: Optional[int] = None) -> dict:
     """Bytes per path group for the whole data directory.
 
     One os.scandir plus a walk of two subdirectories — cheap enough for a
     6-hourly job, and it counts what `du` counts rather than what one
     os.path.getsize call happens to see.
+
+    Args:
+        data_dir: the directory to attribute.
+        disk_used_bytes: used bytes for the filesystem holding it, from
+            `sample_disk_state`. When given, the shortfall between it and the
+            groups above is recorded as `unattributed` — everything on this
+            disk that the container cannot walk. Optional so the function stays
+            usable as a plain directory sizer.
     """
     import os
 
@@ -331,6 +440,9 @@ def sample_data_dir(data_dir: str) -> dict:
     try:
         entries = list(os.scandir(data_dir))
     except (FileNotFoundError, PermissionError):
+        # No remainder either: a total with nothing to subtract from it would
+        # book the entire filesystem as `unattributed` and read as a step
+        # change, when all that happened is that the directory went unreadable.
         return {}
 
     for entry in entries:
@@ -349,6 +461,13 @@ def sample_data_dir(data_dir: str) -> dict:
         except OSError:
             continue
         totals[group] = totals.get(group, 0) + size
+
+    if disk_used_bytes is not None:
+        # Clamped at zero: `du` sums apparent sizes and `statvfs` counts
+        # allocated blocks, so a sparse file or a hardlink can make the parts
+        # exceed the whole by a little. A negative remainder is that artefact,
+        # never a fact about the disk, and it must not read as a shrink.
+        totals[UNATTRIBUTED] = max(0, disk_used_bytes - sum(totals.values()))
 
     return totals
 

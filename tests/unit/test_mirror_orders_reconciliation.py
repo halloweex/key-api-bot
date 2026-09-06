@@ -67,13 +67,21 @@ def _epoch_us(value):
     return (value - EPOCH) // timedelta(microseconds=1)
 
 
+# The bucket is an expression per dialect from 2026-08-27, because
+# `inventory_sku_history` buckets by the day rather than by an id. These two
+# specs still divide an integer column, and this is the Python spelling of it —
+# named here rather than read off the spec, so the reimplementation keeps
+# owing nothing to the SQL it is checking.
+_BUCKET_COLUMN = {"bronze.orders": "id", "bronze.order_products": "order_id"}
+
+
 def python_fingerprint(spec, rows):
     """The fingerprint's definition, in Python, owing nothing to either SQL.
 
     `rows` is {id: tuple in spec.columns order}. Buckets come from the same
     column the SQL groups on.
     """
-    bucket_at = spec.columns.index(spec.bucket_column)
+    bucket_at = spec.columns.index(_BUCKET_COLUMN[spec.pg_table])
     out = {}
     for row in rows.values():
         bucket = int(row[bucket_at]) // BUCKET_SIZE
@@ -238,7 +246,7 @@ class TestTheBackfillGate:
             return python_fingerprint(spec, pg_rows[spec.pg_table])
 
         async def _bucket(pool, spec, bucket):
-            at = spec.columns.index(spec.bucket_column)
+            at = spec.columns.index(_BUCKET_COLUMN[spec.pg_table])
             return {
                 i: r for i, r in pg_rows[spec.pg_table].items()
                 if int(r[at]) // BUCKET_SIZE == bucket

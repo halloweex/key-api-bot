@@ -1268,6 +1268,17 @@ async def notify_admins_new_request(context: ContextTypes.DEFAULT_TYPE, user) ->
         ]
     ]
 
+    # Through the kill switch and signed, like every other outbound message —
+    # this was transport T5 in the alerts inventory: a dev instance running
+    # the bot answered a real access request and notified the admins from a
+    # laptop. The direct send stays (send_admin_message carries no reply
+    # keyboard); the channel rules come along.
+    from core.telegram_alerts import alerts_disabled, sign
+
+    if alerts_disabled():
+        logger.info("access-request notification suppressed (KS_ALERTS_DISABLED)")
+        return
+    message = sign(message)
     for admin_id in ADMIN_USER_IDS:
         try:
             await context.bot.send_message(
@@ -2024,7 +2035,16 @@ async def check_and_broadcast_milestones(context: ContextTypes.DEFAULT_TYPE) -> 
                 f"{'🎊' * 8}"
             )
 
-            # Broadcast to all authorized users
+            # Broadcast to all authorized users — through the kill switch
+            # and signed: a milestone from a dev instance replaying a backup
+            # is a phantom celebration on two dozen phones.
+            from core.telegram_alerts import alerts_disabled, sign
+
+            if alerts_disabled():
+                logger.info(
+                    "milestone broadcast suppressed (KS_ALERTS_DISABLED)")
+                return
+            congrats_msg = sign(congrats_msg)
             success_count = 0
             for user in authorized_users:
                 try:

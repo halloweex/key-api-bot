@@ -619,6 +619,50 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Replicate the operational history into Postgres (hourly)
+        #
+        # One call site on purpose. Five separate code paths write these tables
+        # — the inventory snapshot job, two branches of the sync service, and
+        # both repair jobs — and hooking each of them is how the sixth gets
+        # forgotten. That is not hypothetical: `update_manager_stats`
+        # recomputed three columns without replicating them for exactly this
+        # reason, and it took a daily CRITICAL to notice (cf34e8b, 2026-08-27).
+        #
+        # A job instead. Idempotent, self-watermarking, and cheap when nothing
+        # moved: two MAX() reads and ~1,100 rows replaced. The cost is lag —
+        # Postgres is behind by up to one interval, which is why
+        # OPERATIONAL_GRACE_MINUTES is sized against this number and must be
+        # raised with it.
+        self._add_job(
+            job_id="replicate_operational",
+            name="Replicate: operational history and bot state",
+            description="Copy the irreplaceable tables and data/bot.db into Postgres",
+            func=self._run_replicate_operational,
+            trigger=IntervalTrigger(hours=1),
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Job: ClickHouse sync (hourly) — steps 5–6 of «Одна бронза»
+        #
+        # Silver ships whole (staging + EXCHANGE), Gold is then DERIVED inside
+        # ClickHouse from that silver — the same GOLD_MEASURES text, third
+        # engine — and the archive appends above its own MAX(id). Stands down
+        # silently while KS_CH_URL is unset, so registering it is safe on a
+        # host with no ClickHouse at all. Freshness rides meta.mirror_state
+        # ('clickhouse.silver_orders' / 'gold_daily_revenue' /
+        # 'order_versions'); fidelity and the engine-vs-engine Gold verdict
+        # are checked daily inside dq_mirror_landing.
+        self._add_job(
+            job_id="ch_sync",
+            name="ClickHouse: silver → gold + history",
+            description="Ship silver, derive gold in ClickHouse, append the archive (steps 5–6)",
+            func=self._run_ch_sync,
+            trigger=IntervalTrigger(hours=1),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Half-written order repair (every 2 h)
         # Orders with revenue and no line items. Detection is a table scan of
         # our own data, so an idle run costs nothing; a working one costs one
@@ -797,6 +841,65 @@ class BackgroundScheduler:
             )
             return result
 
+    async def _run_replicate_operational(self) -> Dict[str, Any]:
+        """Copy `stock_movements` and its four neighbours into Postgres.
+
+        The five tables step 05 routes to Postgres rather than ClickHouse,
+        because none of them can be rebuilt from KeyCRM — see revision 0008.
+
+        Never raises: `replicate_operational` returns its own error rather than
+        propagating, so a Postgres fault cannot take a scheduler job into the
+        failure history it shares with the sync.
+        """
+        from core.duckdb_store import get_store
+        from core.pg_bot_state import replicate_bot_state
+        from core.pg_operational import replicate_operational
+
+        with correlation_context():
+            store = await get_store()
+            result = await replicate_operational(store)
+            # `data/bot.db` rides the same job rather than getting one of its
+            # own: same cadence, same grace window, and one schedule to reason
+            # about. It reads the file the web container already opens
+            # read-only for the weekly report, so the bot is not touched.
+            result["bot_state"] = await replicate_bot_state()
+            # The buyers ids-diff rides here every hour: it needs the store,
+            # the store admits one process, and a diff that ships only what
+            # is missing costs two ~20k-id scans when nothing is. A heal is
+            # logged WARNING and surfaces as an INFO finding at 07:30.
+            from core.pg_buyers import hourly_ids_diff
+
+            result["buyers_backfill"] = await hourly_ids_diff(store)
+            # The SMS tab's own state rides here for the same reason as the
+            # rest: one call site. Five of its six tables are irreplaceable —
+            # a frozen roster cannot be recomputed, because the eligible
+            # population moves every day — and the sixth carries the cost
+            # side of margin. Stands down on its own once
+            # KS_SMS_STORE=postgres makes DuckDB no longer the writer.
+            from core.pg_sms import replicate_sms
+
+            result["sms_state"] = await replicate_sms(store)
+            if "skipped" not in result:
+                logger.info("Operational replication: %s", result)
+            return result
+
+    async def _run_ch_sync(self) -> Dict[str, Any]:
+        """Silver into ClickHouse, Gold derived there, the archive appended.
+
+        Never raises: each half returns its own error rather than propagating,
+        `_run_replicate_operational`'s contract — an optional store's fault
+        must not enter the failure history the scheduler shares with the sync.
+        """
+        from core.ch_history import ship_history
+        from core.ch_silver import ch_silver_sync
+
+        with correlation_context():
+            result = await ch_silver_sync()
+            result["history"] = await ship_history()
+            if "skipped" not in result:
+                logger.info("ClickHouse sync: %s", result)
+            return result
+
     async def _run_manager_stats(self) -> Dict[str, Any]:
         """Run manager stats update job."""
         with correlation_context() as corr_id:
@@ -949,13 +1052,14 @@ class BackgroundScheduler:
                 # landing. Outside every `store.connection()` block — the
                 # refresh has released the DuckDB lock by now, and holding it
                 # across a network round-trip is how a sync becomes a stall.
-                await self._rebuild_postgres_silver(result)
+                await self._rebuild_postgres_layers(result)
                 return result
 
-    # Postgres Silver is rebuilt whole, so its cost does not shrink with the
-    # size of the change: 46,446 rows, 2.19 s, every time. The warehouse
-    # refresh fires as often as orders move, which on a busy afternoon is
-    # every two minutes — 720 rebuilds a day for a table nothing reads yet.
+    # Postgres Silver and Gold are both rebuilt whole, so their cost does not
+    # shrink with the size of the change: 46,446 rows, 2.19 s, every time. The
+    # warehouse refresh fires as often as orders move, which on a busy
+    # afternoon is every two minutes — 720 rebuilds a day for tables nothing
+    # reads yet.
     #
     # A floor instead. Ten minutes keeps Postgres far closer to DuckDB than
     # the daily reconciliation that compares them needs, at roughly a tenth of
@@ -968,8 +1072,8 @@ class BackgroundScheduler:
     # invisible, on a CI runner it fired immediately.
     _pg_silver_last_at = None
 
-    async def _rebuild_postgres_silver(self, refresh_result) -> None:
-        """Recompute `silver.orders` from `bronze.orders`. Never raises.
+    async def _rebuild_postgres_layers(self, refresh_result) -> None:
+        """Recompute `silver.orders`, then `gold.daily_revenue`. Never raises.
 
         Same failure policy as the mirror, and the same reason: DuckDB is what
         the business looks at, and a Postgres fault must not be able to break
@@ -980,6 +1084,11 @@ class BackgroundScheduler:
         landing would still work, but reporting a fresh Postgres Silver beside
         a failed DuckDB one invites reading the two as comparable when they are
         not.
+
+        One floor covers both layers, and one call runs them in order. The
+        method was named for Silver alone until Gold joined it on 2026-08-27;
+        the shared name is the honest one, because there is exactly one moment
+        at which Postgres recomputes what it derives.
         """
         import os
         import time
@@ -1000,14 +1109,41 @@ class BackgroundScheduler:
                 return
             BackgroundScheduler._pg_silver_last_at = now
 
-            from core.pg_silver import rebuild_silver
+            from core.pg_gold import rebuild_gold
+            from core.pg_silver import PG_LAYER_LOCK, rebuild_silver
 
-            logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
+            async with PG_LAYER_LOCK:
+                await self._rebuild_pg_layers(rebuild_silver, rebuild_gold)
         except Exception as e:
             # ERROR, not DEBUG. A mirror that fails quietly is the 2026-08-09
             # shape, and the watermark it did not move is what Reconciliation A
             # reads as "not rebuilt yet".
-            logger.error("Postgres Silver rebuild failed: %s", e, exc_info=True)
+            logger.error("Postgres layer rebuild failed: %s", e, exc_info=True)
+
+    async def _rebuild_pg_layers(self, rebuild_silver, rebuild_gold) -> None:
+        """The three derived layers, in order, under PG_LAYER_LOCK.
+
+        Gold reads the Silver that was just written, in the same tick and
+        from the same caller, so it can never aggregate a Silver the next
+        statement is about to replace. Not in its own job for the same
+        reason: two schedules would let Gold be built from a Silver one
+        interval stale, and the comparison would then be measuring the
+        gap between two of our own timers.
+
+        Order matters on failure too. Silver raising skips Gold, which is
+        what should happen — a Gold rebuilt over a stale Silver would
+        stamp a fresh watermark on a stale answer, and that reads clean.
+        """
+        logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
+        logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
+        # And the витрина, from the same Silver in the same tick — one
+        # floor, one тик, Gold's own reasoning one consumer down.
+        from core.pg_vitrina import rebuild_customer_profile
+
+        logger.info(
+            "Rebuilding customer profile in Postgres: %s",
+            await rebuild_customer_profile(),
+        )
 
     async def _run_backup(self) -> Dict[str, Any]:
         """Daily consistent backup of the DuckDB warehouse (A9-1)."""
@@ -1038,37 +1174,59 @@ class BackgroundScheduler:
 
     # ─── Data Quality framework (Layer 1 + 2) ─────────────────────────────────
 
-    # Alert throttling — independent timers per layer so an integrity issue
-    # doesn't suppress a reconciliation alert in the same cooldown window.
-    _dq_last_alert: Dict[str, float] = {}
-    _DQ_ALERT_COOLDOWN_S = 86400  # 24 h
+    async def _resolve_dq_layer(
+        self, layer: str, issues, error_message: "Optional[str]",
+    ) -> None:
+        """Announce the layer's cleared page-conditions after a run.
+
+        Only after a run that actually produced a verdict: a failed run
+        proves nothing — the condition is unknown, not cleared, and calling
+        this on error would announce recoveries nobody verified. Checks
+        still present at CRITICAL stay firing; a check that dropped to WARN
+        cleared as a *page* condition — the digest still carries it, which
+        is the page/digest lane split the charter draws.
+        """
+        if error_message:
+            return
+        try:
+            from core.data_quality import Severity
+            from core.alerting import resolve_group
+
+            still = [
+                i.check_name for i in issues
+                if i.severity == Severity.CRITICAL
+            ]
+            await resolve_group(f"dq:{layer}", still_firing=still)
+        except Exception as e:
+            logger.warning(f"DQ resolve for {layer} failed: {e}")
 
     async def _send_dq_alert_throttled(
         self, layer: str, message: str, key: Optional[str] = None,
+        conditions: "Sequence[str]" = (),
+        evidence: Optional[dict] = None,
     ) -> bool:
-        """Send a Data Quality alert with a 24h cooldown per distinct problem.
+        """Send a Data Quality alert through the Gate.
 
-        The cooldown used to be per *layer*, which meant a second, unrelated
-        CRITICAL in the same layer was silently swallowed for a day by the
-        first one. `key` — from `alert_fingerprint`, naming the checks and
-        discrepancy classes involved — makes each problem its own bucket.
+        The dedup bucket is still the fingerprint (`key`) — per problem, not
+        per layer, so a second unrelated CRITICAL in the same layer is not
+        swallowed by the first one's cooldown. `conditions` are the canonical
+        check names involved, which is what gives the Gate its standing/event
+        judgement and, from step 03 on, the ledger its series.
 
-        Returns True if alert was sent, False if throttled or failed.
+        The private 24h dict this method used to keep is gone: the Gate's
+        standing cooldown *is* daily, it pays for the slot only on delivery,
+        and it is one policy instead of a sixth.
+
+        Returns True if the alert reached at least one admin.
         """
         bucket = key or layer
-        now = time.time()
-        last = BackgroundScheduler._dq_last_alert.get(bucket, 0.0)
-        if now - last < self._DQ_ALERT_COOLDOWN_S:
-            logger.info(
-                f"DQ alert ({bucket}) throttled: "
-                f"last sent {int(now - last)}s ago"
-            )
-            return False
         try:
-            from bot.main import send_admin_message
-            await send_admin_message(message, key=bucket)
-            BackgroundScheduler._dq_last_alert[bucket] = now
-            return True
+            from core.alerting import raise_alert
+
+            return await raise_alert(
+                message, conditions=list(conditions), bucket=bucket,
+                group=f"dq:{layer}", evidence=evidence,
+            ) > 0
         except Exception as e:
             logger.warning(f"DQ alert send failed ({bucket}): {e}")
             return False
@@ -1079,8 +1237,10 @@ class BackgroundScheduler:
         from core.data_quality import (
             Severity,
             alert_fingerprint,
+            evidence_for_agent,
             check_internal_integrity,
             format_alert_message,
+            machine_attempts_note,
             overall_severity,
             persist_run,
         )
@@ -1121,11 +1281,18 @@ class BackgroundScheduler:
 
             sev = overall_severity(issues, [])
             if sev == Severity.CRITICAL and not error_message:
-                msg = format_alert_message("integrity", sev, issues, [])
+                msg = format_alert_message(
+                    "integrity", sev, issues, [],
+                    machine_note=machine_attempts_note(),
+                )
                 await self._send_dq_alert_throttled(
                     "integrity", msg,
                     alert_fingerprint("integrity", sev, issues, []),
+                    conditions=[i.check_name for i in issues
+                                if i.severity == Severity.CRITICAL],
+                    evidence=evidence_for_agent("integrity", issues, run_id=run_id),
                 )
+            await self._resolve_dq_layer("integrity", issues, error_message)
 
             result = {
                 "run_id": run_id,
@@ -1138,7 +1305,7 @@ class BackgroundScheduler:
             return result
 
     async def _run_dq_mirror_landing(self) -> Dict[str, Any]:
-        """Reconciliation A: is the Postgres mirror of landing equal to DuckDB?
+        """Reconciliation A: does Postgres hold — and compute — what DuckDB does?
 
         The closing criterion for step 05 is this reporting zero, so it runs on
         its own layer with its own age rather than riding along with the
@@ -1157,7 +1324,9 @@ class BackgroundScheduler:
         from core.data_quality import (
             Severity,
             alert_fingerprint,
+            evidence_for_agent,
             format_alert_message,
+            machine_attempts_note,
             overall_severity,
             persist_run,
         )
@@ -1167,6 +1336,10 @@ class BackgroundScheduler:
             configured,
             read_duckdb_side,
             reconcile_mirror,
+            reconcile_bot_state,
+            reconcile_gold,
+            reconcile_operational,
+            reconcile_order_versions,
             reconcile_orders,
             reconcile_silver,
         )
@@ -1196,6 +1369,56 @@ class BackgroundScheduler:
                 # And the two computations of Silver. Same layer: it is the
                 # same question — do the stores agree — asked one level up.
                 issues += await reconcile_silver(store)
+                # And of Gold, one level up again. Still the same layer, and
+                # here the argument is stronger than for Silver: all three run
+                # inside this one call, so an exception from any of them fails
+                # the whole run. They cannot have different ages, and separate
+                # layers would only invent an age that does not exist. That is
+                # the opposite of `reconciliation_pg`, which is a separate
+                # layer precisely because it *can* stop running on its own.
+                issues += await reconcile_gold(store)
+                # And the five tables that are neither landing nor computed —
+                # the ones with no source to be rebuilt from. Last because they
+                # are the least likely to be wrong and the most expensive to
+                # read, and because a Silver or Gold finding above them is
+                # almost certainly the better explanation of both.
+                issues += await reconcile_operational(store)
+                # And the third store. `data/bot.db` is SQLite, not DuckDB, and
+                # it is the only one of the three that is in no backup — which
+                # is the whole reason its fifty rows are being copied at all.
+                issues += await reconcile_bot_state()
+                # And the archive, which is none of the above: it has no
+                # counterpart to be compared against, so this asks whether it
+                # is still being written rather than whether it agrees with
+                # anything. Same layer as the rest for the same reason — one
+                # call, one age, and a fourth layer would invent one.
+                issues += await reconcile_order_versions()
+                # And the buyer landing — step 2. Same layer, same argument.
+                from core.mirror_reconciliation import reconcile_buyers
+                issues += await reconcile_buyers(store)
+                # And the SMS tab's own six (revision 0013), on the way to
+                # answering /sms without DuckDB. Five of them are irreplaceable
+                # in `stock_movements`' sense — a frozen roster cannot be
+                # recomputed, so a lost one costs a campaign its control group
+                # and with it any measurable lift. Stands down once
+                # KS_SMS_STORE=postgres freezes the DuckDB side.
+                from core.mirror_reconciliation import reconcile_sms
+                issues += await reconcile_sms(store)
+                # And the витрина, which rebuilds itself and then checks the
+                # materialisation against the same Silver snapshot.
+                from core.pg_vitrina import reconcile_customer_profile
+                issues += await reconcile_customer_profile()
+                # And the third engine — steps 5–6. Silver round-trips, then
+                # the two engines' independent Gold aggregations are set
+                # against each other («сверка навсегда»), then the archive's
+                # buckets. Stands down when KS_CH_URL is unset; an unreachable
+                # ClickHouse is a WARN finding rather than an exception — an
+                # optional store being down must not silence the comparisons
+                # of the mandatory ones.
+                from core.ch_history import reconcile_ch_history
+                from core.ch_silver import reconcile_clickhouse
+                issues += await reconcile_clickhouse()
+                issues += await reconcile_ch_history()
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("Mirror reconciliation raised")
@@ -1220,11 +1443,18 @@ class BackgroundScheduler:
 
             sev = overall_severity(issues, [])
             if sev == Severity.CRITICAL and not error_message:
-                msg = format_alert_message(MIRROR_LAYER, sev, issues, [])
+                msg = format_alert_message(
+                    MIRROR_LAYER, sev, issues, [],
+                    machine_note=machine_attempts_note(),
+                )
                 await self._send_dq_alert_throttled(
                     MIRROR_LAYER, msg,
                     alert_fingerprint(MIRROR_LAYER, sev, issues, []),
+                    conditions=[i.check_name for i in issues
+                                if i.severity == Severity.CRITICAL],
+                    evidence=evidence_for_agent(MIRROR_LAYER, issues, run_id=run_id),
                 )
+            await self._resolve_dq_layer(MIRROR_LAYER, issues, error_message)
 
             result = {
                 "run_id": run_id,
@@ -1232,13 +1462,26 @@ class BackgroundScheduler:
                 "severity": sev.value,
                 "duration_ms": int((ended_at - started_at).total_seconds() * 1000),
                 "error": error_message,
+                # Name the findings, or the severity is a dead end: the audit
+                # hit a WARN verdict here and had no way to learn WHICH checks
+                # fired — the issue rows live in DuckDB (one process, no
+                # outside reader), /api/jobs and the DQ health detail sit
+                # behind a session, and the digest goes to Telegram. Check
+                # name, table and count only — no descriptions, no sample ids.
+                "findings": [
+                    f"{i.severity.value}:{i.check_name}:{i.table_name}:{i.count}"
+                    for i in issues
+                    if i.severity is not Severity.INFO
+                ][:10],
             }
             logger.info("Mirror reconciliation complete", extra=result)
             return result
 
     # ─── Disk capacity watchdog ───────────────────────────────────────────────
 
-    _disk_alert_last_sent: float = 0.0
+    # The disk watchdog's private cooldown is gone (29.08): the Gate keys per
+    # condition — so a WARN cannot mute the escalation to CRITICAL — and its
+    # standing policy is the daily reminder this 24h float was approximating.
     _DISK_ALERT_COOLDOWN_S = 86400  # 24h
 
     async def _run_disk_watchdog(self) -> Dict[str, Any]:
@@ -1256,8 +1499,9 @@ class BackgroundScheduler:
         """
         from core.disk_monitor import (
             BOOTSTRAP_STEP_GB,
-            evaluate_dir_growth,
+            UNATTRIBUTED,
             evaluate_disk_capacity,
+            evaluate_growth,
             fetch_dir_sample_at_age,
             fetch_sample_at_age,
             insert_dir_samples,
@@ -1276,7 +1520,19 @@ class BackgroundScheduler:
             # The whole directory, not just the database file. The 27 GB that
             # arrived in August 2026 sat next to analytics.duckdb, so a check
             # that sampled only the file could not see it — and blamed the file.
-            dir_now = sample_data_dir(str(store.db_path.parent))
+            #
+            # And the whole disk, not just the directory: only ./data and
+            # ./logs are mounted here, so the ~11 GB of Docker images, journald
+            # and WAL archive that filled the host on 2026-08-30 was in none of
+            # the groups above. `disk_used_bytes` turns that into a remainder
+            # this job can at least name.
+            # `.get`, not `[...]`: a sample without the key predates it, and a
+            # watchdog that raises rather than measuring one thing less is a
+            # watchdog that is off.
+            dir_now = sample_data_dir(
+                str(store.db_path.parent),
+                disk_used_bytes=sample.get("disk_used_bytes"),
+            )
 
             async with store.connection() as conn:
                 history = fetch_sample_at_age(conn, hours=24, slack_hours=2)
@@ -1290,14 +1546,17 @@ class BackgroundScheduler:
                     insert_dir_samples(conn, dir_now)
                     prune_old_dir_samples(conn, retention_days=21)
 
-            growth = evaluate_dir_growth(current=dir_now, baseline=dir_week_ago)
+            growth = evaluate_growth(current=dir_now, baseline=dir_week_ago)
             if growth is None and dir_week_ago is None:
                 # Bootstrap: no week of history yet. A step change is still a
                 # step change, and a detector silent for its first seven days is
                 # missing exactly when a fresh deploy is most likely to regress.
-                growth = evaluate_dir_growth(
+                # One GB in six hours is a step wherever it lands, so the
+                # remainder gets the same bootstrap limits as the directory.
+                growth = evaluate_growth(
                     current=dir_now, baseline=dir_six_ago, window_hours=6,
                     warn_gb=BOOTSTRAP_STEP_GB, critical_gb=BOOTSTRAP_STEP_GB * 2,
+                    fs_warn_gb=BOOTSTRAP_STEP_GB, fs_critical_gb=BOOTSTRAP_STEP_GB * 2,
                 )
 
             # A heartbeat something outside this process can read. The
@@ -1349,7 +1608,14 @@ class BackgroundScheduler:
                 "disk_free_gb": sample["disk_free_gb"],
                 "db_24h_ago_mb": db_24h_ago,
                 "db_growth_mb_24h": growth_mb_24h,
-                "data_dir_mb": round(sum(dir_now.values()) / (1024 ** 2)) if dir_now else None,
+                # The directory, not the disk: `dir_now` now carries the
+                # remainder too, and summing it here would report the whole
+                # filesystem under a key named for one folder.
+                "data_dir_mb": round(
+                    sum(b for g, b in dir_now.items() if g != UNATTRIBUTED) / (1024 ** 2)
+                ) if dir_now else None,
+                "unattributed_mb": round(dir_now[UNATTRIBUTED] / (1024 ** 2))
+                if dir_now.get(UNATTRIBUTED) is not None else None,
                 "data_dir_growth_gb_168h": growth.total_delta_gb if growth else None,
                 "pruned_old_samples": deleted,
                 "alert_fired": False,
@@ -1368,33 +1634,34 @@ class BackgroundScheduler:
                     f"{sample['disk_free_gb']:.1f} GB free, "
                     f"DB={sample['db_size_mb']:,.0f} MB ({growth_str})"
                 )
+                # A breach that was announced and has cleared says so once
+                # (step 04) — silence after an alert used to be
+                # indistinguishable from the throttle holding it.
+                try:
+                    from core.alerting import resolve_group
+
+                    await resolve_group("disk")
+                except Exception as e:
+                    logger.warning(f"Disk resolve failed: {e}")
                 return result
 
             logger.warning(f"Disk watchdog: {alert.severity.value} — {alert.reason}")
 
-            # Throttle: avoid paging admins every 6h while the breach persists.
-            now = time.time()
-            since = now - BackgroundScheduler._disk_alert_last_sent
-            if since < self._DISK_ALERT_COOLDOWN_S:
-                logger.info(
-                    f"Disk alert throttled — last sent {int(since)}s ago "
-                    f"(cooldown {self._DISK_ALERT_COOLDOWN_S}s)"
-                )
-                return result
-
-            BackgroundScheduler._disk_alert_last_sent = now
+            disk_key = "disk:" + alert.severity.value
             try:
-                from bot.main import send_admin_message
+                from core.alerting import raise_alert
                 icon = "🚨" if alert.severity.value == "CRITICAL" else "⚠️"
                 msg = (
-                    f"{icon} *Disk watchdog: {alert.severity.value}*\n"
-                    f"{alert.reason}\n\n"
-                    f"DB: {alert.db_size_mb:,.0f} MB\n"
-                    f"Disk: {alert.disk_pct_used:.1f}% used, "
-                    f"{alert.disk_free_gb:.1f} GB free"
+                    f"{icon} <b>Disk: {alert.disk_pct_used:.0f}% used, "
+                    f"{alert.disk_free_gb:.0f} GB free</b>\n"
+                    f"{alert.reason}\n"
+                    "→ du -xd1 data; du -sx /var /opt; docker system df. "
+                    "Never trigger the compact — it stops the containers"
                 )
-                await send_admin_message(msg, key="disk:" + alert.severity.value)
-                result["alert_fired"] = True
+                delivered = await raise_alert(
+                    msg, conditions=[disk_key], bucket=disk_key, group="disk",
+                )
+                result["alert_fired"] = delivered > 0
             except Exception as e:
                 logger.warning(f"Disk alert send failed: {e}")
 
@@ -1519,7 +1786,9 @@ class BackgroundScheduler:
         from core.data_quality import (
             Severity,
             alert_fingerprint,
+            evidence_for_agent,
             format_alert_message,
+            machine_attempts_note,
             overall_severity,
             persist_run,
         )
@@ -1551,10 +1820,185 @@ class BackgroundScheduler:
 
         sev = overall_severity(issues, discrepancies)
         if sev == Severity.CRITICAL and not error_message:
-            msg = format_alert_message(layer, sev, issues, discrepancies)
+            msg = format_alert_message(
+                layer, sev, issues, discrepancies,
+                machine_note=machine_attempts_note(),
+            )
             await self._send_dq_alert_throttled(
                 layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
+                conditions=[i.check_name for i in issues
+                                if i.severity == Severity.CRITICAL],
+                evidence=evidence_for_agent(layer, issues, discrepancies,
+                                            run_id=run_id),
             )
+        await self._resolve_dq_layer(layer, issues, error_message)
+
+    async def _reconcile_clickhouse(
+        self, kc_orders, *, window_start, window_end, as_of, inflight_ids,
+    ):
+        """The third arm: ClickHouse's silver against the same KeyCRM snapshot.
+
+        The owner's criterion, applied to the third store: two copies can
+        agree perfectly and both be wrong, and until now ClickHouse's honesty
+        against the source was only transitive — through Postgres, with a
+        two-hour gap between the links. When ClickHouse becomes a reader of
+        Gold, this stops being optional; it is built while the snapshot
+        machinery is warm.
+
+        **Still no extra API calls** — the fetch happened once, at 05:30, and
+        all three verdicts are against the identical snapshot, which is what
+        makes them comparable at all.
+
+        Header grain only: silver carries no line items, so the three
+        line-level fields are out of scope here — the DuckDB and Postgres
+        arms cover them. And the watermark exclusion is computed in Postgres
+        bronze (where `updated_at` lives), because ClickHouse's copy has no
+        such column and skipping the rule would ghost the ~1,400 orders the
+        05:15 status refresh force-rewrites every morning.
+
+        No repair path, more firmly than anywhere: the copy's medicine is its
+        own hourly re-ship (ch_sync), which will have run before any human
+        reads this verdict.
+        """
+        from core import ch_common
+        from core.data_quality import (
+            IntegrityIssue,
+            Severity,
+            classify_order_discrepancies,
+        )
+        from core.mirror_reconciliation import configured, fetch_watermarks
+        from core.reconciliation_io import (
+            CH_HEADER_FIELDS,
+            clickhouse_orders_in_window,
+            pg_ids_updated_since,
+        )
+
+        if not ch_common.configured() or not configured():
+            return None
+
+        issues: list = []
+        discrepancies: list = []
+        error_message = None
+
+        try:
+            from core.pg import get_pool
+
+            pool = await get_pool()
+
+            # The gate: a copy that never shipped, or shipped hours ago, must
+            # not be reconciled against the source — the verdict would measure
+            # the ship's lag and call it a lie. Three hours is the hourly
+            # cadence plus grace.
+            watermarks = await fetch_watermarks(pool)
+            silver_state = watermarks.get("clickhouse.silver_orders") or {}
+            last_ok = silver_state.get("last_ok_at")
+            from datetime import datetime, timedelta, timezone
+
+            stale = (
+                last_ok is None
+                or (datetime.now(timezone.utc) - last_ok) > timedelta(hours=3)
+            )
+            if stale:
+                issues.append(IntegrityIssue(
+                    check_name="ch_reconcile_pending",
+                    table_name="silver.orders",
+                    severity=Severity.WARN,
+                    count=0,
+                    description=(
+                        "ClickHouse silver has not shipped recently enough to "
+                        "be reconciled against KeyCRM (last_ok_at="
+                        f"{last_ok}); comparing now would measure the ship's "
+                        "lag and call it a lie. The hourly ch_sync is the fix."
+                    ),
+                ))
+                return {"issues": issues, "discrepancies": [], "error": None}
+
+            exclude = set(inflight_ids or ())
+            exclude |= await pg_ids_updated_since(
+                pool, window_start, window_end, as_of,
+            )
+            ch_orders = await clickhouse_orders_in_window(
+                window_start, window_end, exclude_ids=exclude,
+            )
+            # The KeyCRM side must shrink by the same exclusion set — the
+            # other arms apply the watermark inside their own SQL; here both
+            # sides get it applied once, symmetrically.
+            kc_comparable = {
+                oid: facts for oid, facts in kc_orders.items()
+                if oid not in exclude
+            }
+            discrepancies = classify_order_discrepancies(
+                ch_orders, kc_comparable, fields=CH_HEADER_FIELDS,
+            )
+            logger.info(
+                f"DQ reconciliation (ClickHouse): ch_orders={len(ch_orders)} "
+                f"kc={len(kc_comparable)} excluded={len(exclude)} "
+                f"discrepancies={len(discrepancies)}"
+            )
+        except Exception as e:
+            error_message = f"{type(e).__name__}: {e}"
+            logger.exception("DQ reconciliation against ClickHouse raised")
+
+        return {
+            "issues": issues,
+            "discrepancies": discrepancies,
+            "error": error_message,
+        }
+
+    async def _persist_ch_reconciliation(
+        self, result, *, started_at, as_of, window_start, window_end,
+    ) -> None:
+        """Write the ClickHouse verdict as its own run — `reconciliation_pg`'s
+        reasons, verbatim: one layer per comparison, so an arm that stops
+        running cannot hide behind a fresh sibling."""
+        from datetime import datetime, timezone
+        from core.data_quality import (
+            Severity,
+            alert_fingerprint,
+            evidence_for_agent,
+            format_alert_message,
+            machine_attempts_note,
+            overall_severity,
+            persist_run,
+        )
+        from core.duckdb_store import get_store
+
+        layer = "reconciliation_ch"
+        issues = result["issues"]
+        discrepancies = result["discrepancies"]
+        error_message = result["error"]
+
+        store = await get_store()
+        try:
+            async with store.connection() as conn:
+                persist_run(
+                    conn,
+                    started_at=started_at,
+                    ended_at=datetime.now(timezone.utc),
+                    as_of=as_of,
+                    window_start=window_start, window_end=window_end,
+                    layer=layer,
+                    issues=issues, discrepancies=discrepancies,
+                    api_calls_used=0,
+                    error_message=error_message,
+                )
+        except Exception as e:
+            logger.exception(f"DQ ClickHouse reconciliation persist failed: {e}")
+
+        sev = overall_severity(issues, discrepancies)
+        if sev == Severity.CRITICAL and not error_message:
+            msg = format_alert_message(
+                layer, sev, issues, discrepancies,
+                machine_note=machine_attempts_note(),
+            )
+            await self._send_dq_alert_throttled(
+                layer, msg, alert_fingerprint(layer, sev, issues, discrepancies),
+                conditions=[i.check_name for i in issues
+                                if i.severity == Severity.CRITICAL],
+                evidence=evidence_for_agent(layer, issues, discrepancies,
+                                            run_id=run_id),
+            )
+        await self._resolve_dq_layer(layer, issues, error_message)
 
     async def _run_dq_reconciliation(self, window_days: int = 90) -> Dict[str, Any]:
         """Layer-2 source-of-truth reconciliation vs KeyCRM.
@@ -1568,9 +2012,11 @@ class BackgroundScheduler:
         from core.data_quality import (
             Severity,
             alert_fingerprint,
+            evidence_for_agent,
             classify_discrepancies,
             classify_order_discrepancies,
             format_alert_message,
+            machine_attempts_note,
             overall_severity,
             persist_run,
         )
@@ -1605,6 +2051,7 @@ class BackgroundScheduler:
             discrepancies: list = []
             api_calls = 0
             pg_result = None
+            ch_result = None
 
             try:
                 # 1. KeyCRM orders (counts API calls). Runs first because it
@@ -1644,6 +2091,13 @@ class BackgroundScheduler:
                     window_start=window_start, window_end=window_end,
                     as_of=as_of, inflight_ids=inflight_ids,
                 )
+                # …and a third time, against ClickHouse. Same snapshot, same
+                # zero API calls, own layer.
+                ch_result = await self._reconcile_clickhouse(
+                    kc_orders,
+                    window_start=window_start, window_end=window_end,
+                    as_of=as_of, inflight_ids=inflight_ids,
+                )
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("DQ reconciliation raised")
@@ -1674,6 +2128,11 @@ class BackgroundScheduler:
             if pg_result is not None:
                 await self._persist_postgres_reconciliation(
                     pg_result, started_at=started_at, as_of=as_of,
+                    window_start=window_start, window_end=window_end,
+                )
+            if ch_result is not None:
+                await self._persist_ch_reconciliation(
+                    ch_result, started_at=started_at, as_of=as_of,
                     window_start=window_start, window_end=window_end,
                 )
 
@@ -1711,6 +2170,7 @@ class BackgroundScheduler:
                 msg = format_alert_message(
                     "reconciliation", sev, issues, discrepancies,
                     window=(window_start, window_end),
+                    machine_note=machine_attempts_note(),
                 )
                 if repair and repair.get("repaired"):
                     msg += (
@@ -1722,7 +2182,12 @@ class BackgroundScheduler:
                 await self._send_dq_alert_throttled(
                     "reconciliation", msg,
                     alert_fingerprint("reconciliation", sev, issues, discrepancies),
+                    conditions=[i.check_name for i in issues
+                                if i.severity == Severity.CRITICAL],
+                    evidence=evidence_for_agent("reconciliation", issues,
+                                                discrepancies, run_id=run_id),
                 )
+            await self._resolve_dq_layer("reconciliation", issues, error_message)
 
             result = {
                 "run_id": run_id,
@@ -1882,12 +2347,25 @@ class BackgroundScheduler:
                     ))
 
             message = build_digest(sections, last_sent_at=last_sent_at, now=now)
+            if message:
+                # Step 06: the ledger's tail — standing conditions with their
+                # ages, escalations, the acknowledged count. It rides a digest
+                # that news already earned and can never summon one: on a
+                # quiet day the tail is not even fetched.
+                from core.alert_archive import fetch_digest_tail
+
+                tail = await fetch_digest_tail()
+                if tail:
+                    message = f"{message}\n\n{tail}"
             sent = False
             if message:
                 try:
                     from bot.main import send_admin_message
-                    await send_admin_message(message, key="dq:digest")
-                    sent = True
+                    # The beat moves only on delivery — "did not raise" also
+                    # covered kill-switched, throttled and Telegram-rejected
+                    # sends, and each of those muted the next seven days on
+                    # the strength of a message nobody received.
+                    sent = await send_admin_message(message, key="dq:digest") > 0
                 except Exception as e:
                     logger.warning(f"DQ digest send failed: {e}")
 
@@ -2119,8 +2597,6 @@ class BackgroundScheduler:
 
                 return result
 
-    _bronze_invariant_last_alert: float = 0.0
-    _BRONZE_INVARIANT_ALERT_COOLDOWN_S = 21600  # 6 hours — match check interval
 
     async def _run_bronze_invariant_check(self) -> Dict[str, Any]:
         """Assert bronze table size matches the (mode, shadow_enabled) invariant.
@@ -2155,27 +2631,33 @@ class BackgroundScheduler:
                     f"Bronze invariant OK: mode={mode}, shadow={shadow}, "
                     f"total={stats['total']:,}"
                 )
+                try:
+                    from core.alerting import resolve_group
+
+                    await resolve_group("bronze")
+                except Exception as e:
+                    logger.warning(f"Bronze resolve failed: {e}")
                 return result
 
             logger.warning(f"Bronze invariant VIOLATED: {reason}")
 
-            # Throttle Telegram alerts so a persistent breach doesn't spam.
-            now = time.time()
-            since_last = now - BackgroundScheduler._bronze_invariant_last_alert
-            if since_last >= self._BRONZE_INVARIANT_ALERT_COOLDOWN_S:
-                BackgroundScheduler._bronze_invariant_last_alert = now
-                try:
-                    from bot.main import send_admin_message
-                    await send_admin_message(
-                        "⚠️ *Bronze invariant violated*\n"
-                        f"`mode={mode}`, `shadow={shadow}`\n"
-                        f"total: {stats['total']:,} | unprocessed: {stats['unprocessed']:,}\n\n"
-                        f"{reason}\n\n"
-                        "Likely cause: prune misconfigured, or sync writing despite opt-out.",
-                        key="bronze:invariant_violated",
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to send bronze invariant alert: {e}")
+            # The Gate owns the cooldown: loud first hour, then one daily
+            # reminder while the breach stands — this used to be a private
+            # 6h float, the fifth of the six throttles.
+            try:
+                from core.alerting import raise_alert
+
+                await raise_alert(
+                    "⚠️ <b>Bronze invariant violated</b>\n"
+                    f"<code>mode={mode}</code>, <code>shadow={shadow}</code>\n"
+                    f"total: {stats['total']:,} | unprocessed: {stats['unprocessed']:,}\n\n"
+                    f"{reason}\n\n"
+                    "Likely cause: prune misconfigured, or sync writing despite opt-out.",
+                    conditions=["bronze:invariant_violated"],
+                    bucket="bronze:invariant_violated", group="bronze",
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send bronze invariant alert: {e}")
 
             return result
 
@@ -2220,19 +2702,22 @@ class BackgroundScheduler:
             return
 
         try:
-            from bot.main import send_admin_message
+            from core.alerting import raise_alert
+
             unprocessed = stats["unprocessed"]
             age_s = stats.get("oldest_unprocessed_age_s")
             age_str = f"{int(age_s)}s" if age_s else "unknown"
 
             msg = (
-                "\u26a0\ufe0f **Bronze Backlog Alert**\n"
+                "\u26a0\ufe0f <b>Bronze Backlog Alert</b>\n"
                 f"Unprocessed events: {unprocessed}\n"
                 f"Oldest age: {age_str}\n\n"
                 "Promotion may be falling behind. "
-                "Check `/api/bronze/stats` and scheduler jobs."
+                "Check <code>/api/bronze/stats</code> and scheduler jobs."
             )
-            await send_admin_message(msg, key="bronze:backlog")
+            await raise_alert(
+                msg, conditions=["bronze:backlog"], bucket="bronze:backlog",
+            )
         except Exception as e:
             logger.warning(f"Failed to send bronze alert: {e}")
 
@@ -2262,38 +2747,6 @@ class BackgroundScheduler:
             if path.exists():
                 return path.stat().st_size / (1024 * 1024)
         return None
-
-    async def _send_admin_telegram(self, message: str) -> None:
-        """Send a Telegram message to all admin users."""
-        import os
-
-        bot_token = os.getenv("BOT_TOKEN", "")
-        admin_str = os.getenv("ADMIN_USER_IDS", "")
-        if not bot_token or not admin_str:
-            logger.warning("BOT_TOKEN or ADMIN_USER_IDS not set, skipping alert")
-            return
-
-        admin_ids = [
-            uid.strip() for uid in admin_str.split(",") if uid.strip().isdigit()
-        ]
-
-        import httpx
-
-        async with httpx.AsyncClient(timeout=10) as client:
-            for uid in admin_ids:
-                try:
-                    resp = await client.post(
-                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                        json={
-                            "chat_id": uid,
-                            "text": message,
-                            "parse_mode": "HTML",
-                        },
-                    )
-                    if resp.status_code != 200:
-                        logger.error(f"Telegram alert to {uid} failed: {resp.text}")
-                except Exception as e:
-                    logger.error(f"Telegram alert to {uid} error: {e}")
 
     async def _run_memory_monitor(self) -> Dict[str, Any]:
         """Sample container memory, persist it, and alert on real pressure.
@@ -2355,6 +2808,12 @@ class BackgroundScheduler:
             result["db_size_mb"] = round(db_size)
 
         if alert is None:
+            try:
+                from core.alerting import resolve_group
+
+                await resolve_group("memory")
+            except Exception as e:
+                logger.warning(f"Memory resolve failed: {e}")
             pct = (mem["working_set"] / mem["limit"]) if mem["limit"] else 0
             # info, not debug, and it names both halves: the whole point is that
             # the big number and the number that matters are different.
@@ -2385,35 +2844,50 @@ class BackgroundScheduler:
             "\u26a0\ufe0f" if level == "WARN" else "\U0001f6a8"
         )
         title = (
-            "OOM KILL" if alert.oom_kills_delta
-            else ("Memory Warning" if level == "WARN" else "MEMORY CRITICAL")
+            "OOM kill (web)" if alert.oom_kills_delta
+            else f"Web memory {level}"
         )
 
-        lines = [
-            f"{icon} <b>{title}</b>",
-            "",
-            f"<b>Working set:</b> {alert.working_set_mb:,.0f} MB"
-            + (f" / {alert.limit_mb:,.0f} MB" if alert.limit_mb else ""),
-            f"<b>Free:</b> {alert.headroom_mb:,.0f} MB",
-            f"<b>Page cache:</b> {alert.page_cache_mb:,.0f} MB (reclaimable, not counted)",
-        ]
-        if peak_24h:
-            lines.append(f"<b>Peak 24h:</b> {peak_24h:,.0f} MB")
-        if db_size:
-            lines.append(f"<b>DuckDB file:</b> {db_size:,.0f} MB")
+        head = f"{alert.working_set_mb:,.0f}"
+        if alert.limit_mb:
+            head += f" of {alert.limit_mb:,.0f}"
+        lines = [f"{icon} <b>{title}: {head} MB</b>"]
         if alert.oom_kills_delta:
-            lines.append(f"<b>Processes killed:</b> {alert.oom_kills_delta}")
-
-        lines += ["", f"<i>{alert.reason}</i>"]
+            lines.append(f"processes killed: {alert.oom_kills_delta}")
+        lines.append(f"<i>{alert.reason}</i>")
         if level == "CRITICAL":
-            lines += [
-                "",
-                "\U0001f449 Reduce <code>DUCKDB_MEMORY_LIMIT</code> or raise the "
-                "container limit. Check what ran: <code>docker logs keycrm-web</code>",
-            ]
+            lines.append(
+                "→ docker logs keycrm-web to see what ran; the lever is "
+                "DUCKDB_MEMORY_LIMIT or the container limit"
+            )
 
-        await self._send_admin_telegram("\n".join(lines))
+        # Through the shared path since 29.08 — the raw transport this used
+        # to hold bypassed KS_ALERTS_DISABLED, the signature and the escaping
+        # net, which is exactly the phantom-from-a-laptop scenario the kill
+        # switch was built against. An OOM kill goes unkeyed on purpose: it is
+        # a fact about the past, each occurrence is its own message, and the
+        # per-level cooldown above already decided this one should go.
+        from core.alerting import raise_alert
+
+        if alert.oom_kills_delta:
+            # An OOM kill is an event: no conditions (never resolvable), no
+            # bucket (each kill is its own fact) — but a diagnosis is exactly
+            # what a kill deserves, so it spools.
+            delivered = await raise_alert(
+                "\n".join(lines), conditions=[],
+                bucket=None, spool_as="memory:web:oom",
+            )
+        else:
+            # bucket=None: the per-level cooldown above already decided this
+            # one goes; the Gate contributes the delivered-conditions map so
+            # the recovery can be announced (step 04), and spool_as summons
+            # the diagnostician the bucket-less path otherwise skips.
+            delivered = await raise_alert(
+                "\n".join(lines), conditions=[f"memory:web:{level}"],
+                bucket=None, group="memory", spool_as=f"memory:web:{level}",
+            )
         result["alert_sent"] = level
+        result["alert_delivered"] = delivered
         return result
 
     # ═══════════════════════════════════════════════════════════════════════════

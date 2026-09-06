@@ -112,13 +112,20 @@ class TestTheRefreshHook:
         BackgroundScheduler._pg_silver_last_at = None
         return BackgroundScheduler()
 
+    @pytest.fixture(autouse=True)
+    def _gold_is_someone_else_s_test(self):
+        """Gold rides in the same call from 2026-08-27. Stubbed here so these
+        stay about Silver; `tests/unit/test_pg_gold.py` owns the pair."""
+        with patch("core.pg_gold.rebuild_gold", new=AsyncMock(return_value={})):
+            yield
+
     @pytest.mark.asyncio
     async def test_it_rebuilds_after_a_successful_refresh(self, monkeypatch):
         monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
         with patch("core.mirror_reconciliation.configured", return_value=True), \
              patch("core.pg_silver.rebuild_silver",
                    new=AsyncMock(return_value={"rows": 1})) as rebuild:
-            await self._scheduler()._rebuild_postgres_silver({"status": "success"})
+            await self._scheduler()._rebuild_postgres_layers({"status": "success"})
         rebuild.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -128,7 +135,7 @@ class TestTheRefreshHook:
         monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
         with patch("core.mirror_reconciliation.configured", return_value=True), \
              patch("core.pg_silver.rebuild_silver", new=AsyncMock()) as rebuild:
-            await self._scheduler()._rebuild_postgres_silver({"status": "error"})
+            await self._scheduler()._rebuild_postgres_layers({"status": "error"})
         rebuild.assert_not_called()
 
     @pytest.mark.asyncio
@@ -141,7 +148,7 @@ class TestTheRefreshHook:
         with patch("core.mirror_reconciliation.configured", return_value=True), \
              patch("core.pg_silver.rebuild_silver",
                    new=AsyncMock(return_value={"rows": 1})) as rebuild:
-            await self._scheduler()._rebuild_postgres_silver({"status": "success"})
+            await self._scheduler()._rebuild_postgres_layers({"status": "success"})
         rebuild.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -152,8 +159,8 @@ class TestTheRefreshHook:
         with patch("core.mirror_reconciliation.configured", return_value=True), \
              patch("core.pg_silver.rebuild_silver",
                    new=AsyncMock(return_value={"rows": 1})) as rebuild:
-            await scheduler._rebuild_postgres_silver({"status": "success"})
-            await scheduler._rebuild_postgres_silver({"status": "success"})
+            await scheduler._rebuild_postgres_layers({"status": "success"})
+            await scheduler._rebuild_postgres_layers({"status": "success"})
         assert rebuild.await_count == 1
 
     @pytest.mark.asyncio
@@ -163,14 +170,14 @@ class TestTheRefreshHook:
         with patch("core.mirror_reconciliation.configured", return_value=True), \
              patch("core.pg_silver.rebuild_silver",
                    side_effect=RuntimeError("postgres is down")):
-            await self._scheduler()._rebuild_postgres_silver({"status": "success"})
+            await self._scheduler()._rebuild_postgres_layers({"status": "success"})
 
     @pytest.mark.asyncio
     async def test_no_postgres_configured_does_nothing(self, monkeypatch):
         monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
         with patch("core.mirror_reconciliation.configured", return_value=False), \
              patch("core.pg_silver.rebuild_silver", new=AsyncMock()) as rebuild:
-            await self._scheduler()._rebuild_postgres_silver({"status": "success"})
+            await self._scheduler()._rebuild_postgres_layers({"status": "success"})
         rebuild.assert_not_called()
 
     def test_the_refresh_job_calls_it_outside_the_store_lock(self):
@@ -183,5 +190,5 @@ class TestTheRefreshHook:
         # `store.connection()` as the thing it stays outside of, so a grep for
         # that string matches the explanation. Sixth time in two days.
         assert source.index("refresh_warehouse_layers") < source.index(
-            "await self._rebuild_postgres_silver"
+            "await self._rebuild_postgres_layers"
         )

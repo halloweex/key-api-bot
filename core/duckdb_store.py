@@ -162,46 +162,17 @@ SILVER_ORDERS_DDL = """CREATE TABLE IF NOT EXISTS silver_orders (
 # sides, 986 dates on both sides, zero disagreeing. The ₴11.2M it holds *above*
 # Gold is returns (₴5.67M) and inactive sources (₴6.26M), which Gold excludes
 # on purpose and this level leaves to the caller.
-SILVER_ORDER_LINES_VIEW_SQL = """CREATE OR REPLACE VIEW silver_order_lines AS
-        SELECT
-            op.id                                        AS line_id,
-            op.order_id,
-            op.product_id,
-            op.name                                      AS product_name,  -- as sold
-            op.quantity,
-            op.price_sold,
-            CAST(op.quantity * op.price_sold AS DECIMAL(14, 2)) AS line_amount,
-            -- the order, denormalised: every predicate a page applies to
-            -- revenue applies here too, and re-deriving them was the bug
-            s.order_date,
-            s.ordered_at,
-            s.sales_type,
-            s.source_id,
-            s.source_name,
-            s.is_return,
-            s.is_active_source,
-            s.buyer_id,
-            s.manager_id,
-            s.is_new_customer,
-            s.buyer_first_order_date,
-            s.promocode,
-            s.grand_total                                AS order_grand_total,
-            -- the catalog, denormalised. 8.2 % of lines carry no product_id and
-            -- 31 % no category; both stay NULL rather than being dropped, which
-            -- is the difference between a level and a filter.
-            p.name                                       AS catalog_product_name,
-            p.brand,
-            p.sku,
-            p.category_id,
-            c.name                                       AS category_name,
-            c.parent_id                                  AS parent_category_id,
-            parent_c.name                                AS parent_category_name
-        FROM order_products op
-        JOIN silver_orders s ON s.id = op.order_id
-        LEFT JOIN products p ON p.id = op.product_id
-        LEFT JOIN categories c ON c.id = p.category_id
-        LEFT JOIN categories parent_c ON parent_c.id = c.parent_id
-"""
+# One body, two engines — the same contract the Silver projection has. The
+# Postgres rendering is `silver.order_lines` (migration 0011); a test renders
+# both from `core.sql_dialect.order_lines_select` and asserts they agree.
+from core.sql_dialect import DUCKDB as _DUCKDB_DIALECT
+from core.sql_dialect import inventory_view_selects as _inventory_view_selects
+from core.sql_dialect import order_lines_select as _order_lines_select
+
+SILVER_ORDER_LINES_VIEW_SQL = (
+    "CREATE OR REPLACE VIEW silver_order_lines AS\n"
+    + _order_lines_select(_DUCKDB_DIALECT)
+)
 
 
 # ─── The one definition of a Silver row ──────────────────────────────────────
@@ -348,33 +319,110 @@ def silver_pass2_sql(buyer_filter: str = "", dialect: "Dialect" = None) -> str:
     """
 
 
-GOLD_REVENUE_SELECT_SQL = """
-SELECT
-    order_date AS date,
-    sales_type,
-    COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0) AS revenue,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) AS orders_count,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND buyer_id IS NOT NULL THEN buyer_id END) AS unique_customers,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND is_new_customer THEN buyer_id END) AS new_customers,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END) AS returning_customers,
-    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 1 THEN grand_total END), 0) AS instagram_revenue,
-    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 2 THEN grand_total END), 0) AS telegram_revenue,
-    COALESCE(SUM(CASE WHEN NOT is_return AND source_id = 4 THEN grand_total END), 0) AS shopify_revenue,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 1 THEN id END) AS instagram_orders,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 2 THEN id END) AS telegram_orders,
-    COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = 4 THEN id END) AS shopify_orders,
-    COUNT(DISTINCT CASE WHEN is_return AND is_active_source THEN id END) AS returns_count,
-    COALESCE(SUM(CASE WHEN is_return AND is_active_source THEN grand_total END), 0) AS returns_revenue,
-    CASE
-        WHEN COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END) > 0
-        THEN COALESCE(SUM(CASE WHEN NOT is_return AND is_active_source THEN grand_total END), 0)
-             / COUNT(DISTINCT CASE WHEN NOT is_return AND is_active_source THEN id END)
-        ELSE 0
-    END AS avg_order_value
-FROM silver_orders
-WHERE {date_filter}
-GROUP BY order_date, sales_type
-"""
+# ─── The one definition of a Gold revenue row ────────────────────────────────
+#
+# Same treatment as the Silver projection above, and for the same reason:
+# Postgres computes Gold too, from revision 0007 onward, and a measure with two
+# homes is a measure that will differ. #101 took under a day to prove that.
+#
+# What does *not* transfer is the shape. DuckDB's `gold_daily_revenue` splits
+# the channels into columns — `instagram_revenue`, `telegram_revenue`,
+# `shopify_revenue` — and a column per source cannot name a source that did not
+# exist when the column was written. Source 5 (Виставка) arrived with #101, and
+# `SUM(revenue) - SUM(the three columns)` is ₴266,059.00 across 177 orders,
+# measured on production: money that is in the total and in no channel. So
+# Postgres carries `source_id` as a *dimension* instead, and only the measures
+# below are shared.
+
+# The two row sets every measure is built from. Spelled once so a change to
+# what counts as revenue cannot reach five of the eight expressions and miss
+# the rest.
+_GOLD_EARNING_ROWS = "NOT is_return AND is_active_source"
+_GOLD_RETURNED_ROWS = "is_return AND is_active_source"
+
+_GOLD_REVENUE_EXPR = (
+    f"COALESCE(SUM(CASE WHEN {_GOLD_EARNING_ROWS} THEN grand_total END), 0)"
+)
+_GOLD_ORDERS_EXPR = (
+    f"COUNT(DISTINCT CASE WHEN {_GOLD_EARNING_ROWS} THEN id END)"
+)
+
+# Engine-neutral by construction: every expression here is ordinary aggregate
+# SQL that means the same thing in DuckDB and in PostgreSQL. A test asserts
+# each one appears verbatim in both renderings.
+GOLD_MEASURES: "Dict[str, str]" = {
+    "revenue": _GOLD_REVENUE_EXPR,
+    "orders_count": _GOLD_ORDERS_EXPR,
+    "unique_customers":
+        f"COUNT(DISTINCT CASE WHEN {_GOLD_EARNING_ROWS} AND buyer_id IS NOT NULL THEN buyer_id END)",
+    "new_customers":
+        f"COUNT(DISTINCT CASE WHEN {_GOLD_EARNING_ROWS} AND is_new_customer THEN buyer_id END)",
+    "returning_customers":
+        f"COUNT(DISTINCT CASE WHEN {_GOLD_EARNING_ROWS} AND NOT is_new_customer AND buyer_id IS NOT NULL THEN buyer_id END)",
+    "returns_count":
+        f"COUNT(DISTINCT CASE WHEN {_GOLD_RETURNED_ROWS} THEN id END)",
+    "returns_revenue":
+        f"COALESCE(SUM(CASE WHEN {_GOLD_RETURNED_ROWS} THEN grand_total END), 0)",
+    # Written out rather than `revenue / orders_count` because the guard and
+    # the division must read the same aggregate, and an alias is not available
+    # to a sibling select item in either engine.
+    "avg_order_value":
+        "CASE\n"
+        f"        WHEN {_GOLD_ORDERS_EXPR} > 0\n"
+        f"        THEN {_GOLD_REVENUE_EXPR}\n"
+        f"             / {_GOLD_ORDERS_EXPR}\n"
+        "        ELSE 0\n"
+        "    END",
+}
+
+# DuckDB only. These are what the `source_id` dimension replaces, kept exactly
+# as they were: the parallel period compares the two stores, and rewriting the
+# side being compared against is how a migration stops proving anything.
+#
+# Note they filter on `source_id`, never on `is_active_source` — which is the
+# same set today, since 1, 2 and 4 are all in REVENUE_SOURCE_IDS.
+GOLD_SOURCE_MEASURES: "Dict[str, str]" = {
+    f"{name}_{suffix}": (
+        f"COALESCE(SUM(CASE WHEN NOT is_return AND source_id = {sid} THEN grand_total END), 0)"
+        if suffix == "revenue" else
+        f"COUNT(DISTINCT CASE WHEN NOT is_return AND source_id = {sid} THEN id END)"
+    )
+    for suffix in ("revenue", "orders")
+    for name, sid in (("instagram", 1), ("telegram", 2), ("shopify", 4))
+}
+
+# `gold_daily_revenue` is written by a **positional** INSERT — no column list —
+# so this is the table's DDL order and nothing may reorder it. A test compares
+# it against the columns DuckDB actually reports for the table.
+DUCKDB_GOLD_COLUMNS: "Tuple[str, ...]" = (
+    "date", "sales_type",
+    "revenue", "orders_count", "unique_customers", "new_customers",
+    "returning_customers",
+    "instagram_revenue", "telegram_revenue", "shopify_revenue",
+    "instagram_orders", "telegram_orders", "shopify_orders",
+    "returns_count", "returns_revenue", "avg_order_value",
+)
+
+
+def gold_select_items(columns: "Sequence[str]") -> str:
+    """`<expr> AS <name>` for each measure, in the order given.
+
+    `date` and `sales_type` are dimensions and are emitted by the caller: only
+    Postgres has a third one, and only DuckDB has the six source columns.
+    """
+    both = {**GOLD_MEASURES, **GOLD_SOURCE_MEASURES}
+    return ",\n".join(f"    {both[c]} AS {c}" for c in columns)
+
+
+GOLD_REVENUE_SELECT_SQL = (
+    "\nSELECT\n"
+    "    order_date AS date,\n"
+    "    sales_type,\n"
+    + gold_select_items(DUCKDB_GOLD_COLUMNS[2:])
+    + "\nFROM silver_orders\n"
+    "WHERE {date_filter}\n"
+    "GROUP BY order_date, sales_type\n"
+)
 
 
 class DuckDBStore(
@@ -896,6 +944,33 @@ class DuckDBStore(
         );
 
         -- ═══════════════════════════════════════════════════════════════════════
+        -- What each delivery-report event first said it was about.
+        --
+        -- TurboSMS signs SHA1(secret + id) and nothing else, so the signature on
+        -- a callback proves the caller knew the secret but says nothing about
+        -- which message the callback names. Without this table one captured
+        -- (id, signature) pair was a permanent write into any recipient's
+        -- delivery state — and delivery state is what a campaign's measured lift
+        -- is computed from.
+        --
+        -- Durable rather than in-process because the captured pair is durable:
+        -- the scheme carries no nonce and no timestamp, so a pair never expires,
+        -- while the web container restarts on every deploy and is stopped weekly
+        -- by the compact cron. A binding that forgets is a binding with a
+        -- published expiry.
+        --
+        -- Append-only, and never pruned. Pruning would hand old pairs their
+        -- window back, and DELETE against an ART-indexed table is the known
+        -- file-growth mechanism in this database; insert-only never enters it.
+        -- One row per event: a 5 000-recipient campaign is 5 000 rows.
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS sms_dlr_events (
+            event_id VARCHAR PRIMARY KEY,
+            message_id VARCHAR NOT NULL,
+            first_seen_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- ═══════════════════════════════════════════════════════════════════════
         -- Marketing opt-outs.
         --
         -- Segmentation looks only at purchases, so without this table someone
@@ -914,6 +989,30 @@ class DuckDBStore(
         );
 
         CREATE INDEX IF NOT EXISTS idx_optouts_phone ON marketing_optouts(phone);
+
+        -- ═══════════════════════════════════════════════════════════════════════
+        -- Saved audiences.
+        --
+        -- A campaign's audience is a set of filters, and the useful ones get
+        -- reused: "everyone who bought this brand in the last quarter" is a
+        -- question asked every time that brand runs a promotion. Without
+        -- somewhere to keep it, the manager rebuilds it from memory each time
+        -- and the second campaign is measured against a slightly different
+        -- population than the first.
+        --
+        -- `criteria` is the wizard's own form state as JSON, and it is never
+        -- executed: the page fills its controls from it and sends the values
+        -- back through the same validated query parameters as a hand-built
+        -- audience. A preset is therefore a saved answer, not a stored query,
+        -- and cannot widen what the endpoints accept.
+        -- ═══════════════════════════════════════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS sms_audience_presets (
+            name VARCHAR PRIMARY KEY,
+            criteria VARCHAR NOT NULL,
+            created_by BIGINT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE
+        );
 
         CREATE INDEX IF NOT EXISTS idx_sms_members_campaign
             ON sms_campaign_members(campaign, assignment);
@@ -1447,381 +1546,17 @@ class DuckDBStore(
 
 
     async def _create_inventory_views(self) -> None:
-        """Create Layer 3 & 4 analytics views for inventory."""
-        views_sql = """
-        -- ═══════════════════════════════════════════════════════════════════════
-        -- LAYER 3: Analytics Views
-        -- ═══════════════════════════════════════════════════════════════════════
+        """Create Layer 3 & 4 analytics views for inventory.
 
-        -- View: Current SKU analysis (adds calculated fields)
-        CREATE OR REPLACE VIEW v_sku_analysis AS
-        SELECT
-            s.*,
-            c.name as category_name,
-            s.quantity - s.reserve as available,
-            s.quantity * s.price as stock_value,
-            (s.quantity - s.reserve) * s.price as available_value,
-            CURRENT_DATE - s.last_sale_date as days_since_sale,
-            CURRENT_DATE - s.first_seen_at as days_in_stock
-        FROM sku_inventory_status s
-        LEFT JOIN categories c ON s.category_id = c.id;
-
-        -- View: Category velocity (for dynamic thresholds)
-        CREATE OR REPLACE VIEW v_category_velocity AS
-        SELECT
-            category_id,
-            category_name,
-            COUNT(*) as sample_size,
-            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY days_since_sale) as p50,
-            PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY days_since_sale) as p75,
-            PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY days_since_sale) as p90,
-            LEAST(GREATEST(
-                PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY days_since_sale),
-                90
-            ), 365) as threshold_days
-        FROM v_sku_analysis
-        WHERE last_sale_date IS NOT NULL AND quantity > 0
-        GROUP BY category_id, category_name
-        HAVING COUNT(*) >= 5;
-
-        -- View: SKU status with dead stock + overstocked classification
-        -- Uses 90-day velocity for days_of_supply (more stable than 30d)
-        CREATE OR REPLACE VIEW v_sku_status AS
-        SELECT
-            s.*,
-            COALESCE(cv.threshold_days, 180) as threshold_days,
-            CASE WHEN COALESCE(vel.qty_sold_90d, 0) > 0
-                 THEN ROUND((s.quantity - s.reserve) / (vel.qty_sold_90d / 90.0), 0)
-                 ELSE NULL
-            END as days_of_supply,
-            CASE
-                WHEN s.last_sale_date IS NULL THEN 'never_sold'
-                WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) THEN 'dead_stock'
-                WHEN s.days_since_sale > COALESCE(cv.threshold_days, 180) * 0.7 THEN 'at_risk'
-                WHEN COALESCE(vel.qty_sold_90d, 0) > 0
-                     AND ROUND((s.quantity - s.reserve) / (vel.qty_sold_90d / 90.0), 0) > 90
-                    THEN 'overstocked'
-                ELSE 'healthy'
-            END as status
-        FROM v_sku_analysis s
-        LEFT JOIN v_category_velocity cv ON s.category_id = cv.category_id
-        LEFT JOIN (
-            SELECT product_id, SUM(quantity_sold) as qty_sold_90d
-            FROM gold_daily_products
-            WHERE date >= CURRENT_DATE - INTERVAL '90 days'
-            GROUP BY product_id
-        ) vel ON s.product_id = vel.product_id
-        WHERE s.quantity > 0;
-
-        -- View: Summary by status
-        CREATE OR REPLACE VIEW v_inventory_summary AS
-        SELECT
-            status,
-            COUNT(*) as sku_count,
-            SUM(available) as total_units,
-            SUM(available_value) as total_value,
-            ROUND(100.0 * SUM(available_value) /
-                NULLIF(SUM(SUM(available_value)) OVER (), 0), 1) as value_pct
-        FROM v_sku_status
-        GROUP BY status;
-
-        -- View: Aging buckets
-        CREATE OR REPLACE VIEW v_aging_buckets AS
-        SELECT
-            CASE
-                WHEN days_since_sale IS NULL THEN '6. Never sold'
-                WHEN days_since_sale <= 30 THEN '1. 0-30 days'
-                WHEN days_since_sale <= 90 THEN '2. 31-90 days'
-                WHEN days_since_sale <= 180 THEN '3. 91-180 days'
-                WHEN days_since_sale <= 365 THEN '4. 181-365 days'
-                ELSE '5. 365+ days'
-            END as bucket,
-            COUNT(*) as sku_count,
-            SUM(available) as units,
-            SUM(available_value) as value
-        FROM v_sku_analysis
-        WHERE quantity > 0
-        GROUP BY bucket
-        ORDER BY bucket;
-
-        -- ═══════════════════════════════════════════════════════════════════════
-        -- LAYER 3b: Turnover & ABC Analytics Views
-        -- ═══════════════════════════════════════════════════════════════════════
-
-        -- View: Per-SKU sell-through (joins inventory with actual sales from gold_daily_products)
-        CREATE OR REPLACE VIEW v_sku_sell_through AS
-        SELECT
-            s.offer_id,
-            s.product_id,
-            s.sku,
-            s.name,
-            s.brand,
-            s.category_id,
-            s.category_name,
-            s.available,
-            s.available_value,
-            s.price,
-            s.purchased_price,
-            s.days_since_sale,
-            s.days_in_stock,
-            COALESCE(g30.qty_sold_30d, 0) as qty_sold_30d,
-            COALESCE(g30.revenue_30d, 0) as revenue_30d,
-            COALESCE(g30.orders_30d, 0) as orders_30d,
-            COALESCE(g90.qty_sold_90d, 0) as qty_sold_90d,
-            COALESCE(g90.revenue_90d, 0) as revenue_90d,
-            CASE WHEN (COALESCE(g30.qty_sold_30d, 0) + s.available) > 0
-                 THEN ROUND(100.0 * COALESCE(g30.qty_sold_30d, 0) /
-                      (COALESCE(g30.qty_sold_30d, 0) + s.available), 1)
-                 ELSE 0
-            END as sell_through_rate_30d,
-            CASE WHEN COALESCE(g90.qty_sold_90d, 0) > 0
-                 THEN ROUND(s.available / (g90.qty_sold_90d / 90.0), 0)
-                 ELSE NULL
-            END as days_of_supply,
-            CASE WHEN COALESCE(g90.qty_sold_90d, 0) > 0
-                 THEN ROUND(g90.qty_sold_90d / 90.0, 2)
-                 ELSE 0
-            END as avg_daily_sales
-        FROM v_sku_analysis s
-        LEFT JOIN (
-            SELECT product_id,
-                   SUM(quantity_sold) as qty_sold_30d,
-                   SUM(product_revenue) as revenue_30d,
-                   SUM(order_count) as orders_30d
-            FROM gold_daily_products
-            WHERE date >= CURRENT_DATE - INTERVAL '30 days'
-            GROUP BY product_id
-        ) g30 ON s.product_id = g30.product_id
-        LEFT JOIN (
-            SELECT product_id,
-                   SUM(quantity_sold) as qty_sold_90d,
-                   SUM(product_revenue) as revenue_90d
-            FROM gold_daily_products
-            WHERE date >= CURRENT_DATE - INTERVAL '90 days'
-            GROUP BY product_id
-        ) g90 ON s.product_id = g90.product_id
-        WHERE s.quantity > 0;
-
-        -- View: ABC classification by cumulative revenue (Pareto)
-        CREATE OR REPLACE VIEW v_abc_classification AS
-        WITH product_revenue AS (
-            SELECT
-                product_id,
-                SUM(product_revenue) as total_revenue,
-                SUM(quantity_sold) as total_qty_sold
-            FROM gold_daily_products
-            WHERE date >= CURRENT_DATE - INTERVAL '90 days'
-            GROUP BY product_id
-        ),
-        ranked AS (
-            SELECT
-                s.offer_id,
-                s.product_id,
-                s.sku,
-                s.name,
-                s.brand,
-                s.category_name,
-                s.available,
-                s.available_value,
-                s.price,
-                COALESCE(pr.total_revenue, 0) as revenue_90d,
-                COALESCE(pr.total_qty_sold, 0) as qty_sold_90d,
-                SUM(COALESCE(pr.total_revenue, 0)) OVER () as grand_total_revenue,
-                SUM(COALESCE(pr.total_revenue, 0)) OVER (
-                    ORDER BY COALESCE(pr.total_revenue, 0) DESC
-                    ROWS UNBOUNDED PRECEDING
-                ) as cumulative_revenue
-            FROM v_sku_analysis s
-            LEFT JOIN product_revenue pr ON s.product_id = pr.product_id
-            WHERE s.quantity > 0
-        )
-        SELECT
-            *,
-            CASE WHEN grand_total_revenue > 0
-                 THEN ROUND(100.0 * cumulative_revenue / grand_total_revenue, 1)
-                 ELSE 0
-            END as cumulative_pct,
-            CASE
-                WHEN grand_total_revenue > 0
-                     AND cumulative_revenue - COALESCE(revenue_90d, 0) < grand_total_revenue * 0.8
-                    THEN 'A'
-                WHEN grand_total_revenue > 0
-                     AND cumulative_revenue - COALESCE(revenue_90d, 0) < grand_total_revenue * 0.95
-                    THEN 'B'
-                ELSE 'C'
-            END as abc_class
-        FROM ranked;
-
-        -- View: ABC summary (aggregated stats per class)
-        CREATE OR REPLACE VIEW v_abc_summary AS
-        SELECT
-            abc_class,
-            COUNT(*) as sku_count,
-            SUM(available) as total_units,
-            SUM(available_value) as stock_value,
-            SUM(revenue_90d) as revenue,
-            ROUND(100.0 * SUM(available_value) /
-                NULLIF(SUM(SUM(available_value)) OVER (), 0), 1) as stock_value_pct,
-            ROUND(100.0 * SUM(revenue_90d) /
-                NULLIF(SUM(SUM(revenue_90d)) OVER (), 0), 1) as revenue_pct
-        FROM v_abc_classification
-        GROUP BY abc_class
-        ORDER BY abc_class;
-
-        -- ═══════════════════════════════════════════════════════════════════════
-        -- LAYER 4: Action Views
-        -- ═══════════════════════════════════════════════════════════════════════
-
-        -- View: Actionable recommendations
-        CREATE OR REPLACE VIEW v_recommended_actions AS
-        SELECT
-            offer_id,
-            sku,
-            name,
-            brand,
-            category_name,
-            available as units,
-            available_value as value,
-            days_since_sale,
-            days_in_stock,
-            status,
-            CASE
-                WHEN status = 'never_sold' AND days_in_stock > 180 THEN 'Return to supplier'
-                WHEN status = 'never_sold' AND days_in_stock > 90 THEN 'Deep discount (70%+)'
-                WHEN status = 'dead_stock' AND available_value > 10000 THEN 'Discount 50%'
-                WHEN status = 'dead_stock' THEN 'Bundle with bestsellers'
-                WHEN status = 'at_risk' THEN 'Promote / Feature'
-                ELSE NULL
-            END as action
-        FROM v_sku_status
-        WHERE status != 'healthy'
-        ORDER BY available_value DESC;
-
-        -- View: Low stock alerts
-        CREATE OR REPLACE VIEW v_restock_alerts AS
-        SELECT
-            offer_id,
-            sku,
-            name,
-            brand,
-            available as units_left,
-            days_since_sale,
-            CASE
-                WHEN available = 0 THEN 'OUT_OF_STOCK'
-                WHEN available <= 3 THEN 'CRITICAL'
-                WHEN available <= 10 THEN 'LOW'
-            END as alert_level
-        FROM v_sku_analysis
-        WHERE available <= 10
-          AND (days_since_sale IS NULL OR days_since_sale <= 90)
-        ORDER BY available ASC;
-
-        -- ═══════════════════════════════════════════════════════════════════════
-        -- LAYER 5: Dead Stock v2 — cost-basis ranking + velocity + ABC + decision
-        -- ═══════════════════════════════════════════════════════════════════════
-
-        -- View: per-SKU dead stock analysis with cost basis, GMROI inputs, and
-        -- velocity tiers. NPV decision is computed in Python (so carrying rate
-        -- and liquidation discount can be tuned without rebuilding the view).
-        CREATE OR REPLACE VIEW v_sku_dead_stock_v2 AS
-        WITH cost_ratio AS (
-            -- Portfolio-wide cost-to-sale ratio for fallback when purchased_price is missing
-            SELECT
-                COALESCE(
-                    SUM(quantity * NULLIF(purchased_price, 0)) /
-                    NULLIF(SUM(quantity * NULLIF(price, 0)), 0),
-                    0.5
-                ) as ratio
-            FROM offer_stocks
-            WHERE quantity > 0
-        ),
-        sales_90 AS (
-            SELECT product_id,
-                   SUM(quantity_sold) as qty_sold_90d,
-                   SUM(product_revenue) as revenue_90d
-            FROM gold_daily_products
-            WHERE date >= CURRENT_DATE - INTERVAL '90 days'
-            GROUP BY product_id
-        ),
-        sales_30 AS (
-            SELECT product_id,
-                   SUM(quantity_sold) as qty_sold_30d,
-                   SUM(product_revenue) as revenue_30d
-            FROM gold_daily_products
-            WHERE date >= CURRENT_DATE - INTERVAL '30 days'
-            GROUP BY product_id
-        ),
-        base AS (
-            SELECT
-                s.offer_id,
-                s.product_id,
-                s.sku,
-                s.name,
-                s.brand,
-                s.category_id,
-                s.category_name,
-                s.available,
-                s.price,
-                s.purchased_price,
-                s.days_since_sale,
-                s.days_in_stock,
-                s.last_sale_date,
-                COALESCE(
-                    NULLIF(s.purchased_price, 0),
-                    s.price * (SELECT ratio FROM cost_ratio)
-                ) as effective_unit_cost,
-                CASE
-                    WHEN s.purchased_price IS NULL OR s.purchased_price = 0
-                        THEN 'fallback'
-                    ELSE 'actual'
-                END as cost_quality,
-                COALESCE(s90.qty_sold_90d, 0) as qty_sold_90d,
-                COALESCE(s90.revenue_90d, 0) as revenue_90d,
-                COALESCE(s30.qty_sold_30d, 0) as qty_sold_30d,
-                COALESCE(s30.revenue_30d, 0) as revenue_30d,
-                COALESCE(a.abc_class, 'C') as abc_class
-            FROM v_sku_analysis s
-            LEFT JOIN sales_90 s90 ON s.product_id = s90.product_id
-            LEFT JOIN sales_30 s30 ON s.product_id = s30.product_id
-            LEFT JOIN v_abc_classification a ON s.offer_id = a.offer_id
-            WHERE s.quantity > 0
-        )
-        SELECT
-            b.*,
-            b.available * b.price as sale_value,
-            b.available * b.effective_unit_cost as cost_basis,
-            CASE WHEN b.qty_sold_90d > 0
-                 THEN ROUND(b.available / (b.qty_sold_90d / 90.0), 0)
-                 ELSE NULL
-            END as days_of_supply,
-            CASE WHEN b.qty_sold_90d > 0 THEN ROUND(b.qty_sold_90d / 90.0, 3) ELSE 0 END as avg_daily_sales_90d,
-            CASE WHEN b.qty_sold_30d > 0 THEN ROUND(b.qty_sold_30d / 30.0, 3) ELSE 0 END as avg_daily_sales_30d,
-            CASE
-                WHEN b.qty_sold_90d = 0 THEN 'frozen'
-                WHEN b.available / (b.qty_sold_90d / 90.0) > 365 THEN 'frozen'
-                WHEN b.available / (b.qty_sold_90d / 90.0) > 180 THEN 'cold'
-                WHEN b.available / (b.qty_sold_90d / 90.0) > 90 THEN 'warm'
-                WHEN b.available / (b.qty_sold_90d / 90.0) > 30 THEN 'healthy'
-                ELSE 'hot'
-            END as velocity_tier,
-            -- Velocity decay: 30d rate vs 90d rate. <0.7 = slowing, >1.3 = accelerating
-            CASE WHEN b.qty_sold_90d > 0 AND (b.qty_sold_90d / 90.0) > 0
-                 THEN ROUND((b.qty_sold_30d / 30.0) / (b.qty_sold_90d / 90.0), 2)
-                 ELSE NULL
-            END as velocity_ratio_30_90,
-            -- Annualized gross profit per SKU (revenue × 4 × margin)
-            CASE WHEN b.price > 0
-                 THEN b.revenue_90d * 4.0 * ((b.price - b.effective_unit_cost) / b.price)
-                 ELSE 0
-            END as annual_gross_profit,
-            -- GMROI annualized: gross profit / cost_basis (avg inventory proxy = current)
-            CASE WHEN (b.available * b.effective_unit_cost) > 0 AND b.price > 0
-                 THEN b.revenue_90d * 4.0 * ((b.price - b.effective_unit_cost) / b.price)
-                      / (b.available * b.effective_unit_cost)
-                 ELSE NULL
-            END as gmroi
-        FROM base b;
+        The bodies live in `core.sql_dialect.inventory_view_selects` — one text
+        for both engines, table names the only difference, the same contract
+        `silver_order_lines` has. Migration 0014 freezes the Postgres
+        rendering and a test asserts the two agree.
         """
+        views_sql = "\n\n".join(
+            f"CREATE OR REPLACE VIEW {name} AS\n{select};"
+            for name, select in _inventory_view_selects(_DUCKDB_DIALECT)
+        )
         self._connection.execute(views_sql)
         logger.info("Inventory analytics views created")
 
@@ -2226,13 +1961,10 @@ class DuckDBStore(
                         f"known-types gold={gold_revenue_known:.2f}; {detail}"
                     )
                     partition_alert = (
-                        "🚨 *Unknown `sales_type` in Gold*\n"
-                        f"Silver revenue {silver_revenue:,.2f} vs "
-                        f"{gold_revenue_known:,.2f} across "
-                        f"{', '.join(KNOWN_SALES_TYPES)}.\n"
-                        f"Outside the partition: {detail}\n\n"
-                        "Revenue in an unknown sales_type reaches no page — "
-                        "every endpoint defaults to retail."
+                        "🚨 <b>Gold: revenue in an unknown sales_type — "
+                        "no page shows it</b>\n"
+                        f"{detail}\n"
+                        "→ A type outside retail/b2b/internal; check the managers"
                     )
 
                 if not validation_passed:
@@ -2276,8 +2008,11 @@ class DuckDBStore(
                         )
                         needs_full_retry = True
                         validation_alert = (
-                            "⚠️ Warehouse validation failed — full retry scheduled "
-                            f"(attempt {consecutive + 1}/{MAX_VALIDATION_RETRIES}).\n{detail}"
+                            f"⚠️ <b>Warehouse: validation failed "
+                            f"(attempt {consecutive + 1}/{MAX_VALIDATION_RETRIES})</b>\n"
+                            f"{detail}\n"
+                            "→ Nothing yet: retries every 2 min; you'll hear at "
+                            f"{MAX_VALIDATION_RETRIES}/{MAX_VALIDATION_RETRIES}"
                         )
                         validation_alert_key = "warehouse:validation_retrying"
                     elif self._claim_stuck_rebuild_slot():
@@ -2288,10 +2023,11 @@ class DuckDBStore(
                         )
                         needs_full_retry = True
                         validation_alert = (
-                            f"🚨 CRITICAL: Warehouse validation failed {consecutive}x in a "
-                            "row. The Gold layer may be serving WRONG revenue. Attempting a "
-                            f"full rebuild; if this alert returns in {hours}h the cause is "
-                            f"not transient and needs a human.\n{detail}"
+                            f"🚨 <b>Warehouse: validation failing ×{consecutive}, "
+                            "Gold may be wrong</b>\n"
+                            f"{detail}\n"
+                            f"→ Full rebuild running (the last auto lever); "
+                            f"back in {hours}h if it fails"
                         )
                         validation_alert_key = "warehouse:validation_rebuilding"
                     else:
@@ -2300,9 +2036,10 @@ class DuckDBStore(
                             f"full rebuild already attempted this period: {detail}"
                         )
                         validation_alert = (
-                            f"🚨 CRITICAL: Warehouse validation failed {consecutive}x in a "
-                            "row and a full rebuild did not fix it — the Gold layer may be "
-                            f"serving WRONG revenue. Manual fix needed.\n{detail}"
+                            f"🚨 <b>Warehouse: ×{consecutive} and the rebuild "
+                            "did not help — human needed</b>\n"
+                            f"{detail}\n"
+                            "→ Machine exhausted; tick history in warehouse_refreshes"
                         )
                         validation_alert_key = "warehouse:validation_unfixed"
 
@@ -2347,6 +2084,23 @@ class DuckDBStore(
                 await self._send_warehouse_alert(
                     partition_alert, "warehouse:sales_type_partition",
                 )
+
+            # Step 04: a tick that came back clean announces the recovery of
+            # whatever this group had announced — validation, partition, and
+            # the errored-refresh pair alike. Silence after an alert used to
+            # be indistinguishable from the throttle holding it, and this
+            # validator once stood failing for three straight weeks.
+            try:
+                from core.alerting import resolve_group
+
+                still = []
+                if validation_alert:
+                    still.append(validation_alert_key)
+                if partition_alert:
+                    still.append("warehouse:sales_type_partition")
+                await resolve_group("warehouse", still_firing=still)
+            except Exception as e:
+                logger.warning(f"Warehouse resolve failed: {e}")
 
             incremental_info = ""
             if affected_dates:
@@ -2446,16 +2200,16 @@ class DuckDBStore(
                 if consecutive <= MAX_VALIDATION_RETRIES:
                     await self.mark_warehouse_dirty(None)
                     await self._send_warehouse_alert(
-                        f"⚠️ Warehouse refresh errored — full rebuild scheduled to "
-                        f"self-heal (attempt {consecutive}/{MAX_VALIDATION_RETRIES}). "
-                        f"Gold layers may be cross-inconsistent until then.\n{error_msg}",
+                        f"⚠️ <b>Warehouse: refresh crashed "
+                        f"(attempt {consecutive}/{MAX_VALIDATION_RETRIES})</b>\n"
+                        f"{error_msg}\n→ Self-heals: full rebuild next tick",
                         "warehouse:refresh_errored",
                     )
                 else:
                     await self._send_warehouse_alert(
-                        f"🚨 CRITICAL: Warehouse refresh errored {consecutive}x in a row. "
-                        f"Auto-retry stopped — Gold layers may be cross-inconsistent. "
-                        f"Manual fix needed.\n{error_msg}",
+                        f"🚨 <b>Warehouse: refresh crashing ×{consecutive}, "
+                        f"auto-retry stopped</b>\n{error_msg}\n"
+                        "→ Human needed: Gold may be cross-inconsistent",
                         "warehouse:refresh_errored_exhausted",
                     )
             except Exception as heal_err:
@@ -2732,8 +2486,12 @@ class DuckDBStore(
         dependency on bot.main at module load.
         """
         try:
-            from bot.main import send_admin_message
-            await send_admin_message(message, key=key)
+            from core.alerting import raise_alert
+
+            await raise_alert(
+                message, conditions=[key] if key else [], bucket=key,
+                group="warehouse",
+            )
         except Exception as e:
             logger.warning(f"Failed to send warehouse alert: {e}")
 
@@ -2784,7 +2542,7 @@ class DuckDBStore(
                    f"~{src_size*1.1/1e9:.1f}GB for {src.name}")
             logger.error(msg)
             await self._send_warehouse_alert(
-                f"🚨 DB backup FAILED — {msg}", "warehouse:backup_failed",
+                f"🚨 DB backup FAILED — {msg}", "warehouse:backup_preflight",
             )
             return {"status": "error", "error": msg}
 
@@ -3735,7 +3493,8 @@ class DuckDBStore(
     async def update_manager_stats(self) -> int:
         """Update manager order statistics from orders table.
 
-        Updates first_order_date, last_order_date, and order_count for all managers.
+        Updates first_order_date, last_order_date, and order_count for all
+        managers, and replicates the result to Postgres.
 
         Returns:
             Number of managers updated
@@ -3762,7 +3521,25 @@ class DuckDBStore(
             """)
             count = result.fetchone()
             logger.info(f"Updated manager statistics")
-            return count[0] if count else 0
+            updated = count[0] if count else 0
+
+        # Step 05. These three columns are computed here, and `replicate_managers`
+        # is what carries them to Postgres — but it only ever ran from
+        # `upsert_managers`, which is a different event. So every recompute left
+        # the two stores disagreeing until the next manager sync, and
+        # `dq_mirror_landing` reported it as CRITICAL every morning
+        # (`mirror_row_values` on last_order_date and order_count, seen daily up
+        # to 2026-08-27). The daily `manager_stats` job never replicated at all,
+        # and `sync_managers` recomputes *after* upserting, so even the sync path
+        # ended with the stores apart. Replicating here is what makes the check's
+        # tolerance of zero honest for this table.
+        #
+        # Outside the connection block: `asyncio.Lock` is not reentrant and
+        # `replicate_managers` opens its own. It never raises.
+        from core.pg_replication import replicate_managers
+
+        await replicate_managers(self)
+        return updated
 
     async def set_manager_retail_status(
         self,

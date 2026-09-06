@@ -78,13 +78,34 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from core.data_quality import IntegrityIssue, Severity
 from core.landing_rows import CATEGORY_COLUMNS, PRODUCT_COLUMNS
+from core.pg_bot_state import (
+    AUTHORIZED_COLUMNS,
+    MILESTONE_COLUMNS,
+    PREFERENCE_COLUMNS,
+    REPORT_HISTORY_COLUMNS,
+)
+from core.pg_operational import (
+    INVENTORY_HISTORY_COLUMNS,
+    MISS_COLUMNS,
+    SKU_STATUS_COLUMNS,
+)
 from core.pg_replication import CLASSIFICATION_COLUMNS, MANAGER_COLUMNS
+from core.pg_sms import (
+    CAMPAIGN_COLUMNS,
+    DLR_COLUMNS,
+    MEMBER_COLUMNS,
+    MEMBER_STAMP,
+    OFFER_STOCK_COLUMNS,
+    OPTOUT_COLUMNS,
+    PRESET_COLUMNS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +135,38 @@ class MirroredTable:
     # Where the grace window reads "when did this store last write the row".
     # None means the table has no such column and nothing is ever in flight.
     synced_column: Optional[str] = "synced_at"
+    # Why a disagreement here is a defect, in this table's own terms. The
+    # default is the landing mirror's story and it is true only of landing:
+    # `bronze.products` really is one parsed tuple handed to two stores. The
+    # replicated tables are a *copy* — of DuckDB, or of SQLite through a type
+    # conversion — and telling their reader otherwise sends them looking for a
+    # write path that does not exist. Found by reading a real finding: a
+    # changed `language` in `app.user_preferences` was reported as impossible
+    # arithmetic between two parsers.
+    origin_note: str = (
+        "Both sides are written from the same parsed tuple in the same call, "
+        "so there is no arithmetic between them that could differ — a "
+        "disagreement here is a defect in the write path, not drift."
+    )
+    # Columns both stores hold, both stores ship, and no comparison can learn
+    # anything from. `app.sku_inventory_status.updated_at` is the case that
+    # forced this: the DuckDB refresh is a `DELETE`+`INSERT` that writes
+    # `CURRENT_TIMESTAMP` to every row (core/repositories/inventory.py:251),
+    # so the stamp records when the table was last rebuilt, not anything about
+    # the SKU. The replica is copied ~10 minutes before the next rebuild, so
+    # the two copies hold different stamps on every row, always — 891 of 891
+    # rows on 2026-09-01, screaming CRITICAL for days while the three rows
+    # that really did differ (`reserve`) sat invisible inside the number.
+    #
+    # `fetch_duckdb_rows` already promises the stamp is "read alongside but
+    # never compared". That promise silently fails when `synced_column` is
+    # also listed in `columns`, which is exactly this table's shape. This is
+    # the promise made explicit and per-column, rather than widened into a
+    # rule: `app.order_backfill_misses.checked_at` is deliberately both the
+    # clock and a compared value, and it is right to be, because it moves only
+    # when that row is genuinely re-recorded.
+    ignore_columns: Tuple[str, ...] = ()
+
     # True when the writer replaces the whole table rather than upserting.
     #
     # This decides what a row present in DuckDB and absent from Postgres
@@ -133,6 +186,23 @@ class MirroredTable:
         which is what a human would go looking for anyway.
         """
         return self.columns.index(self.key_columns[0])
+
+
+# What a disagreement means for a table that is *copied* rather than mirrored.
+# Landing is one parsed tuple handed to two stores; these are not, and a
+# finding that says otherwise sends its reader hunting a shared write path that
+# does not exist.
+_COPIED_FROM_DUCKDB = (
+    "This table is copied out of DuckDB as it stands, not parsed twice, so a "
+    "disagreement is the copy: it did not run, it ran against a different "
+    "snapshot, or something other than the replicator wrote this table."
+)
+_COPIED_FROM_SQLITE = (
+    "This table is copied out of data/bot.db through a type conversion "
+    "(SQLite has no boolean and no timezone), so a disagreement is either the "
+    "copy not having run or the conversion — check the column named above "
+    "against core/pg_bot_state._convert before anything else."
+)
 
 
 # Order matters only for reporting. Products first: it is the table that moves.
@@ -155,12 +225,14 @@ MIRRORED_TABLES: Tuple[MirroredTable, ...] = (
     # missing row here unambiguous: there is no "KeyCRM retired it" to mean.
     MirroredTable(
         pg_table="bronze.managers",
+        origin_note=_COPIED_FROM_DUCKDB,
         dk_table="managers",
         columns=MANAGER_COLUMNS,
         full_replace=True,
     ),
     MirroredTable(
         pg_table="app.manager_classifications",
+        origin_note=_COPIED_FROM_DUCKDB,
         dk_table="manager_classifications",
         columns=CLASSIFICATION_COLUMNS,
         key_columns=("manager_id", "valid_from"),
@@ -202,12 +274,22 @@ def _as_decimal(value: Any) -> Optional[Decimal]:
         return None
 
 
+# Substituted for a column both stores hold and neither can agree on — see
+# `MirroredTable.ignore_columns`. A sentinel rather than dropping the column,
+# because `_row_key` and `sample_index` address values by position and a
+# shorter tuple would silently move the key.
+_IGNORED = "<ignored>"
+
+
 def _normalise_row(
     row: Sequence[Any], columns: Sequence[str], numeric: Sequence[str],
+    ignored: Sequence[str] = (),
 ) -> Tuple[Any, ...]:
     numeric_set = set(numeric)
+    ignored_set = set(ignored)
     return tuple(
-        _as_decimal(v) if c in numeric_set else v
+        _IGNORED if c in ignored_set
+        else _as_decimal(v) if c in numeric_set else v
         for c, v in zip(columns, row)
     )
 
@@ -216,11 +298,20 @@ def _normalise_row(
 
 
 def _row_key(spec: MirroredTable, row: Sequence[Any]) -> Any:
-    """The identity of a row: an int for a simple key, a tuple otherwise."""
+    """The identity of a row: an int for a simple key, a tuple otherwise.
+
+    A single key column is not always a number — `app.inventory_history` is
+    keyed by the day. Coercing it to `int` used to be unconditional, which was
+    correct for every table that existed at the time and a `TypeError` for the
+    first one that did not.
+    """
     values = tuple(row[spec.columns.index(c)] for c in spec.key_columns)
-    if len(values) == 1:
+    if len(values) != 1:
+        return values
+    try:
         return int(values[0])
-    return values
+    except (TypeError, ValueError):
+        return values[0]
 
 
 def fetch_duckdb_rows(
@@ -246,7 +337,9 @@ def fetch_duckdb_rows(
         if any(row[spec.columns.index(c)] is None for c in spec.key_columns):
             continue
         key = _row_key(spec, row)
-        values[key] = _normalise_row(row[:width], spec.columns, spec.numeric)
+        values[key] = _normalise_row(
+            row[:width], spec.columns, spec.numeric, spec.ignore_columns,
+        )
         synced[key] = row[width] if stamp else None
     return values, synced
 
@@ -262,8 +355,62 @@ async def fetch_pg_rows(pool, spec: MirroredTable) -> Dict[Any, Tuple[Any, ...]]
         if any(record[c] is None for c in spec.key_columns):
             continue
         out[_row_key(spec, row)] = _normalise_row(
-            row, spec.columns, spec.numeric,
+            row, spec.columns, spec.numeric, spec.ignore_columns,
         )
+    return out
+
+
+# The tables whose freshness a watchdog outside this container is expected to
+# judge. `bronze.orders` alone, deliberately: it is the copy that carries the
+# money, and it is the one whose failure used to wait for 07:30 — a whole day
+# in which the main copy could be broken with nobody told. The ClickHouse rows
+# are NOT here; that store is optional and its daily window of silence was
+# accepted and written down when step 4 shipped.
+WATCHED_MIRRORS: Tuple[str, ...] = ("bronze.orders",)
+
+
+async def fetch_mirror_freshness(
+    pool, tables: Tuple[str, ...] = WATCHED_MIRRORS, now: Optional[datetime] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Age of the last successful shipment per watched table, plus its failures.
+
+    Two numbers, because on their own each one lies in a different direction:
+
+    - **age alone cannot be tight.** `mirror_orders` refuses to move the
+      watermark when there was nothing to ship, so a quiet night is
+      indistinguishable from a dead mirror by age. Measured on production,
+      the orders watermark legitimately stands still from about 01:00 until
+      the 05:15 status refresh, and again until traffic resumes around 07:00.
+    - **failures alone cannot be complete.** A mirror switched off, or a sync
+      that stopped feeding it, never raises and so never counts a failure.
+
+    `failures_since_ok` is what makes the age threshold affordable: an actively
+    failing mirror is caught on the next sync tick regardless of how generous
+    the age limit is.
+
+    A table with no row at all reports every field None — it has never shipped,
+    which is a different thing from having shipped long ago and must not be
+    flattened into a large age.
+    """
+    reference = now or datetime.now(timezone.utc)
+    rows = await fetch_watermarks(pool)
+    out: Dict[str, Dict[str, Any]] = {}
+    for table in tables:
+        state = rows.get(table)
+        last_ok = (state or {}).get("last_ok_at")
+        out[table] = {
+            "last_ok_at": last_ok.isoformat() if last_ok else None,
+            "age_seconds": (
+                int((reference - last_ok).total_seconds()) if last_ok else None
+            ),
+            "failures_since_ok": (
+                int(state["failures_since_ok"] or 0) if state else None
+            ),
+            # The text is deliberately not published: it is an exception string
+            # from a database driver, and /api/health is public. Whether there
+            # is one is the part a watchdog acts on.
+            "failing": bool(state and state.get("last_error")),
+        }
     return out
 
 
@@ -283,6 +430,24 @@ async def fetch_watermarks(pool) -> Dict[str, Dict[str, Any]]:
 # ─── The comparison (pure) ────────────────────────────────────────────────────
 
 
+def _as_sample_id(value: Any) -> Optional[int]:
+    """One key rendered as the integer `IntegrityIssue.sample_ids` holds.
+
+    A date becomes `20260827`, which is the only integer form of a day anybody
+    reads back as a day. Anything else that is not a number is dropped rather
+    than forced: a sample id nobody can look anything up with is worse than no
+    sample id, and the count and the table name are in the description anyway.
+    """
+    if isinstance(value, datetime):
+        value = value.date()
+    if isinstance(value, date):
+        return value.year * 10000 + value.month * 100 + value.day
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _sample(spec: MirroredTable, keys, limit: int) -> Tuple[int, ...]:
     """Up to `limit` sample ids, from the first key column.
 
@@ -292,7 +457,9 @@ def _sample(spec: MirroredTable, keys, limit: int) -> Tuple[int, ...]:
     """
     out = []
     for key in sorted(keys)[:limit]:
-        out.append(int(key[0]) if isinstance(key, tuple) else int(key))
+        rendered = _as_sample_id(key[0] if isinstance(key, tuple) else key)
+        if rendered is not None:
+            out.append(rendered)
     return tuple(out)
 
 
@@ -474,10 +641,7 @@ def compare_table(
             sample_ids=_sample(spec, differing, max_samples),
             description=(
                 f"{len(differing)} row(s) are present in both stores and "
-                f"disagree. Columns: {worst}. Both sides are written from the "
-                "same parsed tuple in the same call, so there is no arithmetic "
-                "between them that could differ — a disagreement here is a "
-                "defect in the write path, not drift."
+                f"disagree. Columns: {worst}. {spec.origin_note}"
             ),
         ))
 
@@ -622,7 +786,13 @@ class BucketedTable:
     dk_table: str
     columns: Tuple[str, ...]
     fields: Tuple[Tuple[str, str], ...]     # (column, kind), for the fingerprint
-    bucket_column: str
+    # How a row is assigned to a bucket, once per dialect. An expression and
+    # not a column name, because the right bucket is not always `id // 1000`:
+    # `inventory_sku_history` is keyed (date, offer_id) with only ~900 offers,
+    # so dividing an id would put the whole table in one bucket and the
+    # drill-down would read 143,274 rows to find one. Its bucket is the day.
+    dk_bucket: str
+    pg_bucket: str
     numeric: Tuple[str, ...]
     dk_rows_sql: str                        # one bucket, plus DuckDB's synced_at
     pg_rows_sql: str
@@ -650,7 +820,8 @@ ORDER_TABLES: Tuple[BucketedTable, ...] = (
         dk_table="orders",
         columns=_ORDER_COLS,
         fields=_ORDER_FIELDS,
-        bucket_column="id",
+        dk_bucket="id // {}".format(BUCKET_SIZE),
+        pg_bucket="id / {}".format(BUCKET_SIZE),
         numeric=("grand_total",),
         dk_rows_sql=(
             f"SELECT {', '.join(_ORDER_COLS)}, synced_at FROM orders "
@@ -666,7 +837,8 @@ ORDER_TABLES: Tuple[BucketedTable, ...] = (
         dk_table="order_products",
         columns=_ORDER_PRODUCT_COLS,
         fields=_ORDER_PRODUCT_FIELDS,
-        bucket_column="order_id",
+        dk_bucket="order_id // {}".format(BUCKET_SIZE),
+        pg_bucket="order_id / {}".format(BUCKET_SIZE),
         numeric=("price_sold",),
         # A line item has no `synced_at` of its own; its order's is the right
         # one, because the two are written in the same call on both sides.
@@ -724,7 +896,8 @@ SILVER_TABLES: Tuple[BucketedTable, ...] = (
         dk_table="silver_orders",
         columns=_SILVER_COLS,
         fields=_SILVER_FIELDS,
-        bucket_column="id",
+        dk_bucket="id // {}".format(BUCKET_SIZE),
+        pg_bucket="id / {}".format(BUCKET_SIZE),
         numeric=("grand_total",),
         # Silver carries no timestamp of its own on either side. The grace
         # window therefore reads the *order's* — a Silver row is only ever as
@@ -778,7 +951,7 @@ def _pg_term(column: str, kind: str) -> str:
 def duckdb_fingerprint_sql(spec: BucketedTable) -> str:
     terms = ", ".join(_dk_term(c, k) for c, k in spec.fields)
     return (
-        f"SELECT ({spec.bucket_column} // {BUCKET_SIZE})::BIGINT AS bucket, "
+        f"SELECT ({spec.dk_bucket})::BIGINT AS bucket, "
         f"COUNT(*), {terms} FROM {spec.dk_table} GROUP BY 1 ORDER BY 1"
     )
 
@@ -786,7 +959,7 @@ def duckdb_fingerprint_sql(spec: BucketedTable) -> str:
 def postgres_fingerprint_sql(spec: BucketedTable) -> str:
     terms = ", ".join(_pg_term(c, k) for c, k in spec.fields)
     return (
-        f"SELECT ({spec.bucket_column} / {BUCKET_SIZE})::bigint AS bucket, "
+        f"SELECT ({spec.pg_bucket})::bigint AS bucket, "
         f"COUNT(*), {terms} FROM {spec.pg_table} GROUP BY 1 ORDER BY 1"
     )
 
@@ -1176,4 +1349,1284 @@ async def reconcile_silver(
             )
         issues += _divergence_findings(spec, found, max_samples=max_samples)
 
+    return issues
+
+
+# ─── Gold: one aggregate, two shapes, compared through the mapping ───────────
+#
+# Silver was the same projection on both sides, so it could be compared column
+# for column. Gold cannot: DuckDB splits the channels into columns and Postgres
+# carries `source_id` as a dimension, because a column can only name a channel
+# somebody wrote a column for — see revision 0007 for the ₴266,059.00 that
+# proves it.
+#
+# So the comparison goes through a mapping instead, and the mapping is total:
+# every one of DuckDB's fourteen measures has an exact counterpart here, and
+# nothing is compared by folding one grain into the other.
+#
+#     revenue … avg_order_value   ↔  the Postgres roll-up row (source_id NULL)
+#     instagram_revenue           ↔  the fine row for source 1, column revenue
+#     telegram_orders             ↔  the fine row for source 2, orders_count
+#     …and so on for 2 and 4
+#
+# THE ROLL-UP IS COMPARED, NOT RECONSTRUCTED
+#
+# `unique_customers`, `new_customers` and `returning_customers` are
+# `COUNT(DISTINCT buyer_id)`, and adding the per-source rows up overstates them
+# in 29, 12 and 17 of 2,107 production cells — one buyer who used two channels
+# in a day. That is why `gold.daily_revenue` stores the roll-up rather than
+# leaving it to be derived, and why this reads it rather than summing.
+#
+# WHAT IS NOT COMPARED, AND WHY THAT IS NOT A HOLE
+#
+# The fine rows for sources 3 and 5 have no DuckDB counterpart — that absence
+# is the entire reason the grain changed. Their contribution is still checked,
+# twice over: they are inside DuckDB's `revenue`, which the roll-up comparison
+# covers exactly, and `_gold_internal_findings` asserts the fine rows add up to
+# the roll-up for the four measures that are additive.
+
+GOLD_PG_TABLE = "gold.daily_revenue"
+GOLD_DK_TABLE = "gold_daily_revenue"
+
+# Gold is rebuilt in the same call as Silver, on the same floor, so it is
+# behind by the same amount and forgiven for the same window.
+GOLD_GRACE_MINUTES = SILVER_GRACE_MINUTES
+
+_GOLD_ROLLUP_MEASURES: Tuple[str, ...] = (
+    "revenue", "orders_count", "unique_customers", "new_customers",
+    "returning_customers", "returns_count", "returns_revenue",
+    "avg_order_value",
+)
+
+# DuckDB column → (source_id, the Postgres column holding the same number).
+#
+# Sound only while 1, 2 and 4 are all in REVENUE_SOURCE_IDS: DuckDB's channel
+# columns filter `source_id = n` where Postgres filters `is_active_source`, and
+# the two agree exactly because those sources are active. A test pins that.
+_GOLD_SOURCE_MEASURES: Dict[str, Tuple[int, str]] = {
+    "instagram_revenue": (1, "revenue"),
+    "telegram_revenue": (2, "revenue"),
+    "shopify_revenue": (4, "revenue"),
+    "instagram_orders": (1, "orders_count"),
+    "telegram_orders": (2, "orders_count"),
+    "shopify_orders": (4, "orders_count"),
+}
+
+# Zero everywhere except the one column that is a division. DuckDB's DECIMAL
+# `/` promotes to DOUBLE and rounds the result; PostgreSQL divides exactly and
+# rounds once. The warehouse's own Gold check has allowed exactly this cent
+# since it was written — `MATERIAL_THRESHOLDS` in core/data_quality.py.
+_GOLD_TOLERANCES: Dict[str, Decimal] = {"avg_order_value": Decimal("0.01")}
+
+# The four measures that survive being added up across sources. The other four
+# are distinct counts and a division, and summing any of them is the mistake
+# this table's shape exists to avoid.
+_GOLD_ADDITIVE: Tuple[str, ...] = (
+    "revenue", "orders_count", "returns_count", "returns_revenue",
+)
+
+
+def _gold_cell(cell: Tuple[Any, str]) -> str:
+    return f"{cell[0]} {cell[1]}"
+
+
+def _gold_cells(cells: Sequence[Tuple[Any, str]], limit: int) -> str:
+    shown = ", ".join(_gold_cell(c) for c in sorted(cells)[:limit])
+    return shown + ("…" if len(cells) > limit else "")
+
+
+def fetch_duckdb_gold(conn) -> Tuple[
+    Dict[Tuple[Any, str], Dict[str, Optional[Decimal]]],
+    Dict[Tuple[Any, str], Optional[datetime]],
+]:
+    """DuckDB's Gold, and how fresh each cell's newest order is.
+
+    2,107 rows of 16 columns — small enough to read whole, which is why this
+    needs none of the bucketed fingerprint machinery that `orders` and Silver
+    do.
+
+    The freshness comes from the orders behind the cell, because a Gold cell
+    carries no timestamp of its own on either side. A cell holding an order
+    synced two minutes ago is legitimately different between the stores until
+    Postgres rebuilds, exactly as a Silver row is.
+    """
+    columns = list(_GOLD_ROLLUP_MEASURES) + list(_GOLD_SOURCE_MEASURES)
+    rows = conn.execute(
+        f"SELECT date, sales_type, {', '.join(columns)} FROM {GOLD_DK_TABLE}"
+    ).fetchall()
+    values = {
+        (r[0], r[1]): {c: _as_decimal(v) for c, v in zip(columns, r[2:])}
+        for r in rows
+    }
+
+    fresh = conn.execute(
+        "SELECT s.order_date, s.sales_type, MAX(o.synced_at) "
+        "FROM silver_orders s LEFT JOIN orders o ON o.id = s.id "
+        "GROUP BY s.order_date, s.sales_type"
+    ).fetchall()
+    return values, {(r[0], r[1]): r[2] for r in fresh}
+
+
+async def fetch_pg_gold(pool) -> Tuple[
+    Dict[Tuple[Any, str], Dict[str, Optional[Decimal]]],
+    Dict[Tuple[Any, str, int], Dict[str, Optional[Decimal]]],
+]:
+    """The Postgres roll-up rows and fine rows, keyed apart.
+
+    Keyed apart rather than filtered later because they answer different
+    questions and a caller that confused them would compare a channel against
+    a day.
+    """
+    columns = list(_GOLD_ROLLUP_MEASURES)
+    rows = await pool.fetch(
+        f"SELECT date, sales_type, source_id, {', '.join(columns)} "
+        f"FROM {GOLD_PG_TABLE}"
+    )
+    rollup: Dict[Tuple[Any, str], Dict[str, Optional[Decimal]]] = {}
+    fine: Dict[Tuple[Any, str, int], Dict[str, Optional[Decimal]]] = {}
+    for r in rows:
+        measures = {c: _as_decimal(r[c]) for c in columns}
+        if r["source_id"] is None:
+            rollup[(r["date"], r["sales_type"])] = measures
+        else:
+            fine[(r["date"], r["sales_type"], int(r["source_id"]))] = measures
+    return rollup, fine
+
+
+_GOLD_ZERO: Dict[str, Decimal] = {c: Decimal(0) for c in _GOLD_ROLLUP_MEASURES}
+
+
+def _gold_expected(
+    cell: Tuple[Any, str],
+    rollup: Mapping[Tuple[Any, str], Mapping[str, Optional[Decimal]]],
+    fine: Mapping[Tuple[Any, str, int], Mapping[str, Optional[Decimal]]],
+) -> Dict[str, Optional[Decimal]]:
+    """What Postgres says DuckDB's fourteen measures should be, for one cell.
+
+    An absent fine row is zero, not a missing row: Postgres writes a channel
+    row only for channels that sold something that day, where DuckDB writes a
+    zero into the column regardless. Reporting that as a missing row would
+    report the shape rather than the data.
+    """
+    expected = dict(rollup[cell])
+    for dk_column, (source_id, pg_column) in _GOLD_SOURCE_MEASURES.items():
+        row = fine.get((cell[0], cell[1], source_id), _GOLD_ZERO)
+        expected[dk_column] = row[pg_column]
+    return expected
+
+
+def compare_gold(
+    dk_rows: Mapping[Tuple[Any, str], Mapping[str, Optional[Decimal]]],
+    dk_fresh: Mapping[Tuple[Any, str], Optional[datetime]],
+    pg_rollup: Mapping[Tuple[Any, str], Mapping[str, Optional[Decimal]]],
+    pg_fine: Mapping[Tuple[Any, str, int], Mapping[str, Optional[Decimal]]],
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = GOLD_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Both sides, already read. No I/O, so it is testable whole."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=int(grace_minutes))
+    issues: List[IntegrityIssue] = []
+
+    def in_flight(cell: Tuple[Any, str]) -> bool:
+        synced = dk_fresh.get(cell)
+        if synced is None:
+            return False
+        if synced.tzinfo is None:
+            synced = synced.replace(tzinfo=timezone.utc)
+        return synced > cutoff
+
+    # ── the cell sets ──
+    #
+    # This is the August incident's shape one layer up: 100 → 90 → 84 missing
+    # cells with zero value mismatches, invisible to every scalar. The
+    # warehouse's own cell guard catches it between Silver and Gold in one
+    # store; this catches it between the stores.
+    missing = [c for c in dk_rows.keys() - pg_rollup.keys() if not in_flight(c)]
+    if missing:
+        issues.append(IntegrityIssue(
+            check_name="gold_missing_cells",
+            table_name=GOLD_PG_TABLE,
+            severity=Severity.CRITICAL,
+            count=len(missing),
+            description=(
+                f"{len(missing)} (date, sales_type) cell(s) exist in DuckDB's "
+                f"Gold and have no roll-up row in {GOLD_PG_TABLE}: "
+                f"{_gold_cells(missing, max_samples)}. Gold is rebuilt whole on "
+                "both sides, so a missing cell was not aggregated — there is no "
+                "'retired' to mean here."
+            ),
+        ))
+
+    orphans = [c for c in pg_rollup.keys() - dk_rows.keys() if not in_flight(c)]
+    if orphans:
+        issues.append(IntegrityIssue(
+            check_name="gold_orphan_cells",
+            table_name=GOLD_PG_TABLE,
+            severity=Severity.CRITICAL,
+            count=len(orphans),
+            description=(
+                f"{len(orphans)} roll-up row(s) in {GOLD_PG_TABLE} have no cell "
+                f"behind them in DuckDB's Gold: {_gold_cells(orphans, max_samples)}. "
+                "Either DuckDB's Gold lost a cell it should hold, or the two "
+                "stores disagree about which orders exist at all — check the "
+                "Silver comparison in the same run before this one."
+            ),
+        ))
+
+    # ── the values ──
+    offenders: Dict[str, int] = {}
+    differing: List[Tuple[Any, str]] = []
+    worst_example = None
+    for cell in sorted(dk_rows.keys() & pg_rollup.keys()):
+        if in_flight(cell):
+            continue
+        expected = _gold_expected(cell, pg_rollup, pg_fine)
+        cell_differs = False
+        for column, dk_value in dk_rows[cell].items():
+            pg_value = expected.get(column)
+            if dk_value is None or pg_value is None:
+                if dk_value is pg_value:
+                    continue
+            else:
+                gap = abs(dk_value - pg_value)
+                if gap <= _GOLD_TOLERANCES.get(column, Decimal(0)):
+                    continue
+            cell_differs = True
+            offenders[column] = offenders.get(column, 0) + 1
+            if worst_example is None:
+                worst_example = (cell, column, dk_value, pg_value)
+        if cell_differs:
+            differing.append(cell)
+
+    if differing:
+        worst = ", ".join(
+            f"{c} ({n})"
+            for c, n in sorted(offenders.items(), key=lambda kv: -kv[1])[:5]
+        )
+        cell, column, dk_value, pg_value = worst_example
+        issues.append(IntegrityIssue(
+            check_name="gold_cell_values",
+            table_name=GOLD_PG_TABLE,
+            severity=Severity.CRITICAL,
+            count=len(differing),
+            description=(
+                f"{len(differing)} cell(s) are aggregated by both stores and "
+                f"disagree. Columns: {worst}. First: {_gold_cell(cell)} "
+                f"{column} DuckDB={dk_value} Postgres={pg_value}. Cells: "
+                f"{_gold_cells(differing, max_samples)}. Both sides run the "
+                "same measures from GOLD_MEASURES over a Silver the same run "
+                "already proved equal, so a difference here is the aggregation "
+                "or the shape mapping, not the data underneath."
+            ),
+        ))
+
+    issues += _gold_internal_findings(pg_rollup, pg_fine, max_samples=max_samples)
+    return issues
+
+
+def _gold_internal_findings(
+    rollup: Mapping[Tuple[Any, str], Mapping[str, Optional[Decimal]]],
+    fine: Mapping[Tuple[Any, str, int], Mapping[str, Optional[Decimal]]],
+    *,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Do the Postgres fine rows add up to the Postgres roll-up?
+
+    The only check that sees the fine rows for sources 3 and 5 at all, because
+    those have no DuckDB column to be compared against — which is the whole
+    reason `source_id` became a dimension. It covers the four additive
+    measures; the three distinct counts and the division are excluded because
+    summing them is exactly the error the roll-up rows exist to prevent.
+
+    Postgres-only, and deliberately so: it needs no DuckDB, so it keeps working
+    unchanged after the parallel period ends and the other half of this module
+    is deleted.
+    """
+    sums: Dict[Tuple[Any, str], Dict[str, Decimal]] = {}
+    for (date, sales_type, _source), row in fine.items():
+        acc = sums.setdefault((date, sales_type), {c: Decimal(0) for c in _GOLD_ADDITIVE})
+        for column in _GOLD_ADDITIVE:
+            acc[column] += row[column] or Decimal(0)
+
+    offenders: Dict[str, int] = {}
+    bad: List[Tuple[Any, str]] = []
+    for cell, totals in sums.items():
+        if cell not in rollup:
+            continue
+        hit = False
+        for column in _GOLD_ADDITIVE:
+            if (rollup[cell][column] or Decimal(0)) != totals[column]:
+                offenders[column] = offenders.get(column, 0) + 1
+                hit = True
+        if hit:
+            bad.append(cell)
+
+    if not bad:
+        return []
+    worst = ", ".join(
+        f"{c} ({n})" for c, n in sorted(offenders.items(), key=lambda kv: -kv[1])
+    )
+    return [IntegrityIssue(
+        check_name="gold_rollup_mismatch",
+        table_name=GOLD_PG_TABLE,
+        severity=Severity.CRITICAL,
+        count=len(bad),
+        description=(
+            f"{len(bad)} cell(s) whose per-source rows do not add up to their "
+            f"own roll-up row. Columns: {worst}. Cells: "
+            f"{_gold_cells(bad, max_samples)}. Both grains come from one "
+            "GROUPING SETS over one snapshot, so these cannot disagree unless "
+            "the rebuild wrote them from different reads — a partial write, or "
+            "something outside core/pg_gold.py writing this table."
+        ),
+    )]
+
+
+async def reconcile_gold(
+    store,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = GOLD_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Compare the two aggregations of Gold.
+
+    Gated like Silver and for the same reason: `rebuild_gold` writes the table
+    whole every time, so the only question the watermark has to answer is
+    whether it has ever run — `_watermark_findings` reports that as
+    `mirror_never_shipped` and suppresses everything below it.
+
+    Reports only. A finding here cannot start a rebuild, on this module's
+    standing grounds: a comparison that repairs what it finds destroys the
+    evidence that it found anything.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    # The DuckDB read and the Postgres round-trips stay in separate blocks: the
+    # store's lock is not held across the network.
+    async with store.connection() as conn:
+        dk_rows, dk_fresh = fetch_duckdb_gold(conn)
+
+    issues, last_ok_at = _watermark_findings(
+        GOLD_PG_TABLE, watermarks.get(GOLD_PG_TABLE), len(dk_rows),
+    )
+    if last_ok_at is None:
+        return issues
+
+    pg_rollup, pg_fine = await fetch_pg_gold(pool)
+    return issues + compare_gold(
+        dk_rows, dk_fresh, pg_rollup, pg_fine,
+        now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+    )
+
+
+# ─── The operational history: five tables with no source to be rebuilt from ──
+#
+# `bronze.*` can be re-fetched from KeyCRM and Silver and Gold can be
+# recomputed. These five cannot — see revision 0008 for what each one knows
+# that KeyCRM does not. That is what makes the comparison worth its cost: a
+# difference here is not a copy that will be repaired by the next sync, it is
+# the only record of something drifting away from the only record of it.
+#
+# Three shapes, and each one is chosen by how DuckDB writes the table rather
+# than by its size.
+
+# Replicated hourly, so Postgres is legitimately behind by up to an hour. Same
+# relationship SILVER_GRACE_MINUTES has to KS_PG_SILVER_INTERVAL_S — the
+# interval plus half of it again — and the same warning: raise the job's
+# interval and this must move with it, or the check starts reporting the
+# schedule instead of the data.
+OPERATIONAL_GRACE_MINUTES = 90
+
+# ── the three replaced whole ─────────────────────────────────────────────────
+#
+# `full_replace=True` on all three, and it is not a formality. The replicator
+# writes every row it holds, so "in DuckDB and not in Postgres" has exactly one
+# meaning here: lost. There is no retired category to excuse it with, which is
+# the whole reason revision 0005 added the flag.
+
+# Imported, never restated. The replicator owns the column list because it is
+# the thing that writes it; a second copy here would compare a set of columns
+# that had quietly stopped being the set of columns being shipped, and would
+# report clean while doing it.
+
+OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
+    MirroredTable(
+        pg_table="app.order_backfill_misses",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="order_backfill_misses",
+        columns=MISS_COLUMNS,
+        key_columns=("order_id",),
+        # `checked_at` is refreshed every time an id is re-recorded, so it is
+        # both the value being compared and the clock that says whether a
+        # difference has had time to travel. That is fine — it is the same
+        # column, read for two purposes, and the grace window only ever
+        # forgives a row it also compared.
+        synced_column="checked_at",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.inventory_history",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="inventory_history",
+        columns=INVENTORY_HISTORY_COLUMNS,
+        key_columns=("date",),
+        synced_column="recorded_at",
+        numeric=("total_value",),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.sku_inventory_status",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="sku_inventory_status",
+        columns=SKU_STATUS_COLUMNS,
+        key_columns=("offer_id",),
+        synced_column="updated_at",
+        # Still shipped, still the grace clock, never compared: it is stamped
+        # on all 891 rows by every rebuild, so comparing it asks the two copies
+        # to have been taken at the same instant, which they never are.
+        ignore_columns=("updated_at",),
+        numeric=("price", "purchased_price"),
+        full_replace=True,
+    ),
+)
+
+# ── the two shipped above a watermark ────────────────────────────────────────
+
+_SKU_HISTORY_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("offer_id", _INT), ("date", _DATE), ("quantity", _INT),
+    ("reserve", _INT), ("price", _NUMERIC),
+)
+
+_MOVEMENT_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("id", _INT), ("offer_id", _INT), ("product_id", _INT),
+    ("movement_type", _TEXT), ("quantity_before", _INT),
+    ("quantity_after", _INT), ("delta", _INT), ("reserve_before", _INT),
+    ("reserve_after", _INT), ("source", _TEXT),
+)
+
+_SKU_HISTORY_COLS = tuple(c for c, _ in _SKU_HISTORY_FIELDS)
+_MOVEMENT_COLS = tuple(c for c, _ in _MOVEMENT_FIELDS)
+
+# Days since 1970-01-01, one bucket per day. Checked against both engines
+# rather than reasoned about: `epoch(DATE '2026-08-27') // 86400` in DuckDB and
+# `DATE '2026-08-27' - DATE '1970-01-01'` in PostgreSQL both give 20692.
+_DAY_BUCKET_DK = "epoch(date)::BIGINT // 86400"
+_DAY_BUCKET_PG = "(date - DATE '1970-01-01')"
+
+APPEND_ONLY_TABLES: Tuple[BucketedTable, ...] = (
+    BucketedTable(
+        pg_table="app.inventory_sku_history",
+        dk_table="inventory_sku_history",
+        columns=_SKU_HISTORY_COLS,
+        fields=_SKU_HISTORY_FIELDS,
+        dk_bucket=_DAY_BUCKET_DK,
+        pg_bucket=_DAY_BUCKET_PG,
+        numeric=("price",),
+        # One bucket is one day, and `offer_id` is unique inside a day — so the
+        # row identity the drill-down needs is a plain integer after all, even
+        # though the table's key is composite. That is why it is selected
+        # first.
+        #
+        # The table has no timestamp of its own. The day it belongs to is the
+        # day it was written, so the date doubles as the freshness signal: only
+        # today's snapshot can still be in flight.
+        dk_rows_sql=(
+            "SELECT " + ", ".join(_SKU_HISTORY_COLS)
+            + ", date::TIMESTAMP FROM inventory_sku_history "
+            f"WHERE ({_DAY_BUCKET_DK}) = ?"
+        ),
+        pg_rows_sql=(
+            f"SELECT {', '.join(_SKU_HISTORY_COLS)} "
+            "FROM app.inventory_sku_history "
+            f"WHERE ({_DAY_BUCKET_PG}) = $1"
+        ),
+    ),
+    BucketedTable(
+        pg_table="app.stock_movements",
+        dk_table="stock_movements",
+        columns=_MOVEMENT_COLS,
+        fields=_MOVEMENT_FIELDS,
+        dk_bucket="id // {}".format(BUCKET_SIZE),
+        pg_bucket="id / {}".format(BUCKET_SIZE),
+        numeric=(),
+        # `recorded_at` is a real per-row timestamp and is used as the clock,
+        # which is why it is absent from the compared columns above: a movement
+        # is stamped by DuckDB when it is detected and copied verbatim, so the
+        # two stores do agree on it — but making the clock one of the compared
+        # values means a disagreement can never be forgiven by itself.
+        dk_rows_sql=(
+            "SELECT " + ", ".join(_MOVEMENT_COLS)
+            + ", recorded_at FROM stock_movements "
+            f"WHERE (id // {BUCKET_SIZE}) = ?"
+        ),
+        pg_rows_sql=(
+            f"SELECT {', '.join(_MOVEMENT_COLS)} FROM app.stock_movements "
+            f"WHERE (id / {BUCKET_SIZE}) = $1"
+        ),
+    ),
+)
+
+
+async def reconcile_operational(
+    store,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = OPERATIONAL_GRACE_MINUTES,
+    max_samples: int = 10,
+    max_buckets: int = 20,
+) -> List[IntegrityIssue]:
+    """Compare the five irreplaceable tables, whole ones then fingerprinted ones.
+
+    Gated on `last_ok_at` per table, like Silver and Gold: the replicator either
+    replaces a table whole or writes strictly above what Postgres holds, so the
+    only question the watermark has to answer is whether it has ever run. A
+    table it has not reached reports `mirror_never_shipped` and suppresses its
+    row-level findings, which is what keeps the first morning after a deploy
+    from filing 143,274 CRITICALs.
+
+    Reports only, on this module's standing grounds: a comparison that repairs
+    what it finds destroys the evidence that it found anything. That matters
+    more here than anywhere else in the file — a "repair" of `stock_movements`
+    would be writing the only record of a stock change from the only other
+    record of it.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    # ── the three read whole ──
+    async with store.connection() as conn:
+        dk_side = read_duckdb_side(conn, OPERATIONAL_TABLES)
+
+    issues: List[IntegrityIssue] = []
+    for spec in OPERATIONAL_TABLES:
+        dk_rows, dk_synced = dk_side[spec.pg_table]
+        pg_rows = await fetch_pg_rows(pool, spec)
+        issues += compare_table(
+            spec, dk_rows, dk_synced, pg_rows,
+            watermarks.get(spec.pg_table),
+            now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+        )
+
+    # ── the two fingerprinted ──
+    async with store.connection() as conn:
+        dk_prints = {s.pg_table: fingerprints(conn, s) for s in APPEND_ONLY_TABLES}
+
+    suspects: Dict[str, List[int]] = {}
+    for spec in APPEND_ONLY_TABLES:
+        dk_print = dk_prints[spec.pg_table]
+        dk_count = sum(int(v[0]) for v in dk_print.values())
+        found, last_ok_at = _watermark_findings(
+            spec.pg_table, watermarks.get(spec.pg_table), dk_count,
+        )
+        issues += found
+        if last_ok_at is None:
+            continue
+
+        pg_print = await pg_fingerprints(pool, spec)
+        differing = disagreeing_buckets(dk_print, pg_print)
+        if len(differing) > max_buckets:
+            issues.append(IntegrityIssue(
+                check_name="mirror_buckets_disagree",
+                table_name=spec.pg_table,
+                severity=Severity.CRITICAL,
+                count=len(differing),
+                sample_ids=tuple(differing[:max_samples]),
+                description=(
+                    f"{len(differing)} buckets disagree in {spec.pg_table} — "
+                    "more than this check will open. A whole-table problem: "
+                    "the replicator not running, or a watermark that moved "
+                    "without the rows behind it."
+                ),
+            ))
+            differing = differing[:max_buckets]
+        suspects[spec.pg_table] = differing
+
+    if not any(suspects.values()):
+        return issues
+
+    dk_buckets: Dict[str, Dict[int, Any]] = {}
+    async with store.connection() as conn:
+        for spec in APPEND_ONLY_TABLES:
+            dk_buckets[spec.pg_table] = {
+                bucket: _read_dk_bucket(conn, spec, bucket)
+                for bucket in suspects.get(spec.pg_table, ())
+            }
+
+    for spec in APPEND_ONLY_TABLES:
+        found = _Divergence()
+        for bucket in suspects.get(spec.pg_table, ()):
+            dk_rows, dk_synced = dk_buckets[spec.pg_table][bucket]
+            pg_rows = await _read_pg_bucket(pool, spec, bucket)
+            compare_bucket(
+                spec, dk_rows, dk_synced, pg_rows, found,
+                now=now, grace_minutes=grace_minutes,
+            )
+        issues += _divergence_findings(spec, found, max_samples=max_samples)
+
+    return issues
+
+
+# ─── The bot's own state: the third store, and the one with no backup ────────
+#
+# Everything above compares DuckDB against Postgres. This compares **SQLite**
+# against Postgres, because `data/bot.db` is the third store in this system and
+# the only one that is in no backup at all — `data/backups/` and
+# `deploy/daily_offsite.sh` both glob `analytics-*.duckdb`, and the Ark froze
+# the warehouse. Revision 0009 has the measurement.
+#
+# `compare_table` is reused unchanged, which is the point: it is pure and takes
+# two already-read dictionaries, so it does not care that one of them came out
+# of a different engine. Only the reader is new.
+#
+# `full_replace=True` on all four. `deny_user` and `revoke_user` really do
+# delete rows, so "in SQLite and not in Postgres" has one meaning here and it
+# is not "retired" — a ghost in `authorized_users` reads as an approved person
+# who is not, which is the worst shape this particular table has.
+
+BOT_DB_GRACE_MINUTES = OPERATIONAL_GRACE_MINUTES
+
+# `dk_table` names the SQLite table. The field means "the other store's table"
+# and the other store is not always DuckDB from here on.
+BOT_STATE_TABLES: Tuple[MirroredTable, ...] = (
+    MirroredTable(
+        pg_table="app.authorized_users",
+        origin_note=_COPIED_FROM_SQLITE,
+        dk_table="authorized_users",
+        columns=AUTHORIZED_COLUMNS,
+        key_columns=("user_id",),
+        # A row always has `requested_at`; the other two are often NULL. Read
+        # in that order so a person approved four minutes ago is in flight
+        # rather than CRITICAL — the copy runs hourly.
+        synced_column="COALESCE(last_activity, reviewed_at, requested_at)",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.user_preferences",
+        origin_note=_COPIED_FROM_SQLITE,
+        dk_table="user_preferences",
+        columns=PREFERENCE_COLUMNS,
+        key_columns=("user_id",),
+        synced_column="updated_at",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.celebrated_milestones",
+        origin_note=_COPIED_FROM_SQLITE,
+        dk_table="celebrated_milestones",
+        columns=MILESTONE_COLUMNS,
+        key_columns=("id",),
+        synced_column="celebrated_at",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.report_history",
+        origin_note=_COPIED_FROM_SQLITE,
+        dk_table="report_history",
+        columns=REPORT_HISTORY_COLUMNS,
+        key_columns=("id",),
+        synced_column="created_at",
+        full_replace=True,
+    ),
+)
+
+
+def fetch_sqlite_rows(
+    conn, spec: MirroredTable,
+) -> Tuple[Dict[Any, Tuple[Any, ...]], Dict[Any, Optional[datetime]]]:
+    """One `bot.db` table, in the shape `compare_table` already understands.
+
+    The values go through `core.pg_bot_state._convert`, the same function the
+    copy uses. That is not tidiness: SQLite has no boolean and no timezone, so
+    an uncoverted `1` would never equal Postgres' `True` and a naive string
+    would never equal a `timestamptz`. Two conversions would have to agree, and
+    a rule with two homes is a rule that will differ.
+    """
+    from core.pg_bot_state import _convert
+
+    cols = ", ".join(spec.columns)
+    rows = conn.execute(
+        f"SELECT {cols}, {spec.synced_column} FROM {spec.dk_table}"
+    ).fetchall()
+
+    width = len(spec.columns)
+    values: Dict[Any, Tuple[Any, ...]] = {}
+    synced: Dict[Any, Optional[datetime]] = {}
+    for row in rows:
+        converted = _convert(spec.dk_table, spec.columns, row[:width])
+        if any(converted[spec.columns.index(c)] is None for c in spec.key_columns):
+            continue
+        key = _row_key(spec, converted)
+        values[key] = _normalise_row(converted, spec.columns, spec.numeric)
+        synced[key] = _as_utc_stamp(row[width])
+    return values, synced
+
+
+def _as_utc_stamp(value: Any) -> Optional[datetime]:
+    from core.pg_bot_state import as_utc
+
+    return as_utc(value)
+
+
+async def reconcile_bot_state(
+    db_path=None,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = BOT_DB_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Compare `data/bot.db` against `app.*`.
+
+    Skips silently when the file is absent, which is a developer's checkout and
+    not a defect. A missing `bot.db` on production would show up as the copy's
+    watermark going stale, which `_watermark_findings` reports without needing
+    the file to exist.
+
+    Skips just as silently once `KS_BOT_STORE=postgres`. At that point the bot
+    is the writer and `bot.db` is a frozen artefact, so every approval made
+    since the switch would read as a discrepancy — a check that reports a
+    difference it created is worse than no check, and this is the same guard
+    the copy in `core/pg_bot_state.py` carries for the same moment.
+
+    Reports only, like every other comparison in this module.
+    """
+    import sqlite3
+
+    from core import pg_landing
+    from core.bot_prefs import BOT_DB_PATH
+    from core.bot_store import ENGINE_ENV
+    from core.pg import get_pool, require_revision
+    from core.pg_bot_state import BUSY_TIMEOUT_SECONDS
+
+    if not pg_landing.enabled():
+        return []
+    if os.getenv(ENGINE_ENV, "sqlite").strip().lower() == "postgres":
+        return []
+
+    path = Path(db_path) if db_path is not None else BOT_DB_PATH
+    if not path.exists():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    with sqlite3.connect(
+        f"file:{path}?mode=ro", uri=True, timeout=BUSY_TIMEOUT_SECONDS,
+    ) as conn:
+        sqlite_side = {
+            spec.pg_table: fetch_sqlite_rows(conn, spec)
+            for spec in BOT_STATE_TABLES
+        }
+
+    issues: List[IntegrityIssue] = []
+    for spec in BOT_STATE_TABLES:
+        rows, synced = sqlite_side[spec.pg_table]
+        pg_rows = await fetch_pg_rows(pool, spec)
+        issues += compare_table(
+            spec, rows, synced, pg_rows, watermarks.get(spec.pg_table),
+            now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+        )
+    return issues
+
+
+# ─── the SMS tab's state (revision 0013) ─────────────────────────────────────
+#
+# Six tables, all compared whole, and the reason none of them is fingerprinted
+# is size rather than principle: a campaign is capped at 5 000 recipients and
+# the roster tables are a few thousand rows between them. Fingerprinting exists
+# in this file for `stock_movements` and `inventory_sku_history`, where pulling
+# 143 274 rows out of both stores every morning is the thing being avoided.
+# When `sms_dlr_events` passes ~50 000 rows — roughly ten campaigns, since it
+# takes one row per delivery report and is never pruned — it should move to
+# `BucketedTable` alongside them.
+#
+# `full_replace` answers "what does a row DuckDB has and Postgres does not
+# *mean*", and for all six the answer is the same: lost. Five are replaced
+# whole every hour. `sms_dlr_events` ships above a watermark instead, but it is
+# append-only at the source — nothing ever deletes a binding — so a missing row
+# still cannot be a retirement. The flag is set for the meaning, not the
+# shipping shape.
+SMS_TABLES: Tuple[MirroredTable, ...] = (
+    MirroredTable(
+        pg_table="bronze.offer_stocks",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="offer_stocks",
+        columns=OFFER_STOCK_COLUMNS,
+        key_columns=("id",),
+        synced_column="synced_at",
+        numeric=("price", "purchased_price"),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.marketing_optouts",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="marketing_optouts",
+        columns=OPTOUT_COLUMNS,
+        key_columns=("buyer_id", "channel"),
+        # The row's own value doubles as its clock, `order_backfill_misses`'
+        # arrangement: an opt-out is written once and never revised.
+        synced_column="opted_out_at",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.sms_audience_presets",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="sms_audience_presets",
+        columns=PRESET_COLUMNS,
+        key_columns=("name",),
+        # `updated_at` is NULL until the preset is first edited, so the
+        # fallback is what dates an untouched one.
+        synced_column="COALESCE(updated_at, created_at)",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.sms_campaigns",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="sms_campaigns",
+        columns=CAMPAIGN_COLUMNS,
+        key_columns=("campaign",),
+        synced_column="COALESCE(sent_at, exported_at)",
+        numeric=("price_per_part", "cost_total"),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.sms_campaign_members",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="sms_campaign_members",
+        columns=MEMBER_COLUMNS,
+        key_columns=("buyer_id", "campaign"),
+        # The one table here with no clock of its own; see core/pg_sms.py.
+        # `buyer_id` leads the key so the drill-down's sample id is an integer.
+        synced_column=MEMBER_STAMP,
+        numeric=("revenue_ltv_at_export", "margin_ltv_at_export"),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.sms_dlr_events",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="sms_dlr_events",
+        columns=DLR_COLUMNS,
+        key_columns=("event_id",),
+        synced_column="first_seen_at",
+        full_replace=True,
+    ),
+)
+
+
+async def reconcile_sms(
+    store,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = OPERATIONAL_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Compare the SMS tab's six tables between DuckDB and Postgres.
+
+    Stands down once `KS_SMS_STORE=postgres`, and not because the comparison
+    would be expensive: after the switch DuckDB is a frozen artefact, so every
+    opt-out and every campaign recorded since would read as a discrepancy this
+    check itself created. `reconcile_bot_state` stands down beside
+    `replicate_bot_state` for exactly this reason.
+
+    Reports only. A "repair" here would mean writing a frozen roster from a
+    copy of it — and the roster is the campaign's only control group.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+    from core.pg_sms import sms_store_is_postgres
+
+    if not pg_landing.enabled() or sms_store_is_postgres():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    # Only what the source actually has. `sms_dlr_events` arrives with the
+    # TurboSMS signature fix and is not in every checkout yet; comparing a
+    # table one side has never had reports the merge schedule rather than the
+    # data. See `core.pg_sms.source_tables`.
+    from core.pg_sms import source_tables
+
+    async with store.connection() as conn:
+        present = source_tables(conn)
+        specs = tuple(s for s in SMS_TABLES if s.dk_table in present)
+        dk_side = read_duckdb_side(conn, specs)
+
+    issues: List[IntegrityIssue] = []
+    for spec in specs:
+        dk_rows, dk_synced = dk_side[spec.pg_table]
+        pg_rows = await fetch_pg_rows(pool, spec)
+        issues += compare_table(
+            spec, dk_rows, dk_synced, pg_rows, watermarks.get(spec.pg_table),
+            now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+        )
+    return issues
+
+
+# ─── the order-version archive: not a comparison, a liveness check ───────────
+#
+# Every other check in this file asks whether two stores agree. This one cannot:
+# `app.order_versions` has no counterpart anywhere, which is the entire reason
+# it exists. KeyCRM serves current state and has no history, DuckDB never held
+# one, and a transition that was not written when it happened is not
+# recoverable from either.
+#
+# So the question changes. Not "do the copies match" but "is it still writing" —
+# and that question is genuinely hard to answer by looking at the table, because
+# a healthy archive is *supposed* to be quiet. At ~100 rows a day with long gaps
+# between them, a writer that died looks exactly like a morning when nothing
+# moved.
+#
+# What breaks the tie is that a brand-new order can never be silent: it has no
+# previous version, so the comparison in `core/pg_order_versions.py` always
+# writes one. Production creates ~48 orders a day, measured over 31 days. A
+# whole day with no version at all therefore is not a quiet day, it is a broken
+# writer.
+#
+# Three findings, and each fires only on a condition that is actually wrong. In
+# particular there is no daily INFO reciting the row count: a finding that
+# arrives every morning for a permanent reason teaches its reader to skip the
+# message it arrives in, which is how the August incident stayed invisible for a
+# month.
+
+ORDER_VERSIONS_TABLE = "app.order_versions"
+
+# A day with no new version at all. Not tunable per environment on purpose: the
+# argument for it is the ~48 orders a day, and an installation without those has
+# nothing for this check to say.
+ORDER_VERSIONS_STALL_HOURS = 24
+
+# Ten times the expected daily volume. Above this the content comparison has
+# almost certainly stopped discriminating — the 05:15 status refresh alone
+# offers ~1,400 ids every morning, and if those are landing wholesale then this
+# table is becoming `bronze_order_events`, which is the one failure mode the
+# design is built to avoid.
+ORDER_VERSIONS_FLOOD_PER_DAY = 1000
+
+# Named, rather than inline, so a test can assert on the statement instead of on
+# the source text around it. The comment below explains the `kind <> 'baseline'`
+# and therefore contains it — a test grepping this module would pass with the
+# clause deleted, which is the seventh time that trap has come up here.
+ORDER_VERSIONS_RECENT_SQL = (
+    f"SELECT count(*) FROM {ORDER_VERSIONS_TABLE} "
+    f"WHERE captured_at >= $1 AND kind <> 'baseline'"
+)
+
+# No such exclusion here, deliberately: see the two paragraphs in
+# `reconcile_order_versions`.
+ORDER_VERSIONS_NEWEST_SQL = (
+    f"SELECT max(captured_at) FROM {ORDER_VERSIONS_TABLE}"
+)
+
+
+async def reconcile_order_versions(
+    *,
+    now: Optional[datetime] = None,
+    stall_hours: int = ORDER_VERSIONS_STALL_HOURS,
+    flood_per_day: int = ORDER_VERSIONS_FLOOD_PER_DAY,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Is the archive still being written, does it cover the catalogue, and is
+    it writing too much?
+
+    Takes no store: there is nothing on the DuckDB side to take. Reports only,
+    like everything else here — and more absolutely than anything else here,
+    because a "repair" would mean inventing the history the table exists to be
+    the only record of.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+
+    issues: List[IntegrityIssue] = []
+
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(
+            f"SELECT count(*) FROM {ORDER_VERSIONS_TABLE}"
+        )
+        newest = await conn.fetchval(ORDER_VERSIONS_NEWEST_SQL)
+        # The baseline exclusion in the next statement is load-bearing, and it
+        # was found by running this against production rather than by reading
+        # it. Revision 0010 seeds one row per order inside the migration, all
+        # stamped `now()`, so on the day of any deploy that count is the whole
+        # catalogue — 46,695 rows, forty-six times the threshold. Counting the
+        # seed as the writer's output files a WARN on every install for its
+        # first 24 hours, and a finding that arrives for a permanent reason is
+        # how a reader learns to skip the message it arrives in.
+        #
+        # `newest` above deliberately does *not* exclude it: there the baseline
+        # is the right answer, because it gives a fresh archive its first 24
+        # hours before anyone is asked why it is quiet.
+        recent = await conn.fetchval(
+            ORDER_VERSIONS_RECENT_SQL, now - timedelta(hours=24),
+        )
+        # Orders the archive does not cover at all. Should be impossible: the
+        # baseline in revision 0010 seeded every row `bronze.orders` held, and
+        # every row written since goes through `write_orders`, which captures
+        # in the same transaction. That is exactly why it is worth asking — an
+        # invariant with no known way to break is the one whose breach nobody
+        # would otherwise notice.
+        uncovered = await conn.fetch(
+            f"SELECT o.id FROM bronze.orders o "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {ORDER_VERSIONS_TABLE} v "
+            f"                  WHERE v.order_id = o.id) "
+            f"ORDER BY o.id LIMIT $1",
+            max_samples + 1,
+        )
+        uncovered_total = 0
+        if uncovered:
+            uncovered_total = await conn.fetchval(
+                f"SELECT count(*) FROM bronze.orders o "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {ORDER_VERSIONS_TABLE} v "
+                f"                  WHERE v.order_id = o.id)"
+            )
+
+    stale_after = now - timedelta(hours=stall_hours)
+    if total == 0:
+        issues.append(IntegrityIssue(
+            check_name="order_versions_empty",
+            table_name=ORDER_VERSIONS_TABLE,
+            severity=Severity.CRITICAL,
+            count=0,
+            description=(
+                "The order-version archive is empty. Revision 0010 seeds a "
+                "baseline row for every order in bronze.orders as part of the "
+                "migration itself, so an empty table means either the "
+                "migration did not run its seed or the table has been emptied "
+                "since. Nothing re-derives this: KeyCRM has no history."
+            ),
+        ))
+    elif newest is None or newest < stale_after:
+        age = "never" if newest is None else newest.isoformat()
+        issues.append(IntegrityIssue(
+            check_name="order_versions_stalled",
+            table_name=ORDER_VERSIONS_TABLE,
+            severity=Severity.CRITICAL,
+            count=0,
+            description=(
+                f"No order version has been written since {age}, more than "
+                f"{stall_hours}h ago. This is not a quiet day: production "
+                f"creates ~48 orders a day and a new order has no previous "
+                f"version to match, so it always writes one. Every transition "
+                f"since then is lost and cannot be recovered — KeyCRM serves "
+                f"current state only. Check the mirror: the capture runs "
+                f"inside write_orders, so a failing mirror stops the archive."
+            ),
+        ))
+
+    if recent is not None and recent > flood_per_day:
+        issues.append(IntegrityIssue(
+            check_name="order_versions_flooding",
+            table_name=ORDER_VERSIONS_TABLE,
+            severity=Severity.WARN,
+            count=recent,
+            description=(
+                f"{recent} versions written in the last 24h, against an "
+                f"expected ~100 and a threshold of {flood_per_day}. The "
+                f"content comparison has probably stopped discriminating: the "
+                f"05:15 status refresh offers ~1,400 ids every morning with "
+                f"force_update=True, and if those are landing wholesale then "
+                f"this table is recording observations rather than changes — "
+                f"which is what took bronze_order_events to 43 GB."
+            ),
+        ))
+
+    if uncovered_total:
+        issues.append(IntegrityIssue(
+            check_name="order_versions_missing",
+            table_name=ORDER_VERSIONS_TABLE,
+            severity=Severity.CRITICAL,
+            count=uncovered_total,
+            sample_ids=tuple(int(r[0]) for r in uncovered[:max_samples]),
+            description=(
+                f"{uncovered_total} order(s) in bronze.orders have no version "
+                f"at all. Every order written since revision 0010 is captured "
+                f"in the same transaction as its header, and the migration "
+                f"seeded a baseline for everything that predated it, so this "
+                f"should not be reachable. Something is writing bronze.orders "
+                f"without going through write_orders."
+            ),
+        ))
+
+    return issues
+
+
+# ─── The buyer landing: delta-fed like orders, small enough to read whole ────
+#
+# `bronze.buyers` is one parsed Buyer batch handed to two stores in the same
+# call (`core/pg_buyers.py`) — landing in the exact sense of the catalogue.
+# But it is *fed* like orders: the sync only ever fetches buyers missing from
+# the table, so there is no catalogue re-ship to license the retired category.
+# DuckDB never deletes a buyer, and after `backfill_buyers` has carried
+# history across, a row missing from Postgres has exactly one meaning: lost.
+# That is `full_replace=True` used for its semantics, stated out loud.
+
+_BUYERS_ORIGIN = (
+    "Both sides are written from the same parsed Buyer batch in the same "
+    "call, and DuckDB never deletes a buyer — after the backfill, a row "
+    "missing here was lost by the mirror, not retired by KeyCRM."
+)
+
+def _buyers_spec():
+    from core.pg_buyers import BUYER_COLUMNS
+
+    return MirroredTable(
+        pg_table="bronze.buyers",
+        dk_table="buyers",
+        columns=BUYER_COLUMNS,
+        numeric=("loyalty_discount", "loyalty_amount"),
+        key_columns=("id",),
+        synced_column="synced_at",
+        origin_note=_BUYERS_ORIGIN,
+        full_replace=True,
+    )
+
+
+def _contacts_spec():
+    from core.pg_buyers import CONTACT_COLUMNS
+
+    return MirroredTable(
+        pg_table="bronze.buyer_contacts",
+        dk_table="buyer_contacts",
+        columns=CONTACT_COLUMNS,
+        key_columns=("buyer_id", "contact_type", "value"),
+        # No timestamp of its own; the reader below joins the owning buyer's
+        # `synced_at`, because contacts ship in the same transaction as their
+        # buyer and are in flight exactly when the buyer is.
+        synced_column=None,
+        origin_note=_BUYERS_ORIGIN,
+        full_replace=True,
+    )
+
+
+async def reconcile_buyers(
+    store,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = MIRROR_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Compare the buyer landing, row by row, tolerance zero.
+
+    Gated on `backfilled_at` like orders and for the same reason: the mirror
+    ships deltas, so until history has crossed, every buyer older than the
+    mirror looks exactly like a lost one. One `mirror_backfill_pending`
+    instead of twenty thousand CRITICALs.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+    from core.pg_buyers import BUYERS_STATE, CONTACT_COLUMNS
+
+    if not pg_landing.enabled():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    buyers_spec = _buyers_spec()
+    contacts_spec = _contacts_spec()
+
+    wm = watermarks.get(BUYERS_STATE)
+    if wm and wm.get("last_ok_at") and not wm.get("backfilled_at"):
+        return [IntegrityIssue(
+            check_name="mirror_backfill_pending",
+            table_name=BUYERS_STATE,
+            severity=Severity.INFO,
+            count=1,
+            description=(
+                "bronze.buyers is receiving deltas but history has not been "
+                "backfilled; row-level comparison is suppressed until "
+                "backfill_buyers stamps backfilled_at, or every historical "
+                "buyer would read as lost."
+            ),
+        )]
+
+    async with store.connection() as conn:
+        dk_buyers, dk_buyers_synced = fetch_duckdb_rows(conn, buyers_spec)
+        # Contacts, with the owning buyer's clock attached.
+        contact_rows = conn.execute(
+            """
+            SELECT c.buyer_id, c.contact_type, c.value, c.is_primary, b.synced_at
+            FROM buyer_contacts c
+            JOIN buyers b ON b.id = c.buyer_id
+            """
+        ).fetchall()
+
+    dk_contacts: Dict[Any, Tuple[Any, ...]] = {}
+    dk_contacts_synced: Dict[Any, Optional[datetime]] = {}
+    for row in contact_rows:
+        key = (row[0], row[1], row[2])
+        dk_contacts[key] = _normalise_row(
+            tuple(row[:4]), contacts_spec.columns, contacts_spec.numeric
+        )
+        dk_contacts_synced[key] = row[4]
+
+    issues: List[IntegrityIssue] = []
+    pg_buyers = await fetch_pg_rows(pool, buyers_spec)
+    issues += compare_table(
+        buyers_spec, dk_buyers, dk_buyers_synced, pg_buyers,
+        watermarks.get(buyers_spec.pg_table),
+        now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+    )
+    pg_contacts = await fetch_pg_rows(pool, contacts_spec)
+    issues += compare_table(
+        contacts_spec, dk_contacts, dk_contacts_synced, pg_contacts,
+        watermarks.get(contacts_spec.pg_table),
+        now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+    )
+
+    # The hourly ids-diff heals a lost buyer before this comparison can see
+    # it — which is the point, and also the review's objection: a report-only
+    # check that only ever measures the already-repaired is measuring
+    # nothing. So a heal leaves a trace here. Process-local by design: the
+    # healer and this check share a process, and a restart between them costs
+    # one finding (the WARNING log line survives).
+    from core.pg_buyers import last_heal
+
+    if last_heal and (now - last_heal["at"]).total_seconds() < 24 * 3600:
+        issues.append(IntegrityIssue(
+            check_name="mirror_selfhealed_rows",
+            table_name="bronze.buyers",
+            severity=Severity.INFO,
+            count=int(last_heal["shipped"]),
+            description=(
+                f"the hourly ids-diff re-shipped {last_heal['shipped']} "
+                f"buyer(s) at {last_heal['at'].isoformat()} — rows the mirror "
+                f"had lost and this comparison would otherwise never have "
+                f"seen. One heal is housekeeping; a heal every day is a "
+                f"leak wearing a bandage."
+            ),
+        ))
     return issues
