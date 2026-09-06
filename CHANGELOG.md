@@ -2,6 +2,134 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.126
+
+- Name the mechanism behind the lost delivery reports, and guard against it
+- Give the surface tests a frontend to serve when the checkout has none
+- Give the diagnostician the sentence the alert had no room for
+- Make the next dual-role stamp declare which kind it is
+- Stop comparing the stamp that says when the copy was taken
+- Guard the class of bug that shipped twice
+- Stop the cohort and SMS bodies inheriting a timezone
+- Tell both engines whose day today is, and stop two more ties
+- Take the trend chart and the average off DuckDB too
+- Prove the two engines agree, and fix the two places they did not
+- Let KS_READ_INVENTORY choose which engine answers the tab
+- Put the eleven inventory views in Postgres as revision 0014
+- Give the inventory views one body instead of a DuckDB-only one
+- Replace a WAL figure that was 65x out with what the server says
+- Give the WAL archive a base backup to be a recovery point for
+- Let the disk watchdog see the disk, not just its own directory
+- Make the deploy gate run the checks it was skipping
+- Let the archive's real-Postgres test run under production's privileges
+- Give the analytics column types one home, beside the bodies they describe
+- Move the other four cohort bodies onto ClickHouse too
+- Give the analytics reads one router, and catch the deadlock it caused
+- Let the cohort matrix be read from ClickHouse
+- Make the cohort queries sayable to ClickHouse
+- Let the cohort tab mean what every other tab means by retail
+- Answer the whole SMS tab from either engine
+- Move the roster and the delivery binding onto either engine
+- Make the send-once claim atomic, not merely serialised
+- Move the SMS tab's short statements onto either engine
+- Make the half-switched /sms refuse instead of drifting
+- Let the audience be read from Postgres, behind the writer's own flag
+- Give the SMS audience one body, and prove it means one thing
+- Decide the control group in Python, where both engines can agree
+- Close the six the IDOR sweep actually found
+- Ask the store which SMS tables it has, instead of assuming six
+- Put the SMS tab's state where it can be answered without DuckDB
+- Close the book on the two-day alerts rework
+- Admins only, and three fewer reasons to swipe
+- Keep the brevity, drop the translation nobody asked for
+- Часы и дни говорят на языке остального предложения
+- Три строки, по-русски: что случилось, сколько, что делать
+- Let the page speak only of what pages, and teach the agent our own accent
+- Catch the book up with the evening: third arm, agent tier, per-container memory
+- Watch the container with the smallest limit, and let memory summon its agent
+- Ask ClickHouse the question the other two stores already answer daily
+- Let the containers write into the spool root created
+- Give every fresh incident a diagnostician that can look but never touch
+- The offsite channel was dead on arrival, and the archive proved it in a minute
+- Six throttles become one Gate, and "every outbound message" becomes true
+- Let the digest carry the ledger's tail, and never be summoned by it
+- Press once on what nobody resolved, from the process that watches from outside
+- Say when it stops hurting — once, and only to those who heard it hurt
+- Remember what the alerting did, and watch the thing that watches
+- Take back the tests that arrived before their code
+- One door for the web emitters, and a cooldown that knows how old the news is
+- Let the registry wait for an emitter that lives on the shared branch
+- Give every alert condition one name, and make the list unable to lie
+- Deliver the message before admiring its formatting
+- Write down what the three rules cost, and the number that was measured
+- Say who is speaking, what to do, and whether the copy is still moving
+- Document the dev alerts kill switch
+- Let a dev instance run everything without reaching anyone's phone
+- One rhythm between blocks, one grid for tiles
+- Finish what the re-review said was half-finished
+- Give the ClickHouse plumbing one home, and the copies one column list
+- Give Step 1 a standing place, and its button a home
+- Give the archive copy a repair path, and the self-heals a paper trail
+- Close the three races and get the store lock off the network
+- Own every style inside its component, and give the library a Storybook
+- Count the steps once
+- Use the page's own components, and one panel instead of four
+- Say each thing once, in one voice
+- Take the null the Select actually hands back
+- Say what the campaign did before showing how it was measured
+- Say in the doc what production actually reads
+- Make a WARN verdict name its findings in the log
+- Let on-call see the mirror-landing findings without opening the database
+- Run the buyers ids-diff hourly, because a one-shot leaves loss unrepairable
+- Give Postgres a working set that fits again
+- Page when the mirror-landing сверка goes stale, not just the digest
+- Let the buyers backfill run itself, because nobody can run it from outside
+- Wire the third engine into the scheduler, the network and the docs
+- Give ClickHouse silver, a Gold it computes itself, and the archive
+- Land the buyers, the line level, and a customer row built from facts
+- Let the Gold-only reads come from Postgres, behind a flag
+- Say when this file was last true
+- Stop the archive's own seed from reading as a flood
+- Write down why the order archive is a side branch built first
+- Archive every order version, in the transaction that writes it
+- Record the engine switch in the file that performs it
+- Make the bot's healthcheck say something true
+- Give the port a Postgres adapter, and a switch that cannot half-happen
+- Put a port in front of the bot's state so the engine can change
+- Put the access-control logic under test, and fix the clock it reads by
+- Copy the bot's own state, the only store that is in no backup
+- Replicate the five tables that have no source to be rebuilt from
+- Compute Gold inside Postgres, and compare it against DuckDB's
+- Give the Gold measures one home before Postgres needs them too
+- Tell the gateway's hang-ups apart from payloads it never finished sending
+- Replicate the manager numbers that are recomputed after the copy
+- Restore the August campaign's message and bill, and say it was restored
+- Open a campaign and see what it actually was
+- Send the text that was written, not a second one typed at the door
+- Raise the delivery-report ceiling to clear a whole send
+- Say the recency window in dates, not only in days
+- Stop the live preview firing a request per keystroke
+- Take the statistics off the manager's path
+- Separate the value level from the way the result is measured
+- Say that the arms are one audience cut up, not three audiences
+- Stop splitting into value tiers by default, and show their cut-offs
+- Keep the draft, name the save button, and price the campaign on screen
+- Make the filters legible: bigger controls, an icon and an example each
+- Put each explanation under the control it explains
+- Filters first, then how the audience is split
+- Say what a saved audience actually contains
+- Make saved audiences a list you choose from
+- Name the campaign first, and keep saving an audience with loading one
+- Put the step action in the same place on every step
+- Rehearse the text that is about to go out
+- Give the base window a control, and group the filters by what they ask
+- Name the tiers, stop numbering them
+- Open the filter panel by default
+- Gate the wizard's endpoints on the sms permission too
+- Build the campaign audience from filters, not from one fixed cohort
+- Let a marketer run SMS campaigns without being an admin
+
+
 ## 3.0.125
 
 - Reconcile the two computations of Silver (#146)
