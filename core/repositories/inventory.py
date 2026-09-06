@@ -223,14 +223,47 @@ class InventoryMixin:
         Returns:
             Number of SKUs in the refreshed table
         """
+        # One transaction, because `first_seen_at` is carried forward out of
+        # the table's own previous contents and exists nowhere else. As four
+        # autocommit statements, a failure after the DELETE — a kill, or the
+        # INSERT dying on a column the table gained since — left the table
+        # empty and committed: the hourly replica shipped zero rows to
+        # Postgres, the leftover temp table wedged every later call until a
+        # restart, and the next boot rebuilt from an empty carry-forward, so
+        # every SKU's first-seen date reset to today in both stores at once.
         async with self.connection() as conn:
-            # Calculate last sale date per product (using offer_id from order_products)
-            # Then merge with stock data
-            # Save first_seen_at before rebuild (self-referencing subquery needs it)
-            conn.execute("CREATE TEMP TABLE _tmp_first_seen AS SELECT offer_id, first_seen_at FROM sku_inventory_status")
-            conn.execute("DELETE FROM sku_inventory_status")
-            conn.execute("""
-                INSERT INTO sku_inventory_status
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                self._rebuild_sku_inventory_status(conn)
+                count = conn.execute("SELECT COUNT(*) FROM sku_inventory_status").fetchone()[0]
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+            logger.info(f"Refreshed sku_inventory_status: {count} SKUs")
+            return count
+
+    @staticmethod
+    def _rebuild_sku_inventory_status(conn) -> None:
+        """The DELETE + INSERT…SELECT body; the caller owns the transaction."""
+        # Calculate last sale date per product (using offer_id from order_products)
+        # Then merge with stock data
+        # Save first_seen_at before rebuild (self-referencing subquery needs it).
+        # OR REPLACE: a temp table left behind by an interrupted earlier call
+        # must not make every later refresh fail on "already exists".
+        conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_first_seen AS SELECT offer_id, first_seen_at FROM sku_inventory_status")
+        conn.execute("DELETE FROM sku_inventory_status")
+        # The column list is spelled out so that a column added to the table
+        # by a later migration cannot turn this INSERT into the failure above.
+        conn.execute("""
+                INSERT INTO sku_inventory_status (
+                    offer_id, product_id, sku, name, brand, category_id,
+                    quantity, reserve, price, purchased_price,
+                    last_sale_date, first_seen_at, updated_at, last_stock_out_at
+                )
                 SELECT
                     os.id as offer_id,
                     COALESCE(o.product_id, 0) as product_id,
@@ -279,12 +312,7 @@ class InventoryMixin:
                     GROUP BY offer_id
                 ) smo ON os.id = smo.offer_id
             """)
-
-            conn.execute("DROP TABLE IF EXISTS _tmp_first_seen")
-
-            count = conn.execute("SELECT COUNT(*) FROM sku_inventory_status").fetchone()[0]
-            logger.info(f"Refreshed sku_inventory_status: {count} SKUs")
-            return count
+        conn.execute("DROP TABLE IF EXISTS _tmp_first_seen")
 
     async def record_sku_inventory_snapshot(self) -> bool:
         """Record Layer 2: daily per-SKU snapshot.
