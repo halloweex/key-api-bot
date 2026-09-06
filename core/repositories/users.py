@@ -313,23 +313,30 @@ class UsersMixin:
         self,
         role: str,
         feature: str,
-        can_view: bool,
-        can_edit: bool,
-        can_delete: bool,
+        can_view: Optional[bool],
+        can_edit: Optional[bool],
+        can_delete: Optional[bool],
         updated_by: int
     ) -> bool:
-        """Set permission for a role/feature combination."""
+        """Set permission for a role/feature combination.
+
+        Column-level, the shape `create_user` uses for names: a flag passed as
+        None keeps the stored value, so two admins toggling different columns
+        of one cell from stale copies of the matrix both land instead of the
+        later one putting the earlier one back.
+        """
         async with self.connection() as conn:
             conn.execute("""
                 INSERT INTO role_permissions (role, feature, can_view, can_edit, can_delete, updated_at, updated_by)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                VALUES (?, ?, COALESCE(?, FALSE), COALESCE(?, FALSE), COALESCE(?, FALSE), CURRENT_TIMESTAMP, ?)
                 ON CONFLICT (role, feature) DO UPDATE SET
-                    can_view = excluded.can_view,
-                    can_edit = excluded.can_edit,
-                    can_delete = excluded.can_delete,
+                    can_view = COALESCE(?, role_permissions.can_view),
+                    can_edit = COALESCE(?, role_permissions.can_edit),
+                    can_delete = COALESCE(?, role_permissions.can_delete),
                     updated_at = excluded.updated_at,
                     updated_by = excluded.updated_by
-            """, [role, feature, can_view, can_edit, can_delete, updated_by])
+            """, [role, feature, can_view, can_edit, can_delete, updated_by,
+                  can_view, can_edit, can_delete])
             return True
 
     async def seed_default_permissions(self) -> None:

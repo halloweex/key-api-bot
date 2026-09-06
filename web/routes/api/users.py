@@ -150,12 +150,19 @@ async def update_permission(
     request: Request,
     role: str = Query(...),
     feature: str = Query(...),
-    can_view: bool = Query(...),
-    can_edit: bool = Query(...),
-    can_delete: bool = Query(...),
+    can_view: Optional[bool] = Query(None),
+    can_edit: Optional[bool] = Query(None),
+    can_delete: Optional[bool] = Query(None),
     user: dict = Depends(require_admin),
 ):
-    """Update a permission (admin only)."""
+    """Update a permission (admin only).
+
+    Column-level: only the flags given are written. The page used to send all
+    three from its cached copy of the matrix, so a click made from a snapshot
+    up to a minute old — or before the previous click's refetch had landed —
+    put the other two columns back to what the snapshot held, undoing another
+    admin's grant or the caller's own previous toggle.
+    """
     from core.permissions import set_permission_async, Role, Feature
 
     valid_roles = [r.value for r in Role]
@@ -165,6 +172,9 @@ async def update_permission(
     valid_features = [f.value for f in Feature]
     if feature not in valid_features:
         raise HTTPException(status_code=400, detail=f"Invalid feature. Must be one of: {valid_features}")
+
+    if can_view is None and can_edit is None and can_delete is None:
+        raise HTTPException(status_code=400, detail="Nothing to change: pass at least one of can_view, can_edit, can_delete")
 
     admin_id = user.get("user_id")
     success = await set_permission_async(role, feature, can_view, can_edit, can_delete, admin_id)

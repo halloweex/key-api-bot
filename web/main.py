@@ -286,17 +286,13 @@ async def _migrate_sqlite_users_to_duckdb(store):
     if migrated:
         logger.info(f"Migrated {migrated} users from SQLite to DuckDB")
 
-    # Fix users who were incorrectly given admin role by previous migration bug
-    async with store.connection() as conn:
-        admin_ids = tuple(ADMIN_USER_IDS)
-        placeholders = ", ".join("?" for _ in admin_ids)
-        fixed = conn.execute(f"""
-            UPDATE users SET role = 'viewer'
-            WHERE role = 'admin' AND user_id NOT IN ({placeholders})
-            RETURNING user_id
-        """, list(admin_ids)).fetchall()
-        if fixed:
-            logger.info(f"Fixed {len(fixed)} users incorrectly set as admin: {[r[0] for r in fixed]}")
+    # A "one-time repair" used to live here (070af9a, 2026-03-25): every boot
+    # set role='viewer' on any admin outside ADMIN_USER_IDS, to undo a
+    # migration bug of the day. It was never retired, so every promotion made
+    # through the admin page — which offers "admin", and which require_admin
+    # honours — lasted exactly until the next deploy, compact or OOM restart,
+    # with only a log line to say so. The repair is done; the page's promotion
+    # is the intended way to make an admin, and it now sticks.
 
 
 async def _train_prediction_model():

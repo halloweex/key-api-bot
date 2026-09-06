@@ -83,6 +83,9 @@ import type {
   SmsCreateCampaignResponse,
 } from '../types/api'
 
+// Column-level permission update: only the flags present are sent and written.
+export type PermissionChanges = Partial<{ view: boolean; edit: boolean; delete: boolean }>
+
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const API_BASE = '/api'
@@ -672,19 +675,25 @@ export const api = {
   getPermissionsMatrix: (options?: FetchOptions) =>
     fetchApi<PermissionsMatrixResponse>('/admin/permissions', undefined, options),
 
+  // Column-level: only the flags present in `changes` are sent, and only
+  // those are written. Sending all three from a cached copy of the matrix
+  // put the other two back to what the copy held.
   updatePermission: (
     role: UserRole,
     feature: string,
-    canView: boolean,
-    canEdit: boolean,
-    canDelete: boolean,
+    changes: PermissionChanges,
     options?: FetchOptions
-  ) =>
-    fetchApiMutation<UpdatePermissionResponse>(
-      `/admin/permissions?role=${role}&feature=${feature}&can_view=${canView}&can_edit=${canEdit}&can_delete=${canDelete}`,
+  ) => {
+    const params = new URLSearchParams({ role, feature })
+    if (changes.view !== undefined) params.append('can_view', String(changes.view))
+    if (changes.edit !== undefined) params.append('can_edit', String(changes.edit))
+    if (changes.delete !== undefined) params.append('can_delete', String(changes.delete))
+    return fetchApiMutation<UpdatePermissionResponse>(
+      `/admin/permissions?${params.toString()}`,
       'PATCH',
       options
-    ),
+    )
+  },
 
   // Traffic Analytics
   getTrafficAnalytics: (params: string, options?: FetchOptions) =>

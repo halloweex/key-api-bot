@@ -242,12 +242,12 @@ async def get_all_permissions_async() -> Dict[str, Dict[str, Dict[str, bool]]]:
 async def set_permission_async(
     role: str,
     feature: str,
-    can_view: bool,
-    can_edit: bool,
-    can_delete: bool,
+    can_view: Optional[bool],
+    can_edit: Optional[bool],
+    can_delete: Optional[bool],
     updated_by: int
 ) -> bool:
-    """Set a permission in the database."""
+    """Set a permission in the database. A flag left None is not touched."""
     global _permissions_cache
 
     try:

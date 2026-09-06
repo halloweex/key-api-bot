@@ -8,6 +8,7 @@ import { useState, useCallback } from 'react'
 import { Users, ArrowLeft, Info } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
+import type { PermissionChanges } from '../api/client'
 import type { UserRole, FeaturePermissions } from '../types/api'
 import { Card, CardHeader, CardTitle, CardContent } from './Card'
 import { useToast } from './Toast'
@@ -48,28 +49,28 @@ export function AdminPermissionsPage() {
     mutationFn: ({
       role,
       feature,
-      canView,
-      canEdit,
-      canDelete,
+      changes,
     }: {
       role: UserRole
       feature: string
-      canView: boolean
-      canEdit: boolean
-      canDelete: boolean
-    }) => api.updatePermission(role, feature, canView, canEdit, canDelete),
+      changes: PermissionChanges
+    }) => api.updatePermission(role, feature, changes),
     onMutate: ({ role, feature }) => {
       const cellKey = `${role}:${feature}`
       setUpdatingCells((prev) => new Set(prev).add(cellKey))
     },
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['adminPermissions'] })
+      // Returned, so the cell stays disabled until the refetched matrix has
+      // replaced `data`: a second click in that gap used to be computed from
+      // the stale copy and undo the first.
+      const refetched = queryClient.invalidateQueries({ queryKey: ['adminPermissions'] })
       addToast({
         type: 'success',
         title: `Permission updated`,
         message: `${result.role} / ${result.feature}`,
         duration: 2000,
       })
+      return refetched
     },
     onError: (error) => {
       addToast({
@@ -112,13 +113,15 @@ export function AdminPermissionsPage() {
         updatedPerms.delete = false
       }
 
-      updateMutation.mutate({
-        role,
-        feature,
-        canView: updatedPerms.view,
-        canEdit: updatedPerms.edit,
-        canDelete: updatedPerms.delete,
-      })
+      // Only what this click changed — the toggled flag and the ones it
+      // implies — so a stale copy of the other columns is never written back.
+      const changes: PermissionChanges = {}
+      for (const key of ['view', 'edit', 'delete'] as const) {
+        if (updatedPerms[key] !== currentPerms[key]) changes[key] = updatedPerms[key]
+      }
+      if (Object.keys(changes).length === 0) return
+
+      updateMutation.mutate({ role, feature, changes })
     },
     [data, updateMutation]
   )
