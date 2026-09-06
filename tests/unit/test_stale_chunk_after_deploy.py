@@ -99,6 +99,11 @@ class TestEveryChunkIsWrapped:
 
 def _location_block(path: str) -> str:
     """The body of `location <path> { … }`, braces balanced."""
+    assert NGINX.exists(), (
+        f"{NGINX} is not here. The runtime image does not carry `nginx/`, so "
+        f"`deploy/gate_with_stores.sh` has to mount it — it does, and if this "
+        f"fires the mount was dropped or a new runner needs it added."
+    )
     conf = NGINX.read_text(encoding="utf-8")
     match = re.search(rf"location\s+{re.escape(path)}\s*\{{", conf)
     assert match, f"no `location {path}` in nginx.conf"

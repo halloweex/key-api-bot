@@ -76,8 +76,11 @@ docker run --rm --user root --network "$NET" \
     || { echo "GATE: migrations failed"; exit 1; }
 
 # Repo files the runtime image deliberately does not carry. A dozen tests read
-# the Dockerfiles, the lockfiles and the CI workflow; they are not runtime
-# tests, and without these they fail on collection rather than on substance.
+# the Dockerfiles, the lockfiles, the CI workflow and the nginx config; they
+# are not runtime tests, and without these they fail on collection rather than
+# on substance. `nginx/` joined the list on 2026-09-06, when a test asserting
+# the cache headers passed on the laptop and failed here for want of the file —
+# add the mount when you add the reader.
 docker run --rm --user root --network "$NET" \
     -e "KS_PG_DSN=postgresql://ks_app:$PW@$PG:5432/ks" \
     -e "KS_CH_URL=http://$CH:8123" -e KS_CH_USER=default -e "KS_CH_PASSWORD=$PW" \
@@ -88,6 +91,7 @@ docker run --rm --user root --network "$NET" \
     -v "$REPO/.github:/app/.github:ro" \
     -v "$REPO/deploy:/app/deploy:ro" \
     -v "$REPO/docker-compose.yml:/app/docker-compose.yml:ro" \
+    -v "$REPO/nginx:/app/nginx:ro" \
     -v "$REPO/Dockerfile:/app/Dockerfile:ro" \
     -v "$REPO/Dockerfile.web:/app/Dockerfile.web:ro" \
     -v "$REPO/Dockerfile.migrate:/app/Dockerfile.migrate:ro" \
