@@ -143,14 +143,41 @@ class TestPayload:
                         headers={"Content-Type": "application/json"})
         assert r.status_code == 400
 
-    def test_unknown_message_still_acknowledged(self, client, store):
-        """TurboSMS retries for 4.5h on non-200; retrying an unknown id is futile."""
+    def test_unknown_message_is_refused_so_the_gateway_retries(self, client, store):
+        """The first reports of a campaign race `record_sms_send`: the gateway
+        starts delivering the moment it accepts a batch, and our ids land only
+        when the whole send returns. A 200 here made every report in that
+        window unrecoverable — the gateway retries only on a non-2xx."""
         store.known = False
 
-        r = client.post(PATH, json=_signed("evt-1", "mid-x", "DELIVRD"))
+        for attempt in (None, 1, 2, 3):
+            payload = _signed("evt-1", "mid-x", "DELIVRD")
+            if attempt is not None:
+                payload["try"] = attempt
+            r = client.post(PATH, json=payload)
+            assert r.status_code == 404, f"try={attempt}"
+
+        # The report was still written through to the store (the event id is
+        # bound there), and nothing was counted as accepted or as a rejection.
+        assert len(store.calls) == 4
+        assert webhooks._dlr_counts["accepted"] == 0
+        assert webhooks._dlr_counts["unknown_retry_asked"] == 4
+        assert not any(k in webhooks._dlr_counts
+                       for k in ("bad_signature", "no_message_id", "event_rebound"))
+
+    def test_unknown_message_is_acknowledged_once_retries_are_spent(self, client, store):
+        """Past the retry window the id is genuinely foreign (a panel test send,
+        another integration); insisting further only burns the gateway's
+        remaining retries and our error counter."""
+        store.known = False
+
+        payload = _signed("evt-1", "mid-x", "DELIVRD")
+        payload["try"] = 4
+        r = client.post(PATH, json=payload)
 
         assert r.status_code == 200
         assert r.json()["matched"] is False
+        assert webhooks._dlr_counts["accepted"] == 1
 
 
 class TestTheSignedIdIsBoundToItsMessage:

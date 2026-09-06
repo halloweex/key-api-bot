@@ -57,6 +57,18 @@ _dlr_counts: Counter = Counter()
 _ALERT_AT = 25          # first alert once a burst is clearly not noise
 _ALERT_EVERY = 500      # then a reminder, throttled by condition key downstream
 
+# A report for a message id we do not hold yet is refused for this many
+# attempts so the gateway brings it back. The gateway allocates ids and starts
+# delivering the moment it accepts a batch, while our own `record_sms_send`
+# writes those ids only after the whole send returns — so the first reports
+# of every campaign race that write, and a 200 here made them unrecoverable:
+# the gateway retries only on a non-2xx and offers no replay. Three attempts
+# span minutes, which covers the write; past that the id is genuinely foreign
+# (a test send from the panel, a message from another integration) and
+# insisting further only costs the gateway's remaining retries and our error
+# counter — every ≥400 on this endpoint is recorded as an HTTP_404 metric.
+_UNKNOWN_ID_RETRY_ATTEMPTS = 3
+
 # What to actually do about each condition. This used to be one paragraph that
 # named `bad_signature` whatever the kind was, so a burst of
 # `client_disconnected` — a condition in which the secret is provably fine —
@@ -272,11 +284,33 @@ async def turbosms_delivery_report(request: Request):
             status_code=409, detail="event id already reported on another message",
         )
 
-    _dlr_counts["accepted"] += 1
-
     if not known:
-        # Acknowledge anyway — retrying will not make the id appear.
-        logger.info("TurboSMS DLR for unknown message_id=%s status=%s",
-                    message_id, status)
+        attempt = _attempt_number(payload.get("try"))
+        if attempt <= _UNKNOWN_ID_RETRY_ATTEMPTS:
+            # Not counted as a rejection: nothing is misconfigured and the
+            # alert that `_note_rejection` feeds would page on every test
+            # send. The binding of this event id to this message id is already
+            # stored, so the retry that lands after `record_sms_send` matches
+            # and records the same report.
+            _dlr_counts["unknown_retry_asked"] += 1
+            logger.info(
+                "TurboSMS DLR for unknown message_id=%s status=%s try=%s — "
+                "asking the gateway to retry",
+                message_id, status, attempt,
+            )
+            raise HTTPException(status_code=404, detail="message_id not known yet")
+        # Past the retry window the id is foreign; acknowledge and stop
+        # spending the gateway's retries on it.
+        logger.info("TurboSMS DLR for unknown message_id=%s status=%s try=%s — giving up",
+                    message_id, status, attempt)
 
+    _dlr_counts["accepted"] += 1
     return {"ok": True, "matched": known}
+
+
+def _attempt_number(value: Any) -> int:
+    """The gateway's `try` counter; a missing or unreadable one is the first."""
+    try:
+        return max(int(value), 1)
+    except (TypeError, ValueError):
+        return 1
