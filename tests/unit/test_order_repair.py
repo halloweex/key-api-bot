@@ -213,3 +213,39 @@ class TestIntegrityScanSurvivesAMissingTable:
         import core.data_quality as dq
 
         assert hasattr(dq, "logger")
+
+
+class TestTheWriteRunsUnderTheHeavyLock:
+    """The lock covers the upsert and the dirty mark — never the per-id
+    fetches, which would hold the sync up for a batch of HTTP calls."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_outside_write_and_mark_inside(self):
+        import asyncio
+
+        lock = asyncio.Lock()
+        service = _service()
+        seen = {}
+
+        async def _get_order(order_id, include=None):
+            seen["fetch"] = lock.locked()
+            return {"id": order_id}
+
+        async def _upsert(orders, **kw):
+            seen["upsert"] = lock.locked()
+            return (len(orders), 0)
+
+        async def _mark(ids):
+            seen["mark"] = lock.locked()
+
+        client = MagicMock()
+        client.get_order = AsyncMock(side_effect=_get_order)
+        service._upsert_orders_with_expenses = AsyncMock(side_effect=_upsert)
+        service.store.mark_warehouse_dirty = AsyncMock(side_effect=_mark)
+
+        with patch("core.sync_service.get_async_client", AsyncMock(return_value=client)):
+            result = await service.repair_orders([5], lock=lock)
+
+        assert result["repaired"] == 1
+        assert seen == {"fetch": False, "upsert": True, "mark": True}
+        assert not lock.locked()

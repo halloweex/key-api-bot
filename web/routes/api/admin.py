@@ -28,10 +28,17 @@ async def trigger_resync(
     admin: dict = Depends(require_admin),
 ):
     """Force a complete resync of orders from KeyCRM API. Requires admin."""
+    from core.scheduler import get_scheduler
     from core.sync_service import force_resync
 
     try:
-        stats = await force_resync(days_back=days)
+        # Under the heavy-job lock, like the weekly full sync that runs the
+        # same code: a resync interleaving with the minute sync or the status
+        # refresh is how header-only orders got manufactured and how a fresher
+        # mirror write got overwritten by an older snapshot. Taken here, at
+        # the route, never inside full_sync — the weekly job already holds it.
+        async with get_scheduler()._heavy_job_lock:
+            stats = await force_resync(days_back=days)
         return {
             "status": "success",
             "message": f"Resync complete - synced last {days} days",
@@ -54,8 +61,14 @@ async def refresh_order_statuses(
 
     async def run_refresh():
         try:
+            from core.scheduler import get_scheduler
+
             sync_service = await get_sync_service()
-            result = await sync_service.refresh_order_statuses(days_back=days)
+            # The 05:15 job holds the heavy-job lock across this same call;
+            # the manual path did not, so it could interleave with the minute
+            # sync and mirror an older snapshot over a fresher order.
+            async with get_scheduler()._heavy_job_lock:
+                result = await sync_service.refresh_order_statuses(days_back=days)
             logger.info(f"Background status refresh completed: {result}")
             return result
         except asyncio.CancelledError:
@@ -115,8 +128,11 @@ async def backfill_mirror_orders(
 
     async def run():
         try:
+            from core.scheduler import get_scheduler
+
             return await backfill_orders(
                 store, chunk_size=chunk_size, max_chunks=max_chunks,
+                lock=get_scheduler()._heavy_job_lock,
             )
         except asyncio.CancelledError:
             logger.warning("Mirror backfill was cancelled")

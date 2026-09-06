@@ -167,3 +167,99 @@ class TestItRefusesRatherThanMisleads:
                    new=AsyncMock(return_value=set())):
             with pytest.raises(RuntimeError, match="postgres is down"):
                 await backfill_orders(store)
+
+
+class TestEachChunkIsWrittenUnderTheHeavyLock:
+    """The sync jobs hold the heavy-job lock across their DuckDB write *and*
+    their mirror call. A chunk taken under the same lock cannot straddle one;
+    a chunk taken without it could read an order before a sync wrote it and
+    ship after the sync mirrored it, leaving Postgres with the older copy."""
+
+    @pytest.mark.asyncio
+    async def test_the_lock_is_held_for_read_and_write_but_not_for_the_diff(self, tmp_path):
+        import asyncio
+
+        lock = asyncio.Lock()
+        store = await _store_with(tmp_path, [1, 2, 3])
+        seen = {"diff_under_lock": None, "writes_under_lock": []}
+
+        async def _pg_ids(pool):
+            seen["diff_under_lock"] = lock.locked()
+            return set()
+
+        async def _write(orders, products, *, replace_products=True):
+            seen["writes_under_lock"].append(lock.locked())
+
+        try:
+            with patch("core.pg_landing.write_orders", new=_write), \
+                 patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
+                 patch("core.pg.require_revision", new=AsyncMock()), \
+                 patch("core.pg_backfill._mark_backfilled", new=AsyncMock()), \
+                 patch("core.pg_backfill._postgres_order_ids", new=_pg_ids):
+                await backfill_orders(store, chunk_size=1, lock=lock)
+        finally:
+            await store.close()
+
+        assert seen["diff_under_lock"] is False
+        assert seen["writes_under_lock"] == [True, True, True]
+        assert not lock.locked(), "released after the last chunk"
+
+    @pytest.mark.asyncio
+    async def test_without_a_lock_nothing_changes(self, tmp_path):
+        store = await _store_with(tmp_path, [1])
+        try:
+            result, ships = await _run(store)
+        finally:
+            await store.close()
+        assert result["orders_shipped"] == 1
+
+
+class TestTheHourlyOrdersDiff:
+    """Rides J20 with the buyers diff: never raises, skips without Postgres,
+    and says loudly when it had to heal after a complete pass."""
+
+    @pytest.mark.asyncio
+    async def test_it_stands_down_without_postgres(self):
+        from core.pg_backfill import hourly_orders_ids_diff
+
+        with patch("core.pg_landing.enabled", return_value=False):
+            assert "skipped" in await hourly_orders_ids_diff(object())
+
+    @pytest.mark.asyncio
+    async def test_a_failure_is_returned_not_raised(self):
+        from core.pg_backfill import hourly_orders_ids_diff
+
+        with patch("core.pg_landing.enabled", return_value=True), \
+             patch("core.pg.get_pool", new=AsyncMock(side_effect=RuntimeError("pg down"))):
+            result = await hourly_orders_ids_diff(object())
+        assert "error" in result and "pg down" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_a_heal_after_history_is_a_warning(self, caplog):
+        import logging
+
+        from core.pg_backfill import hourly_orders_ids_diff
+
+        class _Conn:
+            async def fetchval(self, *a):
+                return True
+
+        class _Acquire:
+            async def __aenter__(self):
+                return _Conn()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class _Pool:
+            def acquire(self):
+                return _Acquire()
+
+        with patch("core.pg_landing.enabled", return_value=True), \
+             patch("core.pg.get_pool", new=AsyncMock(return_value=_Pool())), \
+             patch("core.pg_backfill.backfill_orders",
+                   new=AsyncMock(return_value={"orders_shipped": 3, "remaining": 0})):
+            with caplog.at_level(logging.WARNING, logger="core.pg_backfill"):
+                result = await hourly_orders_ids_diff(object(), lock=None)
+        assert result["orders_shipped"] == 3
+        assert "healed missing orders" in caplog.text

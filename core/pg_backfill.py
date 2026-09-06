@@ -40,6 +40,8 @@ between orders, never inside one.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -119,6 +121,7 @@ async def backfill_orders(
     *,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     max_chunks: Optional[int] = None,
+    lock: "asyncio.Lock | None" = None,
 ) -> Dict[str, Any]:
     """Ship every order Postgres is missing. Idempotent; safe to re-run.
 
@@ -126,6 +129,13 @@ async def backfill_orders(
     for a caller that would rather come back than hold anything for minutes.
     What it does not do is remember where it stopped; the next call recomputes
     the difference.
+
+    `lock` is the scheduler's heavy-job lock, held for each chunk's read and
+    write together and never for the ids-diff. The sync jobs hold it across
+    their DuckDB write *and* their mirror call, so a chunk taken under it
+    cannot straddle one: without it, a chunk read before a sync wrote an
+    order and mirrored after it left Postgres holding the older copy and
+    the version archive recording a transition that never happened.
 
     Raises on failure rather than swallowing, unlike the mirror in the sync
     path: nothing depends on this call succeeding, so there is no working
@@ -164,11 +174,12 @@ async def backfill_orders(
 
     shipped_orders = 0
     shipped_products = 0
+    held = lock if lock is not None else contextlib.nullcontext()
     for number, ids in enumerate(chunks, start=1):
-        async with store.connection() as conn:
-            orders, products = _read_chunk(conn, ids)
-
-        await write_orders(orders, products, replace_products=True)
+        async with held:
+            async with store.connection() as conn:
+                orders, products = _read_chunk(conn, ids)
+            await write_orders(orders, products, replace_products=True)
         shipped_orders += len(orders)
         shipped_products += len(products)
         logger.info(
@@ -198,3 +209,49 @@ async def backfill_orders(
     }
     logger.info("Backfill finished: %s", result)
     return result
+
+
+async def hourly_orders_ids_diff(store, *, lock: "asyncio.Lock | None" = None) -> Dict[str, Any]:
+    """Run the orders ids-diff every hour, not only when a human remembers.
+
+    The mirror ships `updated_ids` after the DuckDB commit, on a separate
+    store, and never raises. A write lost between the two commits — Postgres
+    unreachable, a deadlock, the container stopped — was therefore never
+    re-shipped on any schedule: the next tick skipped the order as unchanged,
+    and the only path that re-issued the write was this backfill, run by hand.
+    The 05:15 refresh happened to re-ship *headers* of orders created in the
+    last 30 days; line items and the version archive it never repaired.
+
+    Same shape as `core.pg_buyers.hourly_ids_diff`, for the same reason: the
+    diff costs two ~46k-id scans and ships nothing when nothing is missing, so
+    it simply runs every tick. A heal after the first complete pass is logged
+    WARNING — the mirror lost something since the last hour. Never raises: the
+    job's contract. Runs under the heavy-job lock per chunk (see
+    `backfill_orders`), which is also why it rides a job rather than a route.
+    """
+    from core import pg_landing
+
+    if not pg_landing.enabled():
+        return {"skipped": "KS_PG_DSN is not set"}
+    try:
+        from core.pg import get_pool
+        from core.pg_landing import ORDERS_TABLE
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            had_history = await conn.fetchval(
+                "SELECT backfilled_at IS NOT NULL FROM meta.mirror_state "
+                "WHERE table_name = $1",
+                ORDERS_TABLE,
+            )
+        result = await backfill_orders(store, lock=lock)
+        if result.get("orders_shipped"):
+            if had_history:
+                logger.warning("pg_backfill: hourly ids-diff healed missing orders: %s", result)
+            else:
+                logger.info("pg_backfill: initial orders backfill: %s", result)
+        return result
+    except Exception as e:  # noqa: BLE001 — the hourly job must survive it
+        detail = f"{type(e).__name__}: {e}"
+        logger.error("pg_backfill: hourly orders ids-diff failed: %s", detail)
+        return {"error": detail}

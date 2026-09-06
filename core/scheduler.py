@@ -870,6 +870,17 @@ class BackgroundScheduler:
             from core.pg_buyers import hourly_ids_diff
 
             result["buyers_backfill"] = await hourly_ids_diff(store)
+            # The orders ids-diff rides here too. A mirror write lost between
+            # the DuckDB commit and the Postgres commit was re-shipped by
+            # nothing on a schedule — the next tick skips the order as
+            # unchanged and only a human-run backfill re-issued the write.
+            # Each chunk runs under the heavy-job lock so it cannot straddle a
+            # sync's write-and-mirror; the diff itself does not.
+            from core.pg_backfill import hourly_orders_ids_diff
+
+            result["orders_backfill"] = await hourly_orders_ids_diff(
+                store, lock=self._heavy_job_lock,
+            )
             # The SMS tab's own state rides here for the same reason as the
             # rest: one call site. Five of its six tables are irreplaceable —
             # a frozen roster cannot be recomputed, because the eligible
@@ -2160,7 +2171,9 @@ class BackgroundScheduler:
                 if repairable:
                     try:
                         sync_service = await get_sync_service()
-                        repair = await sync_service.repair_orders(repairable)
+                        repair = await sync_service.repair_orders(
+                            repairable, lock=self._heavy_job_lock,
+                        )
                     except Exception as e:
                         logger.exception(f"DQ repair failed: {e}")
 
@@ -2245,7 +2258,9 @@ class BackgroundScheduler:
                 return {"candidates": 0, "repaired": 0, "still_empty": 0}
 
             sync_service = await get_sync_service()
-            result = await sync_service.repair_orders(candidates)
+            result = await sync_service.repair_orders(
+                candidates, lock=self._heavy_job_lock,
+            )
 
             # Which ones KeyCRM served without line items anyway.
             ph = ",".join("?" * len(candidates))
@@ -2539,7 +2554,7 @@ class BackgroundScheduler:
                 return {"gaps_found": 0, "repaired": 0}
 
             sync_service = await get_sync_service()
-            result = await sync_service.repair_orders(gaps)
+            result = await sync_service.repair_orders(gaps, lock=self._heavy_job_lock)
 
             # An id KeyCRM does not have is a hole that will never close.
             # Recording it is what lets the job finish rather than loop.

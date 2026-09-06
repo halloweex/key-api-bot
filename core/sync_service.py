@@ -10,6 +10,7 @@ Features:
 - Observability: Correlation IDs and timing metrics
 """
 import asyncio
+import contextlib
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
@@ -1090,6 +1091,7 @@ class SyncService:
 
     async def repair_orders(
         self, order_ids, *, limit: int | None = None,
+        lock: "asyncio.Lock | None" = None,
     ) -> Dict[str, Any]:
         """Re-fetch specific orders from KeyCRM and upsert them whole.
 
@@ -1100,6 +1102,15 @@ class SyncService:
 
         Only ever adds or corrects — nothing is deleted, so this is safe to run
         automatically against ids that a comparison against the source flagged.
+
+        `lock` is the scheduler's heavy-job lock, held around the write and the
+        dirty mark only — never around the per-id KeyCRM fetches, which would
+        hold the sync up for a batch of HTTP calls. Without it a repair landing
+        between a refresh's Silver commit and its validation read turned a
+        correct rebuild into "validation failed" (a spurious alert and a full
+        rebuild), and a repair's mirror call could overwrite a fresher order
+        the sync had just written to Postgres. Not reentrant: a caller that
+        already holds the lock must not pass it.
         """
         ids = list(dict.fromkeys(int(i) for i in order_ids))
         cap = self.REPAIR_BATCH_LIMIT if limit is None else limit
@@ -1127,12 +1138,14 @@ class SyncService:
 
         repaired = 0
         if fetched:
-            # force_update: the whole point is to overwrite what we hold, and
-            # KeyCRM's updated_at may well be older than our last touch.
-            repaired, _ = await self._upsert_orders_with_expenses(
-                fetched, force_update=True, bronze_source="repair",
-            )
-            await self.store.mark_warehouse_dirty([o["id"] for o in fetched])
+            held = lock if lock is not None else contextlib.nullcontext()
+            async with held:
+                # force_update: the whole point is to overwrite what we hold,
+                # and KeyCRM's updated_at may well be older than our last touch.
+                repaired, _ = await self._upsert_orders_with_expenses(
+                    fetched, force_update=True, bronze_source="repair",
+                )
+                await self.store.mark_warehouse_dirty([o["id"] for o in fetched])
 
         result = {
             "requested": len(ids),
