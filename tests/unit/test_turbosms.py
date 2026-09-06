@@ -152,6 +152,75 @@ async def test_transport_failure_becomes_turbosms_error():
             await c.send(["380961111111"], "hi")
 
 
+class TestTheErrorSaysWhetherAnythingCouldHaveLeft:
+    """`TurboSmsError.unsent` decides whether a claimed campaign is handed back.
+
+    Only failures that end before the gateway has the whole request may say
+    "unsent". A read timeout or a 5xx arrives *after* the upload: the gateway
+    may be delivering while we read the error, and a caller that releases the
+    claim on it sends the roster twice — which is the incident the claim was
+    built for.
+    """
+
+    @staticmethod
+    async def _error_from(handler) -> TurboSmsError:
+        async with _client_with(handler) as c:
+            with pytest.raises(TurboSmsError) as excinfo:
+                await c.send(["380961111111"], "hi")
+        return excinfo.value
+
+    @pytest.mark.asyncio
+    async def test_a_refused_connection_is_unsent(self):
+        def handler(request):
+            raise httpx.ConnectError("boom")
+        assert (await self._error_from(handler)).unsent is True
+
+    @pytest.mark.asyncio
+    async def test_an_upload_that_never_finished_is_unsent(self):
+        def handler(request):
+            raise httpx.WriteTimeout("stalled")
+        assert (await self._error_from(handler)).unsent is True
+
+    @pytest.mark.asyncio
+    async def test_a_read_timeout_is_an_unknown_outcome(self):
+        def handler(request):
+            raise httpx.ReadTimeout("no answer in 20s")
+        err = await self._error_from(handler)
+        assert err.unsent is False
+        assert "ReadTimeout" in str(err), "the operator must see which phase failed"
+
+    @pytest.mark.asyncio
+    async def test_a_4xx_is_the_gateways_own_refusal(self):
+        def handler(request):
+            return httpx.Response(405, text="NOT_ALLOWED_RECIPIENTS_LIMIT")
+        assert (await self._error_from(handler)).unsent is True
+
+    @pytest.mark.asyncio
+    async def test_a_5xx_is_an_unknown_outcome(self):
+        def handler(request):
+            return httpx.Response(502, text="<html>bad gateway</html>")
+        assert (await self._error_from(handler)).unsent is False
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_body_is_an_unknown_outcome(self):
+        def handler(request):
+            return httpx.Response(200, text="not json at all")
+        assert (await self._error_from(handler)).unsent is False
+
+    @pytest.mark.asyncio
+    async def test_a_request_level_rejection_is_unsent(self):
+        def handler(request):
+            return httpx.Response(200, json={
+                "response_code": 103, "response_status": "INVALID_TOKEN",
+                "response_result": None,
+            })
+        assert (await self._error_from(handler)).unsent is True
+
+    def test_the_default_is_the_safe_direction(self):
+        """An error raised without saying is treated as "may have been sent"."""
+        assert TurboSmsError("anything").unsent is False
+
+
 @pytest.mark.asyncio
 async def test_unconfigured_client_refuses_to_send():
     """No token means no send attempt at all, rather than a gateway round-trip."""
@@ -163,8 +232,9 @@ async def test_unconfigured_client_refuses_to_send():
         transport=httpx.MockTransport(handler),
     )
     async with client as c:
-        with pytest.raises(TurboSmsError, match="not configured"):
+        with pytest.raises(TurboSmsError, match="not configured") as excinfo:
             await c.send(["380961111111"], "hi")
+    assert excinfo.value.unsent is True
 
 
 # ─── status ──────────────────────────────────────────────────────────────

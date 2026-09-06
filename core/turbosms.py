@@ -76,7 +76,37 @@ RECIPIENTS_PER_REQUEST = 5000
 
 
 class TurboSmsError(Exception):
-    """A TurboSMS call failed outright (transport, auth, or malformed reply)."""
+    """A TurboSMS call failed outright (transport, auth, or malformed reply).
+
+    `unsent` says whether the gateway provably never took the request: a
+    refused connection, a body that never finished uploading, a 4xx, or an
+    answer that rejects the request outright. It is False by default and that
+    is the safe direction — a read timeout, a 5xx from something in front of
+    the gateway, or an unreadable body is an *unknown* answer, not a negative
+    one. The batch was fully uploaded and may already be leaving, and the
+    caller that treats "unknown" as "nothing went out" hands a claimed
+    campaign back to be sent a second time.
+    """
+
+    def __init__(self, message: str = "", *, unsent: bool = False):
+        super().__init__(message)
+        self.unsent = unsent
+
+
+# Transport failures that end before the request body was fully handed over,
+# so the gateway cannot have queued anything. Everything else under
+# httpx.RequestError — ReadTimeout, ReadError, RemoteProtocolError, CloseError,
+# DecodingError — happens after the upload and leaves the outcome unknown.
+_FAILED_BEFORE_UPLOAD = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ProxyError,
+    httpx.UnsupportedProtocol,
+    httpx.LocalProtocolError,
+    httpx.WriteTimeout,
+    httpx.WriteError,
+)
 
 
 class PartialSendError(TurboSmsError):
@@ -345,19 +375,27 @@ class TurboSmsClient:
     async def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.config.configured:
             raise TurboSmsError(
-                "TurboSMS is not configured — set TURBOSMS_TOKEN and TURBOSMS_SENDER"
+                "TurboSMS is not configured — set TURBOSMS_TOKEN and TURBOSMS_SENDER",
+                unsent=True,
             )
         if self._client is None:
-            raise TurboSmsError("client used outside its context manager")
+            raise TurboSmsError("client used outside its context manager", unsent=True)
 
         try:
             response = await self._client.post(path, json=payload)
         except httpx.RequestError as e:
-            raise TurboSmsError(f"TurboSMS request failed: {e}") from e
+            raise TurboSmsError(
+                f"TurboSMS request failed: {type(e).__name__}: {e}",
+                unsent=isinstance(e, _FAILED_BEFORE_UPLOAD),
+            ) from e
 
         if response.status_code >= 400:
+            # A 4xx is the gateway's own refusal — nothing was queued. A 5xx is
+            # as likely a proxy in front of it as the gateway itself, after the
+            # request was fully received, so its outcome is unknown.
             raise TurboSmsError(
-                f"TurboSMS returned HTTP {response.status_code}: {response.text[:200]}"
+                f"TurboSMS returned HTTP {response.status_code}: {response.text[:200]}",
+                unsent=response.status_code < 500,
             )
 
         try:
@@ -370,7 +408,8 @@ class TurboSmsClient:
         code = body.get("response_code")
         if code not in _ACCEPTED_CODES:
             raise TurboSmsError(
-                f"TurboSMS rejected the request: {code} {body.get('response_status')}"
+                f"TurboSMS rejected the request: {code} {body.get('response_status')}",
+                unsent=True,
             )
         return body
 
@@ -401,7 +440,8 @@ class TurboSmsClient:
         if viber is not None:
             if not self.config.viber_configured:
                 raise TurboSmsError(
-                    "Viber is not configured — set TURBOSMS_VIBER_SENDER"
+                    "Viber is not configured — set TURBOSMS_VIBER_SENDER",
+                    unsent=True,
                 )
             viber_payload = viber.payload(self.config.viber_sender)
 

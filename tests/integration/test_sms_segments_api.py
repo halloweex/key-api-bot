@@ -959,7 +959,8 @@ class TestPartialSend:
                 return False
 
             async def send(self, phones, text, viber=None):
-                raise TurboSmsError("405 NOT_ALLOWED_RECIPIENTS_LIMIT")
+                # A 4xx: the gateway's own refusal, nothing queued.
+                raise TurboSmsError("405 NOT_ALLOWED_RECIPIENTS_LIMIT", unsent=True)
 
         monkeypatch.setattr(
             "web.routes.api.customers.TurboSmsClient", lambda *a, **kw: _Client()
@@ -974,6 +975,42 @@ class TestPartialSend:
         # The claim is taken before the gateway call, so a total failure has to
         # hand it back or the campaign is stuck unsendable.
         assert sending_store["released"] == "aug"
+
+    def test_an_unknown_outcome_keeps_the_claim(
+        self, client, sending_store, monkeypatch,
+    ):
+        """A read timeout is not "nothing went out".
+
+        The whole batch was uploaded before the 20 s read timeout fired; the
+        gateway may be delivering it while we read the error. Releasing the
+        claim here let the operator press send again and message the roster
+        twice — the exact incident the claim exists to prevent. The claim
+        stays, and the error says to check the panel before releasing by hand.
+        """
+        from core.turbosms import TurboSmsError
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def send(self, phones, text, viber=None):
+                raise TurboSmsError("TurboSMS request failed: ReadTimeout: ")
+
+        monkeypatch.setattr(
+            "web.routes.api.customers.TurboSmsClient", lambda *a, **kw: _Client()
+        )
+
+        r = client.post(
+            self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers(),
+        )
+
+        assert r.status_code == 502
+        assert "accepted" not in sending_store
+        assert "released" not in sending_store, "an unknown outcome must keep the claim"
+        assert "stays claimed" in r.json()["detail"]
 
     def test_a_partial_failure_keeps_the_claim(self, client, sending_store, monkeypatch):
         """Messages left, so the campaign must never become sendable again."""

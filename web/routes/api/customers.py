@@ -850,12 +850,32 @@ async def send_sms_campaign(
         )
         results, partial = e.results, e
     except TurboSmsError as e:
-        # Nothing went out, so hand the campaign back — it can be retried once
-        # whatever the gateway objected to is fixed. Safe only on this branch:
-        # PartialSendError above keeps the claim, because messages did leave.
-        await store.release_sms_campaign(campaign)
-        logger.error("TurboSMS send failed: campaign=%s error=%s", campaign, e)
-        raise HTTPException(status_code=502, detail=str(e))
+        if e.unsent:
+            # The gateway provably never took the request — refused connection,
+            # upload never finished, a 4xx or an outright rejection — so hand
+            # the campaign back; it can be retried once whatever the gateway
+            # objected to is fixed. Safe only on this branch: PartialSendError
+            # above keeps the claim, because messages did leave.
+            await store.release_sms_campaign(campaign)
+            logger.error("TurboSMS send failed: campaign=%s error=%s", campaign, e)
+            raise HTTPException(status_code=502, detail=str(e))
+        # A read timeout, a 5xx or an unreadable body is an unknown answer, not
+        # a negative one: the whole batch was uploaded and the gateway may be
+        # delivering it right now. Releasing here is how the roster gets sent
+        # twice — the operator sees a 502, presses send again, and the claim
+        # no longer stops them. Keep it; being wrong this way costs one manual
+        # release after checking the panel, the other way costs a double send.
+        logger.error(
+            "TurboSMS send outcome unknown, claim kept: campaign=%s error=%s",
+            campaign, e,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"{e}. The gateway may have accepted the batch, so the campaign "
+                f"stays claimed — check the TurboSMS panel before releasing it."
+            ),
+        )
 
     accepted, failed, stoplisted = {}, {}, []
     for r in results:
