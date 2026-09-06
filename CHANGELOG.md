@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.130
+
+- Stop serving a stock list nothing renders
+
+
 ## 3.0.129
 
 - Take /inventory's last read off DuckDB — the blocker was a belief
