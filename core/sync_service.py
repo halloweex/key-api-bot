@@ -599,12 +599,18 @@ class SyncService:
             logger.error(f"Meilisearch sync error: {e}")
             return stats
 
-    async def full_sync(self, days_back: int = 730) -> Dict[str, Any]:
+    async def full_sync(
+        self, days_back: int = 730, force_update: bool = False,
+    ) -> Dict[str, Any]:
         """
         Perform full sync of all data from KeyCRM.
 
         Args:
             days_back: Number of days of historical data to sync
+            force_update: rewrite every order in the window even when its
+                `updated_at` has not moved — what `force_resync` asks for,
+                because KeyCRM does not bump `updated_at` on every change
+                and a resync exists to overwrite what we hold.
 
         Returns:
             Dict with sync statistics
@@ -690,6 +696,7 @@ class SyncService:
                 if chunk_orders:
                     order_count, expense_count = await self._upsert_orders_with_expenses(
                         chunk_orders, bronze_source="sync_full",
+                        force_update=force_update,
                     )
                     stats["orders"] += order_count
                     stats["expenses"] += expense_count
@@ -1338,10 +1345,21 @@ async def init_and_sync(full_sync_days: int = 730) -> None:
 
 async def force_resync(days_back: int = 730) -> dict:
     """
-    Force a complete resync by clearing orders and re-fetching from API.
+    Force a complete resync: re-fetch the window from KeyCRM and overwrite
+    every order in it, in place.
 
     Use this when data discrepancies are detected between dashboard and KeyCRM.
-    This clears the orders table and performs a fresh sync.
+
+    It used to DELETE `orders`, `order_products` and `expenses` first and refill
+    them chunk by chunk. That made a 429 storm halfway through — the ordinary
+    failure of a year-long walk over the API — leave the store missing months
+    of facts, with nothing to restore them but the hourly gap crawl at 200 ids
+    an hour, and left every DuckDB-fed page wrong for days. Rewriting in place
+    with `force_update=True` reaches the same end state: each order is
+    overwritten by the fetched payload, and an interrupted run can simply be
+    run again. The one thing the DELETE bought — dropping orders KeyCRM has
+    since deleted — is something the reconciliation deliberately refuses to do
+    automatically and the purge endpoint does by id.
 
     Args:
         days_back: Number of days of historical data to sync
@@ -1349,32 +1367,12 @@ async def force_resync(days_back: int = 730) -> dict:
     Returns:
         Dict with sync statistics
     """
-    logger.warning(f"Force resync requested - clearing orders and syncing last {days_back} days")
+    logger.warning(f"Force resync requested - rewriting the last {days_back} days in place")
 
-    store = await get_store()
-
-    # Clear existing orders and related data atomically
-    async with store.connection() as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            conn.execute("DELETE FROM expenses")
-            conn.execute("DELETE FROM order_products")
-            conn.execute("DELETE FROM orders")
-            conn.execute("DELETE FROM sync_metadata WHERE key LIKE 'last_sync_orders%'")
-            conn.execute("COMMIT")
-        except Exception:
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:
-                pass
-            raise
-        logger.info("Cleared orders, order_products, expenses tables")
-
-    # Perform fresh full sync
     sync_service = await get_sync_service()
     # Reset the filter detection flag
     sync_service._use_ordered_between = None
-    stats = await sync_service.full_sync(days_back=days_back)
+    stats = await sync_service.full_sync(days_back=days_back, force_update=True)
 
     logger.info(f"Force resync complete: {stats}")
     return stats
