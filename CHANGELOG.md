@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.139
+
+- Two portability traps the gate caught in products_intel
+- Let the product-intelligence reads use Postgres
+
+
 ## 3.0.138
 
 - Make a silent fallback fail the differential tests
