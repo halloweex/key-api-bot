@@ -258,38 +258,60 @@ async def _resolve_session(session: str | None) -> dict | None:
             session_data['role'] = 'admin'
             return session_data
 
-        # Verify user is still authorized via DuckDB (primary)
+        # Verify the caller is still authorized, on whichever store owns the
+        # dashboard's user list.
+        #
+        # **An error is not an absence, and they must not share an exit.** Both
+        # used to fall through to the block below, which grants a `viewer` with
+        # no tab override — that is, every tab a viewer's role opens. Absence
+        # deserves that: an account with no row has no tab set to contradict.
+        # An *error* does not, because the row may say `traffic` and nobody
+        # here can see it, and handing back the full set would silently undo an
+        # admin's decision at exactly the moment nothing can be verified.
+        #
+        # The realistic error is not a network blip — under
+        # `KS_USER_STORE=postgres` a blip takes the fallback's own read down
+        # with it and the answer is 401 either way. It is `SchemaVersionError`:
+        # `web` deployed ahead of `migrate`, where `require_revision` raises on
+        # this read while the bot's store, which checks the revision only in
+        # `initialise()`, keeps answering. Every narrowed account would have
+        # got its tabs back, logged at WARNING, until somebody noticed.
         try:
             from core.duckdb_store import get_store
             store = await get_store()
             user = await store.get_user(user_id)
-            if user:
-                if user.get('status') != 'approved':
-                    return None
-                # Always use fresh role from DB, not stale session cookie
-                session_data['role'] = user.get('role', 'viewer')
-                # And the tab set beside it, from the same row and the same
-                # read. A second query for it would put the permission check
-                # on the request path this read exists to keep short; a cache
-                # would make a revoked tab outlive the click that revoked it.
-                session_data['allowed_features'] = user.get('allowed_features')
-                return session_data
         except Exception as e:
-            logger.warning(f"DuckDB user check failed, falling back to SQLite: {e}")
+            logger.error(
+                "Session check failed for user %s — refusing the request "
+                "rather than guessing what access they have: %s",
+                user_id, e, exc_info=True,
+            )
+            return None
 
-        # Fallback to SQLite. Reached either when DuckDB raised above OR when
-        # the user is not in the DuckDB `users` table (migration period).
-        # In either case we can't trust a fresh role from DuckDB, so downgrade
-        # to 'viewer' rather than honouring the role baked into the cookie
-        # — a demoted admin must not retain admin via stale cookie data.
+        if user:
+            if user.get('status') != 'approved':
+                return None
+            # Always use fresh role from DB, not stale session cookie
+            session_data['role'] = user.get('role', 'viewer')
+            # And the tab set beside it, from the same row and the same
+            # read. A second query for it would put the permission check
+            # on the request path this read exists to keep short; a cache
+            # would make a revoked tab outlive the click that revoked it.
+            session_data['allowed_features'] = user.get('allowed_features')
+            return session_data
+
+        # No row at all: the migration-era fallback. We cannot trust a fresh
+        # role, so downgrade to 'viewer' rather than honouring the role baked
+        # into the cookie — a demoted admin must not retain admin via stale
+        # cookie data.
         access = check_user_access(user_id)
         if not access['authorized']:
             return None
         session_data['role'] = 'viewer'
-        # No row means no override to read, so the role decides — which is
-        # `viewer` here for the reason above. Not an empty list: that would
-        # mean "no tabs at all" and lock out somebody the fallback exists to
-        # keep working.
+        # No row means no override exists, so the role decides. Not an empty
+        # list: that would mean "no tabs at all" and lock out somebody this
+        # path exists to keep working. Reached only when the store answered
+        # and had nothing — an error returned above.
         session_data['allowed_features'] = None
         return session_data
     except (BadSignature, SignatureExpired):

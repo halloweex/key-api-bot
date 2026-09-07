@@ -329,6 +329,69 @@ class TestTheAdminEndpoint:
         assert response.status_code == 403
 
 
+# ─── what happens when the store cannot be read ──────────────────────────────
+
+
+class TestAnErrorIsNotAnAbsence:
+    """The two used to share an exit, and the shared exit granted a `viewer`
+    with no tab override — every tab a viewer's role opens.
+
+    For an account with **no row** that is right: there is no tab set to
+    contradict. For an account whose row could not be **read** it is the
+    opposite of right, because the row may say `traffic` and handing back the
+    full set silently undoes an admin's decision at the one moment nothing can
+    be verified.
+    """
+
+    def _login_with(self, monkeypatch, store) -> dict:
+        _install_store(monkeypatch, store)
+        monkeypatch.setattr(
+            dashboard_service, "parse_period",
+            lambda *a, **k: ("2026-08-01", "2026-08-31"),
+        )
+
+        async def _trend(*a, **k):
+            return {}
+
+        monkeypatch.setattr(dashboard_service, "get_revenue_trend", _trend)
+        # The bot's list, which the no-row path consults, says approved.
+        monkeypatch.setattr(
+            "web.routes.auth.check_user_access",
+            lambda uid: {"authorized": True, "status": "approved"},
+        )
+        return _cookie(PLAIN_ID, "viewer")
+
+    def test_a_read_that_raises_refuses_the_request(self, client, monkeypatch):
+        """`SchemaVersionError` is the realistic one: `web` deployed ahead of
+        `migrate`, where this read raises while the bot's store — which checks
+        the revision only in `initialise()` — keeps answering. Every narrowed
+        account used to get its tabs back, at WARNING, until somebody noticed."""
+
+        class Broken(_FakeStore):
+            async def get_user(self, uid):
+                raise RuntimeError("schema is at 0020, this code requires 0021")
+
+        headers = self._login_with(monkeypatch, Broken("viewer", ["traffic"]))
+        assert client.get("/api/revenue/trend", headers=headers).status_code == 401
+        assert client.get("/api/traffic/analytics", headers=headers).status_code == 401
+
+    def test_no_row_still_falls_back_to_the_bots_list(self, client, monkeypatch):
+        """The migration-era path stays: an approved account the dashboard's
+        list has never seen gets a viewer's tabs, which is what it had before
+        per-user access existed."""
+
+        class Empty(_FakeStore):
+            async def get_user(self, uid):
+                return None
+
+        headers = self._login_with(monkeypatch, Empty("viewer", None))
+        assert client.get("/api/revenue/trend", headers=headers).status_code == 200
+
+    def test_the_narrowing_holds_when_the_store_answers(self, client, monkeypatch):
+        headers = self._login_with(monkeypatch, _FakeStore("viewer", ["traffic"]))
+        assert client.get("/api/revenue/trend", headers=headers).status_code == 403
+
+
 # ─── the cost of asking twice ────────────────────────────────────────────────
 
 
