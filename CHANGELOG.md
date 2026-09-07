@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.138
+
+- Make a silent fallback fail the differential tests
+
+
 ## 3.0.137
 
 - Close the margin ties the gate found
