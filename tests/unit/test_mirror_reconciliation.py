@@ -325,6 +325,10 @@ class TestWiring:
     def test_every_pulled_whole_table_is_covered(self):
         assert {s.pg_table for s in MIRRORED_TABLES} == {
             "bronze.products", "bronze.categories",
+            # 27 rows re-shipped whole on every sync, so it belongs with the
+            # catalogue rather than with the delta-mirrored orders and
+            # expenses (revision 0020).
+            "bronze.expense_types",
             "bronze.managers", "app.manager_classifications",
         }
         for spec in MIRRORED_TABLES:

@@ -41,8 +41,10 @@ TODAY = date.today()
 W = (TODAY - timedelta(days=25), TODAY)
 
 # (id, source_id, grand_total, days_ago, status_id, manager_id)
-# status 19 is KeyCRM's lost/cancel group; manager 15 is the wholesale manager,
-# so order 4 classifies as b2b and must vanish under the retail default.
+# status 19 is KeyCRM's lost/cancel group. Manager 15 is `B2B_MANAGER_ID`, and
+# the Silver CASE reads that constant rather than the `managers` table, so
+# order 4 classifies as b2b with no manager row to seed — which is one fewer
+# thing for this fixture to get wrong.
 ORDERS = [
     (1, 1, 1000.0, 2, 1, None),
     (2, 1, 2000.0, 3, 1, None),
@@ -84,8 +86,6 @@ async def _seed_duckdb(store):
                 "INSERT INTO orders (id,source_id,status_id,grand_total,"
                 "ordered_at,buyer_id,manager_id) VALUES (?,?,?,?,?,?,?)",
                 [oid, src, status, total, now - timedelta(days=days), oid, mgr])
-        conn.execute("INSERT INTO managers (id,full_name,is_retail) "
-                     "VALUES (15,'Wholesale',FALSE)")
     # Written through the store, so the shared parse is the thing under test.
     await store.upsert_expense_types([
         {"id": i, "name": n, "alias": a, "is_active": act}
