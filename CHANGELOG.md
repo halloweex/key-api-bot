@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.136
+
+- Let /marketing read Postgres
+
+
 ## 3.0.135
 
 - Derive the reports fixture's expectations from the fixture
