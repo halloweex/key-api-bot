@@ -103,24 +103,9 @@ class RevenueMixin:
         `core.sql_dialect.marketing_period_measures` renders that difference
         from one place.
         """
-        from core.sql_dialect import marketing_period_measures
+        from core.sql_dialect import render_tables
 
-        return sql.format(
-            silver_orders=dialect.silver_orders,
-            order_lines=dialect.order_lines,
-            order_products=dialect.order_products,
-            categories=dialect.categories,
-            gold_daily_revenue=dialect.gold_daily_revenue,
-            revenue_goals=dialect.revenue_goals,
-            # Computed from the dialect being rendered, never handed in by the
-            # caller. It was a caller's argument for about an hour, and the
-            # fallback was broken the whole time: the caller picked the
-            # fragment from the flag, so a Postgres fault fell back to DuckDB
-            # carrying `FILTER (WHERE source_id IS NULL)` — a column DuckDB's
-            # Gold does not have — and the rescue raised instead of rescuing.
-            period_measures=marketing_period_measures(dialect),
-            **extra,
-        )
+        return render_tables(sql, dialect, **extra)
 
     async def _marketing_run(
         self, sql: str, params: Optional[List[Any]] = None, **extra,

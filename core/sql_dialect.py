@@ -326,6 +326,34 @@ _PERIOD_MEASURES = ("revenue", "orders_count", "unique_customers",
 _CHANNELS = (("instagram", 1), ("telegram", 2), ("shopify", 4))
 
 
+def render_tables(sql: str, dialect: Dialect, **extra: Any) -> str:
+    """Fill a body's table holes for one engine.
+
+    The holes every ported read uses, in one place. It began as a method on
+    `RevenueMixin` for `/reports`, gained `/marketing`, and a third consumer
+    (`/margin`) is where a helper living on one mixin and reached through
+    `self` from another stops being an arrangement and becomes an accident.
+
+    `period_measures` is the one hole that is not a name — the two Golds differ
+    in shape there — and it is computed from the dialect being rendered rather
+    than passed in. That is not tidiness: it was a caller's argument for an
+    hour, and the `/marketing` fallback was broken the whole time, because the
+    caller picked the fragment from the flag and a Postgres fault then fell
+    back to DuckDB carrying `FILTER (WHERE source_id IS NULL)`.
+    """
+    return sql.format(
+        silver_orders=dialect.silver_orders,
+        order_lines=dialect.order_lines,
+        order_products=dialect.order_products,
+        categories=dialect.categories,
+        offer_stocks=dialect.offer_stocks,
+        gold_daily_revenue=dialect.gold_daily_revenue,
+        revenue_goals=dialect.revenue_goals,
+        period_measures=marketing_period_measures(dialect),
+        **extra,
+    )
+
+
 def marketing_period_measures(dialect: Dialect) -> str:
     """The eleven select items, in the order the caller unpacks them.
 
