@@ -2095,7 +2095,8 @@ async def reconcile_expenses(
                 f"DuckDB's {len(dk_rows)}, and no completed backfill is "
                 "recorded. The mirror ships only what a sync writes, so "
                 "history does not arrive on its own: run "
-                "`backfill_expenses`. Row-level comparison is suppressed "
+                "POST /api/mirror/backfill/expenses. Row-level comparison is "
+                "suppressed "
                 "until it completes — before that, 'missing' and 'lost' are "
                 "the same picture."
             ),

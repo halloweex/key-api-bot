@@ -162,6 +162,38 @@ async def backfill_mirror_orders(
         raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
 
 
+@router.post("/mirror/backfill/expenses")
+@limiter.limit("2/hour")
+async def backfill_mirror_expenses(
+    request: Request,
+    chunk_size: int = Query(1000, ge=100, le=10000),
+    admin: dict = Depends(require_admin),
+):
+    """Ship the order-level expenses Postgres is missing. Idempotent.
+
+    Revision 0020. `mirror_expenses` ships what a sync fetched, so after the
+    first deploy Postgres holds the last few days against DuckDB's 15,020 rows
+    — and until this has run, `reconcile_expenses` reports one
+    `mirror_backfill_pending` and suppresses the row-level comparison, because
+    before it every expense older than the mirror looks exactly like a lost
+    one.
+
+    Foreground, unlike the orders backfill: 15,020 narrow rows is seconds
+    rather than minutes, so a detached task would only make the result harder
+    to read.
+    """
+    from core.pg_expense_backfill import backfill_expenses
+
+    store = await get_store()
+    try:
+        return {"status": "success", "stats": await backfill_expenses(
+            store, chunk_size=chunk_size,
+        )}
+    except Exception as e:
+        logger.error(f"Expense backfill failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
+
+
 # ─── Warehouse ─────────────────────────────────────────────────────────────────
 
 @router.get("/warehouse/status")

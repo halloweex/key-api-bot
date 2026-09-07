@@ -1555,7 +1555,12 @@ def fetch_run_issues(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]
 REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("mirror_", "Wait for the hourly re-ship; check meta.mirror_state. Never copy rows by hand"),
     ("mirror_never_shipped", "Normal before Sunday (weekly sync writes it); after — a defect"),
-    ("mirror_backfill_pending", "POST /api/mirror/backfill/orders, then wait for 07:30"),
+    # Two layers share this check name — orders and, since revision 0020,
+    # expenses — and REMEDIATION keys on the name alone, so the lever has to
+    # name the table it applies to rather than assume one of them.
+    ("mirror_backfill_pending",
+     "POST /api/mirror/backfill/<orders|expenses> for the table named, "
+     "then wait for 07:30"),
     ("ch_", "Wait for the hourly ch_sync; stuck — check KS_CH_URL and the grant"),
     ("ch_history_", "Lost in PG and CH at once is unrepairable — a human decides"),
     ("order_versions_", "Do not repair: the archive is the only chronicle. Check the writer is alive"),
