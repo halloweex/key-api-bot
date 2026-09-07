@@ -145,15 +145,15 @@ class TestTheTableIsWhereItsMeaningPutsIt:
         """`REQUIRED_REVISION` is what makes deploying `web` before `migrate`
         fail closed instead of writing into a table that is not there.
 
-        The pin moves with the head migration — 0017 since the revenue goals
-        got a Postgres home, which was the last thing standing between
-        `/marketing` and Postgres — and this assertion is the speed bump that
-        makes the move a decision rather than a side effect.
+        The pin moves with the head migration — 0018 since `/traffic` got the
+        UTM classification and the ad spend it reads — and this assertion is
+        the speed bump that makes the move a decision rather than a side
+        effect.
 
         Moving it obliges the deploy to run `migrate` before `web`, which
         `docker compose up -d` does and the workflow then checks with
         `docker wait ks-migrate`."""
-        assert pg.REQUIRED_REVISION == "0017_revenue_goals"
+        assert pg.REQUIRED_REVISION == "0018_traffic"
 
     def test_money_keeps_the_scale_it_has_everywhere_else(self):
         """NUMERIC(12,2), as in `bronze.orders` and as DECIMAL(12,2) in DuckDB.

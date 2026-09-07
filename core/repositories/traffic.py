@@ -911,9 +911,10 @@ class TrafficMixin:
         """Calculate blended and per-platform ROAS.
 
         Combines:
-        - Total revenue from gold_daily_revenue
-        - Paid revenue per platform from gold_daily_traffic
-        - Ad spend per platform from manual_expenses
+        - Total revenue from the revenue Gold, roll-up rows only
+        - Paid revenue per platform from `silver_orders` joined to the UTM
+          level — not from the traffic Gold, which exists in one engine
+        - Ad spend per platform from the manual expenses
 
         Returns dict with blended ROAS, per-platform breakdown, and bonus tier.
         """

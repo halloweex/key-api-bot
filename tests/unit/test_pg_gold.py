@@ -541,12 +541,17 @@ class TestTheRefreshHook:
         monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
         order = []
         with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_order_utm.ship_order_utm",
+                   new=AsyncMock(side_effect=lambda _s: order.append("utm") or {})), \
              patch("core.pg_silver.rebuild_silver",
                    new=AsyncMock(side_effect=lambda: order.append("silver") or {})), \
              patch("core.pg_gold.rebuild_gold",
                    new=AsyncMock(side_effect=lambda: order.append("gold") or {})):
             await self._scheduler()._rebuild_postgres_layers({"status": "success"})
-        assert order == ["silver", "gold"]
+        # The UTM ship is last on purpose: nothing here derives from it, so a
+        # shipping fault must not cost the revenue Gold (revision 0018).
+        assert order[:2] == ["silver", "gold"]
+        assert order[-1] == "utm"
 
     @pytest.mark.asyncio
     async def test_a_failed_silver_leaves_gold_alone(self, monkeypatch):
@@ -585,6 +590,7 @@ class TestTheRefreshHook:
         monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "600")
         scheduler = self._scheduler()
         with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_order_utm.ship_order_utm", new=AsyncMock(return_value={})), \
              patch("core.pg_silver.rebuild_silver", new=AsyncMock(return_value={})), \
              patch("core.pg_gold.rebuild_gold",
                    new=AsyncMock(return_value={})) as gold:

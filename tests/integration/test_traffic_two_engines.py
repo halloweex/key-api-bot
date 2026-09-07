@@ -311,6 +311,18 @@ async def test_an_order_with_no_utm_row_still_counts(both_engines, monkeypatch):
         assert out["summary"]["organic"]["orders"] == 1
 
 
+# Derived from ORDERS rather than written out, because writing it out is how
+# this assertion was wrong the first time: status 19 is in KeyCRM's lost/cancel
+# group and source 3 is Opencart, and a reader counting on their fingers misses
+# one of the six that remain.
+LOST_CANCEL_STATUS = {19}
+INACTIVE_SOURCE = {3}
+COUNTED = [
+    o for o in ORDERS
+    if o[4] not in LOST_CANCEL_STATUS and o[1] not in INACTIVE_SOURCE
+]
+
+
 @pytest.mark.asyncio
 async def test_the_return_and_the_inactive_source_are_both_absent(
     both_engines, monkeypatch,
@@ -320,8 +332,8 @@ async def test_the_return_and_the_inactive_source_are_both_absent(
     in the query now, which is exactly the kind of move that loses a filter."""
     duck, pg = await _both(both_engines, monkeypatch, "get_traffic_analytics", {})
     for out in (duck, pg):
-        assert out["totals"]["orders"] == 5
-        assert out["totals"]["revenue"] == 4500.0
+        assert out["totals"]["orders"] == len(COUNTED)
+        assert out["totals"]["revenue"] == sum(o[2] for o in COUNTED)
 
 
 @pytest.mark.asyncio

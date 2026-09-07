@@ -86,32 +86,49 @@ class TestEveryMethodActuallyRuns:
 
 class TestTheRoutedBodies:
     def _statements(self):
+        """Every SQL literal inside a `get_traffic_*` method, as literal text.
+
+        Not the routed call's argument: four of the five methods build their
+        statement into a local first and pass the name, so reading arguments
+        finds three of the nine. Reading the method bodies finds all of them —
+        and it is the stricter scan anyway, because a query that stopped being
+        routed would still be caught here.
+
+        Constants nested inside an f-string are skipped explicitly. Python
+        folds adjacent literals into one node, so a plain string concatenated
+        with an f-string is a single `JoinedStr` whose children `walk` would
+        otherwise visit a second time and count twice.
+        """
         src = REPOSITORY.read_text(encoding="utf-8")
         tree = ast.parse(src)
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "_traffic_run"):
+        for fn in ast.walk(tree):
+            if not (isinstance(fn, ast.AsyncFunctionDef)
+                    and fn.name.startswith("get_traffic")):
                 continue
-            text = ""
-            for part in ast.walk(node):
-                # Both shapes appear here: plain string literals (the spend
-                # query needs no interpolation) and f-strings whose literal
-                # segments are what carry the holes.
-                if isinstance(part, ast.JoinedStr):
-                    text += "".join(
-                        v.value for v in part.values
+            nested = {
+                id(v) for node in ast.walk(fn)
+                if isinstance(node, ast.JoinedStr) for v in node.values
+            }
+            for node in ast.walk(fn):
+                if isinstance(node, ast.JoinedStr):
+                    text = "".join(
+                        v.value for v in node.values
                         if isinstance(v, ast.Constant) and isinstance(v.value, str)
                     )
-                elif isinstance(part, ast.Constant) and isinstance(part.value, str):
-                    text += part.value
-            if "SELECT" in text.upper():
-                yield node.lineno, text
+                elif (isinstance(node, ast.Constant)
+                      and isinstance(node.value, str)
+                      and id(node) not in nested):
+                    text = node.value
+                else:
+                    continue
+                if "SELECT" in text.upper():
+                    yield node.lineno, text
 
-    def test_the_scan_finds_all_seven(self):
-        """Five methods, seven statements: transactions and campaigns each run
-        a count beside their page of rows, and ROAS runs three."""
-        assert len(list(self._statements())) == 8
+    def test_the_scan_finds_all_nine(self):
+        """Five methods, nine statements: transactions and campaigns each run
+        a count beside their page of rows, and ROAS runs three — total
+        revenue, paid revenue per platform, and the ad spend."""
+        assert len(list(self._statements())) == 9
 
     def test_every_hole_survived_the_f_string(self):
         """`{silver_orders}` inside an f-string is an expression Python

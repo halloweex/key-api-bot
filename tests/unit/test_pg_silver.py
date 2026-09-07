@@ -176,6 +176,7 @@ class TestTheRefreshHook:
         scheduler = self._scheduler()
         with patch("core.mirror_reconciliation.configured", return_value=True), \
              patch("core.pg_vitrina.rebuild_customer_profile", new=AsyncMock(return_value={})), \
+             patch("core.pg_order_utm.ship_order_utm", new=AsyncMock(return_value={})), \
              patch("core.pg_silver.rebuild_silver",
                    new=AsyncMock(return_value={"rows": 1})) as rebuild:
             await scheduler._rebuild_postgres_layers({"status": "success"})

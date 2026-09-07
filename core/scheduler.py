@@ -1180,7 +1180,8 @@ class BackgroundScheduler:
             logger.error("Postgres layer rebuild failed: %s", e, exc_info=True)
 
     async def _rebuild_pg_layers(self, rebuild_silver, rebuild_gold) -> None:
-        """The derived layers and the one shipped one, under PG_LAYER_LOCK.
+        """The three derived layers, then the one shipped one, under
+        PG_LAYER_LOCK.
 
         Gold reads the Silver that was just written, in the same tick and
         from the same caller, so it can never aggregate a Silver the next
@@ -1194,18 +1195,6 @@ class BackgroundScheduler:
         stamp a fresh watermark on a stale answer, and that reads clean.
         """
         logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
-        # The UTM classification, in the same tick and before Gold. Not derived
-        # here — the parser is Python — so it is shipped, and it rides this
-        # floor rather than the hourly operational one because a stale row does
-        # not read as missing data: it reads as `organic`, and the paid/organic
-        # split moves in one store and not the other. Revision 0018.
-        from core.pg_order_utm import ship_order_utm
-        from core.duckdb_store import get_store
-
-        logger.info(
-            "Shipping order UTM to Postgres: %s",
-            await ship_order_utm(await get_store()),
-        )
         logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
         # And the витрина, from the same Silver in the same tick — one
         # floor, one тик, Gold's own reasoning one consumer down.
@@ -1214,6 +1203,24 @@ class BackgroundScheduler:
         logger.info(
             "Rebuilding customer profile in Postgres: %s",
             await rebuild_customer_profile(),
+        )
+        # And the UTM classification — shipped, not derived, because its body
+        # is a Python parser (revision 0018). It rides this floor rather than
+        # the hourly operational one because a stale row here does not read as
+        # missing data: it falls through the COALESCE to `organic`, and the
+        # paid/organic split moves in one store and not the other.
+        #
+        # **Last, and deliberately after the derivations.** Nothing in Postgres
+        # is computed from this level, so putting it between Silver and Gold —
+        # where it was first written — made a shipping fault cost the revenue
+        # Gold, which `/summary` and `/marketing` have read since 2026-08-28.
+        # The ordering rule above is about dependency, and this has none.
+        from core.duckdb_store import get_store
+        from core.pg_order_utm import ship_order_utm
+
+        logger.info(
+            "Shipping order UTM to Postgres: %s",
+            await ship_order_utm(await get_store()),
         )
 
     async def _run_backup(self) -> Dict[str, Any]:
