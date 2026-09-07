@@ -33,6 +33,7 @@ import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, patch
 
+from core.duckdb_constants import B2B_MANAGER_ID
 from core.duckdb_store import DuckDBStore
 
 asyncpg = pytest.importorskip("asyncpg")
@@ -57,14 +58,19 @@ PRODUCTS = [
     (300, "Unbranded", 3, None, "SKU-C", 250.0),
 ]
 
-# (order_id, source_id, grand_total, days_ago, is_return, sales_type, active)
+# (order_id, source_id, grand_total, days_ago, is_return, manager_id)
+#
+# `sales_type` is NOT seeded — the warehouse rebuild derives it, and the rule
+# reads `manager_id`: NULL is retail, `B2B_MANAGER_ID` is b2b. Writing the word
+# into the fixture and leaving the manager NULL is how the first version of
+# this file claimed to have a b2b order and had four retail ones.
 ORDERS = [
-    (1, 1, 1200.0, 2, False, "retail", True),
-    (2, 2, 600.0, 3, False, "retail", True),
-    (3, 1, 400.0, 4, True, "retail", True),      # a return
-    (4, 3, 900.0, 5, False, "retail", False),    # retired source — reaches nothing
-    (5, 4, 750.0, 6, False, "retail", True),     # NO LINE ITEMS, and revenue
-    (6, 1, 300.0, 7, False, "b2b", True),        # another sales_type
+    (1, 1, 1200.0, 2, False, None),
+    (2, 2, 600.0, 3, False, None),
+    (3, 1, 400.0, 4, True, None),        # a return
+    (4, 3, 900.0, 5, False, None),       # source 3 is retired — reaches nothing
+    (5, 4, 750.0, 6, False, None),       # NO LINE ITEMS, and revenue
+    (6, 1, 300.0, 7, False, B2B_MANAGER_ID),   # genuinely b2b
 ]
 # (line_id, order_id, product_id, quantity, price_sold)
 LINES = [
@@ -85,11 +91,12 @@ async def _seed_duckdb(store):
         conn.executemany(
             "INSERT INTO products (id, name, category_id, brand, sku, price)"
             " VALUES (?,?,?,?,?,?)", PRODUCTS)
-        for oid, src, total, days, is_ret, stype, active in ORDERS:
+        for oid, src, total, days, is_ret, manager in ORDERS:
             conn.execute(
                 "INSERT INTO orders (id, source_id, status_id, grand_total,"
-                " ordered_at, buyer_id, manager_id) VALUES (?,?,?,?,?,7,NULL)",
-                [oid, src, 19 if is_ret else 1, total, now - timedelta(days=days)])
+                " ordered_at, buyer_id, manager_id) VALUES (?,?,?,?,?,7,?)",
+                [oid, src, 19 if is_ret else 1, total,
+                 now - timedelta(days=days), manager])
         conn.executemany(
             "INSERT INTO order_products (id, order_id, product_id, name, quantity,"
             " price_sold) SELECT ?, ?, ?, p.name, ?, ? FROM products p WHERE p.id = ?",
@@ -226,7 +233,7 @@ async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
     totals = summary["totals"]
     assert totals["orders_count"] == 3, summary      # 1, 2, 5 — retail, not returned
     assert totals["returns_count"] == 1
-    assert totals["revenue"] == 2550.0               # 1200 + 600 + 750
+    assert totals["revenue"] == 2550.0               # 1200 + 600 + 750; #6 is b2b
 
     # The order with no line items is counted and carries its revenue, while
     # contributing nothing to `products_sold`. That asymmetry is the whole
@@ -237,6 +244,14 @@ async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
 
     # The retired source reaches no total at all.
     assert all(s["source_id"] != 3 for s in summary["sources"])
+
+    # …and `all` picks up the b2b order the default excludes, so the two
+    # parametrised cases above are comparing different rows rather than the
+    # same ones twice.
+    every, _ = await _both(
+        both_engines, monkeypatch, "get_report_summary", {"sales_type": "all"})
+    assert every["totals"]["orders_count"] == 4
+    assert every["totals"]["revenue"] == 2850.0
 
     products, _ = await _both(both_engines, monkeypatch, "get_report_top_products", {})
     assert products, "no products"
