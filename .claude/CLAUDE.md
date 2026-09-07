@@ -132,6 +132,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/customers/sms-segments/export/csv` | Campaign list as CSV, holdout excluded (needs `sms` edit) |
 | `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, needs `sms` edit) |
 | `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (needs `sms` view/edit) |
+| `/api/admin/users/{id}/features` | Which tabs one account may open (PATCH, admin) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
 | `/api/managers/{id}/retail-status` | Classify a manager, marks warehouse dirty (POST, admin) |
 | `/api/health/data-quality` | Latest run per layer — integrity, reconciliation, mirror_landing, reconciliation_pg, reconciliation_ch — with issues/diffs (за сессией) |
@@ -486,6 +487,116 @@ something that no longer means what past campaigns meant.
 refuses the placeholder name `default`, an empty audience, and a truncated one.
 The wizard builds the preview and the freeze from the same query string, so
 what is recorded is what was on screen.
+### Which tabs one person may open
+
+Access used to be a **role** and nothing else: four roles, a stored
+`role × feature` matrix, and — because only `expenses` and `sms` were ever
+gated on the server — an approved account could read every other page's API
+whatever the sidebar showed it. "Open only /traffic to this person" could not
+be said at all: `traffic`, `products`, `marketing` and `margin` were not
+features, and `/margin` was behind the admin role, which meant granting the
+profit numbers also granted user management and the warehouse controls.
+
+It is now **role + tab set**, and the sentence that decides everything is:
+**the tab set decides what is visible, the role decides what may be done
+inside it.**
+
+- `TAB_FEATURES` (`core/permissions.py`) is the grantable list, in the
+  sidebar's order: dashboard, products, traffic, inventory, reports,
+  marketing, margin, expenses, sms. The admin checklist, the bot's keyboard
+  and the route table are all built from it, so a new tab is added once.
+- `user_management` is deliberately **not** in it. The admin pages stay on the
+  admin role: a checkbox that hands somebody the access system itself would
+  make every other rule here advisory. `analytics` and `customers` are absent
+  too — they are stored matrix rows that gate nothing.
+- `apply_feature_override` is the rule, and it is pure. A ticked tab is
+  viewable even where the role would not show it — that is how "traffic only"
+  works without inventing a role — while `edit` and `delete` still come from
+  the role. **No override ever grants an action**: ticking `sms` for a viewer
+  gives roster sizes, never the CSV of names and phone numbers nor the send.
+
+**Three states, and the middle one is the one that gets lost.**
+`dashboard_users.allowed_features` (revision 0021, and the DuckDB twin in
+migration 0029) is NULL for "as the role" — what all 24 existing rows meant on
+the day it shipped, so nobody's access moved — a comma-separated list for
+"exactly these", and an **empty string** for "none of them", which is a real
+choice an admin can make from the page. Folding the empty set into NULL turns
+"see nothing" into "see everything the role shows".
+
+**A column, not a table.** `_resolve_session` reads this row on every request
+to every tab, and that read *is* revocation here — the session cookie is a
+stateless signed token that cannot be withdrawn. A second table would mean a
+second read on that path, or a cache, and a cache is a revocation that takes
+effect later than the admin thinks it did.
+
+**The server enforces it, or it is decoration.** Routers that serve exactly one
+tab carry the gate at their include (`traffic`, `products`, `inventory`,
+`margin`); modules that mix tabs carry it per endpoint (`reports` also serves
+/marketing; `analytics` serves the dashboard and the two charts /marketing
+shares with it). Three things stay open to any approved session and each is a
+decision: `/api/health`, `/api/me`, and the filter lookups `/categories`,
+`/brands`, `/promocodes`, which are the header's dropdowns on every page.
+`/api/summary` is `require_any_permission(["dashboard", "marketing",
+"traffic"])` — the revenue totals are the dashboard's cards *and* what the ROAS
+block on /traffic and the ROI calculator on /marketing divide by, so gating it
+on `dashboard` would leave a traffic-only account looking at empty tiles.
+`tests/integration/test_tab_permissions.py` fails if a tab has no gate at all.
+
+**`/margin` is a permission now, held by the admin role alone.** Nothing
+changed about who can open it; what changed is that it can be ticked for one
+person without making them an admin.
+
+**Presets live in code** (`ACCESS_PRESETS`), like `BUILTIN_AUDIENCE_PRESETS`
+and for the same reason: a stored preset can be edited into something that no
+longer means what it meant when somebody was granted it, and the bot would
+need a second store to read before it could draw a keyboard. `standard` is the
+default an approval grants and equals what a viewer's role opened the day
+before this existed — computed from `ROLE_PERMISSIONS` in the test, so
+changing the role and forgetting the preset fails rather than quietly widening
+every future approval.
+
+**The bot chooses the tabs at the moment of approval.** ✅ Approve now grants
+the dashboard row explicitly (`GRANT_ACCESS`, one statement — an insert
+followed by an update would leave the person approved with somebody else's
+tabs in the second the bot tells them they have access) and redraws the same
+message as a checklist: a chip per tab, the presets, and Готово. Every tap is
+written through immediately rather than accumulated and saved at the end — an
+admin who taps three tabs and walks away has made three decisions. The first
+tap on an account with no override starts from `standard`, not from an empty
+set, or the first tick would silently revoke everything else.
+
+Callback data is `atab:<id>:<key>` — a colon, because the neighbouring auth
+handlers read ids with `split('_')[-1]` and a key containing an underscore
+would be read as the id.
+
+**The bot writes it through the store port**, not through a second connection:
+`DashboardTabs` in `core/bot_store.py`, implemented against `app.dashboard_users`
+in `bot/store_postgres.py`. The statements themselves are in
+`core/dashboard_access.py`, one text with the `{users}`/`{self}` holes, run by
+the web container through `core/repositories/users.py` and by the bot through
+its own pool — a grant written two ways would drift the first time one of them
+learned something the other did not.
+
+`available()` is the honest half: it needs `KS_BOT_STORE=postgres` **and**
+`KS_USER_STORE=postgres`. Under `KS_USER_STORE=duckdb` the dashboard's list is
+in a file the web container holds the single writer for, so no bot process can
+reach it — the approval still grants bot access and the message says the tabs
+are set from Admin → Users, rather than showing a checklist that would do
+nothing. Two variables in the same `.env`; if they ever disagree, a tab set
+written by the bot would go to a table nothing reads.
+
+One portability trap, found by running the statement rather than reading about
+it: DuckDB cannot resolve a bare `CURRENT_TIMESTAMP` on the right of
+`ON CONFLICT DO UPDATE SET` — it binds the name as a column. The value comes
+out of `excluded` instead, which is what `create_user` and `set_permission`
+already do here.
+
+**The redirect could not stay a constant.** `RouteGuard` used to send a denied
+visitor to `/`; an account granted /traffic alone is *denied* at `/`, so that
+is now a redirect loop. It computes the first page the account can actually
+open (`utils/access.firstAllowedPath`) and, when there is none, says so on the
+screen instead of navigating.
+
 ### Who may run an SMS campaign
 Sending is the one thing on this dashboard that spends money and reaches
 customers on their phones, and the roster behind it is 6 000 names and phone
@@ -1124,10 +1235,12 @@ production scale (130 K-row archive, 24 MB): **0.6 ms** for an ordinary tick,
 chunk — ~190 bytes a row, so **~7 MB a year**.
 
 **Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
-moves to `0010_order_versions` and `require_revision` raises on any mismatch,
-ahead or behind. The bot checks it too, but only in `initialise()`, so a running
-bot survives the migration; only a restart before its image is replaced would
-fail.
+moved to `0010_order_versions` at the time and `require_revision` raises on any
+mismatch, ahead or behind. It is `0021_user_allowed_features` today, and every
+revision since has inherited the same rule: rebuild and push `keycrm-migrate`
+alongside `keycrm-web`, and let `docker wait ks-migrate` finish first. The bot
+checks it too, but only in `initialise()`, so a running bot survives the
+migration; only a restart before its image is replaced would fail.
 
 ### The port in front of the bot's state
 
@@ -1135,7 +1248,7 @@ fail.
 Step 03 needs the engine underneath it to change, so it now has a seam:
 
 ```
-core/bot_store.py     the port — four Protocols, a registry, no SQL
+core/bot_store.py     the port — five Protocols, a registry, no SQL
 bot/store_sqlite.py   the adapter — every statement, moved verbatim
 bot/database.py       the facade — same names, same signatures, delegating
 ```
@@ -1663,4 +1776,4 @@ GET /api/admin/resync/status/{job_id}
 
 ---
 
-*Last updated: 2026-09-07*
+*Last updated: 2026-09-08*
