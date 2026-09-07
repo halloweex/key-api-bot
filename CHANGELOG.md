@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.137
+
+- Close the margin ties the gate found
+- Let /margin read Postgres
+
+
 ## 3.0.136
 
 - Let /marketing read Postgres
