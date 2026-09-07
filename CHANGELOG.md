@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.142
+
+- Document the /expenses port
+- Test the expense mirror, its backfill, and the comparison
+- The expense comparison was reading the wrong clock
+- Give the expense backfill a way to be run
+- Fix the expenses fixture, the wiring pin, and add a two-minute gate
+- Read /expenses from Postgres, and fix a fan-out worth 314K
+
+
 ## 3.0.141
 
 - Two defects in the review's own tests
