@@ -164,14 +164,57 @@ class ExpenseRow(NamedTuple):
     amount: float
     description: Optional[str]
     status: Optional[str]
-    payment_date: Optional[Any]
-    created_at: Optional[Any]
+    # Parsed, not passed through: KeyCRM sends ISO strings and asyncpg needs
+    # datetimes. See `_keycrm_datetime`.
+    payment_date: Optional[datetime]
+    created_at: Optional[datetime]
 
 
 EXPENSE_TYPE_COLUMNS = ExpenseTypeRow._fields
 EXPENSE_COLUMNS = ExpenseRow._fields
 
 _LOCALISATION_PREFIX = "dictionaries.expense_types."
+
+
+def _keycrm_datetime(value: Any) -> Optional[datetime]:
+    """A KeyCRM timestamp as a datetime, or None.
+
+    THE BUG THIS EXISTS FOR
+
+    KeyCRM serves these as ISO strings — `2026-09-07T14:31:22.000000Z`. DuckDB
+    accepts the string and parses it on the way in; asyncpg does not, and
+    raises `invalid input for query argument ... expected a datetime`. The
+    first cut of `expense_row` passed the payload value straight through, so
+    DuckDB was written and the mirror failed on all 66 rows of the first
+    batch — caught within the minute by the failure watermark rather than the
+    next morning, which is what that watermark is for.
+
+    That is exactly the class "one parse, two stores" exists to prevent: a
+    parse is not finished until it has produced a value *both* stores accept.
+
+    `.replace("Z", "+00:00")` and the swallowed error are `core/models.py`'s
+    handling of the same field, copied deliberately rather than improved: an
+    unparseable stamp becomes NULL in both stores instead of failing the batch
+    that carries it.
+
+    ONE RESIDUAL DIFFERENCE, LEFT ALONE ON PURPOSE
+
+    A KeyCRM stamp with no zone parses to a naive datetime, and the two stores
+    then disagree about what it means: asyncpg reads naive as UTC, DuckDB reads
+    it in the session timezone, which is `Europe/Kyiv` in these containers —
+    three hours apart. Every value observed on production carries `Z`, so this
+    is hypothetical; normalising it would change what DuckDB stores today on
+    the strength of that hypothesis, and the daily comparison reports a
+    three-hour difference loudly if it ever stops being one.
+    """
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
 
 
 def expense_type_row(payload: Dict[str, Any]) -> ExpenseTypeRow:
@@ -209,8 +252,8 @@ def expense_row(order_id: Optional[int], payload: Dict[str, Any]) -> ExpenseRow:
         amount=payload.get("amount", 0),
         description=payload.get("description"),
         status=payload.get("status"),
-        payment_date=payload.get("payment_date"),
-        created_at=payload.get("created_at"),
+        payment_date=_keycrm_datetime(payload.get("payment_date")),
+        created_at=_keycrm_datetime(payload.get("created_at")),
     )
 
 

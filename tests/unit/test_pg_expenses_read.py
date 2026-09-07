@@ -194,6 +194,30 @@ class TestTheSharedParse:
 
         assert expense_type_row({"id": 9, "name": "Мито"}).name == "Мито"
 
+    @pytest.mark.parametrize("raw,expected_kind", [
+        ("2026-09-07T14:31:22.000000Z", "datetime"),
+        ("2026-09-05 13:04:29", "datetime"),
+        ("2026-09-05", "datetime"),
+        (None, "none"),
+        ("", "none"),
+        ("not a date", "none"),
+    ])
+    def test_timestamps_are_parsed_not_passed_through(self, raw, expected_kind):
+        """KeyCRM sends ISO strings; asyncpg refuses them for TIMESTAMPTZ and
+        DuckDB accepts them, so passing the payload value straight through
+        wrote one store and failed the other — 66 rows on the first batch in
+        production. A parse is not finished until both stores accept it."""
+        from datetime import datetime
+
+        from core.landing_rows import expense_row
+
+        row = expense_row(1, {"id": 9, "payment_date": raw, "created_at": raw})
+        for value in (row.payment_date, row.created_at):
+            if expected_kind == "datetime":
+                assert isinstance(value, datetime), f"{raw!r} -> {value!r}"
+            else:
+                assert value is None
+
     def test_a_null_expenses_list_is_not_a_crash(self):
         """`order.get("expenses", [])` raised on `"expenses": null`, which
         KeyCRM is free to send. The flattening lives in one place now and
