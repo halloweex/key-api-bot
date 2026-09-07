@@ -27,9 +27,9 @@ from __future__ import annotations
 
 import html
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import List, Optional, Tuple
+from typing import List, Mapping, Optional, Tuple
 
 from core.i18n import (
     DEFAULT_LANGUAGE,
@@ -124,6 +124,23 @@ class ProductMove:
 
 
 @dataclass(frozen=True)
+class DayTotals:
+    """One day of the reported week."""
+    day: date
+    revenue: float
+    orders: int
+
+
+@dataclass(frozen=True)
+class ChannelTotals:
+    """One sales channel over the week, against the week before."""
+    name: str
+    revenue: float
+    orders: int
+    previous_revenue: float
+
+
+@dataclass(frozen=True)
 class WeeklyReport:
     start: date
     end: date
@@ -136,6 +153,12 @@ class WeeklyReport:
     baseline_weeks: int
     movers: List[ProductMove]
     product_move_total: float
+    # The rich form only: seven days each for this week and the one before,
+    # and the channel split. Empty lists render nothing, so the caption form
+    # and every older caller are untouched.
+    days: List[DayTotals] = field(default_factory=list)
+    previous_days: List[DayTotals] = field(default_factory=list)
+    channels: List[ChannelTotals] = field(default_factory=list)
 
     @property
     def z(self) -> Optional[float]:
@@ -308,6 +331,65 @@ def fetch_product_moves(
     return moves, total
 
 
+def fetch_daily(conn, start: date, end: date, sales_type: str) -> List[DayTotals]:
+    """Every day of the window, zeros where Gold has no row.
+
+    A quiet type has days with no orders; a missing row there is a real
+    observation, and the day table must keep its seven rows either way.
+    """
+    rows = conn.execute("""
+        SELECT date, revenue, orders_count FROM gold_daily_revenue
+        WHERE date BETWEEN ? AND ? AND sales_type = ?
+    """, [start, end, sales_type]).fetchall()
+    by_day = {
+        (d.date() if hasattr(d, "date") else d): (float(r or 0), int(o or 0))
+        for d, r, o in rows
+    }
+    return [
+        DayTotals(day, *by_day.get(day, (0.0, 0)))
+        for day in (start + timedelta(days=i) for i in range((end - start).days + 1))
+    ]
+
+
+# Gold names a channel by column, so the split can only see the channels
+# somebody wrote a column for. For retail that is all of them: the exhibition
+# source is its own sales_type and never lands in a retail row.
+_CHANNEL_COLUMNS = (
+    ("Instagram", "instagram_revenue", "instagram_orders"),
+    ("Telegram", "telegram_revenue", "telegram_orders"),
+    ("Shopify", "shopify_revenue", "shopify_orders"),
+)
+
+
+def fetch_channels(
+    conn, start: date, end: date, prev_start: date, prev_end: date, sales_type: str,
+) -> List[ChannelTotals]:
+    """Revenue and orders per channel, this week and the week before.
+
+    Largest first. A channel with nothing in either week is dropped rather
+    than rendered as a row of zeros.
+    """
+    def totals(a: date, b: date):
+        cols = ", ".join(
+            f"COALESCE(SUM({rev}), 0), COALESCE(SUM({orders}), 0)"
+            for _, rev, orders in _CHANNEL_COLUMNS
+        )
+        return conn.execute(
+            f"SELECT {cols} FROM gold_daily_revenue "
+            "WHERE date BETWEEN ? AND ? AND sales_type = ?",
+            [a, b, sales_type],
+        ).fetchone()
+
+    cur, prev = totals(start, end), totals(prev_start, prev_end)
+    out = [
+        ChannelTotals(name, float(cur[2 * i]), int(cur[2 * i + 1]), float(prev[2 * i]))
+        for i, (name, _, _) in enumerate(_CHANNEL_COLUMNS)
+    ]
+    out = [c for c in out if c.revenue or c.orders or c.previous_revenue]
+    out.sort(key=lambda c: c.revenue, reverse=True)
+    return out
+
+
 def warehouse_max_date(conn) -> Optional[date]:
     """The last date the Gold layer knows about, across every sales type.
 
@@ -342,18 +424,24 @@ def build_report(
         conn, start, end, prev_start, prev_end, sales_type
     )
 
+    has_previous = bool(previous.orders or previous.revenue)
     return WeeklyReport(
         start=start,
         end=end,
         sales_type=sales_type,
         current=current,
-        previous=previous if previous.orders or previous.revenue else None,
+        previous=previous if has_previous else None,
         year_ago=year_ago if year_ago.orders or year_ago.revenue else None,
         baseline_mean=mean,
         baseline_sd=sd,
         baseline_weeks=len(series),
         movers=movers[:TOP_MOVERS],
         product_move_total=product_total,
+        days=fetch_daily(conn, start, end, sales_type),
+        previous_days=(
+            fetch_daily(conn, prev_start, prev_end, sales_type) if has_previous else []
+        ),
+        channels=fetch_channels(conn, start, end, prev_start, prev_end, sales_type),
     )
 
 
@@ -404,11 +492,19 @@ def _compact(value: float, lang: str) -> str:
     K and M are left untranslated: they read the same in all three languages,
     and a translated suffix beside a Latin σ would be the odder thing.
     """
-    if abs(value) >= 1_000_000:
+    if abs(value) >= 10_000_000:
         return f"₴ {value / 1_000_000:.1f}M"
+    if abs(value) >= 1_000_000:
+        return f"₴ {value / 1_000_000:.2f}M"
     if abs(value) >= 1_000:
         return f"₴ {value / 1_000:.0f}K"
     return f"₴ {value:.0f}"
+
+
+# Public name for the chart renderers; the underscore form stays for the
+# callers that already use it.
+def compact_money(value: float, lang: str) -> str:
+    return _compact(value, lang)
 
 
 def _delta(pct: Optional[float], lang: str) -> str:
@@ -558,4 +654,425 @@ def _top_movers(report: WeeklyReport, lang: str) -> List[str]:
     if top_share is not None:
         out.append(t("report.movers_share", lang,
                      count=len(report.movers), share=f"{top_share:.0f}"))
+    return out
+
+
+# ─── The rich form ──────────────────────────────────────────────────────────
+#
+# Bot API 10.1 (June 2026) lets a bot send a document — headings, a real
+# table, lists, a picture between paragraphs — instead of a caption under a
+# photo. The caption form above is kept as the fallback: a client that cannot
+# render rich messages, or a tag the API refuses, costs the shape of the
+# report and never the report.
+#
+# Written for the reader who is not an analyst. The caption form says
+# "z −0.4 · σ ₴194K"; this one says "an ordinary week" and keeps z and σ
+# behind a tap. Every comparison shows both numbers, because "336 against
+# 433" is understood by everyone and "▼ 22.4%" by fewer than it seems.
+
+_NOTE_Z = "note-z"
+_SPARK = "▁▂▃▄▅▆▇█"
+_LEVER = "\x00lever\x00"
+
+
+def _td_right(inner: str) -> str:
+    return f'<td align="right">{inner}</td>'
+
+
+def _pct_of(part: float, whole: float) -> str:
+    """A share for a table cell, blank when the whole is nothing."""
+    return f"{part / whole * 100:.0f}%" if whole else ""
+
+
+def sparkline(values: List[float]) -> str:
+    """Seven days as seven block glyphs, tallest bar for the best day."""
+    top = max(values) if values else 0
+    if top <= 0:
+        return _SPARK[0] * len(values)
+    return "".join(_SPARK[min(7, int(v / top * 7 + 0.5))] for v in values)
+
+
+def _sales_type_label(sales_type: str, lang: str) -> str:
+    """"Розница" for retail; the raw name for anything the table lacks."""
+    from core.i18n import has_key
+
+    key = f"report.sales_type.{sales_type}"
+    return t(key, lang) if has_key(key) else sales_type
+
+
+def _lever(report: WeeklyReport, lang: str) -> Optional[Tuple[str, str]]:
+    """(the marked clause, the sentence key it belongs in), or None.
+
+    Named only when one effect carries at least 60% of the move; a 55/45
+    split is both, and calling it one of them is a guess."""
+    cur, prev = report.current, report.previous
+    if prev is None:
+        return None
+    delta = cur.revenue - prev.revenue
+    orders_effect, check_effect = decompose(cur, prev)
+    orders_share = share_of(orders_effect, delta)
+    check_share = share_of(check_effect, delta)
+    if orders_share is not None and orders_share >= 60:
+        key = "report.lever_orders_down" if orders_effect < 0 else "report.lever_orders_up"
+        return t(key, lang), "report.why_lever_orders"
+    if check_share is not None and check_share >= 60:
+        key = "report.lever_check_down" if check_effect < 0 else "report.lever_check_up"
+        return t(key, lang), "report.why_lever_check"
+    return None
+
+
+def _lever_sentence(report: WeeklyReport, lang: str) -> Optional[str]:
+    """The one sentence that says why, with the lever marked."""
+    esc = html.escape
+    if report.previous is None:
+        return None
+    lever = _lever(report, lang)
+    if lever is None:
+        return esc(t("report.why_both", lang))
+    clause, sentence_key = lever
+    # The template is escaped whole, then the clause is dropped in — so the
+    # markup never passes through the escaper. Bold, not <mark>: the marker's
+    # highlight is invisible in Telegram's dark theme (owner, 2026-09-07).
+    template = esc(t(sentence_key, lang, lever=_LEVER))
+    return template.replace(_LEVER, f"<b>{esc(clause)}</b>")
+
+
+# The pictures a rich report may carry, by role. The transport uploads each
+# under its media id; the HTML refers to it as tg://photo?id=<id>.
+FIGURE_CARD, FIGURE_DAYS, FIGURE_WHY, FIGURE_CHANNELS = "card", "days", "why", "channels"
+
+
+def _figure(media_id: str, caption: Optional[str] = None) -> str:
+    esc = html.escape
+    img = f'<img src="tg://photo?id={esc(media_id, quote=True)}"/>'
+    cap = f"<figcaption>{caption}</figcaption>" if caption else ""
+    return f"<figure>{img}{cap}</figure>"
+
+
+def format_report_rich(
+    report: WeeklyReport,
+    dashboard_url: Optional[str] = None,
+    lang: str = DEFAULT_LANGUAGE,
+    card_id: Optional[str] = None,
+    figures: Optional[Mapping[str, str]] = None,
+) -> str:
+    """Render the report as rich HTML, in `lang`.
+
+    `figures` maps a role (`FIGURE_CARD`, `FIGURE_DAYS`, `FIGURE_WHY`) to the
+    media id the transport will upload that picture under. A chart that is
+    present replaces the table it stands for — the day table folds into a
+    collapsed block, the decomposition table goes — because a reader who
+    can see the shape does not need the seven numbers, and the one who does
+    is one tap away. `card_id` is the older spelling of `figures["card"]`.
+    """
+    lang = normalize(lang)
+    esc = html.escape
+    figs = dict(figures or {})
+    if card_id:
+        figs.setdefault(FIGURE_CARD, card_id)
+
+    out: List[str] = [
+        # Headings in upper case, the brand's Libre Franklin rule (p. 16), and
+        # no emoji on them: one emoji per screen, and it is the verdict's.
+        f"<h1>{esc(t('report.title', lang).upper())}</h1>",
+        f"<p>{fmt_window(report.start, report.end, lang)} · "
+        f"{esc(_sales_type_label(report.sales_type, lang))}</p>",
+    ]
+    if FIGURE_CARD in figs:
+        out.append(_figure(figs[FIGURE_CARD]))
+
+    out += _rich_summary(report, lang)
+    out += _rich_numbers(report, lang)
+    out += _rich_why(report, lang, figs.get(FIGURE_WHY))
+    out += _rich_days(report, lang, figs.get(FIGURE_DAYS))
+    out += _rich_channels(report, lang, figs.get(FIGURE_CHANNELS))
+    out += _rich_top_movers(report, lang)
+    out += _rich_footnotes(report, lang)
+
+    if dashboard_url:
+        out.append(
+            '<tg-button-row><tg-button type="url" style="primary" '
+            f'url="{esc(dashboard_url, quote=True)}">'
+            f"{esc(t('report.open_dashboard', lang))}</tg-button></tg-button-row>"
+        )
+    return "\n".join(out)
+
+
+def _rich_summary(report: WeeklyReport, lang: str) -> List[str]:
+    """Three sentences a reader can stop after: the verdict, the revenue
+    against everything it can be compared with, and why it moved."""
+    cur, prev, ly = report.current, report.previous, report.year_ago
+    esc = html.escape
+
+    z = report.z
+    if z is None:
+        verdict = ""
+    else:
+        if abs(z) < ANOMALY_Z:
+            mark, key = "✅", "report.summary_normal"
+        elif z > 0:
+            mark, key = "🚀", "report.summary_high"
+        else:
+            mark, key = "⚠️", "report.summary_low"
+        # The verdict is the link to the footnote that says how it is judged.
+        verdict = f'{mark} <a href="#{_NOTE_Z}"><b>{esc(t(key, lang))}</b></a> '
+
+    clauses: List[str] = []
+    if prev:
+        clauses.append(t("report.clause_vs_prev", lang,
+                         delta=_delta(pct_change(cur.revenue, prev.revenue), lang)))
+    if report.baseline_mean is not None and report.baseline_weeks >= MIN_BASELINE_WEEKS:
+        clauses.append(t("report.clause_vs_avg", lang, weeks=report.baseline_weeks,
+                         delta=_delta(pct_change(cur.revenue, report.baseline_mean), lang)))
+    if ly:
+        clauses.append(t("report.clause_vs_ly", lang,
+                         year=same_week_last_year(report.start)[0].year,
+                         delta=_delta(pct_change(cur.revenue, ly.revenue), lang)))
+    revenue = (
+        esc(t("report.summary_revenue", lang, revenue=_money(cur.revenue, lang),
+              clauses=", ".join(clauses)))
+        if clauses else f"{esc(t('report.revenue', lang))} {_money(cur.revenue, lang)}."
+    )
+    parts = [verdict + revenue]
+    why = _lever_sentence(report, lang)
+    if why:
+        parts.append(why)
+    return ["<blockquote>" + "<br/>".join(parts) + "</blockquote>"]
+
+
+def _rich_numbers(report: WeeklyReport, lang: str) -> List[str]:
+    """Every headline number beside last week's, then the change."""
+    cur, prev = report.current, report.previous
+    esc = html.escape
+
+    def money(v: Optional[float]) -> str:
+        return _money(v, lang) if v is not None else ""
+
+    def count(v: Optional[int]) -> str:
+        return fmt_int(v, lang) if v is not None else ""
+
+    rows = [
+        (t("report.revenue", lang), money(cur.revenue), money(prev.revenue if prev else None),
+         pct_change(cur.revenue, prev.revenue if prev else None)),
+        (t("report.orders", lang), count(cur.orders), count(prev.orders if prev else None),
+         pct_change(cur.orders, prev.orders if prev else None)),
+        (t("report.avg_check_full", lang), money(cur.avg_check),
+         money(prev.avg_check if prev else None),
+         pct_change(cur.avg_check, prev.avg_check if prev else None)),
+    ]
+    if cur.new_customer_orders is not None and cur.repeat_orders is not None:
+        prev_new = prev.new_customer_orders if prev else None
+        prev_rep = prev.repeat_orders if prev else None
+        rows += [
+            (t("report.new_orders", lang), count(cur.new_customer_orders), count(prev_new),
+             pct_change(cur.new_customer_orders, prev_new)),
+            (t("report.repeat_orders", lang), count(cur.repeat_orders), count(prev_rep),
+             pct_change(cur.repeat_orders, prev_rep)),
+        ]
+    table = [
+        "<table bordered compact>",
+        f"<tr><th></th><th>{esc(t('report.col_this_week', lang))}</th>"
+        f"<th>{esc(t('report.col_last_week', lang))}</th>"
+        f"<th>{esc(t('report.col_change', lang))}</th></tr>",
+    ]
+    for label, now, before, pct in rows:
+        table.append(
+            f"<tr><td>{esc(label)}</td>{_td_right(f'<b>{now}</b>')}"
+            f"{_td_right(before)}{_td_right(_delta(pct, lang) if before else '')}</tr>"
+        )
+    table.append("</table>")
+    return table
+
+
+def _rich_why(report: WeeklyReport, lang: str, figure: Optional[str] = None) -> List[str]:
+    """The move in hryvnia, split into the two things that can move it.
+
+    With a waterfall chart the two-row table is not drawn: the chart carries
+    the same four numbers as labels, in the order they happened."""
+    cur, prev = report.current, report.previous
+    if prev is None:
+        return []
+    esc = html.escape
+
+    delta = cur.revenue - prev.revenue
+    orders_effect, check_effect = decompose(cur, prev)
+
+    def row(effect: float, down_key: str, up_key: str) -> str:
+        label = t(down_key if effect < 0 else up_key, lang)
+        share = share_of(effect, delta)
+        return (f"<tr><td>{esc(label)}</td>{_td_right(_signed_money(effect, lang))}"
+                f"{_td_right(f'{share:.0f}%' if share is not None else '')}</tr>")
+
+    out = [f"<h3>{esc(t('report.why_title', lang).upper())}</h3>"]
+    if figure:
+        out.append(_figure(figure, esc(t("report.fig_why", lang,
+                                          delta=_signed_money(delta, lang)))))
+    else:
+        out += [
+            f"<p>{esc(t('report.why_delta', lang, delta=_signed_money(delta, lang)))}</p>",
+            "<table compact>",
+            row(orders_effect, "report.effect_orders_down", "report.effect_orders_up"),
+            row(check_effect, "report.effect_check_down", "report.effect_check_up"),
+            "</table>",
+        ]
+
+    if cur.new_customer_orders is None or prev.new_customer_orders is None:
+        return out
+    order_delta = cur.orders - prev.orders
+    new_delta = cur.new_customer_orders - prev.new_customer_orders
+    new_share = share_of(new_delta, order_delta)
+    if new_share is not None and abs(order_delta) >= 5:
+        key = ("report.new_share_gain_plain" if order_delta > 0
+               else "report.new_share_drop_plain")
+        out.append(f"<p><i>{esc(t(key, lang, share=f'{new_share:.0f}'))}</i></p>")
+    return out
+
+
+def _rich_days(report: WeeklyReport, lang: str, figure: Optional[str] = None) -> List[str]:
+    """Seven rows, each against the same weekday the week before.
+
+    Same weekday, not the same position: a Saturday is compared with a
+    Saturday, which is the only comparison that does not hand back the
+    day-of-week effect as if it were news. The best day is bold.
+
+    With the chart, the table folds into a collapsed block and the sparkline
+    goes: the picture is the sparkline, at a size that can be read.
+    """
+    if not report.days:
+        return []
+    esc = html.escape
+    prev = {d.day.weekday(): d for d in report.previous_days}
+    best = max(report.days, key=lambda d: d.revenue)
+    first, last = report.days[0].day.weekday(), report.days[-1].day.weekday()
+    out = [f"<h3>{esc(t('report.by_day', lang).upper())}</h3>"]
+    if figure:
+        out.append(_figure(figure, esc(t("report.fig_days", lang))))
+        out.append(f"<details><summary>{esc(t('report.table_days', lang))}</summary>")
+    else:
+        # Monospace so the seven glyphs sit at equal widths, one per day,
+        # and the two labels say which end is Monday.
+        out.append(
+            f"<p><code>{sparkline([d.revenue for d in report.days])}</code> "
+            f"{esc(t(f'weekday.{first}', lang))} – {esc(t(f'weekday.{last}', lang))}</p>")
+    out += [
+        "<table bordered striped compact>",
+        f"<tr><th></th><th>{esc(t('report.col_revenue', lang))}</th>"
+        f"<th>{esc(t('report.col_orders', lang))}</th>"
+        f"<th>{esc(t('report.col_week_ago', lang))}</th></tr>",
+    ]
+    for d in report.days:
+        before = prev.get(d.day.weekday())
+        label = esc(t(f"weekday.{d.day.weekday()}", lang))
+        revenue = _money(d.revenue, lang)
+        if d is best and d.revenue:
+            label, revenue = f"<b>{label}</b>", f"<b>{revenue}</b>"
+        out.append(
+            f"<tr><td>{label}</td>{_td_right(revenue)}{_td_right(fmt_int(d.orders, lang))}"
+            f"{_td_right(_money(before.revenue, lang) if before else '')}</tr>"
+        )
+    out.append("</table>")
+    if figure:
+        out.append("</details>")
+    return out
+
+
+def _rich_channels(report: WeeklyReport, lang: str, figure: Optional[str] = None) -> List[str]:
+    """Share and change per channel.
+
+    With the chart, the table folds into a collapsed block: Telegram sets
+    table text in the reader's theme colour, so a share drawn in glyphs
+    there is monochrome by construction — the picture is where colour lives.
+    """
+    if not report.channels:
+        return []
+    esc = html.escape
+    total = sum(c.revenue for c in report.channels)
+    out = [f"<h3>{esc(t('report.by_channel', lang).upper())}</h3>"]
+    if figure:
+        out.append(_figure(figure, esc(t("report.fig_channels", lang))))
+        out.append(f"<details><summary>{esc(t('report.table_channels', lang))}</summary>")
+    out += [
+        "<table bordered striped compact>",
+        f"<tr><th></th><th>{esc(t('report.col_this_week', lang))}</th>"
+        f"<th>{esc(t('report.col_share', lang))}</th>"
+        f"<th>{esc(t('report.col_last_week', lang))}</th>"
+        f"<th>{esc(t('report.col_change', lang))}</th></tr>",
+    ]
+    for c in report.channels:
+        out.append(
+            f"<tr><td>{esc(c.name)}</td>{_td_right(_money(c.revenue, lang))}"
+            f"{_td_right(_pct_of(c.revenue, total))}"
+            f"{_td_right(_money(c.previous_revenue, lang))}"
+            f"{_td_right(_delta(pct_change(c.revenue, c.previous_revenue), lang))}</tr>"
+        )
+    out.append("</table>")
+    if figure:
+        out.append("</details>")
+    return out
+
+
+def _rich_top_movers(report: WeeklyReport, lang: str) -> List[str]:
+    """Open by default, collapsible: three product names are detail, but
+    detail the reader asked for every week so far."""
+    if not report.movers:
+        return []
+    esc = html.escape
+    out = [
+        f"<details open><summary>{esc(t('report.movers_title_plain', lang))}</summary>",
+        "<table compact>",
+    ]
+    for m in report.movers:
+        out.append(f"<tr>{_td_right(_signed_money(m.delta, lang))}<td>{_name(m.name)}</td></tr>")
+    out.append("</table>")
+    top_share = share_of(sum(m.delta for m in report.movers), report.product_move_total)
+    if top_share is not None:
+        out.append(
+            f"<p><i>{esc(t('report.movers_share_plain', lang, share=f'{top_share:.0f}'))}</i></p>"
+        )
+    out.append("</details>")
+    return out
+
+
+def _rich_footnotes(report: WeeklyReport, lang: str) -> List[str]:
+    """What the verdict link opens, then the collapsed reading guide.
+
+    The guide is two formulas and four lines. `<tg-math-block>` and
+    `<tg-math>` take raw LaTeX (Bot API 10.1); the words inside `\text{}` come
+    from the translation table, the operators do not.
+    """
+    esc = html.escape
+    out: List[str] = []
+    z = report.z
+    if z is not None:
+        out.append(
+            f'<tg-reference name="{_NOTE_Z}">'
+            f"{esc(t('report.note_z', lang, weeks=report.baseline_weeks, z=f'{z:+.1f}', sigma=_compact(report.baseline_sd, lang)))}"
+            "</tg-reference>"
+        )
+
+    def word(key: str) -> str:
+        return r"\text{" + t(key, lang) + "}"
+
+    formula_revenue = (
+        f"{word('report.revenue')} = {word('report.orders')} "
+        rf"\times {word('report.avg_check_full')}"
+    )
+    formula_z = (
+        rf"z = \frac{{{word('report.revenue')} - {word('report.f_mean')}_{{12}}}}"
+        r"{\sigma_{12}}"
+    )
+    rule, formula = "\x00rule\x00", "\x00formula\x00"
+    normal = esc(t("report.howto_normal", lang, rule=rule, formula=formula))
+    normal = normal.replace(rule, f"<tg-math>{esc('|z| < 1.5')}</tg-math>")
+    normal = normal.replace(formula, f"<tg-math>{esc(formula_z)}</tg-math>")
+    out.append(
+        f"<details><summary>{esc(t('report.howto', lang))}</summary>"
+        f"<tg-math-block>{esc(formula_revenue)}</tg-math-block>"
+        "<ul>"
+        f"<li>{esc(t('report.howto_split', lang))}</li>"
+        f"<li>{normal}</li>"
+        f"<li>{esc(t('report.howto_days', lang))}</li>"
+        f"<li>{esc(t('report.howto_products', lang))}</li>"
+        "</ul></details>"
+    )
     return out

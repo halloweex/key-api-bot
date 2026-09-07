@@ -2049,21 +2049,22 @@ async def check_and_broadcast_milestones(context: ContextTypes.DEFAULT_TYPE) -> 
             )
 
             # Broadcast to all authorized users — through the kill switch
-            # and signed: a milestone from a dev instance replaying a backup
-            # is a phantom celebration on two dozen phones.
-            from core.telegram_alerts import alerts_disabled, sign
+            # and signed for the admins: a milestone from a dev instance
+            # replaying a backup is a phantom celebration on two dozen
+            # phones, and the signature is how an admin tells. Everyone else
+            # gets the message bare; an instance name means nothing to them.
+            from core.telegram_alerts import alerts_disabled, sign_for
 
             if alerts_disabled():
                 logger.info(
                     "milestone broadcast suppressed (KS_ALERTS_DISABLED)")
                 return
-            congrats_msg = sign(congrats_msg)
             success_count = 0
             for user in authorized_users:
                 try:
                     await context.bot.send_message(
                         chat_id=user["user_id"],
-                        text=congrats_msg,
+                        text=sign_for(congrats_msg, user["user_id"]),
                         parse_mode="HTML"
                     )
                     success_count += 1

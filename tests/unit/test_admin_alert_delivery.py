@@ -32,7 +32,11 @@ def _ok_response(*_args, **_kwargs):
 
 class TestHttpTransport:
     @pytest.mark.asyncio
-    async def test_posts_to_every_admin(self):
+    async def test_posts_to_every_admin(self, monkeypatch):
+        # Both recipients are admins here: the signature below is theirs to
+        # see. A non-admin on the same list would get the body bare.
+        monkeypatch.setattr(__import__("importlib").import_module("core.config"),
+                            "ADMIN_USER_IDS", {111, 222})
         client = _client_returning(_ok_response)
         with patch("httpx.AsyncClient", return_value=client):
             delivered = await send_admin_message_http(

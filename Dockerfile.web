@@ -65,6 +65,9 @@ COPY bot/ ./bot/
 # Copy core modules (models, exceptions, etc.)
 COPY core/ ./core/
 
+# The brand marks (and, once added, the brand fonts) the weekly report draws.
+COPY assets/ ./assets/
+
 # Copy maintenance scripts (compact_duckdb.py etc.) — used via sidecar `docker run`
 COPY scripts/ ./scripts/
 

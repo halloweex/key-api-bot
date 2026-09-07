@@ -127,6 +127,9 @@ class TestMessageClamp:
     async def test_the_signature_survives_the_cut(self, monkeypatch):
         monkeypatch.delenv(telegram_alerts.DISABLE_ENV, raising=False)
         monkeypatch.setenv(telegram_alerts.INSTANCE_ENV, "test-instance")
+        # An admin recipient — the only kind that is signed for.
+        monkeypatch.setattr(__import__("importlib").import_module("core.config"),
+                            "ADMIN_USER_IDS", {1})
         posts = []
         monkeypatch.setattr(telegram_alerts.httpx, "AsyncClient",
                             lambda **kw: _client(posts))

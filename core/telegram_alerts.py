@@ -11,11 +11,13 @@ container can deliver on its own. This module is that transport; `bot.main`
 falls back to it when no Application is available.
 """
 import asyncio
+import html as _html
+import json
 import logging
 import os
 import socket
 import time
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import httpx
 
@@ -164,6 +166,49 @@ def sign(text: str) -> str:
     return f"{text}\n\n{line}" if text else line
 
 
+def signature_line() -> str:
+    """The line itself, for a transport that has to place it in markup."""
+    return _SIGNATURE_PREFIX + instance_name()
+
+
+def _is_admin(chat_id) -> bool:
+    from core.config import ADMIN_USER_IDS
+
+    try:
+        return int(chat_id) in {int(a) for a in ADMIN_USER_IDS}
+    except (TypeError, ValueError):
+        return False
+
+
+def sign_for(text: str, chat_id: int) -> str:
+    """`text` signed if `chat_id` is an admin, untouched otherwise.
+
+    The signature answers an operator's question — which machine is telling
+    me this? — and only an admin can act on the answer. The weekly report and
+    the milestone broadcast reach every approved user through the same
+    transports, and to them `· prod-vps` is a stray line under a sales
+    figure. Decided per recipient, inside the transports, so a business
+    message and an alert can share one call without the sender choosing.
+    """
+    return sign(text) if _is_admin(chat_id) else text
+
+
+def sign_html_for(rich_html: str, chat_id: int) -> str:
+    """`sign_for` for a rich message: the line rides in a `<footer>`.
+
+    A rich message is a document, not a run of text, so a bare line appended
+    after the last block would land outside every element and Telegram would
+    reject it as unparseable. `<footer>` is the block that means "the small
+    print at the end", which is exactly what the signature is.
+    """
+    if not _is_admin(chat_id):
+        return rich_html
+    footer = f"<footer>{_html.escape(signature_line())}</footer>"
+    if rich_html.rstrip().endswith(footer):
+        return rich_html
+    return f"{rich_html.rstrip()}\n{footer}"
+
+
 # ─── The alerting watching itself ───────────────────────────────────────────
 #
 # Every transport failure used to be a logger.warning and nothing else, which
@@ -229,8 +274,10 @@ async def send_admin_message_http(
     # Signed here rather than at the ~dozen places that build a message: one
     # call site per transport is the only version of this that cannot be
     # forgotten by the next alert somebody adds. Clamped before signing so the
-    # signature always survives the cut.
-    text = sign(clamp_message(text, reserve=_signature_reserve()))
+    # signature always survives the cut; signed per recipient, because the
+    # `chat_ids` override is how the two business messages reach people who
+    # are not admins and must not see an instance name.
+    text = clamp_message(text, reserve=_signature_reserve())
 
     token = token if token is not None else BOT_TOKEN
     recipients = list(chat_ids if chat_ids is not None else ADMIN_USER_IDS)
@@ -248,9 +295,10 @@ async def send_admin_message_http(
         async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
             for admin_id in recipients:
                 try:
+                    body = sign_for(text, admin_id)
                     response = await client.post(url, json={
                         "chat_id": admin_id,
-                        "text": text,
+                        "text": body,
                         "parse_mode": parse_mode,
                         "disable_web_page_preview": True,
                     })
@@ -267,7 +315,7 @@ async def send_admin_message_http(
                         )
                         response = await client.post(url, json={
                             "chat_id": admin_id,
-                            "text": text,
+                            "text": body,
                             "disable_web_page_preview": True,
                         })
                     response.raise_for_status()
@@ -364,8 +412,11 @@ async def send_admin_photo_http(
 
     # Before the limit check below, not after: a signature that pushed the
     # caption over Telegram's budget would cost the picture silently, and the
-    # budget has to be measured against what is actually sent.
-    caption = sign(caption)
+    # budget has to be measured against what is actually sent. The signed form
+    # is the longer one, so the check is against that even though a non-admin
+    # recipient gets the caption bare: one verdict for the whole send, never a
+    # picture for some readers and text for the rest.
+    signed = sign(caption)
 
     from core.config import ADMIN_USER_IDS, BOT_TOKEN
 
@@ -378,9 +429,9 @@ async def send_admin_photo_http(
     if not recipients:
         logger.warning("Cannot send admin photo: ADMIN_USER_IDS is empty")
         return 0
-    if len(caption) > TELEGRAM_CAPTION_LIMIT:
+    if len(signed) > TELEGRAM_CAPTION_LIMIT:
         logger.warning("Caption is %d chars, over Telegram's %d limit",
-                       len(caption), TELEGRAM_CAPTION_LIMIT)
+                       len(signed), TELEGRAM_CAPTION_LIMIT)
         return 0
 
     url = f"{TELEGRAM_API}/bot{token}/sendPhoto"
@@ -395,7 +446,7 @@ async def send_admin_photo_http(
                         url,
                         data={
                             "chat_id": str(admin_id),
-                            "caption": caption,
+                            "caption": sign_for(caption, admin_id),
                             "parse_mode": parse_mode,
                         },
                         files={"photo": (filename, photo, "image/png")},
@@ -415,6 +466,104 @@ async def send_admin_photo_http(
 
     if delivered:
         logger.info("Admin photo delivered over HTTP to %d/%d admins",
+                    delivered, len(recipients))
+    record_transport_outcome(delivered, len(recipients))
+    return delivered
+
+
+# Bot API 10.1 (June 2026): a message that is a document — headings, tables,
+# lists, media between paragraphs — instead of a run of text with entities.
+# The limit is the text; blocks and media are counted separately by Telegram
+# and reported back as a 400, which the caller turns into a fallback.
+TELEGRAM_RICH_MESSAGE_LIMIT = 32768
+
+
+async def send_rich_message_http(
+    rich_html: str,
+    *,
+    media: Mapping[str, bytes] | None = None,
+    token: str | None = None,
+    chat_ids: Iterable[int] | None = None,
+) -> int:
+    """Send a rich message (`sendRichMessage`, HTML form) to every admin.
+    Never raises.
+
+    `media` maps an id to PNG bytes; the HTML references each one as
+    `tg://photo?id=<id>`, and the bytes go up in the same multipart request
+    under `attach://<id>`. Returns the number of recipients reached, so the
+    weekly report can fall back to the photo-and-caption form when this is 0
+    — a client too old to render rich messages, or a tag the API refuses,
+    must cost the shape of the report and never the report.
+
+    Signed per recipient like the other two transports, in a `<footer>`.
+    """
+    if alerts_disabled():
+        _log_suppressed("rich message", rich_html)
+        return 0
+
+    from core.config import ADMIN_USER_IDS, BOT_TOKEN
+
+    token = token if token is not None else BOT_TOKEN
+    recipients = list(chat_ids if chat_ids is not None else ADMIN_USER_IDS)
+    media = dict(media or {})
+
+    if not token:
+        logger.warning("Cannot send rich message: BOT_TOKEN is not configured")
+        return 0
+    if not recipients:
+        logger.warning("Cannot send rich message: ADMIN_USER_IDS is empty")
+        return 0
+    if len(rich_html) > TELEGRAM_RICH_MESSAGE_LIMIT:
+        logger.warning("Rich message is %d chars, over Telegram's %d limit",
+                       len(rich_html), TELEGRAM_RICH_MESSAGE_LIMIT)
+        return 0
+
+    url = f"{TELEGRAM_API}/bot{token}/sendRichMessage"
+    attachments = [
+        {"id": media_id, "media": {"type": "photo", "media": f"attach://{media_id}"}}
+        for media_id in media
+    ]
+    delivered = 0
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS * 3) as client:
+            for admin_id in recipients:
+                payload = {"html": sign_html_for(rich_html, admin_id)}
+                if attachments:
+                    payload["media"] = attachments
+                try:
+                    response = await client.post(
+                        url,
+                        data={
+                            "chat_id": str(admin_id),
+                            "rich_message": json.dumps(payload, ensure_ascii=False),
+                        },
+                        files={
+                            media_id: (f"{media_id}.png", blob, "image/png")
+                            for media_id, blob in media.items()
+                        } or None,
+                    )
+                    if response.status_code != 200:
+                        # The body names the tag or block Telegram refused —
+                        # the one thing a caller needs to fix a rich message.
+                        logger.warning(
+                            "Rich message to %s rejected (%d): %.300s",
+                            admin_id, response.status_code, response.text,
+                        )
+                    response.raise_for_status()
+                    delivered += 1
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("HTTP rich message to %s failed: %s",
+                                   admin_id, exc)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("HTTP rich message transport failed: %s", exc)
+        return delivered
+
+    if delivered:
+        logger.info("Rich message delivered over HTTP to %d/%d admins",
                     delivered, len(recipients))
     record_transport_outcome(delivered, len(recipients))
     return delivered

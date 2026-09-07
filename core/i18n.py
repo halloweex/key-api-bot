@@ -49,6 +49,11 @@ def normalize(language: Optional[str]) -> str:
     return code if code in LANGUAGES else DEFAULT_LANGUAGE
 
 
+def has_key(key: str) -> bool:
+    """Whether the table carries `key` at all, for a caller with a fallback."""
+    return key in _STRINGS
+
+
 def t(key: str, language: str = DEFAULT_LANGUAGE, **fmt) -> str:
     """The translation for `key`, formatted with `fmt`.
 
@@ -153,14 +158,14 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         RU: "Выручка {delta} неделя к неделе",
     },
     "report.lever_orders": {
-        EN: " — order count, not basket size:",
-        UK: " — кількість замовлень, а не чек:",
-        RU: " — количество заказов, а не чек:",
+        EN: ": order count, not basket size",
+        UK: ": кількість замовлень, а не чек",
+        RU: ": количество заказов, а не чек",
     },
     "report.lever_basket": {
-        EN: " — basket size, not order count:",
-        UK: " — чек, а не кількість замовлень:",
-        RU: " — чек, а не количество заказов:",
+        EN: ": basket size, not order count",
+        UK: ": чек, а не кількість замовлень",
+        RU: ": чек, а не количество заказов",
     },
     "report.effect_orders": {
         EN: "order count",
@@ -185,13 +190,13 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     },
     "report.new_share_drop": {
         EN: "New-customer orders are {share}% of that drop.",
-        UK: "Замовлення нових клієнтів — {share}% цього падіння.",
-        RU: "Заказы новых клиентов — {share}% этого падения.",
+        UK: "Замовлення нових клієнтів: {share}% цього падіння.",
+        RU: "Заказы новых клиентов: {share}% этого падения.",
     },
     "report.new_share_gain": {
         EN: "New-customer orders are {share}% of that gain.",
-        UK: "Замовлення нових клієнтів — {share}% цього приросту.",
-        RU: "Заказы новых клиентов — {share}% этого прироста.",
+        UK: "Замовлення нових клієнтів: {share}% цього приросту.",
+        RU: "Заказы новых клиентов: {share}% этого прироста.",
     },
 
     "report.top_movers": {
@@ -201,14 +206,164 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     },
     "report.movers_share": {
         EN: "These {count} are {share}% of the week's product-revenue move",
-        UK: "Ці {count} — {share}% усього руху виручки за товарами",
-        RU: "Эти {count} — {share}% всего движения выручки по товарам",
+        UK: "Ці {count} дають {share}% усього руху виручки за товарами",
+        RU: "Эти {count} дают {share}% всего движения выручки по товарам",
     },
     "report.open_dashboard": {
         EN: "Open the dashboard",
         UK: "Відкрити дашборд",
         RU: "Открыть дашборд",
     },
+
+    # ── The rich form of the report (Bot API 10.1+): table headers and the
+    # one row the caption spelled out as two lines ──
+    "report.col_week": {EN: "week", UK: "тиждень", RU: "неделя"},
+    "report.col_vs_prev": {EN: "vs prev.", UK: "до минулого", RU: "к прошлой"},
+    "report.new_repeat": {
+        EN: "New / repeat",
+        UK: "Нові / повторні",
+        RU: "Новые / повторные",
+    },
+    "report.by_day": {EN: "By day", UK: "По днях", RU: "По дням"},
+    "report.note_z": {
+        EN: "An ordinary week: |z| < 1.5. This week z = {z}, σ = {sigma} over {weeks} weeks.",
+        UK: "Звичайний тиждень: |z| < 1.5. Цього тижня z = {z}, σ = {sigma} за {weeks} тиж.",
+        RU: "Обычная неделя: |z| < 1.5. На этой неделе z = {z}, σ = {sigma} за {weeks} нед.",
+    },
+    "report.howto": {
+        EN: "How to read this report",
+        UK: "Як читати цей звіт",
+        RU: "Как читать этот отчёт",
+    },
+    # The one word the formulas need that no other key carries. The LaTeX
+    # itself is composed in code: braces in this table read as placeholders.
+    "report.f_mean": {EN: "Mean", UK: "Середнє", RU: "Среднее"},
+    "report.howto_split": {
+        EN: "So a change splits into “more or fewer orders” and “a bigger or smaller check” with nothing left over. The part behind ≥ 60% is marked.",
+        UK: "Тому зміна ділиться на «більше чи менше замовлень» і «більший чи менший чек» без залишку. Виділено те, що дає ≥ 60%.",
+        RU: "Поэтому изменение делится на «заказов больше или меньше» и «чек больше или меньше» без остатка. Выделено то, что даёт ≥ 60%.",
+    },
+    "report.howto_normal": {
+        EN: "An ordinary week: {rule}, where {formula}",
+        UK: "Звичайний тиждень: {rule}, де {formula}",
+        RU: "Обычная неделя: {rule}, где {formula}",
+    },
+    "report.howto_days": {
+        EN: "Each day is compared with the same weekday a week earlier.",
+        UK: "Кожен день порівнюється з тим самим днем тижня тиждень тому.",
+        RU: "Каждый день сравнивается с тем же днём недели неделю назад.",
+    },
+    "report.howto_products": {
+        EN: "Products are ranked by hryvnia moved, not by percent.",
+        UK: "Товари ранжовані за гривнями зміни, не за відсотками.",
+        RU: "Товары ранжированы по гривнам изменения, не по процентам.",
+    },
+    # ── Plain words for the rich form: what a reader who is not an analyst
+    # needs to be told, in sentences ──
+    "report.sales_type.retail": {EN: "Retail", UK: "Роздріб", RU: "Розница"},
+    "report.sales_type.b2b": {EN: "Wholesale", UK: "Гурт", RU: "Опт"},
+    "report.sales_type.internal": {EN: "Internal", UK: "Внутрішні", RU: "Внутренние"},
+    "report.sales_type.exhibition": {EN: "Exhibition", UK: "Виставка", RU: "Выставка"},
+    "report.sales_type.all": {EN: "All sales", UK: "Усі продажі", RU: "Все продажи"},
+    "report.summary_normal": {EN: "An ordinary week.", UK: "Звичайний тиждень.", RU: "Обычная неделя."},
+    "report.summary_high": {EN: "An unusually strong week.", UK: "Незвично сильний тиждень.", RU: "Необычно сильная неделя."},
+    "report.summary_low": {EN: "An unusually weak week.", UK: "Незвично слабкий тиждень.", RU: "Необычно слабая неделя."},
+    "report.summary_revenue": {
+        EN: "Revenue {revenue}: {clauses}.",
+        UK: "Виручка {revenue}: {clauses}.",
+        RU: "Выручка {revenue}: {clauses}.",
+    },
+    "report.clause_vs_prev": {EN: "{delta} vs last week", UK: "{delta} до минулого тижня", RU: "{delta} к прошлой неделе"},
+    "report.clause_vs_avg": {
+        EN: "{delta} vs the {weeks}-week average",
+        UK: "{delta} до середньої за {weeks} тиж.",
+        RU: "{delta} к средней за {weeks} нед.",
+    },
+    "report.clause_vs_ly": {
+        EN: "{delta} vs the same week of {year}",
+        UK: "{delta} до того ж тижня {year}",
+        RU: "{delta} к той же неделе {year}",
+    },
+    "report.lever_orders_down": {EN: "there were fewer orders", UK: "замовлень стало менше", RU: "заказов стало меньше"},
+    "report.lever_orders_up": {EN: "there were more orders", UK: "замовлень стало більше", RU: "заказов стало больше"},
+    "report.lever_check_down": {EN: "the average check fell", UK: "середній чек знизився", RU: "средний чек снизился"},
+    "report.lever_check_up": {EN: "the average check rose", UK: "середній чек зріс", RU: "средний чек вырос"},
+    "report.why_lever_orders": {
+        EN: "Mainly, {lever}, and the average check barely moved.",
+        UK: "Головне: {lever}, середній чек змінився слабко.",
+        RU: "Главное: {lever}, средний чек изменился слабо.",
+    },
+    "report.why_lever_check": {
+        EN: "Mainly, {lever}, and the number of orders barely moved.",
+        UK: "Головне: {lever}, кількість замовлень змінилася слабко.",
+        RU: "Главное: {lever}, число заказов изменилось слабо.",
+    },
+    "report.why_both": {
+        EN: "Both the number of orders and the average check moved.",
+        UK: "Зрушили і кількість замовлень, і середній чек.",
+        RU: "Сдвинулись и число заказов, и средний чек.",
+    },
+    "report.why_title": {EN: "Why revenue changed", UK: "Чому змінилася виручка", RU: "Почему выручка изменилась"},
+    "report.why_delta": {EN: "{delta} vs last week:", UK: "{delta} до минулого тижня:", RU: "{delta} к прошлой неделе:"},
+    "report.effect_orders_down": {EN: "fewer orders", UK: "менше замовлень", RU: "меньше заказов"},
+    "report.effect_orders_up": {EN: "more orders", UK: "більше замовлень", RU: "больше заказов"},
+    "report.effect_check_down": {EN: "lower average check", UK: "нижчий середній чек", RU: "ниже средний чек"},
+    "report.effect_check_up": {EN: "higher average check", UK: "вищий середній чек", RU: "выше средний чек"},
+    "report.new_share_drop_plain": {
+        EN: "New customers account for {share}% of the drop in orders; the rest is repeat purchases.",
+        UK: "На нових клієнтів припадає {share}% падіння замовлень, решту дають повторні покупки.",
+        RU: "На новых клиентов приходится {share}% падения заказов, остальное дают повторные покупки.",
+    },
+    "report.new_share_gain_plain": {
+        EN: "New customers account for {share}% of the gain in orders; the rest is repeat purchases.",
+        UK: "На нових клієнтів припадає {share}% приросту замовлень, решту дають повторні покупки.",
+        RU: "На новых клиентов приходится {share}% прироста заказов, остальное дают повторные покупки.",
+    },
+    "report.fig_days": {
+        EN: "This week in dark against the same weekday last week; orders under each day",
+        UK: "Цей тиждень темним проти того ж дня минулого тижня; під днем: замовлення",
+        RU: "Эта неделя тёмным против того же дня прошлой; под днём: заказы",
+    },
+    "report.fig_why": {
+        EN: "How {delta} came about",
+        UK: "З чого склалося {delta}",
+        RU: "Из чего сложилось {delta}",
+    },
+    "report.table_days": {EN: "Day table", UK: "Таблиця по днях", RU: "Таблица по дням"},
+    "report.fig_channels": {
+        EN: "Revenue by channel: this week filled, last week outlined",
+        UK: "Виручка за каналами: цей тиждень заливкою, минулий контуром",
+        RU: "Выручка по каналам: эта неделя заливкой, прошлая контуром",
+    },
+    "report.table_channels": {EN: "Channel table", UK: "Таблиця за каналами", RU: "Таблица по каналам"},
+    "report.col_this_week": {EN: "this week", UK: "цей тиждень", RU: "эта неделя"},
+    "report.col_last_week": {EN: "last week", UK: "минулий", RU: "прошлая"},
+    "report.col_change": {EN: "change", UK: "зміна", RU: "изменение"},
+    "report.col_week_ago": {EN: "a week ago", UK: "тиждень тому", RU: "неделю назад"},
+    "report.avg_check_full": {EN: "Average check", UK: "Середній чек", RU: "Средний чек"},
+    "report.movers_title_plain": {
+        EN: "Products that moved revenue most",
+        UK: "Товари, що найбільше змінили виручку",
+        RU: "Товары, сильнее всего изменившие выручку",
+    },
+    "report.movers_share_plain": {
+        EN: "Together they account for {share}% of all product-level change",
+        UK: "Разом вони дають {share}% усіх змін за товарами",
+        RU: "Вместе они дают {share}% всех изменений по товарам",
+    },
+    "report.by_channel": {EN: "By channel", UK: "За каналами", RU: "По каналам"},
+    "report.col_revenue": {EN: "revenue", UK: "виручка", RU: "выручка"},
+    "report.col_orders": {EN: "orders", UK: "замовл.", RU: "заказы"},
+    "report.col_share": {EN: "share", UK: "частка", RU: "доля"},
+    # Weekday abbreviations, standalone labels in a table column. Nominative,
+    # like the month names — nothing here follows a day number.
+    "weekday.0": {EN: "Mon", UK: "Пн", RU: "Пн"},
+    "weekday.1": {EN: "Tue", UK: "Вт", RU: "Вт"},
+    "weekday.2": {EN: "Wed", UK: "Ср", RU: "Ср"},
+    "weekday.3": {EN: "Thu", UK: "Чт", RU: "Чт"},
+    "weekday.4": {EN: "Fri", UK: "Пт", RU: "Пт"},
+    "weekday.5": {EN: "Sat", UK: "Сб", RU: "Сб"},
+    "weekday.6": {EN: "Sun", UK: "Нд", RU: "Вс"},
 
     # ── The card ──
     "report.vs_last_week": {
@@ -814,6 +969,59 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         EN: "Choose an action:", UK: "Оберіть дію:", RU: "Выберите действие:",
     },
     "admin.user_approved": {EN: "User approved", UK: "Користувача схвалено", RU: "Пользователь одобрен"},
+
+    # ── Which tabs an approved person may open ──────────────────────────────
+    #
+    # The admin taps Approve and then picks the tabs on the same message. The
+    # names below are the sidebar's, not the API's: an admin choosing what
+    # somebody sees is looking at a dashboard, not at a feature key.
+    "access.tabs.title": {
+        EN: "Which tabs?", UK: "Які вкладки?", RU: "Какие вкладки?",
+    },
+    "access.tabs.hint": {
+        EN: "Tap to turn a tab on or off, then press Done.",
+        UK: "Натисніть, щоб увімкнути або вимкнути вкладку, потім «Готово».",
+        RU: "Нажмите, чтобы включить или выключить вкладку, затем «Готово».",
+    },
+    "access.tabs.done": {EN: "Done", UK: "Готово", RU: "Готово"},
+    "access.tabs.granted": {
+        EN: "Tabs: {tabs}", UK: "Вкладки: {tabs}", RU: "Вкладки: {tabs}",
+    },
+    "access.tabs.none": {
+        EN: "no tabs — this account sees nothing",
+        UK: "жодної вкладки — акаунт не бачить нічого",
+        RU: "ни одной вкладки — аккаунт не видит ничего",
+    },
+    # Shown instead of the checklist when this process cannot reach the
+    # dashboard's user list. Says what happened and where to finish the job,
+    # because an admin who taps Approve and sees nothing assumes it is broken.
+    "access.tabs.unavailable": {
+        EN: "Bot access granted. Tabs are set on the dashboard: Admin → Users.",
+        UK: "Доступ до бота надано. Вкладки налаштовуються на дашборді: Адмін → Користувачі.",
+        RU: "Доступ к боту выдан. Вкладки настраиваются на дашборде: Админ → Пользователи.",
+    },
+    "access.tabs.failed": {
+        EN: "Could not save the tabs — try again from the dashboard.",
+        UK: "Не вдалося зберегти вкладки — спробуйте з дашборда.",
+        RU: "Не удалось сохранить вкладки — попробуйте с дашборда.",
+    },
+    "access.preset.full": {EN: "All", UK: "Усі", RU: "Все"},
+    "access.preset.standard": {EN: "Standard", UK: "Стандарт", RU: "Стандарт"},
+    "access.preset.traffic_only": {EN: "Traffic only", UK: "Лише трафік", RU: "Только трафик"},
+    "access.preset.marketing": {EN: "Marketing", UK: "Маркетинг", RU: "Маркетинг"},
+
+    # The sidebar's own names. Kept beside the access strings rather than in a
+    # `nav.*` group, because the bot has no navigation — these exist only so an
+    # admin can read the checklist.
+    "tab.dashboard": {EN: "Dashboard", UK: "Дашборд", RU: "Дашборд"},
+    "tab.products": {EN: "Products", UK: "Товари", RU: "Товары"},
+    "tab.traffic": {EN: "Traffic", UK: "Трафік", RU: "Трафик"},
+    "tab.inventory": {EN: "Inventory", UK: "Склад", RU: "Склад"},
+    "tab.reports": {EN: "Reports", UK: "Звіти", RU: "Отчёты"},
+    "tab.marketing": {EN: "Marketing", UK: "Маркетинг", RU: "Маркетинг"},
+    "tab.margin": {EN: "Margin", UK: "Маржа", RU: "Маржа"},
+    "tab.expenses": {EN: "Expenses", UK: "Витрати", RU: "Расходы"},
+    "tab.sms": {EN: "SMS", UK: "SMS", RU: "SMS"},
     "admin.user_denied": {EN: "User denied", UK: "Користувача відхилено", RU: "Пользователь отклонён"},
     "admin.user_frozen": {EN: "User frozen", UK: "Користувача заморожено", RU: "Пользователь заморожен"},
     "admin.user_unfrozen": {EN: "User unfrozen", UK: "Користувача розморожено", RU: "Пользователь разморожен"},

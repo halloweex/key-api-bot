@@ -64,10 +64,17 @@ class TestRendering:
         assert img.size == (W, H)
         assert getattr(img, "n_frames", 1) == 1
 
-    def test_it_is_light(self):
-        """A dark card is a hole burnt in a chat that is mostly white."""
+    def test_it_is_the_brand_surface(self):
+        """Bordeaux, the brand's hero surface (brand book p. 2, 14, 18).
+
+        It used to be white on the argument that a dark card burns a hole in
+        a light chat; the owner chose the brand over that on 2026-09-07, and
+        the palette comes from core/brand.py so a change there changes this.
+        """
+        from core import brand
+
         img = _open(render_weekly_card(_report()))
-        assert img.getpixel((5, 5)) == (255, 255, 255)
+        assert img.getpixel((5, 5)) == brand.BORDEAUX
 
     def test_it_stays_small_enough_to_send_every_week(self):
         assert len(render_weekly_card(_report())) < 400_000
