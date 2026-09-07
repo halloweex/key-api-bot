@@ -145,3 +145,51 @@ async def backfill_expenses(
     }
     logger.info("Expense backfill: %s", result)
     return result
+
+
+async def hourly_expenses_ids_diff(store) -> Dict[str, Any]:
+    """Run the expense backfill on the hourly tick. Never raises.
+
+    `core/pg_backfill.hourly_orders_ids_diff`'s arrangement, and its argument:
+    the mirror ships what a sync writes, so a batch lost between the DuckDB
+    commit and the Postgres one is never re-offered — the next sync finds those
+    expenses unchanged and skips them. Nothing but a diff recovers that, and a
+    diff nobody runs recovers nothing.
+
+    It also removes the step that made this port's rollout unsafe. The manual
+    endpoint stays for a forced run, but history now arrives on its own, so
+    `backfilled_at` is set by the machine rather than by remembering to ask.
+
+    Cheap enough to belong on an hourly job: two id scans over 15,020 and
+    ~15,000 rows, and on the ordinary tick the difference is empty.
+    """
+    from core import pg_landing
+
+    if not pg_landing.enabled():
+        return {"skipped": "KS_PG_DSN is not set"}
+    try:
+        from core.pg import get_pool
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            had_history = await conn.fetchval(
+                "SELECT backfilled_at IS NOT NULL FROM meta.mirror_state "
+                "WHERE table_name = $1",
+                EXPENSES_TABLE,
+            )
+        result = await backfill_expenses(store)
+        if result.get("shipped"):
+            if had_history:
+                logger.warning(
+                    "pg_expense_backfill: hourly ids-diff healed missing "
+                    "expenses: %s", result,
+                )
+            else:
+                logger.info(
+                    "pg_expense_backfill: initial expense backfill: %s", result,
+                )
+        return result
+    except Exception as e:  # noqa: BLE001 — the hourly job must survive it
+        detail = f"{type(e).__name__}: {e}"
+        logger.error("pg_expense_backfill: hourly ids-diff failed: %s", detail)
+        return {"error": detail}

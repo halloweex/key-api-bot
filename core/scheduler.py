@@ -881,6 +881,15 @@ class BackgroundScheduler:
             result["orders_backfill"] = await hourly_orders_ids_diff(
                 store, lock=self._heavy_job_lock,
             )
+            # And the expenses ids-diff, for the orders diff's reason at a
+            # twentieth of the scale: 15,020 narrow rows, and on the ordinary
+            # tick the difference is empty. It is also what makes the
+            # `/expenses` rollout safe without an operator remembering an
+            # order — history arrives on its own, so `backfilled_at` is set by
+            # the machine (revision 0020).
+            from core.pg_expense_backfill import hourly_expenses_ids_diff
+
+            result["expenses_backfill"] = await hourly_expenses_ids_diff(store)
             # The SMS tab's own state rides here for the same reason as the
             # rest: one call site. All five tables are irreplaceable — a
             # frozen roster cannot be recomputed, because the eligible
