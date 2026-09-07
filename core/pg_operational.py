@@ -19,8 +19,9 @@ which no API call can be made to return.
 
 TWO SHAPES, CHOSEN BY HOW DUCKDB WRITES EACH ONE
 
-**Full replace** — `offer_stocks` (892 rows), `order_backfill_misses` (43),
-`inventory_history` (188) and `sku_inventory_status` (887). Small, and the last is a `DELETE`+`INSERT` on
+**Full replace** — `offer_stocks` (892 rows), `revenue_goals` (3),
+`order_backfill_misses` (43), `inventory_history` (188) and
+`sku_inventory_status` (887). Small, and the last is a `DELETE`+`INSERT` on
 the DuckDB side too, so replacing it whole is the same operation rather than a
 decision. A full replace also removes the "lost or retired" question the
 catalogue mirror needed a watermark rule to answer: the writer wrote every row
@@ -102,6 +103,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 logger = logging.getLogger(__name__)
 
 OFFER_STOCKS_TABLE = "bronze.offer_stocks"
+GOALS_TABLE = "app.revenue_goals"
 MISSES_TABLE = "app.order_backfill_misses"
 INVENTORY_HISTORY_TABLE = "app.inventory_history"
 SKU_STATUS_TABLE = "app.sku_inventory_status"
@@ -112,6 +114,14 @@ MOVEMENTS_TABLE = "app.stock_movements"
 # `mirrored_at`, and two correct copies differ on those.
 OFFER_STOCK_COLUMNS: Tuple[str, ...] = (
     "id", "sku", "price", "purchased_price", "quantity", "reserve",
+)
+
+# Three rows at most, and the one the monthly report draws its target line
+# from. Revision 0017 says why a number a human typed is replicated rather
+# than derived.
+GOAL_COLUMNS: Tuple[str, ...] = (
+    "period_type", "goal_amount", "is_custom", "calculated_goal",
+    "growth_factor", "updated_at",
 )
 
 MISS_COLUMNS: Tuple[str, ...] = ("order_id", "checked_at", "reason")
@@ -142,6 +152,7 @@ MOVEMENT_COLUMNS: Tuple[str, ...] = (
 # a prefix — a rule that guesses a table name is a rule that will guess wrong.
 _FULL_REPLACE: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
     (OFFER_STOCKS_TABLE, "offer_stocks", OFFER_STOCK_COLUMNS, "id"),
+    (GOALS_TABLE, "revenue_goals", GOAL_COLUMNS, "period_type"),
     (MISSES_TABLE, "order_backfill_misses", MISS_COLUMNS, "order_id"),
     (INVENTORY_HISTORY_TABLE, "inventory_history", INVENTORY_HISTORY_COLUMNS, "date"),
     (SKU_STATUS_TABLE, "sku_inventory_status", SKU_STATUS_COLUMNS, "offer_id"),
@@ -182,7 +193,7 @@ async def _write_chunked(conn, sql: str, rows: Sequence[tuple]) -> None:
 
 
 def read_full_replace(conn) -> Dict[str, List[tuple]]:
-    """The four small tables out of DuckDB, in the column order Postgres wants."""
+    """The five small tables out of DuckDB, in the column order Postgres wants."""
     out: Dict[str, List[tuple]] = {}
     for pg_table, dk_table, columns, order_by in _FULL_REPLACE:
         rows = conn.execute(
@@ -222,7 +233,7 @@ def read_appends(
 
 
 async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
-    """Copy all six tables from DuckDB to Postgres. Never raises.
+    """Copy all seven tables from DuckDB to Postgres. Never raises.
 
     `full=True` ignores both watermarks and re-ships everything, upserting the
     two append-only tables so a row that is missing *or* wrong below the

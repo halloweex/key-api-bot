@@ -94,15 +94,64 @@ class RevenueMixin:
             ).fetchall()
 
     @staticmethod
-    def _render_report(sql: str, dialect) -> str:
-        """The holes these three bodies use. Every one already existed on
-        `Dialect`, which is why this port needed no change to the dialect."""
+    def _render_report(sql: str, dialect, **extra) -> str:
+        """The holes the report and marketing bodies use.
+
+        All the table names already existed on `Dialect`, which is why the
+        `/reports` port needed no change to it. `period_measures` is the one
+        that is not a name: the two Golds differ in *shape* there, and
+        `core.sql_dialect.marketing_period_measures` renders that difference
+        from one place.
+        """
+        from core.sql_dialect import marketing_period_measures
+
         return sql.format(
             silver_orders=dialect.silver_orders,
             order_lines=dialect.order_lines,
             order_products=dialect.order_products,
             categories=dialect.categories,
+            gold_daily_revenue=dialect.gold_daily_revenue,
+            revenue_goals=dialect.revenue_goals,
+            # Computed from the dialect being rendered, never handed in by the
+            # caller. It was a caller's argument for about an hour, and the
+            # fallback was broken the whole time: the caller picked the
+            # fragment from the flag, so a Postgres fault fell back to DuckDB
+            # carrying `FILTER (WHERE source_id IS NULL)` — a column DuckDB's
+            # Gold does not have — and the rescue raised instead of rescuing.
+            period_measures=marketing_period_measures(dialect),
+            **extra,
         )
+
+    async def _marketing_run(
+        self, sql: str, params: Optional[List[Any]] = None, **extra,
+    ) -> List[Tuple]:
+        """`_reports_run`'s twin for `/marketing`, on its own flag.
+
+        A separate switch rather than a shared one, because the two tabs can
+        fail differently and a rollback should cost one of them. `/marketing`
+        also reads Gold and the goals, where `/reports` reads only Silver — so
+        the surfaces genuinely differ, and so does what going wrong looks like.
+        """
+        from core.sql_dialect import DUCKDB, POSTGRES
+
+        from core import pg_marketing_read
+
+        params = list(params or [])
+        if pg_marketing_read.enabled() and pg_marketing_read.available():
+            try:
+                return await pg_marketing_read.fetch(
+                    self._render_report(sql, POSTGRES, **extra), params,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "marketing: Postgres failed, falling back to DuckDB: %s",
+                    exc, exc_info=True,
+                )
+
+        async with self.connection() as conn:
+            return conn.execute(
+                self._render_report(sql, DUCKDB, **extra), params,
+            ).fetchall()
 
     async def _category_ids(self, category_id: int) -> List[int]:
         """A category and its descendants, from whichever engine answers.
@@ -1650,110 +1699,111 @@ class RevenueMixin:
         sales_type: str = "retail",
     ) -> Dict[str, Any]:
         """Get promocode performance overview: top codes by revenue, orders, AOV."""
-        async with self.connection() as conn:
-            params = [start_date, end_date]
-            where_clauses = [
-                "s.order_date BETWEEN ? AND ?",
-                "NOT s.is_return",
-                "s.is_active_source",
-                "s.promocode IS NOT NULL",
-                "s.promocode != ''",
-            ]
+        params = [start_date, end_date]
+        where_clauses = [
+            "s.order_date BETWEEN ? AND ?",
+            "NOT s.is_return",
+            "s.is_active_source",
+            "s.promocode IS NOT NULL",
+            "s.promocode != ''",
+        ]
 
-            if sales_type != "all":
-                where_clauses.append("s.sales_type = ?")
-                params.append(sales_type)
+        if sales_type != "all":
+            where_clauses.append("s.sales_type = ?")
+            params.append(sales_type)
 
-            where_sql = " AND ".join(where_clauses)
+        where_sql = " AND ".join(where_clauses)
 
-            # Per-promocode stats
-            results = conn.execute(f"""
-                SELECT
-                    s.promocode,
-                    COUNT(DISTINCT s.id) as orders,
-                    COALESCE(SUM(s.grand_total), 0) as revenue,
-                    COUNT(DISTINCT s.buyer_id) as unique_customers
-                FROM silver_orders s
-                WHERE {where_sql}
-                GROUP BY s.promocode
-                ORDER BY revenue DESC
-            """, params).fetchall()
+        # Per-promocode stats
+        results = await self._marketing_run(f"""
+            SELECT
+                s.promocode,
+                COUNT(DISTINCT s.id) as orders,
+                COALESCE(SUM(s.grand_total), 0) as revenue,
+                COUNT(DISTINCT s.buyer_id) as unique_customers
+            FROM {{silver_orders}} s
+            WHERE {where_sql}
+            GROUP BY s.promocode
+            -- `promocode` closes the sort: codes can tie on revenue, and
+            -- the two top-10 lists below are cut from this order.
+            ORDER BY revenue DESC, s.promocode
+        """, params)
 
-            # Total orders (with and without promo) for share calculation
-            total_params = [start_date, end_date]
-            total_where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
-            if sales_type != "all":
-                total_where.append("s.sales_type = ?")
-                total_params.append(sales_type)
-            totals = conn.execute(f"""
-                SELECT COUNT(DISTINCT s.id), COALESCE(SUM(s.grand_total), 0)
-                FROM silver_orders s
-                WHERE {" AND ".join(total_where)}
-            """, total_params).fetchone()
+        # Total orders (with and without promo) for share calculation
+        total_params = [start_date, end_date]
+        total_where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source"]
+        if sales_type != "all":
+            total_where.append("s.sales_type = ?")
+            total_params.append(sales_type)
+        totals = (await self._marketing_run(f"""
+            SELECT COUNT(DISTINCT s.id), COALESCE(SUM(s.grand_total), 0)
+            FROM {{silver_orders}} s
+            WHERE {" AND ".join(total_where)}
+        """, total_params))[0]
 
-            total_all_orders = int(totals[0] or 0)
-            total_all_revenue = float(totals[1] or 0)
+        total_all_orders = int(totals[0] or 0)
+        total_all_revenue = float(totals[1] or 0)
 
-            promo_colors = [
-                "#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200",
-                "#EC4899", "#8B5CF6", "#06B6D4", "#14B8A6", "#EF4444",
-            ]
+        promo_colors = [
+            "#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200",
+            "#EC4899", "#8B5CF6", "#06B6D4", "#14B8A6", "#EF4444",
+        ]
 
-            promo_total_orders = sum(int(row[1]) for row in results)
-            promo_total_revenue = sum(float(row[2]) for row in results)
-            promo_total_customers = sum(int(row[3]) for row in results)
+        promo_total_orders = sum(int(row[1]) for row in results)
+        promo_total_revenue = sum(float(row[2]) for row in results)
+        promo_total_customers = sum(int(row[3]) for row in results)
 
-            # Top 10 by revenue
-            top_revenue = results[:10]
-            top_by_revenue = {
-                "labels": [row[0] for row in top_revenue],
-                "data": [round(float(row[2]), 2) for row in top_revenue],
-                "orders": [int(row[1]) for row in top_revenue],
-                "backgroundColor": promo_colors[:len(top_revenue)],
-            }
+        # Top 10 by revenue
+        top_revenue = results[:10]
+        top_by_revenue = {
+            "labels": [row[0] for row in top_revenue],
+            "data": [round(float(row[2]), 2) for row in top_revenue],
+            "orders": [int(row[1]) for row in top_revenue],
+            "backgroundColor": promo_colors[:len(top_revenue)],
+        }
 
-            # Top 10 by orders
-            sorted_by_orders = sorted(results, key=lambda x: x[1], reverse=True)[:10]
-            top_by_orders = {
-                "labels": [row[0] for row in sorted_by_orders],
-                "data": [int(row[1]) for row in sorted_by_orders],
-                "revenue": [round(float(row[2]), 2) for row in sorted_by_orders],
-                "backgroundColor": promo_colors[:len(sorted_by_orders)],
-            }
+        # Top 10 by orders
+        sorted_by_orders = sorted(results, key=lambda x: x[1], reverse=True)[:10]
+        top_by_orders = {
+            "labels": [row[0] for row in sorted_by_orders],
+            "data": [int(row[1]) for row in sorted_by_orders],
+            "revenue": [round(float(row[2]), 2) for row in sorted_by_orders],
+            "backgroundColor": promo_colors[:len(sorted_by_orders)],
+        }
 
-            # Table: all codes with full metrics
-            table = []
-            for row in results:
-                orders = int(row[1])
-                revenue = float(row[2])
-                table.append({
-                    "promocode": row[0],
-                    "orders": orders,
-                    "revenue": round(revenue, 2),
-                    "uniqueCustomers": int(row[3]),
-                    "aov": round(revenue / orders, 2) if orders > 0 else 0,
-                })
+        # Table: all codes with full metrics
+        table = []
+        for row in results:
+            orders = int(row[1])
+            revenue = float(row[2])
+            table.append({
+                "promocode": row[0],
+                "orders": orders,
+                "revenue": round(revenue, 2),
+                "uniqueCustomers": int(row[3]),
+                "aov": round(revenue / orders, 2) if orders > 0 else 0,
+            })
 
-            top_code = results[0][0] if results else "N/A"
-            top_code_revenue = float(results[0][2]) if results else 0
-            top_code_share = (top_code_revenue / total_all_revenue * 100) if total_all_revenue > 0 else 0
-            promo_order_share = (promo_total_orders / total_all_orders * 100) if total_all_orders > 0 else 0
+        top_code = results[0][0] if results else "N/A"
+        top_code_revenue = float(results[0][2]) if results else 0
+        top_code_share = (top_code_revenue / total_all_revenue * 100) if total_all_revenue > 0 else 0
+        promo_order_share = (promo_total_orders / total_all_orders * 100) if total_all_orders > 0 else 0
 
-            return {
-                "topByRevenue": top_by_revenue,
-                "topByOrders": top_by_orders,
-                "table": table,
-                "metrics": {
-                    "totalCodes": len(results),
-                    "topCode": top_code,
-                    "topCodeShare": round(top_code_share, 1),
-                    "promoOrders": promo_total_orders,
-                    "promoRevenue": round(promo_total_revenue, 2),
-                    "promoOrderShare": round(promo_order_share, 1),
-                    "promoCustomers": promo_total_customers,
-                    "promoAov": round(promo_total_revenue / promo_total_orders, 2) if promo_total_orders > 0 else 0,
-                },
-            }
+        return {
+            "topByRevenue": top_by_revenue,
+            "topByOrders": top_by_orders,
+            "table": table,
+            "metrics": {
+                "totalCodes": len(results),
+                "topCode": top_code,
+                "topCodeShare": round(top_code_share, 1),
+                "promoOrders": promo_total_orders,
+                "promoRevenue": round(promo_total_revenue, 2),
+                "promoOrderShare": round(promo_order_share, 1),
+                "promoCustomers": promo_total_customers,
+                "promoAov": round(promo_total_revenue / promo_total_orders, 2) if promo_total_orders > 0 else 0,
+            },
+        }
 
     # ─── Marketing Report ────────────────────────────────────────────────────
 
@@ -1789,28 +1839,26 @@ class RevenueMixin:
         yoy_start = start_date.replace(year=start_date.year - 1)
         yoy_end = end_date.replace(year=end_date.year - 1)
 
-        async with self.connection() as conn:
-            sales_where = "sales_type = ?" if sales_type != "all" else "1=1"
-            sales_params = [sales_type] if sales_type != "all" else []
+        sales_where = "sales_type = ?" if sales_type != "all" else "1=1"
+        sales_params = [sales_type] if sales_type != "all" else []
 
-            def _fetch_month(sd, ed):
-                params = [sd, ed] + sales_params
-                row = conn.execute(f"""
-                    SELECT
-                        COALESCE(SUM(revenue), 0),
-                        COALESCE(SUM(orders_count), 0),
-                        COALESCE(SUM(unique_customers), 0),
-                        COALESCE(SUM(new_customers), 0),
-                        COALESCE(SUM(returning_customers), 0),
-                        COALESCE(SUM(instagram_revenue), 0),
-                        COALESCE(SUM(telegram_revenue), 0),
-                        COALESCE(SUM(shopify_revenue), 0),
-                        COALESCE(SUM(instagram_orders), 0),
-                        COALESCE(SUM(telegram_orders), 0),
-                        COALESCE(SUM(shopify_orders), 0)
-                    FROM gold_daily_revenue
-                    WHERE date BETWEEN ? AND ? AND {sales_where}
-                """, params).fetchone()
+        # The eleven period figures. `{period_measures}` is the one hole here
+        # that is not a table name: DuckDB names a channel with a column,
+        # Postgres with a `source_id` dimension, and the five scalars must be
+        # read from the roll-up rows only — three of them are
+        # `COUNT(DISTINCT buyer_id)`, and distinct counts do not add up.
+        _MONTH_SQL = """
+            SELECT
+                {period_measures}
+            FROM {gold_daily_revenue}
+            WHERE date BETWEEN ? AND ? AND %s
+        """ % sales_where
+
+        async def _fetch_month(sd, ed):
+                rows = await self._marketing_run(
+                    _MONTH_SQL, [sd, ed] + sales_params,
+                )
+                row = rows[0]
 
                 revenue = float(row[0])
                 orders = int(row[1])
@@ -1832,44 +1880,78 @@ class RevenueMixin:
                     "shopify": {"revenue": round(float(row[7]), 2), "orders": int(row[10])},
                 }
 
-            current, cur_sources = _fetch_month(start_date, end_date)
-            previous, _ = _fetch_month(prev_start, prev_end)
-            year_ago, _ = _fetch_month(yoy_start, yoy_end)
+        current, cur_sources = await _fetch_month(start_date, end_date)
+        previous, _ = await _fetch_month(prev_start, prev_end)
+        year_ago, _ = await _fetch_month(yoy_start, yoy_end)
 
-            # Brands - current month from gold_daily_products
-            brand_where = "g.sales_type = ?" if sales_type != "all" else "1=1"
-            brand_params = [start_date, end_date] + sales_params
-            brand_results = conn.execute(f"""
+        # Brands, from the order-line level rather than `gold_daily_products`.
+        #
+        # That table exists only in DuckDB, and deriving it here was the
+        # obvious move and the wrong size: `core/duckdb_store.py` records that
+        # the level reproduces it to the kopeck under Gold's own predicate —
+        # ₴132,077,453.75 on both sides, 986 dates, zero disagreeing.
+        #
+        # The inner grouping is not decoration. `order_count` in that table is
+        # `COUNT(DISTINCT id)` at the grain (date, sales_type, source, product,
+        # name-as-sold, brand, category…), and the report *sums* it. A plain
+        # `COUNT(DISTINCT order_id)` per brand is a different, smaller number —
+        # correct-looking and not the one this report has always shown. So the
+        # grain is reproduced first and summed after.
+        brand_where = "l.sales_type = ?" if sales_type != "all" else "1=1"
+        brand_params = [start_date, end_date] + sales_params
+        brand_results = await self._marketing_run(f"""
+            WITH product_days AS (
                 SELECT
-                    COALESCE(g.brand, 'Unknown') as brand_name,
-                    SUM(g.product_revenue) as revenue,
-                    SUM(g.order_count) as orders,
-                    SUM(g.quantity_sold) as quantity
-                FROM gold_daily_products g
-                WHERE g.date BETWEEN ? AND ? AND {brand_where}
-                GROUP BY COALESCE(g.brand, 'Unknown')
-                HAVING revenue > 0
-                ORDER BY revenue DESC
-            """, brand_params).fetchall()
+                    l.brand,
+                    SUM(l.quantity) AS quantity_sold,
+                    SUM(l.line_amount) AS product_revenue,
+                    COUNT(DISTINCT l.order_id) AS order_count
+                FROM {{order_lines}} l
+                WHERE NOT l.is_return
+                  AND l.is_active_source
+                  AND l.order_date BETWEEN ? AND ?
+                  AND {brand_where}
+                GROUP BY
+                    l.order_date, l.sales_type, l.source_id, l.product_id,
+                    l.product_name, l.brand, l.category_id, l.category_name,
+                    l.parent_category_name
+            )
+            SELECT
+                COALESCE(brand, 'Unknown') AS brand_name,
+                SUM(product_revenue) AS revenue,
+                SUM(order_count) AS orders,
+                SUM(quantity_sold) AS quantity
+            FROM product_days
+            GROUP BY COALESCE(brand, 'Unknown')
+            -- Repeated rather than aliased: PostgreSQL does not see a select
+            -- alias in HAVING, and `HAVING revenue > 0` is what the DuckDB
+            -- original wrote.
+            HAVING SUM(product_revenue) > 0
+            -- Brands can tie on revenue and the page renders them in order.
+            ORDER BY revenue DESC, brand_name
+        """, brand_params)
 
-            total_brand_revenue = sum(float(r[1]) for r in brand_results)
-            brands = []
-            for r in brand_results:
-                rev = float(r[1])
-                ord_count = int(r[2])
-                brands.append({
-                    "brand": r[0],
-                    "revenue": round(rev, 2),
-                    "orders": ord_count,
-                    "avg_check": round(rev / ord_count, 2) if ord_count > 0 else 0,
-                    "share_pct": round(rev / total_brand_revenue * 100, 1) if total_brand_revenue > 0 else 0,
-                })
+        total_brand_revenue = sum(float(r[1]) for r in brand_results)
+        brands = []
+        for r in brand_results:
+            rev = float(r[1])
+            ord_count = int(r[2])
+            brands.append({
+                "brand": r[0],
+                "revenue": round(rev, 2),
+                "orders": ord_count,
+                "avg_check": round(rev / ord_count, 2) if ord_count > 0 else 0,
+                "share_pct": round(rev / total_brand_revenue * 100, 1) if total_brand_revenue > 0 else 0,
+            })
 
-            # Monthly goal
-            goal_row = conn.execute(
-                "SELECT goal_amount FROM revenue_goals WHERE period_type = 'monthly'"
-            ).fetchone()
-            monthly_goal = float(goal_row[0]) if goal_row else None
+        # The target line. Postgres holds an hourly read replica of the goals
+        # (revision 0017); the goals API still writes DuckDB, so a target set
+        # this hour appears here next hour. That is a display lag on a figure
+        # changed a few times a year.
+        goal_rows = await self._marketing_run(
+            "SELECT goal_amount FROM {revenue_goals} WHERE period_type = 'monthly'"
+        )
+        monthly_goal = float(goal_rows[0][0]) if goal_rows else None
 
         # Build sources list
         total_orders = current["orders"]

@@ -89,6 +89,9 @@ class Dialect:
     # that is exactly what differs.
     gold_daily_revenue: str
     gold_revenue_rollup: str
+    # The goals a human set. DuckDB writes them; Postgres holds an hourly
+    # read replica (revision 0017) — see `core/pg_operational.py`.
+    revenue_goals: str
     # A namespace, not a name: the eleven inventory views reference each other,
     # so one prefix does the work of eleven holes. Empty in DuckDB, which has
     # no schemas to speak of; `gold.` in Postgres.
@@ -124,6 +127,7 @@ DUCKDB = Dialect(
     gold_daily_revenue="gold_daily_revenue",
     # Every row is a roll-up here: this Gold has no source dimension.
     gold_revenue_rollup="TRUE",
+    revenue_goals="revenue_goals",
     inventory_views="",
     # Byte-for-byte what `core.duckdb_constants._date_in_kyiv` has always
     # emitted. Changing it here changes stored Silver on the next rebuild.
@@ -154,6 +158,7 @@ POSTGRES = Dialect(
     inventory_history="app.inventory_history",
     gold_daily_revenue="gold.daily_revenue",
     gold_revenue_rollup="source_id IS NULL",
+    revenue_goals="app.revenue_goals",
     inventory_views="gold.",
     # `DATE(x)` also exists in PostgreSQL, but the cast is what the rest of
     # this repository's Postgres SQL uses, so it reads the same as its
@@ -290,6 +295,58 @@ JOIN {silver_orders} s ON s.id = op.order_id
 LEFT JOIN {products} p ON p.id = op.product_id
 LEFT JOIN {categories} c ON c.id = p.category_id
 LEFT JOIN {categories} parent_c ON parent_c.id = c.parent_id"""
+
+
+# ─── the monthly report's period figures ─────────────────────────────────────
+#
+# Eleven numbers over a date window: five that describe the period and six that
+# split it by channel. The five are the same measure in both engines and differ
+# only in *which rows* carry them; the six do not exist as columns in Postgres
+# at all.
+#
+# That is the one place the two Golds genuinely differ in shape, and it was a
+# decision: DuckDB names a channel by writing a column for it, Postgres carries
+# `source_id` as a dimension with `source_id IS NULL` as the roll-up. Source 5
+# (Виставка) is the standing proof of why — ₴266,059.00 that sits in `revenue`
+# and in none of the three channel columns.
+#
+# So this is a fragment per engine rather than a table name, and the ordering
+# of the eleven items is the contract: the caller unpacks positionally.
+#
+# THE TRAP, AND WHY THE ROLL-UP FILTER IS NOT OPTIONAL
+#
+# Three of the five are `COUNT(DISTINCT buyer_id)`, and distinct counts do not
+# add up. Summing the per-source rows overstates `unique_customers` in 29 of
+# 2,107 production cells, `new_customers` in 12, `returning_customers` in 17 —
+# each by one buyer who used two channels in a day. The Postgres rendering
+# therefore reads the five from the roll-up rows *only*, which is what
+# `{rollup}` already means everywhere else in this file.
+_PERIOD_MEASURES = ("revenue", "orders_count", "unique_customers",
+                    "new_customers", "returning_customers")
+_CHANNELS = (("instagram", 1), ("telegram", 2), ("shopify", 4))
+
+
+def marketing_period_measures(dialect: Dialect) -> str:
+    """The eleven select items, in the order the caller unpacks them.
+
+    Both renderings sum the same measures over the same rows; only the way a
+    channel is named differs. `reconcile_gold` compares the two shapes against
+    each other on production data every morning, which is what makes swapping
+    one for the other something already proven rather than newly asserted.
+    """
+    if dialect.gold_revenue_rollup == "TRUE":       # DuckDB: channels are columns
+        items = [f"COALESCE(SUM({m}), 0)" for m in _PERIOD_MEASURES]
+        items += [f"COALESCE(SUM({name}_revenue), 0)" for name, _ in _CHANNELS]
+        items += [f"COALESCE(SUM({name}_orders), 0)" for name, _ in _CHANNELS]
+    else:                                            # Postgres: a dimension
+        rollup = dialect.gold_revenue_rollup
+        items = [f"COALESCE(SUM({m}) FILTER (WHERE {rollup}), 0)"
+                 for m in _PERIOD_MEASURES]
+        items += [f"COALESCE(SUM(revenue) FILTER (WHERE source_id = {sid}), 0)"
+                  for _name, sid in _CHANNELS]
+        items += [f"COALESCE(SUM(orders_count) FILTER (WHERE source_id = {sid}), 0)"
+                  for _name, sid in _CHANNELS]
+    return ",\n        ".join(items)
 
 
 def order_lines_select(dialect: Dialect) -> str:

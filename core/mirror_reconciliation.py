@@ -92,6 +92,7 @@ from core.pg_bot_state import (
     REPORT_HISTORY_COLUMNS,
 )
 from core.pg_operational import (
+    GOAL_COLUMNS,
     INVENTORY_HISTORY_COLUMNS,
     MISS_COLUMNS,
     OFFER_STOCK_COLUMNS,
@@ -1779,6 +1780,18 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         key_columns=("id",),
         synced_column="synced_at",
         numeric=("price", "purchased_price"),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.revenue_goals",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="revenue_goals",
+        columns=GOAL_COLUMNS,
+        key_columns=("period_type",),
+        # The row's own value doubles as its clock, `order_backfill_misses`'
+        # arrangement: a goal is written and then rewritten, never appended to.
+        synced_column="updated_at",
+        numeric=("goal_amount", "calculated_goal", "growth_factor"),
         full_replace=True,
     ),
     MirroredTable(

@@ -452,13 +452,17 @@ class TestSyncedColumnDualRole:
     kind it is, instead of finding out in production.
     """
 
-    # Reviewed 2026-09-03. Adding a spec here is a claim that its writer
-    # stamps one row at a time; if it rewrites the table, it belongs in
-    # `ignore_columns` instead.
+    # Reviewed 2026-09-03, and again 2026-09-07 for `app.revenue_goals`.
+    # Adding a spec here is a claim that its writer stamps one row at a time;
+    # if it rewrites the table, it belongs in `ignore_columns` instead.
     PER_ROW_STAMPS = {
         "app.manager_classifications": "set_at",
         "app.order_backfill_misses": "checked_at",
         "app.inventory_history": "recorded_at",
+        # `set_goal` writes one `period_type` under `ON CONFLICT (period_type)`
+        # and stamps `updated_at` from Python, so the value dates that goal's
+        # own change. Three rows at most, each with its own history.
+        "app.revenue_goals": "updated_at",
     }
     WHOLE_TABLE_STAMPS = {
         "app.sku_inventory_status": "updated_at",

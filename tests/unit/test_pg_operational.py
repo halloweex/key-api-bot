@@ -36,6 +36,7 @@ from core.mirror_reconciliation import (
     fingerprints,
 )
 from core.pg_operational import (
+    GOAL_COLUMNS,
     INVENTORY_HISTORY_COLUMNS,
     MISS_COLUMNS,
     OFFER_STOCK_COLUMNS,
@@ -71,6 +72,11 @@ async def _seed(store):
         conn.execute(
             "INSERT INTO offer_stocks (id, sku, price, purchased_price, "
             " quantity, reserve) VALUES (11, 'SKU-11', 100.00, 40.00, 5, 1)"
+        )
+        conn.execute(
+            "INSERT INTO revenue_goals (period_type, goal_amount, is_custom,"
+            " calculated_goal, growth_factor) VALUES"
+            " ('monthly', 5000000.00, TRUE, 4800000.00, 1.10)"
         )
         conn.execute(
             "INSERT INTO order_backfill_misses (order_id, checked_at, reason) "
@@ -216,13 +222,14 @@ class TestTheyReallyAreAppendOnly:
 
 class TestReadingTheDuckDBSide:
     @pytest.mark.asyncio
-    async def test_the_four_small_tables_come_back_whole(self, tmp_path):
+    async def test_the_five_small_tables_come_back_whole(self, tmp_path):
         store = await _store(tmp_path)
         try:
             await _seed(store)
             async with store.connection() as conn:
                 out = read_full_replace(conn)
             assert len(out[OFFER_STOCKS_TABLE]) == 1
+            assert len(out["app.revenue_goals"]) == 1
             assert len(out["app.order_backfill_misses"]) == 1
             assert len(out["app.inventory_history"]) == 3
             assert len(out["app.sku_inventory_status"]) == 1
@@ -444,7 +451,7 @@ class TestOfferStocksSurvivesTheSmsSwitch:
 
 
 class TestTheComparisonSpecs:
-    def test_all_four_whole_tables_are_full_replace(self):
+    def test_all_five_whole_tables_are_full_replace(self):
         """The replicator writes every row it holds, so "in DuckDB and not in
         Postgres" has one meaning: lost. There is no retired category to excuse
         it with."""
@@ -466,6 +473,7 @@ class TestTheComparisonSpecs:
         does not read, the column is copied and never checked."""
         shipped = {
             "bronze.offer_stocks": set(OFFER_STOCK_COLUMNS),
+            "app.revenue_goals": set(GOAL_COLUMNS),
             "app.order_backfill_misses": set(MISS_COLUMNS),
             "app.inventory_history": set(INVENTORY_HISTORY_COLUMNS),
             "app.sku_inventory_status": set(SKU_STATUS_COLUMNS),
