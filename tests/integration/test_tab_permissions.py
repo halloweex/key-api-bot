@@ -329,6 +329,101 @@ class TestTheAdminEndpoint:
         assert response.status_code == 403
 
 
+# ─── the cost of asking twice ────────────────────────────────────────────────
+
+
+class _CountingStore(_FakeStore):
+    def __init__(self, role="viewer", allowed_features=None):
+        super().__init__(role, allowed_features)
+        self.reads = 0
+        self.status = "approved"
+
+    async def get_user(self, uid):
+        self.reads += 1
+        return {
+            "status": self.status,
+            "role": self._role,
+            "allowed_features": self._features,
+        }
+
+    async def get_role_permissions(self, role):
+        return {}
+
+    async def seed_default_permissions(self):
+        return None
+
+    async def get_stats(self):
+        return {}
+
+
+class TestTheSessionIsResolvedOncePerRequest:
+    """Two dependencies ask who this is on every gated endpoint — `api_gate`
+    at the include, and the permission gate on the route. Each ask used to be
+    a full resolution: a signature check and a read of `app.dashboard_users`.
+
+    That read carries `require_revision()`, which takes a pool connection of
+    its own before the query takes a second, so a doubled resolution is four
+    round trips per request against a pool of five. It was invisible while only
+    `expenses` and `sms` were gated; per-user tabs put a gate on roughly 120 of
+    140 endpoints.
+    """
+
+    @pytest.mark.parametrize("path", [
+        "/api/traffic/analytics",   # a tab gate
+        "/api/summary",             # a shared gate
+        "/api/me",                  # require_user on top of api_gate
+        "/api/categories",          # no gate at all — the control
+    ])
+    def test_one_store_read(self, client, monkeypatch, path):
+        store = _CountingStore(allowed_features=["traffic"])
+
+        async def _empty():
+            return []
+
+        store.get_categories = _empty
+        _install_store(monkeypatch, store)
+        monkeypatch.setattr(
+            dashboard_service, "parse_period",
+            lambda *a, **k: ("2026-08-01", "2026-08-31"),
+        )
+
+        async def _summary(*a, **k):
+            return {"total_revenue": 0}
+
+        monkeypatch.setattr(dashboard_service, "get_summary_stats", _summary)
+
+        assert client.get(path, headers=_cookie(PLAIN_ID, "viewer")).status_code == 200
+        assert store.reads == 1
+
+    def test_an_admin_route_asks_once_too(self, client, monkeypatch):
+        """`require_admin` stacks on `api_gate` the same way a tab gate does,
+        so it paid the same double read."""
+        store = _CountingStore(role="admin")
+
+        async def _list_users(**kwargs):
+            return []
+
+        store.list_users = _list_users
+        _install_store(monkeypatch, store)
+        assert client.get(
+            "/api/admin/users", headers=_cookie(PLAIN_ID, "admin"),
+        ).status_code == 200
+        assert store.reads == 1
+
+    def test_the_cache_dies_with_the_request(self, client, monkeypatch):
+        """It has to, or revocation would stop working — the session cookie is
+        a stateless signed token, and the only thing that withdraws access is
+        the *next* request finding the account no longer approved."""
+        store = _CountingStore(allowed_features=["traffic"])
+        _install_store(monkeypatch, store)
+        headers = _cookie(PLAIN_ID, "viewer")
+
+        assert client.get("/api/traffic/analytics", headers=headers).status_code == 200
+        store.status = "denied"
+        assert client.get("/api/traffic/analytics", headers=headers).status_code == 401
+        assert store.reads == 2   # one per request, not one per process
+
+
 # ─── structural: a tab nobody enforces is decoration ─────────────────────────
 
 

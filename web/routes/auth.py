@@ -297,9 +297,45 @@ async def _resolve_session(session: str | None) -> dict | None:
         return None
 
 
+# The sentinel says "nothing cached yet", which `None` cannot: an anonymous
+# request resolves to `None` and must not be resolved a second time either.
+_UNRESOLVED = object()
+
+# Where the resolved session is parked for the life of one request.
+_REQUEST_USER = "_dashboard_session_user"
+
+
 async def get_current_user(request: Request) -> dict | None:
-    """Get current user from the HTTP session cookie (None if not authenticated)."""
-    return await _resolve_session(request.cookies.get(SESSION_COOKIE))
+    """Get current user from the HTTP session cookie (None if not authenticated).
+
+    **Resolved once per request.** Two dependencies ask for it on every gated
+    endpoint — ``api_gate`` at the ``/api`` include, and then
+    ``require_permission`` / ``require_any_permission`` / ``require_admin`` on
+    the route — and each call is a full session resolution: a signature check
+    and a read of `app.dashboard_users`. Measured before this cache: two store
+    reads for `/api/traffic/analytics`, `/api/summary` and `/api/me`, one for an
+    ungated `/api/categories`.
+
+    That read is not cheap where it lands. `core/pg_dashboard_users.fetch_row`
+    calls `require_revision()` — which acquires a pool connection of its own and
+    runs `SELECT version_num` — before acquiring a second one for the query, so
+    a doubled resolution is **four** pool acquisitions and four round trips per
+    request against a pool of five. It cost nothing while only `expenses` and
+    `sms` were gated; per-user tabs put a permission dependency on roughly 120
+    of the 140 endpoints, which is what turned a detail into every request.
+
+    **Within one request the answer cannot change**, so caching it changes no
+    behaviour: revocation is still read on the *next* request, which is the
+    guarantee `_resolve_session` exists to give. The cache lives on
+    `request.state` and dies with the request; nothing is shared between them.
+    """
+    cached = getattr(request.state, _REQUEST_USER, _UNRESOLVED)
+    if cached is not _UNRESOLVED:
+        return cached
+
+    user = await _resolve_session(request.cookies.get(SESSION_COOKIE))
+    setattr(request.state, _REQUEST_USER, user)
+    return user
 
 
 async def get_current_user_ws(websocket) -> dict | None:

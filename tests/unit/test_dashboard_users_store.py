@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import pathlib
 import re
 from pathlib import Path
 
@@ -277,15 +278,61 @@ class TestNothingGoesRoundTheRouter:
         assert len(calls) == 1, f"{len(calls)} statements, so the count can be lost"
 
 
+def _code_only(path) -> str:
+    """The module with its comments and docstrings removed — and nothing else.
+
+    A plain grep over the source is satisfied by prose: a docstring that
+    *explains* which table the session reads fails an assertion about the
+    session *reading* it. That is `_migration_columns`' lesson one file over,
+    and it went green-to-red for exactly that reason once — a cache added to
+    `get_current_user` named `app.dashboard_users` in a sentence about why the
+    read is expensive, with no change to the code at all.
+
+    **Ordinary string literals are kept, deliberately.** A table name reaches
+    the database inside one, so dropping every STRING would blind the check to
+    the thing it exists to catch — a SQL statement written here instead of in
+    the repository. Docstrings are found through `ast`, which knows which
+    string expressions are documentation, and subtracted by position.
+    """
+    import io
+    import tokenize
+
+    source = pathlib.Path(path).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    docstrings = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            continue
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
+                and isinstance(first.value.value, str):
+            docstrings.add((first.value.lineno, first.value.col_offset))
+
+    kept = []
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type == tokenize.COMMENT:
+            continue
+        if token.type == tokenize.STRING and token.start in docstrings:
+            continue
+        kept.append(token.string)
+    return " ".join(kept)
+
+
 class TestTheTwoListsAreNotConfusedForEachOther:
     def test_the_session_does_not_read_the_bots_list(self):
         """Twelve of sixteen approved dashboard users were `denied` in
         `app.authorized_users` on the day this moved. Reading it here would
         have locked them out, and the one it would not lock out is an owner
         whose id is hardcoded."""
-        source = (REPO / "web" / "routes" / "auth.py").read_text(encoding="utf-8")
-        assert "authorized_users" not in source
-        assert "dashboard_users" not in source, (
+        code = _code_only(REPO / "web" / "routes" / "auth.py")
+        assert "authorized_users" not in code
+        assert "dashboard_users" not in code, (
             "the session should reach the list through the store, not name a "
             "table — the switch is what chooses the engine"
         )
