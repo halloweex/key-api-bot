@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.143
+
+- The expense mirror failed on every row: KeyCRM sends ISO strings
+
+
 ## 3.0.142
 
 - Document the /expenses port
