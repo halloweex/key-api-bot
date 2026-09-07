@@ -47,18 +47,23 @@ def _t(days_ago: int) -> datetime:
 
 
 # (user_id, username, first, last, photo, role, status, requested, reviewed,
-#  reviewed_by, last_activity, denial_count, created)
+#  reviewed_by, last_activity, denial_count, created, allowed_features)
 #
 # Deliberately awkward: a NULL username, a NULL photo, every status, every
 # role, a denial count one below the freeze, and two rows sharing a
 # `requested_at` so the list's ORDER BY has a tie to break.
+#
+# `allowed_features` carries all three of its states, because revision 0021
+# makes NULL and "" mean different things and a fixture of NULLs would prove
+# only that the column exists: 11 inherits (NULL), 12 is narrowed to two tabs,
+# 13 is deliberately given none ("").
 USERS = [
-    (11, "alice",  "Alice", "A",  "http://p/1", "admin",    "approved", _t(30), _t(29), 1, _t(1), 0, _t(30)),
-    (12, "bob",    "Bob",   None, None,         "viewer",   "approved", _t(20), _t(19), 1, _t(2), 0, _t(20)),
-    (13, None,     "Carol", None, None,         "marketer", "approved", _t(20), _t(18), 1, None,  0, _t(20)),
-    (14, "dan",    "Dan",   "D",  None,         "viewer",   "pending",  _t(5),  None,   None, None, 0, _t(5)),
-    (15, "erin",   "Erin",  None, None,         "viewer",   "denied",   _t(9),  _t(8),  1, None,  4, _t(9)),
-    (16, "frank",  "Frank", None, None,         "editor",   "frozen",   _t(40), _t(35), 1, None,  5, _t(40)),
+    (11, "alice",  "Alice", "A",  "http://p/1", "admin",    "approved", _t(30), _t(29), 1, _t(1), 0, _t(30), None),
+    (12, "bob",    "Bob",   None, None,         "viewer",   "approved", _t(20), _t(19), 1, _t(2), 0, _t(20), "dashboard,products"),
+    (13, None,     "Carol", None, None,         "marketer", "approved", _t(20), _t(18), 1, None,  0, _t(20), ""),
+    (14, "dan",    "Dan",   "D",  None,         "viewer",   "pending",  _t(5),  None,   None, None, 0, _t(5), None),
+    (15, "erin",   "Erin",  None, None,         "viewer",   "denied",   _t(9),  _t(8),  1, None,  4, _t(9), None),
+    (16, "frank",  "Frank", None, None,         "editor",   "frozen",   _t(40), _t(35), 1, None,  5, _t(40), None),
 ]
 
 
