@@ -229,7 +229,12 @@ class MarginMixin:
 
         rows = await self._margin_run(f"""
             SELECT
-                strftime(l.order_date, '%Y-%m') as month,
+                -- `strftime` is DuckDB's alone: PostgreSQL rejects it, and
+                -- because this tab falls back, that made the method answer
+                -- from DuckDB forever while looking ported. Both engines
+                -- render a DATE as 'YYYY-MM-DD' under ISO DateStyle (the
+                -- server's, checked), so seven characters is the month.
+                substr(CAST(l.order_date AS VARCHAR), 1, 7) as month,
                 ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
                     THEN l.line_amount ELSE 0 END), 2) as costed_revenue,
                 ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0

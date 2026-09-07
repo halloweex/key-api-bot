@@ -135,10 +135,33 @@ async def both_engines(tmp_path, monkeypatch):
 
 
 async def _both(store, monkeypatch, name, kwargs):
+    """Each engine once — and the Postgres leg with DuckDB made fatal.
+
+    THE FLAW THIS CLOSES, WHICH IS WORSE THAN ANY QUERY BUG
+
+    These tabs fall back to DuckDB when Postgres raises. So a comparison that
+    merely calls the method twice can pass while Postgres never answers at
+    all: the second call falls back, returns the DuckDB answer, and the two
+    "engines" agree because they were the same engine.
+
+    That is not hypothetical. `get_margin_trend` used `strftime`, which
+    PostgreSQL does not have; this file's parametrised comparison passed, the
+    gate went green, and the method was found on production only by making the
+    fallback fatal. So the fallback is fatal here too.
+    """
     monkeypatch.delenv("KS_READ_MARGIN", raising=False)
     duck = await getattr(store, name)(*W, **kwargs)
+
     monkeypatch.setenv("KS_READ_MARGIN", "postgres")
-    postgres = await getattr(store, name)(*W, **kwargs)
+
+    def _no_duckdb(*_a, **_k):
+        raise AssertionError(
+            f"{name} fell back to DuckDB — Postgres did not answer, so the "
+            f"comparison below would have compared DuckDB with itself"
+        )
+
+    with patch.object(type(store), "connection", _no_duckdb):
+        postgres = await getattr(store, name)(*W, **kwargs)
     monkeypatch.delenv("KS_READ_MARGIN", raising=False)
     return duck, postgres
 
