@@ -540,7 +540,13 @@ class TestTheRefreshHook:
     async def test_gold_is_rebuilt_after_silver(self, monkeypatch):
         monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
         order = []
+        # The витрина is patched too, and it was the gap: unpatched it raises
+        # `KS_PG_DSN is not set` and aborts the tick — which this test did not
+        # notice, because the abort happened after the two steps it asserted.
+        # Every step of the sequence has to run for the sequence to be tested.
         with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_vitrina.rebuild_customer_profile",
+                   new=AsyncMock(side_effect=lambda: order.append("vitrina") or {})), \
              patch("core.pg_order_utm.ship_order_utm",
                    new=AsyncMock(side_effect=lambda _s: order.append("utm") or {})), \
              patch("core.pg_silver.rebuild_silver",
@@ -548,10 +554,11 @@ class TestTheRefreshHook:
              patch("core.pg_gold.rebuild_gold",
                    new=AsyncMock(side_effect=lambda: order.append("gold") or {})):
             await self._scheduler()._rebuild_postgres_layers({"status": "success"})
-        # The UTM ship is last on purpose: nothing here derives from it, so a
-        # shipping fault must not cost the revenue Gold (revision 0018).
-        assert order[:2] == ["silver", "gold"]
-        assert order[-1] == "utm"
+        # Silver, then Gold, then the витрина — each reads what the one before
+        # it wrote. The UTM ship is last on purpose: nothing here derives from
+        # it, so a shipping fault must not cost the revenue Gold that
+        # `/summary` and `/marketing` read (revision 0018).
+        assert order == ["silver", "gold", "vitrina", "utm"]
 
     @pytest.mark.asyncio
     async def test_a_failed_silver_leaves_gold_alone(self, monkeypatch):
@@ -590,6 +597,8 @@ class TestTheRefreshHook:
         monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "600")
         scheduler = self._scheduler()
         with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_vitrina.rebuild_customer_profile",
+                   new=AsyncMock(return_value={})), \
              patch("core.pg_order_utm.ship_order_utm", new=AsyncMock(return_value={})), \
              patch("core.pg_silver.rebuild_silver", new=AsyncMock(return_value={})), \
              patch("core.pg_gold.rebuild_gold",
