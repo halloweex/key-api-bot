@@ -225,37 +225,64 @@ async def test_both_engines_return_the_same_answer(
     assert _comparable(postgres) == _comparable(duck)
 
 
+# Derived from the fixture above rather than written out, because I got the
+# arithmetic wrong twice: once by labelling an order `b2b` in a tuple the
+# seeding code never read, and once by making that order genuinely b2b and
+# thereby removing the only unbranded product from the retail view. Numbers a
+# human recomputes on every fixture edit are numbers that will be wrong.
+RETIRED_SOURCE = 3
+RETAIL_ORDERS = [o for o in ORDERS
+                 if not o[4] and o[5] is None and o[1] != RETIRED_SOURCE]
+ALL_ORDERS = [o for o in ORDERS if not o[4] and o[1] != RETIRED_SOURCE]
+LINES_BY_ORDER = {oid for _l, oid, _p, _q, _pr in LINES}
+
+
 @pytest.mark.asyncio
 async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
     """Two empty answers agree about nothing, and every awkward row has to be
     reachable or the comparison above is decoration."""
     summary, _ = await _both(both_engines, monkeypatch, "get_report_summary", {})
     totals = summary["totals"]
-    assert totals["orders_count"] == 3, summary      # 1, 2, 5 — retail, not returned
-    assert totals["returns_count"] == 1
-    assert totals["revenue"] == 2550.0               # 1200 + 600 + 750; #6 is b2b
 
-    # The order with no line items is counted and carries its revenue, while
+    assert totals["orders_count"] == len(RETAIL_ORDERS) == 3, summary
+    assert totals["revenue"] == sum(o[2] for o in RETAIL_ORDERS)
+    assert totals["returns_count"] == sum(1 for o in ORDERS if o[4])
+
+    # The order with no line items is counted and carries its revenue while
     # contributing nothing to `products_sold`. That asymmetry is the whole
-    # reason this method aggregates at the order grain.
-    assert totals["products_sold"] == 6              # 2+3 on o1, 1 on o2, none on o5
-    assert any(s["source_id"] == 4 and s["revenue"] == 750.0
+    # reason this method aggregates at the order grain, and production has 323
+    # such orders.
+    lineless = [o for o in RETAIL_ORDERS if o[0] not in LINES_BY_ORDER]
+    assert lineless, "the fixture lost its line-less order"
+    assert totals["products_sold"] == sum(
+        q for _l, oid, _p, q, _pr in LINES
+        if oid in {o[0] for o in RETAIL_ORDERS})
+    assert any(s["source_id"] == lineless[0][1]
+               and s["revenue"] == lineless[0][2]
                for s in summary["sources"]), "the line-less order is missing"
 
     # The retired source reaches no total at all.
-    assert all(s["source_id"] != 3 for s in summary["sources"])
+    assert all(s["source_id"] != RETIRED_SOURCE for s in summary["sources"])
 
-    # …and `all` picks up the b2b order the default excludes, so the two
-    # parametrised cases above are comparing different rows rather than the
-    # same ones twice.
+    # …and `all` picks up the b2b order the default excludes, so those two
+    # parametrised cases compare different rows rather than the same ones
+    # twice.
     every, _ = await _both(
         both_engines, monkeypatch, "get_report_summary", {"sales_type": "all"})
-    assert every["totals"]["orders_count"] == 4
-    assert every["totals"]["revenue"] == 2850.0
+    assert every["totals"]["orders_count"] == len(ALL_ORDERS) == 4
+    assert every["totals"]["revenue"] == sum(o[2] for o in ALL_ORDERS)
 
-    products, _ = await _both(both_engines, monkeypatch, "get_report_top_products", {})
-    assert products, "no products"
-    assert any(p["sku"] == "SKU-C" for p in products), "the NULL-brand product"
+    assert (await _both(both_engines, monkeypatch,
+                        "get_report_top_products", {}))[0], "no products"
+
+    # The NULL-brand product sells only on the b2b order and the retired one,
+    # so `all` is where it surfaces — and the `Unknown` bucket has to reach it,
+    # since equality never matches NULL and that bucket was displayable but
+    # unselectable until `brand_where` named it.
+    unbranded = next(p for p in PRODUCTS if p[3] is None)
+    every_product, _ = await _both(
+        both_engines, monkeypatch, "get_report_top_products", {"sales_type": "all"})
+    assert any(p["sku"] == unbranded[4] for p in every_product), every_product
 
 
 @pytest.mark.asyncio
