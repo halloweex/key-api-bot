@@ -12,7 +12,107 @@ from core.models import OrderStatus
 logger = logging.getLogger(__name__)
 
 
+# The category tree, one body for both engines. Six other methods still run it
+# on a connection they already hold, and the three report methods run it
+# through the router — so the text lives here rather than in either of them.
+_CATEGORY_TREE_SQL = """
+    WITH RECURSIVE category_tree AS (
+        SELECT id FROM {categories} WHERE id = ?
+        UNION ALL
+        SELECT c.id FROM {categories} c
+        JOIN category_tree ct ON c.parent_id = ct.id
+    )
+    SELECT id FROM category_tree
+    -- Ordered because the result becomes an `IN (...)` list that is compared
+    -- between engines; unordered, the two would build the same filter from a
+    -- different list and a differential test would report a difference that
+    -- is not one.
+    ORDER BY id
+"""
+
+
+def _at_least_the_root(category_id: int, found: List[int]) -> List[int]:
+    """Never hand back an empty list, because the caller builds `IN (...)`.
+
+    The anchor of the recursive term is `WHERE id = ?`, so an existing
+    category always yields itself and this changes nothing. A category id that
+    is *not* in the table yields nothing at all, and the seven callers then
+    render `category_id IN ()` — a parser error on both engines, so
+    `?category_id=99999` was a 500 rather than an empty report.
+
+    Older than this port: `_get_category_with_children` used to open with
+    `result = [category_id]` and then never use it, which reads as dead code
+    and is really a guard somebody wrote and then wired up wrong. Found by the
+    routing test, whose fixture database has no categories in it at all.
+
+    Returning the root keeps the filter valid and means the right thing: no
+    product carries a category that does not exist, so the report is empty.
+    """
+    return found or [category_id]
+
+
 class RevenueMixin:
+
+    # ── Which engine answers `/reports` ────────────────────────────────────
+    #
+    # Three methods, all reading Silver, which Postgres has had since 0005 and
+    # 0011. No migration, no replication — only a choice of engine, made
+    # BEFORE any connection is taken. That ordering is `/inventory`'s §34
+    # invariant: a read bound for Postgres must not first queue behind
+    # DuckDB's single writer, or the flag has moved the bottleneck rather than
+    # left it behind.
+    #
+    # **Never call these from inside `self.connection()`.** The store lock is
+    # not reentrant and the deadlock does not raise — it simply never returns.
+    # That is why `_category_ids` exists beside the older
+    # `_get_category_with_children`: the six unported callers hold a
+    # connection and pass it in; these three hold nothing.
+
+    async def _reports_run(
+        self, sql: str, params: Optional[List[Any]] = None,
+    ) -> List[Tuple]:
+        """Run one report query against whichever engine the flag names."""
+        from core.sql_dialect import DUCKDB, POSTGRES
+
+        from core import pg_reports_read
+
+        params = list(params or [])
+        if pg_reports_read.enabled() and pg_reports_read.available():
+            try:
+                return await pg_reports_read.fetch(
+                    self._render_report(sql, POSTGRES), params,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "reports: Postgres failed, falling back to DuckDB: %s",
+                    exc, exc_info=True,
+                )
+
+        async with self.connection() as conn:
+            return conn.execute(
+                self._render_report(sql, DUCKDB), params,
+            ).fetchall()
+
+    @staticmethod
+    def _render_report(sql: str, dialect) -> str:
+        """The holes these three bodies use. Every one already existed on
+        `Dialect`, which is why this port needed no change to the dialect."""
+        return sql.format(
+            silver_orders=dialect.silver_orders,
+            order_lines=dialect.order_lines,
+            order_products=dialect.order_products,
+            categories=dialect.categories,
+        )
+
+    async def _category_ids(self, category_id: int) -> List[int]:
+        """A category and its descendants, from whichever engine answers.
+
+        The routed twin of `_get_category_with_children`, sharing its SQL. The
+        older one keeps taking a connection because its six callers are inside
+        one; this one must not, for the reentrancy reason above.
+        """
+        rows = await self._reports_run(_CATEGORY_TREE_SQL, [category_id])
+        return _at_least_the_root(category_id, [row[0] for row in rows])
 
     # ── Step 1 of «Одна бронза»: the Gold primitives can read Postgres ──────
     #
@@ -975,21 +1075,22 @@ class RevenueMixin:
         conn: duckdb.DuckDBPyConnection,
         category_id: int
     ) -> List[int]:
-        """Get category ID and all descendant IDs."""
-        result = [category_id]
+        """A category and its descendants, on a connection the caller holds.
 
-        # Recursive query to get all children
-        children = conn.execute("""
-            WITH RECURSIVE category_tree AS (
-                SELECT id FROM categories WHERE id = ?
-                UNION ALL
-                SELECT c.id FROM categories c
-                JOIN category_tree ct ON c.parent_id = ct.id
-            )
-            SELECT id FROM category_tree
-        """, [category_id]).fetchall()
+        Shares `_CATEGORY_TREE_SQL` with `_category_ids`, which is the routed
+        twin the three report methods use. Six methods still call this one
+        from inside `self.connection()`, and the store lock is not reentrant,
+        so they cannot use the router — hence two executors over one body
+        rather than two bodies.
 
-        return [row[0] for row in children]
+        (The `result = [category_id]` this used to open with looked dead — the
+        recursive term already yields the root — but it was guarding something
+        real; see `_at_least_the_root`.)
+        """
+        children = conn.execute(
+            _CATEGORY_TREE_SQL.format(categories="categories"), [category_id],
+        ).fetchall()
+        return _at_least_the_root(category_id, [row[0] for row in children])
 
     @staticmethod
     def _wrap_label(text: str, max_chars: int = 25) -> List[str]:
@@ -1307,128 +1408,128 @@ class RevenueMixin:
         """Get per-source breakdown report for a date range."""
         source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
 
-        async with self.connection() as conn:
-            params: list = [start_date, end_date]
-            where_clauses = ["s.order_date BETWEEN ? AND ?", "s.is_active_source"]
+        params: list = [start_date, end_date]
+        where_clauses = ["s.order_date BETWEEN ? AND ?", "s.is_active_source"]
 
-            if sales_type != "all":
-                where_clauses.append("s.sales_type = ?")
-                params.append(sales_type)
+        if sales_type != "all":
+            where_clauses.append("s.sales_type = ?")
+            params.append(sales_type)
 
-            if source_id:
-                where_clauses.append("s.source_id = ?")
-                params.append(source_id)
+        if source_id:
+            where_clauses.append("s.source_id = ?")
+            params.append(source_id)
 
-            cat_ids = None
-            if category_id:
-                cat_ids = await self._get_category_with_children(conn, category_id)
-                where_clauses.append(f"s.category_id IN ({','.join('?' * len(cat_ids))})")
-                params.extend(cat_ids)
+        if category_id:
+            cat_ids = await self._category_ids(category_id)
+            where_clauses.append(f"s.category_id IN ({','.join('?' * len(cat_ids))})")
+            params.extend(cat_ids)
 
-            if brand:
-                where_clauses.append(brand_where(brand, params, "s"))
+        if brand:
+            where_clauses.append(brand_where(brand, params, "s"))
 
-            where_sql = " AND ".join(where_clauses)
+        where_sql = " AND ".join(where_clauses)
 
-            need_product_filter = bool(category_id or brand)
+        need_product_filter = bool(category_id or brand)
 
-            if need_product_filter:
-                # Filter orders that contain matching products, then aggregate
-                # The level, aliased `s` on purpose: this method shares one
-                # predicate between a line-grain filter and an order-grain
-                # aggregate, and every clause it can emit — dates, sales_type,
-                # source, category, brand — exists on both relations under the
-                # same name. The catalog clauses only appear when the product
-                # filter is on, which is the only branch that reaches here.
-                order_filter_sql = f"""
-                    SELECT DISTINCT s.order_id AS id
-                    FROM silver_order_lines s
-                    WHERE {where_sql}
-                """
-                results = conn.execute(f"""
-                    WITH matching_orders AS ({order_filter_sql})
-                    SELECT
-                        s.source_id,
-                        COUNT(CASE WHEN NOT s.is_return THEN 1 END) as orders_count,
-                        -- Still order-grain, and deliberately so: this counts
-                        -- orders, and an order with no line items at all — 323
-                        -- of them carry revenue — must still be counted. Rolling
-                        -- the whole query onto the level would drop those, which
-                        -- is the boundary of what a line level can replace.
-                        COALESCE(SUM(CASE WHEN NOT s.is_return THEN (
-                            SELECT SUM(op2.quantity) FROM order_products op2 WHERE op2.order_id = s.id
-                        ) ELSE 0 END), 0) as products_sold,
-                        COALESCE(SUM(CASE WHEN NOT s.is_return THEN s.grand_total ELSE 0 END), 0) as revenue,
-                        COUNT(CASE WHEN s.is_return THEN 1 END) as returns_count
-                    FROM silver_orders s
-                    WHERE s.id IN (SELECT id FROM matching_orders)
-                    GROUP BY s.source_id
-                    ORDER BY revenue DESC
-                """, params).fetchall()
-            else:
-                # No product filter: aggregate at order level, products_sold via subquery
-                results = conn.execute(f"""
-                    SELECT
-                        s.source_id,
-                        COUNT(CASE WHEN NOT s.is_return THEN 1 END) as orders_count,
-                        COALESCE(SUM(CASE WHEN NOT s.is_return THEN (
-                            SELECT SUM(op.quantity) FROM order_products op WHERE op.order_id = s.id
-                        ) ELSE 0 END), 0) as products_sold,
-                        COALESCE(SUM(CASE WHEN NOT s.is_return THEN s.grand_total ELSE 0 END), 0) as revenue,
-                        COUNT(CASE WHEN s.is_return THEN 1 END) as returns_count
-                    FROM silver_orders s
-                    WHERE {where_sql}
-                    GROUP BY s.source_id
-                    ORDER BY revenue DESC
-                """, params).fetchall()
+        if need_product_filter:
+            # Filter orders that contain matching products, then aggregate
+            # The level, aliased `s` on purpose: this method shares one
+            # predicate between a line-grain filter and an order-grain
+            # aggregate, and every clause it can emit — dates, sales_type,
+            # source, category, brand — exists on both relations under the
+            # same name. The catalog clauses only appear when the product
+            # filter is on, which is the only branch that reaches here.
+            order_filter_sql = f"""
+                SELECT DISTINCT s.order_id AS id
+                FROM {{order_lines}} s
+                WHERE {where_sql}
+            """
+            results = await self._reports_run(f"""
+                WITH matching_orders AS ({order_filter_sql})
+                SELECT
+                    s.source_id,
+                    COUNT(CASE WHEN NOT s.is_return THEN 1 END) as orders_count,
+                    -- Still order-grain, and deliberately so: this counts
+                    -- orders, and an order with no line items at all — 323
+                    -- of them carry revenue — must still be counted. Rolling
+                    -- the whole query onto the level would drop those, which
+                    -- is the boundary of what a line level can replace.
+                    COALESCE(SUM(CASE WHEN NOT s.is_return THEN (
+                        SELECT SUM(op2.quantity) FROM {{order_products}} op2 WHERE op2.order_id = s.id
+                    ) ELSE 0 END), 0) as products_sold,
+                    COALESCE(SUM(CASE WHEN NOT s.is_return THEN s.grand_total ELSE 0 END), 0) as revenue,
+                    COUNT(CASE WHEN s.is_return THEN 1 END) as returns_count
+                FROM {{silver_orders}} s
+                WHERE s.id IN (SELECT id FROM matching_orders)
+                GROUP BY s.source_id
+                -- `source_id` closes the sort: revenue can tie, and the
+                -- caller renders these rows in order.
+                ORDER BY revenue DESC, s.source_id
+            """, params)
+        else:
+            # No product filter: aggregate at order level, products_sold via subquery
+            results = await self._reports_run(f"""
+                SELECT
+                    s.source_id,
+                    COUNT(CASE WHEN NOT s.is_return THEN 1 END) as orders_count,
+                    COALESCE(SUM(CASE WHEN NOT s.is_return THEN (
+                        SELECT SUM(op.quantity) FROM {{order_products}} op WHERE op.order_id = s.id
+                    ) ELSE 0 END), 0) as products_sold,
+                    COALESCE(SUM(CASE WHEN NOT s.is_return THEN s.grand_total ELSE 0 END), 0) as revenue,
+                    COUNT(CASE WHEN s.is_return THEN 1 END) as returns_count
+                FROM {{silver_orders}} s
+                WHERE {where_sql}
+                GROUP BY s.source_id
+                ORDER BY revenue DESC, s.source_id
+            """, params)
 
-            sources = []
-            total_orders = 0
-            total_products = 0
-            total_revenue = 0.0
-            total_returns = 0
+        sources = []
+        total_orders = 0
+        total_products = 0
+        total_revenue = 0.0
+        total_returns = 0
 
-            for row in results:
-                sid = row[0]
-                if sid not in source_names:
-                    continue
-                orders = int(row[1] or 0)
-                products = int(row[2] or 0)
-                revenue = float(row[3] or 0)
-                returns = int(row[4] or 0)
-                avg_check = revenue / orders if orders > 0 else 0
-                return_rate = returns / (orders + returns) * 100 if (orders + returns) > 0 else 0
+        for row in results:
+            sid = row[0]
+            if sid not in source_names:
+                continue
+            orders = int(row[1] or 0)
+            products = int(row[2] or 0)
+            revenue = float(row[3] or 0)
+            returns = int(row[4] or 0)
+            avg_check = revenue / orders if orders > 0 else 0
+            return_rate = returns / (orders + returns) * 100 if (orders + returns) > 0 else 0
 
-                sources.append({
-                    "source_id": sid,
-                    "source_name": source_names[sid],
-                    "orders_count": orders,
-                    "products_sold": products,
-                    "revenue": round(revenue, 2),
-                    "avg_check": round(avg_check, 2),
-                    "returns_count": returns,
-                    "return_rate": round(return_rate, 1),
-                })
+            sources.append({
+                "source_id": sid,
+                "source_name": source_names[sid],
+                "orders_count": orders,
+                "products_sold": products,
+                "revenue": round(revenue, 2),
+                "avg_check": round(avg_check, 2),
+                "returns_count": returns,
+                "return_rate": round(return_rate, 1),
+            })
 
-                total_orders += orders
-                total_products += products
-                total_revenue += revenue
-                total_returns += returns
+            total_orders += orders
+            total_products += products
+            total_revenue += revenue
+            total_returns += returns
 
-            total_avg_check = total_revenue / total_orders if total_orders > 0 else 0
-            total_return_rate = total_returns / (total_orders + total_returns) * 100 if (total_orders + total_returns) > 0 else 0
+        total_avg_check = total_revenue / total_orders if total_orders > 0 else 0
+        total_return_rate = total_returns / (total_orders + total_returns) * 100 if (total_orders + total_returns) > 0 else 0
 
-            return {
-                "sources": sources,
-                "totals": {
-                    "orders_count": total_orders,
-                    "products_sold": total_products,
-                    "revenue": round(total_revenue, 2),
-                    "avg_check": round(total_avg_check, 2),
-                    "returns_count": total_returns,
-                    "return_rate": round(total_return_rate, 1),
-                },
-            }
+        return {
+            "sources": sources,
+            "totals": {
+                "orders_count": total_orders,
+                "products_sold": total_products,
+                "revenue": round(total_revenue, 2),
+                "avg_check": round(total_avg_check, 2),
+                "returns_count": total_returns,
+                "return_rate": round(total_return_rate, 1),
+            },
+        }
 
     async def get_report_top_products(
         self,
@@ -1441,59 +1542,59 @@ class RevenueMixin:
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         """Get top products report with rank, quantity, revenue, orders."""
-        async with self.connection() as conn:
-            params: list = [start_date, end_date]
-            where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
+        params: list = [start_date, end_date]
+        where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
 
-            if sales_type != "all":
-                where_clauses.append("l.sales_type = ?")
-                params.append(sales_type)
+        if sales_type != "all":
+            where_clauses.append("l.sales_type = ?")
+            params.append(sales_type)
 
-            if source_id:
-                where_clauses.append("l.source_id = ?")
-                params.append(source_id)
+        if source_id:
+            where_clauses.append("l.source_id = ?")
+            params.append(source_id)
 
-            if category_id:
-                cat_ids = await self._get_category_with_children(conn, category_id)
-                where_clauses.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
-                params.extend(cat_ids)
+        if category_id:
+            cat_ids = await self._category_ids(category_id)
+            where_clauses.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
+            params.extend(cat_ids)
 
-            if brand:
-                where_clauses.append(brand_where(brand, params, "l"))
+        if brand:
+            where_clauses.append(brand_where(brand, params, "l"))
 
-            params.append(limit)
-            where_sql = " AND ".join(where_clauses)
+        params.append(limit)
+        where_sql = " AND ".join(where_clauses)
 
-            results = conn.execute(f"""
+        results = await self._reports_run(f"""
                 SELECT
                     COALESCE(l.catalog_product_name, l.product_name, 'Unknown') as product_name,
                     COALESCE(l.sku, '') as sku,
                     SUM(l.quantity) as quantity,
                     COALESCE(SUM(l.line_amount), 0) as revenue,
                     COUNT(DISTINCT l.order_id) as orders_count
-                FROM silver_order_lines l
-                WHERE {where_sql}
-                GROUP BY COALESCE(l.catalog_product_name, l.product_name, 'Unknown'), COALESCE(l.sku, '')
-                -- Ties decide who makes the top-N cut here, so they cannot be
-                -- left to the plan.
-                ORDER BY quantity DESC, product_name
-                LIMIT ?
-            """, params).fetchall()
+            FROM {{order_lines}} l
+            WHERE {where_sql}
+            GROUP BY COALESCE(l.catalog_product_name, l.product_name, 'Unknown'), COALESCE(l.sku, '')
+            -- Ties decide who makes the top-N cut here, so they cannot be
+            -- left to the plan. `sku` closes it: two products can share a
+            -- name, and then the two engines would keep different rows.
+            ORDER BY quantity DESC, product_name, sku
+            LIMIT ?
+        """, params)
 
-            total_qty = sum(int(row[2] or 0) for row in results)
+        total_qty = sum(int(row[2] or 0) for row in results)
 
-            return [
-                {
-                    "rank": i + 1,
-                    "product_name": row[0],
-                    "sku": row[1],
-                    "quantity": int(row[2] or 0),
-                    "percentage": round(int(row[2] or 0) / total_qty * 100, 1) if total_qty > 0 else 0,
-                    "revenue": round(float(row[3] or 0), 2),
-                    "orders_count": int(row[4] or 0),
-                }
-                for i, row in enumerate(results)
-            ]
+        return [
+            {
+                "rank": i + 1,
+                "product_name": row[0],
+                "sku": row[1],
+                "quantity": int(row[2] or 0),
+                "percentage": round(int(row[2] or 0) / total_qty * 100, 1) if total_qty > 0 else 0,
+                "revenue": round(float(row[3] or 0), 2),
+                "orders_count": int(row[4] or 0),
+            }
+            for i, row in enumerate(results)
+        ]
 
     async def get_report_products_by_source(
         self,
@@ -1504,42 +1605,41 @@ class RevenueMixin:
         """Get all products grouped by source (matches bot Excel format)."""
         source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
 
-        async with self.connection() as conn:
-            params: list = [start_date, end_date]
-            where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
+        params: list = [start_date, end_date]
+        where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
 
-            if sales_type != "all":
-                where_clauses.append("l.sales_type = ?")
-                params.append(sales_type)
+        if sales_type != "all":
+            where_clauses.append("l.sales_type = ?")
+            params.append(sales_type)
 
-            where_sql = " AND ".join(where_clauses)
+        where_sql = " AND ".join(where_clauses)
 
-            results = conn.execute(f"""
+        results = await self._reports_run(f"""
                 SELECT
                     l.source_id,
                     COALESCE(l.catalog_product_name, l.product_name, 'Unknown') as product_name,
                     SUM(l.quantity) as quantity
-                FROM silver_order_lines l
-                WHERE {where_sql}
-                GROUP BY l.source_id, COALESCE(l.catalog_product_name, l.product_name, 'Unknown')
-                -- product_name breaks ties: without it the order among equal
-                -- quantities was whatever the plan happened to produce, so the
-                -- same report could come out in a different order twice.
-                ORDER BY l.source_id, quantity DESC, product_name
-            """, params).fetchall()
+            FROM {{order_lines}} l
+            WHERE {where_sql}
+            GROUP BY l.source_id, COALESCE(l.catalog_product_name, l.product_name, 'Unknown')
+            -- product_name breaks ties: without it the order among equal
+            -- quantities was whatever the plan happened to produce, so the
+            -- same report could come out in a different order twice.
+            ORDER BY l.source_id, quantity DESC, product_name
+        """, params)
 
-            # Group by source
-            by_source: Dict[int, list] = {}
-            for row in results:
-                sid = int(row[0])
-                if sid not in source_names:
-                    continue
-                by_source.setdefault(sid, []).append({
-                    "product_name": row[1],
-                    "quantity": int(row[2] or 0),
-                })
+        # Group by source
+        by_source: Dict[int, list] = {}
+        for row in results:
+            sid = int(row[0])
+            if sid not in source_names:
+                continue
+            by_source.setdefault(sid, []).append({
+                "product_name": row[1],
+                "quantity": int(row[2] or 0),
+            })
 
-            return by_source
+        return by_source
 
     # ─── Promocode Analytics ─────────────────────────────────────────────────
 
