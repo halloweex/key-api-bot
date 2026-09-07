@@ -50,9 +50,25 @@ class TrafficMixin:
                     exc, exc_info=True,
                 )
 
-        async with self.connection() as conn:
-            cursor = conn.execute(render_tables(sql, DUCKDB), params)
-            return cursor.fetchone() if mode == "one" else cursor.fetchall()
+        # `_fetch_one`/`_fetch_all`, not a bare `conn.execute` under
+        # `self.connection()`. They take the store lock themselves — so this
+        # must not be wrapped in one, the lock is not reentrant and a nested
+        # acquisition hangs rather than raises — and they add the two things
+        # this tab is the only repository to have ever had: the query runs in
+        # a thread so the event loop keeps answering, and it is bounded by
+        # DEFAULT_QUERY_TIMEOUT, on whose expiry they call `conn.interrupt()`
+        # and wait for the thread to come off the connection before raising.
+        #
+        # The first cut of this router called `conn.execute` directly, which
+        # is what the other four ported tabs do — but they never had the
+        # offloading to lose, and this one did. Without it the fallback path
+        # blocks the whole application for the length of a DuckDB query and
+        # can hold the global store lock without bound, which is worst
+        # exactly when it is reached: Postgres already being down.
+        duck = render_tables(sql, DUCKDB)
+        if mode == "one":
+            return await self._fetch_one(duck, params)
+        return await self._fetch_all(duck, params)
 
     # The two expressions that decide what a chart calls an order, repeated
     # verbatim in five places below because a GROUP BY cannot name the alias

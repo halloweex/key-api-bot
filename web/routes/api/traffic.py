@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
+from core.pg_order_utm import ship_after_reparse
 from web.services import dashboard_service
 from web.routes.auth import require_admin
 from ._deps import (
@@ -207,6 +208,11 @@ async def refresh_traffic_data(
     try:
         utm_count = len(await store.refresh_utm_silver_layer())
         traffic_rows = await store.refresh_traffic_gold_layer()
+        # And on to Postgres, which is what the tab reads. These endpoints do
+        # not mark the warehouse dirty, so without this the reclassification
+        # sits in DuckDB until the next dirty tick while the page keeps
+        # rendering the previous one. Never raises — see `ship_after_reparse`.
+        await ship_after_reparse(store)
 
         return {
             "success": True,
@@ -237,6 +243,11 @@ async def reclassify_traffic(
 
         utm_count = len(await store.refresh_utm_silver_layer())
         traffic_rows = await store.refresh_traffic_gold_layer()
+        # And on to Postgres, which is what the tab reads. These endpoints do
+        # not mark the warehouse dirty, so without this the reclassification
+        # sits in DuckDB until the next dirty tick while the page keeps
+        # rendering the previous one. Never raises — see `ship_after_reparse`.
+        await ship_after_reparse(store)
 
         return {
             "success": True,
@@ -370,6 +381,11 @@ async def _run_backfill_inner(days: int):
 
         utm_count = len(await store.refresh_utm_silver_layer())
         traffic_rows = await store.refresh_traffic_gold_layer()
+        # And on to Postgres, which is what the tab reads. These endpoints do
+        # not mark the warehouse dirty, so without this the reclassification
+        # sits in DuckDB until the next dirty tick while the page keeps
+        # rendering the previous one. Never raises — see `ship_after_reparse`.
+        await ship_after_reparse(store)
 
         logger.info(f"UTM backfill complete: {utm_count} UTM records, {traffic_rows} traffic rows")
 

@@ -116,6 +116,15 @@ async def backfill_utm(days_back: int = 730):
     traffic_rows = await store.refresh_traffic_gold_layer()
     logger.info(f"Gold traffic layer: {traffic_rows} rows")
 
+    # And on to Postgres, which is what `/traffic` reads since revision 0018.
+    # This script rewrites `silver_order_utm` without marking the warehouse
+    # dirty, so without this the operator who just ran it would look at the
+    # tab and see the classification they replaced. The three admin endpoints
+    # that do the same thing call the same function; never raises.
+    from core.pg_order_utm import ship_after_reparse
+
+    logger.info("Shipping UTM to Postgres: %s", await ship_after_reparse(store))
+
     # Show results
     async with store.connection() as conn:
         row = conn.execute(

@@ -32,6 +32,7 @@ transaction, so the delta would save a third of a cost that is already paid.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Sequence, Tuple
@@ -56,6 +57,11 @@ UTM_COLUMNS: Tuple[str, ...] = (
 # every row is a single round trip holding one very large parameter list.
 CHUNK = 5000
 
+# How long a reparse will wait for `PG_LAYER_LOCK` before giving up. Generous
+# against a normal wait (~3 s, the length of one Silver tick) and short enough
+# that an admin request cannot be parked indefinitely behind a stuck shipper.
+LOCK_WAIT_S = 120
+
 
 def _insert() -> str:
     values = ", ".join(f"${i}" for i in range(1, len(UTM_COLUMNS) + 1))
@@ -65,8 +71,11 @@ def _insert() -> str:
 def read_utm(conn) -> List[tuple]:
     """Every UTM row out of DuckDB, in the column order Postgres wants.
 
-    Ordered by the key so a failed run and its successor ship the same rows in
-    the same sequence, which makes a partial write comparable to a whole one.
+    Ordered by the key because the rows go into a table that was truncated a
+    moment earlier, so its primary-key index is built from scratch and appends
+    in key order rather than splitting pages at random. Not for recovery: the
+    write is one transaction, so there is no partial state for a successor run
+    to line up against.
     """
     rows = conn.execute(
         f"SELECT {', '.join(UTM_COLUMNS)} FROM silver_order_utm ORDER BY order_id"
@@ -89,26 +98,60 @@ async def ship_order_utm(store, pool=None) -> Dict[str, Any]:
     is called from outside every `store.connection()` block.
     """
     from core.pg import get_pool, require_revision
-    from core.pg_landing import _WATERMARK_OK
+    from core.pg_landing import _WATERMARK_OK, _record_failure
 
     started = time.monotonic()
-    pool = pool or await get_pool()
-    await require_revision()
 
-    async with store.connection() as conn:
-        rows = read_utm(conn)
+    try:
+        # Inside the try, both of them. `require_revision` raising is the
+        # deploy-order fault — `web` ahead of `migrate` — and that is exactly
+        # the failure worth naming in the watermark rather than discovering
+        # the next morning as row differences. `get_pool` raising usually
+        # cannot be recorded at all (the recorder needs the same pool, and
+        # says so), but it costs nothing to try and the contract is then
+        # simply "every failure is reported or attempted".
+        pool = pool or await get_pool()
+        await require_revision()
 
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(f"TRUNCATE {UTM_TABLE}")
-            await _write_chunked(conn, _insert(), rows)
-            # The same watermark table the mirror and the Silver rebuild use,
-            # so the comparison can tell "not shipped yet" from "shipped
-            # wrong" without a second mechanism to learn.
-            await conn.execute(_WATERMARK_OK, UTM_TABLE, len(rows))
+        # Timed separately because this is the part that costs the *whole
+        # dashboard*: the store lock is global, so every other reader waits
+        # behind this read. The Postgres half costs only this table.
+        read_started = time.monotonic()
+        async with store.connection() as conn:
+            rows = read_utm(conn)
+        read_ms = int((time.monotonic() - read_started) * 1000)
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(f"TRUNCATE {UTM_TABLE}")
+                await _write_chunked(conn, _insert(), rows)
+                # The same watermark table the mirror and the Silver rebuild
+                # use, so the comparison can tell "not shipped yet" from
+                # "shipped wrong" without a second mechanism to learn.
+                await conn.execute(_WATERMARK_OK, UTM_TABLE, len(rows))
+    except Exception as exc:
+        # Say so in the watermark before raising — `core/pg_landing.py`'s
+        # `_record_failure`, borrowed rather than rewritten.
+        #
+        # Without it a shipper that keeps failing leaves `last_ok_at` at the
+        # last success and `failures_since_ok` at zero, so the daily check
+        # reads the watermark as healthy, compares the rows anyway, and
+        # reports *thousands of row differences* — which names the symptom
+        # and hides the cause. With it the finding is `mirror_failing`,
+        # carrying the count and the error text. The alerting charter's rule:
+        # a CRITICAL names its lever.
+        #
+        # The derived layers beside this one (`rebuild_silver`, `rebuild_gold`)
+        # deliberately do not do this, and they are right not to: they can be
+        # recomputed from what Postgres already holds, so a failure costs
+        # freshness and nothing else. This is a copy of state only DuckDB has,
+        # which puts it with the mirrors.
+        await _record_failure(UTM_TABLE, f"{type(exc).__name__}: {exc}")
+        raise
 
     result = {
         "rows": len(rows),
+        "read_ms": read_ms,
         "duration_ms": int((time.monotonic() - started) * 1000),
     }
     logger.info("Order UTM shipped to Postgres: %s", result)
@@ -118,3 +161,57 @@ async def ship_order_utm(store, pool=None) -> Dict[str, Any]:
 async def _write_chunked(conn, sql: str, rows: Sequence[tuple]) -> None:
     for start in range(0, len(rows), CHUNK):
         await conn.executemany(sql, rows[start:start + CHUNK])
+
+
+async def ship_after_reparse(store) -> Dict[str, Any]:
+    """Ship the UTM straight after a reparse that went round the tick.
+
+    Three admin paths rewrite `silver_order_utm` in DuckDB without marking the
+    warehouse dirty — the traffic refresh, the reclassify, and the
+    `manager_comment` backfill. Before `/traffic` read Postgres that was
+    harmless, because the tab read the table those endpoints had just written.
+    It is not harmless now: the tab would keep showing the previous
+    classification until the next dirty warehouse tick, and an admin who has
+    just changed the rules and is looking at the page would read that as the
+    reclassify having failed.
+
+    **Under `PG_LAYER_LOCK`, which is the whole reason this is a function and
+    not a line at each call site.** The scheduler ships this table too, and two
+    TRUNCATE+INSERT transactions that interleave leave Postgres holding
+    whichever copy committed last under a fresh OK watermark — including a copy
+    read *before* the reparse. That is the exact failure the lock was
+    introduced for.
+
+    **Never raises.** The DuckDB work has already succeeded and the endpoint
+    should report it; a Postgres fault costs freshness until the next tick,
+    which is where this table was before this function existed. Rule 8 — the
+    step leaves the system working.
+    """
+    from core.mirror_reconciliation import configured
+
+    if not configured():
+        return {"skipped": "KS_PG_DSN is not set"}
+    try:
+        from core.pg_silver import PG_LAYER_LOCK
+
+        # Bounded, because three of the four callers are HTTP handlers and
+        # `asyncio.Lock` has no timeout of its own. The lock is also held by
+        # the ClickHouse shippers across network I/O, so a hung ClickHouse
+        # would otherwise hang an admin request for ever. A normal wait is the
+        # length of one Silver tick — measured on production at about three
+        # seconds — so this fires only on a genuine hang.
+        #
+        # Cancelling mid-write is safe: asyncpg cancels the statement and the
+        # transaction rolls back, leaving the table exactly as it was.
+        async def _locked():
+            async with PG_LAYER_LOCK:
+                return await ship_order_utm(store)
+
+        return await asyncio.wait_for(_locked(), timeout=LOCK_WAIT_S)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Order UTM not shipped after a reparse — Postgres keeps the "
+            "previous classification until the next Silver tick: %s",
+            exc, exc_info=True,
+        )
+        return {"error": f"{type(exc).__name__}: {exc}"}
