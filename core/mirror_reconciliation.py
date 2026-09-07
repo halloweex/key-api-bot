@@ -2042,10 +2042,19 @@ EXPENSES_TABLE: MirroredTable = MirroredTable(
     dk_table="expenses",
     columns=tuple(EXPENSE_COLUMNS),
     key_columns=("id",),
-    # KeyCRM's own creation stamp, not ours. It is the closest thing this row
-    # has to a clock, and it is what the grace window needs: an expense
-    # created two minutes ago may legitimately not have been mirrored yet.
-    synced_column="created_at",
+    # `synced_at` — DuckDB's own bookkeeping, and the default — not the
+    # payload's `created_at`, which was the first choice here and was wrong
+    # twice over.
+    #
+    # It is the wrong *clock*: `created_at` is KeyCRM's stamp, so an expense
+    # created weeks ago and only just synced would read as lost rather than as
+    # in flight, which is precisely the distinction the grace window exists to
+    # draw. And it is in `columns`, so it would have been both the clock and a
+    # compared value — the shape that made `sku_inventory_status` scream
+    # CRITICAL over 891 rows while three real differences hid inside the
+    # number. `synced_at` is in neither store's shared row, so it is read
+    # alongside and never compared, which is what `fetch_duckdb_rows` promises.
+    synced_column="synced_at",
     numeric=("amount",),
 )
 
