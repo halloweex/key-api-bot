@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.140
+
+- Make the layer-sequence test run the whole sequence
+- Ship the UTM last, and the five contracts the gate made me move
+- Read /traffic from Postgres, and delete a Gold instead of copying it
+
+
 ## 3.0.139
 
 - Two portability traps the gate caught in products_intel
