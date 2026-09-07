@@ -83,6 +83,74 @@ def available() -> bool:
     return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
+# Whether `bronze.expenses` has had its history carried across. A one-way
+# latch: `meta.mirror_state.backfilled_at` is only ever set, never cleared, so
+# once true it stays true and costs nothing thereafter.
+_backfilled: bool = False
+_checked_at: float = 0.0
+_RECHECK_S = 60.0
+
+
+async def backfilled() -> bool:
+    """Whether the mirrored expenses hold history, not just the last sync.
+
+    WHY A READ PATH ASKS THIS AT ALL
+
+    Because the alternative failed in production on 2026-09-07. The flag went
+    on while Postgres held 65 of 15,020 expenses, and the tab answered from it
+    without a murmur: an empty result is not an exception, so nothing fell back
+    and nothing was logged. The summary showed almost no costs and the profit
+    analysis showed almost pure profit.
+
+    "Run the backfill first" had been written down, said out loud, and put in
+    the finding's own text. None of that is a mechanism. `backfilled_at` is the
+    fact, and a read that depends on history can simply ask for it.
+
+    Only the two statements that touch `{expenses}` are gated —
+    `_expenses_run` decides by looking at the body — so the three methods that
+    read `manual_expenses` are unaffected, and so is the type dictionary, which
+    is re-shipped whole every sync and has no history to be missing.
+
+    Cheap: false is re-checked at most once a minute, and true is remembered
+    for the life of the process.
+    """
+    global _backfilled, _checked_at
+    import time as _time
+
+    if _backfilled:
+        return True
+    now = _time.monotonic()
+    if now - _checked_at < _RECHECK_S:
+        return False
+    _checked_at = now
+
+    try:
+        from core.pg import get_pool
+        from core.pg_expense_backfill import EXPENSES_TABLE
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            done = await conn.fetchval(
+                "SELECT backfilled_at IS NOT NULL FROM meta.mirror_state "
+                "WHERE table_name = $1",
+                EXPENSES_TABLE,
+            )
+    except Exception as exc:  # noqa: BLE001
+        # Unreachable Postgres answers the question by itself: this read is
+        # not going to succeed either, so say no and let DuckDB serve.
+        logger.warning("expenses: cannot read the backfill watermark: %s", exc)
+        return False
+
+    _backfilled = bool(done)
+    if not _backfilled:
+        logger.warning(
+            "expenses: %s has no completed backfill, so history is missing — "
+            "serving from DuckDB. The hourly ids-diff sets this on its own.",
+            EXPENSES_TABLE,
+        )
+    return _backfilled
+
+
 async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:
     """Run one expense query against Postgres and return plain tuples.
 

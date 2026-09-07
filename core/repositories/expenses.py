@@ -36,7 +36,14 @@ class ExpensesMixin:
         from core import pg_expenses_read
 
         params = list(params or [])
-        if pg_expenses_read.enabled() and pg_expenses_read.available():
+        # A statement that reads the mirrored landing needs its history to be
+        # across; one that reads `manual_expenses` or the type dictionary does
+        # not. Decided from the body rather than from a flag per method, so a
+        # query that starts reading `{expenses}` tomorrow is gated the moment
+        # it does.
+        needs_history = "{expenses}" in sql
+        if (pg_expenses_read.enabled() and pg_expenses_read.available()
+                and (not needs_history or await pg_expenses_read.backfilled())):
             try:
                 rows = await pg_expenses_read.fetch(
                     render_tables(sql, POSTGRES), params,

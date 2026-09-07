@@ -18,7 +18,7 @@ import inspect
 import textwrap
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -286,6 +286,106 @@ class TestAWriteReachesPostgresAtOnce:
                    new=AsyncMock(side_effect=RuntimeError("pg is down"))):
             out = await replicate_after_manual_expense(AsyncMock())
         assert "error" in out
+
+
+class TestHistoryMustBeAcrossBeforePostgresAnswers:
+    """The mechanism that replaces "run the backfill first".
+
+    On 2026-09-07 the flag went on while Postgres held 65 of 15,020 expenses,
+    and the tab answered from it without a murmur — an empty result is not an
+    exception, so nothing fell back and nothing was logged. The instruction had
+    been written down, said out loud, and put in the finding's own text. None
+    of that is a mechanism; `backfilled_at` is.
+    """
+
+    def setup_method(self):
+        from core import pg_expenses_read as r
+
+        r._backfilled = False
+        r._checked_at = 0.0
+
+    @pytest.mark.asyncio
+    async def test_a_body_reading_the_landing_waits_for_history(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
+        store = DuckDBStore(db_path=tmp_path / "h1.duckdb")
+        await store.connect()
+        try:
+            with patch("core.pg_expenses_read.backfilled",
+                       new=AsyncMock(return_value=False)), \
+                 patch("core.pg_expenses_read.fetch",
+                       new=AsyncMock(return_value=[])) as fetch:
+                await store.get_expense_summary(*W)
+            fetch.assert_not_awaited()
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_and_answers_once_it_is_across(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
+        store = DuckDBStore(db_path=tmp_path / "h2.duckdb")
+        await store.connect()
+        try:
+            with patch("core.pg_expenses_read.backfilled",
+                       new=AsyncMock(return_value=True)), \
+                 patch("core.pg_expenses_read.fetch",
+                       new=AsyncMock(return_value=[])) as fetch:
+                await store.get_expense_summary(*W)
+            fetch.assert_awaited()
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_body_that_does_not_read_it_is_not_gated(
+        self, tmp_path, monkeypatch,
+    ):
+        """`manual_expenses` is replicated whole and the type dictionary is
+        re-shipped every sync; neither has history to be missing."""
+        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
+        store = DuckDBStore(db_path=tmp_path / "h3.duckdb")
+        await store.connect()
+        try:
+            with patch("core.pg_expenses_read.backfilled",
+                       new=AsyncMock(return_value=False)) as gate, \
+                 patch("core.pg_expenses_read.fetch",
+                       new=AsyncMock(return_value=[])) as fetch:
+                await store.get_expense_types()
+            fetch.assert_awaited()
+            gate.assert_not_awaited()
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_the_latch_only_ever_closes_forward(self):
+        """`backfilled_at` is set and never cleared, so a true answer is worth
+        remembering for the life of the process."""
+        from core import pg_expenses_read as r
+
+        pool = MagicMock()
+        conn = AsyncMock()
+        conn.fetchval = AsyncMock(return_value=True)
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=conn)
+        acquire.__aexit__ = AsyncMock(return_value=False)
+        pool.acquire = MagicMock(return_value=acquire)
+
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
+            assert await r.backfilled() is True
+            assert await r.backfilled() is True
+        assert conn.fetchval.await_count == 1, "a settled latch was re-read"
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_postgres_answers_no(self):
+        """That read is not going to succeed either, so DuckDB serves."""
+        from core import pg_expenses_read as r
+
+        with patch("core.pg.get_pool",
+                   new=AsyncMock(side_effect=RuntimeError("pg is down"))):
+            assert await r.backfilled() is False
 
 
 class TestItDoesNotTakeTheDuckDbLock:
