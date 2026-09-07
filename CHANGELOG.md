@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.135
+
+- Derive the reports fixture's expectations from the fixture
+- Make the b2b order in the reports fixture actually b2b
+- Let /reports read Postgres
+
+
 ## 3.0.134
 
 - Stop the write comparison from comparing two clocks
