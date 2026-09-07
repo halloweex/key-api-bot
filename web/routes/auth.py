@@ -3,6 +3,8 @@ Authentication routes for Telegram Login.
 """
 import os
 import logging
+from typing import Sequence
+
 from fastapi import APIRouter, Request, Response, HTTPException, Depends
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -266,6 +268,11 @@ async def _resolve_session(session: str | None) -> dict | None:
                     return None
                 # Always use fresh role from DB, not stale session cookie
                 session_data['role'] = user.get('role', 'viewer')
+                # And the tab set beside it, from the same row and the same
+                # read. A second query for it would put the permission check
+                # on the request path this read exists to keep short; a cache
+                # would make a revoked tab outlive the click that revoked it.
+                session_data['allowed_features'] = user.get('allowed_features')
                 return session_data
         except Exception as e:
             logger.warning(f"DuckDB user check failed, falling back to SQLite: {e}")
@@ -279,6 +286,11 @@ async def _resolve_session(session: str | None) -> dict | None:
         if not access['authorized']:
             return None
         session_data['role'] = 'viewer'
+        # No row means no override to read, so the role decides — which is
+        # `viewer` here for the reason above. Not an empty list: that would
+        # mean "no tabs at all" and lock out somebody the fallback exists to
+        # keep working.
+        session_data['allowed_features'] = None
         return session_data
     except (BadSignature, SignatureExpired):
         logger.warning("Invalid or expired session signature")
@@ -396,6 +408,22 @@ async def require_admin(request: Request) -> dict:
     return user
 
 
+async def effective_permissions(user: dict) -> dict:
+    """What this session may do: the role's matrix, narrowed to its tab set.
+
+    The two halves come from different places on purpose. The matrix is per
+    *role*, stored, editable from the admin page and cached in-process. The tab
+    set is per *person*, carried in the session dict by ``_resolve_session``
+    from the row it already read. `core.permissions.apply_feature_override`
+    holds the rule that combines them, and is pure, so both this and the bot
+    can state the same answer without sharing a database.
+    """
+    from core.permissions import apply_feature_override, get_permissions_for_role_async
+
+    permissions = await get_permissions_for_role_async(user.get("role", "viewer"))
+    return apply_feature_override(permissions, user.get("allowed_features"))
+
+
 async def has_permission(user: dict, feature: str, action: str = "view") -> bool:
     """Does this user hold `action` on `feature`? Never raises.
 
@@ -404,12 +432,10 @@ async def has_permission(user: dict, feature: str, action: str = "view") -> bool
     needs, such as an SMS roster that returns sizes to a viewer and names and
     phone numbers to whoever may send.
     """
-    from core.permissions import get_permissions_for_role_async
-
     if is_hardcoded_admin(user.get("user_id")):
         return True
     try:
-        permissions = await get_permissions_for_role_async(user.get("role", "viewer"))
+        permissions = await effective_permissions(user)
     except Exception:  # noqa: BLE001 — an unreadable matrix must deny, not crash
         return False
     return bool(permissions.get(feature, {}).get(action, False))
@@ -426,22 +452,16 @@ def require_permission(feature: str, action: str = "view"):
         async def get_expenses(user = Depends(require_permission("expenses", "view"))):
             ...
     """
-    from core.permissions import get_permissions_for_role_async
-
     async def check_permission(request: Request) -> dict:
         user = await get_current_user(request)
         if not user:
             raise HTTPException(status_code=401, detail="Authentication required")
 
-        role = user.get('role', 'viewer')
-        user_id = user.get('user_id')
-
         # Hardcoded admins have all permissions
-        if is_hardcoded_admin(user_id):
+        if is_hardcoded_admin(user.get('user_id')):
             return user
 
-        # Check DB-backed permissions (async)
-        permissions = await get_permissions_for_role_async(role)
+        permissions = await effective_permissions(user)
         feature_perms = permissions.get(feature, {})
         if not feature_perms.get(action, False):
             raise HTTPException(
@@ -452,6 +472,40 @@ def require_permission(feature: str, action: str = "view"):
         return user
 
     return check_permission
+
+
+def require_any_permission(features: Sequence[str], action: str = "view"):
+    """Dependency for an endpoint that more than one tab legitimately reads.
+
+    `/api/summary` is the case that forced it: the revenue totals are on the
+    dashboard, and they are also what `ROASSection` divides ad spend by on
+    /traffic and what `ROICalculator` reads on /marketing. Gating it on
+    `dashboard` alone would have made "traffic only" a tab that renders empty
+    cards, which is the failure mode a per-tab gate is supposed to prevent.
+
+    Passing a single feature here is the same as ``require_permission``; the
+    list is a statement that the endpoint is genuinely shared, and each entry
+    is one page that would break without it.
+    """
+
+    async def check_any(request: Request) -> dict:
+        user = await get_current_user(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+        if is_hardcoded_admin(user.get('user_id')):
+            return user
+
+        permissions = await effective_permissions(user)
+        if any(permissions.get(f, {}).get(action, False) for f in features):
+            return user
+
+        raise HTTPException(
+            status_code=403,
+            detail=f"No {action} access to {' or '.join(features)}",
+        )
+
+    return check_any
 
 
 # /api/me and /api/me/preferences moved to web/routes/api/me.py so they sit

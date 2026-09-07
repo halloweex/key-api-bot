@@ -4,6 +4,7 @@
 import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
+import { firstAllowedPath } from '../utils/access'
 import i18n, { SUPPORTED_LANGUAGES, type SupportedLanguage } from '../lib/i18n'
 import type { CurrentUserResponse, Permissions, UserRole } from '../types/api'
 
@@ -73,6 +74,19 @@ export function useAuth() {
     error,
     refetch: query.refetch,
   }
+}
+
+/**
+ * The first page this account may open, in sidebar order — or null when there
+ * is none at all.
+ *
+ * The route guards redirect here rather than to a constant `/`: an account
+ * granted /traffic alone is *denied* at `/`, and sending it there would be a
+ * redirect loop instead of a permission.
+ */
+export function useFirstAllowedPath(): string | null {
+  const { permissions } = useAuth()
+  return firstAllowedPath(permissions)
 }
 
 /**

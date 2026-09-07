@@ -733,6 +733,16 @@ def _m0028_drop_bot_owned_duplicates(self) -> None:
 
 
 
+def _m0029_users_allowed_features(self) -> None:
+    # Per-user tab access. NULL means "as the role", which is what every row
+    # already in the table means and why no backfill follows this: the 24
+    # accounts that existed when it was added see exactly what they saw the
+    # day before. No DEFAULT, this codebase's standing rule for ADD COLUMN.
+    self._connection.execute(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_features VARCHAR"
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration("0001_orders_updated_at", ONCE, _m0001_orders_updated_at),
     Migration("0002_orders_status_group_id", ONCE, _m0002_orders_status_group_id),
@@ -761,4 +771,5 @@ MIGRATIONS: List[Migration] = [
     Migration("0026_data_dir_samples", ONCE, _m0026_data_dir_samples),
     Migration("0027_reset_sequences_after_compaction", ALWAYS, _m0027_reset_sequences_after_compaction),
     Migration("0028_drop_bot_owned_duplicates", ONCE, _m0028_drop_bot_owned_duplicates),
+    Migration("0029_users_allowed_features", ONCE, _m0029_users_allowed_features),
 ]

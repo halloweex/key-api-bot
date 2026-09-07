@@ -11,10 +11,18 @@ audit which API paths can be reached without a session.
 
 Admin-only routers add their own ``Depends(require_admin)`` on top of the
 gate — both run; require_admin is the stricter check.
+
+A router whose every endpoint belongs to **one tab** carries that tab's
+permission here, at the include, rather than repeating it on each endpoint —
+the same reason ``api_gate`` lives at the ``/api`` include. Where a module
+mixes tabs (``reports`` also serves /marketing, ``analytics`` serves the
+dashboard *and* the two charts /marketing shares with it) the gate is on the
+endpoint instead, because a router-level one would be a lie about which page
+the route belongs to.
 """
 from fastapi import APIRouter, Depends
 
-from web.routes.auth import require_admin
+from web.routes.auth import require_admin, require_permission
 
 from .health import router as health_router
 from .admin import router as admin_router
@@ -40,13 +48,25 @@ router.include_router(admin_router, dependencies=[Depends(require_admin)])
 router.include_router(analytics_router)
 router.include_router(customers_router)
 router.include_router(goals_router)
-router.include_router(inventory_router)
+router.include_router(
+    inventory_router, dependencies=[Depends(require_permission("inventory"))],
+)
 router.include_router(expenses_router)
-router.include_router(traffic_router)
+router.include_router(
+    traffic_router, dependencies=[Depends(require_permission("traffic"))],
+)
 router.include_router(users_router)
 router.include_router(reports_router)
-router.include_router(products_intel_router)
-router.include_router(margin_router)
+router.include_router(
+    products_intel_router, dependencies=[Depends(require_permission("products"))],
+)
+# Cost price and profit. Was `require_admin` on every endpoint here and
+# `<AdminGuard>` on the page; it is a permission now so it can be granted to
+# one person without making them an admin. Only the admin role holds it by
+# default, so no account gained anything the day this changed.
+router.include_router(
+    margin_router, dependencies=[Depends(require_permission("margin"))],
+)
 router.include_router(me_router)
 # Inbound machine callers: no session, each endpoint authenticates itself.
 router.include_router(webhooks_router)

@@ -8,7 +8,7 @@ _KYIV_TZ = ZoneInfo("Europe/Kyiv")
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional, List
 
-from web.routes.auth import require_admin
+from web.routes.auth import require_admin, require_any_permission, require_permission
 from web.services import dashboard_service
 from web.schemas import CategoryResponse, BrandResponse
 from ._deps import (
@@ -77,6 +77,7 @@ async def get_revenue_trend(
     sales_type: Optional[str] = Query("retail", description="Sales type: retail, b2b, or all"),
     compare_type: Optional[str] = Query("previous_period", description="Comparison type: previous_period, year_ago, month_ago"),
     include_forecast: Optional[bool] = Query(False, description="Include ML forecast for remaining month days"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get revenue trend data for line chart."""
     try:
@@ -165,6 +166,7 @@ async def get_revenue_trend(
 async def get_revenue_forecast(
     request: Request,
     sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get ML revenue forecast for the current month."""
     try:
@@ -219,6 +221,7 @@ async def tune_revenue_forecast(
 async def evaluate_revenue_forecast(
     request: Request,
     sales_type: Optional[str] = Query("retail", description="Sales type: retail or b2b"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Run walk-forward cross-validation to evaluate the model."""
     try:
@@ -245,6 +248,7 @@ async def get_sales_by_source(
     brand: Optional[str] = Query(None),
     promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get sales data by source for bar/pie chart."""
     try:
@@ -277,6 +281,7 @@ async def get_top_products(
     promocode: Optional[str] = Query(None),
     limit: int = Query(10, description="Number of products to return"),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get top products for horizontal bar chart."""
     try:
@@ -309,6 +314,7 @@ async def get_summary(
     brand: Optional[str] = Query(None),
     promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_any_permission(["dashboard", "marketing", "traffic"])),
 ):
     """Get summary statistics for dashboard cards."""
     try:
@@ -337,6 +343,7 @@ async def get_returns(
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
     limit: int = Query(50, ge=1, le=100),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get list of return orders for a date range."""
     try:
@@ -366,6 +373,7 @@ async def get_product_performance(
     brand: Optional[str] = Query(None),
     promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get product performance: top by revenue, category breakdown."""
     try:
@@ -392,6 +400,7 @@ async def get_brand_analytics(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_any_permission(["dashboard", "marketing"])),
 ):
     """Get brand analytics: top brands by revenue and quantity."""
     try:
@@ -412,6 +421,7 @@ async def get_promocode_analytics(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_any_permission(["dashboard", "marketing"])),
 ):
     """Get promocode performance overview."""
     try:
@@ -436,6 +446,7 @@ async def get_subcategory_breakdown(
     brand: Optional[str] = Query(None),
     promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get sales breakdown by subcategories for a given parent category."""
     try:

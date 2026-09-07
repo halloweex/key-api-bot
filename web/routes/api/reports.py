@@ -5,7 +5,7 @@ import logging
 from datetime import datetime as _datetime
 from typing import Optional
 
-from fastapi import APIRouter, Query, Request, HTTPException
+from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 
 from web.services import dashboard_service
@@ -15,6 +15,8 @@ from ._deps import (
     validate_brand_name, validate_limit, validate_sales_type,
     ValidationError,
 )
+
+from web.routes.auth import require_permission
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 logger = logging.getLogger(__name__)
@@ -43,6 +45,7 @@ async def get_marketing_summary(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("marketing")),
 ):
     """Get marketing report for any date range with previous period and YoY comparison."""
     try:
@@ -95,6 +98,7 @@ async def export_marketing_csv(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("marketing")),
 ):
     """Export marketing report as CSV for the selected period."""
     try:
@@ -189,6 +193,7 @@ async def get_report_summary(
     category_id: Optional[int] = Query(None),
     brand: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("reports")),
 ):
     """Get report summary with per-source breakdown."""
     try:
@@ -214,6 +219,7 @@ async def get_report_top_products(
     brand: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
     limit: int = Query(10),
+    _gate=Depends(require_permission("reports")),
 ):
     """Get top products ranked by quantity."""
     try:
@@ -239,6 +245,7 @@ async def get_report_all_products(
     category_id: Optional[int] = Query(None),
     brand: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("reports")),
 ):
     """Get all products (no limit) for full breakdown report."""
     try:
@@ -265,6 +272,7 @@ async def export_report_csv(
     brand: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
     limit: int = Query(10),
+    _gate=Depends(require_permission("reports")),
 ):
     """Export report data as CSV file."""
     if type not in ("summary", "top_products"):

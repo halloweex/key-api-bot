@@ -42,6 +42,7 @@ async def get_customer_insights(
     brand: Optional[str] = Query(None),
     promocode: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get customer insights: new vs returning, AOV trend, repeat rate."""
     try:
@@ -68,6 +69,7 @@ async def get_cohort_retention(
     retention_months: int = Query(6, ge=1, le=12),
     sales_type: Optional[str] = Query("retail"),
     include_revenue: bool = Query(True),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get cohort retention analysis with optional revenue retention."""
     try:
@@ -96,6 +98,7 @@ async def get_purchase_timing(
     request: Request,
     months_back: int = Query(12, ge=3, le=24),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get days-to-second-purchase analysis."""
     try:
@@ -116,6 +119,7 @@ async def get_cohort_ltv(
     months_back: int = Query(12, ge=3, le=24),
     retention_months: int = Query(12, ge=1, le=24),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get cumulative lifetime value by cohort."""
     try:
@@ -136,6 +140,7 @@ async def get_at_risk_customers(
     days_threshold: int = Query(90, ge=30, le=365),
     months_back: int = Query(12, ge=3, le=24),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get at-risk customers by cohort (haven't purchased in N days)."""
     try:

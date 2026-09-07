@@ -24,6 +24,7 @@ from bot import database, store_sqlite
 from core.bot_store import (
     AccessControl,
     BotStore,
+    DashboardTabs,
     Milestones,
     Preferences,
     ShortLivedCache,
@@ -73,6 +74,10 @@ _RETURNS: Dict[str, Any] = {
     "milestones.recent": [],
     "cache.get": None,
     "cache.sweep": 7,
+    "dashboard.available": False,
+    "dashboard.get": None,
+    "dashboard.grant": True,
+    "dashboard.set_features": True,
     "stats": {"users": 0},
 }
 
@@ -84,6 +89,7 @@ class _RecordingStore:
         self.preferences = _Recorder(self.calls, "preferences")
         self.milestones = _Recorder(self.calls, "milestones")
         self.cache = _Recorder(self.calls, "cache")
+        self.dashboard = _Recorder(self.calls, "dashboard")
 
     def initialise(self) -> None:
         self.calls.append(("initialise", (), {}))
@@ -136,6 +142,7 @@ class TestTheAdapterIsTheShapeThePortDeclares:
         ("preferences", Preferences),
         ("milestones", Milestones),
         ("cache", ShortLivedCache),
+        ("dashboard", DashboardTabs),
     ])
     def test_each_aggregate_satisfies_its_protocol(self, attribute, protocol):
         store = store_sqlite.SqliteBotStore()
@@ -152,6 +159,7 @@ class TestTheAdapterIsTheShapeThePortDeclares:
         for attribute, protocol in (
             ("access", AccessControl), ("preferences", Preferences),
             ("milestones", Milestones), ("cache", ShortLivedCache),
+            ("dashboard", DashboardTabs),
         ):
             implementation = getattr(store, attribute)
             for name, declared in inspect.getmembers(
@@ -208,6 +216,10 @@ class TestEverythingGoesThroughTheStore:
         ("is_milestone_celebrated", ("m", "2026-08", 1), "milestones.already_celebrated"),
         ("mark_milestone_celebrated", ("m", "2026-08", 1, 1.0), "milestones.celebrate"),
         ("get_celebrated_milestones", (), "milestones.recent"),
+        ("dashboard_access_available", (), "dashboard.available"),
+        ("get_dashboard_access", (1,), "dashboard.get"),
+        ("grant_dashboard_access", (1, 9), "dashboard.grant"),
+        ("set_dashboard_features", (1, ["traffic"], 9), "dashboard.set_features"),
     ]
 
     @pytest.mark.parametrize("function,args,expected", CALLS)

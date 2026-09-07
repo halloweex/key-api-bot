@@ -61,7 +61,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from bot.store_sqlite import (
     ALLOWED_PREFERENCES,
@@ -562,6 +562,108 @@ class PostgresMilestones:
         return [_row(r) for r in rows]
 
 
+class PostgresDashboardTabs:
+    """`dashboard` against `app.dashboard_users`.
+
+    The statements are not written here — they are `core/dashboard_access.py`,
+    which the web container runs against the same table through
+    `core/repositories/users.py`. Two containers approving the same person must
+    write the same row the same way, and a grant that learns something on one
+    side only (that it must not demote an admin, say) is exactly the drift that
+    would not be noticed until somebody lost access.
+
+    `available()` asks two questions, and both have to be yes. This adapter
+    exists, so the bot's own state is in Postgres; and `KS_USER_STORE` must say
+    the *dashboard* reads Postgres too. They are separate variables set in the
+    same `.env`, and if they ever disagree, a tab set written here would be
+    written to a table nothing reads — access granted, and invisible.
+    """
+
+    def __init__(self, run, pool):
+        self._run = run
+        self._pool = pool
+
+    @staticmethod
+    def _sql(statement: str) -> str:
+        """One shared body, rendered for asyncpg.
+
+        `{self}` is the unqualified name PostgreSQL insists on inside
+        `ON CONFLICT DO UPDATE`; `{users}` is the qualified one everywhere
+        else. Same two holes `core/repositories/users.py` fills.
+        """
+        from core.pg_dashboard_users import TABLE
+        from core.sql_dialect import numbered
+
+        return numbered(statement.format(users=TABLE, self=TABLE.split(".")[-1]))
+
+    def available(self) -> bool:
+        from core.pg_dashboard_users import user_store_is_postgres
+
+        try:
+            return user_store_is_postgres()
+        except ValueError:
+            # A typo in KS_USER_STORE. It stops the *web* container, which is
+            # right there and is where the value matters. Here it must not stop
+            # an admin approving somebody, so it means "cannot reach it".
+            logger.exception("KS_USER_STORE is not a store this code knows")
+            return False
+
+    def get(self, user_id: int) -> Optional[Dict[str, Any]]:
+        return self._run(self._get(user_id))
+
+    async def _get(self, user_id: int) -> Optional[Dict[str, Any]]:
+        from core.dashboard_access import SELECT_ACCESS, access_row
+
+        async with self._pool.acquire() as conn:
+            record = await conn.fetchrow(self._sql(SELECT_ACCESS), user_id)
+        return access_row(tuple(record) if record is not None else None)
+
+    def grant(
+        self, user_id: int, admin_id: int,
+        features: Optional[Sequence[str]] = None,
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+    ) -> bool:
+        return self._run(
+            self._grant(user_id, admin_id, features, username, first_name, last_name)
+        )
+
+    async def _grant(
+        self, user_id, admin_id, features, username, first_name, last_name,
+    ) -> bool:
+        from core.dashboard_access import GRANT_ACCESS
+        from core.permissions import Role, serialize_features
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                self._sql(GRANT_ACCESS),
+                user_id, username, first_name, last_name,
+                # The role a *new* row starts at. An existing row keeps its
+                # own — the statement leaves `role` out of its update list.
+                Role.VIEWER.value,
+                serialize_features(features),
+                admin_id,
+            )
+        return True
+
+    def set_features(
+        self, user_id: int, features: Optional[Sequence[str]], admin_id: int,
+    ) -> bool:
+        return self._run(self._set_features(user_id, features, admin_id))
+
+    async def _set_features(self, user_id, features, admin_id) -> bool:
+        from core.dashboard_access import SET_FEATURES
+        from core.permissions import serialize_features
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                self._sql(SET_FEATURES),
+                serialize_features(features), admin_id, user_id,
+            )
+        return row is not None
+
+
 def _rowcount(tag: str) -> int:
     """`UPDATE 3` — asyncpg hands back the command tag, not a cursor."""
     try:
@@ -600,6 +702,7 @@ class PostgresBotStore:
         self.preferences = PostgresPreferences(run, pool)
         self.milestones = PostgresMilestones(run, pool)
         self.cache = SqliteCache()
+        self.dashboard = PostgresDashboardTabs(run, pool)
 
     async def _open_pool(self):
         """The wrapper `run` insists on.

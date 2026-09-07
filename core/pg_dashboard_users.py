@@ -47,7 +47,7 @@ TABLE = "app.dashboard_users"
 USER_COLUMNS: Tuple[str, ...] = (
     "user_id", "username", "first_name", "last_name", "photo_url",
     "role", "status", "requested_at", "reviewed_at", "reviewed_by",
-    "last_activity", "denial_count", "created_at",
+    "last_activity", "denial_count", "created_at", "allowed_features",
 )
 
 _ENV = "KS_USER_STORE"

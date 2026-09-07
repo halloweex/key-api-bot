@@ -16,6 +16,8 @@ from __future__ import annotations
 import logging
 from typing import Optional, List, Dict, Any, Sequence, Tuple
 
+from core.permissions import parse_features
+
 logger = logging.getLogger(__name__)
 
 MAX_DENIAL_COUNT = 5
@@ -86,7 +88,7 @@ class UsersMixin:
         row = await self._users_run("""
             SELECT user_id, username, first_name, last_name, photo_url,
                    role, status, requested_at, reviewed_at, reviewed_by,
-                   last_activity, denial_count, created_at
+                   last_activity, denial_count, created_at, allowed_features
             FROM {users} WHERE user_id = ?
         """, [user_id], mode="one")
 
@@ -107,13 +109,18 @@ class UsersMixin:
             "last_activity": self._stamp(row[10]),
             "denial_count": row[11],
             "created_at": self._stamp(row[12]),
+            # A list of tab keys, or None for "as the role". Read on every
+            # request — `_resolve_session` carries it into the session so the
+            # override costs no second query.
+            "allowed_features": parse_features(row[13]),
         }
 
     async def get_user_by_status(self, status: str) -> List[Dict[str, Any]]:
         """Get all users with a given status."""
         rows = await self._users_run("""
             SELECT user_id, username, first_name, last_name, photo_url,
-                   role, status, requested_at, reviewed_at, last_activity
+                   role, status, requested_at, reviewed_at, last_activity,
+                   allowed_features
             FROM {users} WHERE status = ?
             -- `user_id` closes the sort: `requested_at` can tie, and two
             -- engines break a tie differently.
@@ -132,6 +139,7 @@ class UsersMixin:
                 "requested_at": self._stamp(row[7]),
                 "reviewed_at": self._stamp(row[8]),
                 "last_activity": self._stamp(row[9]),
+                "allowed_features": parse_features(row[10]),
             }
             for row in rows
         ]
@@ -159,7 +167,8 @@ class UsersMixin:
 
         rows = await self._users_run(f"""
             SELECT user_id, username, first_name, last_name, photo_url,
-                   role, status, requested_at, reviewed_at, last_activity
+                   role, status, requested_at, reviewed_at, last_activity,
+                   allowed_features
             FROM {{users}}
             {where_clause}
             ORDER BY
@@ -188,6 +197,7 @@ class UsersMixin:
                 "requested_at": self._stamp(row[7]),
                 "reviewed_at": self._stamp(row[8]),
                 "last_activity": self._stamp(row[9]),
+                "allowed_features": parse_features(row[10]),
             }
             for row in rows
         ]
@@ -273,6 +283,33 @@ class UsersMixin:
                 RETURNING user_id
             """, [status, reviewed_by, user_id], mode="one")
 
+        return result is not None
+
+    async def set_user_features(
+        self,
+        user_id: int,
+        features: Optional[Sequence[str]],
+        changed_by: int,
+    ) -> bool:
+        """Set which tabs one person may open. Returns True if the row existed.
+
+        ``features=None`` clears the override — the person goes back to seeing
+        whatever their role shows, which is what every account meant before
+        this column existed. An empty list is *not* the same thing and is
+        stored as one: somebody ticked nothing, deliberately.
+
+        The statement lives in `core/dashboard_access.py` because the bot
+        writes the same column at the moment it approves a request, through a
+        different engine and a different container.
+        """
+        from core.dashboard_access import SET_FEATURES
+        from core.permissions import serialize_features
+
+        result = await self._users_run(
+            SET_FEATURES,
+            [serialize_features(features), changed_by, user_id],
+            mode="one",
+        )
         return result is not None
 
     async def update_user_activity(self, user_id: int) -> bool:

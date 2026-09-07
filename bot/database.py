@@ -66,6 +66,8 @@ __all__ = [
     "generate_cache_key",
     "is_milestone_celebrated", "mark_milestone_celebrated",
     "get_celebrated_milestones",
+    "dashboard_access_available", "get_dashboard_access",
+    "grant_dashboard_access", "set_dashboard_features",
 ]
 
 
@@ -306,3 +308,52 @@ def get_celebrated_milestones(
 ) -> List[Dict[str, Any]]:
     """Get recent celebrated milestones."""
     return get_bot_store().milestones.recent(period_type, limit)
+
+
+# ─── The dashboard's list, which is not the bot's ────────────────────────────
+#
+# `app.dashboard_users` decides who may open the web dashboard and which tabs
+# they see; `app.authorized_users` above decides who may talk to the bot. Two
+# lists, and they disagreed about twelve of sixteen people the day the second
+# one was created — `revoke_user` here is `deny_user`, and revoking somebody's
+# bot access has never been a statement about their dashboard access.
+#
+# The bot writes the dashboard's list at exactly one moment: an admin
+# approving a request also chooses the tabs. Everything else about it is the
+# admin page's business.
+
+
+def dashboard_access_available() -> bool:
+    """Can this process reach the dashboard's user list at all?
+
+    False under `KS_USER_STORE=duckdb`, because DuckDB takes a single writer
+    and the web container holds it. Callers ask *before* offering the admin a
+    checklist, so that a tap that could not be honoured is never drawn.
+    """
+    return get_bot_store().dashboard.available()
+
+
+def get_dashboard_access(user_id: int) -> Optional[Dict[str, Any]]:
+    """The dashboard row for this person, or None if they have none."""
+    return get_bot_store().dashboard.get(user_id)
+
+
+def grant_dashboard_access(
+    user_id: int,
+    admin_id: int,
+    features: Optional[List[str]] = None,
+    username: Optional[str] = None,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+) -> bool:
+    """Approve dashboard access and set the tab set, in one statement."""
+    return get_bot_store().dashboard.grant(
+        user_id, admin_id, features, username, first_name, last_name,
+    )
+
+
+def set_dashboard_features(
+    user_id: int, features: Optional[List[str]], admin_id: int,
+) -> bool:
+    """Change which tabs somebody may open. False if they have no row yet."""
+    return get_bot_store().dashboard.set_features(user_id, features, admin_id)

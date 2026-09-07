@@ -1292,8 +1292,110 @@ async def notify_admins_new_request(context: ContextTypes.DEFAULT_TYPE, user) ->
             logger.error(f"Failed to notify admin {admin_id}: {e}")
 
 
+# ─── Which tabs an approved person may open ──────────────────────────────────
+#
+# Approving somebody has always granted them the dashboard too — before this,
+# implicitly: `check_user_access_async` falls back to the bot's list and
+# creates a `viewer` on first login, and a viewer sees every tab but /margin
+# and /sms. So the checklist below does not widen anything; it makes the
+# decision that was already being taken visible, and narrowable to one tab.
+#
+# The callback data is `atab:<user_id>:<key>`, well inside Telegram's 64 bytes
+# for a 10-digit id and the longest tab key. `:` rather than `_`, because the
+# neighbouring handlers here parse ids with `split('_')[-1]` and a key
+# containing an underscore would be read as the id.
+
+TAB_COLUMNS = 2
+
+
+def _tab_label(key: str, language: str, selected: bool) -> str:
+    return f"{'✅' if selected else '▫️'} {t(f'tab.{key}', language)}"
+
+
+def _tabs_keyboard(user_id: int, granted, language: str) -> InlineKeyboardMarkup:
+    """The checklist, the presets, and Done.
+
+    Drawn from `TAB_FEATURE_KEYS`, so a tab added to the dashboard appears here
+    without this function being touched.
+    """
+    from core.permissions import ACCESS_PRESETS, TAB_FEATURE_KEYS
+
+    chosen = set(granted or ())
+    rows, row = [], []
+    for key in TAB_FEATURE_KEYS:
+        row.append(InlineKeyboardButton(
+            _tab_label(key, language, key in chosen),
+            callback_data=f"atab:{user_id}:{key}",
+        ))
+        if len(row) == TAB_COLUMNS:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    # Presets two to a row as well: four across is legible on a desktop and
+    # three truncated words on the phone an admin actually approves from.
+    presets = [
+        InlineKeyboardButton(
+            t(f"access.preset.{name}", language),
+            callback_data=f"apre:{user_id}:{name}",
+        )
+        for name in ACCESS_PRESETS
+    ]
+    for index in range(0, len(presets), TAB_COLUMNS):
+        rows.append(presets[index:index + TAB_COLUMNS])
+    rows.append([InlineKeyboardButton(
+        f"✔️ {t('access.tabs.done', language)}",
+        callback_data=f"adone:{user_id}",
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+def _tabs_summary(granted, language: str) -> str:
+    """"Traffic, Reports" — or the sentence for an empty set, which is a real
+    choice and must not render as an empty line nobody can interpret."""
+    if not granted:
+        return t("access.tabs.none", language)
+    return ", ".join(t(f"tab.{key}", language) for key in granted)
+
+
+def _approval_header(target_user_id: int, user_info: dict, language: str) -> str:
+    info = user_info or {}
+    return (
+        f"✅ <b>{t('admin.user_approved', language)}</b>\n\n"
+        f"<code>{target_user_id}</code>\n"
+        f"<b>Username:</b> @{info.get('username') or 'N/A'}\n"
+        f"<b>Name:</b> {info.get('first_name') or ''} {info.get('last_name') or ''}"
+    )
+
+
+async def _redraw_tabs(update: Update, target_user_id: int, granted) -> None:
+    """Re-render the message the admin is looking at, from stored state."""
+    language = _lang(update)
+    user_info = database.get_user_auth_status(target_user_id)
+    await update.callback_query.edit_message_text(
+        f"{_approval_header(target_user_id, user_info, language)}\n\n"
+        f"<b>{t('access.tabs.title', language)}</b>\n"
+        f"{t('access.tabs.granted', language, tabs=_tabs_summary(granted, language))}\n"
+        f"<i>{t('access.tabs.hint', language)}</i>",
+        parse_mode="HTML",
+        reply_markup=_tabs_keyboard(target_user_id, granted, language),
+    )
+
+
+def _tabs_target(query, admin_id: int):
+    """The user id in a tab callback, or None if this admin may not act.
+
+    Every one of the three handlers below needs the same two checks, and a
+    handler that forgot one would be a permission written on a button.
+    """
+    if not is_admin(admin_id):
+        return None
+    return int(query.data.split(":")[1])
+
+
 async def auth_approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin approves user access."""
+    """Admin approves user access, then chooses which tabs it opens."""
     query = update.callback_query
     admin = update.effective_user
 
@@ -1311,16 +1413,39 @@ async def auth_approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if success:
         await query.answer(t("admin.user_approved", _lang(update)))
 
-        # Update admin message
-        user_info = database.get_user_auth_status(target_user_id)
-        await query.edit_message_text(
-            f"✅ <b>{t('admin.user_approved', _lang(update))}</b>\n\n"
-            f"<code>{target_user_id}</code>\n"
-            f"<b>Username:</b> @{user_info.get('username') or 'N/A'}\n"
-            f"<b>Name:</b> {user_info.get('first_name') or ''} {user_info.get('last_name') or ''}\n\n"
-            f"<i>Approved by you</i>",
-            parse_mode="HTML"
-        )
+        language = _lang(update)
+        user_info = database.get_user_auth_status(target_user_id) or {}
+
+        # The dashboard half. It is a separate list from the bot's, so this can
+        # fail on its own — and when it does, the approval still stands and the
+        # message says where to finish the job.
+        granted = None
+        if database.dashboard_access_available():
+            from core.permissions import DEFAULT_PRESET, preset_features
+
+            default = preset_features(DEFAULT_PRESET)
+            try:
+                if database.grant_dashboard_access(
+                    target_user_id, admin.id, default,
+                    username=user_info.get("username"),
+                    first_name=user_info.get("first_name"),
+                    last_name=user_info.get("last_name"),
+                ):
+                    granted = default
+            except Exception as e:  # noqa: BLE001 — bot access is already given
+                logger.error(
+                    "Approved %s but could not grant dashboard access: %s",
+                    target_user_id, e, exc_info=True,
+                )
+
+        if granted is None:
+            await query.edit_message_text(
+                f"{_approval_header(target_user_id, user_info, language)}\n\n"
+                f"<i>{t('access.tabs.unavailable', language)}</i>",
+                parse_mode="HTML",
+            )
+        else:
+            await _redraw_tabs(update, target_user_id, granted)
 
         # Notify the user
         try:
@@ -1335,6 +1460,89 @@ async def auth_approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             logger.error(f"Failed to notify user {target_user_id} about approval: {e}")
     else:
         await query.answer(t("admin.already_decided", _lang(update)), show_alert=True)
+
+
+async def auth_toggle_tab(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """One tab on or off.
+
+    Written through on every tap rather than accumulated in `chat_data` and
+    saved at Done: the admin who taps three tabs and walks away has made three
+    decisions, and a bot restart between the taps and the button must not
+    silently discard them.
+    """
+    query = update.callback_query
+    admin = update.effective_user
+    target_user_id = _tabs_target(query, admin.id)
+    if target_user_id is None:
+        await query.answer(t("admin.only", _lang(update)), show_alert=True)
+        return
+
+    key = query.data.split(":")[2]
+    current = database.get_dashboard_access(target_user_id) or {}
+    granted = current.get("allowed_features")
+    if granted is None:
+        # No override stored — the tap is the first decision, and it starts
+        # from what the role shows rather than from an empty set, or the first
+        # tick would silently revoke every other tab.
+        from core.permissions import DEFAULT_PRESET, preset_features
+
+        granted = preset_features(DEFAULT_PRESET)
+
+    granted = [k for k in granted if k != key] if key in granted else [*granted, key]
+
+    from core.permissions import normalize_features
+
+    granted = normalize_features(granted)
+    if not database.set_dashboard_features(target_user_id, granted, admin.id):
+        await query.answer(t("access.tabs.failed", _lang(update)), show_alert=True)
+        return
+
+    await query.answer()
+    await _redraw_tabs(update, target_user_id, granted)
+
+
+async def auth_apply_preset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A whole bundle in one tap."""
+    query = update.callback_query
+    admin = update.effective_user
+    target_user_id = _tabs_target(query, admin.id)
+    if target_user_id is None:
+        await query.answer(t("admin.only", _lang(update)), show_alert=True)
+        return
+
+    from core.permissions import preset_features
+
+    granted = preset_features(query.data.split(":")[2])
+    if granted is None or not database.set_dashboard_features(
+        target_user_id, granted, admin.id,
+    ):
+        await query.answer(t("access.tabs.failed", _lang(update)), show_alert=True)
+        return
+
+    await query.answer()
+    await _redraw_tabs(update, target_user_id, granted)
+
+
+async def auth_tabs_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Put the keyboard away. Nothing is saved here — it already is."""
+    query = update.callback_query
+    admin = update.effective_user
+    target_user_id = _tabs_target(query, admin.id)
+    if target_user_id is None:
+        await query.answer(t("admin.only", _lang(update)), show_alert=True)
+        return
+
+    language = _lang(update)
+    access = database.get_dashboard_access(target_user_id) or {}
+    granted = access.get("allowed_features")
+    user_info = database.get_user_auth_status(target_user_id)
+
+    await query.answer()
+    await query.edit_message_text(
+        f"{_approval_header(target_user_id, user_info, language)}\n\n"
+        f"{t('access.tabs.granted', language, tabs=_tabs_summary(granted, language))}",
+        parse_mode="HTML",
+    )
 
 
 async def auth_deny_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -76,6 +76,9 @@ from bot.handlers_legacy import (
     notify_admins_new_request,
     auth_approve_user,
     auth_deny_user,
+    auth_toggle_tab,
+    auth_apply_preset,
+    auth_tabs_done,
     auth_request_again,
     # Admin handlers
     admin_users_command,
@@ -156,6 +159,9 @@ __all__ = [
     "notify_admins_new_request",
     "auth_approve_user",
     "auth_deny_user",
+    "auth_toggle_tab",
+    "auth_apply_preset",
+    "auth_tabs_done",
     "auth_request_again",
     # Admin handlers
     "admin_users_command",

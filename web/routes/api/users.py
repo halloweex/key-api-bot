@@ -126,6 +126,97 @@ async def update_user_status(
     return {"success": True, "user_id": user_id, "status": status}
 
 
+@router.patch("/admin/users/{user_id}/features")
+@limiter.limit("20/minute")
+async def update_user_features(
+    request: Request,
+    user_id: int,
+    user: dict = Depends(require_admin),
+):
+    """Set which tabs one account may open (admin only).
+
+    The body is either ``{"preset": "traffic_only"}`` — one of the code-defined
+    bundles in `core.permissions.ACCESS_PRESETS` — or ``{"features": [...]}``
+    with the keys ticked in the checklist. ``{"features": null}`` clears the
+    override and the account goes back to whatever its role shows, which is
+    what every account meant before this existed.
+
+    A body rather than query parameters, unlike its neighbours here: this is a
+    list, and the alternative — repeating ``?feature=a&feature=b`` — makes the
+    empty set (a real, reachable state: somebody ticked nothing) indistinguishable
+    from "the parameter was omitted", which is the one distinction the column
+    carries.
+    """
+    from core.permissions import (
+        ACCESS_PRESETS, TAB_FEATURE_KEYS, normalize_features, preset_features,
+    )
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+
+    if "preset" in body:
+        preset = body.get("preset")
+        features = preset_features(preset) if isinstance(preset, str) else None
+        if features is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown preset. Must be one of: {sorted(ACCESS_PRESETS)}",
+            )
+    elif "features" in body:
+        raw = body.get("features")
+        if raw is None:
+            features = None
+        elif isinstance(raw, list) and all(isinstance(v, str) for v in raw):
+            unknown = sorted(set(raw) - set(TAB_FEATURE_KEYS))
+            if unknown:
+                # Refused, not dropped. `normalize_features` drops silently
+                # because it also reads stored rows, where an unknown key means
+                # a tab that was removed. Here it means the caller and the
+                # server disagree about what a tab is, and an admin who ticked
+                # something must not be told it was saved when it was not.
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Not tabs: {unknown}. Known: {list(TAB_FEATURE_KEYS)}",
+                )
+            features = normalize_features(raw)
+        else:
+            raise HTTPException(
+                status_code=400, detail="features must be a list of strings, or null",
+            )
+    else:
+        raise HTTPException(
+            status_code=400, detail="Pass either 'features' or 'preset'",
+        )
+
+    # A hardcoded admin short-circuits every gate on the server, so a tab set
+    # stored against one decides nothing — `_refuse_if_ineffective`'s reason,
+    # and the same failure it exists to prevent: a control reporting a change
+    # that does not happen. Clearing the override is still allowed, so a row
+    # that already carries one can be put back into agreement.
+    if features is not None and is_hardcoded_admin(user_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This account's admin access is pinned in source; it opens "
+                "every tab whatever is stored. Setting tabs here would report "
+                "a change that does not happen."
+            ),
+        )
+
+    store = await get_store()
+    admin_id = user.get("user_id")
+    if not await store.set_user_features(user_id, features, changed_by=admin_id):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    logger.info("Admin %s set tabs for user %s to %s", admin_id, user_id, features)
+    return {"success": True, "user_id": user_id, "allowed_features": features}
+
+
 # ─── Permissions ───────────────────────────────────────────────────────────────
 
 @router.get("/admin/permissions")
@@ -135,13 +226,24 @@ async def get_all_permissions(
     user: dict = Depends(require_admin),
 ):
     """Get all permissions for all roles (admin only)."""
-    from core.permissions import get_all_permissions_async, get_all_features, get_all_roles
+    from core.permissions import (
+        get_all_features, get_all_permissions_async, get_all_presets, get_all_roles,
+    )
 
     permissions = await get_all_permissions_async()
     features = get_all_features()
     roles = get_all_roles()
 
-    return {"permissions": permissions, "features": features, "roles": roles}
+    # The tab checklist and its preset buttons are drawn from the same two
+    # lists the bot draws its keyboard from, so a tab added in
+    # `core/permissions.py` appears in both without either being edited.
+    return {
+        "permissions": permissions,
+        "features": features,
+        "roles": roles,
+        "tabs": [f["key"] for f in features if f.get("tab")],
+        "presets": get_all_presets(),
+    }
 
 
 @router.patch("/admin/permissions")

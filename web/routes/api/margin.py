@@ -1,16 +1,27 @@
 """Margin analysis API endpoints.
 
-Admin-only. These return cost, margin, GMROI and low-margin alerts — the same
-class of sensitive data as expenses. The frontend gates the whole page behind
-``<AdminGuard>`` (web/frontend/src/App.tsx); every endpoint here stacks
-``Depends(require_admin)`` on top of the inherited ``api_gate`` so the server
-enforces the same intent, not merely a valid session.
+These return cost, margin, GMROI and low-margin alerts — the same class of
+sensitive data as expenses, and until 2026-09-07 the only way to see them was
+to be an admin: every endpoint here stacked an admin dependency and the page
+sat behind ``<AdminGuard>``.
+
+It is a **permission** now — `margin`, gated once at the include in
+`web/routes/api/__init__.py` — for the reason the `sms` split gives: the only
+way to let somebody read the profit numbers was to hand them user management,
+the internal `sales_type` and the warehouse controls along with it. Nobody's
+access changes by itself: `margin` is granted to the admin role alone in
+`ROLE_PERMISSIONS`, so an account that could not open this yesterday still
+cannot. What is new is that it can be ticked for one person without making
+them an admin.
+
+The router-level dependency replaces the per-endpoint one deliberately — two
+gates on the same route, one saying "admin" and one saying "whoever holds this
+tab", is a rule with two homes where the stricter one wins by accident.
 """
 import logging
-from fastapi import APIRouter, Query, Request, HTTPException, Depends
+from fastapi import APIRouter, Query, Request, HTTPException
 from typing import Optional
 
-from web.routes.auth import require_admin
 from web.services import margin_service
 from ._deps import limiter, validate_period, validate_sales_type, ValidationError
 
@@ -26,7 +37,6 @@ async def get_margin_overview(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
-    admin: dict = Depends(require_admin),
 ):
     """Get overall margin KPIs."""
     try:
@@ -48,7 +58,6 @@ async def get_margin_by_brand(
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
     limit: int = Query(20, ge=1, le=50),
-    admin: dict = Depends(require_admin),
 ):
     """Get margin breakdown by brand."""
     try:
@@ -69,7 +78,6 @@ async def get_margin_by_category(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
-    admin: dict = Depends(require_admin),
 ):
     """Get margin breakdown by category."""
     try:
@@ -90,7 +98,6 @@ async def get_margin_trend(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
-    admin: dict = Depends(require_admin),
 ):
     """Get monthly margin trend."""
     try:
@@ -112,7 +119,6 @@ async def get_margin_brand_category(
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
     min_revenue: float = Query(500, ge=0),
-    admin: dict = Depends(require_admin),
 ):
     """Get brand × category margin cross-tab."""
     try:
@@ -134,7 +140,6 @@ async def get_margin_alerts(
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
     margin_floor: float = Query(30.0, ge=0, le=100),
-    admin: dict = Depends(require_admin),
 ):
     """Get low-margin brand alerts."""
     try:

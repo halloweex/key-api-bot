@@ -1,7 +1,13 @@
 import { memo } from 'react'
-import type { AdminUser, UserRole, UserStatus } from '../types/api'
+import { useTranslation } from 'react-i18next'
+import { ChevronDown, ChevronRight } from 'lucide-react'
+import type {
+  AccessPreset, AdminUser, TabFeature, UserRole, UserStatus,
+} from '../types/api'
 import { BadgeSelect } from './BadgeSelect'
 import { Tr, Td } from './DataTable'
+import { UserAccessEditor } from './UserAccessEditor'
+import { tabSummary } from '../utils/access'
 import { UserAvatar } from './UserAvatar'
 
 type Tone = 'purple' | 'blue' | 'slate' | 'green' | 'yellow' | 'red'
@@ -40,6 +46,13 @@ interface UserRowProps {
   user: AdminUser
   onRoleChange: (userId: number, role: UserRole) => void
   onStatusChange: (userId: number, status: UserStatus) => void
+  onFeaturesChange: (userId: number, features: TabFeature[] | null) => void
+  onPreset: (userId: number, preset: string) => void
+  /** Open the tab editor under this row. */
+  expanded: boolean
+  onToggleExpanded: (userId: number) => void
+  tabs?: readonly TabFeature[]
+  presets?: AccessPreset[]
   isUpdating: boolean
 }
 
@@ -47,8 +60,15 @@ export const UserRow = memo(function UserRow({
   user,
   onRoleChange,
   onStatusChange,
+  onFeaturesChange,
+  onPreset,
+  expanded,
+  onToggleExpanded,
+  tabs,
+  presets,
   isUpdating,
 }: UserRowProps) {
+  const { t } = useTranslation()
   const displayName = user.first_name
     ? `${user.first_name}${user.last_name ? ` ${user.last_name}` : ''}`
     : user.username
@@ -59,7 +79,15 @@ export const UserRow = memo(function UserRow({
     ? new Date(user.last_activity).toLocaleDateString()
     : 'Never'
 
+  const summary = tabSummary(
+    user.allowed_features,
+    (tab) => t(`access.tab.${tab}`),
+    t('access.asRole'),
+    t('access.noTabs'),
+  )
+
   return (
+    <>
     <Tr variant="admin" faded={isUpdating}>
       <Td variant="admin">
         <div className="flex items-center gap-3">
@@ -95,8 +123,42 @@ export const UserRow = memo(function UserRow({
       </Td>
 
       <Td variant="admin">
+        {/* The summary is the control: reading "Traffic" beside somebody's
+            name is the answer to "what can they see", and the chevron is how
+            you change it. A second dropdown here would not fit a set. */}
+        <button
+          type="button"
+          onClick={() => onToggleExpanded(user.user_id)}
+          disabled={isUpdating}
+          aria-expanded={expanded}
+          className="flex items-center gap-1.5 text-sm text-slate-600 hover:text-slate-900 disabled:opacity-50"
+        >
+          {expanded
+            ? <ChevronDown className="w-4 h-4 shrink-0" aria-hidden />
+            : <ChevronRight className="w-4 h-4 shrink-0" aria-hidden />}
+          <span className="text-left">{summary}</span>
+        </button>
+      </Td>
+
+      <Td variant="admin">
         <span className="text-sm text-slate-600">{lastActivity}</span>
       </Td>
     </Tr>
+
+    {expanded && (
+      <Tr variant="admin" hover={false} faded={isUpdating}>
+        <Td variant="admin" colSpan={5}>
+          <UserAccessEditor
+            value={user.allowed_features}
+            tabs={tabs}
+            presets={presets}
+            disabled={isUpdating}
+            onChange={(features) => onFeaturesChange(user.user_id, features)}
+            onPreset={(preset) => onPreset(user.user_id, preset)}
+          />
+        </Td>
+      </Tr>
+    )}
+    </>
   )
 })

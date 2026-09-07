@@ -73,7 +73,17 @@ export const SidebarRail = memo(function SidebarRail() {
   const { user, isAuthenticated } = useAuth()
   const displayName = useUserDisplayName()
   const isAdmin = user?.role === 'admin'
-  // SMS is a permission of its own: a marketer sees the page without being an admin.
+  // Every tab is a permission of its own, and the sidebar asks about each one.
+  // Not cosmetic: an admin can give one account /traffic alone, and a link to
+  // a page that answers 403 is worse than no link — it reads as a broken
+  // dashboard rather than as a permission somebody chose.
+  const { canView: canDashboard } = usePermission('dashboard')
+  const { canView: canProducts } = usePermission('products')
+  const { canView: canTraffic } = usePermission('traffic')
+  const { canView: canInventory } = usePermission('inventory')
+  const { canView: canReports } = usePermission('reports')
+  const { canView: canMarketing } = usePermission('marketing')
+  const { canView: canMargin } = usePermission('margin')
   const { canView: canSms } = usePermission('sms')
 
   // Health check for version
@@ -195,12 +205,27 @@ export const SidebarRail = memo(function SidebarRail() {
         className={`absolute top-14 left-0 right-0 hidden sm:flex flex-col items-center gap-1 pt-2 px-1
           ${isOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
       >
-        <CollapsedNavIcon href="/" icon={BarChart3} label={t('nav.salesDashboard')} />
-        <CollapsedNavIcon href="/products" icon={Lightbulb} label={t('nav.productIntelligence')} />
-        <CollapsedNavIcon href="/traffic" icon={Activity} label={t('nav.trafficAnalytics')} />
-        <CollapsedNavIcon href="/inventory" icon={Box} label={t('nav.inventory')} />
-        <CollapsedNavIcon href="/reports" icon={ClipboardList} label={t('nav.reports')} />
-        <CollapsedNavIcon href="/marketing" icon={Rocket} label={t('nav.marketing')} />
+        {canDashboard && (
+          <CollapsedNavIcon href="/" icon={BarChart3} label={t('nav.salesDashboard')} />
+        )}
+        {canProducts && (
+          <CollapsedNavIcon href="/products" icon={Lightbulb} label={t('nav.productIntelligence')} />
+        )}
+        {canTraffic && (
+          <CollapsedNavIcon href="/traffic" icon={Activity} label={t('nav.trafficAnalytics')} />
+        )}
+        {canInventory && (
+          <CollapsedNavIcon href="/inventory" icon={Box} label={t('nav.inventory')} />
+        )}
+        {canReports && (
+          <CollapsedNavIcon href="/reports" icon={ClipboardList} label={t('nav.reports')} />
+        )}
+        {canMarketing && (
+          <CollapsedNavIcon href="/marketing" icon={Rocket} label={t('nav.marketing')} />
+        )}
+        {canMargin && (
+          <CollapsedNavIcon href="/margin" icon={Percent} label={t('nav.margin')} />
+        )}
         {canSms && (
           <CollapsedNavIcon href="/sms" icon={MessageSquare} label={t('nav.smsCampaigns')} />
         )}
@@ -213,24 +238,41 @@ export const SidebarRail = memo(function SidebarRail() {
       >
         {/* Main navigation */}
         <nav className="space-y-1" aria-label="Dashboard pages">
-          <NavLink href="/" icon={BarChart3}>
-            {t('nav.salesDashboard')}
-          </NavLink>
-          <NavLink href="/products" icon={Lightbulb}>
-            {t('nav.productIntelligence')}
-          </NavLink>
-          <NavLink href="/traffic" icon={Activity}>
-            {t('nav.trafficAnalytics')}
-          </NavLink>
-          <NavLink href="/inventory" icon={Box}>
-            {t('nav.inventory')}
-          </NavLink>
-          <NavLink href="/reports" icon={ClipboardList}>
-            {t('nav.reports')}
-          </NavLink>
-          <NavLink href="/marketing" icon={Rocket}>
-            {t('nav.marketing')}
-          </NavLink>
+          {canDashboard && (
+            <NavLink href="/" icon={BarChart3}>
+              {t('nav.salesDashboard')}
+            </NavLink>
+          )}
+          {canProducts && (
+            <NavLink href="/products" icon={Lightbulb}>
+              {t('nav.productIntelligence')}
+            </NavLink>
+          )}
+          {canTraffic && (
+            <NavLink href="/traffic" icon={Activity}>
+              {t('nav.trafficAnalytics')}
+            </NavLink>
+          )}
+          {canInventory && (
+            <NavLink href="/inventory" icon={Box}>
+              {t('nav.inventory')}
+            </NavLink>
+          )}
+          {canReports && (
+            <NavLink href="/reports" icon={ClipboardList}>
+              {t('nav.reports')}
+            </NavLink>
+          )}
+          {canMarketing && (
+            <NavLink href="/marketing" icon={Rocket}>
+              {t('nav.marketing')}
+            </NavLink>
+          )}
+          {canMargin && (
+            <NavLink href="/margin" icon={Percent}>
+              {t('nav.margin')}
+            </NavLink>
+          )}
           {canSms && (
             <NavLink href="/sms" icon={MessageSquare}>
               {t('nav.smsCampaigns')}
@@ -253,9 +295,6 @@ export const SidebarRail = memo(function SidebarRail() {
               </NavLink>
               <NavLink href="/admin/permissions" icon={ShieldCheck}>
                 {t('nav.permissions')}
-              </NavLink>
-              <NavLink href="/margin" icon={Percent}>
-                {t('nav.margin')}
               </NavLink>
             </nav>
           </div>

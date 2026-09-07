@@ -1347,7 +1347,11 @@ class DuckDBStore(
             reviewed_by BIGINT,
             last_activity TIMESTAMP WITH TIME ZONE,
             denial_count INTEGER DEFAULT 0,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            -- Which tabs this person may open, comma-separated, or NULL for
+            -- "whatever the role gives". See core/dashboard_access.py; the
+            -- Postgres twin is revision 0021.
+            allowed_features VARCHAR
         );
 
         CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);

@@ -145,14 +145,14 @@ class TestTheTableIsWhereItsMeaningPutsIt:
         """`REQUIRED_REVISION` is what makes deploying `web` before `migrate`
         fail closed instead of writing into a table that is not there.
 
-        The pin moves with the head migration — 0020 since `/expenses` got the
-        order-level costs and their dictionary — and this assertion is the
+        The pin moves with the head migration — 0021 since the dashboard's
+        user rows gained the tab set an admin ticks — and this assertion is the
         speed bump that makes the move a decision rather than a side effect.
 
         Moving it obliges the deploy to run `migrate` before `web`, which
         `docker compose up -d` does and the workflow then checks with
         `docker wait ks-migrate`."""
-        assert pg.REQUIRED_REVISION == "0020_expenses"
+        assert pg.REQUIRED_REVISION == "0021_user_allowed_features"
 
     def test_money_keeps_the_scale_it_has_everywhere_else(self):
         """NUMERIC(12,2), as in `bronze.orders` and as DECIMAL(12,2) in DuckDB.

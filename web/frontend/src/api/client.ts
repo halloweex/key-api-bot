@@ -47,6 +47,8 @@ import type {
   UserStatus,
   PermissionsMatrixResponse,
   UpdatePermissionResponse,
+  UpdateUserFeaturesResponse,
+  TabFeature,
   TrafficAnalyticsResponse,
   TrafficTrendResponse,
   TrafficTransactionsResponse,
@@ -668,6 +670,30 @@ export const api = {
     fetchApiMutation<{ success: boolean; user_id: number; status: UserStatus }>(
       `/admin/users/${userId}/status?status=${status}`,
       'PATCH',
+      options
+    ),
+
+  // Which tabs one account may open. `null` clears the override and the
+  // account goes back to whatever its role shows — which is not the same as
+  // an empty array, "no tabs at all", so the two must stay distinguishable
+  // all the way to the server. That is why this is a body and not a query.
+  updateUserFeatures: (
+    userId: number,
+    features: TabFeature[] | null,
+    options?: FetchOptions
+  ) =>
+    fetchApiMutationWithBody<UpdateUserFeaturesResponse>(
+      `/admin/users/${userId}/features`,
+      'PATCH',
+      { features },
+      options
+    ),
+
+  applyUserPreset: (userId: number, preset: string, options?: FetchOptions) =>
+    fetchApiMutationWithBody<UpdateUserFeaturesResponse>(
+      `/admin/users/${userId}/features`,
+      'PATCH',
+      { preset },
       options
     ),
 

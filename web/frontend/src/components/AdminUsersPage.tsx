@@ -7,7 +7,7 @@ import { useState } from 'react'
 import { ShieldCheck, ArrowLeft } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
-import type { UserRole, UserStatus } from '../types/api'
+import type { TabFeature, UserRole, UserStatus } from '../types/api'
 import { Card, CardHeader, CardTitle, CardContent } from './Card'
 import { Select } from './Select'
 import { SkeletonTable } from './Skeleton'
@@ -25,6 +25,19 @@ export function AdminUsersPage() {
   const [statusFilter, setStatusFilter] = useState<string | null>(null)
   const [roleFilter, setRoleFilter] = useState<string | null>(null)
   const [updatingUsers, setUpdatingUsers] = useState<Set<number>>(new Set())
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
+
+  // The grantable tabs and the ready-made bundles, from the server rather than
+  // from a copy compiled into the page: a tab added in `core/permissions.py`
+  // has to appear here without a frontend release, or the checklist and the
+  // bot's keyboard drift apart.
+  const { data: matrix } = useQuery({
+    // Same key the permissions page uses: one endpoint, one cache entry —
+    // two would go stale independently of each other.
+    queryKey: ['adminPermissions'],
+    queryFn: () => api.getPermissionsMatrix(),
+    staleTime: 10 * 60 * 1000,
+  })
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['adminUsers', statusFilter, roleFilter],
@@ -71,8 +84,52 @@ export function AdminUsersPage() {
     },
   })
 
+  const updateFeaturesMutation = useMutation({
+    mutationFn: ({ userId, features, preset }: {
+      userId: number
+      features?: TabFeature[] | null
+      preset?: string
+    }) =>
+      preset !== undefined
+        ? api.applyUserPreset(userId, preset)
+        : api.updateUserFeatures(userId, features ?? null),
+    onMutate: ({ userId }) => {
+      setUpdatingUsers((prev) => new Set(prev).add(userId))
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['adminUsers'] })
+      // The admin may be editing their own row, and the sidebar reads the same
+      // answer — without this the nav keeps the tabs it drew a minute ago.
+      queryClient.invalidateQueries({ queryKey: ['currentUser'] })
+    },
+    onSettled: (_, __, { userId }) => {
+      setUpdatingUsers((prev) => {
+        const next = new Set(prev)
+        next.delete(userId)
+        return next
+      })
+    },
+  })
+
   const handleRoleChange = (userId: number, role: UserRole) => {
     updateRoleMutation.mutate({ userId, role })
+  }
+
+  const handleFeaturesChange = (userId: number, features: TabFeature[] | null) => {
+    updateFeaturesMutation.mutate({ userId, features })
+  }
+
+  const handlePreset = (userId: number, preset: string) => {
+    updateFeaturesMutation.mutate({ userId, preset })
+  }
+
+  const handleToggleExpanded = (userId: number) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(userId)) next.delete(userId)
+      else next.add(userId)
+      return next
+    })
   }
 
   const handleStatusChange = (userId: number, status: UserStatus) => {
@@ -140,6 +197,7 @@ export function AdminUsersPage() {
                   <Th variant="admin" sticky>User</Th>
                   <Th variant="admin" sticky>Role</Th>
                   <Th variant="admin" sticky>Status</Th>
+                  <Th variant="admin" sticky>Tabs</Th>
                   <Th variant="admin" sticky>Last Activity</Th>
                 </Tr>
               </thead>
@@ -150,6 +208,12 @@ export function AdminUsersPage() {
                     user={user}
                     onRoleChange={handleRoleChange}
                     onStatusChange={handleStatusChange}
+                    onFeaturesChange={handleFeaturesChange}
+                    onPreset={handlePreset}
+                    expanded={expanded.has(user.user_id)}
+                    onToggleExpanded={handleToggleExpanded}
+                    tabs={matrix?.tabs}
+                    presets={matrix?.presets}
                     isUpdating={updatingUsers.has(user.user_id)}
                   />
                 ))}

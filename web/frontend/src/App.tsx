@@ -47,9 +47,11 @@ function App() {
   if (path === '/v2/traffic' || path === '/traffic') {
     return (
       <AppShell>
-        <Suspense fallback={<Spinner />}>
-          <TrafficPage />
-        </Suspense>
+        <PermissionGuard feature="traffic">
+          <Suspense fallback={<Spinner />}>
+            <TrafficPage />
+          </Suspense>
+        </PermissionGuard>
       </AppShell>
     )
   }
@@ -58,9 +60,11 @@ function App() {
   if (path === '/v2/products' || path === '/products') {
     return (
       <AppShell>
-        <Suspense fallback={<Spinner />}>
-          <ProductIntelPage />
-        </Suspense>
+        <PermissionGuard feature="products">
+          <Suspense fallback={<Spinner />}>
+            <ProductIntelPage />
+          </Suspense>
+        </PermissionGuard>
       </AppShell>
     )
   }
@@ -69,9 +73,11 @@ function App() {
   if (path === '/v2/inventory' || path === '/inventory') {
     return (
       <AppShell>
-        <Suspense fallback={<Spinner />}>
-          <InventoryPage />
-        </Suspense>
+        <PermissionGuard feature="inventory">
+          <Suspense fallback={<Spinner />}>
+            <InventoryPage />
+          </Suspense>
+        </PermissionGuard>
       </AppShell>
     )
   }
@@ -80,22 +86,26 @@ function App() {
   if (path === '/v2/marketing' || path === '/marketing') {
     return (
       <AppShell>
-        <Suspense fallback={<Spinner />}>
-          <MarketingPage />
-        </Suspense>
+        <PermissionGuard feature="marketing">
+          <Suspense fallback={<Spinner />}>
+            <MarketingPage />
+          </Suspense>
+        </PermissionGuard>
       </AppShell>
     )
   }
 
-  // Margin Analysis (admin only — guard inside AppShell to keep sidebar)
+  // Margin analysis. Cost and profit, so only the admin role holds it by
+  // default — but it is a permission now rather than a role check, which is
+  // what lets one person be given it without being made an admin.
   if (path === '/v2/margin' || path === '/margin') {
     return (
       <AppShell>
-        <AdminGuard>
+        <PermissionGuard feature="margin">
           <Suspense fallback={<Spinner />}>
             <MarginPage />
           </Suspense>
-        </AdminGuard>
+        </PermissionGuard>
       </AppShell>
     )
   }
@@ -118,17 +128,22 @@ function App() {
   if (path === '/v2/reports' || path === '/reports') {
     return (
       <AppShell>
-        <Suspense fallback={<Spinner />}>
-          <ReportsPage />
-        </Suspense>
+        <PermissionGuard feature="reports">
+          <Suspense fallback={<Spinner />}>
+            <ReportsPage />
+          </Suspense>
+        </PermissionGuard>
       </AppShell>
     )
   }
 
-  // Default: Dashboard
+  // Default: Dashboard. Guarded like every other tab — an account granted
+  // /traffic alone lands here first and is sent on to the page it can open.
   return (
     <AppShell>
-      <Dashboard />
+      <PermissionGuard feature="dashboard">
+        <Dashboard />
+      </PermissionGuard>
     </AppShell>
   )
 }

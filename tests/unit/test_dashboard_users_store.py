@@ -108,7 +108,13 @@ class TestTheReplicationStandsDown:
 
 def _migration_columns() -> list[str]:
     """Parsed from the DDL. A grep is satisfied by a comment naming a column,
-    which is the failure this repository has hit six times."""
+    which is the failure this repository has hit six times.
+
+    The table is 0016's `CREATE TABLE` **plus every `ALTER TABLE ... ADD
+    COLUMN` since** — `allowed_features` arrived that way in 0021, and a parser
+    that read only the create statement would report a shipped column as
+    undeclared and teach whoever hit it to loosen the assertion.
+    """
     body = MIGRATION.read_text(encoding="utf-8").split(
         "CREATE TABLE app.dashboard_users (", 1)[1]
     out = []
@@ -121,6 +127,19 @@ def _migration_columns() -> list[str]:
         m = re.match(r"^([a-z_]+)\s+(TEXT|BIGINT|INTEGER|TIMESTAMPTZ)", line)
         if m:
             out.append(m.group(1))
+
+    added = re.compile(
+        r"ALTER\s+TABLE\s+app\.dashboard_users\s+ADD\s+COLUMN\s+"
+        r"(?:IF\s+NOT\s+EXISTS\s+)?([a-z_]+)\s+(TEXT|BIGINT|INTEGER|TIMESTAMPTZ)",
+        re.IGNORECASE,
+    )
+    for path in sorted(MIGRATION.parent.glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        # `upgrade()` only: a downgrade drops the column it names.
+        if "def upgrade" not in text:
+            continue
+        upgrade = text.split("def upgrade", 1)[1].split("def downgrade", 1)[0]
+        out.extend(m.group(1) for m in added.finditer(upgrade))
     return out
 
 

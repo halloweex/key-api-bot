@@ -51,7 +51,9 @@ and counts as `int`.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import (
+    Any, Dict, List, Optional, Protocol, Sequence, Tuple, runtime_checkable,
+)
 
 
 @runtime_checkable
@@ -172,13 +174,65 @@ class ShortLivedCache(Protocol):
 
 
 @runtime_checkable
+class DashboardTabs(Protocol):
+    """Which tabs a person may open on the **dashboard** — not on the bot.
+
+    A different list from `AccessControl`, and deliberately so: `app.authorized_users`
+    is who may talk to the bot, `app.dashboard_users` is who may open the web
+    dashboard and as what, and on the day the second one was created the two
+    disagreed about twelve of sixteen people (migration 0016 has the numbers).
+    Merging them is the owner's decision and is not taken here.
+
+    It is in this port because the bot writes it at exactly one moment — an
+    admin approving an access request also chooses the tabs — and that write
+    must go through the same pool and the same loop thread as everything else
+    the bot stores. A second, unmanaged path to the database from inside the
+    bot is what `tests/unit/test_pg_bot_state.py` watches for, and it would be
+    right to.
+
+    `available()` is the honest half. DuckDB takes a single writer and the web
+    container holds it, so under `KS_USER_STORE=duckdb` no bot process can
+    reach the dashboard's user list at all; the adapter says so and the
+    approval still happens, with the tabs set from the admin page instead.
+    """
+
+    def available(self) -> bool:
+        """Can this store reach the dashboard's user list at all?"""
+
+    def get(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """The row, with `allowed_features` already parsed to a list of tab
+        keys — or None for "as the role". None for the whole row means the
+        person has never opened the dashboard and has no record there yet."""
+
+    def grant(
+        self, user_id: int, admin_id: int,
+        features: Optional[Sequence[str]] = None,
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+    ) -> bool:
+        """Approve dashboard access and set the tab set in one statement.
+
+        Not two: between an insert and an update the person is approved with
+        somebody else's tabs, and the bot tells them they have access in that
+        same second. The role is never touched — approving is not a statement
+        about what somebody is."""
+
+    def set_features(
+        self, user_id: int, features: Optional[Sequence[str]], admin_id: int,
+    ) -> bool:
+        """Change the tab set of an existing row. False if there is none."""
+
+
+@runtime_checkable
 class BotStore(Protocol):
-    """The four aggregates, which are the four tables plus the cache."""
+    """The five aggregates: four tables, the cache, and the dashboard's list."""
 
     access: AccessControl
     preferences: Preferences
     milestones: Milestones
     cache: ShortLivedCache
+    dashboard: DashboardTabs
 
     def initialise(self) -> None:
         """Make the store ready to be written to. Idempotent."""

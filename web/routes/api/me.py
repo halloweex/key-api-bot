@@ -7,10 +7,10 @@ via inline ``get_current_user`` checks. Moved here so they sit under the
 import logging
 from fastapi import APIRouter, Request, HTTPException, Depends
 
-from web.routes.auth import require_user
+from web.routes.auth import effective_permissions, require_user
 from core.bot_prefs import default_language_for, read_language, write_language
 from core.config import ADMIN_USER_IDS
-from core.permissions import get_permissions_for_role_async
+from core.permissions import is_hardcoded_admin
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,21 @@ async def get_current_user_info(user: dict = Depends(require_user)):
     user_id = user.get("user_id")
     role = user.get("role", "viewer")
 
-    permissions = await get_permissions_for_role_async(role)
+    # The role's matrix narrowed to this person's tab set. A hardcoded admin
+    # short-circuits every gate on the server (`is_hardcoded_admin`), so the
+    # page must be told the same thing — otherwise the sidebar hides tabs the
+    # API would happily serve, which reads as a broken dashboard rather than
+    # as a permission.
+    permissions = await effective_permissions(user)
+    allowed_features = user.get("allowed_features")
+    if is_hardcoded_admin(user_id):
+        from core.permissions import Feature
+
+        permissions = {
+            feature.value: {"view": True, "edit": True, "delete": True}
+            for feature in Feature
+        }
+        allowed_features = None
 
     # The bot's SQLite, not DuckDB. Both databases declare a `user_preferences`
     # table with the same columns, and until 2026-08-20 this endpoint used the
@@ -55,6 +69,10 @@ async def get_current_user_info(user: dict = Depends(require_user)):
             "role": role,
         },
         "permissions": permissions,
+        # What the admin ticked, or null for "as the role". The page shows it
+        # nowhere; it is here so the nav can say *why* a tab is missing and so
+        # the admin screens do not need a second round trip to find out.
+        "allowed_features": allowed_features,
         "preferences": preferences,
     }
 

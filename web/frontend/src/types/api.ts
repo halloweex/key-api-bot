@@ -893,7 +893,24 @@ export interface Permissions {
   reports: FeaturePermissions
   user_management: FeaturePermissions
   sms: FeaturePermissions
+  // The four pages that had no permission of their own until per-user tab
+  // access existed. `margin` used to be gated on the admin role.
+  traffic: FeaturePermissions
+  products: FeaturePermissions
+  marketing: FeaturePermissions
+  margin: FeaturePermissions
 }
+
+// The features that are a page somebody can be given or denied on its own.
+// Mirrors `core.permissions.TAB_FEATURES`, in the sidebar's order; the server
+// also sends the list (`PermissionsMatrixResponse.tabs`), and this is the type
+// the components index by.
+export const TAB_FEATURES = [
+  'dashboard', 'products', 'traffic', 'inventory', 'reports',
+  'marketing', 'margin', 'expenses', 'sms',
+] as const
+
+export type TabFeature = (typeof TAB_FEATURES)[number]
 
 export interface UserPreferences {
   language: string
@@ -902,6 +919,8 @@ export interface UserPreferences {
 export interface CurrentUserResponse {
   user: User
   permissions: Permissions
+  /** The tabs an admin ticked for this account, or null for "as the role". */
+  allowed_features?: TabFeature[] | null
   preferences?: UserPreferences
 }
 
@@ -923,6 +942,8 @@ export interface AdminUser {
   last_activity: string | null
   denial_count: number
   created_at: string | null
+  /** Which tabs this account may open. `null` means "whatever the role gives". */
+  allowed_features: TabFeature[] | null
 }
 
 export interface AdminUsersResponse {
@@ -936,6 +957,14 @@ export interface FeatureInfo {
   key: string
   name: string
   description: string
+  /** True when the feature is a page that can be granted on its own. */
+  tab?: boolean
+  path?: string | null
+}
+
+export interface AccessPreset {
+  key: string
+  features: TabFeature[]
 }
 
 export interface RoleInfo {
@@ -948,6 +977,14 @@ export interface PermissionsMatrixResponse {
   permissions: Record<UserRole, Record<string, FeaturePermissions>>
   features: FeatureInfo[]
   roles: RoleInfo[]
+  tabs: TabFeature[]
+  presets: AccessPreset[]
+}
+
+export interface UpdateUserFeaturesResponse {
+  success: boolean
+  user_id: number
+  allowed_features: TabFeature[] | null
 }
 
 export interface UpdatePermissionResponse {

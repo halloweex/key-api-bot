@@ -6,7 +6,7 @@ DB permissions take precedence when available.
 """
 import logging
 from enum import Enum
-from typing import Dict, Set, Optional
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,22 @@ class Role(str, Enum):
 
 
 class Feature(str, Enum):
-    """Protected features."""
+    """Protected features.
+
+    Most of these are **tabs** — one page in the sidebar, one entry in
+    ``TAB_FEATURES``, one gate on the endpoints behind it. Until 2026-09-07
+    only ``expenses`` and ``sms`` were actually enforced on the server and the
+    other pages were reachable by any approved user; ``traffic``, ``products``,
+    ``marketing`` and ``margin`` did not exist as features at all, which is why
+    "open only the traffic tab to this person" could not be expressed.
+
+    Three members are **not** tabs and are marked so in ``TAB_FEATURES``'s
+    absence: ``analytics`` and ``customers`` gate nothing today and are kept
+    because turning off a stored permission row is a decision somebody made,
+    and ``user_management`` describes the admin pages, which are gated on the
+    admin *role* — a checkbox must never be the way somebody gets the keys to
+    the access system itself.
+    """
     DASHBOARD = "dashboard"
     EXPENSES = "expenses"
     INVENTORY = "inventory"
@@ -37,6 +52,14 @@ class Feature(str, Enum):
     # is the roster sizes and past results; `edit` is what leaves the building
     # — the CSV of names and phone numbers, and the send itself.
     SMS = "sms"
+    # The four pages that had no feature of their own. Their role defaults
+    # below reproduce exactly what each role could reach the day before this
+    # existed: everybody saw traffic, products and marketing, and /margin was
+    # behind the admin role.
+    TRAFFIC = "traffic"
+    PRODUCTS = "products"
+    MARKETING = "marketing"
+    MARGIN = "margin"
 
 
 class Action(str, Enum):
@@ -60,6 +83,10 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         Feature.REPORTS: {Action.VIEW, Action.EDIT},
         Feature.USER_MANAGEMENT: {Action.VIEW, Action.EDIT, Action.DELETE},
         Feature.SMS: {Action.VIEW, Action.EDIT},
+        Feature.TRAFFIC: {Action.VIEW, Action.EDIT},
+        Feature.PRODUCTS: {Action.VIEW},
+        Feature.MARKETING: {Action.VIEW, Action.EDIT},
+        Feature.MARGIN: {Action.VIEW},
     },
     Role.EDITOR: {
         Feature.DASHBOARD: {Action.VIEW, Action.EDIT},
@@ -70,6 +97,13 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         Feature.REPORTS: {Action.VIEW},
         Feature.USER_MANAGEMENT: set(),
         Feature.SMS: set(),
+        Feature.TRAFFIC: {Action.VIEW},
+        Feature.PRODUCTS: {Action.VIEW},
+        Feature.MARKETING: {Action.VIEW},
+        # Cost price and profit. Admin-only before this existed, and left so:
+        # a role default is what everybody with the role gets, and this is the
+        # one tab that was deliberately narrower than "approved".
+        Feature.MARGIN: set(),
     },
     # Everything a viewer has, plus SMS campaigns — deliberately spelled out
     # rather than derived from VIEWER, because a copy that drifts is visible
@@ -83,6 +117,10 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         Feature.REPORTS: {Action.VIEW},
         Feature.USER_MANAGEMENT: set(),
         Feature.SMS: {Action.VIEW, Action.EDIT},
+        Feature.TRAFFIC: {Action.VIEW},
+        Feature.PRODUCTS: {Action.VIEW},
+        Feature.MARKETING: {Action.VIEW},
+        Feature.MARGIN: set(),
     },
     Role.VIEWER: {
         Feature.DASHBOARD: {Action.VIEW},
@@ -93,6 +131,10 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
         Feature.REPORTS: {Action.VIEW},
         Feature.USER_MANAGEMENT: set(),
         Feature.SMS: set(),
+        Feature.TRAFFIC: {Action.VIEW},
+        Feature.PRODUCTS: {Action.VIEW},
+        Feature.MARKETING: {Action.VIEW},
+        Feature.MARGIN: set(),
     },
 }
 
@@ -142,17 +184,180 @@ def get_permissions_for_role(role: str) -> Dict[str, Dict[str, bool]]:
     return result
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TABS, AND THE SET ONE PERSON MAY SEE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# The features that are a page in the sidebar, in the order they appear there.
+# Everything about per-user access — the checklist in the admin page, the
+# keyboard the bot draws on approval, the override applied to a session — reads
+# this tuple, so a tab added to one of those three is added to all of them by
+# adding it here.
+#
+# `user_management` is deliberately absent: the admin pages are gated on the
+# admin *role*, and a checkbox that hands somebody the access system itself
+# would make every other rule here advisory. `analytics` and `customers` are
+# absent because they gate nothing — they are stored matrix rows, not pages.
+TAB_FEATURES: tuple = (
+    Feature.DASHBOARD,
+    Feature.PRODUCTS,
+    Feature.TRAFFIC,
+    Feature.INVENTORY,
+    Feature.REPORTS,
+    Feature.MARKETING,
+    Feature.MARGIN,
+    Feature.EXPENSES,
+    Feature.SMS,
+)
+
+TAB_FEATURE_KEYS: tuple = tuple(f.value for f in TAB_FEATURES)
+
+# Ready-made bundles the admin picks with one tap — in the bot on approval, and
+# as buttons above the checklist in the admin page. They live **in code**, like
+# `BUILTIN_AUDIENCE_PRESETS`, and for the same reason: a preset stored in a
+# table can be edited into something that no longer means what it meant when
+# somebody was granted it, and the bot would then need a second store to read
+# before it could draw a keyboard.
+#
+# `standard` is what a viewer could reach the day before per-user access
+# existed, and it is what an approval grants when the admin taps nothing. That
+# is the whole reason it is spelled out rather than derived: the default has to
+# be a decision that survives somebody changing the viewer role.
+ACCESS_PRESETS: Dict[str, tuple] = {
+    "full": TAB_FEATURE_KEYS,
+    "standard": (
+        Feature.DASHBOARD.value,
+        Feature.PRODUCTS.value,
+        Feature.TRAFFIC.value,
+        Feature.INVENTORY.value,
+        Feature.REPORTS.value,
+        Feature.MARKETING.value,
+    ),
+    "traffic_only": (Feature.TRAFFIC.value,),
+    "marketing": (
+        Feature.MARKETING.value,
+        Feature.TRAFFIC.value,
+        Feature.REPORTS.value,
+    ),
+}
+
+DEFAULT_PRESET = "standard"
+
+
+def preset_features(name: str) -> Optional[List[str]]:
+    """The tab set a preset names, or None if there is no such preset."""
+    values = ACCESS_PRESETS.get(name)
+    return list(values) if values is not None else None
+
+
+def normalize_features(values: Optional[Iterable[str]]) -> Optional[List[str]]:
+    """Keep the known tab keys, in `TAB_FEATURES` order, without duplicates.
+
+    ``None`` means "this person has no override" and is passed through
+    untouched — it is the difference between *inherit the role* and *see
+    nothing*, and an empty list is a real state an admin can create.
+
+    Unknown keys are dropped rather than refused: the caller is a checklist
+    drawn from `TAB_FEATURE_KEYS`, and a key that is no longer a tab is a tab
+    that was removed, not an attack. What must never happen is a stored value
+    outside this set, because the override is read on every request and
+    compared by key.
+    """
+    if values is None:
+        return None
+    wanted = {str(v).strip().lower() for v in values}
+    return [key for key in TAB_FEATURE_KEYS if key in wanted]
+
+
+def parse_features(raw) -> Optional[List[str]]:
+    """Read the stored column: a comma-separated list, or NULL for "inherit"."""
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        return normalize_features(raw)
+    text = str(raw).strip()
+    if not text:
+        # An empty string is a stored, deliberate "no tabs at all" — see
+        # `serialize_features`, which writes one rather than a NULL.
+        return []
+    return normalize_features(text.split(","))
+
+
+def serialize_features(values: Optional[Iterable[str]]) -> Optional[str]:
+    """The column value for a tab set. ``None`` stays NULL — "as the role"."""
+    features = normalize_features(values)
+    if features is None:
+        return None
+    return ",".join(features)
+
+
+def apply_feature_override(
+    permissions: Dict[str, Dict[str, bool]],
+    allowed: Optional[Iterable[str]],
+) -> Dict[str, Dict[str, bool]]:
+    """Narrow (or widen) a role's permissions to one person's tab set.
+
+    The rule, in one sentence: **the checklist decides which tabs are visible,
+    the role decides what can be done inside them.**
+
+    So a tab that is ticked becomes viewable even if the role would not show it
+    — that is how "give this person traffic only" works without inventing a
+    role — while `edit` and `delete` still come from the role, and are dropped
+    along with a tab that is not ticked. The consequence worth stating out
+    loud: ticking `sms` for a viewer grants the roster *sizes*, never the CSV
+    of names and phone numbers nor the send, because those are `sms` **edit**
+    and no override grants an action.
+
+    Features that are not tabs are returned untouched. ``allowed=None`` returns
+    the role's permissions unchanged, which is what every account had before
+    this existed and what every account still has until somebody sets a set.
+    """
+    if allowed is None:
+        return permissions
+
+    granted = set(normalize_features(allowed) or ())
+    result = {}
+    for feature, actions in permissions.items():
+        if feature not in TAB_FEATURE_KEYS:
+            result[feature] = dict(actions)
+            continue
+        visible = feature in granted
+        result[feature] = {
+            "view": visible,
+            "edit": visible and bool(actions.get("edit")),
+            "delete": visible and bool(actions.get("delete")),
+        }
+    return result
+
+
 def get_all_features() -> list:
-    """Get list of all features with metadata."""
+    """Get list of all features with metadata.
+
+    ``tab`` says whether the feature is a page somebody can be given or denied
+    on its own — the admin checklist and the bot's keyboard are built from the
+    entries that carry it.
+    """
     return [
-        {"key": Feature.DASHBOARD.value, "name": "Dashboard", "description": "Main dashboard view"},
-        {"key": Feature.EXPENSES.value, "name": "Manual Expenses", "description": "View and manage expenses"},
-        {"key": Feature.INVENTORY.value, "name": "Inventory", "description": "Stock management"},
-        {"key": Feature.ANALYTICS.value, "name": "Analytics", "description": "Advanced analytics"},
-        {"key": Feature.CUSTOMERS.value, "name": "Customer Insights", "description": "Customer data"},
-        {"key": Feature.REPORTS.value, "name": "Reports", "description": "Export reports"},
-        {"key": Feature.USER_MANAGEMENT.value, "name": "User Management", "description": "Manage users"},
-        {"key": Feature.SMS.value, "name": "SMS Campaigns", "description": "Segment, export and send SMS campaigns"},
+        {"key": Feature.DASHBOARD.value, "name": "Dashboard", "description": "Main dashboard view", "tab": True, "path": "/"},
+        {"key": Feature.PRODUCTS.value, "name": "Product Intelligence", "description": "Baskets, pairs, momentum", "tab": True, "path": "/products"},
+        {"key": Feature.TRAFFIC.value, "name": "Traffic", "description": "UTM traffic, campaigns and ROAS", "tab": True, "path": "/traffic"},
+        {"key": Feature.INVENTORY.value, "name": "Inventory", "description": "Stock management", "tab": True, "path": "/inventory"},
+        {"key": Feature.REPORTS.value, "name": "Reports", "description": "Export reports", "tab": True, "path": "/reports"},
+        {"key": Feature.MARKETING.value, "name": "Marketing", "description": "Monthly report, promocodes, ROI", "tab": True, "path": "/marketing"},
+        {"key": Feature.MARGIN.value, "name": "Margin", "description": "Cost price and profit", "tab": True, "path": "/margin"},
+        {"key": Feature.EXPENSES.value, "name": "Manual Expenses", "description": "View and manage expenses", "tab": True, "path": None},
+        {"key": Feature.SMS.value, "name": "SMS Campaigns", "description": "Segment, export and send SMS campaigns", "tab": True, "path": "/sms"},
+        {"key": Feature.ANALYTICS.value, "name": "Analytics", "description": "Advanced analytics", "tab": False, "path": None},
+        {"key": Feature.CUSTOMERS.value, "name": "Customer Insights", "description": "Customer data", "tab": False, "path": None},
+        {"key": Feature.USER_MANAGEMENT.value, "name": "User Management", "description": "Manage users", "tab": False, "path": "/admin/users"},
+    ]
+
+
+def get_all_presets() -> list:
+    """The code-defined tab bundles, for the admin page and the bot."""
+    return [
+        {"key": name, "features": list(features)}
+        for name, features in ACCESS_PRESETS.items()
     ]
 
 

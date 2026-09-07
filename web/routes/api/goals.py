@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
-from web.routes.auth import require_admin
+from web.routes.auth import require_admin, require_permission
 from ._deps import limiter, get_store, validate_sales_type, ValidationError
 
 router = APIRouter()
@@ -13,6 +13,7 @@ router = APIRouter()
 async def get_goals(
     request: Request,
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get revenue goals for daily, weekly, and monthly periods."""
     try:
@@ -31,6 +32,7 @@ async def get_goal_history(
     period_type: str = Query(..., description="Period type: daily, weekly, or monthly"),
     weeks_back: int = Query(4, ge=1, le=12),
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get historical revenue data used for goal calculations."""
     if period_type not in ["daily", "weekly", "monthly"]:
@@ -90,6 +92,7 @@ async def get_smart_goals(
     sales_type: Optional[str] = Query("retail"),
     year: Optional[int] = Query(None, ge=2020, le=2030),
     month: Optional[int] = Query(None, ge=1, le=12),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get smart revenue goals using seasonality and YoY growth.
 
@@ -110,6 +113,7 @@ async def get_smart_goals(
 async def get_seasonality_data(
     request: Request,
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get monthly seasonality indices."""
     try:
@@ -130,6 +134,7 @@ async def get_seasonality_data(
 async def get_growth_data(
     request: Request,
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get year-over-year growth metrics."""
     try:
@@ -150,6 +155,7 @@ async def get_growth_data(
 async def get_weekly_patterns(
     request: Request,
     sales_type: Optional[str] = Query("retail"),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Get weekly distribution patterns within months."""
     try:
@@ -202,6 +208,7 @@ async def get_goal_forecast(
     month: int = Query(..., ge=1, le=12),
     sales_type: Optional[str] = Query("retail"),
     recalculate: bool = Query(False),
+    _gate=Depends(require_permission("dashboard")),
 ):
     """Generate smart goals for a specific future month.
 

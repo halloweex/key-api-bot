@@ -34,7 +34,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -520,14 +520,51 @@ class SqliteCache:
         return deleted
 
 
+class NoDashboardTabs:
+    """`dashboard`, when there is no way to reach it.
+
+    The dashboard's user list lives in DuckDB under `KS_USER_STORE=duckdb`, and
+    DuckDB takes a single writer that the web container holds — a bot process
+    cannot open that file at all. This is the same wall `core/bot_prefs.py`
+    documents from the other side.
+
+    So the answer is `available() -> False` and nothing else pretends. The
+    approval the admin taps still grants **bot** access, the person is still
+    told, and the tabs are set from the admin page — which the bot says in the
+    message rather than leaving the admin to wonder why no checklist appeared.
+    """
+
+    def available(self) -> bool:
+        return False
+
+    def get(self, user_id: int) -> Optional[Dict[str, Any]]:
+        return None
+
+    def grant(
+        self, user_id: int, admin_id: int,
+        features: Optional[Sequence[str]] = None,
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+    ) -> bool:
+        return False
+
+    def set_features(
+        self, user_id: int, features: Optional[Sequence[str]], admin_id: int,
+    ) -> bool:
+        return False
+
+
 class SqliteBotStore:
-    """The four aggregates against one SQLite file."""
+    """The four aggregates against one SQLite file, plus a fifth that is not
+    reachable from here at all — see `NoDashboardTabs`."""
 
     def __init__(self) -> None:
         self.access = SqliteAccessControl()
         self.preferences = SqlitePreferences()
         self.milestones = SqliteMilestones()
         self.cache = SqliteCache()
+        self.dashboard = NoDashboardTabs()
 
     def initialise(self) -> None:
         """Create every table, and add every column added since.

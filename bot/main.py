@@ -328,6 +328,12 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handlers.auth_request_again, pattern=r"^auth_request_again$"))
     application.add_handler(CallbackQueryHandler(handlers.auth_approve_user, pattern=r"^auth_approve_\d+$"))
     application.add_handler(CallbackQueryHandler(handlers.auth_deny_user, pattern=r"^auth_deny_\d+$"))
+    # The tab checklist that follows an approval. `:` separates the parts —
+    # see the note in handlers_legacy: the ids above are parsed with
+    # `split('_')[-1]`, which a tab key like `user_management` would break.
+    application.add_handler(CallbackQueryHandler(handlers.auth_toggle_tab, pattern=r"^atab:\d+:[a-z_]+$"))
+    application.add_handler(CallbackQueryHandler(handlers.auth_apply_preset, pattern=r"^apre:\d+:[a-z_]+$"))
+    application.add_handler(CallbackQueryHandler(handlers.auth_tabs_done, pattern=r"^adone:\d+$"))
 
     # Add admin user management
     application.add_handler(CommandHandler("users", handlers.admin_users_command))
