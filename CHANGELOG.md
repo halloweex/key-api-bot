@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.144
+
+- Weekly report: the rich form, the brand marks, and an admin-only signature
+
+
 ## 3.0.143
 
 - The expense mirror failed on every row: KeyCRM sends ISO strings
