@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import re
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -135,6 +136,35 @@ class TestTheRoutedBodies:
             if len(parts) < 2 and last not in self.UNIQUE_KEYS:
                 offenders.append((lineno, tail.strip()))
         assert not offenders, f"single-key ORDER BY, so a tie is the planner's: {offenders}"
+
+    def test_no_having_leans_on_a_select_alias(self):
+        """DuckDB resolves a select alias in HAVING; PostgreSQL does not.
+
+        The lenient spelling renders fine and fails only on the other engine —
+        `column "co_occurrence" does not exist`. It bit the marketing brand
+        query first and three of these next, which is twice too many for a
+        rule that a scan can hold.
+        """
+        offenders = []
+        for lineno, text in self._statements():
+            aliases = set(re.findall(r"\bAS\s+([a-z_][a-z0-9_]*)", text, re.I))
+            for having in re.findall(r"HAVING\s+([^\n]+)", text, re.I):
+                first = having.strip().split()[0].strip("(")
+                if first.lower() in {a.lower() for a in aliases}:
+                    offenders.append((lineno, having.strip()[:60]))
+        assert not offenders, (
+            f"HAVING referring to a select alias, which PostgreSQL rejects: "
+            f"{offenders}"
+        )
+
+    def test_no_arbitrary_pick_decides_a_name(self):
+        """`any_value` returns *an* value from the group, and the two engines
+        are free to pick different ones — so the same product would carry
+        different names on the two sides and the comparison would be
+        measuring the planners."""
+        for lineno, text in self._statements():
+            assert "any_value" not in text.lower(), (
+                f"line {lineno} lets the engine choose which name to show")
 
     def test_no_method_opens_the_store_itself(self):
         src = REPOSITORY.read_text(encoding="utf-8")

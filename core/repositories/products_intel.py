@@ -84,7 +84,7 @@ class ProductsIntelMixin:
             WITH oi AS (
                 SELECT l.order_id,
                        COALESCE(l.product_id, l.line_id) AS product_id,
-                       ANY_VALUE(l.product_name) AS product_name
+                       MIN(l.product_name) AS product_name
                 FROM {{order_lines}} l
                 WHERE {where_sql}
                 GROUP BY l.order_id, COALESCE(l.product_id, l.line_id)
@@ -152,7 +152,7 @@ class ProductsIntelMixin:
             WITH order_items AS (
                 SELECT l.order_id,
                        COALESCE(l.product_id, l.line_id) AS product_id,
-                       ANY_VALUE(l.product_name) AS product_name
+                       MIN(l.product_name) AS product_name
                 FROM {{order_lines}} l
                 WHERE {where_sql}
                 GROUP BY l.order_id, COALESCE(l.product_id, l.line_id)
@@ -172,7 +172,11 @@ class ProductsIntelMixin:
                 JOIN multi_orders b ON a.order_id = b.order_id
                     AND a.product_id < b.product_id
                 GROUP BY a.product_id, b.product_id
-                HAVING co_occurrence >= {having_threshold}
+                -- Repeated, not aliased: PostgreSQL does not see a select
+                -- alias in HAVING and DuckDB does, so the lenient spelling
+                -- renders fine and fails only on the other engine — the
+                -- same trap the marketing brand query hit.
+                HAVING COUNT(DISTINCT a.order_id) >= {having_threshold}
             ),
             product_orders AS (
                 SELECT product_id, COUNT(DISTINCT order_id) AS orders
@@ -198,8 +202,8 @@ class ProductsIntelMixin:
                 FROM pair_counts pc
                 LEFT JOIN {{products}} p_a ON pc.a_id = p_a.id
                 LEFT JOIN {{products}} p_b ON pc.b_id = p_b.id
-                LEFT JOIN (SELECT product_id, ANY_VALUE(product_name) AS product_name FROM multi_orders GROUP BY product_id) oi_a ON pc.a_id = oi_a.product_id
-                LEFT JOIN (SELECT product_id, ANY_VALUE(product_name) AS product_name FROM multi_orders GROUP BY product_id) oi_b ON pc.b_id = oi_b.product_id
+                LEFT JOIN (SELECT product_id, MIN(product_name) AS product_name FROM multi_orders GROUP BY product_id) oi_a ON pc.a_id = oi_a.product_id
+                LEFT JOIN (SELECT product_id, MIN(product_name) AS product_name FROM multi_orders GROUP BY product_id) oi_b ON pc.b_id = oi_b.product_id
                 LEFT JOIN product_orders po_a ON pc.a_id = po_a.product_id
                 LEFT JOIN product_orders po_b ON pc.b_id = po_b.product_id
                 CROSS JOIN total t
@@ -315,7 +319,11 @@ class ProductsIntelMixin:
                 JOIN order_cats b ON a.order_id = b.order_id
                     AND a.category_name < b.category_name
                 GROUP BY a.category_name, b.category_name
-                HAVING co_occurrence >= 2
+                -- Repeated, not aliased: PostgreSQL does not see a select
+                -- alias in HAVING and DuckDB does, so the lenient spelling
+                -- renders fine and fails only on the other engine — the
+                -- same trap the marketing brand query hit.
+                HAVING COUNT(DISTINCT a.order_id) >= 2
             )
             SELECT cat_a, cat_b, co_occurrence
             FROM cat_pairs
@@ -365,7 +373,11 @@ class ProductsIntelMixin:
                 JOIN order_brands b ON a.order_id = b.order_id
                     AND a.brand < b.brand
                 GROUP BY a.brand, b.brand
-                HAVING co_occurrence >= {having_threshold}
+                -- Repeated, not aliased: PostgreSQL does not see a select
+                -- alias in HAVING and DuckDB does, so the lenient spelling
+                -- renders fine and fails only on the other engine — the
+                -- same trap the marketing brand query hit.
+                HAVING COUNT(DISTINCT a.order_id) >= {having_threshold}
             )
             SELECT brand_a, brand_b, co_occurrence, product_pairs
             FROM brand_pairs
