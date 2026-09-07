@@ -147,10 +147,31 @@ async def _seed_postgres(conn, store):
         f"VALUES ({', '.join(f'${i}' for i in range(1, len(SPEND_COLS) + 1))})",
         [tuple(r) for r in spend])
 
+    # A backfilled mirror, which is the only state in which Postgres is
+    # allowed to answer the two methods that read the landing. Without this
+    # the read falls back to DuckDB — correctly, and the comparison below
+    # would then be comparing DuckDB with itself, which is what the fatal
+    # fallback in `_both` refuses to let happen quietly.
+    await conn.execute(
+        """
+        INSERT INTO meta.mirror_state (table_name, last_ok_at, backfilled_at)
+        VALUES ('bronze.expenses', now(), now())
+        ON CONFLICT (table_name) DO UPDATE
+            SET last_ok_at = now(), backfilled_at = now()
+        """
+    )
+
 
 @pytest_asyncio.fixture
 async def both_engines(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_PG_DSN", DSN)
+    # Module state, and a latch that only closes forward — so a test that left
+    # it closed would let the next one answer from Postgres without having
+    # earned it.
+    from core import pg_expenses_read
+
+    monkeypatch.setattr(pg_expenses_read, "_backfilled", False)
+    monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
     store = DuckDBStore(db_path=tmp_path / "expenses.duckdb")
     await store.connect()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
@@ -165,6 +186,9 @@ async def both_engines(tmp_path, monkeypatch):
             for t in ("bronze.expenses", "bronze.expense_types",
                       "app.manual_expenses", "silver.orders"):
                 await conn.execute(f"DELETE FROM {t}")
+            await conn.execute(
+                "DELETE FROM meta.mirror_state WHERE table_name = 'bronze.expenses'"
+            )
         await pool.close()
         await store.close()
 

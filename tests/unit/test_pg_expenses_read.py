@@ -317,13 +317,18 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
                        new=AsyncMock(return_value=False)), \
                  patch("core.pg_expenses_read.fetch",
                        new=AsyncMock(return_value=[])) as fetch:
-                await store.get_expense_summary(*W)
+                await store.get_profit_analysis(*W)
             fetch.assert_not_awaited()
         finally:
             await store.close()
 
     @pytest.mark.asyncio
     async def test_and_answers_once_it_is_across(self, tmp_path, monkeypatch):
+        """`get_profit_analysis` rather than the summary: its statement
+        consumes a row *list*, so an empty stand-in is a legitimate answer.
+        The summary's totals query is `SELECT COALESCE(SUM(...), 0), ...`
+        with no GROUP BY, which always returns exactly one row — mocking it
+        empty tests the mock, not the code."""
         monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
         store = DuckDBStore(db_path=tmp_path / "h2.duckdb")
@@ -333,7 +338,7 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
                        new=AsyncMock(return_value=True)), \
                  patch("core.pg_expenses_read.fetch",
                        new=AsyncMock(return_value=[])) as fetch:
-                await store.get_expense_summary(*W)
+                await store.get_profit_analysis(*W)
             fetch.assert_awaited()
         finally:
             await store.close()
