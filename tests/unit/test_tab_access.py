@@ -419,6 +419,95 @@ class TestTheHandlersAreReachable:
             assert pattern in source, pattern
 
 
+# ─── what the permission cache costs ─────────────────────────────────────────
+
+
+class _MatrixStore:
+    def __init__(self, rows):
+        self.rows = rows
+        self.seeds = 0
+        self.reads = 0
+
+    async def seed_default_permissions(self):
+        self.seeds += 1
+
+    async def get_role_permissions(self, role):
+        self.reads += 1
+        return self.rows
+
+
+@pytest.mark.asyncio
+class TestTheRoleMatrixIsReadOnce:
+    """Every miss is two acquisitions of DuckDB's process-wide store lock —
+    one to seed, one to read. That was affordable while `expenses` and `sms`
+    were the only gated features; per-user tabs put a permission dependency on
+    roughly 120 of the 140 endpoints.
+    """
+
+    def setup_method(self):
+        perm.invalidate_permissions_cache()
+
+    def teardown_method(self):
+        perm.invalidate_permissions_cache()
+
+    async def _ask_twice(self, monkeypatch, rows):
+        store = _MatrixStore(rows)
+
+        async def get_store():
+            return store
+
+        monkeypatch.setattr("core.duckdb_store.get_store", get_store)
+        first = await perm.get_permissions_for_role_async("viewer")
+        second = await perm.get_permissions_for_role_async("viewer")
+        assert first == second
+        return store, first
+
+    async def test_a_populated_matrix_is_read_once(self, monkeypatch):
+        rows = {"traffic": {"view": True, "edit": False, "delete": False}}
+        store, result = await self._ask_twice(monkeypatch, rows)
+        assert (store.seeds, store.reads) == (1, 1)
+        assert result["traffic"]["view"] is True
+
+    async def test_an_empty_matrix_is_read_once_too(self, monkeypatch):
+        """It used to be read on *every* call: the cache was only written when
+        the table had rows, so an empty one meant a seed and a read per
+        request, forever."""
+        store, result = await self._ask_twice(monkeypatch, {})
+        assert (store.seeds, store.reads) == (1, 1)
+        # And what it serves is the hardcoded matrix, unchanged.
+        assert result == perm.get_permissions_for_role("viewer")
+
+    async def test_an_error_is_not_cached(self, monkeypatch):
+        """An error is not an answer — the next request may get one."""
+
+        class Broken(_MatrixStore):
+            async def get_role_permissions(self, role):
+                self.reads += 1
+                raise RuntimeError("store is down")
+
+        store = Broken({})
+
+        async def get_store():
+            return store
+
+        monkeypatch.setattr("core.duckdb_store.get_store", get_store)
+        await perm.get_permissions_for_role_async("viewer")
+        await perm.get_permissions_for_role_async("viewer")
+        assert store.reads == 2
+
+    async def test_the_store_is_not_touched_on_a_hit(self, monkeypatch):
+        """The cache used to be checked *after* `get_store()`, so a broken
+        store could not even serve an answer already held."""
+        store, _ = await self._ask_twice(
+            monkeypatch, {"traffic": {"view": True, "edit": False, "delete": False}})
+
+        async def explode():
+            raise AssertionError("get_store must not be called on a cache hit")
+
+        monkeypatch.setattr("core.duckdb_store.get_store", explode)
+        await perm.get_permissions_for_role_async("viewer")
+
+
 # ─── the push side ───────────────────────────────────────────────────────────
 
 

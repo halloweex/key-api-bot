@@ -379,6 +379,14 @@ def get_all_roles() -> list:
 _permissions_cache: Optional[Dict[str, Dict[str, Dict[str, bool]]]] = None
 
 
+def _remember(role: str, permissions: Dict[str, Dict[str, bool]]) -> None:
+    """Keep one role's answer until somebody changes the matrix."""
+    global _permissions_cache
+    if _permissions_cache is None:
+        _permissions_cache = {}
+    _permissions_cache[role] = permissions
+
+
 async def get_permissions_for_role_async(role: str) -> Dict[str, Dict[str, bool]]:
     """
     Get permissions for a role from database.
@@ -387,13 +395,17 @@ async def get_permissions_for_role_async(role: str) -> Dict[str, Dict[str, bool]
     """
     global _permissions_cache
 
+    # The cache is checked before the store is even fetched. It used to be
+    # checked after, which cost nothing — until per-user tabs put a permission
+    # dependency on roughly 120 of the 140 endpoints instead of the ~20 that
+    # were gated before, and every miss here is two acquisitions of DuckDB's
+    # process-wide store lock: one to seed, one to read.
+    if _permissions_cache is not None and role in _permissions_cache:
+        return _permissions_cache[role]
+
     try:
         from core.duckdb_store import get_store
         store = await get_store()
-
-        # Try cache first
-        if _permissions_cache is not None and role in _permissions_cache:
-            return _permissions_cache[role]
 
         # Ensure defaults are seeded
         await store.seed_default_permissions()
@@ -410,17 +422,31 @@ async def get_permissions_for_role_async(role: str) -> Dict[str, Dict[str, bool]
                 else:
                     result[feature.value] = {"view": False, "edit": False, "delete": False}
 
-            # Update cache for this role
-            if _permissions_cache is None:
-                _permissions_cache = {}
-            _permissions_cache[role] = result
-
+            _remember(role, result)
             return result
+
+        # An empty table after a seed is an **answer**, not a failure: nothing
+        # is stored for this role and the hardcoded matrix is therefore the
+        # matrix. Cached for that reason — without it every single request
+        # re-ran the seed and the read, taking the store lock twice, forever.
+        #
+        # It is also an anomaly worth a line in the log, because the seed
+        # immediately above should have written those rows: a table that is
+        # still empty means the write went nowhere.
+        logger.warning(
+            "role_permissions is empty for %r after seeding — serving the "
+            "hardcoded matrix. The seed wrote nothing; check the store.", role,
+        )
+        result = get_permissions_for_role(role)
+        _remember(role, result)
+        return result
 
     except Exception as e:
         logger.warning(f"Failed to load permissions from DB: {e}, using hardcoded")
 
-    # Fallback to hardcoded
+    # Deliberately **not** cached: an error is not an answer, and the next
+    # request may get one. The cost of retrying is bounded by the store being
+    # broken, which is a louder problem than this one.
     return get_permissions_for_role(role)
 
 
