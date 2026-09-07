@@ -130,7 +130,12 @@ class MarginMixin:
             WHERE {where}
               AND TRIM(l.brand) != '' AND l.brand IS NOT NULL
             GROUP BY 1
-            ORDER BY total_revenue DESC
+            -- `1` is the grouping key, unique per output row. Without it
+            -- two engines break a tie on revenue differently — and two of
+            -- these carry a LIMIT, where that means different *rows*, not
+            -- a different order. Found by the gate: two categories on
+            -- ₴1450 each came back in opposite orders.
+            ORDER BY total_revenue DESC, 1
             LIMIT ?
         """, params + [limit])
 
@@ -185,7 +190,12 @@ class MarginMixin:
             LEFT JOIN root_cat rc ON l.category_id = rc.id
             WHERE {where}
             GROUP BY 1
-            ORDER BY total_revenue DESC
+            -- `1` is the grouping key, unique per output row. Without it
+            -- two engines break a tie on revenue differently — and two of
+            -- these carry a LIMIT, where that means different *rows*, not
+            -- a different order. Found by the gate: two categories on
+            -- ₴1450 each came back in opposite orders.
+            ORDER BY total_revenue DESC, 1
         """, params)
 
         result = []
@@ -282,7 +292,12 @@ class MarginMixin:
             WHERE {where}
             GROUP BY 1, 2
             HAVING SUM(l.line_amount) > ?
-            ORDER BY brand, total_revenue DESC
+            -- `1` is the grouping key, unique per output row. Without it
+            -- two engines break a tie on revenue differently — and two of
+            -- these carry a LIMIT, where that means different *rows*, not
+            -- a different order. Found by the gate: two categories on
+            -- ₴1450 each came back in opposite orders.
+            ORDER BY brand, total_revenue DESC, 2
         """, params + [min_revenue])
 
         result = []
@@ -331,7 +346,12 @@ class MarginMixin:
             GROUP BY 1
             HAVING SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
                 THEN l.line_amount ELSE 0 END) > ?
-            ORDER BY total_revenue DESC
+            -- `1` is the grouping key, unique per output row. Without it
+            -- two engines break a tie on revenue differently — and two of
+            -- these carry a LIMIT, where that means different *rows*, not
+            -- a different order. Found by the gate: two categories on
+            -- ₴1450 each came back in opposite orders.
+            ORDER BY total_revenue DESC, 1
         """, params + [min_revenue])
 
         alerts = []
