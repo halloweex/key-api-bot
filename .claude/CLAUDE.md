@@ -597,6 +597,32 @@ is now a redirect loop. It computes the first page the account can actually
 open (`utils/access.firstAllowedPath`) and, when there is none, says so on the
 screen instead of navigating.
 
+**Three things the audit of this change moved**, each because putting a gate on
+~120 endpoints instead of ~20 changed what a detail costs:
+
+- **The session is resolved once per request**, cached on `request.state`.
+  Two dependencies ask — `api_gate` at the include, then the permission gate on
+  the route — and each ask was a signature check plus a read of the user list;
+  under `KS_USER_STORE=postgres` that read carries `require_revision()`, so a
+  doubled resolution was four pool acquisitions per request against a pool of
+  five. Within one request the answer cannot change, so revocation is unmoved:
+  it is still the *next* request that finds an account no longer approved.
+- **An unreadable user list refuses the request** instead of falling back to a
+  viewer with no override. An error and an absence used to share one exit, and
+  that exit handed back every tab a viewer's role opens — silently undoing an
+  admin's narrowing at the one moment nothing can be verified. The realistic
+  trigger is `SchemaVersionError`: `web` deployed ahead of `migrate`, where
+  this read raises while the bot's store, which checks the revision only in
+  `initialise()`, keeps answering. A genuine absence still falls back, because
+  an account with no row has no tab set to contradict.
+- **A broadcast that carries money names its tab.** `ConnectionManager.broadcast`
+  takes an optional `feature` and connections remember their viewer's tabs from
+  the handshake. Most events name none on purpose — the room is how the whole
+  UI learns a sync happened, and scoping `orders_synced {count}` would stop a
+  traffic-only page refreshing itself for no gain. `goal_progress` is scoped,
+  though **nothing emits it today**: it is the one payload that would be
+  revenue, so whoever wires the emitter up inherits the answer.
+
 ### Who may run an SMS campaign
 Sending is the one thing on this dashboard that spends money and reaches
 customers on their phones, and the roster behind it is 6 000 names and phone
