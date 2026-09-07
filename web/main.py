@@ -337,11 +337,20 @@ def _register_event_handlers():
 
     @events.on(SyncEvent.GOALS_UPDATED)
     async def on_goals_updated(data: dict):
-        """Broadcast goal updates to WebSocket clients."""
+        """Broadcast goal updates to WebSocket clients.
+
+        Scoped to the `dashboard` tab, and it is the only broadcast here that
+        is. Nothing emits `GOALS_UPDATED` today — the audit that added this
+        looked — so the scope costs nothing now and is the point: the payload
+        is revenue against a target, and whoever wires the emitter up inherits
+        the answer instead of having to arrive at it. The three counters above
+        stay unscoped deliberately; see `ConnectionManager.broadcast`.
+        """
         await ws_manager.broadcast(
             "dashboard",
             WebSocketEvent.GOAL_PROGRESS,
-            data
+            data,
+            feature="dashboard",
         )
 
 

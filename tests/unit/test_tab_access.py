@@ -417,3 +417,89 @@ class TestTheHandlersAreReachable:
         ):
             assert f"handlers.{name}" in source, name
             assert pattern in source, pattern
+
+
+# ─── the push side ───────────────────────────────────────────────────────────
+
+
+class _Socket:
+    def __init__(self):
+        self.sent = []
+
+    async def accept(self):
+        return None
+
+    async def send_text(self, text):
+        self.sent.append(text)
+
+
+@pytest.mark.asyncio
+class TestBroadcastsRespectTheTabSet:
+    """The REST surface is gated per tab; the push surface was not.
+
+    Nothing leaked when this was written — the dashboard room carries counts
+    (`orders_synced`, `products_synced`, `inventory_updated {stocks_count}`)
+    and `goal_progress`, the one event whose payload is revenue, has no emitter
+    anywhere. The scope exists so that the day somebody writes that emitter,
+    the answer is already made.
+    """
+
+    async def _manager(self):
+        from core.websocket_manager import ConnectionManager
+
+        return ConnectionManager()
+
+    async def test_an_unscoped_event_reaches_everybody(self):
+        manager = await self._manager()
+        narrow = _Socket()
+        await manager.connect(narrow, room="dashboard", features={"traffic"})
+
+        sent = await manager.broadcast("dashboard", "orders_synced", {"count": 3})
+        assert sent == 1, "a sync counter must still refresh a traffic-only page"
+
+    async def test_a_scoped_event_skips_a_connection_without_the_tab(self):
+        manager = await self._manager()
+        narrow = _Socket()
+        await manager.connect(narrow, room="dashboard", features={"traffic"})
+
+        sent = await manager.broadcast(
+            "dashboard", "goal_progress", {"revenue": 1_000_000},
+            feature="dashboard",
+        )
+        assert sent == 0
+        assert not any("goal_progress" in message for message in narrow.sent)
+
+    async def test_a_scoped_event_reaches_a_connection_with_it(self):
+        manager = await self._manager()
+        wide = _Socket()
+        await manager.connect(wide, room="dashboard", features={"dashboard", "traffic"})
+
+        sent = await manager.broadcast(
+            "dashboard", "goal_progress", {"revenue": 1_000_000},
+            feature="dashboard",
+        )
+        assert sent == 1
+
+    async def test_an_unresolved_connection_is_not_silently_starved(self):
+        """`features=None` means the route could not resolve them — an admin
+        socket, or a failure. It must not turn into "sees nothing", which would
+        make a live-update feature fail closed and invisibly."""
+        manager = await self._manager()
+        unknown = _Socket()
+        await manager.connect(unknown, room="dashboard", features=None)
+
+        assert await manager.broadcast(
+            "dashboard", "goal_progress", {}, feature="dashboard",
+        ) == 1
+
+
+class TestTheRevenueEventIsScoped:
+    def test_goal_progress_names_its_tab(self):
+        """The audit's finding, pinned: a broadcast carrying money must say
+        which tab it belongs to."""
+        import inspect
+        import web.main as main
+
+        source = inspect.getsource(main._register_event_handlers)
+        block = source[source.index("GOAL_PROGRESS"):]
+        assert 'feature="dashboard"' in block[:400]

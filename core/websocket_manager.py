@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from fastapi import WebSocket
 
@@ -55,6 +55,18 @@ class ConnectionInfo:
     connected_at: datetime = field(default_factory=datetime.now)
     last_activity: datetime = field(default_factory=datetime.now)
     message_count: int = 0
+    # Which tabs the viewer on the other end may open, resolved once at the
+    # handshake. `None` means "not scoped" — an admin socket, or a caller the
+    # route did not resolve — and receives everything the room gets.
+    features: Optional[Set[str]] = None
+
+    def may_see(self, feature: Optional[str]) -> bool:
+        """Should this connection get an event scoped to `feature`?"""
+        if feature is None:
+            return True
+        if self.features is None:
+            return True
+        return feature in self.features
 
 
 class ConnectionManager:
@@ -78,7 +90,8 @@ class ConnectionManager:
         self._next_connection_id = 1
 
     async def connect(
-        self, websocket: WebSocket, room: str = "dashboard"
+        self, websocket: WebSocket, room: str = "dashboard",
+        features: Optional[Set[str]] = None,
     ) -> ConnectionInfo:
         """
         Accept a WebSocket connection and add it to a room.
@@ -86,6 +99,11 @@ class ConnectionManager:
         Args:
             websocket: The WebSocket connection to accept
             room: Room name to subscribe to (default: "dashboard")
+            features: the tabs this viewer may open, for events that name one.
+                Resolved once, at the handshake — which is the whole difference
+                from the HTTP side, where every request re-reads the row. A
+                socket outlives a revocation until it is closed, so anything
+                genuinely sensitive belongs on the request path and not here.
 
         Returns:
             ConnectionInfo for the new connection
@@ -96,7 +114,9 @@ class ConnectionManager:
             conn_id = self._next_connection_id
             self._next_connection_id += 1
 
-            conn_info = ConnectionInfo(id=conn_id, websocket=websocket, room=room)
+            conn_info = ConnectionInfo(
+                id=conn_id, websocket=websocket, room=room, features=features,
+            )
 
             if room not in self._rooms:
                 self._rooms[room] = {}
@@ -142,7 +162,8 @@ class ConnectionManager:
         )
 
     async def broadcast(
-        self, room: str, event: WebSocketEvent | str, data: Dict[str, Any]
+        self, room: str, event: WebSocketEvent | str, data: Dict[str, Any],
+        feature: Optional[str] = None,
     ) -> int:
         """
         Broadcast a message to all connections in a room.
@@ -151,6 +172,21 @@ class ConnectionManager:
             room: Room to broadcast to
             event: Event type (WebSocketEvent or string)
             data: Event payload
+            feature: the tab this event belongs to, if it belongs to one. Only
+                connections whose viewer may open that tab receive it.
+
+        **Why `feature` is optional and most events do not set it.** Every page
+        in the dashboard is a permission now, but this room is how the whole UI
+        learns that a sync happened, and the frontend answers by invalidating
+        its caches. Scoping a plain "orders were synced, here is the count" to
+        one tab would stop a traffic-only account's page refreshing itself, and
+        buy nothing: the payload is a count.
+
+        What it is for is the events that carry a *number somebody is not
+        supposed to see*. `goal_progress` is the one that would — revenue
+        against a target — and it is scoped here even though nothing emits it
+        today, so that whoever wires it up inherits the answer instead of
+        having to arrive at it.
 
         Returns:
             Number of connections that received the message
@@ -161,7 +197,10 @@ class ConnectionManager:
             event_name = event
 
         async with self._lock:
-            connections = list(self._rooms.get(room, {}).values())
+            connections = [
+                conn for conn in self._rooms.get(room, {}).values()
+                if conn.may_see(feature)
+            ]
 
         if not connections:
             logger.debug(f"No connections in room '{room}' for broadcast")

@@ -97,7 +97,19 @@ async def dashboard_websocket(websocket: WebSocket):
         await websocket.close(code=4001, reason="Authentication required")
         return
 
-    conn_info = await manager.connect(websocket, room="dashboard")
+    # The tabs this viewer may open, resolved once here. Events that name a
+    # tab are withheld from a socket that cannot open it; events that name
+    # none — the sync counters the whole UI refreshes on — reach everybody.
+    features = None
+    try:
+        from web.routes.auth import effective_permissions
+
+        permissions = await effective_permissions(user)
+        features = {key for key, actions in permissions.items() if actions.get("view")}
+    except Exception as e:  # noqa: BLE001 — a live-update socket is not worth a 500
+        logger.warning("Could not resolve tabs for a socket, scoping nothing: %s", e)
+
+    conn_info = await manager.connect(websocket, room="dashboard", features=features)
 
     try:
         while True:
