@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -102,8 +103,20 @@ class TestTheReadsKeepTheirTimeout:
     def test_it_does_not_take_the_store_lock_itself(self):
         """The helpers take it. Taking it here as well is a nested
         acquisition, and the store lock is not reentrant — it hangs rather
-        than raising, which is the worst way to find out."""
-        assert "self.connection()" not in self._router()
+        than raising, which is the worst way to find out.
+
+        Parsed, not searched: the first version of this asserted the substring
+        `self.connection()` was absent, and failed on the *comment* explaining
+        why it must be. Prose is not structure.
+        """
+        tree = ast.parse(textwrap.dedent(self._router()))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncWith):
+                continue
+            head = ast.unparse(node.items[0].context_expr)
+            assert "connection()" not in head, (
+                f"the router opens the store itself: {head}"
+            )
 
     def test_no_traffic_read_bypasses_the_router(self):
         src = (REPO / "core" / "repositories" / "traffic.py").read_text()
@@ -233,11 +246,17 @@ class TestTheComparisonCatchesWhatItMustCatch:
         dk = {i: _row(i) for i in (1, 2, 3)}
         return dk, {k: v for k, v in dk.items()}
 
-    def _run(self, dk, pg, watermark=None):
+    # `None` is a *meaningful* watermark here — it is what "never shipped"
+    # looks like — so the default cannot be None. The first version of this
+    # helper used None for both, and the never-shipped case was silently
+    # handed a healthy watermark and asserted against the wrong branch.
+    _DEFAULT = object()
+
+    def _run(self, dk, pg, watermark=_DEFAULT):
         synced = {k: v[-1] for k, v in dk.items()}
         return compare_table(
             ORDER_UTM_TABLE, dk, synced, pg,
-            watermark if watermark is not None else self.WATERMARK,
+            self.WATERMARK if watermark is self._DEFAULT else watermark,
             now=NOW, grace_minutes=20,
         )
 
