@@ -345,6 +345,7 @@ def render_tables(sql: str, dialect: Dialect, **extra: Any) -> str:
         silver_orders=dialect.silver_orders,
         order_lines=dialect.order_lines,
         order_products=dialect.order_products,
+        products=dialect.products,
         categories=dialect.categories,
         offer_stocks=dialect.offer_stocks,
         gold_daily_revenue=dialect.gold_daily_revenue,
