@@ -28,7 +28,12 @@ from core.events import (
     emit_orders_synced,
 )
 from core.meilisearch_client import get_meili_client, init_meilisearch
-from core.pg_landing import mirror_categories, mirror_products
+from core.pg_landing import (
+    mirror_categories,
+    mirror_expense_types,
+    mirror_expenses,
+    mirror_products,
+)
 from bot.config import DEFAULT_TIMEZONE
 
 logger = get_logger(__name__)
@@ -275,6 +280,7 @@ class SyncService:
             # Still upsert expenses directly — they're not in the bronze pipeline.
             orders_with_expenses = [o for o in orders if o.get("expenses")]
             expense_count = await self.store.upsert_expenses_batch(orders_with_expenses)
+            await mirror_expenses(orders_with_expenses)
             return bronze_count, expense_count
 
         # Legacy mode: direct upsert to orders table
@@ -287,6 +293,10 @@ class SyncService:
         # Batch upsert all expenses in a single transaction
         orders_with_expenses = [o for o in orders if o.get("expenses")]
         expense_count = await self.store.upsert_expenses_batch(orders_with_expenses)
+        # And the same rows to Postgres. Never raises — a Postgres fault must
+        # not be able to stop a sync — so a miss is carried by the backfill
+        # and reported by the daily comparison, not by this line.
+        await mirror_expenses(orders_with_expenses)
 
         return result.count, expense_count
 
@@ -667,6 +677,10 @@ class SyncService:
 
             stats["expense_types"] = await self.store.upsert_expense_types(expense_types)
             await self.store.set_last_sync_time("expense_types")
+            # Same payloads, read through the same `landing_rows` — including
+            # the localisation-key cleanup, which is why that parse had to move
+            # there before this line could exist (revision 0020).
+            await mirror_expense_types(expense_types)
 
             stats["products"] = await self.store.upsert_products(products)
             await self.store.set_last_sync_time("products")

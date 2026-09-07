@@ -364,3 +364,44 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
             "Operational history replication failed: %s", e, exc_info=True,
         )
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+async def replicate_after_manual_expense(store) -> Dict[str, Any]:
+    """Carry a manual expense to Postgres now, rather than within the hour.
+
+    WHY THIS EXISTS AT ALL, GIVEN THE ONE-CALL-SITE RULE ABOVE
+
+    `replicate_operational` is hourly and has exactly one scheduled caller,
+    because five code paths write these tables and hooking each is how the
+    sixth gets forgotten — which is precisely what `update_manager_stats` did
+    until `cf34e8b`. That rule is about *writers*, and this is not a second
+    writer: it is the same function, called sooner.
+
+    What changed is who reads. While `manual_expenses` was written in DuckDB
+    and read in DuckDB, an hour of lag on the copy cost nothing —
+    `core/pg_landing.py`'s revision 0018 note says so in as many words, and
+    adds that the one-line fix is available if it ever stops being true.
+    `KS_READ_EXPENSES=postgres` is when it stops: the expenses form writes one
+    store and the page it returns to reads the other, so without this a human
+    types an amount and watches it not appear.
+
+    Measured: the incremental replication is 116 ms against the production
+    catalogue, which is nothing on a form submit. The full first run is 9.3 s,
+    and only ever happens once.
+
+    **Never raises.** The DuckDB write has already committed and the endpoint
+    must report it; a Postgres fault costs freshness until the hourly job,
+    which is exactly where this table was before this function existed.
+    """
+    from core.mirror_reconciliation import configured
+
+    if not configured():
+        return {"skipped": "KS_PG_DSN is not set"}
+    try:
+        return await replicate_operational(store)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Manual expense not replicated — Postgres keeps the previous "
+            "copy until the hourly job: %s", exc, exc_info=True,
+        )
+        return {"error": f"{type(exc).__name__}: {exc}"}

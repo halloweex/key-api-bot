@@ -127,6 +127,112 @@ def product_rows(payloads: List[Dict[str, Any]]) -> List[ProductRow]:
     return [product_row(p) for p in payloads]
 
 
+# ─── Expenses ─────────────────────────────────────────────────────────────────
+#
+# The order-level costs KeyCRM serves with `include=expenses`, and the small
+# dictionary that names their kinds. Both land in two stores, so both are
+# parsed once here.
+#
+# `expense_types` is the one place in this module where the parse is a real
+# transformation rather than a lookup: KeyCRM returns some names as
+# localisation keys — `dictionaries.expense_types.delivery` — and the display
+# name is built from the alias instead. A mirror that re-read the payload
+# would either repeat that rule or drop it, and the two stores would then
+# disagree about what an expense is *called*, which is exactly the class of
+# difference the comparison would report every morning without being able to
+# say which store was right.
+
+
+class ExpenseTypeRow(NamedTuple):
+    """An expense type as KeyCRM describes it, after the name is made human.
+    Column order is the write order."""
+    id: Optional[int]
+    name: str
+    alias: Optional[str]
+    is_active: bool
+
+
+class ExpenseRow(NamedTuple):
+    """One order-level expense. Column order is the write order.
+
+    `order_id` is not in the payload — it is the order the expense was served
+    under — so it is passed in rather than read out.
+    """
+    id: Optional[int]
+    order_id: Optional[int]
+    expense_type_id: Optional[int]
+    amount: float
+    description: Optional[str]
+    status: Optional[str]
+    payment_date: Optional[Any]
+    created_at: Optional[Any]
+
+
+EXPENSE_TYPE_COLUMNS = ExpenseTypeRow._fields
+EXPENSE_COLUMNS = ExpenseRow._fields
+
+_LOCALISATION_PREFIX = "dictionaries.expense_types."
+
+
+def expense_type_row(payload: Dict[str, Any]) -> ExpenseTypeRow:
+    """One KeyCRM expense-type payload as a row.
+
+    Preserved exactly, including the fallback chain: a localisation key
+    becomes the alias in Title Case, and without an alias it becomes the key's
+    own tail in Title Case. `is_active` defaults to True, which is what a
+    dictionary entry KeyCRM bothered to return should be.
+    """
+    name = payload.get("name", "Unknown")
+    alias = payload.get("alias")
+    if name.startswith(_LOCALISATION_PREFIX):
+        if alias:
+            name = alias.replace("_", " ").title()
+        else:
+            name = name.replace(_LOCALISATION_PREFIX, "").replace("_", " ").title()
+    return ExpenseTypeRow(
+        id=payload.get("id"),
+        name=name,
+        alias=alias,
+        is_active=payload.get("is_active", True),
+    )
+
+
+def expense_row(order_id: Optional[int], payload: Dict[str, Any]) -> ExpenseRow:
+    """One KeyCRM expense payload as a row, under the order that carried it."""
+    return ExpenseRow(
+        id=payload.get("id"),
+        order_id=order_id,
+        expense_type_id=payload.get("expense_type_id"),
+        # `0`, not None: the column is NOT NULL in both stores, and an expense
+        # KeyCRM served without an amount is a zero-cost expense rather than a
+        # write that fails the whole batch.
+        amount=payload.get("amount", 0),
+        description=payload.get("description"),
+        status=payload.get("status"),
+        payment_date=payload.get("payment_date"),
+        created_at=payload.get("created_at"),
+    )
+
+
+def expense_type_rows(payloads: List[Dict[str, Any]]) -> List[ExpenseTypeRow]:
+    return [expense_type_row(p) for p in payloads]
+
+
+def expense_rows(orders_with_expenses: List[Dict[str, Any]]) -> List[ExpenseRow]:
+    """Every expense across a batch of orders, flattened.
+
+    The input is the shape the sync already has — orders each carrying an
+    `expenses` list — so the flattening lives here rather than being repeated
+    by each store.
+    """
+    rows: List[ExpenseRow] = []
+    for order in orders_with_expenses:
+        order_id = order.get("id")
+        for payload in order.get("expenses", []) or []:
+            rows.append(expense_row(order_id, payload))
+    return rows
+
+
 # ─── Orders ───────────────────────────────────────────────────────────────────
 #
 # Orders arrive through `core.models.Order.from_api`, which already has one

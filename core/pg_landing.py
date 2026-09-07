@@ -215,6 +215,44 @@ async def mirror_products(payloads: List[Dict[str, Any]]) -> MirrorOutcome:
     return await _mirror("bronze.products", PRODUCT_COLUMNS, rows)
 
 
+async def mirror_expense_types(payloads: List[Dict[str, Any]]) -> MirrorOutcome:
+    """The expense-type dictionary, 27 rows, re-shipped whole every sync.
+
+    Like the catalogue and unlike orders: the dictionary is small and arrives
+    complete, so there is nothing to backfill and `last_ok_at` licenses a
+    tolerance of zero the morning after the first successful ship.
+    """
+    from core.landing_rows import EXPENSE_TYPE_COLUMNS, expense_type_rows
+
+    rows = [tuple(r) for r in expense_type_rows(payloads)]
+    return await _mirror("bronze.expense_types", EXPENSE_TYPE_COLUMNS, rows)
+
+
+async def mirror_expenses(orders_with_expenses: List[Dict[str, Any]]) -> MirrorOutcome:
+    """The order-level costs carried by a batch of orders.
+
+    **A delta, like orders and unlike the catalogue** — it ships what this sync
+    fetched, not the whole 15,020 rows — so, like orders, it needs a backfill
+    to carry history across and its comparison must be gated until that has
+    run. `core/pg_expense_backfill.py` is that backfill.
+
+    **Upserted, never deleted-and-reinserted.** That is the opposite of line
+    items, and the difference is the id: an expense carries KeyCRM's own id,
+    which is stable, whereas a line item's is `order_id * 1000 + position` and
+    therefore shifts when a basket shrinks. Nothing here leaves a `…002`
+    behind.
+
+    An expense KeyCRM has *removed* from an order is therefore kept, exactly as
+    DuckDB keeps it — the two stores agree, which is what the comparison
+    measures. Whether either should keep it is a question about the sync, and
+    the same one `feedback_never_delete_retired_products` answers for products.
+    """
+    from core.landing_rows import EXPENSE_COLUMNS, expense_rows
+
+    rows = [tuple(r) for r in expense_rows(orders_with_expenses)]
+    return await _mirror("bronze.expenses", EXPENSE_COLUMNS, rows)
+
+
 # ─── Orders ───────────────────────────────────────────────────────────────────
 #
 # Two tables, one transaction, and three things the catalogue never had to

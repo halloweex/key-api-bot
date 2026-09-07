@@ -1455,6 +1455,11 @@ class BackgroundScheduler:
                 # a campaign renamed to another name of the same length moves
                 # no number and no length. Revision 0018.
                 issues += await reconcile_order_utm(store)
+                # And the order-level expenses — landing, like the catalogue,
+                # but delta-shipped like orders, so gated on `backfilled_at`
+                # and read whole rather than fingerprinted (revision 0020).
+                from core.mirror_reconciliation import reconcile_expenses
+                issues += await reconcile_expenses(store)
                 # And of Gold, one level up again. Still the same layer, and
                 # here the argument is stronger than for Silver: all three run
                 # inside this one call, so an exception from any of them fails

@@ -99,6 +99,7 @@ from core.pg_operational import (
     OFFER_STOCK_COLUMNS,
     SKU_STATUS_COLUMNS,
 )
+from core.landing_rows import EXPENSE_COLUMNS, EXPENSE_TYPE_COLUMNS
 from core.pg_order_utm import UTM_COLUMNS
 from core.pg_dashboard_users import USER_COLUMNS
 from core.pg_replication import CLASSIFICATION_COLUMNS, MANAGER_COLUMNS
@@ -221,6 +222,16 @@ MIRRORED_TABLES: Tuple[MirroredTable, ...] = (
         pg_table="bronze.categories",
         dk_table="categories",
         columns=tuple(CATEGORY_COLUMNS),
+    ),
+    # The expense-type dictionary, 27 rows, re-shipped whole on every sync —
+    # so it belongs with the catalogue and not with orders. Its `name` is the
+    # *resolved* display name, built in `core/landing_rows.py` from a
+    # localisation key, which is the whole reason that parse had to move there
+    # before this table gained a second writer (revision 0020).
+    MirroredTable(
+        pg_table="bronze.expense_types",
+        dk_table="expense_types",
+        columns=tuple(EXPENSE_TYPE_COLUMNS),
     ),
     # Not a mirror — a replica. `is_retail` and the effective-dated intervals
     # are decisions KeyCRM cannot supply, so `core/pg_replication.py` copies
@@ -2005,6 +2016,94 @@ async def reconcile_order_utm(
     return compare_table(
         ORDER_UTM_TABLE, dk_rows, dk_synced, pg_rows,
         watermarks.get(ORDER_UTM_TABLE.pg_table),
+        now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+    )
+
+
+# ─── The order-level expenses: a delta mirror read whole ─────────────────────
+#
+# `bronze.expenses` ships what a sync fetched, so it is gated on
+# `backfilled_at` exactly as orders are: until history has been carried across,
+# every expense older than the mirror looks the same as a lost one.
+#
+# **Read whole rather than fingerprinted, unlike orders, and the reason is
+# size rather than principle.** 15,020 rows against orders' 46,487 and their
+# 147,648 line items — small enough that both sides fit in memory once a day,
+# which buys an exact comparison instead of one that cannot see a text edit of
+# equal length. `description` is a text column here and carries KeyCRM's own
+# wording, so that blind spot would have been a real one.
+#
+# `expense_types` needs none of this and is compared with the catalogue above:
+# 27 rows re-shipped whole on every sync, so its first successful ship *is* its
+# history.
+
+EXPENSES_TABLE: MirroredTable = MirroredTable(
+    pg_table="bronze.expenses",
+    dk_table="expenses",
+    columns=tuple(EXPENSE_COLUMNS),
+    key_columns=("id",),
+    # KeyCRM's own creation stamp, not ours. It is the closest thing this row
+    # has to a clock, and it is what the grace window needs: an expense
+    # created two minutes ago may legitimately not have been mirrored yet.
+    synced_column="created_at",
+    numeric=("amount",),
+)
+
+
+async def reconcile_expenses(
+    store,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = MIRROR_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Compare the mirrored order-level expenses. Reports only.
+
+    Not `full_replace`: this mirror upserts a delta, so "in DuckDB and not in
+    Postgres" has the retired reading available to it — an expense KeyCRM
+    stopped serving is kept by both stores, and one the mirror simply never
+    carried is the defect. `synced_column` tells them apart the way it does for
+    the catalogue.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+    watermark = watermarks.get(EXPENSES_TABLE.pg_table)
+
+    async with store.connection() as conn:
+        dk_rows, dk_synced = fetch_duckdb_rows(conn, EXPENSES_TABLE)
+
+    if (watermark or {}).get("last_ok_at") and not (watermark or {}).get("backfilled_at"):
+        # The gate, orders' reasoning at a twentieth of the scale: without it
+        # the first run would file one CRITICAL per expense that predates the
+        # mirror, for a job nobody has run yet.
+        pg_rows = await fetch_pg_rows(pool, EXPENSES_TABLE)
+        return [IntegrityIssue(
+            check_name="mirror_backfill_pending",
+            table_name=EXPENSES_TABLE.pg_table,
+            severity=Severity.WARN,
+            count=max(len(dk_rows) - len(pg_rows), 0),
+            description=(
+                f"{EXPENSES_TABLE.pg_table} holds {len(pg_rows)} row(s) against "
+                f"DuckDB's {len(dk_rows)}, and no completed backfill is "
+                "recorded. The mirror ships only what a sync writes, so "
+                "history does not arrive on its own: run "
+                "`backfill_expenses`. Row-level comparison is suppressed "
+                "until it completes — before that, 'missing' and 'lost' are "
+                "the same picture."
+            ),
+        )]
+
+    pg_rows = await fetch_pg_rows(pool, EXPENSES_TABLE)
+    return compare_table(
+        EXPENSES_TABLE, dk_rows, dk_synced, pg_rows, watermark,
         now=now, grace_minutes=grace_minutes, max_samples=max_samples,
     )
 

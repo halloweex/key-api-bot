@@ -101,6 +101,11 @@ class Dialect:
     # production as of 2026-09-07, so the endpoint's job on both engines is to
     # return the same "no spend data" rather than an error from one of them.
     manual_expenses: str
+    # `/expenses`. These two are the opposite of the one above: KeyCRM serves
+    # them, so they are mirrored into `bronze` (revision 0020) rather than
+    # replicated into `app`.
+    expenses: str
+    expense_types: str
     # A namespace, not a name: the eleven inventory views reference each other,
     # so one prefix does the work of eleven holes. Empty in DuckDB, which has
     # no schemas to speak of; `gold.` in Postgres.
@@ -139,6 +144,8 @@ DUCKDB = Dialect(
     revenue_goals="revenue_goals",
     order_utm="silver_order_utm",
     manual_expenses="manual_expenses",
+    expenses="expenses",
+    expense_types="expense_types",
     inventory_views="",
     # Byte-for-byte what `core.duckdb_constants._date_in_kyiv` has always
     # emitted. Changing it here changes stored Silver on the next rebuild.
@@ -172,6 +179,8 @@ POSTGRES = Dialect(
     revenue_goals="app.revenue_goals",
     order_utm="silver.order_utm",
     manual_expenses="app.manual_expenses",
+    expenses="bronze.expenses",
+    expense_types="bronze.expense_types",
     inventory_views="gold.",
     # `DATE(x)` also exists in PostgreSQL, but the cast is what the rest of
     # this repository's Postgres SQL uses, so it reads the same as its
@@ -366,6 +375,8 @@ def render_tables(sql: str, dialect: Dialect, **extra: Any) -> str:
         revenue_goals=dialect.revenue_goals,
         order_utm=dialect.order_utm,
         manual_expenses=dialect.manual_expenses,
+        expenses=dialect.expenses,
+        expense_types=dialect.expense_types,
         period_measures=marketing_period_measures(dialect),
         **extra,
     )
