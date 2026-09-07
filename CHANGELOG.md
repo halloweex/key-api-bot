@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.145
+
+- The dashboard-users fixture did not know about the new column
+- Per-user tab access: which tabs a person may open
+- Teach the expense tests about the backfill latch
+- A read that needs history asks for it, instead of being told
+- The expense backfill runs itself, hourly
+
+
 ## 3.0.144
 
 - Weekly report: the rich form, the brand marks, and an admin-only signature
