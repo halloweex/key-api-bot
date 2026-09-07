@@ -1,11 +1,12 @@
-"""Replicating the five tables that have no source to be rebuilt from — and
+"""Replicating the seven tables that have no source to be rebuilt from — and
 one that does.
 
 `core/pg_landing.py` mirrors a KeyCRM payload: parsed once, written twice,
 recoverable from KeyCRM if Postgres is ever lost. `core/pg_replication.py`
 copies the manager classification, which a human decided and KeyCRM never knew.
-This module is the second kind, five times over — see revision 0008 for what
-each table knows that its source does not.
+This module is the second kind, seven times over — see revision 0008 for what
+each table knows that its source does not; 0017 and 0018 added the two a human
+types, `revenue_goals` and `manual_expenses`.
 
 WHY REPLICATED AND NOT MIRRORED, IN ONE SENTENCE EACH
 
@@ -15,7 +16,9 @@ diverge the first time either side missed a sync. `sku_inventory_status`
 carries `first_seen_at` forward out of its own previous contents.
 `inventory_sku_history` and `inventory_history` are snapshots of a moment that
 has passed. `order_backfill_misses` records what an API call did *not* return,
-which no API call can be made to return.
+which no API call can be made to return. `revenue_goals` and `manual_expenses`
+are both numbers a human typed into a form — a target and an ad spend — and
+KeyCRM has never heard of either.
 
 TWO SHAPES, CHOSEN BY HOW DUCKDB WRITES EACH ONE
 
@@ -104,6 +107,7 @@ logger = logging.getLogger(__name__)
 
 OFFER_STOCKS_TABLE = "bronze.offer_stocks"
 GOALS_TABLE = "app.revenue_goals"
+MANUAL_EXPENSES_TABLE = "app.manual_expenses"
 MISSES_TABLE = "app.order_backfill_misses"
 INVENTORY_HISTORY_TABLE = "app.inventory_history"
 SKU_STATUS_TABLE = "app.sku_inventory_status"
@@ -122,6 +126,14 @@ OFFER_STOCK_COLUMNS: Tuple[str, ...] = (
 GOAL_COLUMNS: Tuple[str, ...] = (
     "period_type", "goal_amount", "is_custom", "calculated_goal",
     "growth_factor", "updated_at",
+)
+
+# DuckDB's column order, `platform` last because a later migration added it
+# to the table rather than into the middle of it. The comparison reads the
+# same tuple, so the two cannot drift apart.
+MANUAL_EXPENSE_COLUMNS: Tuple[str, ...] = (
+    "id", "expense_date", "category", "expense_type", "amount",
+    "currency", "note", "created_at", "updated_at", "platform",
 )
 
 MISS_COLUMNS: Tuple[str, ...] = ("order_id", "checked_at", "reason")
@@ -153,6 +165,11 @@ MOVEMENT_COLUMNS: Tuple[str, ...] = (
 _FULL_REPLACE: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
     (OFFER_STOCKS_TABLE, "offer_stocks", OFFER_STOCK_COLUMNS, "id"),
     (GOALS_TABLE, "revenue_goals", GOAL_COLUMNS, "period_type"),
+    # Full replace and not an upsert, because the expenses form genuinely
+    # deletes: `DELETE FROM manual_expenses WHERE id = ?` is one of its three
+    # statements, and a ghost here is ad spend that was withdrawn and still
+    # divides the ROAS.
+    (MANUAL_EXPENSES_TABLE, "manual_expenses", MANUAL_EXPENSE_COLUMNS, "id"),
     (MISSES_TABLE, "order_backfill_misses", MISS_COLUMNS, "order_id"),
     (INVENTORY_HISTORY_TABLE, "inventory_history", INVENTORY_HISTORY_COLUMNS, "date"),
     (SKU_STATUS_TABLE, "sku_inventory_status", SKU_STATUS_COLUMNS, "offer_id"),
@@ -193,7 +210,7 @@ async def _write_chunked(conn, sql: str, rows: Sequence[tuple]) -> None:
 
 
 def read_full_replace(conn) -> Dict[str, List[tuple]]:
-    """The five small tables out of DuckDB, in the column order Postgres wants."""
+    """The six small tables out of DuckDB, in the column order Postgres wants."""
     out: Dict[str, List[tuple]] = {}
     for pg_table, dk_table, columns, order_by in _FULL_REPLACE:
         rows = conn.execute(
@@ -233,7 +250,7 @@ def read_appends(
 
 
 async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
-    """Copy all seven tables from DuckDB to Postgres. Never raises.
+    """Copy all eight tables from DuckDB to Postgres. Never raises.
 
     `full=True` ignores both watermarks and re-ships everything, upserting the
     two append-only tables so a row that is missing *or* wrong below the

@@ -1180,7 +1180,7 @@ class BackgroundScheduler:
             logger.error("Postgres layer rebuild failed: %s", e, exc_info=True)
 
     async def _rebuild_pg_layers(self, rebuild_silver, rebuild_gold) -> None:
-        """The three derived layers, in order, under PG_LAYER_LOCK.
+        """The derived layers and the one shipped one, under PG_LAYER_LOCK.
 
         Gold reads the Silver that was just written, in the same tick and
         from the same caller, so it can never aggregate a Silver the next
@@ -1194,6 +1194,18 @@ class BackgroundScheduler:
         stamp a fresh watermark on a stale answer, and that reads clean.
         """
         logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
+        # The UTM classification, in the same tick and before Gold. Not derived
+        # here — the parser is Python — so it is shipped, and it rides this
+        # floor rather than the hourly operational one because a stale row does
+        # not read as missing data: it reads as `organic`, and the paid/organic
+        # split moves in one store and not the other. Revision 0018.
+        from core.pg_order_utm import ship_order_utm
+        from core.duckdb_store import get_store
+
+        logger.info(
+            "Shipping order UTM to Postgres: %s",
+            await ship_order_utm(await get_store()),
+        )
         logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
         # And the витрина, from the same Silver in the same tick — one
         # floor, one тик, Gold's own reasoning one consumer down.
@@ -1398,6 +1410,7 @@ class BackgroundScheduler:
             reconcile_bot_state,
             reconcile_gold,
             reconcile_operational,
+            reconcile_order_utm,
             reconcile_order_versions,
             reconcile_orders,
             reconcile_silver,
@@ -1428,6 +1441,13 @@ class BackgroundScheduler:
                 # And the two computations of Silver. Same layer: it is the
                 # same question — do the stores agree — asked one level up.
                 issues += await reconcile_silver(store)
+                # And the UTM classification beside it — the one Silver object
+                # Postgres is shipped rather than computes, so a difference is
+                # a defect in the shipper and not in a projection. Read whole
+                # rather than fingerprinted: the table is almost all text, and
+                # a campaign renamed to another name of the same length moves
+                # no number and no length. Revision 0018.
+                issues += await reconcile_order_utm(store)
                 # And of Gold, one level up again. Still the same layer, and
                 # here the argument is stronger than for Silver: all three run
                 # inside this one call, so an exception from any of them fails

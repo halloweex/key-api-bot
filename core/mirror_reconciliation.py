@@ -94,10 +94,12 @@ from core.pg_bot_state import (
 from core.pg_operational import (
     GOAL_COLUMNS,
     INVENTORY_HISTORY_COLUMNS,
+    MANUAL_EXPENSE_COLUMNS,
     MISS_COLUMNS,
     OFFER_STOCK_COLUMNS,
     SKU_STATUS_COLUMNS,
 )
+from core.pg_order_utm import UTM_COLUMNS
 from core.pg_dashboard_users import USER_COLUMNS
 from core.pg_replication import CLASSIFICATION_COLUMNS, MANAGER_COLUMNS
 from core.pg_sms import (
@@ -1795,6 +1797,20 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         full_replace=True,
     ),
     MirroredTable(
+        pg_table="app.manual_expenses",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="manual_expenses",
+        columns=MANUAL_EXPENSE_COLUMNS,
+        key_columns=("id",),
+        # `updated_at` is NULL until the expense is edited, so the clock falls
+        # back to when it was created — `authorized_users`' arrangement, and
+        # for its reason: a row that has never been touched still has to have
+        # an age, or it is CRITICAL the hour it is typed.
+        synced_column="COALESCE(updated_at, created_at)",
+        numeric=("amount",),
+        full_replace=True,
+    ),
+    MirroredTable(
         pg_table="app.order_backfill_misses",
         origin_note=_COPIED_FROM_DUCKDB,
         dk_table="order_backfill_misses",
@@ -1909,6 +1925,88 @@ APPEND_ONLY_TABLES: Tuple[BucketedTable, ...] = (
         ),
     ),
 )
+
+
+# ─── The UTM classification: shipped on the Silver tick, compared whole ──────
+#
+# `silver.order_utm` is the one Silver object Postgres cannot compute, because
+# its body is a Python parser (revision 0018). It is therefore shipped, and it
+# is compared here rather than inside `reconcile_silver` for one reason that
+# is about this table specifically:
+#
+# **Fingerprints would be the wrong instrument.** The bucket fingerprint sums
+# numbers and text *lengths*, which is exactly right for orders — 46,487 rows
+# that are mostly numeric and timestamped. This table is almost entirely text,
+# and its content is campaign names: renaming `spring` to `autumn` changes no
+# number and no length, and in a bucket where nothing else moved the
+# fingerprint would report the two stores identical while every chart split
+# them differently. So both sides are read whole, 32,905 rows, and compared
+# column by column with a tolerance of zero.
+#
+# It costs more than any other whole-table comparison here — the next largest
+# is `bronze.products` at 1,003 rows — and it is a daily check, once, against
+# a table this store replaces whole every ten minutes anyway.
+#
+# The grace is Silver's, not the operational 90 minutes: this rides the Silver
+# tick, so a row that is stale by more than that floor is late by the clock
+# that actually governs it.
+
+ORDER_UTM_TABLE: MirroredTable = MirroredTable(
+    pg_table="silver.order_utm",
+    origin_note=(
+        "`silver.order_utm` is parsed out of `manager_comment` in Python and "
+        "shipped whole from DuckDB — not derived here, because a SQL "
+        "reimplementation of the classifier would drift from it. A difference "
+        "is therefore a defect in the shipper, and it does not read as missing "
+        "data: an order whose UTM row is absent falls through the COALESCE to "
+        "`organic` and moves the paid/organic split on the chart."
+    ),
+    dk_table="silver_order_utm",
+    columns=UTM_COLUMNS,
+    key_columns=("order_id",),
+    # When the parser last looked at the order. Carried across rather than
+    # regenerated, so it is the same clock on both sides.
+    synced_column="parsed_at",
+    full_replace=True,
+)
+
+
+async def reconcile_order_utm(
+    store,
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = SILVER_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Compare the shipped UTM classification against DuckDB's. Reports only.
+
+    `full_replace=True` removes the retired category, and correctly: every
+    ship writes the whole table, so a row Postgres is missing was lost rather
+    than retired. That is the same argument `app.manager_classifications`
+    makes, and it holds here for the same reason — the shipper has no delta
+    path to have skipped a row through.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    watermarks = await fetch_watermarks(pool)
+
+    async with store.connection() as conn:
+        dk_side = read_duckdb_side(conn, (ORDER_UTM_TABLE,))
+
+    dk_rows, dk_synced = dk_side[ORDER_UTM_TABLE.pg_table]
+    pg_rows = await fetch_pg_rows(pool, ORDER_UTM_TABLE)
+    return compare_table(
+        ORDER_UTM_TABLE, dk_rows, dk_synced, pg_rows,
+        watermarks.get(ORDER_UTM_TABLE.pg_table),
+        now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+    )
 
 
 async def reconcile_operational(

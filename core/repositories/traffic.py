@@ -20,6 +20,50 @@ class TrafficMixin:
     # "key: value" pairs without any "UTM:" prefix (tracking keys only)
     _UTM_BARE_RE = re.compile(r'\b(utm_\w+|fbclid|ttp|_fbp|_fbc):\s*((?:(?!,\s*\w+:)[^;\n\r])+)')
 
+    async def _traffic_run(
+        self, sql: str, params: "list | None" = None, *, mode: str = "all",
+    ):
+        """Run one traffic statement against whichever engine the flag names.
+
+        The bodies below carry `{silver_orders}`, `{order_utm}`,
+        `{gold_daily_revenue}`, `{gold_revenue_rollup}` and
+        `{manual_expenses}` holes; `render_tables` fills them for the engine
+        that is about to answer. One body, two engines — and the fill happens
+        *inside* this method rather than at the call site, because a caller
+        that picks the fragment from the flag renders the Postgres shape into
+        the DuckDB fallback, which is how `/marketing` was broken for an hour.
+        """
+        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+
+        from core import pg_traffic_read
+
+        params = list(params or [])
+        if pg_traffic_read.enabled() and pg_traffic_read.available():
+            try:
+                rows = await pg_traffic_read.fetch(
+                    render_tables(sql, POSTGRES), params,
+                )
+                return (rows[0] if rows else None) if mode == "one" else rows
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "traffic: Postgres failed, falling back to DuckDB: %s",
+                    exc, exc_info=True,
+                )
+
+        async with self.connection() as conn:
+            cursor = conn.execute(render_tables(sql, DUCKDB), params)
+            return cursor.fetchone() if mode == "one" else cursor.fetchall()
+
+    # The two expressions that decide what a chart calls an order, repeated
+    # verbatim in five places below because a GROUP BY cannot name the alias
+    # (see `refresh_traffic_gold_layer` for what happens when it tries). They
+    # are the fallback for an order the parser never classified: no UTM row at
+    # all, which the LEFT JOIN renders as NULL.
+    _PLATFORM_EXPR = """COALESCE(u.platform,
+        CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END)"""
+    _TRAFFIC_TYPE_EXPR = """COALESCE(u.traffic_type,
+        CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END)"""
+
     @staticmethod
     def _parse_utm_from_comment(comment: str) -> Dict[str, Any]:
         """Parse UTM data from manager_comment field.
@@ -384,37 +428,42 @@ class TrafficMixin:
 
         Returns breakdown by platform and traffic type.
         """
-        # Build filters
+        # `refresh_traffic_gold_layer`'s own predicate, because this reads the
+        # rows that Gold aggregates rather than the Gold. Dropping one of the
+        # three would not shift a cell, it would add rows the Gold never had.
         filters = [
-            "g.date >= ?",
-            "g.date <= ?",
+            "NOT s.is_return",
+            "s.is_active_source",
+            "s.order_date IS NOT NULL",
+            "s.order_date >= ?",
+            "s.order_date <= ?",
         ]
         params: list = [start_date, end_date]
 
         if source_id:
-            filters.append("g.source_id = ?")
+            filters.append("s.source_id = ?")
             params.append(source_id)
 
-        # Sales type filter (uses sales_type column in gold table)
         if sales_type != "all":
-            filters.append("g.sales_type = ?")
+            filters.append("s.sales_type = ?")
             params.append(sales_type)
 
         where_clause = " AND ".join(filters)
 
         query = f"""
             SELECT
-                g.platform,
-                g.traffic_type,
-                SUM(g.orders_count) AS orders,
-                SUM(g.revenue) AS revenue
-            FROM gold_daily_traffic g
+                {self._PLATFORM_EXPR} AS platform,
+                {self._TRAFFIC_TYPE_EXPR} AS traffic_type,
+                COUNT(DISTINCT s.id) AS orders,
+                COALESCE(SUM(s.grand_total), 0) AS revenue
+            FROM {{silver_orders}} s
+            LEFT JOIN {{order_utm}} u ON s.id = u.order_id
             WHERE {where_clause}
-            GROUP BY g.platform, g.traffic_type
-            ORDER BY revenue DESC
+            GROUP BY {self._PLATFORM_EXPR}, {self._TRAFFIC_TYPE_EXPR}
+            ORDER BY revenue DESC, platform, traffic_type
         """
 
-        rows = await self._fetch_all(query, params)
+        rows = await self._traffic_run(query, params)
 
         # Aggregate by platform
         platforms = {}
@@ -495,34 +544,38 @@ class TrafficMixin:
         Returns list of daily entries with paid/organic split.
         """
         filters = [
-            "g.date >= ?",
-            "g.date <= ?",
+            "NOT s.is_return",
+            "s.is_active_source",
+            "s.order_date IS NOT NULL",
+            "s.order_date >= ?",
+            "s.order_date <= ?",
         ]
         params: list = [start_date, end_date]
 
         if source_id:
-            filters.append("g.source_id = ?")
+            filters.append("s.source_id = ?")
             params.append(source_id)
 
         if sales_type != "all":
-            filters.append("g.sales_type = ?")
+            filters.append("s.sales_type = ?")
             params.append(sales_type)
 
         where_clause = " AND ".join(filters)
 
         query = f"""
             SELECT
-                g.date,
-                g.traffic_type,
-                SUM(g.orders_count) AS orders,
-                SUM(g.revenue) AS revenue
-            FROM gold_daily_traffic g
+                s.order_date AS date,
+                {self._TRAFFIC_TYPE_EXPR} AS traffic_type,
+                COUNT(DISTINCT s.id) AS orders,
+                COALESCE(SUM(s.grand_total), 0) AS revenue
+            FROM {{silver_orders}} s
+            LEFT JOIN {{order_utm}} u ON s.id = u.order_id
             WHERE {where_clause}
-            GROUP BY g.date, g.traffic_type
-            ORDER BY g.date
+            GROUP BY s.order_date, {self._TRAFFIC_TYPE_EXPR}
+            ORDER BY s.order_date, traffic_type
         """
 
-        rows = await self._fetch_all(query, params)
+        rows = await self._traffic_run(query, params)
 
         # Group by date
         daily_data = {}
@@ -613,11 +666,11 @@ class TrafficMixin:
         # Get total count
         count_query = f"""
             SELECT COUNT(*)
-            FROM silver_orders s
-            LEFT JOIN silver_order_utm u ON s.id = u.order_id
+            FROM {{silver_orders}} s
+            LEFT JOIN {{order_utm}} u ON s.id = u.order_id
             WHERE {where_clause}
         """
-        count_row = await self._fetch_one(count_query, params)
+        count_row = await self._traffic_run(count_query, params, mode="one")
         total = count_row[0] if count_row else 0
 
         # Get paginated rows
@@ -632,14 +685,14 @@ class TrafficMixin:
                 ) AS platform,
                 u.utm_source, u.utm_medium, u.utm_campaign, u.utm_content,
                 u.fbp, u.fbc, u.ttp, u.fbclid
-            FROM silver_orders s
-            LEFT JOIN silver_order_utm u ON s.id = u.order_id
+            FROM {{silver_orders}} s
+            LEFT JOIN {{order_utm}} u ON s.id = u.order_id
             WHERE {where_clause}
             ORDER BY s.order_date DESC, s.id DESC
             LIMIT ? OFFSET ?
         """
         data_params = params + [limit, offset]
-        rows = await self._fetch_all(data_query, data_params)
+        rows = await self._traffic_run(data_query, data_params)
 
         transactions = []
         for row in rows:
@@ -782,34 +835,43 @@ class TrafficMixin:
         traffic_type_expr = """COALESCE(u.traffic_type,
             CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END)"""
 
+        # `AS groups` is not decoration: PostgreSQL requires a derived table to
+        # be named, and DuckDB accepts the alias, so naming it is what makes
+        # one body run on both.
         count_query = f"""
             SELECT COUNT(*) FROM (
                 SELECT 1
-                FROM silver_orders s
-                LEFT JOIN silver_order_utm u ON s.id = u.order_id
+                FROM {{silver_orders}} s
+                LEFT JOIN {{order_utm}} u ON s.id = u.order_id
                 WHERE {where_clause}
                 GROUP BY {campaign_expr}, {platform_expr}, {traffic_type_expr}
-            )
+            ) AS groups
         """
-        count_row = await self._fetch_one(count_query, params)
+        count_row = await self._traffic_run(count_query, params, mode="one")
         total = count_row[0] if count_row else 0
 
+        # `MIN`, not `any_value`: the campaign is grouped on but `utm_source`
+        # is not, and "whichever row the engine reached first" is a different
+        # row in each of them. The grouping keys settle the ORDER BY for the
+        # same reason — this query is paginated, so two rows tied on the sort
+        # column can otherwise appear on both page 1 and page 2, or on
+        # neither.
         data_query = f"""
             SELECT
                 {campaign_expr} AS campaign,
-                any_value(u.utm_source) AS utm_source,
+                MIN(u.utm_source) AS utm_source,
                 {platform_expr} AS platform,
                 {traffic_type_expr} AS traffic_type,
                 COUNT(DISTINCT s.id) AS orders,
                 COALESCE(SUM(s.grand_total), 0) AS revenue
-            FROM silver_orders s
-            LEFT JOIN silver_order_utm u ON s.id = u.order_id
+            FROM {{silver_orders}} s
+            LEFT JOIN {{order_utm}} u ON s.id = u.order_id
             WHERE {where_clause}
             GROUP BY {campaign_expr}, {platform_expr}, {traffic_type_expr}
-            ORDER BY {sort_by} {sort_dir}, revenue DESC
+            ORDER BY {sort_by} {sort_dir}, revenue DESC, campaign, platform, traffic_type
             LIMIT ? OFFSET ?
         """
-        rows = await self._fetch_all(data_query, params + [limit, offset])
+        rows = await self._traffic_run(data_query, params + [limit, offset])
 
         campaigns = [
             {
@@ -863,41 +925,59 @@ class TrafficMixin:
             revenue_params.append(sales_type)
         revenue_where = " AND ".join(revenue_filters)
 
-        total_rev_row = await self._fetch_one(
-            f"SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue WHERE {revenue_where}",
+        # `{gold_revenue_rollup}` is `TRUE` in DuckDB and `source_id IS NULL`
+        # in Postgres, whose Gold carries the source as a dimension with the
+        # roll-up as a row. Without it this sum counts every order twice there
+        # — 11,107,040.50 against a true 5,553,520.25, measured over 30 days —
+        # and the blended ROAS reads exactly double.
+        total_rev_row = await self._traffic_run(
+            "SELECT COALESCE(SUM(revenue), 0) FROM {gold_daily_revenue} "
+            f"WHERE {revenue_where} AND {{gold_revenue_rollup}}",
             revenue_params,
+            mode="one",
         )
         total_revenue = float(total_rev_row[0]) if total_rev_row else 0.0
 
-        # 2. Paid revenue per platform from gold_daily_traffic
+        # 2. Paid revenue per platform, from the same join the rest of the tab
+        #    reads. `traffic_type` is a fallback expression rather than a
+        #    column, so the paid filter has to repeat it — an order with no UTM
+        #    row is `organic` or `unknown` and can never be paid, which is the
+        #    answer the Gold gave too.
         traffic_filters = [
-            "g.date >= ?",
-            "g.date <= ?",
-            "g.traffic_type IN ('paid_confirmed', 'paid_likely')",
+            "NOT s.is_return",
+            "s.is_active_source",
+            "s.order_date IS NOT NULL",
+            "s.order_date >= ?",
+            "s.order_date <= ?",
+            f"{self._TRAFFIC_TYPE_EXPR} IN ('paid_confirmed', 'paid_likely')",
         ]
         traffic_params: list = [start_date, end_date]
         if sales_type != "all":
-            traffic_filters.append("g.sales_type = ?")
+            traffic_filters.append("s.sales_type = ?")
             traffic_params.append(sales_type)
         traffic_where = " AND ".join(traffic_filters)
 
-        paid_rows = await self._fetch_all(
-            f"""SELECT g.platform, SUM(g.revenue) as paid_revenue
-                FROM gold_daily_traffic g
+        paid_rows = await self._traffic_run(
+            f"""SELECT {self._PLATFORM_EXPR} AS platform,
+                       COALESCE(SUM(s.grand_total), 0) as paid_revenue
+                FROM {{silver_orders}} s
+                LEFT JOIN {{order_utm}} u ON s.id = u.order_id
                 WHERE {traffic_where}
-                GROUP BY g.platform""",
+                GROUP BY {self._PLATFORM_EXPR}
+                ORDER BY platform""",
             traffic_params,
         )
         paid_by_platform = {row[0]: float(row[1]) for row in paid_rows}
 
         # 3. Ad spend per platform from manual_expenses
-        spend_rows = await self._fetch_all(
+        spend_rows = await self._traffic_run(
             """SELECT platform, SUM(amount) as spend
-               FROM manual_expenses
+               FROM {manual_expenses}
                WHERE expense_date BETWEEN ? AND ?
                  AND category = 'marketing'
                  AND platform IS NOT NULL
-               GROUP BY platform""",
+               GROUP BY platform
+               ORDER BY platform""",
             [start_date, end_date],
         )
         spend_by_platform = {row[0]: float(row[1]) for row in spend_rows}

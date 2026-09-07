@@ -92,6 +92,15 @@ class Dialect:
     # The goals a human set. DuckDB writes them; Postgres holds an hourly
     # read replica (revision 0017) — see `core/pg_operational.py`.
     revenue_goals: str
+    # `/traffic`. `order_utm` is shipped rather than derived — its body is a
+    # Python parser, not SQL (revision 0018) — and it is 1:1 with the order,
+    # which is what lets the traffic reads fold it against `silver_orders`
+    # instead of against a Gold this store deliberately does not have.
+    order_utm: str
+    # The ad spend behind ROAS. Irreplaceable and empty: zero rows in
+    # production as of 2026-09-07, so the endpoint's job on both engines is to
+    # return the same "no spend data" rather than an error from one of them.
+    manual_expenses: str
     # A namespace, not a name: the eleven inventory views reference each other,
     # so one prefix does the work of eleven holes. Empty in DuckDB, which has
     # no schemas to speak of; `gold.` in Postgres.
@@ -128,6 +137,8 @@ DUCKDB = Dialect(
     # Every row is a roll-up here: this Gold has no source dimension.
     gold_revenue_rollup="TRUE",
     revenue_goals="revenue_goals",
+    order_utm="silver_order_utm",
+    manual_expenses="manual_expenses",
     inventory_views="",
     # Byte-for-byte what `core.duckdb_constants._date_in_kyiv` has always
     # emitted. Changing it here changes stored Silver on the next rebuild.
@@ -159,6 +170,8 @@ POSTGRES = Dialect(
     gold_daily_revenue="gold.daily_revenue",
     gold_revenue_rollup="source_id IS NULL",
     revenue_goals="app.revenue_goals",
+    order_utm="silver.order_utm",
+    manual_expenses="app.manual_expenses",
     inventory_views="gold.",
     # `DATE(x)` also exists in PostgreSQL, but the cast is what the rest of
     # this repository's Postgres SQL uses, so it reads the same as its
@@ -349,7 +362,10 @@ def render_tables(sql: str, dialect: Dialect, **extra: Any) -> str:
         categories=dialect.categories,
         offer_stocks=dialect.offer_stocks,
         gold_daily_revenue=dialect.gold_daily_revenue,
+        gold_revenue_rollup=dialect.gold_revenue_rollup,
         revenue_goals=dialect.revenue_goals,
+        order_utm=dialect.order_utm,
+        manual_expenses=dialect.manual_expenses,
         period_measures=marketing_period_measures(dialect),
         **extra,
     )
