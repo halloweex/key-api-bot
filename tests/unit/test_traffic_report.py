@@ -161,6 +161,22 @@ class TestPlatformsAndCampaigns:
         assert "search_brand" not in {m.campaign for m in report.movers}
 
     @pytest.mark.asyncio
+    async def test_untagged_traffic_is_not_a_campaign(self):
+        """It is the largest mover most weeks — the first production run put
+        it at -346,815, four times the largest real one — and it would push
+        every actionable line off a list of five. Untagged traffic is already
+        reported by name in the buckets above."""
+        def campaigns(cur):
+            return [
+                {"campaign": "—", "platform": "", "revenue": 10_000 if cur else 350_000},
+                {"campaign": "real_one", "platform": "facebook",
+                 "revenue": 30_000 if cur else 10_000},
+            ]
+
+        report = await _report(FakeStore(campaigns=campaigns))
+        assert [m.campaign for m in report.movers] == ["real_one"]
+
+    @pytest.mark.asyncio
     async def test_a_campaign_that_only_ran_last_week_still_shows(self):
         """A campaign that stopped is the most reportable thing there is, and
         it appears in only one of the two weeks."""

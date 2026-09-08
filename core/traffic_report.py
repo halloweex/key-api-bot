@@ -63,6 +63,13 @@ TOP_CAMPAIGNS = 5
 # runs at; without a floor the movers list fills with rounding.
 CAMPAIGN_FLOOR = 2_000.0
 
+# What the repository calls a row with no campaign at all. It is by far the
+# largest "mover" most weeks — on the first production run it was −₴346,815,
+# four times the largest real one — and it is not a campaign, so it would push
+# every actionable line off a list of five. Untagged traffic is already
+# reported, by name, in the attribution buckets above.
+NO_CAMPAIGN = ("", "—", "none", "unknown", "(not set)")
+
 
 @dataclass(frozen=True)
 class Bucket:
@@ -213,7 +220,11 @@ async def _fetch_movers(
         )
         for name in set(now) | set(before)
     ]
-    moves = [m for m in moves if abs(m.delta) >= CAMPAIGN_FLOOR]
+    moves = [
+        m for m in moves
+        if abs(m.delta) >= CAMPAIGN_FLOOR
+        and m.campaign.strip().lower() not in NO_CAMPAIGN
+    ]
     moves.sort(key=lambda m: abs(m.delta), reverse=True)
     return moves[:TOP_CAMPAIGNS]
 
