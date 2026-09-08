@@ -20,7 +20,7 @@ Features:
 import asyncio
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -641,6 +641,14 @@ class BackgroundScheduler:
             trigger=IntervalTrigger(hours=1),
             max_instances=1,
             coalesce=True,
+            # Ninety seconds after start, not an hour. This family is a cheap
+            # idempotent copy — 116 ms when nothing moved — and it is what
+            # carries `bronze.expense_types`, whose absence collapses the
+            # `/expenses` breakdown into a single "Other". Waiting an hour
+            # after every deploy for that is the wrong trade, and the delay is
+            # there at all so the copy does not compete with the app's own
+            # startup.
+            first_run_delay_s=90,
         )
 
         # Job: ClickHouse sync (hourly) — steps 5–6 of «Одна бронза»
@@ -750,8 +758,29 @@ class BackgroundScheduler:
         max_instances: int = 1,
         coalesce: bool = True,
         misfire_grace_time: int = DEFAULT_MISFIRE_GRACE_SECONDS,
+        first_run_delay_s: Optional[int] = None,
     ) -> None:
-        """Add a job to the scheduler."""
+        """Add a job to the scheduler.
+
+        `first_run_delay_s` overrides when the *first* firing happens, and
+        exists because `IntervalTrigger(hours=1)` counts that first firing from
+        the moment the scheduler starts. Every deploy restarts the scheduler,
+        so on a day with five deploys an hourly job can wait most of the day —
+        measured 2026-09-08, where the gap between two runs of the operational
+        replication was **138 minutes against a grace window of 90 sized for
+        the interval**, and the same delay held up a rollout three times over.
+
+        Not a default. A job that fires on every restart is a job that runs
+        five times on a deploy-heavy afternoon, which is right for a cheap
+        idempotent copy and wrong for anything that costs. Passed explicitly by
+        the jobs that have earned it.
+        """
+        extra = {}
+        if first_run_delay_s is not None:
+            extra["next_run_time"] = (
+                datetime.now(timezone.utc) + timedelta(seconds=first_run_delay_s)
+            )
+
         self._scheduler.add_job(
             func,
             trigger=trigger,
@@ -761,6 +790,7 @@ class BackgroundScheduler:
             max_instances=max_instances,
             coalesce=coalesce,
             replace_existing=True,
+            **extra,
         )
 
         self._job_info[job_id] = JobInfo(
