@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.163
+
+- A weekly report should not deliver a week that ended before it existed
+
+
 ## 3.0.162
 
 - Being told nothing is not the same as not understanding it
