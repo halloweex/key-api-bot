@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.156
+
+- Give the bot image the fonts too, and say so when the fallback is missing
+
+
 ## 3.0.155
 
 - Say which half of the order count moved, in orders
