@@ -445,6 +445,43 @@ class TestTheRoleMatrixLeftDuckDB:
                 f"{name} chooses its engine some other way"
             )
 
+    @pytest.mark.asyncio
+    async def test_seeding_is_one_statement(self, tmp_path):
+        """It runs on the request path of the first authorization check after
+        every restart, and there are 48 (role, feature) pairs.
+
+        A statement per row meant 48 acquisitions of DuckDB's store lock where
+        the single-connection version it replaced took one — and under Postgres
+        48 × (require_revision + insert). Measured with two concurrent callers
+        on a cold table before this was fixed: 93 statements for 48 rows.
+        """
+        store = DuckDBStore(db_path=tmp_path / "seed.duckdb")
+        await store.connect()
+        try:
+            calls = []
+            original = store._perms_run
+
+            async def counting(sql, params=None, *, mode="all"):
+                calls.append(sql)
+                return await original(sql, params, mode=mode)
+
+            store._perms_run = counting
+            await store.seed_default_permissions()
+
+            inserts = [sql for sql in calls if "INSERT" in sql.upper()]
+            assert len(inserts) == 1, f"{len(inserts)} inserts for one seed"
+
+            matrix = await store.get_all_permissions()
+            pairs = sum(len(features) for features in matrix.values())
+            assert pairs == 48, pairs
+
+            # And it stays idempotent, which is what lets every read path seed.
+            calls.clear()
+            await store.seed_default_permissions()
+            assert not [sql for sql in calls if "INSERT" in sql.upper()]
+        finally:
+            await store.close()
+
     def test_the_migration_and_the_code_agree_on_the_table(self):
         migration = (MIGRATION.parent / "0022_role_permissions.py").read_text(
             encoding="utf-8")

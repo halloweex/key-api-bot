@@ -556,26 +556,39 @@ class UsersMixin:
             )
         }
 
-        inserted = 0
+        missing = []
         for role, features in ROLE_PERMISSIONS.items():
             for feature, actions in features.items():
                 key = (str(role.value), str(feature.value))
                 if key in existing:
                     continue
-                await self._perms_run("""
-                    INSERT INTO {perms} (role, feature, can_view, can_edit, can_delete)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT (role, feature) DO NOTHING
-                """, [
+                missing.extend([
                     key[0], key[1],
                     Action.VIEW in actions,
                     Action.EDIT in actions,
                     Action.DELETE in actions,
-                ], mode="none")
-                inserted += 1
+                ])
 
-        if inserted:
-            logger.info("Seeded %d missing role permissions", inserted)
+        if not missing:
+            return
+
+        # **One statement, not one per row.** This runs on the request path of
+        # the first authorization check after every restart, and there are 48
+        # (role, feature) pairs. A statement each meant 48 acquisitions of
+        # DuckDB's store lock where the old single-connection version took one,
+        # and under Postgres 48 × (require_revision + insert) — ~96 round trips
+        # before anybody's first page could be authorized. Measured with two
+        # concurrent callers on a cold table: 93 statements for 48 rows,
+        # because each caller seeds what it still sees missing.
+        rows = len(missing) // 5
+        values = ", ".join(["(?, ?, ?, ?, ?)"] * rows)
+        await self._perms_run(f"""
+            INSERT INTO {{perms}} (role, feature, can_view, can_edit, can_delete)
+            VALUES {values}
+            ON CONFLICT (role, feature) DO NOTHING
+        """, missing, mode="none")
+
+        logger.info("Seeded %d missing role permissions", rows)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
