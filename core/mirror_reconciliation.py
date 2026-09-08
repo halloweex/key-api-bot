@@ -223,16 +223,6 @@ MIRRORED_TABLES: Tuple[MirroredTable, ...] = (
         dk_table="categories",
         columns=tuple(CATEGORY_COLUMNS),
     ),
-    # The expense-type dictionary, 27 rows, re-shipped whole on every sync —
-    # so it belongs with the catalogue and not with orders. Its `name` is the
-    # *resolved* display name, built in `core/landing_rows.py` from a
-    # localisation key, which is the whole reason that parse had to move there
-    # before this table gained a second writer (revision 0020).
-    MirroredTable(
-        pg_table="bronze.expense_types",
-        dk_table="expense_types",
-        columns=tuple(EXPENSE_TYPE_COLUMNS),
-    ),
     # Not a mirror — a replica. `is_retail` and the effective-dated intervals
     # are decisions KeyCRM cannot supply, so `core/pg_replication.py` copies
     # what DuckDB holds rather than re-deriving them. `full_replace` because
@@ -1805,6 +1795,19 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # arrangement: a goal is written and then rewritten, never appended to.
         synced_column="updated_at",
         numeric=("goal_amount", "calculated_goal", "growth_factor"),
+        full_replace=True,
+    ),
+    # Landing, replicated rather than mirrored — `bronze.offer_stocks`'
+    # situation exactly. KeyCRM serves this dictionary only to the weekly full
+    # sync, so a payload-fed mirror leaves Postgres empty for up to a week, and
+    # `/expenses` renders its breakdown by *name*. `full_replace` because the
+    # replicator rewrites it whole, which also makes a missing row unambiguous:
+    # there is no "KeyCRM retired it" to mean.
+    MirroredTable(
+        pg_table="bronze.expense_types",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="expense_types",
+        columns=tuple(EXPENSE_TYPE_COLUMNS),
         full_replace=True,
     ),
     MirroredTable(

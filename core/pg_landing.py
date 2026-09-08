@@ -215,19 +215,6 @@ async def mirror_products(payloads: List[Dict[str, Any]]) -> MirrorOutcome:
     return await _mirror("bronze.products", PRODUCT_COLUMNS, rows)
 
 
-async def mirror_expense_types(payloads: List[Dict[str, Any]]) -> MirrorOutcome:
-    """The expense-type dictionary, 27 rows, re-shipped whole every sync.
-
-    Like the catalogue and unlike orders: the dictionary is small and arrives
-    complete, so there is nothing to backfill and `last_ok_at` licenses a
-    tolerance of zero the morning after the first successful ship.
-    """
-    from core.landing_rows import EXPENSE_TYPE_COLUMNS, expense_type_rows
-
-    rows = [tuple(r) for r in expense_type_rows(payloads)]
-    return await _mirror("bronze.expense_types", EXPENSE_TYPE_COLUMNS, rows)
-
-
 async def mirror_expenses(orders_with_expenses: List[Dict[str, Any]]) -> MirrorOutcome:
     """The order-level costs carried by a batch of orders.
 

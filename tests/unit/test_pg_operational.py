@@ -35,6 +35,7 @@ from core.mirror_reconciliation import (
     _row_key,
     fingerprints,
 )
+from core.landing_rows import EXPENSE_TYPE_COLUMNS
 from core.pg_operational import (
     GOAL_COLUMNS,
     INVENTORY_HISTORY_COLUMNS,
@@ -476,6 +477,7 @@ class TestTheComparisonSpecs:
             "bronze.offer_stocks": set(OFFER_STOCK_COLUMNS),
             "app.revenue_goals": set(GOAL_COLUMNS),
             "app.manual_expenses": set(MANUAL_EXPENSE_COLUMNS),
+            "bronze.expense_types": set(EXPENSE_TYPE_COLUMNS),
             "app.order_backfill_misses": set(MISS_COLUMNS),
             "app.inventory_history": set(INVENTORY_HISTORY_COLUMNS),
             "app.sku_inventory_status": set(SKU_STATUS_COLUMNS),

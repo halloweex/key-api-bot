@@ -54,12 +54,25 @@ class TestTheSyncShipsWhatItWrites:
                     f"{name} writes expenses to DuckDB and never ships them"
                 )
 
-    def test_every_expense_type_upsert_is_mirrored(self):
+    def test_the_type_dictionary_is_not_mirrored_from_the_payload(self):
+        """It rides `replicate_operational` instead, and the difference is not
+        academic: KeyCRM serves this dictionary only to the **weekly** full
+        sync, so a payload-fed mirror left Postgres empty for up to a week —
+        measured on production the hour the flag first went on, where it
+        collapsed every expense type into "Other" and emptied the filter.
+
+        `bronze.offer_stocks` sits in that family for the same reason. Two
+        writers for one table is how they drift, so the mirror is gone rather
+        than kept beside the replica."""
         for name, calls in self._pairs():
-            if "upsert_expense_types" in calls:
-                assert "mirror_expense_types" in calls, (
-                    f"{name} writes the dictionary to DuckDB and never ships it"
-                )
+            assert "mirror_expense_types" not in calls, (
+                f"{name} mirrors a dictionary that only the weekly sync carries"
+            )
+
+    def test_it_is_in_the_replicated_family(self):
+        from core.pg_operational import EXPENSE_TYPES_TABLE, _FULL_REPLACE
+
+        assert EXPENSE_TYPES_TABLE in {spec[0] for spec in _FULL_REPLACE}
 
 
 class TestTheMirrorNeverStopsASync:

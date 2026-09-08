@@ -30,7 +30,6 @@ from core.events import (
 from core.meilisearch_client import get_meili_client, init_meilisearch
 from core.pg_landing import (
     mirror_categories,
-    mirror_expense_types,
     mirror_expenses,
     mirror_products,
 )
@@ -677,10 +676,13 @@ class SyncService:
 
             stats["expense_types"] = await self.store.upsert_expense_types(expense_types)
             await self.store.set_last_sync_time("expense_types")
-            # Same payloads, read through the same `landing_rows` — including
-            # the localisation-key cleanup, which is why that parse had to move
-            # there before this line could exist (revision 0020).
-            await mirror_expense_types(expense_types)
+            # Not mirrored from here. KeyCRM serves this dictionary only to the
+            # weekly full sync, so a payload-fed mirror would leave Postgres
+            # empty for up to a week — and `/expenses` renders the breakdown by
+            # *name*, so that is a collapsed chart and an empty filter, not a
+            # freshness detail. It rides the hourly `replicate_operational`
+            # instead, out of DuckDB, which holds it every minute of that week.
+            # `bronze.offer_stocks` sits in that family for the same reason.
 
             stats["products"] = await self.store.upsert_products(products)
             await self.store.set_last_sync_time("products")
