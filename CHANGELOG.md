@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.153
+
+- Put the brand faces in the repository, and draw around what they lack
+
+
 ## 3.0.152
 
 - Send the weekly report as the rich form, with two rungs under it
