@@ -46,6 +46,12 @@ from core.weekly_report_image import (
 # all; card / text: the two forms the scheduled job sends today.
 FORMS = ("rich", "rich-nocard", "rich-text", "card", "text")
 
+# Which weekly message to preview. The traffic one needs no fixture and no
+# readable DuckDB: its reads go through the repository, which follows
+# `KS_READ_TRAFFIC` to Postgres, so an empty throwaway store is enough to
+# carry the method and the numbers are still the live ones.
+REPORTS = ("sales", "traffic")
+
 
 # gold.daily_revenue, retail, per (day, source): what Postgres held on
 # 2026-09-07. Source 1 Instagram, 2 Telegram, 4 Shopify. The roll-ups add
@@ -172,6 +178,39 @@ async def send(report: WeeklyReport, chat_id: int, lang: str,
         print(f"{form:<12} lang={lang} delivered={n}")
 
 
+async def send_traffic(chat_id: int, lang: str, db_path: str,
+                       dashboard_url: str | None) -> None:
+    """Build and send the traffic report exactly as the job would.
+
+    The store is opened on `db_path` only to carry the repository methods —
+    with `KS_READ_TRAFFIC=postgres` not one of them touches the file, which
+    is why a throwaway path works while the production DuckDB is locked by
+    the running process.
+    """
+    from core.duckdb_store import DuckDBStore
+    from core.telegram_alerts import send_rich_message_http
+    from core.traffic_report import build_report, chart_view, format_report_rich
+    from core.weekly_report_image import render_channels_chart
+
+    store = DuckDBStore(db_path=db_path)
+    await store.connect()
+    try:
+        report = await build_report(store, datetime.now().date())
+    finally:
+        await store.close()
+
+    print(f"week {report.start} – {report.end}: "
+          f"{report.revenue:,.0f} from {report.orders} orders")
+    chart = render_channels_chart(chart_view(report, lang), lang) if report.platforms else None
+    html = format_report_rich(
+        report, dashboard_url, lang,
+        figures={"platforms": "platforms"} if chart else None,
+    )
+    delivered = await send_rich_message_http(
+        html, media={"platforms": chart} if chart else None, chat_ids=[chat_id])
+    print(f"traffic      lang={lang} delivered={delivered}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--chat-id", type=int, required=True)
@@ -182,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="render the 31.08–06.09.2026 week from fixed values")
     parser.add_argument("--db", default=os.getenv("DUCKDB_PATH", "data/analytics.duckdb"))
     parser.add_argument("--sales-type", default="retail")
+    parser.add_argument("--report", default="sales",
+                        help="which weekly message: " + ", ".join(REPORTS))
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -189,6 +230,15 @@ def main(argv: list[str] | None = None) -> int:
     # token. A preview run must not print it into a terminal.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     from core.config import DASHBOARD_URL
+
+    if args.report == "traffic":
+        asyncio.run(send_traffic(args.chat_id, args.lang, args.db,
+                                 DASHBOARD_URL or None))
+        return 0
+    if args.report not in REPORTS:
+        print(f"unknown report {args.report!r}; one of {', '.join(REPORTS)}",
+              file=sys.stderr)
+        return 1
 
     report = fixture_report() if args.fixture else live_report(args.db, args.sales_type)
     if report.current.orders == 0:
