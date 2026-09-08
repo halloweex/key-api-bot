@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.152
+
+- Send the weekly report as the rich form, with two rungs under it
+
+
 ## 3.0.151
 
 - A restart must not cost an hourly job its hour
