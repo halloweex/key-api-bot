@@ -658,3 +658,49 @@ class TestTheAccessRequestQueue:
             headers=headers, json={"features": ["user_management"]},
         ).status_code == 400
         assert store.granted is None
+
+
+class TestThePageIsToldWhatInheritingMeans:
+    """The admin page cannot derive "the tabs this level opens" any more.
+
+    It used to read the permissions matrix and take every feature with `view`.
+    That was right while the matrix carried areas; the day it became uniform
+    depth, it meant *all nine tabs for every level*. An admin opening an
+    inheriting row saw nine lit chips instead of six — and one click would have
+    written an explicit eight-tab set, granting margin, expenses and the SMS
+    roster by touching an unrelated tab. Reported from the page, with a
+    screenshot of nine.
+    """
+
+    def test_the_matrix_endpoint_sends_the_level_defaults(self, client, monkeypatch):
+        from core.permissions import DEFAULT_TABS
+
+        store = _FakeStore("admin", None)
+
+        async def _seed():
+            return None
+
+        async def _all():
+            return {}
+
+        store.seed_default_permissions = _seed
+        store.get_all_permissions = _all
+        _install_store(monkeypatch, store)
+
+        body = client.get(
+            "/api/admin/permissions", headers=_cookie(ADMIN_ID, "admin"),
+        ).json()
+
+        assert "default_tabs" in body, "the page has to be told, not left to derive"
+        assert set(body["default_tabs"]) == set(DEFAULT_TABS)
+        assert body["default_tabs"]["viewer"] == list(DEFAULT_TABS["viewer"])
+        # `null` is "not narrowed at all", which is what admin means.
+        assert body["default_tabs"]["admin"] is None
+
+    def test_a_viewer_default_is_not_every_tab(self):
+        """The assertion the bug would have failed."""
+        from core.permissions import DEFAULT_TABS, TAB_FEATURE_KEYS
+
+        assert set(DEFAULT_TABS["viewer"]) < set(TAB_FEATURE_KEYS)
+        for closed in ("margin", "expenses", "sms"):
+            assert closed not in DEFAULT_TABS["viewer"]

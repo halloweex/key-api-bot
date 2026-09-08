@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { tabSummary, roleTabs, firstAllowedPath } from '../access'
+import { tabSummary, defaultTabsFor, firstAllowedPath } from '../access'
 import type { Permissions, TabFeature } from '../../types/api'
 
 const label = (tab: TabFeature) => tab
@@ -23,30 +23,31 @@ describe('tabSummary', () => {
   })
 })
 
-describe('roleTabs', () => {
-  const matrix = {
-    dashboard: { view: true, edit: false, delete: false },
-    traffic: { view: true, edit: false, delete: false },
-    expenses: { view: true, edit: false, delete: false },
-    margin: { view: false, edit: false, delete: false },
-    user_management: { view: true, edit: false, delete: false },
-  }
+describe('defaultTabsFor', () => {
+  // Read from the server, never derived from the permissions matrix: since
+  // the matrix became uniform depth, every level has `view` on everything, and
+  // deriving it lit nine chips on an inheriting row instead of six — where one
+  // click would have written an explicit eight-tab set and granted margin,
+  // expenses and the SMS roster by touching an unrelated tab.
+  const defaults = {
+    viewer: ['dashboard', 'products', 'traffic', 'inventory', 'reports', 'marketing'],
+    editor: ['dashboard', 'products', 'traffic', 'inventory', 'reports', 'marketing', 'expenses'],
+    admin: null,
+  } as Record<string, TabFeature[] | null>
 
-  it('returns the granted tabs in sidebar order', () => {
-    expect(roleTabs(matrix)).toEqual(['dashboard', 'traffic', 'expenses'])
+  it('returns the level default the server sent', () => {
+    expect(defaultTabsFor(defaults, 'viewer')).toEqual(
+      ['dashboard', 'products', 'traffic', 'inventory', 'reports', 'marketing'])
+    expect(defaultTabsFor(defaults, 'editor')).toContain('expenses')
   })
 
-  it('includes expenses, which is a tab without a page', () => {
-    // Ordering this by TAB_PATHS would have dropped it silently.
-    expect(roleTabs(matrix)).toContain('expenses')
+  it('reads null as every tab, which is what "not narrowed" means', () => {
+    expect(defaultTabsFor(defaults, 'admin')).toHaveLength(9)
   })
 
-  it('never returns something that is not a grantable tab', () => {
-    expect(roleTabs(matrix)).not.toContain('user_management')
-  })
-
-  it('says nothing when the matrix has not loaded', () => {
-    expect(roleTabs(undefined)).toEqual([])
+  it('says nothing when the matrix has not loaded or the role is unknown', () => {
+    expect(defaultTabsFor(undefined, 'viewer')).toEqual([])
+    expect(defaultTabsFor(defaults, 'nope')).toEqual([])
   })
 })
 

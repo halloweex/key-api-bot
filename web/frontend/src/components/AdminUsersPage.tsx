@@ -21,7 +21,7 @@ import { PageHeading } from './PageHeading'
 import { Wrapper } from './Wrapper'
 import { UserRow, roleOptions, statusOptions } from './UserRow'
 import { AccessRequestsCard } from './AccessRequestsCard'
-import { roleTabs } from '../utils/access'
+import { defaultTabsFor } from '../utils/access'
 
 export function AdminUsersPage() {
   const queryClient = useQueryClient()
@@ -256,7 +256,7 @@ export function AdminUsersPage() {
                     expanded={expanded.has(user.user_id)}
                     onToggleExpanded={handleToggleExpanded}
                     tabs={matrix?.tabs}
-                    roleFeatures={roleTabs(matrix?.permissions?.[user.role])}
+                    roleFeatures={defaultTabsFor(matrix?.default_tabs, user.role)}
                     presets={matrix?.presets}
                     isUpdating={updatingUsers.has(user.user_id)}
                   />

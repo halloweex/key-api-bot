@@ -980,6 +980,8 @@ export interface PermissionsMatrixResponse {
   roles: RoleInfo[]
   tabs: TabFeature[]
   presets: AccessPreset[]
+  /** What "no tab set" means per level; `null` is "not narrowed" (admin). */
+  default_tabs: Record<UserRole, TabFeature[] | null>
 }
 
 export interface AccessRequest {

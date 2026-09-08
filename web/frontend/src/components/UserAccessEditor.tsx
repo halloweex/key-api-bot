@@ -78,10 +78,11 @@ export const UserAccessEditor = memo(function UserAccessEditor({
           <FilterChip
             key={tab}
             active={granted.has(tab)}
-            // Slate while the answer comes from the role, purple once somebody
-            // has decided it for this person: two states that look different,
-            // because they behave differently.
-            tone={inherited ? 'slate' : 'purple'}
+            // Two states that look different because they behave differently
+            // — but both light. `slate` was a dark navy fill, and a row of
+            // nine of them read as an error rather than as "these come from
+            // the role"; the admin who saw it said so.
+            tone={inherited ? 'blue' : 'purple'}
             disabled={disabled}
             onClick={() => toggle(tab)}
           >

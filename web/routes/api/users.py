@@ -419,12 +419,28 @@ async def get_all_permissions(
     # The tab checklist and its preset buttons are drawn from the same two
     # lists the bot draws its keyboard from, so a tab added in
     # `core/permissions.py` appears in both without either being edited.
+    from core.permissions import DEFAULT_TABS
+
     return {
         "permissions": permissions,
         "features": features,
         "roles": roles,
         "tabs": [f["key"] for f in features if f.get("tab")],
         "presets": get_all_presets(),
+        # What "no tab set" means, per level. **The page cannot derive this
+        # any more and must not try.** It used to read the matrix and take
+        # every feature with `view` — which was right while the matrix carried
+        # areas, and became "all nine tabs for everybody" the moment it became
+        # uniform depth. An admin opening an inheriting row then saw nine lit
+        # chips instead of six, and one click would have written an explicit
+        # eight-tab set: margin, expenses and the SMS roster granted by
+        # touching an unrelated tab.
+        #
+        # `null` for a level means not narrowed at all — the admin.
+        "default_tabs": {
+            role: (list(tabs) if tabs is not None else None)
+            for role, tabs in DEFAULT_TABS.items()
+        },
     }
 
 

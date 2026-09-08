@@ -53,15 +53,24 @@ export function tabSummary(
   return value.map(label).join(', ')
 }
 
-/** The tabs a role opens, in sidebar order, out of the permissions matrix.
+/**
+ * The tabs a level opens when nobody has set any — **as the server says**.
  *
- * Ordered by `TAB_FEATURES` and not by `TAB_PATHS`: the latter lists the eight
- * that are pages, and `expenses` is a grantable tab without one — driving this
- * from it would have hidden a granted tab from the sentence.
+ * This used to be derived from the permissions matrix, taking every feature
+ * with `view`. That was right while the matrix carried areas. It became "all
+ * nine tabs, for every level" the day the matrix became uniform depth, and the
+ * admin page then lit nine chips on an inheriting row instead of six — where
+ * one click would write an explicit eight-tab set and hand somebody margin,
+ * expenses and the SMS roster by touching an unrelated tab.
+ *
+ * So it is read, not computed. `null` from the server means the level is not
+ * narrowed at all, which is every tab.
  */
-export function roleTabs(
-  matrix: Record<string, { view: boolean }> | undefined,
-): TabFeature[] {
-  if (!matrix) return []
-  return TAB_FEATURES.filter((feature) => matrix[feature]?.view)
+export function defaultTabsFor(
+  defaults: Record<string, TabFeature[] | null> | undefined,
+  role: string | undefined,
+): readonly TabFeature[] {
+  if (!defaults || !role || !(role in defaults)) return []
+  const tabs = defaults[role]
+  return tabs === null ? TAB_FEATURES : tabs
 }

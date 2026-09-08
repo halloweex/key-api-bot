@@ -9,6 +9,7 @@
   "access.noneBody": "Аккаунт одобрен, но вкладки ещё не назначены. Попросите администратора открыть нужные.",
   "access.noneTitle": "Вам не открыта ни одна страница",
   "access.preset.full": "Все",
+  "access.preset.marketer": "Маркетинг + SMS",
   "access.preset.marketing": "Маркетинг",
   "access.preset.standard": "Стандарт",
   "access.preset.traffic_only": "Только трафик",

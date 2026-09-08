@@ -9,6 +9,7 @@
   "access.noneBody": "Your account is approved but no tabs are assigned yet. Ask an admin to open the ones you need.",
   "access.noneTitle": "No pages are open to you",
   "access.preset.full": "All",
+  "access.preset.marketer": "Marketing team",
   "access.preset.marketing": "Marketing",
   "access.preset.standard": "Standard",
   "access.preset.traffic_only": "Traffic only",
