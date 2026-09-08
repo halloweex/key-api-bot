@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.151
+
+- A restart must not cost an hourly job its hour
+- bot and web wait for migrate to finish
+
+
 ## 3.0.150
 
 - Roles are levels, areas are tabs — untangling the two
