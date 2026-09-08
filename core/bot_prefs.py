@@ -65,18 +65,49 @@ def read_approved_user_ids() -> List[int]:
     minute ago is what this returns. Forgiving: a store that cannot be read
     yields nobody, and the caller falls back to the admins.
     """
+    from core.permissions import surface_feature
+
+    feature = surface_feature("weekly_report")
     try:
         store = _store()
         ids: List[int] = []
         for row in store.access.approved():
             uid = int(row["user_id"])
             prefs = store.preferences.get(uid)
-            if prefs is None or _notifications_on(prefs.get("notifications_enabled")):
-                ids.append(uid)
+            if not (prefs is None or _notifications_on(prefs.get("notifications_enabled"))):
+                continue
+            # And the tab the report's numbers belong to. Approval alone
+            # decided this until 2026-09-08, so somebody narrowed to /traffic
+            # on the dashboard still received last week's revenue every Monday
+            # — the same figures, through a door that did not ask.
+            if feature and not _may_use(store, uid, feature):
+                logger.info("Weekly report: %s has no %s tab, skipping", uid, feature)
+                continue
+            ids.append(uid)
         return ids
     except Exception as exc:  # noqa: BLE001 — a reader here must never take the report down
         logger.info("Could not read approved users from the bot store: %s", exc)
         return []
+
+
+def _may_use(store, user_id: int, feature: str) -> bool:
+    """Does this person hold `feature`? Permissive where it cannot know.
+
+    None from `permissions()` means the dashboard's list is unreachable, the
+    person has no row there, or their row carries no override — three ways of
+    saying "nothing has been narrowed", all of which must leave the audience
+    exactly as it was before tabs existed. A reader that silently emptied the
+    weekly report's audience because a database hiccuped would be a worse
+    failure than the one it prevents.
+    """
+    try:
+        permissions = store.dashboard.permissions(user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Could not read tabs for %s: %s", user_id, exc)
+        return True
+    if permissions is None:
+        return True
+    return bool(permissions.get(feature, {}).get("view", False))
 
 
 def read_user_languages(

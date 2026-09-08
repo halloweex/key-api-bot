@@ -223,6 +223,25 @@ class DashboardTabs(Protocol):
     ) -> bool:
         """Change the tab set of an existing row. False if there is none."""
 
+    def permissions(self, user_id: int) -> Optional[Dict[str, Dict[str, bool]]]:
+        """What this person may do, as the dashboard would answer it.
+
+        The role's stored matrix narrowed by their tab set — the same two
+        halves and the same pure rule (`core.permissions.apply_feature_override`)
+        the web container combines on every request. It is here because the bot
+        hands out the same numbers: a summary report is the dashboard's revenue
+        in a Telegram message, and somebody narrowed to /traffic must not
+        receive it just because the door they came through is different.
+
+        **None means "nothing to narrow", not "denied".** Three cases return
+        it, and all three mean the bot should behave exactly as it did before
+        tabs existed: this store cannot be reached at all (`available()` is
+        false), the person has no dashboard row, or their row carries no tab
+        override. Failing closed here would lock every approved person out of
+        the bot the first time the database hiccuped, to protect a narrowing
+        that in that moment nobody has.
+        """
+
 
 @runtime_checkable
 class BotStore(Protocol):

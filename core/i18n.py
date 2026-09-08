@@ -975,6 +975,14 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     # The admin taps Approve and then picks the tabs on the same message. The
     # names below are the sidebar's, not the API's: an admin choosing what
     # somebody sees is looking at a dashboard, not at a feature key.
+    # Shown when somebody approved for the bot asks it for data belonging to a
+    # tab they were not given. Names the reason rather than saying "no": the
+    # person did nothing wrong, and the admin who narrowed them is reachable.
+    "access.not_your_tab": {
+        EN: "This report is not part of your access. Ask an admin if you need it.",
+        UK: "Цей звіт не входить у ваш доступ. Зверніться до адміністратора, якщо він потрібен.",
+        RU: "Этот отчёт не входит в ваш доступ. Обратитесь к администратору, если он нужен.",
+    },
     "access.tabs.title": {
         EN: "Which tabs?", UK: "Які вкладки?", RU: "Какие вкладки?",
     },

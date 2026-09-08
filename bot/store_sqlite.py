@@ -554,6 +554,11 @@ class NoDashboardTabs:
     ) -> bool:
         return False
 
+    def permissions(self, user_id: int) -> Optional[Dict[str, Dict[str, bool]]]:
+        # Nothing to narrow: this store cannot see the dashboard's list at all,
+        # so the bot behaves as it did before tabs existed.
+        return None
+
 
 class SqliteBotStore:
     """The four aggregates against one SQLite file, plus a fifth that is not

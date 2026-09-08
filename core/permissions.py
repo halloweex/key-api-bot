@@ -353,6 +353,46 @@ def get_all_features() -> list:
     ]
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# WHAT THE BOT HANDS OUT, AND WHICH TAB IT BELONGS TO
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# The bot is a second door to the same numbers: a summary report *is* the
+# dashboard's revenue in a Telegram message. So each thing it produces names
+# the tab that thing lives on, and somebody who does not hold that tab does not
+# receive it — whichever door they came through.
+#
+# **One table, not an argument per handler.** The mapping is the decision; if
+# it were spelled at fifteen call sites, "marketing sees marketing" and
+# "traffic sees traffic" would drift apart the first time somebody added a
+# report. A test walks the handlers and fails on one that produces data
+# without an entry here.
+#
+# `search` is the entry that is not obvious and is deliberately conservative:
+# the web's `/api/search*` is admin-only, while the bot has offered search to
+# every approved person since long before tabs existed. Gating it on the
+# dashboard tab keeps that promise for everybody who is not narrowed rather
+# than silently taking it away; whether the two doors should agree on *admin*
+# is a separate decision and is not taken here.
+BOT_SURFACES: Dict[str, str] = {
+    # /report → the sales summary: revenue, orders, the split by source.
+    "summary": Feature.DASHBOARD.value,
+    # /report → TOP-10 products, which is the dashboard's own panel.
+    "top10": Feature.DASHBOARD.value,
+    # /report → the Excel export.
+    "excel": Feature.REPORTS.value,
+    # /search over orders, products and buyers.
+    "search": Feature.DASHBOARD.value,
+    # The weekly push: last week's revenue against the week before.
+    "weekly_report": Feature.DASHBOARD.value,
+}
+
+
+def surface_feature(surface: str) -> Optional[str]:
+    """Which tab a bot surface belongs to, or None if it is not data."""
+    return BOT_SURFACES.get(surface)
+
+
 def get_all_presets() -> list:
     """The code-defined tab bundles, for the admin page and the bot."""
     return [

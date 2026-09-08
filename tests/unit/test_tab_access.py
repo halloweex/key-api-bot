@@ -592,3 +592,178 @@ class TestTheRevenueEventIsScoped:
         source = inspect.getsource(main._register_event_handlers)
         block = source[source.index("GOAL_PROGRESS"):]
         assert 'feature="dashboard"' in block[:400]
+
+
+# ─── the bot hands out the same numbers ──────────────────────────────────────
+
+
+class _Tabs:
+    """The dashboard aggregate, answering for one person."""
+
+    def __init__(self, permissions):
+        self._permissions = permissions
+        self.asked = []
+
+    def available(self):
+        return True
+
+    def permissions(self, user_id):
+        self.asked.append(user_id)
+        return self._permissions
+
+
+class _StoreWithTabs:
+    def __init__(self, tabs, approved=(), prefs=None):
+        self.dashboard = tabs
+        self._approved = list(approved)
+        self._prefs = prefs or {}
+
+        class _Access:
+            def approved(inner):
+                return [{"user_id": uid} for uid in self._approved]
+
+        class _Prefs:
+            def get(inner, uid):
+                return self._prefs.get(uid)
+
+        self.access = _Access()
+        self.preferences = _Prefs()
+
+
+def _matrix(**views):
+    from core.permissions import Feature
+
+    return {
+        f.value: {"view": views.get(f.value, False), "edit": False, "delete": False}
+        for f in Feature
+    }
+
+
+class TestTheBotAsksTheSameQuestion:
+    """A summary report *is* the dashboard's revenue in a Telegram message.
+
+    Approval alone decided this until 2026-09-08, which meant granting one tab
+    on the dashboard granted every report in the bot — somebody narrowed to
+    /traffic still received last week's revenue every Monday.
+    """
+
+    def test_a_narrowed_person_is_refused_the_surface_they_lack(self, monkeypatch):
+        from bot import database
+        from core.bot_store import use_bot_store
+
+        store = _StoreWithTabs(_Tabs(_matrix(traffic=True)))
+        previous = use_bot_store(store)
+        try:
+            assert database.may_use(1, "dashboard") is False
+            assert database.may_use(1, "reports") is False
+            assert database.may_use(1, "traffic") is True
+        finally:
+            use_bot_store(previous)
+
+    def test_marketing_does_not_reach_traffic(self, monkeypatch):
+        """The case named when this was asked for: access and what the bot
+        sends must agree in *both* directions, not merely be non-empty."""
+        from bot import database
+        from core.bot_store import use_bot_store
+
+        store = _StoreWithTabs(_Tabs(_matrix(marketing=True)))
+        previous = use_bot_store(store)
+        try:
+            assert database.may_use(1, "traffic") is False
+            assert database.may_use(1, "marketing") is True
+        finally:
+            use_bot_store(previous)
+
+    @pytest.mark.parametrize("answer", [None])
+    def test_nothing_narrowed_behaves_as_before(self, answer):
+        """None means the store cannot say — unreachable, no row, or no
+        override. All three must leave the bot exactly as it was."""
+        from bot import database
+        from core.bot_store import use_bot_store
+
+        previous = use_bot_store(_StoreWithTabs(_Tabs(answer)))
+        try:
+            assert database.may_use(1, "dashboard") is True
+        finally:
+            use_bot_store(previous)
+
+    def test_a_failing_read_does_not_silence_the_bot(self):
+        from bot import database
+        from core.bot_store import use_bot_store
+
+        class Broken(_Tabs):
+            def permissions(self, user_id):
+                raise RuntimeError("store is down")
+
+        previous = use_bot_store(_StoreWithTabs(Broken(None)))
+        try:
+            assert database.may_use(1, "dashboard") is True
+        finally:
+            use_bot_store(previous)
+
+
+class TestEverySurfaceNamesItsTab:
+    def test_the_map_only_names_real_tabs(self):
+        assert set(perm.BOT_SURFACES.values()) <= set(perm.TAB_FEATURE_KEYS)
+
+    def test_every_gated_handler_uses_a_surface_that_exists(self):
+        """A typo in the decorator would gate on None — that is, not gate."""
+        import ast
+        import pathlib
+
+        source = pathlib.Path("bot/handlers_legacy.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        used = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for dec in node.decorator_list:
+                if not (isinstance(dec, ast.Call)
+                        and getattr(dec.func, "id", None) == "authorized"):
+                    continue
+                for kw in dec.keywords:
+                    if kw.arg == "surface" and isinstance(kw.value, ast.Constant):
+                        used.add(kw.value.value)
+        assert used, "no handler is gated on a surface at all"
+        unknown = used - set(perm.BOT_SURFACES)
+        assert not unknown, f"{unknown} is not in BOT_SURFACES, so it gates nothing"
+
+    def test_the_report_producers_are_all_gated(self):
+        """The three handlers where data actually leaves the bot. Gating only
+        the /report entry point would let the menu's other branches through."""
+        import ast
+        import pathlib
+
+        source = pathlib.Path("bot/handlers_legacy.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        gated = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for dec in node.decorator_list:
+                if (isinstance(dec, ast.Call)
+                        and getattr(dec.func, "id", None) == "authorized"):
+                    for kw in dec.keywords:
+                        if kw.arg == "surface":
+                            gated[node.name] = kw.value.value
+        for name in ("generate_summary_report", "generate_excel_report",
+                     "generate_top10_report"):
+            assert name in gated, f"{name} produces data without a tab"
+
+    def test_the_weekly_report_audience_asks_too(self):
+        from core.bot_prefs import read_approved_user_ids
+        from core.bot_store import use_bot_store
+
+        store = _StoreWithTabs(_Tabs(_matrix(traffic=True)), approved=[11, 22])
+        previous = use_bot_store(store)
+        try:
+            assert read_approved_user_ids() == []
+        finally:
+            use_bot_store(previous)
+
+        store = _StoreWithTabs(_Tabs(_matrix(dashboard=True)), approved=[11, 22])
+        previous = use_bot_store(store)
+        try:
+            assert read_approved_user_ids() == [11, 22]
+        finally:
+            use_bot_store(previous)

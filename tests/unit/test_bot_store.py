@@ -78,6 +78,7 @@ _RETURNS: Dict[str, Any] = {
     "dashboard.get": None,
     "dashboard.grant": True,
     "dashboard.set_features": True,
+    "dashboard.permissions": None,
     "stats": {"users": 0},
 }
 
@@ -220,6 +221,7 @@ class TestEverythingGoesThroughTheStore:
         ("get_dashboard_access", (1,), "dashboard.get"),
         ("grant_dashboard_access", (1, 9), "dashboard.grant"),
         ("set_dashboard_features", (1, ["traffic"], 9), "dashboard.set_features"),
+        ("may_use", (1, "dashboard"), "dashboard.permissions"),
     ]
 
     @pytest.mark.parametrize("function,args,expected", CALLS)

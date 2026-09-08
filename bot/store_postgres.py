@@ -652,6 +652,58 @@ class PostgresDashboardTabs:
     ) -> bool:
         return self._run(self._set_features(user_id, features, admin_id))
 
+    def permissions(self, user_id: int) -> Optional[Dict[str, Any]]:
+        if not self.available():
+            return None
+        return self._run(self._permissions(user_id))
+
+    async def _permissions(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Two reads and the pure rule the web container uses.
+
+        The matrix is read rather than taken from `ROLE_PERMISSIONS` in code,
+        even though on production the two are identical today (measured, all 48
+        pairs). A matrix an admin edits on the dashboard and a bot that keeps
+        answering from the constant is a divergence nobody would see until
+        somebody was told something wrong.
+        """
+        from core.dashboard_access import SELECT_ACCESS, access_row
+        from core.permissions import (
+            Action, Feature, ROLE_PERMISSIONS, apply_feature_override,
+        )
+        from core.repositories.users import PERMISSIONS_TABLE
+
+        async with self._pool.acquire() as conn:
+            record = await conn.fetchrow(self._sql(SELECT_ACCESS), user_id)
+            row = access_row(tuple(record) if record is not None else None)
+            if row is None:
+                return None
+
+            stored = await conn.fetch(
+                f"SELECT feature, can_view, can_edit, can_delete "
+                f"FROM {PERMISSIONS_TABLE} WHERE role = $1",
+                row.get("role") or "viewer",
+            )
+
+        matrix = {
+            r[0]: {"view": bool(r[1]), "edit": bool(r[2]), "delete": bool(r[3])}
+            for r in stored
+        }
+        if not matrix:
+            # The table has no rows for this role yet — the web seeds it on its
+            # first permission check. Fall back to the same defaults that seed
+            # writes, rather than reading "no rows" as "no permissions".
+            role_defaults = ROLE_PERMISSIONS.get(row.get("role") or "viewer", {})
+            matrix = {
+                feature.value: {
+                    "view": Action.VIEW in role_defaults.get(feature, set()),
+                    "edit": Action.EDIT in role_defaults.get(feature, set()),
+                    "delete": Action.DELETE in role_defaults.get(feature, set()),
+                }
+                for feature in Feature
+            }
+
+        return apply_feature_override(matrix, row.get("allowed_features"))
+
     async def _set_features(self, user_id, features, admin_id) -> bool:
         from core.dashboard_access import SET_FEATURES
         from core.permissions import serialize_features

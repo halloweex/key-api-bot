@@ -591,6 +591,36 @@ it: DuckDB cannot resolve a bare `CURRENT_TIMESTAMP` on the right of
 out of `excluded` instead, which is what `create_user` and `set_permission`
 already do here.
 
+**The bot hands out the same numbers, so it asks the same question.** A
+summary report *is* the dashboard's revenue in a Telegram message, and until
+2026-09-08 approval alone decided who got one — granting somebody the traffic
+tab and nothing else still sent them last week's revenue every Monday and let
+`/report` answer in full. `core.permissions.BOT_SURFACES` now maps each thing
+the bot produces to the tab it belongs to (summary and TOP-10 → `dashboard`,
+Excel → `reports`, search → `dashboard`, the weekly push → `dashboard`), and
+`@authorized(surface=...)` refuses the rest. **One table, not an argument per
+handler**: spelled at fifteen call sites, "marketing sees marketing" and
+"traffic sees traffic" would drift apart the first time somebody added a
+report, and a test walks the handlers to catch a surface that is not in it.
+
+Gated at the three *generators* rather than at `/report` — the menu offers
+three branches and only the branch that produces data knows which tab it is.
+
+**Permissive where it cannot know, and that is the opposite of the web's
+answer on purpose.** `DashboardTabs.permissions()` returns None when the
+dashboard's list is unreachable, when the person has no row there, or when
+their row carries no override; all three mean nothing has been narrowed, and
+the bot behaves as it did before tabs existed. The web fails *closed* on an
+unreadable store because a narrowing exists there to be undone; a reporting
+bot that answers "no" because a read threw would take the bot away from
+everybody to protect a restriction nobody has.
+
+`search` is the one conservative entry: the web's `/api/search*` is admin-only
+while the bot has offered search to every approved person since long before
+tabs. It is gated on `dashboard`, which keeps that promise for anyone who is
+not narrowed; whether the two doors should agree on *admin* is a separate
+decision and is deliberately not taken.
+
 **The request itself is visible in the UI, and actionable there.** It was not
 at first, and the gap was exactly the shape of the two lists: a person asking
 for access lands in the **bot's** list as `pending`, and the dashboard's list

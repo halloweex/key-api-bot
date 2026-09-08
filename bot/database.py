@@ -67,7 +67,7 @@ __all__ = [
     "is_milestone_celebrated", "mark_milestone_celebrated",
     "get_celebrated_milestones",
     "dashboard_access_available", "get_dashboard_access",
-    "grant_dashboard_access", "set_dashboard_features",
+    "grant_dashboard_access", "set_dashboard_features", "may_use",
 ]
 
 
@@ -357,3 +357,32 @@ def set_dashboard_features(
 ) -> bool:
     """Change which tabs somebody may open. False if they have no row yet."""
     return get_bot_store().dashboard.set_features(user_id, features, admin_id)
+
+
+def may_use(user_id: int, feature: str) -> bool:
+    """May this person have data belonging to `feature` from the bot?
+
+    The bot hands out the same numbers the dashboard does — a summary report
+    *is* the dashboard's revenue in a Telegram message — so somebody narrowed
+    to /traffic must not receive it because they came through a different
+    door. Approval alone decided this until 2026-09-08, which meant granting
+    one tab on the dashboard granted every report in the bot.
+
+    Permissive where it cannot know, and that is deliberate: `permissions()`
+    answers None when the dashboard's list is unreachable, when the person has
+    no row there, or when their row carries no tab override. All three mean
+    "nothing has been narrowed", and all three must behave exactly as the bot
+    did before tabs existed — failing closed would lock every approved person
+    out of the bot the first time the database hiccuped.
+
+    Never raises: a reporting bot that answers "no" because a permission read
+    threw is worse than one that answers.
+    """
+    try:
+        permissions = get_bot_store().dashboard.permissions(user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not read tabs for user %s: %s", user_id, exc)
+        return True
+    if permissions is None:
+        return True
+    return bool(permissions.get(feature, {}).get("view", False))

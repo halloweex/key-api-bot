@@ -68,8 +68,32 @@ ACCESS_PENDING_MESSAGE = "access.pending"
 REQUEST_ACCESS_MESSAGE = "access.required"
 
 
-def authorized(func):
-    """Decorator to check if user is authorized."""
+def authorized(func=None, *, surface: str = None):
+    """Decorator to check if user is authorized — and, optionally, for what.
+
+    Bare, it is what it always was: approved or not. With a feature it also
+    asks the question the dashboard asks, because the bot hands out the same
+    numbers. A summary report *is* the dashboard's revenue in a Telegram
+    message, so somebody narrowed to /traffic must not receive it merely
+    because they came through a different door.
+
+    Only an explicit tab set narrows anything: an account with no override, no
+    dashboard row, or an unreachable store behaves exactly as it did before
+    tabs existed (`bot/database.may_use`). Admins short-circuit as ever.
+
+    The argument is a *surface* — "summary", "excel", "search" — and
+    `core.permissions.BOT_SURFACES` says which tab each one belongs to. One
+    table rather than a feature spelled at each call site: otherwise "marketing
+    sees marketing" and "traffic sees traffic" drift apart the first time
+    somebody adds a report.
+
+    Both spellings work — `@authorized` and `@authorized(surface="summary")` —
+    because fifteen call sites use the first and rewriting them would be
+    fifteen chances to change something else by accident.
+    """
+    if func is None:
+        return lambda inner: authorized(inner, surface=surface)
+
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user = update.effective_user
@@ -147,6 +171,20 @@ def authorized(func):
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="HTML"
                 )
+            return ConversationHandler.END
+
+        # Approved for the bot. Now: approved for *this*?
+        feature = surface_feature(surface) if surface else None
+        if feature is not None and not database.may_use(user.id, feature):
+            logger.info(
+                "User %s has no %s tab — refusing %s (%s)",
+                user.id, feature, getattr(func, "__name__", "handler"), surface,
+            )
+            message = t("access.not_your_tab", _lang(update))
+            if update.callback_query:
+                await update.callback_query.answer(message, show_alert=True)
+            elif update.message:
+                await update.message.reply_text(message, parse_mode="HTML")
             return ConversationHandler.END
 
         # User is approved - update last activity
@@ -855,6 +893,7 @@ async def quick_top10_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     return await generate_top10_report(update, context)
 
 
+@authorized(surface="top10")
 async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Generate TOP-10 products report for selected source(s)."""
     query = update.callback_query
@@ -955,6 +994,7 @@ async def generate_top10_report(update: Update, context: ContextTypes.DEFAULT_TY
 # REPORT GENERATION HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════
 
+@authorized(surface="summary")
 async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Generate the summary sales report."""
     query = update.callback_query
@@ -1028,6 +1068,7 @@ async def generate_summary_report(update: Update, context: ContextTypes.DEFAULT_
     return ConversationHandler.END
 
 
+@authorized(surface="excel")
 async def generate_excel_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Generate and send an Excel sales report."""
     query = update.callback_query
@@ -1191,7 +1232,7 @@ async def reply_keyboard_dashboard(update: Update, context: ContextTypes.DEFAULT
     return await dashboard_command(update, context)
 
 
-@authorized
+@authorized(surface="search")
 async def reply_keyboard_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle '🔍 Search' button from reply keyboard."""
     return await search_command(update, context)
@@ -1850,7 +1891,7 @@ async def admin_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # SEARCH HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════
 
-@authorized
+@authorized(surface="search")
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle /search command - start order search."""
     await update.message.reply_text(
@@ -1862,7 +1903,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationState.SEARCH_WAITING_QUERY
 
 
-@authorized
+@authorized(surface="search")
 async def search_command_from_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle search from callback."""
     query = update.callback_query
