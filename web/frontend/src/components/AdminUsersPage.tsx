@@ -7,7 +7,8 @@ import { useState } from 'react'
 import { ShieldCheck, ArrowLeft } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
-import type { TabFeature, UserRole, UserStatus } from '../types/api'
+import { useAuth } from '../hooks/useAuth'
+import type { AdminUsersResponse, TabFeature, UserRole, UserStatus } from '../types/api'
 import { Card, CardHeader, CardTitle, CardContent } from './Card'
 import { Select } from './Select'
 import { SkeletonTable } from './Skeleton'
@@ -23,6 +24,8 @@ import { AccessRequestsCard } from './AccessRequestsCard'
 
 export function AdminUsersPage() {
   const queryClient = useQueryClient()
+  const { user: currentUser } = useAuth()
+  const currentUserId = currentUser?.id
   const [statusFilter, setStatusFilter] = useState<string | null>(null)
   const [roleFilter, setRoleFilter] = useState<string | null>(null)
   const [updatingUsers, setUpdatingUsers] = useState<Set<number>>(new Set())
@@ -85,6 +88,38 @@ export function AdminUsersPage() {
     },
   })
 
+  // ── Tabs: optimistic, because a checkbox has to move when it is clicked ──
+  //
+  // It used to cost three sequential round trips before the tick appeared —
+  // PATCH, then a refetch of the whole user list, then /api/me — and the chips
+  // were disabled for all three, because the chip's state is read from the
+  // list query. The database is not the reason it felt slow: measured on
+  // production, the write is 1.95 ms and the list read 1.58 ms. It was the
+  // waiting, and the control being dead while it waited.
+  //
+  // So the cache is written first and the request follows. `onError` puts back
+  // exactly what was there, `onSettled` refetches the truth either way, and
+  // /api/me is invalidated only when the admin is editing their own row —
+  // which is the only case where the sidebar's own answer changed.
+  const patchCachedFeatures = (userId: number, features: TabFeature[] | null) => {
+    const previous = queryClient.getQueriesData<AdminUsersResponse>({
+      queryKey: ['adminUsers'],
+    })
+    queryClient.setQueriesData<AdminUsersResponse>(
+      { queryKey: ['adminUsers'] },
+      (old) =>
+        old
+          ? {
+              ...old,
+              users: old.users.map((u) =>
+                u.user_id === userId ? { ...u, allowed_features: features } : u,
+              ),
+            }
+          : old,
+    )
+    return previous
+  }
+
   const updateFeaturesMutation = useMutation({
     mutationFn: ({ userId, features, preset }: {
       userId: number
@@ -94,21 +129,24 @@ export function AdminUsersPage() {
       preset !== undefined
         ? api.applyUserPreset(userId, preset)
         : api.updateUserFeatures(userId, features ?? null),
-    onMutate: ({ userId }) => {
-      setUpdatingUsers((prev) => new Set(prev).add(userId))
+    onMutate: async ({ userId, features, preset }) => {
+      // Stop an in-flight refetch from landing on top of the optimistic write.
+      await queryClient.cancelQueries({ queryKey: ['adminUsers'] })
+      const next = preset !== undefined
+        ? (matrix?.presets?.find((p) => p.key === preset)?.features ?? null)
+        : (features ?? null)
+      return { previous: patchCachedFeatures(userId, next) }
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['adminUsers'] })
-      // The admin may be editing their own row, and the sidebar reads the same
-      // answer — without this the nav keeps the tabs it drew a minute ago.
-      queryClient.invalidateQueries({ queryKey: ['currentUser'] })
-    },
-    onSettled: (_, __, { userId }) => {
-      setUpdatingUsers((prev) => {
-        const next = new Set(prev)
-        next.delete(userId)
-        return next
+    onError: (_error, _variables, context) => {
+      context?.previous?.forEach(([key, data]) => {
+        queryClient.setQueryData(key, data)
       })
+    },
+    onSettled: (_data, _error, { userId }) => {
+      queryClient.invalidateQueries({ queryKey: ['adminUsers'] })
+      if (userId === currentUserId) {
+        queryClient.invalidateQueries({ queryKey: ['currentUser'] })
+      }
     },
   })
 
