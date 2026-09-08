@@ -16,11 +16,21 @@ does not come from KeyCRM and is entered by hand, so a weekly figure built on
 it would be as fresh as somebody remembered to be. Revenue and orders are
 facts this system owns.
 
-**Attribution quality is a headline, not a footnote.** Every share below is a
-share of the orders we could attribute, so the orders we could not are what
-says whether the rest of the message can be trusted at all. A week where
-unattributed traffic grows is a week where every other line quietly got less
-true, and that has to be visible without being looked for.
+**What is evidence and what is inference is a headline, not a footnote.** Only
+the `paid` bucket carries a campaign name, because a campaign *is*
+`utm_campaign` and that is what puts an order there. Every other bucket is
+placed by inference: a pixel that says which platform but not which ad, or
+simply the channel the order arrived through. An order taken by hand in the
+Instagram inbox is counted organic Instagram, which is true about where it
+landed and says nothing about what sent it.
+
+So the message leads with how many orders can be traced to a campaign at all.
+It said something else on its first live run — the share of the `unknown`
+bucket, announced as 5% with a tick — and that number was worse than useless:
+`unknown` means "no tracking data whatsoever", 18 orders that week, while 251
+of 336 carried no UTM values at all. A threshold set against it could never
+have fired. Measured, not reasoned: the correction is a count this report
+already holds rather than a new query.
 
 Everything is pure except `build_report`, which takes the store and awaits it.
 """
@@ -51,10 +61,11 @@ TRAFFIC_SALES_TYPE = "retail"
 # repository's confirmed and likely rolled together, exactly as the card does.
 BUCKETS = ("paid", "organic", "manager", "pixel_only", "unknown")
 
-# Attribution is the point of the report, so its own quality gets a threshold
-# rather than a mention: above this share of orders with no tracking at all,
-# the message says so in its first lines.
-UNATTRIBUTED_WARN_PCT = 25.0
+# No verdict on this number. 13% of orders traceable to a campaign was the
+# first live week, and a threshold I cannot calibrate would either mark every
+# week or none — which is how the tick that said ✅ over a 5% figure came to
+# be wrong twice over. The number and its direction are stated; judging it is
+# the reader's job, and they are the person who runs the campaigns.
 
 TOP_PLATFORMS = 5
 TOP_CAMPAIGNS = 5
@@ -69,6 +80,49 @@ CAMPAIGN_FLOOR = 2_000.0
 # every actionable line off a list of five. Untagged traffic is already
 # reported, by name, in the attribution buckets above.
 NO_CAMPAIGN = ("", "—", "none", "unknown", "(not set)")
+
+
+# Who gets this besides the admins. A list of Telegram ids in the environment
+# rather than a rule derived from dashboard permissions, and the reason is
+# what the permissions actually say: the traffic tab is in the default set for
+# both `viewer` and `editor`, so "everyone who can open it" was seventeen of
+# eighteen accounts, and "everyone who holds it explicitly" is a general staff
+# account with six other tabs plus the one person whose whole job is traffic.
+# Neither is the sentence the owner said. A list is that sentence, written
+# down where they can change it without a deploy.
+#
+# Empty by default: nobody is added to a weekly message to their phone by a
+# code path that guessed.
+RECIPIENTS_ENV = "KS_TRAFFIC_REPORT_RECIPIENTS"
+
+
+def extra_recipients() -> List[int]:
+    """Telegram ids from `KS_TRAFFIC_REPORT_RECIPIENTS`, comma-separated.
+
+    A value that is not a number is dropped with a warning rather than
+    raising: this list decides who gets a message, and one bad character in
+    it must not cost everybody else theirs.
+    """
+    import logging
+    import os
+
+    out: List[int] = []
+    for chunk in os.getenv(RECIPIENTS_ENV, "").replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            out.append(int(chunk))
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "%s: %r is not a Telegram id, skipping", RECIPIENTS_ENV, chunk)
+    return out
+
+
+def audience(admin_ids) -> List[int]:
+    """Everyone the traffic report is written to, in a stable order."""
+    ids = [int(a) for a in admin_ids] + extra_recipients()
+    return list(dict.fromkeys(ids))
 
 
 @dataclass(frozen=True)
@@ -108,20 +162,32 @@ class TrafficReport:
     movers: List[CampaignMove] = field(default_factory=list)
 
     @property
-    def unattributed_pct(self) -> Optional[float]:
-        if not self.orders:
-            return None
-        unknown = next((b.orders for b in self.buckets if b.name == "unknown"), 0)
-        return unknown / self.orders * 100.0
+    def named_campaign_orders(self) -> int:
+        """Orders whose campaign this system can actually name.
+
+        The `paid` bucket, and only it: a campaign comes from `utm_campaign`,
+        and that is what puts an order there. Everything else is placed by
+        inference — a pixel, or the channel the order arrived through — which
+        is worth knowing and is not the same as evidence.
+        """
+        return next((b.orders for b in self.buckets if b.name == "paid"), 0)
 
     @property
-    def previous_unattributed_pct(self) -> Optional[float]:
+    def previous_named_campaign_orders(self) -> int:
+        return next(
+            (b.previous_orders for b in self.buckets if b.name == "paid"), 0)
+
+    @property
+    def named_pct(self) -> Optional[float]:
+        if not self.orders:
+            return None
+        return self.named_campaign_orders / self.orders * 100.0
+
+    @property
+    def previous_named_pct(self) -> Optional[float]:
         if not self.previous_orders:
             return None
-        unknown = next(
-            (b.previous_orders for b in self.buckets if b.name == "unknown"), 0
-        )
-        return unknown / self.previous_orders * 100.0
+        return self.previous_named_campaign_orders / self.previous_orders * 100.0
 
 
 # ─── Reads ──────────────────────────────────────────────────────────────────
@@ -332,15 +398,16 @@ def _rich_summary(report: TrafficReport, lang: str) -> List[str]:
               orders=fmt_int(report.orders, lang),
               delta=_delta(pct_change(report.revenue, report.previous_revenue), lang)))
     ]
-    share = report.unattributed_pct
+    share = report.named_pct
     if share is not None:
-        before = report.previous_unattributed_pct
+        before = report.previous_named_pct
         moved = "" if before is None else " " + t(
-            "traffic.unattributed_was", lang, was=f"{before:.0f}")
-        mark = "⚠️" if share >= UNATTRIBUTED_WARN_PCT else "✅"
+            "traffic.named_was", lang, was=f"{before:.0f}")
         lines.append(
-            f"{mark} {esc(t('traffic.unattributed', lang, share=f'{share:.0f}'))}"
-            f"{esc(moved)}"
+            esc(t("traffic.named", lang,
+                  named=fmt_int(report.named_campaign_orders, lang),
+                  orders=fmt_int(report.orders, lang),
+                  share=f"{share:.0f}")) + esc(moved)
         )
     return ["<blockquote>" + "<br/>".join(lines) + "</blockquote>"]
 
@@ -446,10 +513,11 @@ def format_report(
               orders=fmt_int(report.orders, lang),
               delta=_delta(pct_change(report.revenue, report.previous_revenue), lang))),
     ]
-    share = report.unattributed_pct
-    if share is not None:
-        mark = "⚠️" if share >= UNATTRIBUTED_WARN_PCT else "✅"
-        lines.append(f"{mark} {esc(t('traffic.unattributed', lang, share=f'{share:.0f}'))}")
+    if report.named_pct is not None:
+        lines.append(esc(t("traffic.named", lang,
+                           named=fmt_int(report.named_campaign_orders, lang),
+                           orders=fmt_int(report.orders, lang),
+                           share=f"{report.named_pct:.0f}")))
 
     if report.buckets:
         lines += ["", f"<b>{esc(t('traffic.by_type', lang))}</b>"]

@@ -2820,14 +2820,21 @@ class BackgroundScheduler:
             from core.traffic_report import chart_view
             from core.weekly_report_image import render_channels_chart
 
+            from core.traffic_report import audience
+
             dashboard = DASHBOARD_URL or None
-            admins = [int(a) for a in ADMIN_USER_IDS]
+            # Admins plus whoever the owner listed. Language comes from the
+            # same rule as everywhere else — Ukrainian unless they are an
+            # admin or have chosen otherwise in the bot — so a curator added
+            # to the list is written to in Ukrainian without anybody setting
+            # anything.
+            readers = audience(ADMIN_USER_IDS)
             defaults = {uid: default_language_for(uid, ADMIN_USER_IDS)
-                        for uid in admins}
+                        for uid in readers}
 
             delivered = 0
             with_rich = 0
-            for lang, recipients in group_by_language(admins, defaults).items():
+            for lang, recipients in group_by_language(readers, defaults).items():
                 # Pictures carry translated labels, so they are drawn per
                 # language rather than once and reused.
                 chart = (render_channels_chart(chart_view(report, lang), lang)
@@ -2867,6 +2874,7 @@ class BackgroundScheduler:
                 "revenue": round(report.revenue, 2),
                 "orders": report.orders,
                 "delivered": delivered,
+                "recipients": len(readers),
                 "rich": bool(with_rich),
             }
             logger.info("Traffic report sent", extra=result)

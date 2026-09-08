@@ -369,12 +369,12 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         UK: "{revenue} з {orders} замовлень, {delta} до минулого тижня.",
         RU: "{revenue} с {orders} заказов, {delta} к прошлой неделе.",
     },
-    "traffic.unattributed": {
-        EN: "{share}% of orders arrived with no tracking: they are a row of their own below, but where they came from is not knowable.",
-        UK: "{share}% замовлень прийшли без міток: вони окремим рядком нижче, але звідки вони — невідомо.",
-        RU: "{share}% заказов пришли без меток: они отдельной строкой ниже, но откуда они — неизвестно.",
+    "traffic.named": {
+        EN: "A campaign can be named for {named} of {orders} orders ({share}%); the rest is placed by pixel or by the channel it arrived through.",
+        UK: "Кампанію можна назвати для {named} із {orders} замовлень ({share}%); решту віднесено за пікселем або каналом, яким прийшло замовлення.",
+        RU: "Кампанию можно назвать для {named} из {orders} заказов ({share}%); остальные отнесены по пикселю или по каналу, которым пришёл заказ.",
     },
-    "traffic.unattributed_was": {
+    "traffic.named_was": {
         EN: "Last week it was {was}%.",
         UK: "Минулого тижня було {was}%.",
         RU: "На прошлой неделе было {was}%.",
