@@ -63,23 +63,102 @@ class TestGreenMeansWhatItSaysOnALaptop:
     def _run_step(self):
         return next(s for s in STEPS if s.get("name") == "Run the suite")
 
-    def test_it_invokes_pytest_with_no_marker_of_its_own(self):
+    def test_it_invokes_pytest_with_no_marker_or_path_of_its_own(self):
         """`pytest.ini` owns `testpaths`, `asyncio_mode` and the deselections.
         A `-m` or a path here would make the check and the laptop disagree
-        about what passing means, and the laptop is where it gets debugged."""
-        run = self._run_step()["run"].strip()
-        assert run == "pytest -q"
+        about what passing means, and the laptop is where it gets debugged.
+
+        Asserted on the selection flags rather than on the whole string: the
+        command also reports its skips and tees the output, and neither
+        changes which tests run.
+        """
+        run = self._run_step()["run"]
+        assert "pytest -q" in run
+        assert "-m " not in run
+        assert not re.search(r"pytest[^|]*\btests/", run), "a path would narrow the run"
+        assert "-k " not in run
+        assert "--deselect" not in run
 
     def test_it_does_not_reach_the_live_api_or_the_production_database(self):
         """`external` is deselected by `pytest.ini` and must stay that way:
         those tests read the live KeyCRM API and the production DuckDB file.
-        Nothing in CI may opt into them."""
-        run = self._run_step()["run"]
-        assert "-m " not in run
-        # No credentials reach this workflow, so the external suite could not
-        # run even if something asked it to.
-        assert all("env" not in step for step in STEPS)
+        Nothing in CI may opt into them.
+
+        The blanket "no step sets `env`" this used to assert stopped being
+        available when the throwaway PostgreSQL arrived. The guarantee it
+        stood for is narrower and is asserted directly: no secret reaches
+        this workflow, and the only variable any step sets points at a
+        database on the runner itself.
+        """
+        assert "-m " not in self._run_step()["run"]
         assert "secrets." not in CI_TEXT
+
+        for step in STEPS:
+            for name, value in (step.get("env") or {}).items():
+                assert name == "KS_PG_DSN", f"{name} is not the throwaway DSN"
+                assert "127.0.0.1" in value, f"{name} must not leave the runner"
+
+
+class TestTheStoreTestsActuallyRun:
+    """The differential tests skip themselves without `KS_PG_DSN`, and it was
+    unset here — 60 checks that never ran on any pull request, including all
+    20 proving the /traffic port answers the same in both engines. A check
+    that does not run is not a check, and `deploy/gate_with_stores.sh` is a
+    thing a person remembers rather than a thing that happens.
+    """
+
+    def _step(self, name):
+        return next(s for s in STEPS if s.get("name") == name)
+
+    def test_a_postgres_is_started_from_the_repository_s_own_initdb(self):
+        """Those scripts create the roles and schemas the migrations need, so
+        a bare image would fail at the first `CREATE TABLE`. They are also why
+        this is a `docker run` after checkout and not a `services:` block:
+        service containers start before the checkout that would supply them."""
+        run = self._step("Start a throwaway PostgreSQL")["run"]
+        assert "postgres/initdb:/docker-entrypoint-initdb.d" in run
+
+    def test_the_postgres_version_is_the_one_everything_else_uses(self):
+        """A check on a different major from production and from the gate is
+        a check about a database nobody runs."""
+        run = self._step("Start a throwaway PostgreSQL")["run"]
+        image = re.search(r"postgres:\d+\.\d+-alpine", run)
+        assert image, "the postgres image is no longer pinned"
+
+        gate = (REPO / "deploy" / "gate_with_stores.sh").read_text()
+        compose = (REPO / "docker-compose.yml").read_text()
+        assert image.group(0) in gate
+        assert image.group(0) in compose
+
+    def test_the_migrations_are_applied_before_the_suite(self):
+        """`require_revision` refuses a schema that is behind or ahead, so an
+        unmigrated database would fail every store test rather than skip
+        them — noisily, but for the wrong reason."""
+        names = [s.get("name") for s in STEPS]
+        assert names.index("Apply the migrations") < names.index("Run the suite")
+        assert "alembic upgrade head" in self._step("Apply the migrations")["run"]
+
+    def test_the_suite_is_given_the_dsn(self):
+        assert "KS_PG_DSN" in (self._step("Run the suite").get("env") or {})
+
+    def test_a_postgres_skip_fails_the_job(self):
+        """Otherwise this whole arrangement can stop working — a renamed
+        container, a migration that did not apply — and the only sign would
+        be a skip count in a log, which is exactly the state it replaced."""
+        run = self._step("No store test may have skipped")["run"]
+        assert "needs a live PostgreSQL" in run
+        assert "exit 1" in run
+
+    def test_the_reason_string_is_the_one_the_tests_actually_use(self):
+        """The check above greps for a sentence written in another file. If
+        that sentence is reworded, the grep silently matches nothing and the
+        job goes green on zero store tests."""
+        marker = "needs a live PostgreSQL"
+        users = [
+            p for p in (REPO / "tests").rglob("test_*.py")
+            if marker in p.read_text()
+        ]
+        assert users, f"no test skips with {marker!r} — the CI grep is dead"
 
 
 class TestItRunsTheRuntimesPython:

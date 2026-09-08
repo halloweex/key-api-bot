@@ -130,7 +130,10 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         variant="blue"
         subtitle={`${formatNumber(summary?.paid?.orders ?? 0)} ${t('common.orders')}`}
         ariaLabel={`${t('traffic.paidAds')}: ${formatCurrency(summary?.paid?.revenue ?? 0)}`}
-        clickable={!showPaidBreakdown}
+        // Always clickable: the card stays interactive while the breakdown is
+        // open (clicking it closes it again), so removing the affordance left
+        // a `role="button"` that looked inert and still responded.
+        clickable
         onClick={() => setShowPaidBreakdown(!showPaidBreakdown)}
       />
       <StatCard

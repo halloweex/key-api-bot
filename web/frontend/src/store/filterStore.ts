@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import { useMemo } from 'react'
+import { useRouter } from '../hooks/useRouter'
+import { filtersForPath } from '../utils/pageFilters'
 import type { FilterStore, Period, SalesType } from '../types/filters'
 
 const initialState = {
@@ -45,9 +47,15 @@ export const useFilterStore = create<FilterStore>((set) => ({
 export const useQueryParams = () => {
   const { period, startDate, endDate, salesType, sourceId, categoryId, brand, promocode } =
     useFilterStore()
+  // A filter the current page's API does not accept is left out rather than
+  // sent and ignored — see `utils/pageFilters`. It also keeps the query key
+  // honest: two pages that differ only by an ignored parameter were caching
+  // under two keys for one answer.
+  const path = useRouter()
 
   // Memoize URLSearchParams construction to prevent unnecessary re-renders
   return useMemo(() => {
+    const applies = filtersForPath(path)
     const params = new URLSearchParams()
 
     if (period !== 'custom') {
@@ -59,11 +67,11 @@ export const useQueryParams = () => {
 
     params.set('sales_type', salesType)
 
-    if (sourceId) params.set('source_id', String(sourceId))
-    if (categoryId) params.set('category_id', String(categoryId))
-    if (brand) params.set('brand', brand)
-    if (promocode) params.set('promocode', promocode)
+    if (sourceId && applies.has('sourceId')) params.set('source_id', String(sourceId))
+    if (categoryId && applies.has('categoryId')) params.set('category_id', String(categoryId))
+    if (brand && applies.has('brand')) params.set('brand', brand)
+    if (promocode && applies.has('promocode')) params.set('promocode', promocode)
 
     return params.toString()
-  }, [period, startDate, endDate, salesType, sourceId, categoryId, brand, promocode])
+  }, [path, period, startDate, endDate, salesType, sourceId, categoryId, brand, promocode])
 }

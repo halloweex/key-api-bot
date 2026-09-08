@@ -9,6 +9,15 @@ from typing import Optional, List, Dict, Any, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _rounded(bucket: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """One `{orders, revenue}` bucket, revenue to the kopeck, absent as zero."""
+    bucket = bucket or {}
+    return {
+        'orders': int(bucket.get('orders', 0) or 0),
+        'revenue': round(float(bucket.get('revenue', 0) or 0), 2),
+    }
+
+
 class TrafficMixin:
 
     # A pair value runs until a semicolon, newline, or the next ", key:" pair
@@ -259,11 +268,24 @@ class TrafficMixin:
         if has_fbclid:
             return 'paid_likely', 'facebook'
 
-        # 14. Pixel-only — passive tracking
-        if has_fbp:
-            return 'pixel_only', 'facebook'
-        if has_ttp:
-            return 'pixel_only', 'tiktok'
+        # 14. Pixel-only — passive tracking, and **no platform to name**.
+        #
+        # `_fbp` and `ttp` are our own first-party cookies: the Meta and
+        # TikTok pixels set them on any page view, whatever brought the
+        # visitor. Neither says where the order came from, so neither may
+        # name a channel — this used to return facebook for `_fbp` and
+        # tiktok for `ttp`, which made the answer depend on the order of two
+        # `if`s rather than on anything the visitor did.
+        #
+        # It was not a rare corner: measured on production 2026-09-08, 1,969
+        # of 2,210 pixel-only retail orders over 180 days (₴4.55M) carry
+        # **both** cookies, so ₴4.55M sat in the Facebook slice of the
+        # platform chart and would have sat in TikTok's had the two lines
+        # been written the other way round. Which pixel fired is still
+        # visible per order — `_build_evidence` puts both in the evidence
+        # column, where a claim that weak belongs.
+        if has_fbp or has_ttp:
+            return 'pixel_only', 'other'
 
         # 15. No tracking data at all
         return 'unknown', 'other'
@@ -535,8 +557,12 @@ class TrafficMixin:
                 'paid_likely': {'orders': paid_likely.get('orders', 0), 'revenue': round(paid_likely.get('revenue', 0), 2)},
                 'organic': {'orders': organic_orders, 'revenue': round(organic_revenue, 2)},
                 'manager': {'orders': manager_data.get('orders', 0), 'revenue': round(manager_data.get('revenue', 0), 2)},
-                'pixel_only': traffic_types.get('pixel_only', {'orders': 0, 'revenue': 0.0}),
-                'unknown': traffic_types.get('unknown', {'orders': 0, 'revenue': 0.0}),
+                # Rounded like the five above them. These two used to be
+                # handed straight out of the accumulator, so the payload
+                # carried 1182863.0299999998 where every sibling carried two
+                # decimals.
+                'pixel_only': _rounded(traffic_types.get('pixel_only')),
+                'unknown': _rounded(traffic_types.get('unknown')),
             },
             'by_platform': {
                 k: {'orders': v['orders'], 'revenue': round(v['revenue'], 2)}
@@ -910,12 +936,17 @@ class TrafficMixin:
 
     # ─── ROAS Calculation ──────────────────────────────────────────────────────
 
+    # Keys, not display strings. These used to be "+30%" … "No bonus", which
+    # the frontend printed verbatim — so a Ukrainian dashboard said "Base
+    # rate" — and then string-compared against its own *translated* label to
+    # decide which row of the tier table to highlight, which therefore only
+    # ever matched in English. A key is the thing both halves can agree on.
     BONUS_TIERS = [
-        (7.0, "+30%"),
-        (6.0, "+20%"),
-        (5.0, "+10%"),
-        (4.0, "Base rate"),
-        (0.0, "No bonus"),
+        (7.0, "plus_30"),
+        (6.0, "plus_20"),
+        (5.0, "plus_10"),
+        (4.0, "base"),
+        (0.0, "none"),
     ]
 
     async def get_traffic_roas(
@@ -1003,8 +1034,15 @@ class TrafficMixin:
         # 4. Compute blended ROAS
         blended_roas = round(total_revenue / total_spend, 2) if total_spend > 0 else None
 
-        # 5. Compute bonus tier
-        bonus_tier = "No bonus"
+        # 5. Compute bonus tier — `None` when there is no ROAS to place.
+        #
+        # It defaulted to the bottom tier, so a period with no ad spend
+        # entered (which is every period: `manual_expenses` holds zero rows
+        # in production) put "No bonus" on the card as though it had been
+        # computed, and lit the "< 4.0x" row of the tier table as the one in
+        # force. That is a verdict rendered out of missing data. Nothing
+        # divided means nothing to report.
+        bonus_tier = None
         if blended_roas is not None:
             for threshold, tier in self.BONUS_TIERS:
                 if blended_roas >= threshold:

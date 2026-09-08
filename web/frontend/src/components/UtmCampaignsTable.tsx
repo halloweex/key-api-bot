@@ -103,8 +103,15 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
   const { t } = useTranslation()
   const [trafficFilter, setTrafficFilter] = useState('')
   const [platformFilter, setPlatformFilter] = useState('')
-  const [sortBy, setSortBy] = useState('revenue')
-  const [sortDir, setSortDir] = useState<SortDirection>('desc')
+  // One piece of state, because the two move together. As two, the handler
+  // called `setSortDir` from inside the `setSortBy` updater — a side effect
+  // in an updater, which StrictMode double-invokes in development, so the
+  // direction toggled twice and the arrow never changed while running
+  // `npm run dev`.
+  const [sort, setSort] = useState<{ by: string; dir: SortDirection }>({
+    by: 'revenue', dir: 'desc',
+  })
+  const { by: sortBy, dir: sortDir } = sort
   const [offset, setOffset] = useState(0)
   // Accumulate loaded pages; keyed by the filter context to reset on change
   const pagesRef = useRef<UtmCampaignRow[]>([])
@@ -150,14 +157,11 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
 
   const handleSort = useCallback((column: string) => {
     setOffset(0)
-    setSortBy(prev => {
-      if (prev === column) {
-        setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))
-        return prev
-      }
-      setSortDir(NUMERIC_COLUMNS.has(column) ? 'desc' : 'asc')
-      return column
-    })
+    // One pure updater: same column flips the direction, a new column starts
+    // at the direction that reads best for it.
+    setSort(prev => prev.by === column
+      ? { by: column, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+      : { by: column, dir: NUMERIC_COLUMNS.has(column) ? 'desc' : 'asc' })
   }, [])
 
   const handleLoadMore = useCallback(() => {

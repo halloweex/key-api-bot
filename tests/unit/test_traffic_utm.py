@@ -157,8 +157,28 @@ class TestClassify:
     def test_fbclid_only_is_paid_likely(self):
         assert classify({"fbclid": "IwAR1"}) == ("paid_likely", "facebook")
 
-    def test_fbp_pixel_only(self):
-        assert classify({"_fbp": "fb.1.123"}) == ("pixel_only", "facebook")
+    def test_a_pixel_names_no_platform(self):
+        """`_fbp` and `ttp` are our own cookies, set on any page view.
+
+        This returned facebook for one and tiktok for the other until
+        2026-09-08, so which channel got the revenue depended on the order of
+        two `if`s. On production that decided ₴4.55M over 180 days.
+        """
+        assert classify({"_fbp": "fb.1.123"}) == ("pixel_only", "other")
+        assert classify({"ttp": "TTP123"}) == ("pixel_only", "other")
+
+    def test_both_pixels_is_the_common_case_and_still_names_no_platform(self):
+        """1,969 of 2,210 production pixel-only orders carry both. The old
+        rule called every one of them Facebook, on evidence that TikTok's
+        pixel had fired too."""
+        assert classify({"_fbp": "fb.1.123", "ttp": "TTP123"}) \
+            == ("pixel_only", "other")
+
+    def test_a_click_still_beats_a_pixel(self):
+        """The demotion is of pixels only: `_fbc` and `fbclid` follow a real
+        click and must keep naming Facebook, even alongside both pixels."""
+        assert classify({"_fbc": "fb.1.789", "_fbp": "fb.1.123", "ttp": "T"}) \
+            == ("paid_likely", "facebook")
 
     def test_no_data_is_unknown(self):
         assert classify({}) == ("unknown", "other")

@@ -1099,10 +1099,13 @@ export interface PlatformROAS {
   roas: number | null
 }
 
+export type BonusTier = 'plus_30' | 'plus_20' | 'plus_10' | 'base' | 'none'
+
 export interface TrafficROASResponse {
   blended: { revenue: number; spend: number; roas: number | null }
   by_platform: Record<string, PlatformROAS>
-  bonus_tier: string
+  /** A key, not a label — and `null` when there was no spend to divide by. */
+  bonus_tier: BonusTier | null
   has_spend_data: boolean
 }
 
