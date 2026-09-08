@@ -396,6 +396,13 @@ services:
       # Names this process's slice of shared state (both containers mount
       # ./data): the alert gate's decision file is alert-gate-{role}.json.
       - KS_ROLE=web
+      # The weekly report sends the rich form (Bot API 10.1). Set this to 0
+      # to fall back to the card with the report as its caption — no image
+      # rebuild, `up -d web` is enough. Left commented because the default
+      # is on; an unrecognised value keeps the default rather than raising,
+      # since this decides what a message looks like and not where data
+      # lives.
+      # - KS_WEEKLY_REPORT_RICH=0
     volumes:
       - ./data:/app/data
     expose:

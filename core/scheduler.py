@@ -18,6 +18,7 @@ Features:
 - Graceful shutdown
 """
 import asyncio
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -95,6 +96,32 @@ INVENTORY_CATCHUP_DELAY_S = 420
 # `internal` is not sales at all — staff orders and shipments to bloggers that
 # carry line items and no money.
 WEEKLY_REPORT_SALES_TYPE = "retail"
+
+# The rich form (Bot API 10.1) is what the report sends; this turns it off
+# without a deploy, and the job falls back to the card with the report as its
+# caption — the form it sent until 2026-09-08.
+#
+# Off only on an explicitly falsy value. Unlike `KS_BOT_STORE`, a typo here
+# must not raise: that variable decides where the approval list lives, this
+# one decides what a message looks like, and taking the report down over a
+# misspelling would be the worse failure. An unrecognised value keeps the
+# default and says so.
+WEEKLY_REPORT_RICH_ENV = "KS_WEEKLY_REPORT_RICH"
+_FALSY = {"0", "false", "no", "off"}
+_TRUTHY = {"1", "true", "yes", "on", ""}
+
+
+def weekly_report_rich_enabled() -> bool:
+    """Whether the weekly report sends the rich form. Default: yes."""
+    value = os.getenv(WEEKLY_REPORT_RICH_ENV, "").strip().lower()
+    if value in _FALSY:
+        return False
+    if value not in _TRUTHY:
+        logger.warning(
+            "%s=%r is not a yes/no value; keeping the rich form on",
+            WEEKLY_REPORT_RICH_ENV, value,
+        )
+    return True
 
 
 class JobStatus(Enum):
@@ -2601,8 +2628,21 @@ class BackgroundScheduler:
             from core.telegram_alerts import (
                 send_admin_message_http,
                 send_admin_photo_http,
+                send_rich_message_http,
             )
-            from core.weekly_report_image import render_weekly_card
+            from core.weekly_report import (
+                FIGURE_CARD,
+                FIGURE_CHANNELS,
+                FIGURE_DAYS,
+                FIGURE_WHY,
+                format_report_rich,
+            )
+            from core.weekly_report_image import (
+                render_channels_chart,
+                render_days_chart,
+                render_waterfall,
+                render_weekly_card,
+            )
 
             audience = list(dict.fromkeys(
                 [int(a) for a in ADMIN_USER_IDS] + read_approved_user_ids()
@@ -2613,16 +2653,48 @@ class BackgroundScheduler:
 
             delivered = 0
             with_card = 0
+            with_rich = 0
+            rich_enabled = weekly_report_rich_enabled()
             for lang, recipients in group_by_language(audience, defaults).items():
                 message = format_report(report, DASHBOARD_URL or None, lang)
 
-                # The card first, with the report as its caption, so one
-                # message carries both. It is drawn from the same values, so a
-                # host with no fonts or a caption over Telegram's limit costs
-                # the picture and nothing else.
-                card = render_weekly_card(report, lang)
+                # Pictures are drawn once per language, not per reader: the
+                # labels are translated, the numbers are not.
+                pictures = {
+                    FIGURE_CARD: render_weekly_card(report, lang),
+                    FIGURE_DAYS: render_days_chart(report, lang),
+                    FIGURE_WHY: render_waterfall(report, lang),
+                    FIGURE_CHANNELS: render_channels_chart(report, lang),
+                }
+                pictures = {k: v for k, v in pictures.items() if v}
+                card = pictures.get(FIGURE_CARD)
+
+                # Three forms, each a fallback for the one before it, and the
+                # ladder is the whole safety story: a rich message rejected
+                # for a tag Telegram does not know, or a reader on a client
+                # too old to render one, costs the shape of the report and
+                # never the report itself.
                 sent_here = 0
-                if card is not None:
+                if rich_enabled:
+                    sent_here = await send_rich_message_http(
+                        format_report_rich(
+                            report, DASHBOARD_URL or None, lang,
+                            figures={role: role for role in pictures},
+                        ),
+                        media=pictures, chat_ids=recipients,
+                    )
+                    if sent_here:
+                        with_rich += sent_here
+                        with_card += sent_here if card else 0
+                    else:
+                        logger.warning(
+                            "Weekly report: the rich form reached nobody in %s, "
+                            "falling back to the card", lang,
+                        )
+                if not sent_here and card is not None:
+                    # The card with the report as its caption, so one message
+                    # carries both. A host with no fonts or a caption over
+                    # Telegram's limit costs the picture and nothing else.
                     sent_here = await send_admin_photo_http(
                         card, caption=message, chat_ids=recipients,
                         filename=f"week-{week}-{lang}.png",
@@ -2655,6 +2727,7 @@ class BackgroundScheduler:
                 "recipients": len(audience),
                 "delivered": delivered,
                 "card": bool(with_card),
+                "rich": bool(with_rich),
             }
             logger.info("Weekly report sent", extra=result)
             return result
