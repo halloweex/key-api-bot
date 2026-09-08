@@ -104,7 +104,8 @@ async def get_traffic_transactions(
     ):
         raise HTTPException(status_code=400, detail=f"Invalid traffic_type: {traffic_type}")
 
-    valid_platforms = ("facebook", "instagram", "google", "tiktok", "email", "telegram", "ai", "manager", "other")
+    valid_platforms = ("facebook", "instagram", "google", "tiktok", "email", "telegram",
+                       "ai", "manager", "other", "unattributed")
     if platform and platform not in valid_platforms:
         raise HTTPException(status_code=400, detail=f"Invalid platform: {platform}")
 
@@ -149,7 +150,8 @@ async def get_traffic_utm_campaigns(
     ):
         raise HTTPException(status_code=400, detail=f"Invalid traffic_type: {traffic_type}")
 
-    valid_platforms = ("facebook", "instagram", "google", "tiktok", "email", "telegram", "ai", "manager", "other")
+    valid_platforms = ("facebook", "instagram", "google", "tiktok", "email", "telegram",
+                       "ai", "manager", "other", "unattributed")
     if platform and platform not in valid_platforms:
         raise HTTPException(status_code=400, detail=f"Invalid platform: {platform}")
 

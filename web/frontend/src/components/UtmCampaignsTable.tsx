@@ -32,6 +32,7 @@ const PLATFORMS = [
   { value: 'ai', labelKey: 'traffic.ai' },
   { value: 'manager', labelKey: 'traffic.manager' },
   { value: 'other', labelKey: 'traffic.otherPlatform' },
+  { value: 'unattributed', labelKey: 'traffic.unattributedPlatform' },
 ] as const
 
 // ─── Traffic Type Badges ─────────────────────────────────────────────────────
@@ -53,7 +54,12 @@ const TrafficBadge = memo(function TrafficBadge({ type }: { type: string }) {
   return <Badge tone={config.tone}>{t(config.labelKey)}</Badge>
 })
 
-const formatPlatformName = (platform: string, trafficType: string): string => {
+const formatPlatformName = (
+  platform: string, trafficType: string, t: (key: string) => string,
+): string => {
+  // The one key here that is not a proper noun: it names an absence, so it
+  // has to be said in the reader's language.
+  if (platform === 'unattributed') return t('traffic.unattributedPlatform')
   if (platform === 'google') {
     return trafficType === 'paid_confirmed' || trafficType === 'paid_likely'
       ? 'Google Ads'
@@ -103,8 +109,15 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
   const { t } = useTranslation()
   const [trafficFilter, setTrafficFilter] = useState('')
   const [platformFilter, setPlatformFilter] = useState('')
-  const [sortBy, setSortBy] = useState('revenue')
-  const [sortDir, setSortDir] = useState<SortDirection>('desc')
+  // One piece of state, because the two move together. As two, the handler
+  // called `setSortDir` from inside the `setSortBy` updater — a side effect
+  // in an updater, which StrictMode double-invokes in development, so the
+  // direction toggled twice and the arrow never changed while running
+  // `npm run dev`.
+  const [sort, setSort] = useState<{ by: string; dir: SortDirection }>({
+    by: 'revenue', dir: 'desc',
+  })
+  const { by: sortBy, dir: sortDir } = sort
   const [offset, setOffset] = useState(0)
   // Accumulate loaded pages; keyed by the filter context to reset on change
   const pagesRef = useRef<UtmCampaignRow[]>([])
@@ -150,14 +163,11 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
 
   const handleSort = useCallback((column: string) => {
     setOffset(0)
-    setSortBy(prev => {
-      if (prev === column) {
-        setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))
-        return prev
-      }
-      setSortDir(NUMERIC_COLUMNS.has(column) ? 'desc' : 'asc')
-      return column
-    })
+    // One pure updater: same column flips the direction, a new column starts
+    // at the direction that reads best for it.
+    setSort(prev => prev.by === column
+      ? { by: column, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+      : { by: column, dir: NUMERIC_COLUMNS.has(column) ? 'desc' : 'asc' })
   }, [])
 
   const handleLoadMore = useCallback(() => {
@@ -230,7 +240,7 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
                   </span>
                 </td>
                 <td className="py-3 px-4 text-slate-600 hidden md:table-cell whitespace-nowrap">
-                  {formatPlatformName(row.platform, row.traffic_type)}
+                  {formatPlatformName(row.platform, row.traffic_type, t)}
                 </td>
                 <td className="py-3 px-4">
                   <TrafficBadge type={row.traffic_type} />

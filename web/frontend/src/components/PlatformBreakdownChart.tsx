@@ -31,13 +31,20 @@ const PLATFORM_COLORS: Record<string, string> = {
   ai: '#A855F7',        // violet
   manager: '#14B8A6',   // teal
   other: '#6B7280',     // gray
+  // Deliberately the flattest colour on the wheel: this slice is an absence,
+  // and giving it a channel's colour would make it read as one.
+  unattributed: '#94A3B8', // slate
 }
 
 const getPlatformColor = (platform: string): string => {
   return PLATFORM_COLORS[platform.toLowerCase()] || PLATFORM_COLORS.other
 }
 
-const formatPlatformName = (platform: string): string => {
+// Channel names are proper nouns and need no translation. `unattributed` is
+// not a channel — it is the absence of one — so it is the single key here
+// that has to be said in the reader's language.
+const formatPlatformName = (platform: string, t: (key: string) => string): string => {
+  if (platform.toLowerCase() === 'unattributed') return t('traffic.unattributedPlatform')
   const names: Record<string, string> = {
     facebook: 'Facebook',
     tiktok: 'TikTok',
@@ -81,8 +88,18 @@ function CustomTooltip({
   return (
     <div style={{ ...TOOLTIP_STYLE, minWidth: '140px' }}>
       <p style={{ fontWeight: 600, marginBottom: '6px', color: CHART_THEME.text }}>
-        {formatPlatformName(data.platform)}
+        {data.platform === 'unattributed'
+          ? t('traffic.unattributedNote')
+          : formatPlatformName(data.platform, t)}
       </p>
+      {data.platform === 'unattributed' && (
+        <p style={{
+          color: CHART_THEME.muted, fontSize: '11px', lineHeight: 1.4,
+          marginBottom: '6px', maxWidth: '260px',
+        }}>
+          {t('traffic.unattributedHint')}
+        </p>
+      )}
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
         <span style={{ color: CHART_THEME.muted }}>{t('summary.totalOrders')}:</span>
         <span style={{ fontWeight: 500 }}>{formatNumber(data.orders)}</span>
@@ -120,14 +137,20 @@ export const PlatformBreakdownChart = memo(function PlatformBreakdownChart() {
     return platforms
       .map(([platform, p]) => ({
         platform,
-        name: formatPlatformName(platform),
+        // The slice label and the axis tick have to stay short. The
+        // parenthetical about the pixels rides the legend and the tooltip,
+        // which have room for it.
+        name: formatPlatformName(platform, t),
+        legendName: platform === 'unattributed'
+          ? t('traffic.unattributedNote')
+          : formatPlatformName(platform, t),
         orders: p.orders,
         revenue: p.revenue,
         color: getPlatformColor(platform),
         pct: totalRevenue > 0 ? (p.revenue / totalRevenue) * 100 : 0,
       }))
       .sort((a, b) => b.revenue - a.revenue)
-  }, [data])
+  }, [data, t])
 
   const isEmpty = !isLoading && chartData.length === 0
 
@@ -177,7 +200,7 @@ export const PlatformBreakdownChart = memo(function PlatformBreakdownChart() {
                   className="w-3 h-3 rounded-sm"
                   style={{ backgroundColor: entry.color }}
                 />
-                <span className="text-xs text-slate-600">{entry.name}</span>
+                <span className="text-xs text-slate-600">{entry.legendName}</span>
               </div>
             ))}
           </div>

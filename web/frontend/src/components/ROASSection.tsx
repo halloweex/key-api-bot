@@ -7,8 +7,10 @@ import { Input } from './Input'
 import { Select } from './Select'
 import { Button } from './Button'
 import { TrashIcon } from './icons'
+import { ProtectedSection } from './ProtectedSection'
+import { useToast } from './Toast'
 import { formatCurrency } from '../utils/formatters'
-import { useSummary, useTrafficROAS, useCreateExpense, useDeleteExpense } from '../hooks'
+import { useTrafficROAS, useCreateExpense, useDeleteExpense } from '../hooks'
 import { useFilterStore } from '../store/filterStore'
 import type { CreateExpenseRequest } from '../types/api'
 
@@ -20,13 +22,19 @@ const PLATFORMS = [
   { value: 'google', label: 'Google', icon: '\uD83D\uDD0D' },
 ] as const
 
+// `key` is what the API returns; the label beside it is what a reader sees.
+// The two used to be the same string, so the row highlight was a comparison
+// between an English literal from the server and a translated label here \u2014
+// which matched in English and never in Ukrainian or Russian.
 const BONUS_TIERS = [
-  { label: '> 7.0x', bonus: '+30%' },
-  { label: '6.0 \u2013 7.0x', bonus: '+20%' },
-  { label: '5.0 \u2013 6.0x', bonus: '+10%' },
-  { label: '4.0 \u2013 5.0x', bonusKey: 'traffic.baseRate' },
-  { label: '< 4.0x', bonusKey: 'traffic.noBonus' },
+  { key: 'plus_30', label: '> 7.0x', bonus: '+30%' },
+  { key: 'plus_20', label: '6.0 \u2013 7.0x', bonus: '+20%' },
+  { key: 'plus_10', label: '5.0 \u2013 6.0x', bonus: '+10%' },
+  { key: 'base', label: '4.0 \u2013 5.0x', bonusKey: 'traffic.baseRate' },
+  { key: 'none', label: '< 4.0x', bonusKey: 'traffic.noBonus' },
 ] as const
+
+type BonusTierKey = (typeof BONUS_TIERS)[number]['key']
 
 function roasColor(roas: number | null): string {
   if (roas === null) return 'text-slate-400'
@@ -48,7 +56,14 @@ interface BlendedCardProps {
   revenue: number
   spend: number
   roas: number | null
-  bonusTier: string
+  bonusTier: BonusTierKey | null
+}
+
+function bonusTierLabel(key: BonusTierKey | null, t: (k: string) => string): string {
+  if (key === null) return '—'
+  const tier = BONUS_TIERS.find(x => x.key === key)
+  if (!tier) return '—'
+  return 'bonusKey' in tier ? t(tier.bonusKey) : tier.bonus
 }
 
 const BlendedROASCard = memo(function BlendedROASCard({ revenue, spend, roas, bonusTier }: BlendedCardProps) {
@@ -76,7 +91,7 @@ const BlendedROASCard = memo(function BlendedROASCard({ revenue, spend, roas, bo
         <div>
           <p className="text-xs text-slate-500">{t('traffic.bonusTier')}</p>
           <span className={`inline-block px-2.5 py-1 text-sm font-semibold rounded-lg ${roasColor(roas)} bg-white/60`}>
-            {bonusTier}
+            {bonusTierLabel(bonusTier, t)}
           </span>
         </div>
       </div>
@@ -86,7 +101,7 @@ const BlendedROASCard = memo(function BlendedROASCard({ revenue, spend, roas, bo
 
 // ─── Bonus Tier Table ───────────────────────────────────────────────────────
 
-const BonusTierTable = memo(function BonusTierTable({ currentTier }: { currentTier: string }) {
+const BonusTierTable = memo(function BonusTierTable({ currentTier }: { currentTier: BonusTierKey | null }) {
   const { t } = useTranslation()
   return (
     <div className="overflow-hidden rounded-lg border border-slate-200">
@@ -104,7 +119,8 @@ const BonusTierTable = memo(function BonusTierTable({ currentTier }: { currentTi
         <tbody className="divide-y divide-slate-100">
           {BONUS_TIERS.map((tier) => {
             const bonusText = 'bonusKey' in tier ? t(tier.bonusKey) : tier.bonus
-            const isActive = bonusText === currentTier
+            // `null` means nothing was divided, so no row is in force.
+            const isActive = currentTier !== null && tier.key === currentTier
             return (
               <tr
                 key={tier.label}
@@ -166,10 +182,21 @@ const PlatformCard = memo(function PlatformCard({ platform, icon, paidRevenue, s
 
 // ─── Ad Spend Input Form ────────────────────────────────────────────────────
 
+// Today in Kyiv, which is the day the rest of the dashboard means. This was
+// `new Date().toISOString()` — UTC — so between midnight and 03:00 Kyiv the
+// form prefilled yesterday and the spend landed on the wrong day.
+function todayInKyiv(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Kyiv',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date())
+}
+
 const AdSpendInput = memo(function AdSpendInput() {
   const { t } = useTranslation()
+  const { addToast } = useToast()
   const [platform, setPlatform] = useState('facebook')
-  const [date, setDate] = useState(() => new Date().toISOString().split('T')[0])
+  const [date, setDate] = useState(todayInKyiv)
   const [amount, setAmount] = useState('')
   const createExpense = useCreateExpense()
 
@@ -190,8 +217,16 @@ const AdSpendInput = memo(function AdSpendInput() {
     }
     createExpense.mutate(data, {
       onSuccess: () => setAmount(''),
+      // Without this the one write on this tab failed in silence: the form
+      // read only `isPending`, so a refusal left the amount sitting in the
+      // box and nothing else happened.
+      onError: (error: Error) => addToast({
+        type: 'error',
+        title: t('traffic.adSpendFailed'),
+        message: error.message,
+      }),
     })
-  }, [platform, date, amount, expenseType, createExpense])
+  }, [platform, date, amount, expenseType, createExpense, addToast, t])
 
   const platformOptions = PLATFORMS.map((p) => ({
     value: p.value,
@@ -255,6 +290,7 @@ interface ExpenseListResponse {
 
 const RecentEntries = memo(function RecentEntries() {
   const { t } = useTranslation()
+  const { addToast } = useToast()
   const deleteExpense = useDeleteExpense()
   const [deletingId, setDeletingId] = useState<number | null>(null)
   const { period } = useFilterStore()
@@ -277,8 +313,13 @@ const RecentEntries = memo(function RecentEntries() {
     setDeletingId(id)
     deleteExpense.mutate(id, {
       onSettled: () => setDeletingId(null),
+      onError: (error: Error) => addToast({
+        type: 'error',
+        title: t('traffic.adSpendDeleteFailed'),
+        message: error.message,
+      }),
     })
-  }, [deleteExpense])
+  }, [deleteExpense, addToast, t])
 
   const marketingExpenses = useMemo(
     () => (data?.expenses ?? []).filter(e => e.category === 'marketing' && e.platform),
@@ -312,20 +353,26 @@ const RecentEntries = memo(function RecentEntries() {
                 <td className="py-2 px-3 text-right font-medium text-slate-800">
                   {formatCurrency(exp.amount)}
                 </td>
+                {/* `DELETE /api/expenses/{id}` needs the delete action, which
+                    starts at admin — so an editor who may add a row could not
+                    remove one, and got a refusal from a bin that looked
+                    live. */}
                 <td className="py-1 px-2">
-                  <button
-                    onClick={() => handleDelete(exp.id)}
-                    disabled={deletingId === exp.id}
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50
-                               transition-colors disabled:opacity-50"
-                    title="Delete"
-                  >
-                    {deletingId === exp.id ? (
-                      <span className="block w-4 h-4 border-2 border-slate-300 border-t-transparent rounded-full animate-spin" />
-                    ) : (
-                      <TrashIcon className="w-4 h-4" />
-                    )}
-                  </button>
+                  <ProtectedSection feature="expenses" action="delete">
+                    <button
+                      onClick={() => handleDelete(exp.id)}
+                      disabled={deletingId === exp.id}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50
+                                 transition-colors disabled:opacity-50"
+                      title={t('common.delete')}
+                    >
+                      {deletingId === exp.id ? (
+                        <span className="block w-4 h-4 border-2 border-slate-300 border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <TrashIcon className="w-4 h-4" />
+                      )}
+                    </button>
+                  </ProtectedSection>
                 </td>
               </tr>
             )
@@ -340,17 +387,22 @@ const RecentEntries = memo(function RecentEntries() {
 
 export const ROASSection = memo(function ROASSection() {
   const { t } = useTranslation()
-  const { data: summary } = useSummary()
   const { data: roasData, isLoading, error, refetch } = useTrafficROAS()
+  const { sourceId } = useFilterStore()
   const [showInput, setShowInput] = useState(false)
 
-  const totalRevenue = summary?.totalRevenue ?? 0
   const blended = roasData?.blended
   const byPlatform = roasData?.by_platform ?? {}
-  const bonusTier = roasData?.bonus_tier ?? 'No bonus'
+  const bonusTier = roasData?.bonus_tier ?? null
   const hasSpendData = roasData?.has_spend_data ?? false
 
-  const displayRevenue = totalRevenue
+  // All three numbers come from the ROAS response, so the card cannot
+  // contradict itself. The revenue used to come from `/api/summary`, which
+  // honours the header's source, category, brand and promocode filters while
+  // this endpoint honours none of them: picking Instagram showed ₴1,356,330
+  // above a ROAS computed from ₴3,602,560, a ratio of 2.66x between two
+  // numbers printed one above the other.
+  const displayRevenue = blended?.revenue ?? 0
   const displaySpend = blended?.spend ?? 0
   const displayRoas = blended?.roas ?? null
 
@@ -375,13 +427,20 @@ export const ROASSection = memo(function ROASSection() {
       height="auto"
       ariaLabel={t('traffic.roasCalcDesc')}
       action={
-        <button
-          onClick={() => setShowInput(!showInput)}
-          className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600
-                     hover:bg-slate-50 hover:border-slate-300 transition-colors font-medium"
-        >
-          {showInput ? t('traffic.hideInput') : t('traffic.editAdSpend')}
-        </button>
+        // Ad spend is written through `/api/expenses`, which is gated on the
+        // **expenses** tab while this page is gated on `traffic`. An account
+        // granted traffic alone used to be shown this button, and the form
+        // behind it, and every submission was refused. The gate belongs where
+        // the write is, not where the page is.
+        <ProtectedSection feature="expenses" action="edit">
+          <button
+            onClick={() => setShowInput(!showInput)}
+            className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600
+                       hover:bg-slate-50 hover:border-slate-300 transition-colors font-medium"
+          >
+            {showInput ? t('traffic.hideInput') : t('traffic.editAdSpend')}
+          </button>
+        </ProtectedSection>
       }
     >
       <div className="space-y-5">
@@ -392,6 +451,14 @@ export const ROASSection = memo(function ROASSection() {
           roas={displayRoas}
           bonusTier={bonusTier}
         />
+
+        {/* Blended ROAS divides all revenue by all ad spend, and spend is
+            recorded per platform, not per source — so there is no such thing
+            as this figure "for Instagram". The rest of the tab does follow
+            the source filter, so say where it stops. */}
+        {sourceId !== null && (
+          <p className="text-xs text-slate-500">{t('traffic.roasIgnoresSource')}</p>
+        )}
 
         {/* Bonus Tier Table */}
         <BonusTierTable currentTier={bonusTier} />
@@ -414,28 +481,36 @@ export const ROASSection = memo(function ROASSection() {
 
         {/* Ad Spend Input (collapsible) */}
         {showInput && (
-          <Card>
-            <CardContent>
-              <h4 className="text-sm font-semibold text-slate-700 mb-1">{t('traffic.addAdSpend')}</h4>
-              <p className="text-xs text-slate-400 mb-2">{t('traffic.enterDailyAdSpend')}</p>
-              <AdSpendInput />
-              <RecentEntries />
-            </CardContent>
-          </Card>
+          <ProtectedSection feature="expenses" action="edit">
+            <Card>
+              <CardContent>
+                <h4 className="text-sm font-semibold text-slate-700 mb-1">{t('traffic.addAdSpend')}</h4>
+                <p className="text-xs text-slate-400 mb-2">{t('traffic.enterDailyAdSpend')}</p>
+                <AdSpendInput />
+                <RecentEntries />
+              </CardContent>
+            </Card>
+          </ProtectedSection>
         )}
 
-        {/* Empty state hint */}
+        {/* Empty state hint. The invitation to add spend is only shown to
+            somebody who can; without the permission the sentence stops after
+            saying there is none. */}
         {!hasSpendData && !showInput && (
           <div className="text-center py-4">
             <p className="text-sm text-slate-500">
               {t('traffic.noAdSpendData')}{' '}
-              <button
-                onClick={() => setShowInput(true)}
-                className="text-blue-600 hover:text-blue-700 font-medium"
-              >
-                {t('traffic.addAdSpend')}
-              </button>{' '}
-              {t('traffic.addAdSpendToCalc')}
+              <ProtectedSection feature="expenses" action="edit">
+                <>
+                  <button
+                    onClick={() => setShowInput(true)}
+                    className="text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    {t('traffic.addAdSpend')}
+                  </button>{' '}
+                  {t('traffic.addAdSpendToCalc')}
+                </>
+              </ProtectedSection>
             </p>
           </div>
         )}

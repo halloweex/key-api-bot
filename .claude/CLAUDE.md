@@ -275,9 +275,39 @@ no paths to remember, nothing reaching the network.
 **Baseline as of 2026-08-14 (`d81b194`): 1297 passed, 7 deselected, 39s.**
 Any change that lowers the passing count is a regression until explained.
 
+**CI runs the suite against a real PostgreSQL** since 2026-09-08. Without one,
+every differential test — the ones proving DuckDB and Postgres answer the same
+question the same way — skipped itself on `KS_PG_DSN`, so **60 checks never
+ran on a pull request**, including all 20 guarding the /traffic port. That tab
+reads Postgres in production behind a silent fallback to DuckDB, so a query
+broken in one engine only would have kept the page working and left an ERROR
+in a log nobody reads. `.github/workflows/ci.yml` now starts
+`postgres:17.2-alpine` after checkout with `postgres/initdb` mounted (a
+`services:` block starts *before* the checkout that would supply those
+scripts), applies `alembic upgrade head`, and **fails the job if any test
+still skips for want of PostgreSQL** — the arrangement breaking silently is
+the state it replaced. Baseline with the store up: **3 771 passed, 8 skipped**
+(ClickHouse, which CI still has no container for). `tests/unit/test_ci_workflow.py`
+pins all of it, including that the image matches `docker-compose.yml` and
+`deploy/gate_with_stores.sh`.
+
 ```bash
 # The suite. No network, no production data.
 pytest -q
+
+# What CI runs. The store tests need a database; `deploy/gate_with_stores.sh`
+# builds one on the VPS, and locally any throwaway will do:
+#   docker run -d --name pg -p 5432:5432 -e POSTGRES_USER=postgres \
+#     -e POSTGRES_PASSWORD=x -e POSTGRES_DB=ks \
+#     -v "$PWD/postgres/initdb:/docker-entrypoint-initdb.d:ro" postgres:17.2-alpine
+#   docker exec pg psql -U postgres -tAc "ALTER ROLE ks_app WITH PASSWORD 'x'"
+#   KS_PG_DSN=postgresql://ks_app:x@127.0.0.1:5432/ks alembic upgrade head
+KS_PG_DSN=... pytest -q
+
+# On a machine that is not UTC, `test_expenses_two_engines.py` fails three
+# ways: it compares *rendered* timestamps, so it only passes where the
+# renderer agrees with Postgres. CI and the production image are UTC.
+TZ=UTC KS_PG_DSN=... pytest -q
 
 # The external tests, deliberately: these reach the live KeyCRM API and the
 # production DuckDB file.
@@ -959,13 +989,28 @@ rows land behind the orders, so a week whose attribution has not arrived
 looks exactly like a week where nothing came from anywhere. It reports
 `no_attribution` and tries again tomorrow.
 
-**Admins only.** "Everyone who can see the traffic tab" was the obvious
-audience and the wrong one: measured 2026-09-08, seventeen of the eighteen
-approved dashboard accounts hold that tab, because it is in the default set
-for both `viewer` and `editor`. Narrowing later is a change of one list;
-widening after a wrong number went out is not. Dashboard accounts are
+**Admins, plus a named list.** "Everyone who can see the traffic tab" was the
+obvious audience and the wrong one: measured 2026-09-08, seventeen of the
+eighteen approved dashboard accounts hold that tab, because it is in the
+default set for both `viewer` and `editor`. Narrowing later is a change of one
+list; widening after a wrong number went out is not. Dashboard accounts are
 reachable in any case — `app.dashboard_users.user_id` **is** the Telegram id,
 since the dashboard signs in through Telegram.
+
+So the widening is **written down rather than derived**:
+`KS_TRAFFIC_REPORT_RECIPIENTS` is a comma-separated list of Telegram ids,
+added to the admins by `audience()`, **empty by default** — nobody is put on a
+weekly message to their phone by a code path that guessed. A curator can be
+added without a deploy, and the choice stays a sentence somebody typed. A
+malformed entry is dropped with a warning rather than raising: one bad
+character must not cost everybody else their report. Language follows the
+system rule with nothing to configure — Ukrainian unless the reader is an
+admin or has chosen otherwise in the bot — so the send splits per language,
+not per reader.
+
+This is the **only** `chat_ids` override in the repository that can widen an
+audience rather than narrow one, and `tests/unit/test_alert_recipients.py`
+says so at the site of the guard.
 
 Same shape as the sales report otherwise: last complete Monday–Sunday week, a
 daily tick against its own ledger (`traffic_report_sends` — its own table,
@@ -1075,10 +1120,16 @@ flag in its internal tooling is not a neutral act. Languages have names.
   возрасты — в /api/health, деталь приносит агент вторым сообщением.
   Правка владельца 30.08; «коротко» ≠ «по-русски» — язык шаблонов не
   менять без явной просьбы.
-- **Получатели — только админы**, запинено
-  `tests/unit/test_alert_recipients.py`: единственный chat_ids-override —
-  недельный отчёт; алерт-модулям запрещён импорт списка пользователей.
-  Бизнес-исключения: недельный отчёт и веха-рассылка.
+- **Получатели алертов — только админы**, запинено
+  `tests/unit/test_alert_recipients.py`: chat_ids-override есть лишь у двух
+  отчётов; алерт-модулям запрещён импорт списка пользователей.
+  Бизнес-исключения: недельный отчёт продаж и веха-рассылка. С 08.09 к ним
+  добавился **отчёт по трафику**, и он единственный, чей override
+  *расширяет* аудиторию: `KS_TRAFFIC_REPORT_RECIPIENTS` — явный список
+  Telegram-id поверх админов, пустой по умолчанию, применяется одной
+  функцией `core.traffic_report.audience`. Правило не «нельзя расширять», а
+  «нельзя расширять молча»: список пишет человек, а не выводит код из прав
+  на вкладку.
 - **Антишум**: health_*-блип канарейки ждёт второго зонда (`defer_flaky` —
   ежедневная 4.5-мин UTM-заморозка 05:15 и пересоздания при деплоях);
   «🫀» офсайта — еженедельно по пн; test:/deploy-test: бакеты не вызывают
@@ -1843,6 +1894,68 @@ silver_order_utm` (одно тело, правило 1), и хранилище �
 крупнейшим источником роста файла DuckDB: 3.86 M хранимых строк за 5 781 живой,
 667× амплификация, ~90 МБ в день до починки инкрементальной перестройки.
 Выбросить её — решение владельца, здесь оно намеренно не принято.
+
+**Пиксель не называет площадку.** `_fbp` и `ttp` — наши собственные
+first-party куки: пиксели Meta и TikTok ставят их любому посетителю, кто бы
+его ни привёл. До 08.09.2026 классификатор возвращал по ним `facebook` и
+`tiktok` соответственно, то есть канал выбирался порядком двух `if`, а не
+поведением посетителя. Замер на проде: **1 969 из 2 210** розничных
+pixel-only заказов за 180 дней (**₴4.55 млн**) несут **обе** куки — вся эта
+сумма лежала в слайсе «Facebook» на графике платформ и лежала бы в «TikTok»,
+будь строки написаны в другом порядке. Теперь `pixel_only` отдаёт платформу
+`other`; какой пиксель сработал, по-прежнему видно в колонке улик
+(`_build_evidence`), где утверждению такой силы и место. Тип трафика не
+тронут: прогон обеих версий по всем комментариям за 180 дней даёт 2 210
+переносов платформы и **ноль** смен `traffic_type`.
+
+**`unattributed` — не `other`, и это две разные незнания.** `other` —
+источник, о котором нам *сказали*, но который мы не научились называть (`qr`,
+`novaposhta`, `rivo`: ~26 заказов за 180 дней). `unattributed` — когда не
+сказали ничего: сработали наши пиксели и ни один параметр не говорит,
+откуда покупатель. Пока они делили один ключ, ₴1.36 млн «не знаем» лежали
+под словом, читающимся как «прочие мелкие каналы». Ключ живёт в семи местах:
+две ступени классификатора, `_PLATFORM_EXPR`, валидация платформ в API, два
+списка фильтра на фронте и `traffic.platform.unattributed` для отчёта.
+
+Подпись сектора и ось графика держат короткое «Источник не определён», а
+скобку про пиксели несут легенда и подсказка — там есть место, а на секторе
+круговой диаграммы его нет.
+
+`platform` материализована в `silver_order_utm`, а перепарсинг трогает только
+заказы с изменившимся `updated_at` — поэтому правка правил классификации
+доезжает до экрана лишь после `POST /api/traffic/reclassify` (он же отгружает
+результат в Postgres через `ship_after_reparse`). Без этого вызова старые
+строки продолжают называть Facebook то, что классификатор уже так не считает.
+Проверено на проде 09.09: со сменённым классификатором, но без перепарсинга,
+`unattributed` показывает 25 заказов — ровно те, у кого строки атрибуции нет
+вовсе и кого размечает SQL-подстановка, — а 600 Facebook и 45 TikTok стоят на
+месте.
+
+**Три решения на карточке ROAS, каждое — утверждение, которого не считали.**
+
+- Выручку карточка берёт из **своего же** ответа (`blended.revenue`), а не из
+  `/api/summary`. Тот применяет фильтры шапки, а `/api/traffic/roas` не
+  принимает ни одного — при выбранном Instagram сверху стояло ₴1 356 330, а
+  ROAS под ним считался от ₴3 602 560, вдвое с лишним. Сам ROAS остаётся
+  общим по аккаунту (расходы вносятся по платформе, а не по источнику), и при
+  активном фильтре источника карточка это говорит вслух.
+- `bonus_tier` — **ключ** (`plus_30`…`none`) и `None`, когда делить было
+  нечего. Была английская фраза, которую фронт печатал как есть и сравнивал с
+  собственным *переведённым* ярлыком, так что подсветка строки работала только
+  в английском; а дефолт «No bonus» при нулевых расходах — а они нулевые
+  всегда — выводил на экран вердикт из пустоты.
+- Ввод расходов ходит в `/api/expenses`, то есть во вкладку **expenses**, а
+  страница гейтится на `traffic`. Форма, кнопка и корзина обёрнуты в
+  `ProtectedSection` (`edit` и `delete` соответственно), а отказ записи теперь
+  виден тостом: раньше единственная запись на вкладке падала молча.
+
+**Фильтры шапки, которых вкладка не применяет, на ней не показываются.**
+`utils/pageFilters.filtersForPath` — одна карта на два читателя: `FilterBar` не
+рисует контрол, `useQueryParams` не кладёт параметр в запрос. Для `/traffic`
+это `period`, `sales_type`, `source_id`; категория, бренд и промокод не
+доезжали до эндпоинтов никогда (FastAPI молча роняет лишние query-параметры), и
+выбор их не менял на странице ровно ничего. Остальные вкладки намеренно не
+тронуты — сузить любую из них значит сперва проверить её эндпоинты.
 
 **Ревизия 0018** привозит две таблицы, которых действительно не хватало:
 

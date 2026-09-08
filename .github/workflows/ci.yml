@@ -17,13 +17,31 @@
 # Running it on a documentation PR costs about a minute and buys the property
 # that a green check means the same thing on every PR.
 #
+# WHY THERE IS A POSTGRES HERE
+#
+# The differential tests — the ones proving DuckDB and PostgreSQL answer the
+# same question the same way — skip themselves when `KS_PG_DSN` is unset, and
+# it was unset here. **60 tests never ran**, including all 20 that guard the
+# /traffic port, on a tab that reads PostgreSQL in production behind a silent
+# fallback to DuckDB: a query that broke in one engine only would have kept
+# the page working and left an ERROR in a log nobody reads. `deploy/
+# gate_with_stores.sh` has supplied a DSN since 2026-08-31, but that is a
+# thing a person remembers to run, and a check that runs when remembered is
+# not what a pull request needs.
+#
+# A throwaway container started after checkout, not a `services:` block:
+# service containers start *before* the checkout step, so they cannot mount
+# `postgres/initdb`, and those scripts are what create the roles and schemas
+# the migrations then need.
+#
 # WHAT THIS DOES NOT DO
 #
-# It does not touch Postgres, ClickHouse, KeyCRM or the production DuckDB file.
-# `pytest.ini` deselects the `external` marker by default, which is what makes
-# a bare `pytest` safe to run anywhere, and this deliberately does not override
-# it. The external suite reaches the live API and the production database; it
-# stays a thing a person runs on purpose.
+# It does not touch ClickHouse, KeyCRM, the production PostgreSQL or the
+# production DuckDB file. `pytest.ini` deselects the `external` marker by
+# default, which is what makes a bare `pytest` safe to run anywhere, and this
+# deliberately does not override it. The external suite reaches the live API
+# and the production database; it stays a thing a person runs on purpose.
+# ClickHouse is still absent, so its own differential tests still skip.
 name: CI
 
 on:
@@ -65,8 +83,67 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.lock
 
+      # 17.2-alpine, the version the VPS runs and the version the gate script
+      # uses. The password is a literal because the container lives for one
+      # job, publishes to localhost only, and holds nothing.
+      - name: Start a throwaway PostgreSQL
+        run: |
+          docker run -d --name ci-pg -p 5432:5432 \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=ci-only \
+            -e POSTGRES_DB=ks \
+            -e POSTGRES_INITDB_ARGS="--locale=C.UTF-8 --encoding=UTF8" \
+            -v "$PWD/postgres/initdb:/docker-entrypoint-initdb.d:ro" \
+            postgres:17.2-alpine
+          for _ in $(seq 1 60); do
+            docker exec ci-pg pg_isready -U postgres -d ks >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec ci-pg psql -U postgres -d ks -tAc "SELECT 1" >/dev/null
+          docker exec ci-pg psql -U postgres \
+            -tAc "ALTER ROLE ks_app WITH PASSWORD 'ci-only'" >/dev/null
+
+      # `alembic upgrade head`, so the suite meets the schema at
+      # `core.pg.REQUIRED_REVISION` — the same thing `ks-migrate` does before
+      # web and bot are allowed to start.
+      - name: Apply the migrations
+        env:
+          KS_PG_DSN: postgresql://ks_app:ci-only@127.0.0.1:5432/ks
+        run: |
+          alembic upgrade head
+          docker exec ci-pg psql -U postgres -d ks -tAc \
+            "SELECT version_num FROM meta.alembic_version"
+
       # No paths, no markers, no flags. `pytest.ini` owns `testpaths`,
       # `asyncio_mode` and the deselections, so what runs here is exactly what
       # runs on a laptop — which is the point of a check.
+      #
+      # `KS_PG_DSN` is the one addition, and it *unskips* rather than changes:
+      # every test that reads it creates and drops its own rows in the
+      # throwaway database.
+      #
+      # `-rs` so the run reports what it skipped, and the next step reads that
+      # rather than running the suite a second time to ask.
       - name: Run the suite
-        run: pytest -q
+        env:
+          KS_PG_DSN: postgresql://ks_app:ci-only@127.0.0.1:5432/ks
+        run: set -o pipefail && pytest -q -rs | tee pytest.out
+
+      # A store test that skipped is a check that silently stopped running,
+      # which is the failure this whole block exists to prevent — so it fails
+      # the job instead of printing a number nobody reads. Only PostgreSQL
+      # skips are caught: ClickHouse has no container here and its own
+      # differential tests are expected to skip.
+      - name: No store test may have skipped
+        if: always()
+        run: |
+          skipped=$(grep -c "needs a live PostgreSQL" pytest.out || true)
+          if [ "$skipped" != "0" ]; then
+            echo "::error::$skipped test(s) skipped for want of PostgreSQL"
+            grep "needs a live PostgreSQL" pytest.out
+            exit 1
+          fi
+
+      - name: Stop the throwaway PostgreSQL
+        if: always()
+        run: docker rm -f ci-pg || true

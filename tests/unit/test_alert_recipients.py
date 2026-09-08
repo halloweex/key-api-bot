@@ -33,14 +33,25 @@ class TestAlertsGoToAdminsOnly:
         audience rules in CLAUDE.md). A second override site is somebody
         widening an alert audience and must land here first.
 
-        Five of them, across two reports, and not one widens an audience.
-        The weekly sales report's ladder is three — the rich form, the card
-        with the report as its caption, then plain text. The weekly traffic
-        report's is two, and its `chat_ids` are a *subset* of the admins:
-        the list is grouped by language so nobody is sent somebody else's,
-        which is narrowing dressed as an override.
+        Five of them, across two reports. The weekly sales report's ladder is
+        three — the rich form, the card with the report as its caption, then
+        plain text. The weekly traffic report's is two.
 
-        Both landed here first, which is the guard working.
+        The traffic report's two **can widen past the admins**, and that is
+        the one place in this repository where an override does. It used to
+        be a strict subset — the admin list split by language so nobody was
+        sent somebody else's — and `KS_TRAFFIC_REPORT_RECIPIENTS` was added
+        on 2026-09-08 so a curator can be added without a deploy. The guard
+        does not forbid that; it forbids it happening quietly. What makes it
+        acceptable is that the widening is an explicit list of Telegram ids
+        typed by a human, empty by default, and applied by one function
+        (`core.traffic_report.audience`) that no alert path calls —
+        never a rule inferred from dashboard permissions, which is how
+        "everyone who can open the tab" would have become seventeen of
+        eighteen accounts. `tests/unit/test_traffic_report.py` pins its
+        behaviour; the audience decision itself is in CLAUDE.md.
+
+        All of it landed here first, which is the guard working.
         """
         hits = []
         for path in ("core/scheduler.py", "core/duckdb_store.py",
