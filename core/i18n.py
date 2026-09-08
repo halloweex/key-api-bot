@@ -358,6 +358,69 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "weekday.5": {EN: "Sat", UK: "Сб", RU: "Сб"},
     "weekday.6": {EN: "Sun", UK: "Нд", RU: "Вс"},
 
+    # ── The weekly traffic report ──
+    "traffic.title": {
+        EN: "Traffic report",
+        UK: "Звіт по трафіку",
+        RU: "Отчёт по трафику",
+    },
+    "traffic.summary": {
+        EN: "{revenue} from {orders} orders, {delta} vs last week.",
+        UK: "{revenue} з {orders} замовлень, {delta} до минулого тижня.",
+        RU: "{revenue} с {orders} заказов, {delta} к прошлой неделе.",
+    },
+    "traffic.unattributed": {
+        EN: "{share}% of orders arrived with no tracking at all, so every share below is of the rest.",
+        UK: "{share}% замовлень прийшли зовсім без міток, тому всі частки нижче — від решти.",
+        RU: "{share}% заказов пришли вообще без меток, поэтому все доли ниже — от остальных.",
+    },
+    "traffic.unattributed_was": {
+        EN: "Last week it was {was}%.",
+        UK: "Минулого тижня було {was}%.",
+        RU: "На прошлой неделе было {was}%.",
+    },
+    "traffic.by_type": {
+        EN: "Where the orders came from",
+        UK: "Звідки прийшли замовлення",
+        RU: "Откуда пришли заказы",
+    },
+    "traffic.by_platform": {EN: "By platform", UK: "За майданчиками", RU: "По площадкам"},
+    "traffic.table_platforms": {
+        EN: "Platform table",
+        UK: "Таблиця за майданчиками",
+        RU: "Таблица по площадкам",
+    },
+    "traffic.movers": {
+        EN: "Campaigns that moved most",
+        UK: "Кампанії, що змінилися найбільше",
+        RU: "Кампании, изменившиеся сильнее всего",
+    },
+    "traffic.open_tab": {
+        EN: "Open the traffic tab",
+        UK: "Відкрити вкладку трафіку",
+        RU: "Открыть вкладку трафика",
+    },
+    # The five buckets the tab's cards show, in its own words.
+    "traffic.bucket.paid": {EN: "Paid ads", UK: "Платна реклама", RU: "Платная реклама"},
+    "traffic.bucket.organic": {EN: "Organic", UK: "Органіка", RU: "Органика"},
+    "traffic.bucket.manager": {EN: "Sales manager", UK: "Менеджер", RU: "Менеджер"},
+    "traffic.bucket.pixel_only": {EN: "Pixel only", UK: "Лише піксель", RU: "Только пиксель"},
+    "traffic.bucket.unknown": {EN: "No tracking", UK: "Без міток", RU: "Без меток"},
+    # Platform names are proper nouns and stay as they are; only the two
+    # Google slices need words, because "google_ads" and "google_organic" are
+    # our split and not a name anybody uses.
+    "traffic.platform.google_ads": {EN: "Google Ads", UK: "Google Ads", RU: "Google Ads"},
+    "traffic.platform.google_organic": {
+        EN: "Google organic", UK: "Google органіка", RU: "Google органика",
+    },
+    "traffic.platform.facebook": {EN: "Facebook", UK: "Facebook", RU: "Facebook"},
+    "traffic.platform.instagram": {EN: "Instagram", UK: "Instagram", RU: "Instagram"},
+    "traffic.platform.tiktok": {EN: "TikTok", UK: "TikTok", RU: "TikTok"},
+    "traffic.platform.email": {EN: "Email", UK: "Email", RU: "Email"},
+    "traffic.platform.manager": {EN: "Manager", UK: "Менеджер", RU: "Менеджер"},
+    "traffic.platform.organic": {EN: "Organic", UK: "Органіка", RU: "Органика"},
+    "traffic.platform.unknown": {EN: "Unknown", UK: "Невідомо", RU: "Неизвестно"},
+
     # ── The card ──
     "report.vs_last_week": {
         EN: "vs last week",

@@ -1385,6 +1385,20 @@ class DuckDBStore(
             PRIMARY KEY (week_start, sales_type)
         );
 
+        -- Weekly traffic report: the same ledger, for the other report.
+        -- Its own table rather than a row in `weekly_report_sends` with
+        -- "traffic" in the `sales_type` column: that column means a sales
+        -- type, and a report is not one. Same shape, same reason — the job
+        -- fires daily and reports the last complete week.
+        CREATE TABLE IF NOT EXISTS traffic_report_sends (
+            week_start DATE NOT NULL,
+            sales_type VARCHAR NOT NULL,
+            revenue DECIMAL(14, 2) NOT NULL,
+            orders INTEGER NOT NULL,
+            sent_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (week_start, sales_type)
+        );
+
         -- Role permissions (dynamic permissions matrix)
         CREATE TABLE IF NOT EXISTS role_permissions (
             role VARCHAR NOT NULL,              -- admin, editor, viewer
