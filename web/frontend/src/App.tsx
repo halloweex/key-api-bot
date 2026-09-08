@@ -110,8 +110,9 @@ function App() {
     )
   }
 
-  // SMS campaigns (the roster carries names and phone numbers, so it is gated
-  // on the `sms` permission — admins and marketers, nobody else)
+  // SMS campaigns. The roster carries names and phone numbers, so the page is
+  // gated on the `sms` tab; whether the person may *send* from it is their
+  // level, not this guard.
   if (path === '/v2/sms' || path === '/sms') {
     return (
       <AppShell>

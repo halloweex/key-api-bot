@@ -867,7 +867,8 @@ export interface AtRiskResponse {
 
 // ─── User & Permissions Types ─────────────────────────────────────────────────
 
-export type UserRole = 'admin' | 'editor' | 'marketer' | 'viewer'
+/** The *level*: how deep, not which area. Areas are `allowed_features`. */
+export type UserRole = 'admin' | 'editor' | 'viewer'
 
 export interface User {
   id: number

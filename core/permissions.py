@@ -12,15 +12,27 @@ logger = logging.getLogger(__name__)
 
 
 class Role(str, Enum):
-    """User roles."""
+    """How deep an account may go — **not** what it may see.
+
+    These are levels, and the two questions are independent: *how deep* is the
+    role, *where* is the tab set (`dashboard_users.allowed_features`). One
+    person is "viewer over the marketing tabs", another is "editor over the
+    same tabs"; the pair expresses both without inventing a role for each area.
+
+    `marketer` used to be a member here and was the mistake this enum now
+    avoids: it was an *area* wearing a level's clothes — a viewer's depth plus
+    `sms` edit — so "a marketer who may only look" could not be said at all.
+    It is a tab **preset** now (`ACCESS_PRESETS["marketer"]`), and revision
+    0023 moved the one account carrying it to `editor` with that set.
+
+    A stored `marketer` therefore no longer resolves to anything here. It is
+    left out of the enum deliberately rather than kept as a quiet alias:
+    `update_user_role` validates against these members, so a row that somehow
+    still said `marketer` would be refused loudly at the next edit instead of
+    resolving to a level nobody chose.
+    """
     ADMIN = "admin"
     EDITOR = "editor"
-    # A viewer who also runs SMS campaigns. Sending is the one thing on this
-    # dashboard that spends money and reaches customers directly, so it had to
-    # be grantable without handing over user management, expenses, margin and
-    # the internal sales_type along with it — which is what "make them an
-    # admin" used to mean.
-    MARKETER = "marketer"
     VIEWER = "viewer"
 
 
@@ -74,70 +86,67 @@ class Action(str, Enum):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 ROLE_PERMISSIONS: Dict[str, Dict[str, Set[str]]] = {
+    # **Depth, not area.** Each level grants the same actions everywhere,
+    # because *where* is the tab set's question and asking it twice is what
+    # produced `marketer` — an area that had to be a role because the matrix
+    # was the only place areas could be expressed.
+    #
+    # So a viewer looks at whatever tabs they hold, an editor changes things in
+    # whatever tabs they hold, and an admin also manages access. "Viewer over
+    # the marketing tabs" and "editor over the marketing tabs" are now one
+    # sentence each instead of two roles.
+    #
+    # `user_management` is the one feature that is not a tab and stays with the
+    # level: it is the access system itself, and a checkbox must never be the
+    # way somebody reaches it.
     Role.ADMIN: {
-        Feature.DASHBOARD: {Action.VIEW, Action.EDIT},
-        Feature.EXPENSES: {Action.VIEW, Action.EDIT, Action.DELETE},
-        Feature.INVENTORY: {Action.VIEW, Action.EDIT, Action.DELETE},
-        Feature.ANALYTICS: {Action.VIEW, Action.EDIT},
-        Feature.CUSTOMERS: {Action.VIEW, Action.EDIT},
-        Feature.REPORTS: {Action.VIEW, Action.EDIT},
-        Feature.USER_MANAGEMENT: {Action.VIEW, Action.EDIT, Action.DELETE},
-        Feature.SMS: {Action.VIEW, Action.EDIT},
-        Feature.TRAFFIC: {Action.VIEW, Action.EDIT},
-        Feature.PRODUCTS: {Action.VIEW},
-        Feature.MARKETING: {Action.VIEW, Action.EDIT},
-        Feature.MARGIN: {Action.VIEW},
+        **{feature: {Action.VIEW, Action.EDIT, Action.DELETE} for feature in Feature},
     },
     Role.EDITOR: {
-        Feature.DASHBOARD: {Action.VIEW, Action.EDIT},
-        Feature.EXPENSES: {Action.VIEW, Action.EDIT},
-        Feature.INVENTORY: {Action.VIEW, Action.EDIT},
-        Feature.ANALYTICS: {Action.VIEW},
-        Feature.CUSTOMERS: {Action.VIEW},
-        Feature.REPORTS: {Action.VIEW},
+        **{feature: {Action.VIEW, Action.EDIT} for feature in Feature},
         Feature.USER_MANAGEMENT: set(),
-        Feature.SMS: set(),
-        Feature.TRAFFIC: {Action.VIEW},
-        Feature.PRODUCTS: {Action.VIEW},
-        Feature.MARKETING: {Action.VIEW},
-        # Cost price and profit. Admin-only before this existed, and left so:
-        # a role default is what everybody with the role gets, and this is the
-        # one tab that was deliberately narrower than "approved".
-        Feature.MARGIN: set(),
-    },
-    # Everything a viewer has, plus SMS campaigns — deliberately spelled out
-    # rather than derived from VIEWER, because a copy that drifts is visible
-    # and an inheritance that silently widens is not.
-    Role.MARKETER: {
-        Feature.DASHBOARD: {Action.VIEW},
-        Feature.EXPENSES: set(),
-        Feature.INVENTORY: {Action.VIEW},
-        Feature.ANALYTICS: {Action.VIEW},
-        Feature.CUSTOMERS: {Action.VIEW},
-        Feature.REPORTS: {Action.VIEW},
-        Feature.USER_MANAGEMENT: set(),
-        Feature.SMS: {Action.VIEW, Action.EDIT},
-        Feature.TRAFFIC: {Action.VIEW},
-        Feature.PRODUCTS: {Action.VIEW},
-        Feature.MARKETING: {Action.VIEW},
-        Feature.MARGIN: set(),
     },
     Role.VIEWER: {
-        Feature.DASHBOARD: {Action.VIEW},
-        Feature.EXPENSES: set(),
-        Feature.INVENTORY: {Action.VIEW},
-        Feature.ANALYTICS: {Action.VIEW},
-        Feature.CUSTOMERS: {Action.VIEW},
-        Feature.REPORTS: {Action.VIEW},
+        **{feature: {Action.VIEW} for feature in Feature},
         Feature.USER_MANAGEMENT: set(),
-        Feature.SMS: set(),
-        Feature.TRAFFIC: {Action.VIEW},
-        Feature.PRODUCTS: {Action.VIEW},
-        Feature.MARKETING: {Action.VIEW},
-        Feature.MARGIN: set(),
     },
 }
 
+
+# What "no tab set" means, per level.
+#
+# **This is load-bearing and it is new.** While the matrix carried areas, an
+# account with no override saw whatever its role happened to grant, and a
+# viewer's row simply did not grant `margin`, `expenses` or `sms`. With depth
+# uniform, "no override" would hand every one of the sixteen viewers the margin
+# tab, the expenses block and the SMS roster the moment this shipped. So the
+# default is written down instead of falling out of the matrix.
+#
+# `standard` is what a viewer could reach the day before per-user tabs existed,
+# which keeps that promise exactly. An editor adds `expenses`, which is what
+# the editor row granted before. An admin holds everything.
+DEFAULT_TABS: Dict[str, tuple] = {
+    Role.ADMIN.value: None,     # every tab; None means "no narrowing at all"
+    Role.EDITOR.value: (
+        Feature.DASHBOARD.value, Feature.PRODUCTS.value, Feature.TRAFFIC.value,
+        Feature.INVENTORY.value, Feature.REPORTS.value, Feature.MARKETING.value,
+        Feature.EXPENSES.value,
+    ),
+    Role.VIEWER.value: (
+        Feature.DASHBOARD.value, Feature.PRODUCTS.value, Feature.TRAFFIC.value,
+        Feature.INVENTORY.value, Feature.REPORTS.value, Feature.MARKETING.value,
+    ),
+}
+
+
+def default_tabs(role: str):
+    """The tab set an account of this level holds when nobody set one.
+
+    `None` means "not narrowed" — the admin case, and the answer for a level
+    this code does not recognise, which must not silently become "sees
+    nothing".
+    """
+    return DEFAULT_TABS.get(role, None)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PERMISSION HELPERS
@@ -234,6 +243,15 @@ ACCESS_PRESETS: Dict[str, tuple] = {
         Feature.MARKETING.value,
     ),
     "traffic_only": (Feature.TRAFFIC.value,),
+    # What the `marketer` *role* used to grant, now expressible as an area:
+    # everything a viewer saw, plus the SMS tab. Paired with `viewer` it is
+    # somebody who reads campaign results; paired with `editor` it is somebody
+    # who sends them. That pair is what the role could not say.
+    "marketer": (
+        Feature.DASHBOARD.value, Feature.PRODUCTS.value, Feature.TRAFFIC.value,
+        Feature.INVENTORY.value, Feature.REPORTS.value, Feature.MARKETING.value,
+        Feature.SMS.value,
+    ),
     "marketing": (
         Feature.MARKETING.value,
         Feature.TRAFFIC.value,
@@ -294,6 +312,7 @@ def serialize_features(values: Optional[Iterable[str]]) -> Optional[str]:
 def apply_feature_override(
     permissions: Dict[str, Dict[str, bool]],
     allowed: Optional[Iterable[str]],
+    role: Optional[str] = None,
 ) -> Dict[str, Dict[str, bool]]:
     """Narrow (or widen) a role's permissions to one person's tab set.
 
@@ -308,12 +327,19 @@ def apply_feature_override(
     of names and phone numbers nor the send, because those are `sms` **edit**
     and no override grants an action.
 
-    Features that are not tabs are returned untouched. ``allowed=None`` returns
-    the role's permissions unchanged, which is what every account had before
-    this existed and what every account still has until somebody sets a set.
+    Features that are not tabs are returned untouched.
+
+    ``allowed=None`` means nobody has set tabs for this person, and the answer
+    is then the **level's default set** (`DEFAULT_TABS`) rather than the whole
+    matrix. That indirection is what keeps the two questions apart: since the
+    matrix became uniform depth, "no override" without a default would hand
+    every viewer the margin tab, the expenses block and the SMS roster. A level
+    whose default is `None` — the admin — is not narrowed at all.
     """
     if allowed is None:
-        return permissions
+        allowed = default_tabs(role) if role else None
+        if allowed is None:
+            return permissions
 
     granted = set(normalize_features(allowed) or ())
     result = {}
@@ -404,10 +430,9 @@ def get_all_presets() -> list:
 def get_all_roles() -> list:
     """Get list of all roles with metadata."""
     return [
-        {"key": Role.ADMIN.value, "name": "Admin", "description": "Full access to all features"},
-        {"key": Role.EDITOR.value, "name": "Editor", "description": "Can view and edit most features"},
-        {"key": Role.MARKETER.value, "name": "Marketer", "description": "Viewer access plus SMS campaigns"},
-        {"key": Role.VIEWER.value, "name": "Viewer", "description": "View-only access"},
+        {"key": Role.ADMIN.value, "name": "Admin", "description": "Everything, including access itself"},
+        {"key": Role.EDITOR.value, "name": "Editor", "description": "May change things in the tabs they hold"},
+        {"key": Role.VIEWER.value, "name": "Viewer", "description": "May look at the tabs they hold"},
     ]
 
 

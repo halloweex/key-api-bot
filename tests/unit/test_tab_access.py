@@ -37,12 +37,18 @@ class TestTheOverrideNarrowsAndWidens:
             if key != "traffic":
                 assert narrowed[key]["view"] is False, key
 
-    def test_it_can_open_a_tab_the_role_does_not_have(self):
+    def test_it_can_open_a_tab_the_level_does_not_hold_by_default(self):
         """This is how "give this person margin" works without making them an
-        admin — and it is the half a pure intersection could not express."""
+        admin. The matrix cannot say it — it carries depth now — so what the
+        override widens is the level's *default set*."""
         base = perm.get_permissions_for_role("viewer")
-        assert base["margin"]["view"] is False
-        assert perm.apply_feature_override(base, ["margin"])["margin"]["view"] is True
+        inherited = perm.apply_feature_override(base, None, "viewer")
+        assert inherited["margin"]["view"] is False
+
+        granted = perm.apply_feature_override(base, ["margin"], "viewer")
+        assert granted["margin"]["view"] is True
+        # And still only looking: widening an area never deepens it.
+        assert granted["margin"]["edit"] is False
 
     def test_it_never_grants_an_action(self):
         """Ticking `sms` for a viewer gives the roster sizes. It must not give
@@ -117,14 +123,13 @@ class TestThePresets:
     def test_the_default_is_what_a_viewer_used_to_see(self):
         """`standard` is what an approval grants when the admin taps nothing,
         so it has to equal the access an approved account had the day before
-        per-user tabs existed: every page a viewer's role opened.
+        per-user tabs existed.
 
-        Computed from `ROLE_PERMISSIONS` rather than restated, so that changing
-        the viewer role and forgetting the preset fails here instead of
-        silently widening or narrowing every future approval."""
-        viewer = perm.get_permissions_for_role("viewer")
-        expected = [k for k in perm.TAB_FEATURE_KEYS if viewer[k]["view"]]
-        assert list(perm.ACCESS_PRESETS[perm.DEFAULT_PRESET]) == expected
+        Compared against `DEFAULT_TABS[viewer]` rather than restated: since the
+        matrix became depth, the viewer's default *set* is the thing that says
+        what a plain viewer sees, and the two must not drift."""
+        assert (list(perm.ACCESS_PRESETS[perm.DEFAULT_PRESET])
+                == list(perm.DEFAULT_TABS["viewer"]))
 
     def test_traffic_only_is_one_tab(self):
         assert perm.preset_features("traffic_only") == ["traffic"]
@@ -142,6 +147,12 @@ class TestTheTabListItself:
     def test_admin_pages_are_not_grantable(self):
         assert perm.Feature.USER_MANAGEMENT.value not in perm.TAB_FEATURE_KEYS
 
+    def test_every_level_says_what_no_tab_set_means(self):
+        """A level missing from `DEFAULT_TABS` would fall through to "not
+        narrowed" — every tab, including margin and SMS."""
+        for level in perm.Role:
+            assert level.value in perm.DEFAULT_TABS, level
+
     def test_every_tab_has_a_role_default_for_every_role(self):
         """A missing entry reads as denied, so a tab added to the enum and not
         to the matrix would be invisible to every DB-backed role — including
@@ -154,12 +165,17 @@ class TestTheTabListItself:
         described = {f["key"] for f in perm.get_all_features() if f.get("tab")}
         assert described == set(perm.TAB_FEATURE_KEYS)
 
-    def test_margin_is_the_admin_role_only_by_default(self):
-        """It was `require_admin` before it was a permission. Nobody gained it
-        the day that changed, and this is what says so."""
-        for role in ("viewer", "editor", "marketer"):
-            assert perm.get_permissions_for_role(role)["margin"]["view"] is False
-        assert perm.get_permissions_for_role("admin")["margin"]["view"] is True
+    def test_margin_reaches_nobody_by_default_below_admin(self):
+        """It was `require_admin` before it was a permission, and nobody gained
+        it when that changed. The matrix cannot say so any more — it carries
+        depth — so the level's default set is what keeps the promise."""
+        for level in ("viewer", "editor"):
+            inherited = perm.apply_feature_override(
+                perm.get_permissions_for_role(level), None, level)
+            assert inherited["margin"]["view"] is False
+        assert "margin" not in (perm.DEFAULT_TABS["viewer"] or ())
+        # The admin is not narrowed at all, which is what `None` means here.
+        assert perm.DEFAULT_TABS["admin"] is None
 
 
 # ─── the bot's checklist ─────────────────────────────────────────────────────

@@ -20,7 +20,6 @@ import type { UserRole } from '../types/api'
 const roleTone: Record<UserRole, 'purple' | 'blue' | 'green' | 'neutral'> = {
   admin: 'purple',
   editor: 'blue',
-  marketer: 'green',
   viewer: 'neutral',
 }
 

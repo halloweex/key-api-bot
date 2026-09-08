@@ -150,7 +150,7 @@ def launched(monkeypatch):
 class TestBackfillUtmRequiresAdmin:
     """Every non-admin role is refused, and refused *before* the launch."""
 
-    @pytest.mark.parametrize("role", ["viewer", "editor", "marketer"])
+    @pytest.mark.parametrize("role", ["viewer", "editor"])
     def test_non_admin_is_forbidden(self, client, monkeypatch, launched, role):
         headers = _login(monkeypatch, role)
         r = client.post(BACKFILL_PATH, headers=headers)
@@ -186,7 +186,7 @@ class TestBackfillUtmStatusRequiresAdmin:
     orders are missing attribution. It has no frontend caller either, so it
     follows the mutation rather than standing open beside it."""
 
-    @pytest.mark.parametrize("role", ["viewer", "editor", "marketer"])
+    @pytest.mark.parametrize("role", ["viewer", "editor"])
     def test_non_admin_is_forbidden(self, client, monkeypatch, role):
         headers = _login(monkeypatch, role)
         assert client.get(BACKFILL_STATUS_PATH, headers=headers).status_code == 403
@@ -245,7 +245,7 @@ class TestTrafficReadsStayOpenToViewers:
     also deny nobody — all four roles hold it.
     """
 
-    @pytest.mark.parametrize("role", ["viewer", "editor", "marketer"])
+    @pytest.mark.parametrize("role", ["viewer", "editor"])
     def test_transactions_answers_a_non_admin(self, client, monkeypatch, role):
         headers = _login(monkeypatch, role)
         r = client.get(f"{TRANSACTIONS_PATH}?period=month", headers=headers)

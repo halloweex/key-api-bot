@@ -478,8 +478,12 @@ async def effective_permissions(user: dict) -> dict:
     """
     from core.permissions import apply_feature_override, get_permissions_for_role_async
 
-    permissions = await get_permissions_for_role_async(user.get("role", "viewer"))
-    return apply_feature_override(permissions, user.get("allowed_features"))
+    role = user.get("role", "viewer")
+    permissions = await get_permissions_for_role_async(role)
+    # The level goes in too: with no tab set of their own, an account holds the
+    # level's default tabs, and the matrix alone no longer knows which those
+    # are — it carries depth now, uniform across areas.
+    return apply_feature_override(permissions, user.get("allowed_features"), role)
 
 
 async def has_permission(user: dict, feature: str, action: str = "view") -> bool:

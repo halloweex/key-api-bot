@@ -27,10 +27,11 @@ import { Wrapper } from './Wrapper'
 
 type RoleTone = 'purple' | 'blue' | 'green' | 'slate'
 
+// Levels. `marketer` stood here as a fourth column and was an area, not a
+// depth — it is a tab preset now, and this page is about depth only.
 const roleConfig: Record<UserRole, { label: string; tone: RoleTone }> = {
   admin: { label: 'Admin', tone: 'purple' },
   editor: { label: 'Editor', tone: 'blue' },
-  marketer: { label: 'Marketer', tone: 'green' },
   viewer: { label: 'Viewer', tone: 'slate' },
 }
 

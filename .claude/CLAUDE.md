@@ -487,6 +487,48 @@ something that no longer means what past campaigns meant.
 refuses the placeholder name `default`, an empty audience, and a truncated one.
 The wizard builds the preview and the freeze from the same query string, so
 what is recorded is what was on screen.
+### Two axes: a level and an area
+
+Access is a **pair**, and conflating the two halves is the mistake this section
+exists to record. `marketer` was a *role* — and it was an **area wearing a
+level's clothes**: a viewer's depth plus `sms` edit. So "a marketer who may
+only read campaign results" could not be said at all; the only marketer there
+could be was one who may send. The owner put it plainly: viewer and editor are
+one category, marketer is another, and a person may be marketer-viewer or
+marketer-editor.
+
+* **level** — `viewer`, `editor`, `admin` (`Role`). How deep, nothing else.
+  The stored matrix carries this and is now **uniform across features**: every
+  level may view what it is asked about, `edit` starts at editor, `delete` at
+  admin, and `user_management` — the access system itself, not a tab — stays
+  with admin alone.
+* **area** — `dashboard_users.allowed_features`. Which tabs, nothing else.
+
+`view` is "the tab is in my set"; `edit` is that **and** a level of editor or
+above. So "viewer over the marketing tabs" and "editor over the same tabs" are
+one pair each, and `ACCESS_PRESETS["marketer"]` is that area by name.
+
+**`DEFAULT_TABS` is load-bearing and arrived with this.** While the matrix
+carried areas, an account with no override saw whatever its role granted, and
+a viewer's row simply did not grant `margin`, `expenses` or `sms`. With depth
+uniform, "no override" without a default would have handed all sixteen viewers
+the margin tab, the expenses block and the SMS roster the moment it shipped.
+The default is written down instead: viewer gets `standard`, editor adds
+`expenses` (what the editor row granted before), admin is not narrowed at all —
+which is what `None` means there.
+
+**Revision 0023 carries the data**, because `seed_default_permissions` fills
+pairs the table lacks and never rewrites one it has: the stored rows still
+described the old world, where `viewer/sms = false` would make "marketer
+viewer" somebody holding the SMS tab and seeing nothing on it. Safe to rewrite
+because it was measured first — every stored pair equalled the code defaults,
+so nobody had ever customised the matrix. The one `marketer` account became
+`editor` with that preset's tabs, keeping every ability it had. Executed
+against a production-shaped copy before shipping, not only read.
+
+It does not downgrade: going back would have to invent which editor used to be
+the marketer, and guessing that is guessing who may spend money on SMS.
+
 ### Which tabs one person may open
 
 Access used to be a **role** and nothing else: four roles, a stored

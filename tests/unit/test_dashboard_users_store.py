@@ -448,7 +448,7 @@ class TestTheRoleMatrixLeftDuckDB:
     @pytest.mark.asyncio
     async def test_seeding_is_one_statement(self, tmp_path):
         """It runs on the request path of the first authorization check after
-        every restart, and there are 48 (role, feature) pairs.
+        every restart, and there is a pair per (level, feature).
 
         A statement per row meant 48 acquisitions of DuckDB's store lock where
         the single-connection version it replaced took one — and under Postgres
@@ -471,9 +471,12 @@ class TestTheRoleMatrixLeftDuckDB:
             inserts = [sql for sql in calls if "INSERT" in sql.upper()]
             assert len(inserts) == 1, f"{len(inserts)} inserts for one seed"
 
+            from core.permissions import ROLE_PERMISSIONS
+
             matrix = await store.get_all_permissions()
             pairs = sum(len(features) for features in matrix.values())
-            assert pairs == 48, pairs
+            expected = sum(len(f) for f in ROLE_PERMISSIONS.values())
+            assert pairs == expected, (pairs, expected)
 
             # And it stays idempotent, which is what lets every read path seed.
             calls.clear()

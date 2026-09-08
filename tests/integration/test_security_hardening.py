@@ -441,7 +441,7 @@ class TestHardcodedAdminAccessIsNotSilentlyRevocable:
             "refused, but the row was written anyway — the page would show a " \
             f"status the session ignores: {store.writes}"
 
-    @pytest.mark.parametrize("role", ["viewer", "editor", "marketer"])
+    @pytest.mark.parametrize("role", ["viewer", "editor"])
     def test_demoting_a_hardcoded_admin_is_refused(self, client, monkeypatch, role):
         store = _install_store(monkeypatch, _RecordingStore(role="admin"))
         r = client.patch(

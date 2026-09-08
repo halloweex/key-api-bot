@@ -702,7 +702,9 @@ class PostgresDashboardTabs:
                 for feature in Feature
             }
 
-        return apply_feature_override(matrix, row.get("allowed_features"))
+        return apply_feature_override(
+            matrix, row.get("allowed_features"), row.get("role") or "viewer",
+        )
 
     async def _set_features(self, user_id, features, admin_id) -> bool:
         from core.dashboard_access import SET_FEATURES

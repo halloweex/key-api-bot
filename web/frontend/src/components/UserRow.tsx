@@ -15,7 +15,6 @@ type Tone = 'purple' | 'blue' | 'slate' | 'green' | 'yellow' | 'red'
 const roleTone: Record<UserRole, Tone> = {
   admin: 'purple',
   editor: 'blue',
-  marketer: 'green',
   viewer: 'slate',
 }
 
@@ -26,12 +25,12 @@ const statusTone: Record<UserStatus, Tone> = {
   frozen: 'slate',
 }
 
+// Levels, not areas. `marketer` was here and was the mistake: an area wearing
+// a level's clothes, which made "a marketer who may only look" unsayable. It
+// is a tab preset now, so the pair (level, tabs) says both.
 export const roleOptions = [
   { value: 'admin', label: 'Admin' },
   { value: 'editor', label: 'Editor' },
-  // Viewer access plus SMS campaigns — the grant that used to require making
-  // somebody an admin.
-  { value: 'marketer', label: 'Marketer' },
   { value: 'viewer', label: 'Viewer' },
 ]
 

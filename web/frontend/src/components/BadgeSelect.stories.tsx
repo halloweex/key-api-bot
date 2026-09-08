@@ -5,7 +5,6 @@ import { Wrapper } from './Wrapper'
 
 const ROLE_OPTIONS = [
   { value: 'admin', label: 'Admin' },
-  { value: 'marketer', label: 'Marketer' },
   { value: 'viewer', label: 'Viewer' },
 ]
 

@@ -98,17 +98,23 @@ def _permission_gates(path: str, method: str = "GET") -> set:
     return gates
 
 
-def _role_store(role: str):
-    """A store stub that reports one role and knows nothing else.
+def _role_store(role: str, tabs=None):
+    """A store stub that reports one level, and optionally a tab set.
 
     Having no `seed_default_permissions` is deliberate: the permission lookup
     falls back to the hardcoded matrix, which is what this file is asserting
     about.
+
+    `tabs` is the second half of the answer since roles became levels: the
+    matrix says how deep, the tab set says where, and `None` means the level's
+    default — which does not include SMS below admin.
     """
 
     class _Store:
         async def get_user(self, uid):
-            return {"status": "approved", "role": role}
+            return {
+                "status": "approved", "role": role, "allowed_features": tabs,
+            }
 
     async def _fake_get_store():
         return _Store()
@@ -290,19 +296,44 @@ class TestSmsSegmentsAuth:
         )
         assert r.status_code == 403
 
-    @pytest.mark.parametrize("path", [SEGMENTS_PATH, CSV_PATH])
-    def test_marketer_is_allowed(self, client, store, monkeypatch, path):
-        marketer_id = 555_000_333
-        assert marketer_id not in ADMIN_USER_IDS
+    def test_the_sms_tab_is_what_opens_the_sizes(self, client, store, monkeypatch):
+        """`marketer` used to be the role that reached this, and it was an
+        *area* wearing a level's clothes. The tab is the area now."""
+        reader_id = 555_000_333
+        assert reader_id not in ADMIN_USER_IDS
 
-        monkeypatch.setattr("core.duckdb_store.get_store", _role_store("marketer"))
+        monkeypatch.setattr(
+            "core.duckdb_store.get_store", _role_store("viewer", ["sms"]))
 
         r = client.get(
-            path,
+            SEGMENTS_PATH,
             params={"campaign": "aug-promo"},
-            headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(marketer_id, role='marketer')}"},
+            headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(reader_id, role='viewer')}"},
         )
         assert r.status_code == 200, r.text
+
+    def test_the_roster_itself_needs_the_level_too(self, client, store, monkeypatch):
+        """The CSV is names and phone numbers — `sms` **edit**. Holding the tab
+        is where; being an editor is how deep. This is the pair the old role
+        could not express: a marketer who may read results but not send."""
+        person_id = 555_000_334
+        assert person_id not in ADMIN_USER_IDS
+
+        monkeypatch.setattr(
+            "core.duckdb_store.get_store", _role_store("viewer", ["sms"]))
+        refused = client.get(
+            CSV_PATH,
+            headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(person_id, role='viewer')}"},
+        )
+        assert refused.status_code == 403, refused.text
+
+        monkeypatch.setattr(
+            "core.duckdb_store.get_store", _role_store("editor", ["sms"]))
+        allowed = client.get(
+            CSV_PATH,
+            headers={"Cookie": f"{SESSION_COOKIE}={_make_cookie(person_id, role='editor')}"},
+        )
+        assert allowed.status_code == 200, allowed.text
 
     def test_viewer_cannot_pull_customer_rows(self, client, store, monkeypatch):
         """`view` is sizes. The rows themselves are names and phone numbers."""
