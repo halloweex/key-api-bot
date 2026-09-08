@@ -783,3 +783,81 @@ class TestEverySurfaceNamesItsTab:
             assert read_approved_user_ids() == [11, 22]
         finally:
             use_bot_store(previous)
+
+
+# ─── the audit's findings, pinned ────────────────────────────────────────────
+
+
+class TestAuthorizationRefusalsAreLogged:
+    """OWASP's authorization guidance asks for authorization events in a
+    consistent, parseable format. The middleware's `status_code: 403` names
+    neither the account nor what it asked for, which makes "who is hitting
+    this, and on what" unanswerable after a permission change — and leaves
+    somebody probing the surface indistinguishable from somebody whose tabs
+    were narrowed an hour ago.
+    """
+
+    def test_every_refusal_path_says_who_and_what(self):
+        import ast
+        import pathlib
+
+        source = pathlib.Path("web/routes/auth.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        # Every function that refuses with 403 must say so — through the
+        # shared helper, or with its own line where the event is a different
+        # one. `webapp_auth` is the second case: it refuses a *login*, not a
+        # resource, and logs the status that refused it.
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            body = ast.get_source_segment(source, node) or ""
+            if "status_code=403" not in body:
+                continue
+            assert "_refused(" in body or "logger." in body, (
+                f"{node.name} refuses with 403 and logs nothing about it — a "
+                f"refusal nobody can attribute is a refusal nobody can debug"
+            )
+
+
+class TestTheBotSaysWhenItCannotEnforce:
+    """`may_use` is permissive where it cannot know — right for a missing row
+    or an unreachable store, and a silent no-op when the reason is
+    configuration. `KS_BOT_STORE` and `KS_USER_STORE` are separate variables,
+    and with the second not `postgres` every narrowed account quietly gets
+    every report again.
+    """
+
+    def test_a_mismatch_is_an_error(self, monkeypatch, caplog):
+        import logging
+
+        import bot.main as main
+
+        monkeypatch.setenv("KS_BOT_STORE", "postgres")
+        monkeypatch.setenv("KS_USER_STORE", "duckdb")
+        with caplog.at_level(logging.ERROR):
+            main._warn_if_tab_access_is_off()
+        assert any("cannot read the dashboard's tab sets" in r.message
+                   for r in caplog.records), caplog.text
+
+    def test_agreement_is_silent(self, monkeypatch, caplog):
+        import logging
+
+        import bot.main as main
+
+        monkeypatch.setenv("KS_BOT_STORE", "postgres")
+        monkeypatch.setenv("KS_USER_STORE", "postgres")
+        with caplog.at_level(logging.INFO):
+            main._warn_if_tab_access_is_off()
+        assert not caplog.records, caplog.text
+
+    def test_it_runs_before_the_store_is_touched(self):
+        """After `init_database()` it would be a note attached to whatever the
+        store did first, which on a bad day is a traceback."""
+        import inspect
+
+        import bot.main as main
+
+        source = inspect.getsource(main.main)
+        assert (source.index("_warn_if_tab_access_is_off()")
+                < source.index("database.init_database()"))

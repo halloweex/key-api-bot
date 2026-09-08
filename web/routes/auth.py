@@ -441,6 +441,13 @@ def require_admin_for_internal(user: dict, sales_type: str | None) -> None:
         return
     user_id = user.get("user_id")
     if user.get("role") != "admin" and not is_hardcoded_admin(user_id):
+        # Found by the audit: this refusal was the one with no trace at all.
+        # It is the most interesting of them, too — `internal` is staff
+        # activity, so somebody asking for it repeatedly is worth seeing.
+        logger.info(
+            "Authorization refused: user=%s role=%s wanted=sales_type=internal",
+            user_id, user.get("role"),
+        )
         raise HTTPException(
             status_code=403, detail="sales_type=internal is admin-only",
         )
@@ -461,9 +468,30 @@ async def require_admin(request: Request) -> dict:
 
     # Check role from session (already refreshed from DB by get_current_user)
     if role != 'admin' and not is_hardcoded_admin(user_id):
+        _refused(user, "admin", request)
         raise HTTPException(status_code=403, detail="Admin access required")
 
     return user
+
+
+def _refused(user: dict, wanted: str, request: Request) -> None:
+    """Say who was refused what, once, in one shape.
+
+    OWASP's authorization guidance asks for authorization events in a
+    consistent, parseable format; before this the only trace of a refusal was
+    the middleware's `status_code: 403`, which names neither the account nor
+    the thing it asked for. After a permission change that leaves nobody able
+    to answer "who is hitting this, and on what" — and it leaves somebody
+    probing the surface indistinguishable from somebody whose tabs were
+    narrowed an hour ago.
+
+    INFO, not WARNING: with per-user tabs a refusal is the system working. The
+    account, the ask and the path are what make it useful.
+    """
+    logger.info(
+        "Authorization refused: user=%s role=%s wanted=%s path=%s",
+        user.get("user_id"), user.get("role"), wanted, request.url.path,
+    )
 
 
 async def effective_permissions(user: dict) -> dict:
@@ -526,6 +554,7 @@ def require_permission(feature: str, action: str = "view"):
         permissions = await effective_permissions(user)
         feature_perms = permissions.get(feature, {})
         if not feature_perms.get(action, False):
+            _refused(user, f"{action} on {feature}", request)
             raise HTTPException(
                 status_code=403,
                 detail=f"No {action} access to {feature}"
@@ -562,6 +591,7 @@ def require_any_permission(features: Sequence[str], action: str = "view"):
         if any(permissions.get(f, {}).get(action, False) for f in features):
             return user
 
+        _refused(user, f"{action} on any of {', '.join(features)}", request)
         raise HTTPException(
             status_code=403,
             detail=f"No {action} access to {' or '.join(features)}",
