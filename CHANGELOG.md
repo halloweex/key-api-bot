@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.148
+
+- Seed the role matrix in one statement, not one per row
+- Take the role matrix off DuckDB, so access never queues behind a rebuild
+- A tab checkbox has to answer the click, not the network
+
+
 ## 3.0.147
 
 - Show the access request in the UI, and let it be answered there
