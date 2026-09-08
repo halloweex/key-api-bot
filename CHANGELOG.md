@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.162
+
+- Being told nothing is not the same as not understanding it
+- A pixel names no platform, and the tab stops offering filters it ignores
+
+
 ## 3.0.161
 
 - Lead the traffic report with what is evidence, and let the owner name readers
