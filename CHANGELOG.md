@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.159
+
+- Untagged traffic is not a campaign, and it was crowding out the ones that are
+
+
 ## 3.0.158
 
 - A weekly traffic report, for the people who watch where orders come from
