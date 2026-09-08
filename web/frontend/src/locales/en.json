@@ -1,5 +1,8 @@
 {
+  "access.approve": "Approve",
   "access.asRole": "As the role",
+  "access.deniedBefore": "refused {{count}}× before",
+  "access.deny": "Deny",
   "access.editorHint": "Tabs decide what is visible; the role decides what can be changed inside them.",
   "access.noTabs": "No tabs",
   "access.noneBody": "Your account is approved but no tabs are assigned yet. Ask an admin to open the ones you need.",
@@ -9,6 +12,7 @@
   "access.preset.standard": "Standard",
   "access.preset.traffic_only": "Traffic only",
   "access.presetsLabel": "Presets",
+  "access.requestsTitle": "Access requests",
   "access.tab.dashboard": "Dashboard",
   "access.tab.expenses": "Expenses",
   "access.tab.inventory": "Inventory",

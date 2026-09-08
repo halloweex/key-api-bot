@@ -48,6 +48,7 @@ import type {
   PermissionsMatrixResponse,
   UpdatePermissionResponse,
   UpdateUserFeaturesResponse,
+  AccessRequestsResponse,
   TabFeature,
   TrafficAnalyticsResponse,
   TrafficTrendResponse,
@@ -670,6 +671,31 @@ export const api = {
     fetchApiMutation<{ success: boolean; user_id: number; status: UserStatus }>(
       `/admin/users/${userId}/status?status=${status}`,
       'PATCH',
+      options
+    ),
+
+  // Who is waiting to be let in. The queue lives in the bot's list, because
+  // Telegram is the only door; approving writes the dashboard's row too.
+  getAccessRequests: (options?: FetchOptions) =>
+    fetchApi<AccessRequestsResponse>('/admin/access-requests', undefined, options),
+
+  approveAccessRequest: (
+    userId: number,
+    features: TabFeature[],
+    options?: FetchOptions
+  ) =>
+    fetchApiMutationWithBody<UpdateUserFeaturesResponse>(
+      `/admin/access-requests/${userId}/approve`,
+      'POST',
+      { features },
+      options
+    ),
+
+  denyAccessRequest: (userId: number, options?: FetchOptions) =>
+    fetchApiMutationWithBody<{ success: boolean; user_id: number; frozen: boolean }>(
+      `/admin/access-requests/${userId}/deny`,
+      'POST',
+      {},
       options
     ),
 

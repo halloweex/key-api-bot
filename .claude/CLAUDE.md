@@ -591,6 +591,23 @@ it: DuckDB cannot resolve a bare `CURRENT_TIMESTAMP` on the right of
 out of `excluded` instead, which is what `create_user` and `set_permission`
 already do here.
 
+**The request itself is visible in the UI, and actionable there.** It was not
+at first, and the gap was exactly the shape of the two lists: a person asking
+for access lands in the **bot's** list as `pending`, and the dashboard's list
+gains a row only when somebody approves — so `/admin/users`, which reads the
+second list, had nothing to show until the decision had already been taken on
+a phone. `GET /api/admin/access-requests` reads the bot's queue and the two
+`POST .../approve|deny` endpoints write exactly the rows the bot's own buttons
+write: the conditional `expected_status="pending"` (two admins must not both
+win), then `grant_access` — the shared statement — and a message to the person
+in their own language over the same HTTP transport the weekly report uses, so
+the kill switch and the admin-only signature both still apply. The lists are
+still not merged; this gives one decision a second door.
+
+The tabs are picked **before** the grant on that card, not after it, which is
+also the order the bot's keyboard uses. A denial writes no dashboard row at
+all: a refusal is not a decision about somebody who is not there.
+
 **The redirect could not stay a constant.** `RouteGuard` used to send a denied
 visitor to `/`; an account granted /traffic alone is *denied* at `/`, so that
 is now a redirect loop. It computes the first page the account can actually

@@ -217,6 +217,188 @@ async def update_user_features(
     return {"success": True, "user_id": user_id, "allowed_features": features}
 
 
+# ─── Incoming access requests ─────────────────────────────────────────────────
+#
+# A person asking for access lands in the **bot's** list (`app.authorized_users`)
+# as `pending`, because the only door is Telegram. The dashboard's list gains a
+# row when somebody approves them — so until this existed, an incoming request
+# was invisible on the admin page and the decision could only be taken from a
+# phone. That is the half of "manage access in the UI" that was missing.
+#
+# The two lists still are not merged: this reads the bot's queue and writes the
+# same two rows the bot's own Approve button writes, through the same port and
+# the same statement. Nothing here decides that the lists are one.
+
+
+def _request_row(row: dict) -> dict:
+    """One pending request, in the shape the admin page renders."""
+    return {
+        "user_id": row.get("user_id"),
+        "username": row.get("username"),
+        "first_name": row.get("first_name"),
+        "last_name": row.get("last_name"),
+        "requested_at": row.get("requested_at"),
+        "denial_count": row.get("denial_count") or 0,
+    }
+
+
+@router.get("/admin/access-requests")
+@limiter.limit("30/minute")
+async def list_access_requests(
+    request: Request,
+    user: dict = Depends(require_admin),
+):
+    """Who is waiting for access (admin only)."""
+    from bot import database
+
+    try:
+        pending = database.get_pending_requests()
+    except Exception as e:  # noqa: BLE001 — an unreachable bot store must not
+        # take the whole admin page down; the rest of it reads another store.
+        logger.error("Could not read pending access requests: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="The access-request queue is unavailable right now",
+        )
+
+    return {"requests": [_request_row(row) for row in pending], "count": len(pending)}
+
+
+async def _tell_the_person(user_id: int, key: str) -> None:
+    """Say what was decided, in their language. Never raises.
+
+    The bot says this from its own Application; from here it goes over the same
+    HTTP transport the weekly report uses, which means it honours
+    `KS_ALERTS_DISABLED` and — through `sign_for` — does not put an instance
+    signature under a message to somebody who is not an admin.
+
+    A failure here is logged and swallowed: the access decision is already
+    written, and refusing the admin's click because a Telegram delivery failed
+    would leave the two disagreeing.
+    """
+    from bot import database
+    from core.i18n import t
+    from core.telegram_alerts import send_admin_message_http
+
+    try:
+        language = database.get_user_language(user_id)
+        await send_admin_message_http(t(key, language), chat_ids=[user_id])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not tell user %s about the decision: %s", user_id, e)
+
+
+@router.post("/admin/access-requests/{user_id}/approve")
+@limiter.limit("20/minute")
+async def approve_access_request(
+    request: Request,
+    user_id: int,
+    user: dict = Depends(require_admin),
+):
+    """Approve a pending request and set the tabs it opens (admin only).
+
+    The body is `{"preset": ...}` or `{"features": [...]}`, exactly as
+    `/admin/users/{id}/features` takes them, and omitting it grants the
+    default preset — which is what the bot's Approve button grants, and what a
+    viewer could reach before per-user tabs existed.
+    """
+    from bot import database
+    from core.permissions import (
+        ACCESS_PRESETS, DEFAULT_PRESET, TAB_FEATURE_KEYS,
+        normalize_features, preset_features,
+    )
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+
+    if "preset" in body:
+        features = preset_features(body.get("preset")) if isinstance(
+            body.get("preset"), str) else None
+        if features is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown preset. Must be one of: {sorted(ACCESS_PRESETS)}",
+            )
+    elif "features" in body:
+        raw = body.get("features")
+        if not isinstance(raw, list) or not all(isinstance(v, str) for v in raw):
+            raise HTTPException(
+                status_code=400, detail="features must be a list of strings",
+            )
+        unknown = sorted(set(raw) - set(TAB_FEATURE_KEYS))
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not tabs: {unknown}. Known: {list(TAB_FEATURE_KEYS)}",
+            )
+        features = normalize_features(raw)
+    else:
+        features = preset_features(DEFAULT_PRESET)
+
+    admin_id = user.get("user_id")
+    profile = database.get_user_auth_status(user_id) or {}
+
+    # `expected_status="pending"` for the bot's reason: two admins tapping
+    # Approve and Deny on the same request in the same second used to be
+    # last-write-wins, with the person told both.
+    if not database.approve_user(user_id, admin_id, expected_status="pending"):
+        raise HTTPException(
+            status_code=409,
+            detail="This request has already been decided by somebody else",
+        )
+
+    store = await get_store()
+    await store.grant_access(
+        user_id,
+        reviewed_by=admin_id,
+        features=features,
+        username=profile.get("username"),
+        first_name=profile.get("first_name"),
+        last_name=profile.get("last_name"),
+    )
+    await _tell_the_person(user_id, "access.granted")
+
+    logger.info(
+        "Admin %s approved access request %s with tabs %s",
+        admin_id, user_id, features,
+    )
+    return {"success": True, "user_id": user_id, "allowed_features": features}
+
+
+@router.post("/admin/access-requests/{user_id}/deny")
+@limiter.limit("20/minute")
+async def deny_access_request(
+    request: Request,
+    user_id: int,
+    user: dict = Depends(require_admin),
+):
+    """Refuse a pending request (admin only).
+
+    No dashboard row is written — a refusal is not a decision about somebody
+    who is not there. The count is what freezes, not the verdict: five
+    refusals and the person is frozen out for thirty days.
+    """
+    from bot import database
+
+    admin_id = user.get("user_id")
+    written, frozen = database.deny_user(user_id, admin_id, expected_status="pending")
+    if not written:
+        raise HTTPException(
+            status_code=409,
+            detail="This request has already been decided by somebody else",
+        )
+
+    await _tell_the_person(
+        user_id, "access.frozen" if frozen else "access.denied",
+    )
+    logger.info("Admin %s denied access request %s (frozen=%s)",
+                admin_id, user_id, frozen)
+    return {"success": True, "user_id": user_id, "frozen": frozen}
+
+
 # ─── Permissions ───────────────────────────────────────────────────────────────
 
 @router.get("/admin/permissions")

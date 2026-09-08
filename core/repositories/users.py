@@ -285,6 +285,45 @@ class UsersMixin:
 
         return result is not None
 
+    async def grant_access(
+        self,
+        user_id: int,
+        reviewed_by: int,
+        features: Optional[Sequence[str]] = None,
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> bool:
+        """Approve dashboard access and set the tab set, in one statement.
+
+        The web container's half of the decision the bot makes from a Telegram
+        keyboard. Same statement — `core/dashboard_access.GRANT_ACCESS` — run
+        through whichever store `KS_USER_STORE` names, because a grant written
+        two ways drifts the first time one of them learns something.
+
+        Not `create_user` followed by `update_user_status`: between two
+        statements the person is approved carrying the previous tab set, and
+        the approval is the moment they are told they have access.
+        """
+        from core.dashboard_access import GRANT_ACCESS
+        from core.permissions import Role, serialize_features
+
+        await self._users_run(
+            GRANT_ACCESS,
+            [
+                user_id, username, first_name, last_name,
+                # The role a *new* row starts at. An existing row keeps its
+                # own: the statement leaves `role` out of its update list, so
+                # approving cannot demote an admin whose request came back.
+                role or Role.VIEWER.value,
+                serialize_features(features),
+                reviewed_by,
+            ],
+            mode="none",
+        )
+        return True
+
     async def set_user_features(
         self,
         user_id: int,

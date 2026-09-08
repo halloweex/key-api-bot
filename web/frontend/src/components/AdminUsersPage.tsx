@@ -19,6 +19,7 @@ import { PageShell } from './PageShell'
 import { PageHeading } from './PageHeading'
 import { Wrapper } from './Wrapper'
 import { UserRow, roleOptions, statusOptions } from './UserRow'
+import { AccessRequestsCard } from './AccessRequestsCard'
 
 export function AdminUsersPage() {
   const queryClient = useQueryClient()
@@ -154,6 +155,9 @@ export function AdminUsersPage() {
           </>
         }
       />
+
+      {/* Anyone waiting to be let in, above the list of people already in. */}
+      <AccessRequestsCard presets={matrix?.presets} tabs={matrix?.tabs} />
 
       <Card>
         <CardHeader>

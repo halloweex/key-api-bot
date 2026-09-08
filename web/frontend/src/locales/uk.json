@@ -1,5 +1,8 @@
 {
+  "access.approve": "Схвалити",
   "access.asRole": "Як у ролі",
+  "access.deniedBefore": "відхилено {{count}}× раніше",
+  "access.deny": "Відхилити",
   "access.editorHint": "Вкладки вирішують, що видно; роль вирішує, що можна змінювати всередині.",
   "access.noTabs": "Жодної вкладки",
   "access.noneBody": "Акаунт схвалено, але вкладки ще не призначені. Попросіть адміністратора відкрити потрібні.",
@@ -9,6 +12,7 @@
   "access.preset.standard": "Стандарт",
   "access.preset.traffic_only": "Лише трафік",
   "access.presetsLabel": "Шаблони",
+  "access.requestsTitle": "Запити доступу",
   "access.tab.dashboard": "Дашборд",
   "access.tab.expenses": "Витрати",
   "access.tab.inventory": "Склад",

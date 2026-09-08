@@ -981,6 +981,20 @@ export interface PermissionsMatrixResponse {
   presets: AccessPreset[]
 }
 
+export interface AccessRequest {
+  user_id: number
+  username: string | null
+  first_name: string | null
+  last_name: string | null
+  requested_at: string | null
+  denial_count: number
+}
+
+export interface AccessRequestsResponse {
+  requests: AccessRequest[]
+  count: number
+}
+
 export interface UpdateUserFeaturesResponse {
   success: boolean
   user_id: number

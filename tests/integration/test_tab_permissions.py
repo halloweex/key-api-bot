@@ -509,3 +509,152 @@ class TestEveryTabIsEnforcedSomewhere:
                     ):
                         return
         raise AssertionError(f"no route is gated on the {feature!r} tab")
+
+
+# ─── the request itself, in the UI ───────────────────────────────────────────
+
+
+class _FakeAccessControl:
+    """The bot's list, in memory. Only what the endpoints touch."""
+
+    def __init__(self, rows=None):
+        self.rows = rows if rows is not None else [
+            {"user_id": 7001, "username": "asker", "first_name": "Ask",
+             "last_name": "Er", "requested_at": "2026-09-08 05:00:00",
+             "denial_count": 0, "status": "pending"},
+        ]
+        self.approved_calls = []
+        self.denied_calls = []
+        self.decided = False
+
+    def pending(self):
+        return list(self.rows)
+
+    def status(self, user_id):
+        for row in self.rows:
+            if row["user_id"] == user_id:
+                return row
+        return None
+
+    def approve(self, user_id, admin_id, *, expected_status=None):
+        if self.decided:
+            return False
+        self.decided = True
+        self.approved_calls.append((user_id, admin_id, expected_status))
+        return True
+
+    def deny(self, user_id, admin_id, *, expected_status=None):
+        if self.decided:
+            return False, False
+        self.decided = True
+        self.denied_calls.append((user_id, admin_id, expected_status))
+        return True, False
+
+
+class _GrantingStore(_FakeStore):
+    def __init__(self):
+        super().__init__("admin", None)
+        self.granted = None
+
+    async def grant_access(self, user_id, reviewed_by, features=None,
+                           username=None, first_name=None, last_name=None,
+                           role=None):
+        self.granted = (user_id, reviewed_by, features)
+        return True
+
+
+class TestTheAccessRequestQueue:
+    """A request lands in the *bot's* list and the dashboard's list gains a row
+    only when somebody approves — so an incoming request was invisible on the
+    admin page, and the decision could only be taken from a phone.
+
+    These endpoints are the missing door. They do not merge the two lists: they
+    read the bot's queue and write exactly the two rows the bot's own Approve
+    button writes.
+    """
+
+    def _admin(self, monkeypatch, access=None, store=None):
+        import bot.database as database
+
+        access = access or _FakeAccessControl()
+        store = store or _GrantingStore()
+
+        class _Store:
+            def __init__(self, a):
+                self.access = a
+
+        monkeypatch.setattr(
+            "core.bot_store.get_bot_store", lambda: _Store(access))
+        monkeypatch.setattr(database, "get_bot_store", lambda: _Store(access))
+        monkeypatch.setattr(database, "get_user_language", lambda uid: "uk")
+        _install_store(monkeypatch, store)
+
+        sent = []
+
+        async def _send(text, *a, chat_ids=None, **k):
+            sent.append((chat_ids, text))
+            return 1
+
+        monkeypatch.setattr("core.telegram_alerts.send_admin_message_http", _send)
+        return access, store, sent, _cookie(ADMIN_ID, "admin")
+
+    def test_the_queue_is_listed(self, client, monkeypatch):
+        _, _, _, headers = self._admin(monkeypatch)
+        body = client.get("/api/admin/access-requests", headers=headers).json()
+        assert body["count"] == 1
+        assert body["requests"][0]["username"] == "asker"
+
+    def test_a_viewer_cannot_see_the_queue(self, client, monkeypatch):
+        headers = _login(monkeypatch, allowed_features=None)
+        assert client.get(
+            "/api/admin/access-requests", headers=headers).status_code == 403
+
+    def test_approving_writes_both_rows_and_says_so(self, client, monkeypatch):
+        access, store, sent, headers = self._admin(monkeypatch)
+        response = client.post(
+            "/api/admin/access-requests/7001/approve",
+            headers=headers, json={"preset": "traffic_only"},
+        )
+        assert response.status_code == 200
+        assert response.json()["allowed_features"] == ["traffic"]
+        # the bot's list, conditionally — two admins must not both win
+        assert access.approved_calls == [(7001, ADMIN_ID, "pending")]
+        # the dashboard's list, with the tabs chosen here
+        assert store.granted == (7001, ADMIN_ID, ["traffic"])
+        # and the person is told, in their own language
+        assert sent and sent[0][0] == [7001]
+
+    def test_omitting_the_body_grants_the_default(self, client, monkeypatch):
+        from core.permissions import ACCESS_PRESETS, DEFAULT_PRESET
+
+        _, store, _, headers = self._admin(monkeypatch)
+        response = client.post(
+            "/api/admin/access-requests/7001/approve", headers=headers, json={},
+        )
+        assert response.status_code == 200
+        assert store.granted[2] == list(ACCESS_PRESETS[DEFAULT_PRESET])
+
+    def test_a_request_already_decided_is_refused(self, client, monkeypatch):
+        access, _, _, headers = self._admin(monkeypatch)
+        access.decided = True
+        assert client.post(
+            "/api/admin/access-requests/7001/approve", headers=headers, json={},
+        ).status_code == 409
+
+    def test_denying_writes_no_dashboard_row(self, client, monkeypatch):
+        access, store, sent, headers = self._admin(monkeypatch)
+        response = client.post(
+            "/api/admin/access-requests/7001/deny", headers=headers,
+        )
+        assert response.status_code == 200
+        assert access.denied_calls == [(7001, ADMIN_ID, "pending")]
+        assert store.granted is None, "a refusal is not a decision about a row"
+        assert sent and sent[0][0] == [7001]
+
+    def test_an_unknown_tab_is_refused(self, client, monkeypatch):
+        _, store, _, headers = self._admin(monkeypatch)
+        assert client.post(
+            "/api/admin/access-requests/7001/approve",
+            headers=headers, json={"features": ["user_management"]},
+        ).status_code == 400
+        assert store.granted is None
