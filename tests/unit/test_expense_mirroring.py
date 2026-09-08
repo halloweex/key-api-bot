@@ -92,10 +92,10 @@ class TestTheMirrorNeverStopsASync:
 
     @pytest.mark.asyncio
     async def test_it_stands_down_when_the_mirror_is_off(self):
-        from core.pg_landing import mirror_expense_types
+        from core.pg_landing import mirror_expenses
 
         with patch("core.pg_landing.enabled", return_value=False):
-            out = await mirror_expense_types([{"id": 1, "name": "x"}])
+            out = await mirror_expenses([{"id": 1, "expenses": [{"id": 9}]}])
         assert out.skipped
 
 
