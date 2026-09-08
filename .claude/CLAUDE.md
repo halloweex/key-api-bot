@@ -788,6 +788,7 @@ whole reason the group is read from the source now.
 | `ch_sync` | every 1 h | Ship silver → ClickHouse, derive gold there, append the archive (шаги 5–6); stands down without `KS_CH_URL` |
 | `dq_digest` | 09:00 | one message with WARN+ findings and a delta |
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
+| `traffic_report` | daily 09:45 | last complete week's attribution to the admins — sends once, then quiet |
 | `bot_memory_watch` | every 30 min (bot) | бот сторожит свои 512 МБ тем же evaluator'ом; предыдущий сэмпл — в `data/memory-bot-last.json` (OOM-счётчик ядра сбрасывается при recreate) |
 
 **Never schedule anything at 05:00–05:05 Kyiv.** The host cron
@@ -929,6 +930,50 @@ recipient inside the transports, so a business message and an alert share one
 call and the sender chooses nothing. The caption budget is still measured
 against the signed form: one verdict per send, never a picture for the admins
 and text for everyone else.
+
+### The other weekly message: where the orders came from
+
+`core/traffic_report.py`, job `traffic_report`, daily 09:45 Kyiv. The sales
+report answers "how much"; this answers "from where", and they are two
+messages on purpose — burying attribution under a revenue headline is
+attribution not being read.
+
+**It reads through the repository the tab reads**, `get_traffic_analytics`
+and `get_traffic_utm_campaigns`, with the tab's own `sales_type="retail"`.
+Same question, same answer: a message that disagreed with the screen would
+cost more trust than it delivers.
+
+**No spend, no ROAS** (owner's call, 2026-09-08). The tab has a ROAS block,
+but ad spend is not in KeyCRM and is typed in by hand, so a weekly figure
+built on it would be as fresh as somebody remembered to be.
+
+**Attribution quality is a headline, not a footnote.** Every share in the
+message is a share of what could be attributed, so the orders that could not
+be are what says whether the rest is worth reading. Above
+`UNATTRIBUTED_WARN_PCT` (25% of orders) the summary marks it, and it always
+says what the share was the week before — a share that doubled matters more
+than the share itself.
+
+**Orders with no attribution at all is a deferral, not a finding.** The UTM
+rows land behind the orders, so a week whose attribution has not arrived
+looks exactly like a week where nothing came from anywhere. It reports
+`no_attribution` and tries again tomorrow.
+
+**Admins only.** "Everyone who can see the traffic tab" was the obvious
+audience and the wrong one: measured 2026-09-08, seventeen of the eighteen
+approved dashboard accounts hold that tab, because it is in the default set
+for both `viewer` and `editor`. Narrowing later is a change of one list;
+widening after a wrong number went out is not. Dashboard accounts are
+reachable in any case — `app.dashboard_users.user_id` **is** the Telegram id,
+since the dashboard signs in through Telegram.
+
+Same shape as the sales report otherwise: last complete Monday–Sunday week, a
+daily tick against its own ledger (`traffic_report_sends` — its own table,
+because `weekly_report_sends.sales_type` means a sales type and "traffic" is
+not one), the rich form with plain text under it, campaigns ranked by hryvnia
+moved rather than by percent, and one picture — the sales report's channel
+chart fed platform totals, so the two reports do not grow two visual
+languages for one idea.
 
 ### The conversation must always be re-enterable
 `/report`, `/search` and `/settings` — and the reply-keyboard buttons standing

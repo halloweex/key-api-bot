@@ -747,6 +747,23 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Job: Weekly traffic report (daily tick at 09:45 Kyiv, delivers once)
+        #
+        # Same shape and same reasons as the sales report above, fifteen
+        # minutes later: two messages rather than one long one, because the
+        # question "how much did we sell" and the question "where did it come
+        # from" are read by different people for different reasons, and the
+        # second buried under the first is the second not being read.
+        self._add_job(
+            job_id="traffic_report",
+            name="Weekly Traffic Report",
+            description="Last complete week's attribution, platforms and campaigns",
+            func=self._run_traffic_report,
+            trigger=CronTrigger(hour=9, minute=45),
+            max_instances=1,
+            coalesce=True,
+        )
+
         # Job: Reconciliation check (daily at 6 AM)
         # Legacy job — preserved for backward compatibility; the new
         # dq_reconciliation job above is the source of truth for alerts.
@@ -2730,6 +2747,129 @@ class BackgroundScheduler:
                 "rich": bool(with_rich),
             }
             logger.info("Weekly report sent", extra=result)
+            return result
+
+    async def _run_traffic_report(self) -> Dict[str, Any]:
+        """Deliver last week's traffic to the admins, once.
+
+        The sales report's gates in the same order, and one more: this reads
+        `silver_order_utm`, which the traffic backfill fills behind the orders
+        themselves, so a week with orders and no attribution at all is a week
+        the report would describe as "nothing came from anywhere". That is not
+        a finding, it is a missing read, and it defers rather than states it.
+
+        Admins only, for now (owner, 2026-09-08). The tab is visible to
+        seventeen of the eighteen approved dashboard accounts, so "everyone
+        who can see the tab" would have been the whole company; narrowing it
+        later is a change of one list, widening it after a wrong number went
+        out is not.
+        """
+        from datetime import datetime as _datetime
+
+        from core.config import DASHBOARD_URL
+        from core.duckdb_store import get_store
+        from core.traffic_report import (
+            TRAFFIC_SALES_TYPE,
+            already_sent,
+            build_report,
+            format_report,
+            format_report_rich,
+            mark_sent,
+        )
+        from core.weekly_report import last_complete_week, warehouse_max_date
+
+        sales_type = TRAFFIC_SALES_TYPE
+
+        with correlation_context():
+            store = await get_store()
+            today = _datetime.now(SCHEDULER_TIMEZONE).date()
+            week_start, week_end = last_complete_week(today)
+            week = week_start.isoformat()
+
+            async with store.connection() as conn:
+                if already_sent(conn, week_start, sales_type):
+                    logger.debug("Traffic report for %s already sent", week)
+                    return {"sent": False, "week": week, "reason": "already_sent"}
+                max_date = warehouse_max_date(conn)
+                if max_date is None or max_date < week_end:
+                    logger.info(
+                        "Traffic report deferred: warehouse at %s, week ends %s",
+                        max_date, week_end,
+                    )
+                    return {"sent": False, "week": week, "reason": "warehouse_behind"}
+
+            report = await build_report(store, today, sales_type)
+
+            if report.orders == 0:
+                logger.warning("Traffic report skipped: no orders in %s", week)
+                return {"sent": False, "week": week, "reason": "no_orders"}
+            if not report.buckets:
+                # Orders exist and not one of them could be placed anywhere:
+                # the UTM read has not caught up, not a week without traffic.
+                logger.warning("Traffic report deferred: no attribution for %s", week)
+                return {"sent": False, "week": week, "reason": "no_attribution"}
+
+            # Outside the connection block, like the sales report: that lock is
+            # held for its whole body and Telegram is allowed ten seconds.
+            from core.bot_prefs import default_language_for, group_by_language
+            from core.config import ADMIN_USER_IDS
+            from core.telegram_alerts import (
+                send_admin_message_http,
+                send_rich_message_http,
+            )
+            from core.traffic_report import chart_view
+            from core.weekly_report_image import render_channels_chart
+
+            dashboard = DASHBOARD_URL or None
+            admins = [int(a) for a in ADMIN_USER_IDS]
+            defaults = {uid: default_language_for(uid, ADMIN_USER_IDS)
+                        for uid in admins}
+
+            delivered = 0
+            with_rich = 0
+            for lang, recipients in group_by_language(admins, defaults).items():
+                # Pictures carry translated labels, so they are drawn per
+                # language rather than once and reused.
+                chart = (render_channels_chart(chart_view(report, lang), lang)
+                         if report.platforms else None)
+                media = {"platforms": chart} if chart else {}
+                sent_here = await send_rich_message_http(
+                    format_report_rich(
+                        report, dashboard, lang,
+                        figures={"platforms": "platforms"} if chart else None,
+                    ),
+                    media=media, chat_ids=recipients,
+                )
+                if sent_here:
+                    with_rich += sent_here
+                else:
+                    logger.warning(
+                        "Traffic report: the rich form reached nobody in %s, "
+                        "falling back to text", lang,
+                    )
+                    sent_here = await send_admin_message_http(
+                        format_report(report, dashboard, lang),
+                        chat_ids=recipients,
+                    )
+                delivered += sent_here
+
+            if not delivered:
+                logger.warning("Traffic report for %s reached no admin", week)
+                return {"sent": False, "week": week, "reason": "not_delivered"}
+
+            async with store.connection() as conn:
+                mark_sent(conn, week_start, sales_type, report.revenue, report.orders)
+
+            result = {
+                "sent": True,
+                "week": week,
+                "sales_type": sales_type,
+                "revenue": round(report.revenue, 2),
+                "orders": report.orders,
+                "delivered": delivered,
+                "rich": bool(with_rich),
+            }
+            logger.info("Traffic report sent", extra=result)
             return result
 
     async def _run_order_gap_backfill(self) -> Dict[str, Any]:

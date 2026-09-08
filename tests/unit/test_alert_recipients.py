@@ -33,11 +33,14 @@ class TestAlertsGoToAdminsOnly:
         audience rules in CLAUDE.md). A second override site is somebody
         widening an alert audience and must land here first.
 
-        Three of them, and all three are the same message: the weekly
-        report's delivery ladder sends the rich form, falls back to the card
-        with the report as its caption, then to plain text. Adding a rung
-        landed here, which is the guard working — the audience did not
-        change, only the number of ways it is written to.
+        Five of them, across two reports, and not one widens an audience.
+        The weekly sales report's ladder is three — the rich form, the card
+        with the report as its caption, then plain text. The weekly traffic
+        report's is two, and its `chat_ids` are a *subset* of the admins:
+        the list is grouped by language so nobody is sent somebody else's,
+        which is narrowing dressed as an override.
+
+        Both landed here first, which is the guard working.
         """
         hits = []
         for path in ("core/scheduler.py", "core/duckdb_store.py",
@@ -46,7 +49,7 @@ class TestAlertsGoToAdminsOnly:
                      "bot/main.py", "bot/canary.py", "bot/memory_watch.py",
                      "web/routes/api/webhooks.py"):
             hits += [(path, *c) for c in _calls_with_chat_ids(path)]
-        assert len(hits) == 3, hits
+        assert len(hits) == 5, hits
         assert {name for _, name, _ in hits} == {
             "send_rich_message_http",
             "send_admin_photo_http",
