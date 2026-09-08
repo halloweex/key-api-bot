@@ -1,4 +1,4 @@
-import type { Permissions, TabFeature } from '../types/api'
+import { TAB_FEATURES, type Permissions, type TabFeature } from '../types/api'
 
 // ─── Tab access ──────────────────────────────────────────────────────────────
 //
@@ -38,8 +38,30 @@ export function tabSummary(
   label: (tab: TabFeature) => string,
   asRole: string,
   none: string,
+  roleFeatures: readonly TabFeature[] = [],
 ): string {
-  if (value === null) return asRole
+  // "As the role" on its own answers the wrong question: an admin reading a
+  // row wants to know which tabs this person opens, not where the answer comes
+  // from. So it names them, and keeps the prefix that says nobody decided it
+  // for this person specifically.
+  if (value === null) {
+    return roleFeatures.length
+      ? `${asRole}: ${roleFeatures.map(label).join(', ')}`
+      : asRole
+  }
   if (value.length === 0) return none
   return value.map(label).join(', ')
+}
+
+/** The tabs a role opens, in sidebar order, out of the permissions matrix.
+ *
+ * Ordered by `TAB_FEATURES` and not by `TAB_PATHS`: the latter lists the eight
+ * that are pages, and `expenses` is a grantable tab without one — driving this
+ * from it would have hidden a granted tab from the sentence.
+ */
+export function roleTabs(
+  matrix: Record<string, { view: boolean }> | undefined,
+): TabFeature[] {
+  if (!matrix) return []
+  return TAB_FEATURES.filter((feature) => matrix[feature]?.view)
 }

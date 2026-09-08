@@ -52,6 +52,8 @@ interface UserRowProps {
   expanded: boolean
   onToggleExpanded: (userId: number) => void
   tabs?: readonly TabFeature[]
+  /** What this account's role opens — what "as the role" means for them. */
+  roleFeatures?: readonly TabFeature[]
   presets?: AccessPreset[]
   isUpdating: boolean
 }
@@ -65,6 +67,7 @@ export const UserRow = memo(function UserRow({
   expanded,
   onToggleExpanded,
   tabs,
+  roleFeatures,
   presets,
   isUpdating,
 }: UserRowProps) {
@@ -84,6 +87,7 @@ export const UserRow = memo(function UserRow({
     (tab) => t(`access.tab.${tab}`),
     t('access.asRole'),
     t('access.noTabs'),
+    roleFeatures,
   )
 
   return (
@@ -151,6 +155,8 @@ export const UserRow = memo(function UserRow({
           <UserAccessEditor
             value={user.allowed_features}
             tabs={tabs}
+            roleFeatures={roleFeatures}
+            roleName={t(`profile.${user.role}`, user.role)}
             presets={presets}
             disabled={isUpdating}
             onChange={(features) => onFeaturesChange(user.user_id, features)}

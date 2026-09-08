@@ -27,6 +27,15 @@ interface UserAccessEditorProps {
   value: TabFeature[] | null
   /** The grantable tabs, from the server. Falls back to the compiled list. */
   tabs?: readonly TabFeature[]
+  /**
+   * The tabs this account's *role* opens — what "as the role" actually means
+   * for this person. Without it the editor could only say the words, and an
+   * admin had to know the matrix by heart to translate `viewer` into six tab
+   * names.
+   */
+  roleFeatures?: readonly TabFeature[]
+  /** The role's name, for the sentence that explains the grey chips. */
+  roleName?: string
   presets?: AccessPreset[]
   disabled?: boolean
   onChange: (features: TabFeature[] | null) => void
@@ -36,6 +45,8 @@ interface UserAccessEditorProps {
 export const UserAccessEditor = memo(function UserAccessEditor({
   value,
   tabs = TAB_FEATURES,
+  roleFeatures = [],
+  roleName,
   presets = [],
   disabled = false,
   onChange,
@@ -43,13 +54,17 @@ export const UserAccessEditor = memo(function UserAccessEditor({
 }: UserAccessEditorProps) {
   const { t } = useTranslation()
 
-  // A tab is ticked when the override names it. With no override the chips
-  // show the role's own answer as "nothing ticked yet" rather than guessing —
-  // the first tick then writes an explicit set, which is what the admin means
-  // by touching it at all.
-  const granted = new Set(value ?? [])
+  // With no override the account still sees something — whatever its role
+  // opens — so those chips are lit, in a different tone. Showing them all grey
+  // said "no access at all" about somebody with six tabs, which is the reading
+  // an admin actually reported.
+  const inherited = value === null
+  const granted = new Set(inherited ? roleFeatures : (value ?? []))
 
   const toggle = (tab: TabFeature) => {
+    // **The first click starts from what they have, not from nothing.** It
+    // used to start from an empty set, so ticking one tab on an inheriting
+    // account silently revoked every other tab it was already seeing.
     const next = new Set(granted)
     if (next.has(tab)) next.delete(tab)
     else next.add(tab)
@@ -63,6 +78,10 @@ export const UserAccessEditor = memo(function UserAccessEditor({
           <FilterChip
             key={tab}
             active={granted.has(tab)}
+            // Slate while the answer comes from the role, purple once somebody
+            // has decided it for this person: two states that look different,
+            // because they behave differently.
+            tone={inherited ? 'slate' : 'purple'}
             disabled={disabled}
             onClick={() => toggle(tab)}
           >
@@ -94,7 +113,11 @@ export const UserAccessEditor = memo(function UserAccessEditor({
         </Button>
       </Wrapper>
 
-      <p className="text-xs text-slate-400">{t('access.editorHint')}</p>
+      <p className="text-xs text-slate-400">
+        {inherited
+          ? t('access.inheritedHint', { role: roleName ?? '' })
+          : t('access.editorHint')}
+      </p>
     </Wrapper>
   )
 })

@@ -4,6 +4,7 @@
   "access.deniedBefore": "refused {{count}}× before",
   "access.deny": "Deny",
   "access.editorHint": "Tabs decide what is visible; the role decides what can be changed inside them.",
+  "access.inheritedHint": "Grey chips come from the {{role}} role — nobody has set tabs for this person. Click one to decide it for them.",
   "access.noTabs": "No tabs",
   "access.noneBody": "Your account is approved but no tabs are assigned yet. Ask an admin to open the ones you need.",
   "access.noneTitle": "No pages are open to you",

@@ -22,9 +22,15 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-/** No override: the account sees whatever its role shows. */
+/** No override: the account sees whatever its role shows — and the chips say
+ *  which tabs that is, in a different tone, rather than sitting grey and
+ *  reading as "no access at all". */
 export const AsTheRole: Story = {
-  args: { value: null },
+  args: {
+    value: null,
+    roleName: 'Viewer',
+    roleFeatures: ['dashboard', 'products', 'traffic', 'inventory', 'reports', 'marketing'],
+  },
 }
 
 /** The case this whole feature exists for. */
