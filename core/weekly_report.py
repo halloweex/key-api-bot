@@ -515,6 +515,37 @@ def _delta(pct: Optional[float], lang: str) -> str:
     return f"{'▲' if pct > 0 else '▼'} {abs(pct):.1f}%"
 
 
+def _signed_int(value: int, lang: str) -> str:
+    return f"{'+' if value >= 0 else '-'}{fmt_int(abs(value), lang)}"
+
+
+def _orders_split(cur: WeekTotals, prev: WeekTotals, lang: str) -> Optional[str]:
+    """Which half of the order count moved, as counts.
+
+    It used to say "new-customer orders are 5% of that drop", and the honest
+    reading of that is a question: five per cent of what? The share was taken
+    against a difference the reader never sees, so the sentence now carries
+    the three numbers themselves and the arithmetic is theirs to check. It
+    also survives the case a share cannot describe — one half rising while
+    the other falls — because signed counts always add up.
+    """
+    if cur.new_customer_orders is None or prev.new_customer_orders is None:
+        return None
+    if cur.repeat_orders is None or prev.repeat_orders is None:
+        return None
+    order_delta = cur.orders - prev.orders
+    # Below this the split is noise dressed as a finding.
+    if abs(order_delta) < 5:
+        return None
+    key = "report.orders_split_gain" if order_delta > 0 else "report.orders_split_drop"
+    return t(
+        key, lang,
+        total=fmt_int(abs(order_delta), lang),
+        repeat=_signed_int(cur.repeat_orders - prev.repeat_orders, lang),
+        new=_signed_int(cur.new_customer_orders - prev.new_customer_orders, lang),
+    )
+
+
 def _name(raw: str) -> str:
     """Trim a product name and make it safe for an HTML-parsed message.
 
@@ -633,12 +664,9 @@ def _what_moved(report: WeeklyReport, lang: str) -> List[str]:
         f"{_delta(pct_change(cur.repeat_orders, prev.repeat_orders), lang)}",
     ]
 
-    order_delta = cur.orders - prev.orders
-    new_delta = cur.new_customer_orders - prev.new_customer_orders
-    new_share = share_of(new_delta, order_delta)
-    if new_share is not None and abs(order_delta) >= 5:
-        key = "report.new_share_gain" if order_delta > 0 else "report.new_share_drop"
-        out.append(t(key, lang, share=f"{new_share:.0f}"))
+    split_sentence = _orders_split(cur, prev, lang)
+    if split_sentence:
+        out.append(split_sentence)
     return out
 
 
@@ -916,15 +944,9 @@ def _rich_why(report: WeeklyReport, lang: str, figure: Optional[str] = None) -> 
             "</table>",
         ]
 
-    if cur.new_customer_orders is None or prev.new_customer_orders is None:
-        return out
-    order_delta = cur.orders - prev.orders
-    new_delta = cur.new_customer_orders - prev.new_customer_orders
-    new_share = share_of(new_delta, order_delta)
-    if new_share is not None and abs(order_delta) >= 5:
-        key = ("report.new_share_gain_plain" if order_delta > 0
-               else "report.new_share_drop_plain")
-        out.append(f"<p><i>{esc(t(key, lang, share=f'{new_share:.0f}'))}</i></p>")
+    split_sentence = _orders_split(cur, prev, lang)
+    if split_sentence:
+        out.append(f"<p><i>{esc(split_sentence)}</i></p>")
     return out
 
 

@@ -188,17 +188,20 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         UK: "Повторні замовлення",
         RU: "Повторные заказы",
     },
-    "report.new_share_drop": {
-        EN: "New-customer orders are {share}% of that drop.",
-        UK: "Замовлення нових клієнтів: {share}% цього падіння.",
-        RU: "Заказы новых клиентов: {share}% этого падения.",
-    },
-    "report.new_share_gain": {
-        EN: "New-customer orders are {share}% of that gain.",
-        UK: "Замовлення нових клієнтів: {share}% цього приросту.",
-        RU: "Заказы новых клиентов: {share}% этого прироста.",
-    },
 
+    # Which half of the order count moved, in orders rather than in a share
+    # of a difference: "5% of the drop" made a reader ask 5% of what, and the
+    # answer was a number they could not see. These are the numbers.
+    "report.orders_split_drop": {
+        EN: "Orders are down by {total}: repeat {repeat}, new customers {new}.",
+        UK: "Замовлень менше на {total}: повторних {repeat}, від нових клієнтів {new}.",
+        RU: "Заказов меньше на {total}: повторных {repeat}, от новых клиентов {new}.",
+    },
+    "report.orders_split_gain": {
+        EN: "Orders are up by {total}: repeat {repeat}, new customers {new}.",
+        UK: "Замовлень більше на {total}: повторних {repeat}, від нових клієнтів {new}.",
+        RU: "Заказов больше на {total}: повторных {repeat}, от новых клиентов {new}.",
+    },
     "report.top_movers": {
         EN: "Top movers vs previous week",
         UK: "Найбільші зрушення проти минулого тижня",
@@ -309,16 +312,6 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "report.effect_orders_up": {EN: "more orders", UK: "більше замовлень", RU: "больше заказов"},
     "report.effect_check_down": {EN: "lower average check", UK: "нижчий середній чек", RU: "ниже средний чек"},
     "report.effect_check_up": {EN: "higher average check", UK: "вищий середній чек", RU: "выше средний чек"},
-    "report.new_share_drop_plain": {
-        EN: "New customers account for {share}% of the drop in orders; the rest is repeat purchases.",
-        UK: "На нових клієнтів припадає {share}% падіння замовлень, решту дають повторні покупки.",
-        RU: "На новых клиентов приходится {share}% падения заказов, остальное дают повторные покупки.",
-    },
-    "report.new_share_gain_plain": {
-        EN: "New customers account for {share}% of the gain in orders; the rest is repeat purchases.",
-        UK: "На нових клієнтів припадає {share}% приросту замовлень, решту дають повторні покупки.",
-        RU: "На новых клиентов приходится {share}% прироста заказов, остальное дают повторные покупки.",
-    },
     "report.fig_days": {
         EN: "This week in dark against the same weekday last week; orders under each day",
         UK: "Цей тиждень темним проти того ж дня минулого тижня; під днем: замовлення",

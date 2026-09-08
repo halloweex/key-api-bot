@@ -753,6 +753,85 @@ class TestSchedulerJob:
             await store.close()
 
 
+class TestTheOrderSplitSentence:
+    """Which half of the order count moved, in orders rather than in a share.
+
+    It used to read "new-customer orders are 5% of that drop", and the honest
+    reading of that is a question — five per cent of what? The share was taken
+    against a difference the reader never sees. The owner said so on
+    2026-09-08; these are the numbers instead.
+    """
+
+    @staticmethod
+    def _weeks(cur_new, cur_rep, prev_new, prev_rep):
+        cur = WeekTotals(revenue=800_000, orders=cur_new + cur_rep,
+                         new_customer_orders=cur_new, repeat_orders=cur_rep)
+        prev = WeekTotals(revenue=1_100_000, orders=prev_new + prev_rep,
+                          new_customer_orders=prev_new, repeat_orders=prev_rep)
+        return cur, prev
+
+    def test_it_names_three_counts_and_no_percentage(self):
+        from core.weekly_report import _orders_split
+
+        cur, prev = self._weeks(131, 205, 136, 297)
+        assert _orders_split(cur, prev, "ru") == (
+            "Заказов меньше на 97: повторных -92, от новых клиентов -5."
+        )
+        assert "%" not in _orders_split(cur, prev, "ru")
+
+    def test_the_parts_add_up_to_the_total_it_states(self):
+        """The reader can check it, which is the point of using counts."""
+        import re
+
+        from core.weekly_report import _orders_split
+
+        cur, prev = self._weeks(131, 205, 136, 297)
+        total, repeat, new = (
+            int(n) for n in re.findall(r"-?\d+", _orders_split(cur, prev, "en"))
+        )
+        assert repeat + new == -total
+
+    def test_it_survives_the_case_a_share_could_not_describe(self):
+        """Repeat orders falling while new ones rise: the old share was
+        `share_of(+3, -97)`, which returned None, and the sentence vanished
+        exactly when it had the most to say."""
+        from core.weekly_report import _orders_split
+
+        cur, prev = self._weeks(139, 197, 136, 297)
+        assert _orders_split(cur, prev, "en") == (
+            "Orders are down by 97: repeat -100, new customers +3."
+        )
+
+    def test_a_move_of_four_orders_is_not_a_finding(self):
+        from core.weekly_report import _orders_split
+
+        cur, prev = self._weeks(100, 100, 102, 102)
+        assert _orders_split(cur, prev, "en") is None
+
+    def test_it_says_nothing_when_the_split_was_not_read(self):
+        from core.weekly_report import _orders_split
+
+        cur = WeekTotals(revenue=800_000, orders=336)
+        prev = WeekTotals(revenue=1_100_000, orders=433)
+        assert _orders_split(cur, prev, "en") is None
+
+    def test_both_forms_carry_the_same_sentence(self):
+        """The rich message and the caption it falls back to must not say
+        different things about the same week."""
+        from core.weekly_report import _orders_split, format_report, format_report_rich
+
+        cur, prev = self._weeks(131, 205, 136, 297)
+        report = WeeklyReport(
+            start=date(2026, 8, 31), end=date(2026, 9, 6), sales_type="retail",
+            current=cur, previous=prev, year_ago=None,
+            baseline_mean=None, baseline_sd=None, baseline_weeks=0,
+            movers=[], product_move_total=0.0,
+        )
+        sentence = _orders_split(cur, prev, "uk")
+        assert sentence in format_report(report, None, "uk")
+        assert sentence in format_report_rich(report, None, "uk")
+
+
 class TestTheRichFormIsWhatTheJobSends:
     """The delivery ladder: the rich form, then the card, then plain text.
 
