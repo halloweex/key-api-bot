@@ -814,15 +814,100 @@ than no toggle. The report is `retail` only, which is exactly what an approved
 user already sees on the dashboard, so the wider audience does not widen what
 is disclosed. An unreadable `bot.db` falls back to the admins alone.
 
-It sends a light PNG card (`core/weekly_report_image.py`) with the text report
-as the caption: revenue against the week before, then orders, basket and the
-new/repeat split. Nothing else — everything the caption already carries stays
-in the caption. Pillow only, no matplotlib, drawn at ~2× display size because
-Telegram re-encodes photos as JPEG. The card needs `fonts-dejavu-core` in the
-image (`Dockerfile.web`): `python:3.14-slim` ships no fonts, and DejaVu is the
-one carrying both Cyrillic and ₴. No font, a caption over Telegram's 1 024, or
-any render failure costs the picture and nothing else — the text still goes
-out.
+**It sends the rich form** (Bot API 10.1, June 2026), which is a document
+rather than a run of text: `<h1>`, real `<table>`s, `<ul>`, `<details>`, a
+`<figure>` between paragraphs, `<tg-button>`, `<tg-math>`, and a 32 768-char
+budget instead of a caption's 1 024. `format_report_rich` renders it and
+`send_rich_message_http` carries it, uploading every picture in the same
+multipart request (`attach://<id>`, named in the HTML as
+`tg://photo?id=<id>`).
+
+**Three rungs, each a fallback for the one above**: the rich form, then the
+card with the report as its caption, then plain text. A 400 from the API — a
+tag Telegram does not know, a reader on a client too old — returns 0 from the
+transport, and the next rung sends. That ladder is the whole safety story of
+the rich form: it can cost the shape of the report, never the report.
+`KS_WEEKLY_REPORT_RICH=0` on the web container is the rollback and needs no
+deploy. Unlike `KS_BOT_STORE` an unrecognised value does **not** raise: that
+variable decides where the approval list lives, this one decides what a
+message looks like, and taking the weekly report down over a misspelling is
+the worse failure. The ladder is three `chat_ids=` overrides in one job,
+which is why `tests/unit/test_alert_recipients.py` expects three and names
+them.
+
+**Written for a reader who is not an analyst** (owner's brief, 2026-09-07):
+a `<blockquote>` summary in three sentences — the verdict in words ("an
+ordinary week", linking to a `<tg-reference>` footnote that holds z and σ, so
+the jargon is one tap away and nowhere else), revenue against last week / the
+12-week average / last year, then the one sentence that says why with the
+lever in bold ("there were fewer orders, and the average check barely
+moved"). Bold, never `<mark>`, whose highlight is invisible in the dark
+theme. Every headline number sits **beside last week's** — "336 against 433"
+is understood by everyone, "▼ 22.4%" by fewer. A collapsed "how to read this
+report" is two `<tg-math>` formulas and four lines; the LaTeX is composed in
+code from translated words, because braces in the i18n table read as
+placeholders.
+
+**Four pictures, drawn with Pillow** (`core/weekly_report_image.py`): the
+card, seven grouped bars by day (this week against the *same weekday* a week
+earlier, orders under each day), a waterfall (last week → order effect →
+basket effect → this week, which closes exactly because the decomposition is
+an identity) and one bar per channel (this week filled, last week outlined,
+share and change beside). They come from `gold_daily_revenue` via
+`fetch_daily`/`fetch_channels` on `WeeklyReport.days/previous_days/channels`;
+empty lists render nothing. A chart replaces the table it stands for, or
+folds it into a `<details>`. Shares were block-glyph bars in a table once —
+Telegram sets table text in the reader's theme colour, so they were
+monochrome by construction, and colour now lives only in pictures. Pictures
+are rendered **once per language**, not per reader: their labels are
+translated, their numbers are not.
+
+**Everything drawn is in the brand's colours.** `core/brand.py` holds the
+palette from the brand book (p. 13: bordeaux `#821532`, lime `#dcdf5d`,
+off-white `#f5f4eb`, pink `#f7c9df`, plus beige `#e3d4d2` and plum
+`#922146`), its contrast rules (p. 14: lime is never text on the light
+canvas) and its type (p. 15/46: Libre Franklin for headings in upper case and
+body, Instrument Serif for accent headings; left or centre aligned, never
+right). The card is the brand's hero surface — bordeaux with a lime chip and
+pink labels — and the charts sit on the off-white canvas. There is no red and
+no green in the palette, so the arrow carries the sign and the colour carries
+the brand. The flower and wordmark are greyscale masks in `assets/brand/`,
+tinted at draw time; `Dockerfile.web` COPYs `assets/`. `brand_font(role)`
+looks for the brand faces under `assets/fonts/` and the renderers fall back
+to DejaVu — the font files are not in the repository yet (they are OFL, from
+github.com/google/fonts). The brand book itself is outside the repo; see the
+memory note `reference_brand_book`.
+
+**The shop bot's voice rules apply to what the report says**, where they
+translate: one emoji per screen and it is a pointer (the verdict's ✅/🚀/⚠️,
+never the heading), no long dash inside a sentence, headings in upper case.
+Pinned in `tests/unit/test_rich_report.py`, which also pins every tag the
+report may use — anything new goes through the "Rich HTML style" section of
+the Bot API docs first.
+
+The card (`core/weekly_report_image.py`) carries revenue against the week
+before, then orders, basket and the new/repeat split. Nothing else — what the
+message already carries stays in the message. Pillow only, no matplotlib,
+drawn at ~2× display size because Telegram re-encodes photos as JPEG. It needs
+`fonts-dejavu-core` in the image (`Dockerfile.web`): `python:3.14-slim` ships
+no fonts, and DejaVu is the one carrying both Cyrillic and ₴. No font, a
+caption over Telegram's 1 024, or any render failure costs the picture and
+nothing else — the text still goes out.
+
+Preview any of it on a real phone with `scripts/weekly_report_preview.py`,
+which honours the kill switch and writes nothing to the send ledger;
+`--fixture` renders the 31.08–06.09.2026 week from Gold rows copied out of
+Postgres, for a laptop whose DuckDB copy is stale.
+
+**The instance signature is admins-only** (owner's decision, 2026-09-07).
+`· prod-vps` answers an operator's question and only an admin can act on the
+answer; the weekly report and the milestone broadcast reach every approved
+user through the same transports, and to them it is a stray line under a
+sales figure. `sign_for(text, chat_id)` and `sign_html_for` decide per
+recipient inside the transports, so a business message and an alert share one
+call and the sender chooses nothing. The caption budget is still measured
+against the signed form: one verdict per send, never a picture for the admins
+and text for everyone else.
 
 ### The conversation must always be re-enterable
 `/report`, `/search` and `/settings` — and the reply-keyboard buttons standing

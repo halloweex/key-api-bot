@@ -753,6 +753,186 @@ class TestSchedulerJob:
             await store.close()
 
 
+class TestTheRichFormIsWhatTheJobSends:
+    """The delivery ladder: the rich form, then the card, then plain text.
+
+    Each rung is a fallback for the one above, and that is the whole safety
+    story of shipping the rich form — a tag Telegram refuses, or a reader on
+    a client too old to render one, costs the shape of the report and never
+    the report itself.
+    """
+
+    ADMINS = TestSchedulerJob.ADMINS
+    _wire = TestSchedulerJob._wire
+    _seed = TestSchedulerJob._seed
+
+    @staticmethod
+    async def _seed_channels(store):
+        """Give the seeded weeks a channel split.
+
+        `_seed` writes revenue and orders only, and every channel column stays
+        zero — which `fetch_channels` correctly drops, so without this the
+        channel chart is legitimately absent and the test would be asserting
+        the wrong thing.
+        """
+        async with store.connection() as conn:
+            conn.execute(
+                "UPDATE gold_daily_revenue SET instagram_revenue = revenue * 0.4, "
+                "instagram_orders = 1, shopify_revenue = revenue * 0.6, "
+                "shopify_orders = 1 WHERE sales_type = 'retail'"
+            )
+
+    @staticmethod
+    def _capture_rich(monkeypatch, delivered=2):
+        calls = []
+
+        async def _rich(html, media=None, chat_ids=None, **kwargs):
+            calls.append({"html": html, "media": dict(media or {}),
+                          "chat_ids": list(chat_ids or [])})
+            return delivered
+
+        monkeypatch.setattr("core.telegram_alerts.send_rich_message_http", _rich)
+        return calls
+
+    @staticmethod
+    def _capture_photo(monkeypatch, delivered=2):
+        calls = []
+
+        async def _photo(data, caption="", **kwargs):
+            calls.append((data, caption))
+            return delivered
+
+        monkeypatch.setattr("core.telegram_alerts.send_admin_photo_http", _photo)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_it_sends_the_rich_form_with_the_card_and_the_charts(
+        self, tmp_path, monkeypatch,
+    ):
+        store = await _store(tmp_path)
+        try:
+            await self._seed(store, complete=True)
+            await self._seed_channels(store)
+            text_sends = []
+            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
+            rich = self._capture_rich(monkeypatch)
+            photo = self._capture_photo(monkeypatch)
+
+            result = await scheduler._run_weekly_report()
+
+            assert result["sent"] is True and result["rich"] is True
+            assert len(rich) == 1
+            # Every picture the report can carry goes up in the same request,
+            # under the id the document names.
+            assert set(rich[0]["media"]) == {"card", "days", "why", "channels"}
+            for blob in rich[0]["media"].values():
+                assert blob[:8] == b"\x89PNG\r\n\x1a\n"
+            html = rich[0]["html"]
+            assert html.startswith("<h1>")
+            for role in ("card", "days", "why", "channels"):
+                assert f'tg://photo?id={role}' in html
+            assert photo == [] and text_sends == [], "the rich form carried it"
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_rich_message_falls_back_to_the_card(
+        self, tmp_path, monkeypatch,
+    ):
+        """An unsupported tag is a 400, which the transport reports as 0."""
+        store = await _store(tmp_path)
+        try:
+            await self._seed(store, complete=True)
+            text_sends = []
+            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
+            rich = self._capture_rich(monkeypatch, delivered=0)
+            photo = self._capture_photo(monkeypatch)
+
+            result = await scheduler._run_weekly_report()
+
+            assert result["sent"] is True
+            assert result["rich"] is False and result["card"] is True
+            assert len(rich) == 1 and len(photo) == 1
+            assert "Weekly report" in photo[0][1], "the caption carries the report"
+            assert text_sends == []
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_the_flag_turns_it_off_without_a_deploy(
+        self, tmp_path, monkeypatch,
+    ):
+        """`KS_WEEKLY_REPORT_RICH=0` is the rollback, and it must not even
+        reach the transport — a rollback that still spends the call is not
+        one."""
+        store = await _store(tmp_path)
+        try:
+            await self._seed(store, complete=True)
+            monkeypatch.setenv("KS_WEEKLY_REPORT_RICH", "0")
+            text_sends = []
+            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
+            rich = self._capture_rich(monkeypatch)
+            photo = self._capture_photo(monkeypatch)
+
+            result = await scheduler._run_weekly_report()
+
+            assert result["sent"] is True and result["rich"] is False
+            assert rich == [], "the flag is off; nothing may be sent as rich"
+            assert len(photo) == 1
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_with_both_pictures_gone_the_text_still_goes_out(
+        self, tmp_path, monkeypatch,
+    ):
+        """The bottom rung. Numbers are the deliverable; pictures are not."""
+        store = await _store(tmp_path)
+        try:
+            await self._seed(store, complete=True)
+            text_sends = []
+            scheduler = self._wire(monkeypatch, store, text_sends, tmp_path)
+            self._capture_rich(monkeypatch, delivered=0)
+            self._capture_photo(monkeypatch, delivered=0)
+
+            result = await scheduler._run_weekly_report()
+
+            assert result["sent"] is True
+            assert result["rich"] is False and result["card"] is False
+            assert len(text_sends) == 1 and "Weekly report" in text_sends[0]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_one_rich_render_per_language_and_nobody_gets_another(
+        self, tmp_path, monkeypatch,
+    ):
+        """The pictures carry translated labels, so they are drawn per
+        language too — not once and reused."""
+        store = await _store(tmp_path)
+        try:
+            await self._seed(store, complete=True)
+            text_sends = []
+            scheduler = self._wire(
+                monkeypatch, store, text_sends, tmp_path,
+                approved=[333], languages={self.ADMINS[0]: "en", 333: "uk"},
+            )
+            rich = self._capture_rich(monkeypatch, delivered=1)
+
+            await scheduler._run_weekly_report()
+
+            by_recipient = {tuple(c["chat_ids"]): c for c in rich}
+            assert len(rich) == 2, "one render per language"
+            uk = next(c for c in rich if c["chat_ids"] == [333])
+            assert "ТИЖНЕВИЙ ЗВІТ" in uk["html"]
+            assert 333 not in sum(
+                (c["chat_ids"] for c in rich if c is not uk), [],
+            ), "nobody is written to twice"
+            assert all(c["media"] for c in rich), "each language gets its own pictures"
+        finally:
+            await store.close()
+
+
 class TestBuildReport:
     @pytest.mark.asyncio
     async def test_end_to_end_on_a_small_warehouse(self, tmp_path):
