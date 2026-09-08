@@ -185,28 +185,45 @@ class TestTheColumnsAgree:
 
 
 class TestOneBodyTwoEngines:
+    """Both routers, because the matrix followed the user list onto Postgres
+    and its statements have exactly the same two holes."""
+
+    ROUTERS = {"_users_run": "{users}", "_perms_run": "{perms}"}
+
+    # What makes a row unique in each routed table, last column first. An
+    # ordered read has to end on it, or two engines can return different rows
+    # for the same page.
+    KEY_ENDS = {"_users_run": "user_id", "_perms_run": "feature"}
+
     def _statements(self) -> list[tuple[int, str]]:
         tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
         out = []
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "_users_run"):
+                    and node.func.attr in self.ROUTERS):
                 continue
+            hole = self.ROUTERS[node.func.attr]
             for lit in ast.walk(node):
                 if (isinstance(lit, ast.Constant) and isinstance(lit.value, str)
-                        and "{users}" in lit.value):
-                    out.append((lit.lineno, lit.value))
+                        and hole in lit.value):
+                    out.append((lit.lineno, node.func.attr, lit.value))
         return out
+
+    @staticmethod
+    def _render(sql: str, table: str, own: str) -> str:
+        return sql.format(users=table, perms=table, self=own)
 
     def test_the_scan_finds_them(self):
         assert len(self._statements()) >= 8, "the routed statements are not being found"
 
     def test_both_renderings_leave_no_hole(self):
-        for lineno, sql in self._statements():
-            for users, own in (("users", "users"),
-                               ("app.dashboard_users", "dashboard_users")):
-                rendered = sql.format(users=users, self=own)
+        for lineno, _router, sql in self._statements():
+            for table, own in (("users", "users"),
+                               ("app.dashboard_users", "dashboard_users"),
+                               ("role_permissions", "role_permissions"),
+                               ("app.role_permissions", "role_permissions")):
+                rendered = self._render(sql, table, own)
                 assert "{" not in rendered and "}" not in rendered, (
                     f"line {lineno} still has a hole after rendering"
                 )
@@ -215,39 +232,55 @@ class TestOneBodyTwoEngines:
         """PostgreSQL rejects `app.dashboard_users.username` inside
         `ON CONFLICT DO UPDATE`; the existing row is reached by the bare
         relation name. That is the whole reason `{self}` exists."""
-        for lineno, sql in self._statements():
-            if "ON CONFLICT" not in sql.upper():
+        for lineno, _router, sql in self._statements():
+            # `DO NOTHING` names no columns at all — the seeding statement is
+            # one, and reading it as an update is how this scan first broke.
+            if "DO UPDATE" not in sql.upper():
                 continue
             after = sql.upper().split("DO UPDATE", 1)[1]
             original = sql[len(sql) - len(after):]
-            assert "{users}." not in original, (
+            assert "{users}." not in original and "{perms}." not in original, (
                 f"line {lineno} reaches the stored row through the qualified "
                 f"name, which PostgreSQL will not accept"
             )
             assert "{self}." in original
 
     def test_every_ordered_read_breaks_its_ties(self):
-        """Two engines order ties differently, and both of these reads are
-        rendered as a list — one of them under LIMIT/OFFSET, where a tie means
-        different *people* on the same page rather than a different order."""
-        for lineno, sql in self._statements():
+        """Two engines order ties differently, and these reads are rendered as
+        lists — one under LIMIT/OFFSET, where a tie means different *people* on
+        the same page rather than a different order.
+
+        The tie-breaker is the table's key, not a fixed column name: the user
+        list ends on `user_id`, the matrix on `feature`, which with `role`
+        ahead of it is that table's whole primary key."""
+        for lineno, router, sql in self._statements():
             upper = sql.upper()
             if "ORDER BY" not in upper:
                 continue
             tail = re.split(r"LIMIT", sql[upper.index("ORDER BY") + 8:], flags=re.I)[0]
-            last = [c for c in tail.split(",") if c.strip()][-1]
-            assert "user_id" in last, f"line {lineno} can tie: {tail.strip()!r}"
+            columns = [c for c in tail.split(",") if c.strip()]
+            assert columns, f"line {lineno} orders by nothing"
+            expected = self.KEY_ENDS[router]
+            assert expected in columns[-1], (
+                f"line {lineno} can tie: {tail.strip()!r} does not end on "
+                f"{expected!r}"
+            )
 
 
 class TestNothingGoesRoundTheRouter:
-    def test_no_user_method_opens_the_store_itself(self):
-        """A method left on `self.connection()` would keep working on DuckDB
-        and silently ignore the switch — the half-migrated state that makes an
-        authorisation bug invisible."""
+    def test_no_access_method_opens_the_store_itself(self):
+        """A method left on `self.connection()` keeps working on DuckDB and
+        silently ignores the switch — the half-migrated state that makes an
+        authorisation bug invisible.
+
+        The four matrix methods were the standing exception until 2026-09-08,
+        excused because they are cached per role. Per-user tabs put a
+        permission dependency on ~120 of the 140 endpoints, so every cache
+        miss took the store lock on an authorisation path. The exception is
+        gone and this list is now just the two routers."""
         source = REPOSITORY.read_text(encoding="utf-8")
         tree = ast.parse(source)
-        allowed = {"_users_run", "get_role_permissions", "get_all_permissions",
-                   "set_permission", "seed_default_permissions"}
+        allowed = {"_users_run", "_perms_run"}
         offenders = []
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -258,9 +291,10 @@ class TestNothingGoesRoundTheRouter:
             if "self.connection()" in body:
                 offenders.append(node.name)
         assert not offenders, (
-            f"{offenders} open DuckDB directly — the permissions matrix is the "
-            f"only part of this file that has not moved, and it is cached "
-            f"per role rather than read per request"
+            f"{offenders} open DuckDB directly. Nothing in the access path may: "
+            f"the store lock is held by a warehouse rebuild every two minutes, "
+            f"and an authorisation check that can queue behind a rebuild is the "
+            f"one read that must not. Route it through _users_run/_perms_run."
         )
 
     def test_denial_is_one_statement(self):
@@ -341,3 +375,83 @@ class TestTheTwoListsAreNotConfusedForEachOther:
         body = inspect.getsource(duf.replicate_dashboard_users)
         assert "FROM users" in body
         assert "authorized_users" not in body
+
+
+# ─── the matrix followed the list ────────────────────────────────────────────
+
+
+class TestTheRoleMatrixLeftDuckDB:
+    """`KS_USER_STORE` decides where *all* of access lives, not half of it.
+
+    Revision 0016 moved who may open the dashboard and left the matrix saying
+    what each role may do behind, cached per role and read out of DuckDB. Per
+    user tabs made that untenable: a permission dependency sits on roughly 120
+    of the 140 endpoints now, so every cache miss took DuckDB's process-wide
+    store lock on an authorisation path — the lock a warehouse rebuild holds
+    every two minutes.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_matrix_reads_postgres_when_the_list_does(self, monkeypatch):
+        """The proof that matters: with the switch on, the four matrix methods
+        must not touch the store's own connection at all."""
+        monkeypatch.setenv("KS_USER_STORE", "postgres")
+
+        seen = []
+
+        async def fetch_rows(sql, params=()):
+            seen.append(sql)
+            return []
+
+        async def fetch_row(sql, params=()):
+            seen.append(sql)
+            return None
+
+        async def execute(sql, params=()):
+            seen.append(sql)
+
+        monkeypatch.setattr(duf, "fetch_rows", fetch_rows)
+        monkeypatch.setattr(duf, "fetch_row", fetch_row)
+        monkeypatch.setattr(duf, "execute", execute)
+
+        store = DuckDBStore(db_path=Path("/nonexistent/never-opened.duckdb"))
+
+        def explode():
+            raise AssertionError(
+                "the access path opened DuckDB with KS_USER_STORE=postgres")
+
+        monkeypatch.setattr(store, "connection", explode)
+
+        await store.get_role_permissions("viewer")
+        await store.get_all_permissions()
+        await store.set_permission("viewer", "traffic", False, None, None, 1)
+        await store.seed_default_permissions()
+
+        assert seen, "nothing reached Postgres"
+        assert all("app.role_permissions" in sql for sql in seen), seen
+
+    def test_the_two_tables_move_together(self):
+        """One variable answers "where does access live". Splitting them would
+        let an approval and the permissions behind it disagree about which
+        database is authoritative."""
+        source = REPOSITORY.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for name in ("_users_run", "_perms_run"):
+            body = ast.get_source_segment(source, next(
+                n for n in ast.walk(tree)
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == name
+            )) or ""
+            assert "user_store_is_postgres" in body, (
+                f"{name} chooses its engine some other way"
+            )
+
+    def test_the_migration_and_the_code_agree_on_the_table(self):
+        migration = (MIGRATION.parent / "0022_role_permissions.py").read_text(
+            encoding="utf-8")
+        from core.repositories.users import PERMISSIONS_TABLE
+
+        assert PERMISSIONS_TABLE == "app.role_permissions"
+        assert "CREATE TABLE IF NOT EXISTS app.role_permissions" in migration
+        for column in ("role", "feature", "can_view", "can_edit", "can_delete",
+                       "updated_at", "updated_by"):
+            assert column in migration, column

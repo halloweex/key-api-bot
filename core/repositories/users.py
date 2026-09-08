@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 MAX_DENIAL_COUNT = 5
 
+# Where the role matrix lives when `KS_USER_STORE=postgres`. The user list is
+# `core.pg_dashboard_users.TABLE`; these two move together, so one variable
+# still answers "where does access live".
+PERMISSIONS_TABLE = "app.role_permissions"
+
 
 class UsersMixin:
 
@@ -57,6 +62,48 @@ class UsersMixin:
             return None
 
         rendered = sql.format(users="users", self="users")
+        async with self.connection() as conn:
+            cursor = conn.execute(rendered, params)
+            if mode == "all":
+                return cursor.fetchall()
+            if mode == "one":
+                return cursor.fetchone()
+            return None
+
+    async def _perms_run(self, sql: str, params: Optional[Sequence[Any]] = None,
+                         *, mode: str = "all"):
+        """Run one statement against the store that owns the role matrix.
+
+        The matrix follows the user list — same `KS_USER_STORE`, same reason:
+        an approval and the permissions behind it must not disagree about
+        which database is authoritative.
+
+        It used to stay in DuckDB because it is read once per role and cached.
+        Per-user tabs put a permission dependency on roughly 120 of the 140
+        endpoints, and every cache miss took DuckDB's **process-wide store
+        lock** on the request path of an authorization check — the same lock a
+        warehouse rebuild holds every two minutes, and the measured reason the
+        SMS tab went from 124 req/s to 38. An authorization check is the one
+        read that must never queue behind a rebuild.
+        """
+        from core.pg_dashboard_users import user_store_is_postgres
+
+        params = list(params or [])
+        if user_store_is_postgres():
+            from core.pg_dashboard_users import execute, fetch_row, fetch_rows
+            from core.sql_dialect import numbered
+
+            rendered = numbered(
+                sql.format(perms=PERMISSIONS_TABLE, self="role_permissions")
+            )
+            if mode == "all":
+                return await fetch_rows(rendered, params)
+            if mode == "one":
+                return await fetch_row(rendered, params)
+            await execute(rendered, params)
+            return None
+
+        rendered = sql.format(perms="role_permissions", self="role_permissions")
         async with self.connection() as conn:
             cursor = conn.execute(rendered, params)
             if mode == "all":
@@ -420,21 +467,20 @@ class UsersMixin:
 
         Returns dict of feature -> {view: bool, edit: bool, delete: bool}
         """
-        async with self.connection() as conn:
-            rows = conn.execute("""
-                SELECT feature, can_view, can_edit, can_delete
-                FROM role_permissions
-                WHERE role = ?
-            """, [role]).fetchall()
+        rows = await self._perms_run("""
+            SELECT feature, can_view, can_edit, can_delete
+            FROM {perms}
+            WHERE role = ?
+        """, [role])
 
-            return {
-                row[0]: {
-                    "view": bool(row[1]),
-                    "edit": bool(row[2]),
-                    "delete": bool(row[3]),
-                }
-                for row in rows
+        return {
+            row[0]: {
+                "view": bool(row[1]),
+                "edit": bool(row[2]),
+                "delete": bool(row[3]),
             }
+            for row in rows
+        }
 
     async def get_all_permissions(self) -> Dict[str, Dict[str, Dict[str, bool]]]:
         """
@@ -442,24 +488,23 @@ class UsersMixin:
 
         Returns dict of role -> feature -> {view: bool, edit: bool, delete: bool}
         """
-        async with self.connection() as conn:
-            rows = conn.execute("""
-                SELECT role, feature, can_view, can_edit, can_delete
-                FROM role_permissions
-                ORDER BY role, feature
-            """).fetchall()
+        rows = await self._perms_run("""
+            SELECT role, feature, can_view, can_edit, can_delete
+            FROM {perms}
+            ORDER BY role, feature
+        """)
 
-            result: Dict[str, Dict[str, Dict[str, bool]]] = {}
-            for row in rows:
-                role, feature = row[0], row[1]
-                if role not in result:
-                    result[role] = {}
-                result[role][feature] = {
-                    "view": bool(row[2]),
-                    "edit": bool(row[3]),
-                    "delete": bool(row[4]),
-                }
-            return result
+        result: Dict[str, Dict[str, Dict[str, bool]]] = {}
+        for row in rows:
+            role, feature = row[0], row[1]
+            if role not in result:
+                result[role] = {}
+            result[role][feature] = {
+                "view": bool(row[2]),
+                "edit": bool(row[3]),
+                "delete": bool(row[4]),
+            }
+        return result
 
     async def set_permission(
         self,
@@ -477,19 +522,18 @@ class UsersMixin:
         of one cell from stale copies of the matrix both land instead of the
         later one putting the earlier one back.
         """
-        async with self.connection() as conn:
-            conn.execute("""
-                INSERT INTO role_permissions (role, feature, can_view, can_edit, can_delete, updated_at, updated_by)
-                VALUES (?, ?, COALESCE(?, FALSE), COALESCE(?, FALSE), COALESCE(?, FALSE), CURRENT_TIMESTAMP, ?)
-                ON CONFLICT (role, feature) DO UPDATE SET
-                    can_view = COALESCE(?, role_permissions.can_view),
-                    can_edit = COALESCE(?, role_permissions.can_edit),
-                    can_delete = COALESCE(?, role_permissions.can_delete),
-                    updated_at = excluded.updated_at,
-                    updated_by = excluded.updated_by
-            """, [role, feature, can_view, can_edit, can_delete, updated_by,
-                  can_view, can_edit, can_delete])
-            return True
+        await self._perms_run("""
+            INSERT INTO {perms} (role, feature, can_view, can_edit, can_delete, updated_at, updated_by)
+            VALUES (?, ?, COALESCE(?, FALSE), COALESCE(?, FALSE), COALESCE(?, FALSE), CURRENT_TIMESTAMP, ?)
+            ON CONFLICT (role, feature) DO UPDATE SET
+                can_view = COALESCE(?, {self}.can_view),
+                can_edit = COALESCE(?, {self}.can_edit),
+                can_delete = COALESCE(?, {self}.can_delete),
+                updated_at = excluded.updated_at,
+                updated_by = excluded.updated_by
+        """, [role, feature, can_view, can_edit, can_delete, updated_by,
+              can_view, can_edit, can_delete], mode="none")
+        return True
 
     async def seed_default_permissions(self) -> None:
         """Insert any (role, feature) pair the table does not carry yet.
@@ -505,34 +549,33 @@ class UsersMixin:
         """
         from core.permissions import ROLE_PERMISSIONS, Action
 
-        async with self.connection() as conn:
-            existing = {
-                (row[0], row[1])
-                for row in conn.execute(
-                    "SELECT role, feature FROM role_permissions"
-                ).fetchall()
-            }
+        existing = {
+            (row[0], row[1])
+            for row in await self._perms_run(
+                "SELECT role, feature FROM {perms}"
+            )
+        }
 
-            inserted = 0
-            for role, features in ROLE_PERMISSIONS.items():
-                for feature, actions in features.items():
-                    key = (str(role.value), str(feature.value))
-                    if key in existing:
-                        continue
-                    conn.execute("""
-                        INSERT INTO role_permissions (role, feature, can_view, can_edit, can_delete)
-                        VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT (role, feature) DO NOTHING
-                    """, [
-                        key[0], key[1],
-                        Action.VIEW in actions,
-                        Action.EDIT in actions,
-                        Action.DELETE in actions,
-                    ])
-                    inserted += 1
+        inserted = 0
+        for role, features in ROLE_PERMISSIONS.items():
+            for feature, actions in features.items():
+                key = (str(role.value), str(feature.value))
+                if key in existing:
+                    continue
+                await self._perms_run("""
+                    INSERT INTO {perms} (role, feature, can_view, can_edit, can_delete)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (role, feature) DO NOTHING
+                """, [
+                    key[0], key[1],
+                    Action.VIEW in actions,
+                    Action.EDIT in actions,
+                    Action.DELETE in actions,
+                ], mode="none")
+                inserted += 1
 
-            if inserted:
-                logger.info("Seeded %d missing role permissions", inserted)
+        if inserted:
+            logger.info("Seeded %d missing role permissions", inserted)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

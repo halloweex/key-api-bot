@@ -614,6 +614,27 @@ is now a redirect loop. It computes the first page the account can actually
 open (`utils/access.firstAllowedPath`) and, when there is none, says so on the
 screen instead of navigating.
 
+**Access no longer touches DuckDB at all.** Revision 0016 moved the user list;
+the matrix saying what each role may do stayed behind, cached per role and read
+out of DuckDB — defensible while ~20 endpoints were gated. With a permission
+dependency on ~120 of 140, every cache miss took DuckDB's **process-wide store
+lock** on an authorisation path, and that lock is held by a warehouse rebuild
+every two minutes (the measured cause of the SMS tab going 124 → 38 req/s).
+Revision 0022 puts `role_permissions` in `app`, routed by `_perms_run` through
+the same `KS_USER_STORE` switch, so one variable still answers "where does
+access live" — splitting them would let an approval and the permissions behind
+it disagree about which database is authoritative.
+
+**Not ClickHouse**, asked and answered: these rows are read on every request,
+written by a human, and authoritative. ClickHouse has no transactional update
+and holds what can be rebuilt from source; access can be rebuilt from nothing.
+
+**No copy step, because there was nothing to copy.** Measured on the 2026-09-07
+snapshot before writing any: all 32 stored pairs equal the code defaults
+exactly — nobody had ever edited the matrix — so `seed_default_permissions`
+reproduces it. Verify after deploying rather than assuming; a permission
+someone turns off in the window between the two stores stays in DuckDB.
+
 **Three things the audit of this change moved**, each because putting a gate on
 ~120 endpoints instead of ~20 changed what a detail costs:
 
