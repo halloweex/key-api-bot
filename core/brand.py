@@ -72,10 +72,35 @@ def brand_font(role: str) -> Optional[str]:
     the brand fonts still draws the picture, just not in the brand's hand.
     """
     return _first_existing({
-        "body": ("LibreFranklin-Medium.ttf", "LibreFranklin-Regular.ttf"),
-        "heading": ("LibreFranklin-Bold.ttf", "LibreFranklin-SemiBold.ttf"),
+        "body": ("LibreFranklin[wght].ttf", "LibreFranklin-Medium.ttf",
+                 "LibreFranklin-Regular.ttf"),
+        "heading": ("LibreFranklin[wght].ttf", "LibreFranklin-Bold.ttf",
+                    "LibreFranklin-SemiBold.ttf"),
         "accent": ("InstrumentSerif-Regular.ttf",),
     }[role])
+
+
+# Google Fonts ships Libre Franklin as one variable file, so a weight is an
+# axis setting and not a second file: `body` and `heading` resolve to the same
+# path and are told apart by this. The renderer applies it after loading and
+# ignores the failure, so a static face that already is that weight, or a
+# DejaVu fallback with no axes, still draws.
+_WEIGHTS = {"body": "Medium", "heading": "Bold"}
+
+
+def weight_for(role: str) -> Optional[str]:
+    """The variable-font instance `role` should be set to, if any."""
+    return _WEIGHTS.get(role)
+
+
+# What the brand faces do not carry, measured rather than assumed:
+# Libre Franklin covers Latin, Cyrillic, digits and ₴ but not the geometric
+# arrows the deltas are written with, and Instrument Serif is Latin and digits
+# alone — no Cyrillic, no ₴. So the arrows are drawn from the fallback face at
+# the same size, and the ₴ is set in Libre Franklin even where the number
+# beside it is the accent serif. `tests/unit/test_brand_fonts.py` computes
+# this set from the bundled files and fails if it drifts.
+FALLBACK_CHARS = "▲▼"
 
 
 # ─── The marks ──────────────────────────────────────────────────────────────

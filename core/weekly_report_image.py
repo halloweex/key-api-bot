@@ -77,6 +77,13 @@ BOLD_PATHS = tuple(p for p in (
 ) if p)
 ACCENT_PATHS = tuple(p for p in (brand.brand_font("accent"),) if p)
 
+# DejaVu on its own, without the brand faces in front of it: the fallback for
+# the handful of glyphs they do not carry. See `brand.FALLBACK_CHARS`.
+DEJAVU_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+)
+
 
 @dataclass(frozen=True)
 class _Fonts:
@@ -105,6 +112,27 @@ def _font_file(candidates: Sequence[str], matplotlib_name: str) -> Optional[str]
     return None
 
 
+def _face(path: str, size: int, role: str):
+    """`path` at `size`, set to the weight `role` asks for.
+
+    With the brand faces installed, `body` and `heading` are the same variable
+    file and only the axis tells them apart — which is why both loaders go
+    through here and neither calls `truetype` directly. A static face or a
+    DejaVu fallback has no axes and keeps the weight it was built with, so the
+    failure is ignored rather than reported.
+    """
+    from PIL import ImageFont
+
+    font = ImageFont.truetype(path, size)
+    weight = brand.weight_for(role)
+    if weight:
+        try:
+            font.set_variation_by_name(weight)
+        except Exception:  # noqa: BLE001 — a static face has no axes
+            pass
+    return font
+
+
 def _load_fonts() -> Optional[_Fonts]:
     """Every size the card uses, or None if the host has no DejaVu.
 
@@ -125,12 +153,67 @@ def _load_fonts() -> Optional[_Fonts]:
     # otherwise. Everything else is the sans, upper-case labels included.
     accent = _font_file(ACCENT_PATHS, "") or bold
     return _Fonts(
-        label=ImageFont.truetype(regular, 27),
-        chip=ImageFont.truetype(bold, 30),
-        currency=ImageFont.truetype(accent, 52),
-        stat=ImageFont.truetype(bold, 50),
-        big=ImageFont.truetype(accent, 124),
+        label=_face(regular, 27, "body"),
+        chip=_face(bold, 30, "heading"),
+        # Not the accent serif, which carries no ₴ at all: Instrument Serif is
+        # Latin and digits. The number beside this stays the serif — digits it
+        # does have — and the mark is small and dimmer, so the two faces meet
+        # where nobody reads them as one word.
+        currency=_face(bold, 52, "heading"),
+        stat=_face(bold, 50, "heading"),
+        big=_face(accent, 124, "accent"),
     )
+
+
+# ─── Drawing, with a fallback for the glyphs the brand faces lack ───────────
+#
+# Pillow has no font fallback: a missing glyph is drawn as an empty box and
+# nothing says so. The brand faces carry everything this report writes except
+# the two arrows, so text is drawn in runs and those characters come from
+# DejaVu at the same size. When DejaVu *is* the primary face the run is the
+# same file and the output is identical, which is why this is unconditional
+# rather than a branch on which fonts happen to be installed.
+
+_FALLBACK_FACES: dict = {}
+
+
+def _fallback_face(size: int):
+    from PIL import ImageFont
+
+    if size not in _FALLBACK_FACES:
+        path = _font_file(DEJAVU_PATHS, "DejaVuSans.ttf")
+        _FALLBACK_FACES[size] = ImageFont.truetype(path, size) if path else None
+    return _FALLBACK_FACES[size]
+
+
+def _runs(text: str, font):
+    """`text` split into (run, face) pairs, one face per contiguous stretch."""
+    spare = _fallback_face(int(getattr(font, "size", 0) or 0))
+    if spare is None or not any(c in brand.FALLBACK_CHARS for c in text):
+        return [(text, font)]
+    out, buf, buf_spare = [], "", False
+    for ch in text:
+        needs = ch in brand.FALLBACK_CHARS
+        if buf and needs != buf_spare:
+            out.append((buf, spare if buf_spare else font))
+            buf = ""
+        buf, buf_spare = buf + ch, needs
+    if buf:
+        out.append((buf, spare if buf_spare else font))
+    return out
+
+
+def _len(d, text: str, font) -> float:
+    """`d.textlength`, measured per run so a fallback glyph counts."""
+    return sum(d.textlength(run, font=face) for run, face in _runs(text, font))
+
+
+def _text(d, xy, text: str, font=None, fill=None) -> None:
+    """`d.text`, drawn per run so a missing glyph is never an empty box."""
+    x, y = xy
+    for run, face in _runs(text, font):
+        d.text((x, y), run, font=face, fill=fill)
+        x += d.textlength(run, font=face)
 
 
 # ─── Small helpers ──────────────────────────────────────────────────────────
@@ -152,7 +235,7 @@ def _draw_header(d, report: WeeklyReport, fonts: _Fonts, lang: str) -> None:
 
     window = fmt_window(report.start, report.end, lang)
     label = _sales_type_label(report.sales_type, lang).upper()
-    d.text((PAD, PAD), f"{window}   ·   {label}", font=fonts.label, fill=CARD_LABEL)
+    _text(d, (PAD, PAD), f"{window}   ·   {label}", font=fonts.label, fill=CARD_LABEL)
 
 
 def _draw_headline(d, report: WeeklyReport, fonts: _Fonts, lang: str) -> None:
@@ -161,8 +244,8 @@ def _draw_headline(d, report: WeeklyReport, fonts: _Fonts, lang: str) -> None:
 
     # The currency mark is smaller and dimmer: at 124px the ₴ is as heavy as
     # a digit, and the eye reads "₴9" as one character.
-    d.text((PAD, PAD + 104), "₴", font=fonts.currency, fill=CARD_LABEL)
-    d.text((PAD + 56, PAD + 50), fmt_int(cur.revenue, lang),
+    _text(d, (PAD, PAD + 104), "₴", font=fonts.currency, fill=CARD_LABEL)
+    _text(d, (PAD + 56, PAD + 50), fmt_int(cur.revenue, lang),
            font=fonts.big, fill=CARD_TEXT)
 
     text, _ = _delta(pct_change(cur.revenue, prev.revenue if prev else None), lang)
@@ -170,12 +253,14 @@ def _draw_headline(d, report: WeeklyReport, fonts: _Fonts, lang: str) -> None:
         text = f"{text} {t('report.vs_last_week', lang)}"
     # The chip is the brand's lime on bordeaux — its signature pairing — with
     # bordeaux text, whatever the sign; the arrow says which way.
+    # Width from the run-aware measurement, because the arrow is a fallback
+    # glyph and `textbbox` would size the chip for a face that lacks it.
     box = d.textbbox((0, 0), text, font=fonts.chip)
-    w, h = box[2] - box[0], box[3] - box[1]
+    w, h = _len(d, text, fonts.chip), box[3] - box[1]
     x, y = PAD, 270
     d.rounded_rectangle((x, y, x + w + 44, y + h + 32), radius=(h + 32) // 2,
                         fill=CHIP)
-    d.text((x + 22, y + 14), text, font=fonts.chip, fill=CHIP_TEXT)
+    _text(d, (x + 22, y + 14), text, font=fonts.chip, fill=CHIP_TEXT)
 
 
 def _draw_stats(d, report: WeeklyReport, fonts: _Fonts, lang: str) -> None:
@@ -185,20 +270,20 @@ def _draw_stats(d, report: WeeklyReport, fonts: _Fonts, lang: str) -> None:
 
     def cell(x: float, label: str, value: str,
              deltas: Sequence[Optional[float]]) -> None:
-        d.text((x, STATS_TOP), label, font=fonts.label, fill=CARD_LABEL)
-        d.text((x, STATS_TOP + 38), value, font=fonts.stat, fill=CARD_TEXT)
+        _text(d, (x, STATS_TOP), label, font=fonts.label, fill=CARD_LABEL)
+        _text(d, (x, STATS_TOP + 38), value, font=fonts.stat, fill=CARD_TEXT)
         # Two numbers in a cell need two deltas beside them; one would leave
         # the reader guessing which of them it belongs to.
         cursor = x
         for i, delta in enumerate(deltas):
             if i:
-                d.text((cursor, STATS_TOP + 104), " / ", font=fonts.label, fill=CARD_LINE)
-                cursor += d.textlength(" / ", font=fonts.label)
+                _text(d, (cursor, STATS_TOP + 104), " / ", font=fonts.label, fill=CARD_LINE)
+                cursor += _len(d, " / ", font=fonts.label)
             text, colour = _delta(delta, lang)
             if colour == MUTED:
                 colour = CARD_LABEL
-            d.text((cursor, STATS_TOP + 104), text, font=fonts.label, fill=colour)
-            cursor += d.textlength(text, font=fonts.label)
+            _text(d, (cursor, STATS_TOP + 104), text, font=fonts.label, fill=colour)
+            cursor += _len(d, text, font=fonts.label)
 
     width = (W - 2 * PAD) / 3
     cell(PAD, t("card.orders", lang), fmt_int(cur.orders, lang),
@@ -302,23 +387,24 @@ class _ChartFonts:
 
 
 def _load_chart_fonts() -> Optional[_ChartFonts]:
-    from PIL import ImageFont
-
     regular = _font_file(FONT_PATHS, "DejaVuSans.ttf")
     bold = _font_file(BOLD_PATHS, "DejaVuSans-Bold.ttf")
     if not regular or not bold:
         logger.info("Weekly report charts skipped: DejaVu fonts not installed")
         return None
+    # Through `_face`, not `truetype`: with the variable brand file both paths
+    # are the same file, and calling `truetype` directly gave every chart's
+    # bold label the default Regular instance instead.
     return _ChartFonts(
-        label=ImageFont.truetype(regular, 26),
-        small=ImageFont.truetype(regular, 22),
-        value=ImageFont.truetype(bold, 24),
+        label=_face(regular, 26, "body"),
+        small=_face(regular, 22, "body"),
+        value=_face(bold, 24, "heading"),
     )
 
 
 def _centered(d, x: float, y: float, text: str, font, fill) -> None:
-    w = d.textlength(text, font=font)
-    d.text((x - w / 2, y), text, font=font, fill=fill)
+    w = _len(d, text, font=font)
+    _text(d, (x - w / 2, y), text, font=font, fill=fill)
 
 
 def render_days_chart(report: WeeklyReport, lang: str = DEFAULT_LANGUAGE) -> Optional[bytes]:
@@ -352,8 +438,8 @@ def render_days_chart(report: WeeklyReport, lang: str = DEFAULT_LANGUAGE) -> Opt
         lx, ly = w - PAD - 20, PAD - 10
         for label, colour in ((t("report.col_last_week", lang), PALE),
                               (t("report.col_this_week", lang), INK)):
-            tw = d.textlength(label, font=fonts.small)
-            d.text((lx - tw, ly), label, font=fonts.small, fill=MUTED)
+            tw = _len(d, label, font=fonts.small)
+            _text(d, (lx - tw, ly), label, font=fonts.small, fill=MUTED)
             d.rounded_rectangle((lx - tw - 34, ly + 3, lx - tw - 12, ly + 21), radius=4, fill=colour)
             lx = lx - tw - 60
 
@@ -379,7 +465,7 @@ def render_days_chart(report: WeeklyReport, lang: str = DEFAULT_LANGUAGE) -> Opt
             label = compact_money(values[i], lang)
             lx = cx + bar / 2 + 3
             ly = plot_bottom - height - 34
-            lw = d.textlength(label, font=fonts.value)
+            lw = _len(d, label, font=fonts.value)
             d.rounded_rectangle((lx - lw / 2 - 8, ly - 4, lx + lw / 2 + 8, ly + 28),
                                 radius=8, fill=BG)
             _centered(d, lx, ly, label, fonts.value, TEXT)
@@ -505,16 +591,16 @@ def render_channels_chart(report: WeeklyReport, lang: str = DEFAULT_LANGUAGE) ->
             y = PAD + row_h * i
             colour = CHANNEL_COLOURS[i]
             # Name, then the change under it, in the label column.
-            d.text((PAD, y), c.name, font=fonts.value, fill=TEXT)
+            _text(d, (PAD, y), c.name, font=fonts.value, fill=TEXT)
             # Only the change under the name: the outline below the bar is
             # last week, and the legend says so once.
             change, _ = _delta(pct_change(c.revenue, c.previous_revenue), lang)
-            d.text((PAD, y + 34), change, font=fonts.small, fill=MUTED)
+            _text(d, (PAD, y + 34), change, font=fonts.small, fill=MUTED)
             # This week: a filled bar with the revenue and share at its end.
             length = span * c.revenue / top
             d.rounded_rectangle((bar_left, y, bar_left + max(length, 6), y + 36),
                                 radius=8, fill=colour)
-            d.text((bar_left + length + 14, y + 4),
+            _text(d, (bar_left + length + 14, y + 4),
                    f"{compact_money(c.revenue, lang)} · {c.revenue / total * 100:.0f}%",
                    font=fonts.value, fill=TEXT)
             # Last week: the same scale, drawn as an outline underneath.
@@ -522,13 +608,13 @@ def render_channels_chart(report: WeeklyReport, lang: str = DEFAULT_LANGUAGE) ->
             if prev_len > 0:
                 d.rounded_rectangle((bar_left, y + 46, bar_left + max(prev_len, 6), y + 66),
                                     radius=6, outline=brand.PLUM, width=2)
-                d.text((bar_left + prev_len + 14, y + 42),
+                _text(d, (bar_left + prev_len + 14, y + 42),
                        compact_money(c.previous_revenue, lang), font=fonts.small, fill=MUTED)
 
         # Legend for the outline, once, bottom left.
         ly = PAD + row_h * len(rows) - 14
         d.rounded_rectangle((PAD, ly + 6, PAD + 34, ly + 20), radius=4, outline=brand.PLUM, width=2)
-        d.text((PAD + 46, ly), t("report.col_last_week", lang), font=fonts.small, fill=MUTED)
+        _text(d, (PAD + 46, ly), t("report.col_last_week", lang), font=fonts.small, fill=MUTED)
 
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=True)
