@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.158
+
+- A weekly traffic report, for the people who watch where orders come from
+
+
 ## 3.0.157
 
 - The admin page was told nine tabs where the answer was six
