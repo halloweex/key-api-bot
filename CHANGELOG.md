@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.150
+
+- Roles are levels, areas are tabs — untangling the two
+- "As the role" has to say which tabs that is
+
+
 ## 3.0.149
 
 - The bot hands out the same numbers, so it asks the same question
