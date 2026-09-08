@@ -2772,6 +2772,7 @@ class BackgroundScheduler:
             TRAFFIC_SALES_TYPE,
             already_sent,
             build_report,
+            first_week,
             format_report,
             format_report_rich,
             mark_sent,
@@ -2785,6 +2786,17 @@ class BackgroundScheduler:
             today = _datetime.now(SCHEDULER_TIMEZONE).date()
             week_start, week_end = last_complete_week(today)
             week = week_start.isoformat()
+
+            # Before the ledger, because this is not a delivery question: the
+            # week ended before the report existed, and nothing about it will
+            # change by tomorrow.
+            floor = first_week()
+            if floor is not None and week_start < floor:
+                logger.info(
+                    "Traffic report skipped: %s is before the first week %s",
+                    week, floor,
+                )
+                return {"sent": False, "week": week, "reason": "before_first_week"}
 
             async with store.connection() as conn:
                 if already_sent(conn, week_start, sales_type):
