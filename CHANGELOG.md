@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.160
+
+- Two defects the first live render showed, and a way to keep looking
+
+
 ## 3.0.159
 
 - Untagged traffic is not a campaign, and it was crowding out the ones that are
