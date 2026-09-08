@@ -22,6 +22,19 @@ FROM python:3.14-slim@sha256:83ff1d245a3d57d04152252d3ef9cb361494d0b3395abd65a5e
 # Set working directory
 WORKDIR /app
 
+# Fonts, for the same reason the web image has them: `core/` travels into this
+# image, renderers included, so anything this container draws should come out
+# in the brand's hand rather than not at all. DejaVu is not decoration here —
+# it is the fallback face for the two arrow glyphs the brand fonts do not
+# carry, and without it those become empty boxes with nothing said. ~2 MB.
+#
+# Nothing under `bot/` draws today; this makes the capability whole instead of
+# half-present, and keeps the two images from disagreeing about what they can
+# render.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies
 # The lock, not the intent file: `requirements.txt` has floors and no
 # ceilings, so building from it lets pip decide what production runs.
@@ -33,6 +46,9 @@ RUN pip install --no-cache-dir -r requirements.lock
 COPY VERSION ./
 COPY bot/ ./bot/
 COPY core/ ./core/
+
+# The brand faces and the marks the renderers in core/ look for.
+COPY assets/ ./assets/
 
 # Create non-root user and data directory
 RUN groupadd -r appuser && useradd -r -g appuser -d /app appuser \
