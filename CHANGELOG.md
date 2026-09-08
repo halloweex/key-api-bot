@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.154
+
+- Audit the access work against OWASP A01, and write the memo
+
+
 ## 3.0.153
 
 - Put the brand faces in the repository, and draw around what they lack
