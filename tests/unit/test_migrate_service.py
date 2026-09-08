@@ -17,8 +17,10 @@ reading the service in isolation:
 * `migrate` must wait for `postgres-bootstrap`, not merely for a healthy
   server — the race is invisible on a fresh volume and real on the one case
   that service exists for.
-* Nothing may depend on `migrate` yet: a failed migration must not be able to
-  take the dashboard down over a database no code reads.
+* `bot` and `web` must wait for it to *finish*. That line used to say the
+  opposite — "nothing may depend on it yet" — and named the condition for
+  changing: the step that first reads Postgres. Both read it now, and both
+  already failed without it, the bot loudly and `web` silently.
 """
 from __future__ import annotations
 
@@ -86,18 +88,40 @@ class TestTheOrderingIsDeclared:
         policy would turn a finished migration into a crash loop."""
         assert SERVICES["migrate"]["restart"] == "no"
 
-    def test_nothing_depends_on_it_yet(self):
-        """Deliberate, and it changes in the step that first reads Postgres.
-        Today a failed migration must not be able to stop `web` — charter
-        rule 8, the step leaves the system working."""
-        dependents = [
-            name for name, svc in SERVICES.items()
-            if "migrate" in (svc.get("depends_on") or {})
-        ]
-        assert dependents == [], (
-            f"{dependents} now wait on migrate; that is right once they read "
-            f"Postgres, and a new way to break the dashboard until they do"
-        )
+    def test_the_readers_wait_for_it(self):
+        """This assertion used to be its own opposite, and said why: "nothing
+        depends on it **yet** — that changes in the step that first reads
+        Postgres". That step arrived and kept arriving. `web` now answers
+        /summary, the user list, expenses and traffic out of Postgres, and the
+        bot keeps its whole state there.
+
+        What the old wording protected against was a failed migration taking
+        down a dashboard that did not need the database. Both services need it
+        now, and both already fail without it — the bot refuses to start on a
+        revision mismatch, and `web` starts and then cannot authenticate
+        anybody, which is the quieter and worse of the two. Observed on the
+        0023 deploy: one bot crash and restart per migration, in the log as a
+        RuntimeError naming both revisions.
+
+        So they wait, and a failed migration stops them in one place instead of
+        a restart loop and a login page that refuses everybody."""
+        for name in ("bot", "web"):
+            depends = SERVICES[name].get("depends_on") or {}
+            assert "migrate" in depends, (
+                f"{name} does not wait for migrate — every migration costs it "
+                f"a crash, or a window where it serves 401 to everyone"
+            )
+            assert depends["migrate"]["condition"] == "service_completed_successfully", (
+                f"{name} waits for the wrong thing: what it needs is the "
+                f"migration finished, not the container started"
+            )
+
+    def test_it_stays_a_one_shot_so_the_condition_can_mean_that(self):
+        """`service_completed_successfully` is only meaningful because the
+        container exits. A restart policy here would leave the dependents
+        waiting for something that never completes."""
+        assert SERVICES["migrate"].get("restart") in ("no", False), \
+            SERVICES["migrate"].get("restart")
 
 
 class TestItRunsAsTheRoleThatOwnsTheTables:

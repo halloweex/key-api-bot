@@ -1370,6 +1370,15 @@ production scale (130 K-row archive, 24 MB): **0.6 ms** for an ordinary tick,
 **2.4 ms** for the 1 400-id 05:15 batch, **7.4 ms** for a 5 000-id backfill
 chunk — ~190 bytes a row, so **~7 MB a year**.
 
+**`bot` and `web` wait for `migrate` to finish** (`service_completed_successfully`,
+added 2026-09-08). They did not until then, and `up -d` started all three at
+once: the bot lost the race on every migration, refused to start on the
+revision mismatch and came back on its restart policy — one crash per deploy,
+seen in the log as a RuntimeError naming both revisions. `web` had no startup
+gate at all, so it lost the same race silently and served 401 to everybody
+while looking healthy, because the session read is a Postgres read. A failed
+migration now stops both in one place instead.
+
 **Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
 moved to `0010_order_versions` at the time and `require_revision` raises on any
 mismatch, ahead or behind. It is `0021_user_allowed_features` today, and every

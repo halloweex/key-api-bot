@@ -310,6 +310,23 @@ services:
       # Names this process's slice of shared state (both containers mount
       # ./data): the alert gate's decision file is alert-gate-{role}.json.
       - KS_ROLE=bot
+    depends_on:
+      # The bot checks `REQUIRED_REVISION` in `initialise()` and refuses to
+      # start against an older schema — correct, and until this was added it
+      # meant every migration cost one crash: `up -d` starts both at once, the
+      # bot loses the race, exits, and comes back on the restart policy after
+      # `migrate` has finished. Observed on the 0023 deploy, in the log as a
+      # RuntimeError naming both revisions.
+      #
+      # `service_completed_successfully` and not `service_started`: what the
+      # bot needs is the migration *finished*, and `migrate` is a one-shot with
+      # `restart: "no"` precisely so this condition means what it says.
+      #
+      # If a migration fails, the bot does not start at all. That is the same
+      # answer it reaches on its own today, arrived at in one place instead of
+      # a restart loop.
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
@@ -386,6 +403,14 @@ services:
     depends_on:
       meilisearch:
         condition: service_healthy
+      # For the bot's reason, with a quieter failure and therefore a worse one.
+      # `web` has no startup revision gate, so deployed ahead of `migrate` it
+      # starts happily and every Postgres read raises `SchemaVersionError` —
+      # including the session read, which means nobody can log in while the
+      # dashboard looks healthy. Waiting here removes the window rather than
+      # relying on each read to fail correctly inside it.
+      migrate:
+        condition: service_completed_successfully
     mem_limit: 7g
     cpus: 1.0
     healthcheck:
