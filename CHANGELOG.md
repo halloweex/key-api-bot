@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.149
+
+- The bot hands out the same numbers, so it asks the same question
+- Point the stand-down test at the mirror that still exists
+- The expense-type dictionary ships hourly, not weekly
+
+
 ## 3.0.148
 
 - Seed the role matrix in one statement, not one per row
