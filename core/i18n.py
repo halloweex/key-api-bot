@@ -422,6 +422,14 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "traffic.platform.unknown": {EN: "Unknown", UK: "Невідомо", RU: "Неизвестно"},
     "traffic.platform.google": {EN: "Google", UK: "Google", RU: "Google"},
     "traffic.platform.other": {EN: "Other", UK: "Інше", RU: "Прочее"},
+    # Not "Other": that is a source we were told and have not learned to name.
+    # This is having been told nothing — our own pixels fired and no parameter
+    # says where the buyer came from.
+    "traffic.platform.unattributed": {
+        EN: "Source not identified",
+        UK: "Джерело не визначено",
+        RU: "Источник не определён",
+    },
 
     # ── The card ──
     "report.vs_last_week": {

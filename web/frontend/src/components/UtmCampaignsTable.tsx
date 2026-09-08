@@ -32,6 +32,7 @@ const PLATFORMS = [
   { value: 'ai', labelKey: 'traffic.ai' },
   { value: 'manager', labelKey: 'traffic.manager' },
   { value: 'other', labelKey: 'traffic.otherPlatform' },
+  { value: 'unattributed', labelKey: 'traffic.unattributedPlatform' },
 ] as const
 
 // ─── Traffic Type Badges ─────────────────────────────────────────────────────
@@ -53,7 +54,12 @@ const TrafficBadge = memo(function TrafficBadge({ type }: { type: string }) {
   return <Badge tone={config.tone}>{t(config.labelKey)}</Badge>
 })
 
-const formatPlatformName = (platform: string, trafficType: string): string => {
+const formatPlatformName = (
+  platform: string, trafficType: string, t: (key: string) => string,
+): string => {
+  // The one key here that is not a proper noun: it names an absence, so it
+  // has to be said in the reader's language.
+  if (platform === 'unattributed') return t('traffic.unattributedPlatform')
   if (platform === 'google') {
     return trafficType === 'paid_confirmed' || trafficType === 'paid_likely'
       ? 'Google Ads'
@@ -234,7 +240,7 @@ export const UtmCampaignsTable = memo(function UtmCampaignsTable() {
                   </span>
                 </td>
                 <td className="py-3 px-4 text-slate-600 hidden md:table-cell whitespace-nowrap">
-                  {formatPlatformName(row.platform, row.traffic_type)}
+                  {formatPlatformName(row.platform, row.traffic_type, t)}
                 </td>
                 <td className="py-3 px-4">
                   <TrafficBadge type={row.traffic_type} />

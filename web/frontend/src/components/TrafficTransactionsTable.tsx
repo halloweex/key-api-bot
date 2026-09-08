@@ -42,6 +42,7 @@ const PLATFORMS = [
   { value: 'ai', labelKey: 'traffic.ai' },
   { value: 'manager', labelKey: 'traffic.manager' },
   { value: 'other', labelKey: 'traffic.otherPlatform' },
+  { value: 'unattributed', labelKey: 'traffic.unattributedPlatform' },
 ] as const
 
 const PAGE_SIZE = 50

@@ -185,3 +185,52 @@ class TestEveryBucketIsRoundedTheSameWay:
             }
         assert out["summary"]["pixel_only"] == {"orders": 0, "revenue": 0.0}
         assert out["summary"]["unknown"] == {"orders": 0, "revenue": 0.0}
+
+
+class TestBeingToldNothingIsNotTheSameAsNotUnderstanding:
+    """`other` and `unattributed` are two different ignorances.
+
+    `other` is a source we were told and have not learned to name — `qr`,
+    `novaposhta`, `rivo`. `unattributed` is having been told nothing: our own
+    pixels fired and no parameter says where the buyer came from. They shared
+    the key `other` until 2026-09-09, which put ₴1.36M of "we don't know"
+    under a word that reads as "miscellaneous small channels".
+    """
+
+    def test_a_pixel_is_not_a_channel(self):
+        assert TrafficMixin._classify_traffic({"_fbp": "fb.1"}) \
+            == ("pixel_only", "unattributed")
+        assert TrafficMixin._classify_traffic({"ttp": "T"}) \
+            == ("pixel_only", "unattributed")
+        assert TrafficMixin._classify_traffic({"_fbp": "fb.1", "ttp": "T"}) \
+            == ("pixel_only", "unattributed")
+
+    def test_nothing_at_all_is_not_a_channel(self):
+        assert TrafficMixin._classify_traffic({}) == ("unknown", "unattributed")
+
+    def test_a_source_we_were_told_but_cannot_place_stays_other(self):
+        """The distinction the split exists for: these carry a real tag, so
+        somebody could map them one day. `qr` and `novaposhta` are live
+        examples from production."""
+        for source in ("qr", "novaposhta", "rivo", "wishpicks"):
+            traffic_type, platform = TrafficMixin._classify_traffic(
+                {"utm_source": source, "utm_medium": "referral"})
+            assert platform == "other", f"{source} lost its tag"
+            assert traffic_type == "organic"
+
+    def test_the_fallback_for_an_order_with_no_row_agrees(self):
+        """`_PLATFORM_EXPR` is what places an order the parser never saw. It
+        has to reach the same verdict as the classifier or the chart carries
+        two names for one state."""
+        assert "ELSE 'unattributed' END" in TrafficMixin._PLATFORM_EXPR
+        assert "'other'" not in TrafficMixin._PLATFORM_EXPR
+
+    @pytest.mark.parametrize("lang", ["en", "uk", "ru"])
+    def test_the_report_can_name_it(self, lang):
+        """It falls back to the raw key when a platform has no translation,
+        so an untranslated one reaches a human as `unattributed`."""
+        from core.traffic_report import _platform_label
+
+        label = _platform_label("unattributed", lang)
+        assert label != "unattributed", f"{lang} is showing the raw key"
+        assert _platform_label("other", lang) != label, "other must stay distinct"

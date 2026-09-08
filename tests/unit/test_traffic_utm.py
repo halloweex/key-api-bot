@@ -164,15 +164,15 @@ class TestClassify:
         2026-09-08, so which channel got the revenue depended on the order of
         two `if`s. On production that decided ₴4.55M over 180 days.
         """
-        assert classify({"_fbp": "fb.1.123"}) == ("pixel_only", "other")
-        assert classify({"ttp": "TTP123"}) == ("pixel_only", "other")
+        assert classify({"_fbp": "fb.1.123"}) == ("pixel_only", "unattributed")
+        assert classify({"ttp": "TTP123"}) == ("pixel_only", "unattributed")
 
     def test_both_pixels_is_the_common_case_and_still_names_no_platform(self):
         """1,969 of 2,210 production pixel-only orders carry both. The old
         rule called every one of them Facebook, on evidence that TikTok's
         pixel had fired too."""
         assert classify({"_fbp": "fb.1.123", "ttp": "TTP123"}) \
-            == ("pixel_only", "other")
+            == ("pixel_only", "unattributed")
 
     def test_a_click_still_beats_a_pixel(self):
         """The demotion is of pixels only: `_fbc` and `fbclid` follow a real
@@ -181,7 +181,7 @@ class TestClassify:
             == ("paid_likely", "facebook")
 
     def test_no_data_is_unknown(self):
-        assert classify({}) == ("unknown", "other")
+        assert classify({}) == ("unknown", "unattributed")
 
     def test_explicit_utm_beats_cookie(self):
         # Cookie persists 90 days; explicit organic UTM must win.
@@ -200,7 +200,7 @@ class TestEndToEnd:
         ("UTM: utm_source: fbads\nutm_medium: cpc",
          ("paid_confirmed", "facebook")),
         ("UTM: fbclid: IwAR123", ("paid_likely", "facebook")),
-        ("комментарий без меток", ("unknown", "other")),
+        ("комментарий без меток", ("unknown", "unattributed")),
     ])
     def test_comment_to_classification(self, comment, expected):
         assert classify(parse(comment)) == expected

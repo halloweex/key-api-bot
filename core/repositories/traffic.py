@@ -85,7 +85,7 @@ class TrafficMixin:
     # are the fallback for an order the parser never classified: no UTM row at
     # all, which the LEFT JOIN renders as NULL.
     _PLATFORM_EXPR = """COALESCE(u.platform,
-        CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END)"""
+        CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END)"""
     _TRAFFIC_TYPE_EXPR = """COALESCE(u.traffic_type,
         CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END)"""
 
@@ -284,11 +284,17 @@ class TrafficMixin:
         # been written the other way round. Which pixel fired is still
         # visible per order — `_build_evidence` puts both in the evidence
         # column, where a claim that weak belongs.
+        #
+        # `unattributed` rather than `other`, and the distinction is the whole
+        # point: `other` is a source we were *told* and have not learned to
+        # name (`qr`, `novaposhta`), which is a different kind of ignorance
+        # from having been told nothing. Folding them together is what made
+        # ₴1.36M read as "miscellaneous small channels" on the chart.
         if has_fbp or has_ttp:
-            return 'pixel_only', 'other'
+            return 'pixel_only', 'unattributed'
 
         # 15. No tracking data at all
-        return 'unknown', 'other'
+        return 'unknown', 'unattributed'
 
     _UTM_BATCH_SIZE = 1000
 
@@ -397,7 +403,7 @@ class TrafficMixin:
                 s.source_id,
                 s.sales_type,
                 COALESCE(u.platform,
-                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END
+                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END
                 ) AS platform,
                 COALESCE(u.traffic_type,
                     CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
@@ -416,7 +422,7 @@ class TrafficMixin:
         # to the raw u.platform column), and NULL != 'other' creates
         # separate groups that both map to 'other' after COALESCE → PK violation.
         _platform_expr = """COALESCE(u.platform,
-            CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END)"""
+            CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END)"""
         _traffic_type_expr = """COALESCE(u.traffic_type,
             CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END)"""
         _group_by = f"GROUP BY s.order_date, s.source_id, s.sales_type, {_platform_expr}, {_traffic_type_expr}"
@@ -699,7 +705,7 @@ class TrafficMixin:
         if platform:
             filters.append("""
                 COALESCE(u.platform,
-                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END
+                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END
                 ) = ?""")
             params.append(platform)
 
@@ -723,7 +729,7 @@ class TrafficMixin:
                     CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
                 ) AS traffic_type,
                 COALESCE(u.platform,
-                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END
+                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END
                 ) AS platform,
                 u.utm_source, u.utm_medium, u.utm_campaign, u.utm_content,
                 u.fbp, u.fbc, u.ttp, u.fbclid
@@ -864,7 +870,7 @@ class TrafficMixin:
         if platform:
             filters.append("""
                 COALESCE(u.platform,
-                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END
+                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END
                 ) = ?""")
             params.append(platform)
 
@@ -873,7 +879,7 @@ class TrafficMixin:
         # GROUP BY must repeat the COALESCE expressions (see refresh_traffic_gold_layer)
         campaign_expr = "COALESCE(u.utm_campaign, '')"
         platform_expr = """COALESCE(u.platform,
-            CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'other' END)"""
+            CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END)"""
         traffic_type_expr = """COALESCE(u.traffic_type,
             CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END)"""
 
