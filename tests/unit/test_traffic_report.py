@@ -8,6 +8,7 @@ attribution, which looks exactly like a week where nothing came from anywhere.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date
 
@@ -15,10 +16,12 @@ import pytest
 
 from core.traffic_report import (
     CAMPAIGN_FLOOR,
-    UNATTRIBUTED_WARN_PCT,
+    RECIPIENTS_ENV,
     TrafficReport,
+    audience,
     build_report,
     chart_view,
+    extra_recipients,
     format_report,
     format_report_rich,
 )
@@ -102,53 +105,43 @@ class TestItAsksWhatTheTabAsks:
         assert (report.start, report.end) == (date(2026, 8, 31), date(2026, 9, 6))
 
 
-class TestAttributionQuality:
+class TestWhatIsEvidenceAndWhatIsInference:
+    """The headline number, and the one this got wrong first.
+
+    It used to report the `unknown` bucket as "arrived with no tracking" —
+    5% of the week it first ran, with a tick — while 251 of those 336 orders
+    carried no UTM values at all. `unknown` means "no tracking data
+    whatsoever" and most untracked orders are not in it, so the threshold
+    set against it could never have fired.
+    """
+
     @pytest.mark.asyncio
-    async def test_the_unattributed_share_is_of_orders_not_revenue(self):
-        """Revenue would flatter it: an untracked order is usually a small
-        one, and the question is how many orders we cannot place."""
+    async def test_only_the_paid_bucket_counts_as_a_named_campaign(self):
+        """A campaign *is* `utm_campaign`, and that is what puts an order in
+        `paid`. Everything else is placed by inference."""
         report = await _report()
-        assert report.unattributed_pct == pytest.approx(40 / 300 * 100)
+        assert report.named_campaign_orders == 120
+        assert report.named_pct == pytest.approx(120 / 300 * 100)
 
     @pytest.mark.asyncio
-    async def test_a_bad_week_is_marked_and_a_good_one_is_not(self):
-        clean = await _report()
-        assert "✅" in format_report_rich(clean, None, "en")
-
-        noisy = await _report(FakeStore(
-            analytics=lambda cur: _analytics(1.0, unknown_orders=120)))
-        assert noisy.unattributed_pct > UNATTRIBUTED_WARN_PCT
-        assert "⚠️" in format_report_rich(noisy, None, "en")
+    async def test_the_pixel_and_unknown_buckets_are_not_evidence_of_a_campaign(self):
+        """Both say something about the channel and nothing about the ad."""
+        report = await _report()
+        by_name = {b.name: b.orders for b in report.buckets}
+        assert by_name["pixel_only"] and by_name["unknown"]
+        assert report.named_campaign_orders < report.orders - by_name["unknown"]
 
     @pytest.mark.asyncio
-    async def test_the_sentence_agrees_with_the_table_it_introduces(self):
-        """It used to say every share below was "of the rest", while the
-        table put untracked orders in a row of their own and took shares of
-        everything. Spotted on the first live render: the words and the
-        arithmetic disagreed."""
+    async def test_the_sentence_states_the_count_and_never_judges_it(self):
+        """A verdict nobody can calibrate is how a tick came to sit over a
+        number that was wrong twice over."""
         report = await _report()
         html = format_report_rich(report, None, "en")
-        assert "of the rest" not in html
-        assert "a row of their own" in html
-
-    @pytest.mark.asyncio
-    async def test_every_platform_the_data_can_carry_has_a_name(self):
-        """`other` and a bare `google` both turned up in the first live
-        render as raw keys — `google` because the campaigns query does not
-        make the ads/organic split the analytics aggregation does."""
-        from core.traffic_report import _platform_label
-
-        for key in ("facebook", "instagram", "tiktok", "email", "manager",
-                    "organic", "unknown", "other", "google", "google_ads",
-                    "google_organic"):
-            for lang in ("en", "uk", "ru"):
-                assert _platform_label(key, lang) != key or key in (
-                    "facebook", "instagram", "tiktok",
-                ), f"{key}/{lang} is showing its raw key"
+        assert "A campaign can be named for 120 of 300 orders (40%)" in html
+        assert "✅" not in html and "⚠️" not in html
 
     @pytest.mark.asyncio
     async def test_it_says_what_the_share_was_last_week(self):
-        """A share that doubled matters more than the share itself."""
         report = await _report()
         assert "Last week it was" in format_report_rich(report, None, "en")
 
@@ -157,8 +150,8 @@ class TestAttributionQuality:
             start=date(2026, 8, 31), end=date(2026, 9, 6), sales_type="retail",
             revenue=0.0, orders=0, previous_revenue=0.0, previous_orders=0,
         )
-        assert empty.unattributed_pct is None
-        assert empty.previous_unattributed_pct is None
+        assert empty.named_pct is None
+        assert empty.previous_named_pct is None
 
 
 class TestPlatformsAndCampaigns:
@@ -266,6 +259,73 @@ class TestRendering:
         assert "Paid ads" in text and "No tracking" in text
         assert "bf_broad" in text
         assert "<table" not in text, "the fallback is lines, not a document"
+
+
+# ─── Who the report is written to ───────────────────────────────────────────
+
+
+class TestTheAudienceList:
+    """`KS_TRAFFIC_REPORT_RECIPIENTS` widens the report past the admins.
+
+    Admins-only was the shipped decision, and it stays the default: the
+    traffic tab is in the default set for both `viewer` and `editor`, so
+    "everyone who can open it" is seventeen of eighteen accounts and is not
+    the sentence anybody said. The env list is the sentence — written where
+    it can change without a deploy, and empty until somebody writes in it.
+
+    A list that decides who gets a message on their phone has to fail in one
+    direction only: a malformed entry may cost that entry and never anybody
+    else's, and it may never invent a recipient.
+    """
+
+    def test_unset_means_nobody_extra(self, monkeypatch):
+        monkeypatch.delenv(RECIPIENTS_ENV, raising=False)
+        assert extra_recipients() == []
+        assert audience([111, 222]) == [111, 222]
+
+    def test_empty_and_whitespace_are_not_recipients(self, monkeypatch):
+        """`KS_TRAFFIC_REPORT_RECIPIENTS=` and a stray trailing comma are how
+        the variable actually looks after somebody edits it by hand."""
+        for value in ("", "   ", ",", " , , "):
+            monkeypatch.setenv(RECIPIENTS_ENV, value)
+            assert extra_recipients() == [], value
+            assert audience([111]) == [111], value
+
+    def test_a_list_is_added_to_the_admins(self, monkeypatch):
+        monkeypatch.setenv(RECIPIENTS_ENV, "333,444")
+        assert extra_recipients() == [333, 444]
+        assert audience([111, 222]) == [111, 222, 333, 444]
+
+    def test_semicolons_and_spaces_are_tolerated(self, monkeypatch):
+        """Nobody reads a variable's grammar before typing in it."""
+        monkeypatch.setenv(RECIPIENTS_ENV, " 333 ; 444 , 555 ")
+        assert extra_recipients() == [333, 444, 555]
+
+    def test_a_malformed_entry_costs_only_itself(self, monkeypatch, caplog):
+        """Raising here would take the report away from everybody to punish
+        one typo — the opposite of what a reporting job should do."""
+        monkeypatch.setenv(RECIPIENTS_ENV, "333,not-an-id,444")
+        with caplog.at_level(logging.WARNING):
+            assert extra_recipients() == [333, 444]
+        assert "not-an-id" in caplog.text
+
+    def test_an_admin_listed_again_is_written_to_once(self, monkeypatch):
+        """The two lists are maintained by hand and will overlap. A duplicate
+        here is a second message to the same phone."""
+        monkeypatch.setenv(RECIPIENTS_ENV, "222,333,333")
+        assert audience([111, 222]) == [111, 222, 333]
+
+    def test_the_order_is_stable_and_admins_come_first(self, monkeypatch):
+        """`group_by_language` and the send ledger both walk this list; an
+        order that moved between ticks would make two runs incomparable."""
+        monkeypatch.setenv(RECIPIENTS_ENV, "555,444")
+        assert audience([222, 111]) == [222, 111, 555, 444]
+
+    def test_ids_that_arrive_as_strings_are_still_ids(self, monkeypatch):
+        """`ADMIN_USER_IDS` is parsed out of the environment too, so its
+        members are not guaranteed to be ints by the time they reach here."""
+        monkeypatch.setenv(RECIPIENTS_ENV, "333")
+        assert audience(["111", "222"]) == [111, 222, 333]
 
 
 # ─── The scheduled job ──────────────────────────────────────────────────────
@@ -405,12 +465,79 @@ class TestTheScheduledJob:
     async def test_it_writes_only_to_admins(self, tmp_path, monkeypatch):
         """The tab is visible to seventeen of eighteen dashboard accounts;
         this report is not."""
+        monkeypatch.delenv(RECIPIENTS_ENV, raising=False)
         store = await _duck_store(tmp_path)
         try:
             await _seed_gold(store)
             scheduler = self._wire(monkeypatch, store, tmp_path)
             sent = self._capture(monkeypatch)
             await scheduler._run_traffic_report()
+            written_to = {uid for call in sent["rich"] for uid in call["chat_ids"]}
+            assert written_to == set(self.ADMINS)
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_listed_reader_is_written_to(self, tmp_path, monkeypatch):
+        """The list is only a list until the job reads it. This is the
+        variable reaching an actual send, which is the half that a unit test
+        of `audience()` cannot show."""
+        monkeypatch.setenv(RECIPIENTS_ENV, "999")
+        store = await _duck_store(tmp_path)
+        try:
+            await _seed_gold(store)
+            scheduler = self._wire(monkeypatch, store, tmp_path)
+            sent = self._capture(monkeypatch)
+            result = await scheduler._run_traffic_report()
+
+            written_to = {uid for call in sent["rich"] for uid in call["chat_ids"]}
+            assert written_to == set(self.ADMINS) | {999}
+            assert result["recipients"] == len(self.ADMINS) + 1
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_listed_reader_gets_their_own_language(
+        self, tmp_path, monkeypatch,
+    ):
+        """Ukrainian for everyone, English for admins — the rule the whole
+        system uses, applied here without anybody configuring a thing. So a
+        curator added to the list splits the send in two rather than being
+        handed the admins' English.
+        """
+        monkeypatch.setenv(RECIPIENTS_ENV, "999")
+        store = await _duck_store(tmp_path)
+        try:
+            await _seed_gold(store)
+            scheduler = self._wire(monkeypatch, store, tmp_path)
+            sent = self._capture(monkeypatch)
+            await scheduler._run_traffic_report()
+
+            assert len(sent["rich"]) == 2, "one send per language, not per reader"
+            by_reader = {uid: call["html"]
+                         for call in sent["rich"] for uid in call["chat_ids"]}
+            # Headings are upper-cased by the house style, so compare folded.
+            assert by_reader[999] != by_reader[self.ADMINS[0]]
+            assert "traffic report" in by_reader[self.ADMINS[0]].lower()
+            assert "звіт по трафіку" in by_reader[999].lower()
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_list_still_delivers_to_the_admins(
+        self, tmp_path, monkeypatch,
+    ):
+        """One bad character in a variable nobody validates must not be the
+        reason a Monday report does not go out."""
+        monkeypatch.setenv(RECIPIENTS_ENV, "oops")
+        store = await _duck_store(tmp_path)
+        try:
+            await _seed_gold(store)
+            scheduler = self._wire(monkeypatch, store, tmp_path)
+            sent = self._capture(monkeypatch)
+            result = await scheduler._run_traffic_report()
+
+            assert result["sent"] is True
             written_to = {uid for call in sent["rich"] for uid in call["chat_ids"]}
             assert written_to == set(self.ADMINS)
         finally:
