@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.146
+
+- Record what the audit of per-user tabs moved
+- Cache a definite answer about the role matrix, never an error
+- A broadcast that carries money names the tab it belongs to
+- An unreadable user list must not hand back the tabs an admin took away
+- Resolve the session once per request, not once per gate
+- Document per-user tab access, and the two lines it dates
+
+
 ## 3.0.145
 
 - The dashboard-users fixture did not know about the new column
