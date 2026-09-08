@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.155
+
+- Say which half of the order count moved, in orders
+
+
 ## 3.0.154
 
 - Audit the access work against OWASP A01, and write the memo
