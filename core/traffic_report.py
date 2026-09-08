@@ -95,6 +95,39 @@ NO_CAMPAIGN = ("", "—", "none", "unknown", "(not set)")
 # code path that guessed.
 RECIPIENTS_ENV = "KS_TRAFFIC_REPORT_RECIPIENTS"
 
+# The first week this report is allowed to send, as the Monday it starts on.
+#
+# A report that ships on a Wednesday finds last week complete and unsent, and
+# delivers it that morning — a week that ended before the report existed,
+# arriving on a day nobody expects a weekly message. The ledger cannot say
+# "skip this one" because the ledger records deliveries, and DuckDB is held
+# open by the running process, so backdating a row there is not available
+# either. A date is.
+#
+# Unset means no floor, which is the right default for a report that has been
+# running: the guard exists for the first week of a new one.
+FIRST_WEEK_ENV = "KS_TRAFFIC_REPORT_FIRST_WEEK"
+
+
+def first_week() -> Optional[date]:
+    """The earliest week start this report may deliver, or None.
+
+    A value that is not a date is ignored with a warning rather than raising:
+    a typo in a start date must not stop a weekly report for good.
+    """
+    import logging
+    import os
+
+    raw = os.getenv(FIRST_WEEK_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "%s: %r is not an ISO date (YYYY-MM-DD), ignoring", FIRST_WEEK_ENV, raw)
+        return None
+
 
 def extra_recipients() -> List[int]:
     """Telegram ids from `KS_TRAFFIC_REPORT_RECIPIENTS`, comma-separated.

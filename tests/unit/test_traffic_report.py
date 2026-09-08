@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -328,6 +328,32 @@ class TestTheAudienceList:
         assert audience(["111", "222"]) == [111, 222, 333]
 
 
+class TestTheFirstWeekFloor:
+    """A report that ships on a Wednesday must not deliver last week that
+    morning: the week ended before the report existed, and it arrives on a
+    day nobody expects a weekly message."""
+
+    def test_unset_means_no_floor(self, monkeypatch):
+        from core.traffic_report import FIRST_WEEK_ENV, first_week
+
+        monkeypatch.delenv(FIRST_WEEK_ENV, raising=False)
+        assert first_week() is None
+
+    def test_it_reads_an_iso_date(self, monkeypatch):
+        from core.traffic_report import FIRST_WEEK_ENV, first_week
+
+        monkeypatch.setenv(FIRST_WEEK_ENV, "2026-09-07")
+        assert first_week() == date(2026, 9, 7)
+
+    def test_a_typo_does_not_stop_the_report_for_good(self, monkeypatch, caplog):
+        from core.traffic_report import FIRST_WEEK_ENV, first_week
+
+        monkeypatch.setenv(FIRST_WEEK_ENV, "next monday")
+        with caplog.at_level("WARNING"):
+            assert first_week() is None
+        assert any("ISO date" in r.message for r in caplog.records)
+
+
 # ─── The scheduled job ──────────────────────────────────────────────────────
 
 async def _duck_store(tmp_path):
@@ -405,6 +431,53 @@ class TestTheScheduledJob:
         monkeypatch.setattr("core.telegram_alerts.send_rich_message_http", _rich)
         monkeypatch.setattr("core.telegram_alerts.send_admin_message_http", _text)
         return sent
+
+    @pytest.mark.asyncio
+    async def test_a_week_older_than_the_floor_is_never_sent(
+        self, tmp_path, monkeypatch,
+    ):
+        """Checked before the ledger, because this is not a delivery
+        question: nothing about that week changes by tomorrow."""
+        from core.traffic_report import FIRST_WEEK_ENV, already_sent
+
+        store = await _duck_store(tmp_path)
+        try:
+            week_start = await _seed_gold(store)
+            monkeypatch.setenv(
+                FIRST_WEEK_ENV, (week_start + timedelta(days=7)).isoformat())
+            scheduler = self._wire(monkeypatch, store, tmp_path)
+            sent = self._capture(monkeypatch)
+
+            result = await scheduler._run_traffic_report()
+
+            assert result["sent"] is False
+            assert result["reason"] == "before_first_week"
+            assert sent["rich"] == [] and sent["text"] == []
+            async with store.connection() as conn:
+                assert not already_sent(conn, week_start, "retail"), (
+                    "skipping a week must not record it as delivered")
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_the_floor_week_itself_is_sent(self, tmp_path, monkeypatch):
+        """The boundary is inclusive: naming Monday the 7th means the week
+        that starts on the 7th is the first one delivered."""
+        from core.traffic_report import FIRST_WEEK_ENV
+
+        store = await _duck_store(tmp_path)
+        try:
+            week_start = await _seed_gold(store)
+            monkeypatch.setenv(FIRST_WEEK_ENV, week_start.isoformat())
+            scheduler = self._wire(monkeypatch, store, tmp_path)
+            sent = self._capture(monkeypatch)
+
+            result = await scheduler._run_traffic_report()
+
+            assert result["sent"] is True
+            assert len(sent["rich"]) == 1
+        finally:
+            await store.close()
 
     @pytest.mark.asyncio
     async def test_it_waits_while_the_warehouse_is_behind(self, tmp_path, monkeypatch):

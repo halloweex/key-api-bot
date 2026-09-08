@@ -1008,6 +1008,20 @@ system rule with nothing to configure — Ukrainian unless the reader is an
 admin or has chosen otherwise in the bot — so the send splits per language,
 not per reader.
 
+**`KS_TRAFFIC_REPORT_FIRST_WEEK`** names the earliest week the report may
+deliver, as the Monday that week starts on, inclusive. A report that ships
+mid-week finds last week complete and unsent and delivers it the next
+morning — a week that ended before the report existed, arriving on a day
+nobody expects a weekly message. The ledger cannot express "skip this one":
+it records deliveries, marking that week delivered would be a lie in the one
+table that answers whether a week went out, and backdating it is not
+available anyway while DuckDB is held open by the running process. Checked
+**before** the ledger, because nothing about that week changes by tomorrow,
+and skipping a week does **not** record it as sent — the guard defers, it
+does not consume. Unset means no floor, which is right for a report already
+running; this exists for the first week of a new one. Set to `2026-09-07` in
+production, so the first delivery is Monday 2026-09-14.
+
 This is the **only** `chat_ids` override in the repository that can widen an
 audience rather than narrow one, and `tests/unit/test_alert_recipients.py`
 says so at the site of the guard.
