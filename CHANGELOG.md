@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.147
+
+- Show the access request in the UI, and let it be answered there
+
+
 ## 3.0.146
 
 - Record what the audit of per-user tabs moved
