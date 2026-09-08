@@ -177,13 +177,32 @@ def _load_fonts() -> Optional[_Fonts]:
 _FALLBACK_FACES: dict = {}
 
 
+_warned_about_fallback = False
+
+
 def _fallback_face(size: int):
+    """DejaVu at `size`, or None when this host has no DejaVu at all.
+
+    None is a real defect and not a quiet degradation: the primary face is
+    then asked to draw glyphs it does not have, and Pillow renders those as
+    empty boxes without a word. It cannot be fixed here — nothing else on the
+    host has the arrows — so it is said once, loudly, and the picture still
+    goes out with the boxes rather than being dropped.
+    """
+    global _warned_about_fallback
     from PIL import ImageFont
 
     if size not in _FALLBACK_FACES:
         path = _font_file(DEJAVU_PATHS, "DejaVuSans.ttf")
         _FALLBACK_FACES[size] = ImageFont.truetype(path, size) if path else None
-    return _FALLBACK_FACES[size]
+    face = _FALLBACK_FACES[size]
+    if face is None and not _warned_about_fallback:
+        _warned_about_fallback = True
+        logger.warning(
+            "No DejaVu on this host: %s will be drawn as empty boxes. "
+            "Install fonts-dejavu-core.", brand.FALLBACK_CHARS,
+        )
+    return face
 
 
 def _runs(text: str, font):

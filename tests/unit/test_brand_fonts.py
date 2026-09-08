@@ -189,3 +189,58 @@ class TestTheWeightAxisIsApplied:
         from core.weekly_report_image import _face
 
         assert _face(brand.brand_font("accent"), 40, "heading") is not None
+
+
+class TestBothImagesCanDraw:
+    """`core/` travels into both images, renderers included, so both need the
+    same two things or they disagree about what they can render.
+
+    Parsed from the Dockerfiles rather than remembered: the bot image had
+    neither until 2026-09-08, and nothing would have said so — a bot asked to
+    draw would have fallen back to text, or worse, drawn the brand faces
+    without the fallback and put empty boxes where the arrows go.
+    """
+
+    IMAGES = {"bot": ROOT / "Dockerfile", "web": ROOT / "Dockerfile.web"}
+
+    @pytest.mark.parametrize("name", sorted(IMAGES))
+    def test_it_copies_the_brand_assets(self, name):
+        assert "COPY assets/" in self.IMAGES[name].read_text(), name
+
+    @pytest.mark.parametrize("name", sorted(IMAGES))
+    def test_it_installs_the_fallback_face(self, name):
+        """python:3.14-slim ships no fonts at all, and the brand faces do not
+        carry the arrows — so DejaVu is a dependency, not a nicety."""
+        assert "fonts-dejavu-core" in self.IMAGES[name].read_text(), name
+
+
+class TestAMissingFallbackIsSaidOutLoud:
+    def test_it_warns_once_and_keeps_drawing(self, monkeypatch, caplog):
+        """Nothing on the host can supply the arrows, so this cannot be
+        repaired — but it must not pass in silence either."""
+        import core.weekly_report_image as image
+
+        monkeypatch.setattr(image, "_font_file", lambda paths, mpl: None)
+        monkeypatch.setattr(image, "_FALLBACK_FACES", {})
+        monkeypatch.setattr(image, "_warned_about_fallback", False)
+
+        with caplog.at_level("WARNING"):
+            assert image._fallback_face(40) is None
+            assert image._fallback_face(41) is None
+
+        warnings = [r for r in caplog.records if "DejaVu" in r.message]
+        assert len(warnings) == 1, "said once, not once per size"
+        assert "fonts-dejavu-core" in warnings[0].message
+
+    def test_without_a_fallback_the_text_is_still_drawn_whole(self, monkeypatch):
+        """Boxes are bad; dropping the label would be worse."""
+        import core.weekly_report_image as image
+
+        fonts = image._load_fonts()
+        if fonts is None:
+            pytest.skip("no fonts on this host")
+        monkeypatch.setattr(image, "_font_file", lambda paths, mpl: None)
+        monkeypatch.setattr(image, "_FALLBACK_FACES", {})
+        monkeypatch.setattr(image, "_warned_about_fallback", True)
+
+        assert image._runs("▼ 22.4%", fonts.label) == [("▼ 22.4%", fonts.label)]

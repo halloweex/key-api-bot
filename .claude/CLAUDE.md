@@ -872,7 +872,14 @@ right). The card is the brand's hero surface — bordeaux with a lime chip and
 pink labels — and the charts sit on the off-white canvas. There is no red and
 no green in the palette, so the arrow carries the sign and the colour carries
 the brand. The flower and wordmark are greyscale masks in `assets/brand/`,
-tinted at draw time; `Dockerfile.web` COPYs `assets/`. `brand_font(role)`
+tinted at draw time. **Both images carry the fonts and the marks** — `core/`
+travels into each, renderers included, so both COPY `assets/` and both apt
+`fonts-dejavu-core`; the bot had neither until 2026-09-08 and nothing said
+so. DejaVu is a dependency there, not decoration: it is the fallback face
+for the arrows, and with the brand faces present but DejaVu absent the
+arrows become empty boxes. That case now logs a warning once and still
+draws, and `tests/unit/test_brand_fonts.py` parses both Dockerfiles so the
+two cannot drift. `brand_font(role)`
 finds the brand faces in `assets/fonts/`, where both now ship with their OFL
 licences: Libre Franklin as Google Fonts' single **variable** file, so a
 weight is an axis and not a second path — `_face()` sets Medium for body and
