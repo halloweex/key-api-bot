@@ -873,10 +873,24 @@ pink labels — and the charts sit on the off-white canvas. There is no red and
 no green in the palette, so the arrow carries the sign and the colour carries
 the brand. The flower and wordmark are greyscale masks in `assets/brand/`,
 tinted at draw time; `Dockerfile.web` COPYs `assets/`. `brand_font(role)`
-looks for the brand faces under `assets/fonts/` and the renderers fall back
-to DejaVu — the font files are not in the repository yet (they are OFL, from
-github.com/google/fonts). The brand book itself is outside the repo; see the
-memory note `reference_brand_book`.
+finds the brand faces in `assets/fonts/`, where both now ship with their OFL
+licences: Libre Franklin as Google Fonts' single **variable** file, so a
+weight is an axis and not a second path — `_face()` sets Medium for body and
+Bold for headings, and both loaders go through it, because calling
+`truetype` directly gave every "bold" chart label the default Regular
+instance. The renderers still fall back to DejaVu when the files are absent.
+
+**Neither brand face covers everything, so the drawing is run-based.** Libre
+Franklin has Latin, Cyrillic, digits and ₴ but not the arrows `▼▲`;
+Instrument Serif is Latin and digits alone, which is why the headline number
+is set in it and the ₴ beside it is not. Pillow has no font fallback and
+draws a missing glyph as `.notdef` in silence, so `_text`/`_len` split a
+string on `brand.FALLBACK_CHARS` and draw those characters from DejaVu at
+the same size; where DejaVu *is* the primary face the run is the same file
+and the output is identical, which is why it is unconditional rather than a
+branch. `tests/unit/test_brand_fonts.py` computes the gap from the shipped
+files and fails if `FALLBACK_CHARS` drifts either way. The brand book itself
+is outside the repo; see the memory note `reference_brand_book`.
 
 **The shop bot's voice rules apply to what the report says**, where they
 translate: one emoji per screen and it is a pointer (the verdict's ✅/🚀/⚠️,
