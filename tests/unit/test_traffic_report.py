@@ -121,6 +121,32 @@ class TestAttributionQuality:
         assert "⚠️" in format_report_rich(noisy, None, "en")
 
     @pytest.mark.asyncio
+    async def test_the_sentence_agrees_with_the_table_it_introduces(self):
+        """It used to say every share below was "of the rest", while the
+        table put untracked orders in a row of their own and took shares of
+        everything. Spotted on the first live render: the words and the
+        arithmetic disagreed."""
+        report = await _report()
+        html = format_report_rich(report, None, "en")
+        assert "of the rest" not in html
+        assert "a row of their own" in html
+
+    @pytest.mark.asyncio
+    async def test_every_platform_the_data_can_carry_has_a_name(self):
+        """`other` and a bare `google` both turned up in the first live
+        render as raw keys — `google` because the campaigns query does not
+        make the ads/organic split the analytics aggregation does."""
+        from core.traffic_report import _platform_label
+
+        for key in ("facebook", "instagram", "tiktok", "email", "manager",
+                    "organic", "unknown", "other", "google", "google_ads",
+                    "google_organic"):
+            for lang in ("en", "uk", "ru"):
+                assert _platform_label(key, lang) != key or key in (
+                    "facebook", "instagram", "tiktok",
+                ), f"{key}/{lang} is showing its raw key"
+
+    @pytest.mark.asyncio
     async def test_it_says_what_the_share_was_last_week(self):
         """A share that doubled matters more than the share itself."""
         report = await _report()

@@ -370,9 +370,9 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         RU: "{revenue} с {orders} заказов, {delta} к прошлой неделе.",
     },
     "traffic.unattributed": {
-        EN: "{share}% of orders arrived with no tracking at all, so every share below is of the rest.",
-        UK: "{share}% замовлень прийшли зовсім без міток, тому всі частки нижче — від решти.",
-        RU: "{share}% заказов пришли вообще без меток, поэтому все доли ниже — от остальных.",
+        EN: "{share}% of orders arrived with no tracking: they are a row of their own below, but where they came from is not knowable.",
+        UK: "{share}% замовлень прийшли без міток: вони окремим рядком нижче, але звідки вони — невідомо.",
+        RU: "{share}% заказов пришли без меток: они отдельной строкой ниже, но откуда они — неизвестно.",
     },
     "traffic.unattributed_was": {
         EN: "Last week it was {was}%.",
@@ -420,6 +420,8 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "traffic.platform.manager": {EN: "Manager", UK: "Менеджер", RU: "Менеджер"},
     "traffic.platform.organic": {EN: "Organic", UK: "Органіка", RU: "Органика"},
     "traffic.platform.unknown": {EN: "Unknown", UK: "Невідомо", RU: "Неизвестно"},
+    "traffic.platform.google": {EN: "Google", UK: "Google", RU: "Google"},
+    "traffic.platform.other": {EN: "Other", UK: "Інше", RU: "Прочее"},
 
     # ── The card ──
     "report.vs_last_week": {
