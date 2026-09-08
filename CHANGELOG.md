@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.157
+
+- The admin page was told nine tabs where the answer was six
+
+
 ## 3.0.156
 
 - Give the bot image the fonts too, and say so when the fallback is missing
