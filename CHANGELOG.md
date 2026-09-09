@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.165
+
+- Let the diagnostician see the disk it is asked to diagnose
+- Take the gate's volumes with its containers
+
+
 ## 3.0.164
 
 - Watch whether the data still means anything, not only that it arrived intact
