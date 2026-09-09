@@ -658,6 +658,101 @@ def _orders_without_line_items_check(
         ),
     )]
 
+def _attribution_coverage_check(
+    conn,
+    severity: "Severity" = None,
+    window_days: int = 7,
+    baseline_days: int = 28,
+    floor_pct: float = 15.0,
+    halved_against_baseline: float = 0.5,
+    min_orders: int = 40,
+) -> List[IntegrityIssue]:
+    """Are the website's orders still arriving with a campaign tag?
+
+    THE FAILURE THIS EXISTS FOR
+
+    On 2026-07-20/21 the Shopify order-comment template changed — its average
+    length went from ~700 to ~1350 characters — and from that day
+    `utm_source`, `utm_medium` and `utm_campaign` stopped appearing in it.
+    `utm_lang` and the pixel cookies kept coming, so nothing looked broken.
+    The share of website orders carrying a campaign tag fell from 34% to
+    5.5% and stayed there for **five weeks**, and nobody was told.
+
+    Nothing in this system could have told them, and that is the point worth
+    writing down. The reconciliations compare DuckDB against Postgres against
+    ClickHouse against KeyCRM — and every store faithfully recorded "no tag",
+    so they agreed perfectly. `validation_passed` counts rows and checksums
+    revenue, and revenue never moved: the orders kept coming, only their
+    labels stopped. The platform chart actively hid it, because pixel-only
+    orders were being counted as Facebook until 2026-09-09. Every guard here
+    watches whether data is transported faithfully; not one asked whether it
+    still means anything.
+
+    WHY THESE NUMBERS
+
+    Measured over the twelve complete retail weeks to 2026-09-06, the share
+    of source-4 orders carrying `utm_campaign` ran 34.3, 32.2, 29.3, 27.7,
+    24.0, 20.5 — then 8.2, 5.5, 9.1, 6.2, 5.5 through the outage, and 21.2 as
+    it partly recovered. A floor of 15% fires on the second week of the
+    outage and on none of the healthy ones.
+
+    The floor alone would miss a fall from 34% to 16%, which is the same
+    failure caught early, so a halving against the trailing 28 days fires
+    too. Both are WARN: nothing is corrupted and no repair exists here — the
+    fix is on the website — so this belongs in the 09:00 digest and not in a
+    page at 3am.
+
+    Website orders only (`source_id = 4`). An order taken by hand in the
+    Instagram inbox cannot carry a tag and never will, so including those
+    would measure the channel mix rather than the tagging.
+    """
+    severity = severity or Severity.WARN
+
+    def coverage(days_ago_from: int, days_ago_to: int) -> Tuple[int, int]:
+        row = conn.execute(f"""
+            SELECT COUNT(*),
+                   COALESCE(SUM(CASE WHEN u.utm_campaign IS NOT NULL
+                                     THEN 1 ELSE 0 END), 0)
+            FROM silver_orders s
+            LEFT JOIN silver_order_utm u ON u.order_id = s.id
+            WHERE s.source_id = 4
+              AND NOT s.is_return
+              AND s.is_active_source
+              AND s.order_date >= CURRENT_DATE - INTERVAL '{days_ago_from} days'
+              AND s.order_date <  CURRENT_DATE - INTERVAL '{days_ago_to} days'
+        """).fetchone()
+        return int(row[0] or 0), int(row[1] or 0)
+
+    orders, tagged = coverage(window_days, 0)
+    if orders < min_orders:
+        # Too few to say anything. A quiet week must not read as an outage.
+        return []
+
+    pct = tagged / orders * 100.0
+    base_orders, base_tagged = coverage(window_days + baseline_days, window_days)
+    base_pct = (base_tagged / base_orders * 100.0) if base_orders >= min_orders else None
+
+    below_floor = pct < floor_pct
+    halved = base_pct is not None and base_pct > 0 and pct < base_pct * halved_against_baseline
+    if not (below_floor or halved):
+        return []
+
+    trend = "" if base_pct is None else f" Over the previous {baseline_days} days it was {base_pct:.0f}%."
+    return [IntegrityIssue(
+        check_name="attribution_coverage_website",
+        table_name="silver_order_utm",
+        severity=severity,
+        count=orders - tagged,
+        description=(
+            f"{pct:.0f}% of website orders in the last {window_days} days "
+            f"carry a campaign tag ({tagged} of {orders})." + trend +
+            " Orders are arriving; their UTM parameters are not. Nothing "
+            "downstream can see this — every store copies the absence "
+            "faithfully and revenue is unaffected."
+        ),
+    )]
+
+
 def classify_order_discrepancies(
     dk: Dict[int, Dict[str, Any]],
     kc: Dict[int, Dict[str, Any]],
@@ -1338,6 +1433,15 @@ def check_internal_integrity(conn) -> List[IntegrityIssue]:
     except Exception as exc:  # silver_orders may not exist yet on a fresh DB
         logger.debug("silver_arc check skipped: %s", exc)
 
+    # The first check here that reads the *meaning* of the data rather than
+    # the fidelity of its copying. Everything above proves rows moved intact;
+    # this asks whether they still say anything. See the docstring for the
+    # five-week outage that nothing else could have seen.
+    try:
+        issues += _attribution_coverage_check(conn)
+    except Exception as exc:  # silver_order_utm may not exist yet
+        logger.debug("attribution_coverage check skipped: %s", exc)
+
     # Fourteen Gold columns against a recompute from Silver. Report-only by
     # construction: an integrity finding cannot reach validation_passed.
     try:
@@ -1569,6 +1673,10 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("customer_profile_", "Rebuilt on the same tick; survives one — suspect Silver"),
     ("freshness_", "The sync, not the warehouse: see the sync block in /api/health"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),
+    # No lever in this repository: the tags stop arriving at the website, so
+    # the fix is the order-comment template and nothing here can repair it.
+    ("attribution_coverage_",
+     "Not ours to repair: check the shop's order-comment template still writes utm_source/medium/campaign"),
     ("pk_uniqueness_", "Duplicate primary key — a human with a query only"),
     ("fk_orphan_", "Re-sync the parent first; never delete the children"),
     ("not_null_", "Find the sync path that wrote it, then fix the rows"),
