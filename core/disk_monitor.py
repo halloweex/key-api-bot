@@ -419,6 +419,51 @@ def evaluate_growth(
     )
 
 
+def evidence_for_growth(
+    *,
+    current: dict,
+    baseline: Optional[dict],
+    sample: dict,
+    window_hours: int = 168,
+) -> dict:
+    """The whole group table, for the ledger the diagnostician can read.
+
+    The message carries one mover and a total, because it is three lines. This
+    is every group with its delta, which is the difference between "mostly
+    unattributed" and knowing that nothing else moved at all.
+
+    It does **not** try to say what inside the remainder grew — this process
+    cannot see it, and pretending otherwise is how a confident wrong cause gets
+    written down. Naming the remainder and proving the named groups held still
+    is the honest half; the other half is the agent's `du`, which runs on the
+    host.
+
+    Pure. Bounded by construction: there are seven groups, not seven thousand.
+    """
+    groups = sorted(set(current) | set(baseline or {}))
+    rows = []
+    for g in groups:
+        now_b = int(current.get(g, 0))
+        was_b = int((baseline or {}).get(g, 0))
+        row = {"group": g, "gb": round(now_b / _GB, 3)}
+        if baseline is not None:
+            row["delta_gb"] = round((now_b - was_b) / _GB, 3)
+        rows.append(row)
+    rows.sort(key=lambda r: -r.get("delta_gb", r["gb"]))
+
+    payload: dict = {
+        "window_hours": window_hours,
+        "disk_pct_used": sample.get("disk_pct_used"),
+        "disk_free_gb": sample.get("disk_free_gb"),
+        "groups": rows,
+    }
+    if baseline is None:
+        # Says why there are no deltas, rather than leaving a reader to infer
+        # that nothing moved.
+        payload["baseline"] = "none in window — first samples after a deploy"
+    return payload
+
+
 def sample_data_dir(data_dir: str, disk_used_bytes: Optional[int] = None) -> dict:
     """Bytes per path group for the whole data directory.
 

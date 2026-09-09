@@ -75,12 +75,35 @@ $(cat "$task")"
     # The allowlist IS the safety model: prompt injection from a log line can
     # at worst waste a diagnosis, never touch anything. ks_readonly cannot
     # write even if asked nicely.
+    #
+    # The four docker read verbs were added 2026-09-09. The disk alert's own
+    # remediation line says "docker system df", and the agent was not allowed
+    # to run it — we were asking for a command we had forbidden. On the 09-07
+    # volume leak it was refused `docker volume ls`, reasoned around it with
+    # `du`, and reached the right *what* (anonymous volumes) with the wrong
+    # *why*: it blamed bot redeploys, where the cause was the CI gate removing
+    # its containers without `-v`. `volume inspect` is what separates those —
+    # it names the labels and the mountpoint, so the agent can say whose
+    # volume it is instead of guessing.
+    #
+    # The verbs are spelled out rather than `docker:*` because the prefix is
+    # doing the work: "docker volume ls" does not match "docker volume rm" or
+    # "docker volume prune", and "docker system df" does not match
+    # "docker system prune". Nothing here writes.
+    #
+    # Comments cannot go inside the continued argument list below: a `#` line
+    # between two `\`-continuations swallows the backslash and breaks the
+    # command. Found by breaking it.
     report="$(ANTHROPIC_API_KEY="$(api_key)" timeout 300 claude -p "$prompt" \
         --model sonnet \
         --max-turns 25 \
         --allowedTools \
             "Bash(docker logs:*)" \
             "Bash(docker ps:*)" \
+            "Bash(docker system df:*)" \
+            "Bash(docker volume ls:*)" \
+            "Bash(docker volume inspect:*)" \
+            "Bash(docker image ls:*)" \
             "Bash(docker exec -i ks-postgres psql -U ks_readonly:*)" \
             "Bash(docker exec ks-postgres psql -U ks_readonly:*)" \
             "Bash(curl -s:*)" \

@@ -1681,6 +1681,7 @@ class BackgroundScheduler:
             UNATTRIBUTED,
             evaluate_disk_capacity,
             evaluate_growth,
+            evidence_for_growth,
             fetch_dir_sample_at_age,
             fetch_sample_at_age,
             insert_dir_samples,
@@ -1837,8 +1838,22 @@ class BackgroundScheduler:
                     "→ du -xd1 data; du -sx /var /opt; docker system df. "
                     "Never trigger the compact — it stops the containers"
                 )
+                # The three-line message names one mover; this carries the
+                # whole group table, so the reader can see that everything
+                # else held still. Against the baseline the comparison
+                # actually used — the bootstrap path differences at 6h, and
+                # handing it the 168h one would caption the numbers wrongly.
+                baseline = (
+                    dir_six_ago
+                    if growth is not None and growth.window_hours == 6
+                    else dir_week_ago
+                )
                 delivered = await raise_alert(
                     msg, conditions=[disk_key], bucket=disk_key, group="disk",
+                    evidence=evidence_for_growth(
+                        current=dir_now, baseline=baseline, sample=sample,
+                        window_hours=growth.window_hours if growth else 168,
+                    ),
                 )
                 result["alert_fired"] = delivered > 0
             except Exception as e:
