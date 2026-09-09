@@ -130,6 +130,24 @@ class TestTheStoreTestsActuallyRun:
         assert image.group(0) in gate
         assert image.group(0) in compose
 
+    def test_the_gate_takes_its_volumes_with_its_containers(self):
+        """`docker rm` without `-v` orphans the anonymous volume each store
+        container mints, so the gate leaked two per run. Measured on the VPS
+        2026-09-09: 173 dangling volumes, 7.13 GB — enough to take the disk
+        watchdog from WARN to CRITICAL, which is how it was found.
+
+        Asserted on the flag rather than on the comment beside it: a grep for
+        the reason passes while the behaviour regresses."""
+        gate = (REPO / "deploy" / "gate_with_stores.sh").read_text()
+        removals = re.findall(r"docker rm[^\n]*", gate)
+        assert removals, "the gate no longer removes its containers"
+        for line in removals:
+            flags = line.split('"')[0]
+            assert "-v" in flags, (
+                f"{line.strip()!r} removes containers without -v; every run "
+                "then leaves the stores' anonymous volumes on the host"
+            )
+
     def test_the_migrations_are_applied_before_the_suite(self):
         """`require_revision` refuses a schema that is behind or ahead, so an
         unmigrated database would fail every store test rather than skip
