@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.164
+
+- Watch whether the data still means anything, not only that it arrived intact
+- The products-intel fixture thought in UTC about a store that buckets in Kyiv
+
+
 ## 3.0.163
 
 - A weekly report should not deliver a week that ended before it existed
