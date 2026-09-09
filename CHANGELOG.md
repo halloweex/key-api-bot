@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.167
+
+- The CI database was declared ready by the server that was about to shut down
+- A 504 from the reclassify endpoint is the proxy giving up, not a failure
+
+
 ## 3.0.166
 
 
