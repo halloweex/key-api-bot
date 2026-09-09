@@ -198,6 +198,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
 
     # ── data-quality findings: business-shape checks ──
     "orders_without_line_items": _c("halfwritten_repair re-fetches them"),
+    # A condition, not an event: it holds for as long as the website keeps
+    # sending orders without their UTM parameters, and it clears the day the
+    # template is fixed. Nothing here can repair it, so it must not resolve
+    # itself on a quiet pass.
+    "attribution_coverage_website": _c(
+        "the shop's order-comment template stopped sending utm_source/medium/campaign"),
     "headline_vs_line_items": _c("never fully — the standing 436 are certificates"),
     "status_group_vs_return_list": _c("the stored group and the legacy list agree"),
     "goods_shipped_without_sale": _c("by design it never fully clears"),

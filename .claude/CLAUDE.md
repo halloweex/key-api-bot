@@ -2081,6 +2081,36 @@ same tick, so a consistent wrong value is reproduced on both sides — proven by
 injection: ±1000 on two orders, `status 12→19`, `source 1→2` all pass. Only
 reconciliation against KeyCRM sees those.
 
+**And reconciliation cannot see data that stops meaning anything**, which is
+the wider blind spot the July 2026 outage exposed. On 20–21 July the shop's
+order-comment template changed and stopped carrying `utm_source`,
+`utm_medium` and `utm_campaign`; website campaign coverage fell from 34% to
+5.5% and stayed there **five weeks**, and nobody was told. Nothing here could
+have told them: the reconciliations compare DuckDB against Postgres against
+ClickHouse against KeyCRM, and all four faithfully recorded the absence, so
+they agreed perfectly. `validation_passed` checksums revenue, which never
+moved — the orders kept coming, only their labels stopped. The platform chart
+hid it outright, because pixel-only orders were counted as Facebook until
+2026-09-09, so ~600 Facebook orders a month stayed on screen while the real
+number was 58. Every guard in this system watched whether data was
+transported faithfully; not one asked whether it still said anything.
+
+`_attribution_coverage_check` is the first that does, and it rides
+`dq_integrity_check` (01, 07, 13, 19) so it reaches people through the 09:00
+digest. It measures the share of **website** orders (`source_id = 4`) that
+carry a `utm_campaign` — an order taken by hand in the Instagram inbox cannot
+carry a tag and never will, so including those would measure the channel mix
+instead. WARN below **15%** over 7 days, or when that share has **halved**
+against the trailing 28 days; the floor alone would sleep through 34% → 16%,
+which is the same failure caught early. Numbers from the twelve complete
+weeks to 2026-09-06: healthy ran 20.5–34.3%, the outage 5.5–9.1%.
+Back-tested day by day over that history: **it would have fired first on
+2026-07-28**, one week after the break, and it is quiet today at 27.8%.
+
+Its `REMEDIATION` deliberately names no lever in this repository. The tags
+stop arriving at the website, so a warehouse rebuild would only recopy the
+absence; the entry sends the reader to the shop's order-comment template.
+
 The `sales_type` partition assertion (Gold known types == Silver total) is
 deliberately **not** part of `validation_passed`: no rebuild can invent a
 sales_type the code does not know, so it reports and stops rather than driving
