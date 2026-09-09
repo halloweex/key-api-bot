@@ -95,6 +95,20 @@ jobs:
             -e POSTGRES_INITDB_ARGS="--locale=C.UTF-8 --encoding=UTF8" \
             -v "$PWD/postgres/initdb:/docker-entrypoint-initdb.d:ro" \
             postgres:17.2-alpine
+          # Wait for the entrypoint to finish before waiting for the server.
+          # The image starts a *temporary* postgres to run the initdb scripts,
+          # then shuts it down and starts the real one — so `pg_isready` says
+          # yes to the temporary server, and the very next `psql` lands in the
+          # shutdown and fails with "the database system is shutting down".
+          # That is exactly how this failed on 2026-09-09: the first two runs
+          # passed on timing luck, and the third had to pull the image, which
+          # moved the poll into the gap. Waiting on the entrypoint's own line
+          # makes it timing-independent.
+          for _ in $(seq 1 90); do
+            docker logs ci-pg 2>&1 \
+              | grep -q "PostgreSQL init process complete" && break
+            sleep 1
+          done
           for _ in $(seq 1 60); do
             docker exec ci-pg pg_isready -U postgres -d ks >/dev/null 2>&1 && break
             sleep 1
@@ -137,6 +151,12 @@ jobs:
       - name: No store test may have skipped
         if: always()
         run: |
+          # No file means the suite never ran, and whichever step failed
+          # before it is the real error. Grepping a missing file here added
+          # two more ##[error] lines pointing at nothing, which is how the
+          # 2026-09-09 failure read as a skip problem when it was a startup
+          # race.
+          [ -f pytest.out ] || { echo "suite did not run — see the step above"; exit 0; }
           skipped=$(grep -c "needs a live PostgreSQL" pytest.out || true)
           if [ "$skipped" != "0" ]; then
             echo "::error::$skipped test(s) skipped for want of PostgreSQL"

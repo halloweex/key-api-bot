@@ -236,6 +236,32 @@ async def reclassify_traffic(
 
     Use after classification rule changes. Deletes silver_order_utm
     and re-parses everything from scratch.
+
+    **A 504 in the browser is expected and does not mean it failed.** The work
+    is synchronous and longer than any proxy will wait: 2026-09-09 it took
+    **281 s** for 32,966 orders, while nginx gave up well before that and
+    served the "warming up" page. The application still finished and returned
+    200. Read the outcome in the log, not in the response:
+
+        docker compose logs web | grep -E "Parsed UTM data for|reclassify"
+
+    A successful run prints `Parsed UTM data for N orders (M batches)`, then
+    `Refreshed gold_daily_traffic`, then `Request completed ... 200`.
+
+    Left synchronous on purpose. `backfill-utm` next door is a background task
+    with a status endpoint, and copying that shape here would buy a subsystem
+    for an operation run **twice in seven months** — the classification rules
+    changed on 2026-02-17 and 2026-09-08, and nothing else calls this. A
+    docstring costs less than a task registry, and the log already holds the
+    answer.
+
+    A client that hangs up does not stop the work, and the tab does not see
+    the middle of it. DuckDB *is* inconsistent for those minutes — the DELETE
+    commits on its own connection and the re-parse writes in batches of a
+    thousand on theirs — but the page reads Postgres, and Postgres keeps the
+    previous complete copy until `ship_after_reparse` replaces the whole table
+    at the end. So the window is invisible from the screen rather than merely
+    short.
     """
     store = await get_store()
 
