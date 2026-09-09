@@ -36,7 +36,19 @@ CH=gate-ch
 PW=gate-only
 
 cleanup() {
-    docker rm -f "$PG" "$CH" >/dev/null 2>&1 || true
+    # `-v`, or the gate leaks two volumes per run. Both images declare a VOLUME,
+    # so each `docker run` mints an anonymous one; removing the container without
+    # `-v` orphans it. Measured on the VPS 2026-09-09: **173 dangling volumes,
+    # 7.13 GB**, which is what took the disk watchdog from WARN on 07.09 to
+    # CRITICAL on 08.09 — the gate had quietly become the largest thing growing
+    # on the host.
+    #
+    # Safe by construction, which is why it is this flag and not a prune:
+    # `docker rm -v` removes only the anonymous volumes attached to the named
+    # containers. It cannot reach a named volume — and one of the orphans here
+    # *is* named (`key-api-bot_app-data`), so a blanket `docker volume prune`
+    # would be a different and much worse operation.
+    docker rm -f -v "$PG" "$CH" >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
