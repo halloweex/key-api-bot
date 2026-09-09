@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.166
+
+
+
 ## 3.0.165
 
 - Let the diagnostician see the disk it is asked to diagnose
