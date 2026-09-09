@@ -21,7 +21,8 @@ Skipped without `KS_PG_DSN`; `deploy/gate_with_stores.sh` supplies one.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -36,9 +37,30 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TODAY = date.today()
+# The store buckets orders by their **Kyiv** date, so the fixture has to think
+# in Kyiv too. It did not, and that cost two red CI runs: `date.today()` on a
+# UTC runner plus an `ordered_at` of `now_utc - 15 days` puts the previous
+# period's order at 00:11 Kyiv on the window's first day, inside the period it
+# exists to sit outside. Both failures were the same order — the current
+# period counted six instead of five, and momentum then had an empty previous
+# period to compare against.
+#
+# It is a three-hour flake: the shift only happens when the run starts between
+# 21:00 and 23:59 UTC. Both failing runs were at 21:11 and 21:30.
+#
+# Two changes make it impossible rather than unlikely. The day comes from
+# Kyiv, so `W` means what the store means; and every order is stamped at
+# **midday**, where no offset this codebase sees can move the calendar day.
+KYIV = ZoneInfo("Europe/Kyiv")
+TODAY = datetime.now(KYIV).date()
 W = (TODAY - timedelta(days=14), TODAY)          # current period
 PREV_DAYS = 15                                    # lands in the previous one
+
+
+def _ordered_at(days_ago: int) -> datetime:
+    """Midday Kyiv, `days_ago` days back — a timestamp no timezone can move."""
+    return datetime.combine(
+        TODAY - timedelta(days=days_ago), time(12, 0), tzinfo=KYIV)
 
 CATEGORIES = [(1, "Care", None), (2, "Makeup", None), (3, "Hair", None)]
 PRODUCTS = [
@@ -72,7 +94,6 @@ LINES = [
 
 
 async def _seed_duckdb(store):
-    now = datetime.now(timezone.utc)
     async with store.connection() as conn:
         conn.executemany("INSERT INTO categories (id,name,parent_id) VALUES (?,?,?)",
                          CATEGORIES)
@@ -81,7 +102,7 @@ async def _seed_duckdb(store):
         for oid, days, total in ORDERS:
             conn.execute("INSERT INTO orders (id,source_id,status_id,grand_total,"
                          "ordered_at,buyer_id,manager_id) VALUES (?,1,1,?,?,?,NULL)",
-                         [oid, total, now - timedelta(days=days), oid])
+                         [oid, total, _ordered_at(days), oid])
         conn.executemany("INSERT INTO order_products (id,order_id,product_id,name,"
                          "quantity,price_sold) VALUES (?,?,?,?,?,?)",
                          [(l, o, p, n, q, pr) for l, o, p, q, pr, n in LINES])
