@@ -4,6 +4,22 @@
 1. df -h /
 2. du -xd1 /opt/key-api-bot/data | sort -h | tail -10
 3. du -xd1 /var/lib/docker | sort -h | tail -5  (только чтение размеров)
-4. docker ps --size | tail -8
-5. psql: SELECT pg_size_pretty(pg_database_size('ks'));
+4. docker system df — сводка; если Local Volumes велики, следующий ход обязателен.
+5. docker volume ls -f dangling=true | wc -l — сколько томов ничем не занято.
+   Много (десятки) — почти наверняка анонимные тома от одноразовых
+   контейнеров. Чьи они, говорит docker volume inspect <имя>: Labels несут
+   com.docker.compose.project, Mountpoint — путь. НЕ утверждай владельца по
+   тому, какие образы часто передеплоиваются: 09.09.2026 так был назван бот,
+   а виноват был CI-гейт.
+6. docker ps --size | tail -8
+7. psql: SELECT pg_size_pretty(pg_database_size('ks'));
+Знание: анонимные тома. `docker rm` без `-v` оставляет том каждого
+контейнера, чей образ объявляет VOLUME. `deploy/gate_with_stores.sh` так терял
+по два тома за прогон и накопил 173 (7.13 ГБ) — это и был CRITICAL 08.09.2026;
+починено там же флагом `-v`. Если картина повторяется, ищи `docker rm` без
+`-v`, а не «частые передеплои».
+ВАЖНО: `docker volume prune` — НЕ рычаг для человека по умолчанию. Он сносит и
+ИМЕНОВАННЫЕ неиспользуемые тома; на этом хосте среди висячих был именованный
+`key-api-bot_app-data`. Безопасная форма отбирает только анонимные:
+`docker volume ls -qf dangling=true | grep -E '^[0-9a-f]{64}$' | xargs -r docker volume rm`.
 Знание: известный пожиратель — WAL/файлы рядом с analytics.duckdb (27 ГБ в августе); недельный компакт (вс 02:00 UTC) — единственная автоуборка, он ОСТАНАВЛИВАЕТ web и bot, его нельзя дёргать автоматикой. Ротация docker-логов 5×50 МБ на контейнер.

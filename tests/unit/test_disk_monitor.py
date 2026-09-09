@@ -751,3 +751,72 @@ class TestSplitGrowth:
         assert FS_WARN_GROWTH_GB_168H < FS_CRITICAL_GROWTH_GB_168H
         assert FS_WARN_GROWTH_GB_168H > WARN_GROWTH_GB_168H
         assert FS_CRITICAL_GROWTH_GB_168H > CRITICAL_GROWTH_GB_168H
+
+
+class TestEvidenceForGrowth:
+    """The group table the three-line message has no room for.
+
+    Every disk alert reached the ledger with `context IS NULL` until
+    2026-09-09, so the diagnostician was summoned eight times over the volume
+    leak and reasoned from `du` alone each time.
+    """
+
+    def _sample(self):
+        return {"disk_pct_used": 47.0, "disk_free_gb": 37.0}
+
+    def test_it_shows_the_mover_and_that_the_rest_held_still(self):
+        from core.disk_monitor import UNATTRIBUTED, evidence_for_growth
+        before = {UNATTRIBUTED: int(25.6 * _GB), "live_db": int(0.19 * _GB)}
+        after = {UNATTRIBUTED: int(31.2 * _GB), "live_db": int(0.19 * _GB)}
+        ev = evidence_for_growth(current=after, baseline=before,
+                                 sample=self._sample())
+        assert ev["window_hours"] == 168
+        assert ev["disk_free_gb"] == 37.0
+        top = ev["groups"][0]
+        assert top["group"] == UNATTRIBUTED
+        assert top["delta_gb"] == 5.6
+        assert all(g["delta_gb"] == 0.0 for g in ev["groups"][1:])
+
+    def test_worst_mover_leads(self):
+        """Sorted by delta, so the reader's eye lands on the cause."""
+        from core.disk_monitor import evidence_for_growth
+        before = {"a": 0, "b": 0, "c": 0}
+        after = {"a": int(1 * _GB), "b": int(4 * _GB), "c": int(2 * _GB)}
+        ev = evidence_for_growth(current=after, baseline=before,
+                                 sample=self._sample())
+        assert [g["group"] for g in ev["groups"]] == ["b", "c", "a"]
+
+    def test_a_group_that_appeared_since_the_baseline_counts_whole(self):
+        from core.disk_monitor import evidence_for_growth
+        ev = evidence_for_growth(current={"new": int(3 * _GB)}, baseline={},
+                                 sample=self._sample())
+        assert ev["groups"][0] == {"group": "new", "gb": 3.0, "delta_gb": 3.0}
+
+    def test_no_baseline_says_so_instead_of_implying_nothing_moved(self):
+        """Absent deltas and zero deltas are different answers."""
+        from core.disk_monitor import evidence_for_growth
+        ev = evidence_for_growth(current={"live_db": int(0.19 * _GB)},
+                                 baseline=None, sample=self._sample())
+        assert "baseline" in ev
+        assert "delta_gb" not in ev["groups"][0]
+
+    def test_it_never_guesses_what_is_inside_the_remainder(self):
+        """This process cannot see /var. Naming a cause it cannot observe is
+        exactly how the 09-07 diagnosis went wrong."""
+        import json
+        from core.disk_monitor import UNATTRIBUTED, evidence_for_growth
+        ev = evidence_for_growth(current={UNATTRIBUTED: int(31.2 * _GB)},
+                                 baseline={UNATTRIBUTED: int(25.6 * _GB)},
+                                 sample=self._sample())
+        blob = json.dumps(ev).lower()
+        for invented in ("docker", "volume", "/var", "image", "cause"):
+            assert invented not in blob, f"evidence invented {invented!r}"
+
+    def test_the_payload_stays_small(self):
+        """Seven groups, not seven thousand — but pin it, because the ledger
+        write is fire-and-forget with a one-second budget."""
+        import json
+        from core.disk_monitor import evidence_for_growth
+        big = {f"g{i}": i * _GB for i in range(50)}
+        ev = evidence_for_growth(current=big, baseline={}, sample=self._sample())
+        assert len(json.dumps(ev).encode()) < 8192
