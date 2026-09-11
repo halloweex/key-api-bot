@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.168
+
+- Ask whether a differing row was still in flight
+
+
 ## 3.0.167
 
 - The CI database was declared ready by the server that was about to shut down
