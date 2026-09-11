@@ -463,18 +463,51 @@ class TestSyncedColumnDualRole:
         # and stamps `updated_at` from Python, so the value dates that goal's
         # own change. Three rows at most, each with its own history.
         "app.revenue_goals": "updated_at",
+        # Added 2026-09-11 with the widened scan below. All seven are event times
+        # written when that row's event happened, so each dates its own row.
+        "app.celebrated_milestones": "celebrated_at",
+        "app.marketing_optouts": "opted_out_at",
+        "app.report_history": "created_at",
+        "app.sms_dlr_events": "first_seen_at",
+        "app.user_preferences": "updated_at",
+        # `parsed_at` is a column DEFAULT, so only the rows a reparse rewrites
+        # take a new value. This is the one that fired while the test was green.
+        "silver.order_utm": "parsed_at",
     }
     WHOLE_TABLE_STAMPS = {
         "app.sku_inventory_status": "updated_at",
     }
 
     def _dual_role(self):
-        from core.mirror_reconciliation import MIRRORED_TABLES, OPERATIONAL_TABLES
-        return {
-            s.pg_table: s
-            for s in tuple(MIRRORED_TABLES) + tuple(OPERATIONAL_TABLES)
-            if s.synced_column and s.synced_column in s.columns
-        }
+        """Every spec in the module, not the two tuples this first scanned.
+
+        Until 2026-09-11 it read `MIRRORED_TABLES` and `OPERATIONAL_TABLES`
+        only, and so covered four of eleven dual-role stamps: a guard whose
+        whole job is "the next one has to declare itself" was not looking at
+        `BOT_STATE_TABLES`, `SMS_TABLES`, `DASHBOARD_USER_TABLES`, or the two
+        standalone specs. `silver.order_utm.parsed_at` fired in production
+        while this test was green.
+
+        Walks the module instead, so a sixth group cannot reopen the blind
+        spot by existing.
+        """
+        import core.mirror_reconciliation as m
+        from core.mirror_reconciliation import MirroredTable
+
+        found = {}
+        for name in dir(m):
+            value = getattr(m, name)
+            if isinstance(value, MirroredTable):
+                specs = [value]
+            elif (isinstance(value, tuple) and value
+                  and all(isinstance(x, MirroredTable) for x in value)):
+                specs = list(value)
+            else:
+                continue
+            for spec in specs:
+                if spec.synced_column and spec.synced_column in spec.columns:
+                    found[spec.pg_table] = spec
+        return found
 
     def test_every_dual_role_spec_has_been_classified(self):
         """The guard: a new one fails here until somebody decides which it is."""
@@ -500,3 +533,114 @@ class TestSyncedColumnDualRole:
             assert specs[table].synced_column == column
             assert column in specs[table].ignore_columns, table
             assert column in specs[table].columns, "still shipped, still the clock"
+
+
+class TestGraceOnDifferingValues:
+    """A row written between the copy and the check legitimately differs.
+
+    `compare_bucket` has always asked whether such a row was in flight.
+    `compare_table` — the path every small table uses — did not, until
+    2026-09-11. The cost was a CRITICAL every morning naming three rows of
+    `reserve` that had moved minutes earlier: nine firings over ten days, with
+    the sample ids rotating each time, which is the signature of a race and not
+    of a stuck row.
+    """
+
+    def _spec(self, **kw):
+        from core.mirror_reconciliation import MirroredTable
+        base = dict(
+            pg_table="app.sku_inventory_status",
+            dk_table="sku_inventory_status",
+            columns=("offer_id", "reserve", "updated_at"),
+            key_columns=("offer_id",),
+            synced_column="updated_at",
+            full_replace=True,
+        )
+        base.update(kw)
+        return MirroredTable(**base)
+
+    def _sides(self, dk_reserve, pg_reserve, stamp):
+        dk = {470: (470, dk_reserve, stamp)}
+        pg = {470: (470, pg_reserve, stamp)}
+        return dk, {470: stamp}, pg
+
+    def test_a_row_written_minutes_ago_is_forgiven(self):
+        """The production case: `reserve` moved eight minutes before the
+        check, on a table copied hourly."""
+        from core.mirror_reconciliation import compare_table
+        spec = self._spec()
+        dk, synced, pg = self._sides(4, 7, NOW - timedelta(minutes=8))
+        assert compare_table(spec, dk, synced, pg, _watermark(), now=NOW) == []
+
+    def test_a_row_older_than_the_window_still_reports(self):
+        """The leniency is a window, not a tolerance."""
+        from core.mirror_reconciliation import compare_table
+        spec = self._spec()
+        dk, synced, pg = self._sides(4, 7, NOW - timedelta(hours=6))
+        issues = compare_table(spec, dk, synced, pg, _watermark(), now=NOW)
+        assert _names(issues) == {"mirror_row_values"}
+        assert _by_name(issues, "mirror_row_values").count == 1
+
+    def test_a_whole_table_stamp_forgives_nothing(self):
+        """The safety property. `sku_inventory_status.updated_at` is restamped
+        on all 891 rows by every rebuild, so a fresh stamp says nothing about
+        any particular row — granting grace on it would forgive the whole
+        table every morning the refresh happened to be recent, which is how a
+        real defect would disappear."""
+        from core.mirror_reconciliation import compare_table
+        spec = self._spec(ignore_columns=("updated_at",))
+        assert spec.stamp_is_per_row is False
+        dk, synced, pg = self._sides(4, 7, NOW - timedelta(minutes=1))
+        issues = compare_table(spec, dk, synced, pg, _watermark(), now=NOW)
+        assert _names(issues) == {"mirror_row_values"}
+
+    def test_a_row_with_no_stamp_is_never_forgiven(self):
+        """Absent is not recent."""
+        from core.mirror_reconciliation import compare_table
+        spec = self._spec()
+        dk = {470: (470, 4, None)}
+        pg = {470: (470, 7, None)}
+        issues = compare_table(spec, dk, {470: None}, pg, _watermark(), now=NOW)
+        assert _names(issues) == {"mirror_row_values"}
+
+    def test_a_naive_stamp_is_read_as_utc(self):
+        """DuckDB hands some columns back without a tzinfo; comparing those to
+        an aware cutoff raises rather than forgiving."""
+        from core.mirror_reconciliation import compare_table
+        spec = self._spec()
+        naive = (NOW - timedelta(minutes=8)).replace(tzinfo=None)
+        dk, synced, pg = self._sides(4, 7, naive)
+        assert compare_table(spec, dk, synced, pg, _watermark(), now=NOW) == []
+
+    def test_the_two_paths_now_agree(self):
+        """`compare_bucket` and `compare_table` answered the same
+        question differently, and that disagreement was the defect."""
+        import inspect
+        from core.mirror_reconciliation import compare_bucket, compare_table
+        for fn in (compare_bucket, compare_table):
+            src = inspect.getsource(fn)
+            body = src.split("dk_rows.keys() & pg_rows.keys()")[1]
+            assert "in_flight" in body, f"{fn.__name__} skips the grace window"
+
+
+class TestStampIsPerRow:
+    def test_it_is_derived_from_ignore_columns_not_declared_twice(self):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+        by_table = {s.pg_table: s for s in OPERATIONAL_TABLES}
+        assert by_table["app.sku_inventory_status"].stamp_is_per_row is False
+        assert by_table["app.order_backfill_misses"].stamp_is_per_row is True
+
+    def test_an_expression_stamp_is_per_row(self):
+        """`COALESCE(delivered_at, ...)` is still a function of the row."""
+        from core.mirror_reconciliation import SMS_TABLES
+        members = next(s for s in SMS_TABLES
+                       if s.pg_table == "app.sms_campaign_members")
+        assert members.synced_column.startswith("COALESCE")
+        assert members.stamp_is_per_row is True
+
+    def test_no_stamp_at_all_is_not_per_row(self):
+        from core.mirror_reconciliation import MirroredTable
+        spec = MirroredTable(
+            pg_table="t", dk_table="t", columns=("id",), synced_column=None,
+        )
+        assert spec.stamp_is_per_row is False
