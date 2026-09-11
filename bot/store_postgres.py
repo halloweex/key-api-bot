@@ -730,6 +730,38 @@ def _written(tag: str) -> bool:
     return _rowcount(tag) > 0
 
 
+class PostgresAlertActions:
+    """`alert_actions` against `app.alert_events`.
+
+    No table of its own, and that is the design rather than thrift: "somebody
+    asked for X on alert Y" belongs in the log of what alerts did, beside the
+    fired and resolved rows it refers to. The audit is the storage, so it
+    cannot be the part somebody forgets to add.
+    """
+
+    def __init__(self, run, pool):
+        self._run = run
+        self._pool = pool
+
+    def available(self) -> bool:
+        return True
+
+    def request(self, *, action: str, subject: str, condition_key: str,
+                by_user_id: int) -> Optional[int]:
+        return self._run(self._request(action, subject, condition_key, by_user_id))
+
+    async def _request(self, action, subject, condition_key, by_user_id):
+        from core.alert_actions import request
+        from core.telegram_alerts import instance_name
+
+        async with self._pool.acquire() as conn:
+            return await request(
+                conn, action=action, subject=subject,
+                condition_key=condition_key, by_user_id=by_user_id,
+                instance=instance_name(),
+            )
+
+
 class PostgresBotStore:
     """The three persistent aggregates against `app.*`; the cache stays local.
 
@@ -753,6 +785,7 @@ class PostgresBotStore:
 
         run, pool = self._loop.run, self._pool
         self.access = PostgresAccessControl(run, pool)
+        self.alert_actions = PostgresAlertActions(run, pool)
         self.preferences = PostgresPreferences(run, pool)
         self.milestones = PostgresMilestones(run, pool)
         self.cache = SqliteCache()

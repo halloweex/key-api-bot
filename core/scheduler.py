@@ -600,6 +600,20 @@ class BackgroundScheduler:
         # in the job result and the log but is NOT an alerting condition: the
         # docstring in core/disk_monitor.py explains what the percentage-growth
         # rule did here and what has to replace it.
+        # Job: the button on an alert (every minute)
+        # Drains what an admin authorised in Telegram. A minute is the delay an
+        # operator feels between the tap and the work; anything rarer and the
+        # button stops reading as a button.
+        self._add_job(
+            job_id="alert_actions",
+            name="Alert Actions",
+            description="Run what an admin authorised from an alert button",
+            func=self._run_alert_actions,
+            trigger=IntervalTrigger(minutes=1),
+            max_instances=1,
+            coalesce=True,
+        )
+
         self._add_job(
             job_id="disk_watchdog",
             name="Disk Capacity Watchdog",
@@ -1384,9 +1398,15 @@ class BackgroundScheduler:
         try:
             from core.alerting import raise_alert
 
+            # `dq_recheck` on the layer that raised this. Half the diagnoses
+            # this system has produced end in "wait for the next run and see
+            # whether the same ids come back", and the next run is hours away.
+            # `buttons_for` drops it silently where the layer is not one the
+            # action declares, so the two reconciliation siblings carry none.
             return await raise_alert(
                 message, conditions=list(conditions), bucket=bucket,
                 group=f"dq:{layer}", evidence=evidence,
+                actions=("dq_recheck",), subject=layer,
             ) > 0
         except Exception as e:
             logger.warning(f"DQ alert send failed ({bucket}): {e}")
@@ -1662,6 +1682,76 @@ class BackgroundScheduler:
     # condition — so a WARN cannot mute the escalation to CRITICAL — and its
     # standing policy is the daily reminder this 24h float was approximating.
     _DISK_ALERT_COOLDOWN_S = 86400  # 24h
+
+    async def _run_alert_actions(self) -> Dict[str, Any]:
+        """Drain the buttons an admin tapped. Runs in web; the tap arrived at
+        the bot.
+
+        Rule 5 of the charter is intact: nothing here decides to act. Every row
+        this reads exists because a person read a diagnosis and chose, and the
+        row records who. What this adds is the hands, not the judgement.
+
+        Failures are recorded rather than raised: a request that cannot run has
+        an outcome too, and an executor that dies on one would leave every
+        later tap queued behind it.
+        """
+        import json as _json
+
+        from core.alert_actions import complete, job_for, pending
+        from core.pg import get_pool
+        from core.telegram_alerts import instance_name
+
+        if not os.getenv("KS_PG_DSN", "").strip():
+            return {"skipped": "no KS_PG_DSN"}
+
+        done: List[Dict[str, Any]] = []
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            queued = await pending(conn)
+
+        for row in queued:
+            ctx = row.get("context") or {}
+            if isinstance(ctx, str):
+                ctx = _json.loads(ctx)
+            action, subject = ctx.get("action", ""), ctx.get("subject", "")
+            job_id = job_for(action, subject)
+            ok, detail = False, ""
+
+            if job_id is None:
+                # The action was retired, or the row predates it. Recorded as
+                # an outcome anyway, so it leaves the queue instead of being
+                # retried every minute forever.
+                detail = f"{action}/{subject}: no job answers this any more"
+            else:
+                try:
+                    await self.trigger_job(job_id)
+                    ok, detail = True, f"{job_id} ran"
+                except Exception as exc:
+                    detail = f"{job_id} failed: {type(exc).__name__}: {exc}"
+                    logger.exception("Alert action %s failed", job_id)
+
+            async with pool.acquire() as conn:
+                await complete(
+                    conn, request_id=row["id"],
+                    condition_key=row["condition_key"],
+                    instance=instance_name(), ok=ok, detail=detail,
+                )
+            done.append({"id": row["id"], "ok": ok, "detail": detail})
+
+            try:
+                from bot.main import send_admin_message
+
+                icon = "✅" if ok else "🚨"
+                await send_admin_message(
+                    f"{icon} <b>{subject}: перепроверено по запросу</b>\n"
+                    f"{detail}\n"
+                    "→ смотри слой в /api/health/data-quality",
+                    pre_throttled=True,
+                )
+            except Exception as exc:
+                logger.warning("Could not report an alert action outcome: %s", exc)
+
+        return {"executed": len(done), "results": done}
 
     async def _run_disk_watchdog(self) -> Dict[str, Any]:
         """Sample disk + DB state, alert on a capacity breach.

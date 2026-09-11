@@ -538,8 +538,16 @@ async def raise_alert(
     group: "str | None" = None,
     spool_as: "str | None" = None,
     evidence: "dict | None" = None,
+    actions: "Sequence[str]" = (),
+    subject: "str | None" = None,
 ) -> int:
     """Raise an alert about the named conditions. Returns admins reached.
+
+    `actions` are keys from `core.alert_actions.ACTIONS` and `subject` is
+    matched against what that action declares. Both are named by the emitter,
+    in code — nothing the diagnostician writes reaches here. Its safety model
+    is an allowlist holding no command that writes, and a button it could
+    invent would spend exactly that.
 
     `conditions` are canonical keys from the REGISTRY — the vocabulary this
     module declares. An unregistered key is tolerated (it gets the inert
@@ -577,11 +585,26 @@ async def raise_alert(
             log.debug("Alert already in flight (bucket=%s)", bucket)
             return 0
 
+    # Attached only on a raise that is actually being sent: a suppressed
+    # repeat carrying buttons would offer an operator a decision about a
+    # message they never saw.
+    reply_markup = None
+    if actions and subject:
+        from core.alert_actions import buttons_for
+
+        rows = [
+            [{"text": label, "callback_data": data}]
+            for label, data in buttons_for(actions, subject)
+        ]
+        if rows:
+            reply_markup = {"inline_keyboard": rows}
+
     from bot.main import send_admin_message
 
     try:
         delivered = await send_admin_message(
             text + suffix, parse_mode, pre_throttled=True,
+            reply_markup=reply_markup,
         )
         if delivered:
             swallowed = _gate.record_delivery(bucket) if bucket is not None else 0

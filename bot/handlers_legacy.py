@@ -2324,3 +2324,73 @@ async def check_and_broadcast_milestones(context: ContextTypes.DEFAULT_TYPE) -> 
 
         except Exception as e:
             logger.error(f"Error checking milestone for {period_type}: {e}", exc_info=True)
+
+
+# ── The button on an alert ───────────────────────────────────────────────────
+#
+# `afix:<action>:<subject>`. Colon for `atab:`'s reason: the handlers above
+# read ids with `split('_')[-1]`, and both action keys and layer names contain
+# underscores.
+#
+# This handler authorises and records. It does not run anything: the work
+# belongs to the web container, where the scheduler and DuckDB are, and the
+# ledger row is the handover. Rule 5 of the alerts charter is untouched — an
+# alert still triggers no repair, a person does.
+
+async def alert_action_callback(update, context) -> None:
+    """An admin tapped a button on an alert."""
+    from bot.config import is_admin
+    from core.alert_actions import parse_callback
+    from core.bot_store import get_bot_store
+
+    query = update.callback_query
+    user_id = query.from_user.id if query and query.from_user else 0
+
+    if not is_admin(user_id):
+        # Alerts only ever reach admins, so this is somebody forwarding a
+        # message and tapping. Answered, not silently dropped.
+        await query.answer("Только для администраторов", show_alert=True)
+        return
+
+    parsed = parse_callback(query.data or "")
+    if parsed is None:
+        # The registry did not recognise it. Either an old message whose
+        # action has since been retired, or something that did not come from
+        # us — both answered the same way, because neither should run.
+        logger.warning("Unknown alert action callback %r from %s",
+                       query.data, user_id)
+        await query.answer("Не знаю такого действия", show_alert=True)
+        return
+
+    spec, subject = parsed
+    store = get_bot_store()
+    actions = getattr(store, "alert_actions", None)
+
+    if actions is None or not actions.available():
+        await query.answer(
+            "Кнопка работает только на Postgres (KS_BOT_STORE=postgres)",
+            show_alert=True,
+        )
+        return
+
+    try:
+        request_id = actions.request(
+            action=spec.key, subject=subject,
+            condition_key=f"dq:{subject}", by_user_id=user_id,
+        )
+    except Exception:
+        logger.exception("Could not record alert action %s/%s", spec.key, subject)
+        await query.answer("Не удалось записать запрос", show_alert=True)
+        return
+
+    logger.info("Alert action %s/%s requested by %s as #%s",
+                spec.key, subject, user_id, request_id)
+    await query.answer(spec.ack, show_alert=False)
+
+    # Taken away once used. A button that can be tapped twice is a queue of
+    # duplicate work an operator did not intend, and the second tap looks to
+    # them exactly like the first.
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception as exc:
+        logger.debug("Could not clear the alert keyboard: %s", exc)
