@@ -183,6 +183,32 @@ class MirroredTable:
     full_replace: bool = False
 
     @property
+    def stamp_is_per_row(self) -> bool:
+        """Whether `synced_column` dates *this row* or the whole rebuild.
+
+        The grace window forgives a row that was written between the copy and
+        the check, and it is a per-row leniency — it asks "was this row in
+        flight". That question only means something when the stamp moves for
+        the row it belongs to.
+
+        `app.sku_inventory_status.updated_at` is the exception that made this
+        explicit: the DuckDB refresh restamps all 891 rows on every rebuild, so
+        the answer is the same for every row and the leniency stops being per
+        row — it forgives the whole table or none of it, and the first of those
+        would hide a real defect behind a recent rebuild.
+
+        Derived rather than declared a second time: a whole-table stamp is
+        exactly the thing that had to be dropped from the comparison, so
+        `ignore_columns` already carries the answer and the two cannot drift.
+        A stamp that is an expression over the row's own columns
+        (`COALESCE(delivered_at, ...)`) is per-row like any other.
+        """
+        return (
+            self.synced_column is not None
+            and self.synced_column not in self.ignore_columns
+        )
+
+    @property
     def sample_index(self) -> int:
         """Which column supplies `IntegrityIssue.sample_ids`.
 
@@ -622,11 +648,31 @@ def compare_table(
         ))
 
     # ── both hold it, and disagree ──
+    # A row written between the copy and the check legitimately differs, and
+    # this branch did not ask until 2026-09-11. `compare_bucket` — the
+    # other half of this module — has always asked, with the same grace and for
+    # the same reason; the two paths simply disagreed, and the whole-table path
+    # is the one every small table uses. The cost was a CRITICAL every morning
+    # naming three rows of `reserve` that had moved eight minutes earlier, nine
+    # firings over ten days with the sample ids rotating each time.
+    #
+    # Gated on `stamp_is_per_row`, because on a whole-table stamp this would
+    # forgive everything at once — see the property.
+    def _differing_in_flight(row_id: Any) -> bool:
+        if not spec.stamp_is_per_row:
+            return False
+        synced = dk_synced.get(row_id)
+        if synced is None:
+            return False
+        if synced.tzinfo is None:
+            synced = synced.replace(tzinfo=timezone.utc)
+        return synced > cutoff
+
     offenders: Dict[str, int] = {}
     differing: List[int] = []
     for row_id in dk_rows.keys() & pg_rows.keys():
         dk_row, pg_row = dk_rows[row_id], pg_rows[row_id]
-        if dk_row == pg_row:
+        if dk_row == pg_row or _differing_in_flight(row_id):
             continue
         differing.append(row_id)
         for column, dk_value, pg_value in zip(spec.columns, dk_row, pg_row):
