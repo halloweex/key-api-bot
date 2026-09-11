@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.170
+
+- Export the alert handler from the facade the bot actually reads
+
+
 ## 3.0.169
 
 - Let an admin authorise one named action from the alert itself
