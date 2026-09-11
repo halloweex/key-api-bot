@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.169
+
+- Let an admin authorise one named action from the alert itself
+
+
 ## 3.0.168
 
 - Ask whether a differing row was still in flight
