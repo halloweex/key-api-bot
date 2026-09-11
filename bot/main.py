@@ -58,7 +58,7 @@ CONVERSATION_TIMEOUT_SECONDS = 30 * 60
 
 async def send_admin_message(
     text: str, parse_mode: str = "HTML", *, key: str | None = None,
-    pre_throttled: bool = False,
+    pre_throttled: bool = False, reply_markup: dict | None = None,
 ) -> int:
     """Broadcast `text` to every admin. Returns how many it actually reached.
 
@@ -103,7 +103,9 @@ async def send_admin_message(
         # Unsigned on purpose: the HTTP transport signs, and signing here too
         # would either double the line or rely on `sign` staying idempotent.
         from core.telegram_alerts import send_admin_message_http
-        return await send_admin_message_http(text, parse_mode)
+        return await send_admin_message_http(
+            text, parse_mode, reply_markup=reply_markup,
+        )
     if not ADMIN_USER_IDS:
         return 0
 
@@ -119,7 +121,7 @@ async def send_admin_message(
             try:
                 await _application.bot.send_message(
                     chat_id=admin_id, text=text, parse_mode=parse_mode,
-                    disable_web_page_preview=True,
+                    disable_web_page_preview=True, reply_markup=reply_markup,
                 )
             except Exception as exc:
                 # Same degradation the HTTP transport applies: markup Telegram
@@ -134,6 +136,7 @@ async def send_admin_message(
                     await _application.bot.send_message(
                         chat_id=admin_id, text=text,
                         disable_web_page_preview=True,
+                        reply_markup=reply_markup,
                     )
                 else:
                     raise
@@ -360,6 +363,15 @@ def main() -> None:
     application.add_handler(MessageHandler(button_filter("btn.dashboard"), handlers.reply_keyboard_dashboard))
 
     # Add authorization handlers
+    # The button on an alert. Standalone, not a conversation entry point, for
+    # "ℹ️ Help"'s reason: `allow_reentry` aside, an admin parked mid-report must
+    # still be able to act on a page at 03:00 — and as an entry point this
+    # would have *started* the report builder on a tap.
+    from core.alert_actions import CALLBACK_PATTERN as ALERT_ACTION_PATTERN
+
+    application.add_handler(CallbackQueryHandler(
+        handlers.alert_action_callback, pattern=ALERT_ACTION_PATTERN))
+
     application.add_handler(CallbackQueryHandler(handlers.auth_request_access, pattern=r"^auth_request_access$"))
     application.add_handler(CallbackQueryHandler(handlers.auth_request_again, pattern=r"^auth_request_again$"))
     application.add_handler(CallbackQueryHandler(handlers.auth_approve_user, pattern=r"^auth_approve_\d+$"))

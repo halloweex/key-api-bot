@@ -244,6 +244,34 @@ class DashboardTabs(Protocol):
 
 
 @runtime_checkable
+class AlertActions(Protocol):
+    """The button on an alert: recording that a human authorised something.
+
+    In this port for `DashboardTabs`' reason — the bot writes it at exactly one
+    moment, and that write must go through the same pool and the same loop
+    thread as everything else the bot stores. `tests/unit/test_pg_bot_state.py`
+    watches for a second, unmanaged path to the database from inside the bot,
+    and it would be right to.
+
+    It records an *intent*, and never executes one. The tap arrives here and
+    the work happens in the web container, which is where the scheduler and
+    DuckDB are; the row is the handover. That split is not an inconvenience to
+    route around — it is why a new internal credential was not needed.
+
+    `available()` is false on SQLite, and honestly: the row has to be visible
+    to the other container, and a file this process holds is not.
+    """
+
+    def available(self) -> bool:
+        ...
+
+    def request(self, *, action: str, subject: str, condition_key: str,
+                by_user_id: int) -> "Optional[int]":
+        """Record the authorisation. Returns the request id, or None."""
+        ...
+
+
+@runtime_checkable
 class BotStore(Protocol):
     """The five aggregates: four tables, the cache, and the dashboard's list."""
 

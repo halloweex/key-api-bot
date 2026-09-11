@@ -91,7 +91,15 @@ class TestFallbackWiring:
         with patch("core.telegram_alerts.send_admin_message_http", sender):
             await bot_main.send_admin_message("warehouse is broken")
 
-        sender.assert_awaited_once_with("warehouse is broken", "HTML")
+        # Asserted on what the call means, not on its exact shape: the
+        # transport gained `reply_markup` when alerts learned to carry buttons,
+        # and a test pinned to a tuple fails on a parameter whose default
+        # changes nothing. What matters is the text, the parse mode, and that
+        # an alert offering no action sends no keyboard.
+        sender.assert_awaited_once()
+        args, kwargs = sender.await_args
+        assert args[:2] == ("warehouse is broken", "HTML")
+        assert kwargs.get("reply_markup") is None
 
     @pytest.mark.asyncio
     async def test_uses_the_application_when_one_is_running(self, monkeypatch):

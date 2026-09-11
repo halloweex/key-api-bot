@@ -560,12 +560,30 @@ class NoDashboardTabs:
         return None
 
 
+class SqliteAlertActions:
+    """No button under SQLite, and it says so rather than failing later.
+
+    The request has to be visible to the *web* container, which is where the
+    work happens. A file this process holds is not a handover, so `available()`
+    is false and the bot tells the operator plainly instead of recording an
+    intent nothing will ever read.
+    """
+
+    def available(self) -> bool:
+        return False
+
+    def request(self, *, action: str, subject: str, condition_key: str,
+                by_user_id: int):
+        return None
+
+
 class SqliteBotStore:
     """The four aggregates against one SQLite file, plus a fifth that is not
     reachable from here at all — see `NoDashboardTabs`."""
 
     def __init__(self) -> None:
         self.access = SqliteAccessControl()
+        self.alert_actions = SqliteAlertActions()
         self.preferences = SqlitePreferences()
         self.milestones = SqliteMilestones()
         self.cache = SqliteCache()

@@ -258,8 +258,15 @@ async def send_admin_message_http(
     *,
     token: str | None = None,
     chat_ids: Iterable[int] | None = None,
+    reply_markup: dict | None = None,
 ) -> int:
     """Send `text` to every admin over the HTTP Bot API. Never raises.
+
+    `reply_markup` carries an inline keyboard — the alert buttons of
+    `core/alert_actions.py`. It rides both POSTs below, including the
+    plain-text retry: a keyboard dropped on degradation would take the button
+    away exactly when the message is already the ugliest it gets, which is not
+    when an operator wants fewer options.
 
     Returns the number of admins the message actually reached, so callers can
     tell "delivered" from "silently dropped" — the distinction this whole module
@@ -296,12 +303,15 @@ async def send_admin_message_http(
             for admin_id in recipients:
                 try:
                     body = sign_for(text, admin_id)
-                    response = await client.post(url, json={
+                    payload = {
                         "chat_id": admin_id,
                         "text": body,
                         "parse_mode": parse_mode,
                         "disable_web_page_preview": True,
-                    })
+                    }
+                    if reply_markup:
+                        payload["reply_markup"] = reply_markup
+                    response = await client.post(url, json=payload)
                     if _is_parse_rejection(
                         response.status_code, response.text,
                     ) and parse_mode:
@@ -313,11 +323,14 @@ async def send_admin_message_http(
                             "Admin alert to %s rejected as unparseable %s; "
                             "resending as plain text", admin_id, parse_mode,
                         )
-                        response = await client.post(url, json={
+                        plain = {
                             "chat_id": admin_id,
                             "text": body,
                             "disable_web_page_preview": True,
-                        })
+                        }
+                        if reply_markup:
+                            plain["reply_markup"] = reply_markup
+                        response = await client.post(url, json=plain)
                     response.raise_for_status()
                     delivered += 1
                 except asyncio.CancelledError:
