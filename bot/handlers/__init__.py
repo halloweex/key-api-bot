@@ -97,6 +97,8 @@ from bot.handlers_legacy import (
     settings_callback,
     # Milestone handlers
     check_and_broadcast_milestones,
+    # The button on an alert
+    alert_action_callback,
 )
 
 __all__ = [
@@ -180,4 +182,6 @@ __all__ = [
     "settings_callback",
     # Milestone handlers
     "check_and_broadcast_milestones",
+    # The button on an alert
+    "alert_action_callback",
 ]
