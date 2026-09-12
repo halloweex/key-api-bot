@@ -31,6 +31,49 @@ _CATEGORY_TREE_SQL = """
 """
 
 
+# ─── The filter bar's four dropdowns ────────────────────────────────────────
+#
+# Not a tab: the header, drawn on every page but `/traffic`. One body each,
+# two engines, and the table names are the only thing that differs — every
+# hole below already existed on `Dialect`, so this port needed no change to
+# it. Why they share one flag, and why their `ORDER BY` is portable, is in
+# `core/pg_lookups_read.py`.
+
+_ROOT_CATEGORIES_SQL = """
+    SELECT id, name FROM {categories}
+    WHERE parent_id IS NULL
+    ORDER BY name
+"""
+
+_CHILD_CATEGORIES_SQL = """
+    SELECT id, name FROM {categories}
+    WHERE parent_id = ?
+    ORDER BY name
+"""
+
+_BRANDS_SQL = """
+    SELECT DISTINCT brand FROM {products}
+    WHERE brand IS NOT NULL AND brand != ''
+    ORDER BY brand
+"""
+
+# Deliberately a second statement rather than a `UNION` onto the list above:
+# the unknown bucket is a different question (does one exist?) with a
+# different answer type, and folding it in would put its placement in the
+# dropdown at the mercy of the sort. `BrandFilter` sorts by label anyway.
+_UNBRANDED_EXISTS_SQL = """
+    SELECT EXISTS (
+        SELECT 1 FROM {products} WHERE brand IS NULL OR TRIM(brand) = ''
+    )
+"""
+
+_PROMOCODES_SQL = """
+    SELECT DISTINCT promocode FROM {silver_orders}
+    WHERE promocode IS NOT NULL AND promocode != ''
+    ORDER BY promocode
+"""
+
+
 def _at_least_the_root(category_id: int, found: List[int]) -> List[int]:
     """Never hand back an empty list, because the caller builds `IN (...)`.
 
@@ -136,6 +179,38 @@ class RevenueMixin:
         async with self.connection() as conn:
             return conn.execute(
                 self._render_report(sql, DUCKDB, **extra), params,
+            ).fetchall()
+
+    async def _lookups_run(
+        self, sql: str, params: Optional[List[Any]] = None,
+    ) -> List[Tuple]:
+        """`_reports_run`'s twin for the filter bar, on its own flag.
+
+        Its own switch for the reason the others have theirs, sharpened: these
+        four are drawn on *every* page, so a rollback here is the one that
+        must not be tangled up with a tab's. It is also the only router in
+        this file whose failure would be visible on nine tabs at once, which
+        is why the fallback below is not negotiable.
+        """
+        from core.sql_dialect import DUCKDB, POSTGRES
+
+        from core import pg_lookups_read
+
+        params = list(params or [])
+        if pg_lookups_read.enabled() and pg_lookups_read.available():
+            try:
+                return await pg_lookups_read.fetch(
+                    self._render_report(sql, POSTGRES), params,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "lookups: Postgres failed, falling back to DuckDB: %s",
+                    exc, exc_info=True,
+                )
+
+        async with self.connection() as conn:
+            return conn.execute(
+                self._render_report(sql, DUCKDB), params,
             ).fetchall()
 
     async def _category_ids(self, category_id: int) -> List[int]:
@@ -1043,24 +1118,14 @@ class RevenueMixin:
             }
 
     async def get_categories(self) -> List[Dict[str, Any]]:
-        """Get root categories for filter dropdown."""
-        async with self.connection() as conn:
-            results = conn.execute("""
-                SELECT id, name FROM categories
-                WHERE parent_id IS NULL
-                ORDER BY name
-            """).fetchall()
-            return [{"id": row[0], "name": row[1]} for row in results]
+        """Root categories for the filter dropdown, from whichever engine."""
+        rows = await self._lookups_run(_ROOT_CATEGORIES_SQL)
+        return [{"id": row[0], "name": row[1]} for row in rows]
 
     async def get_child_categories(self, parent_id: int) -> List[Dict[str, Any]]:
-        """Get child categories for a parent."""
-        async with self.connection() as conn:
-            results = conn.execute("""
-                SELECT id, name FROM categories
-                WHERE parent_id = ?
-                ORDER BY name
-            """, [parent_id]).fetchall()
-            return [{"id": row[0], "name": row[1]} for row in results]
+        """A parent's children, from whichever engine."""
+        rows = await self._lookups_run(_CHILD_CATEGORIES_SQL, [parent_id])
+        return [{"id": row[0], "name": row[1]} for row in rows]
 
     async def get_brands(self) -> List[Dict[str, str]]:
         """Every brand the filter can be set to, plus the unknown bucket.
@@ -1075,32 +1140,18 @@ class RevenueMixin:
         it reads alphabetically in the dropdown, which is where someone
         looking for it would look.
         """
-        async with self.connection() as conn:
-            results = conn.execute("""
-                SELECT DISTINCT brand FROM products
-                WHERE brand IS NOT NULL AND brand != ''
-                ORDER BY brand
-            """).fetchall()
-            brands = [{"name": row[0]} for row in results]
+        rows = await self._lookups_run(_BRANDS_SQL)
+        brands = [{"name": row[0]} for row in rows]
 
-            has_unbranded = conn.execute("""
-                SELECT EXISTS (
-                    SELECT 1 FROM products WHERE brand IS NULL OR TRIM(brand) = ''
-                )
-            """).fetchone()[0]
-            if has_unbranded:
-                brands.append({"name": UNKNOWN_BRAND})
-            return brands
+        unbranded = await self._lookups_run(_UNBRANDED_EXISTS_SQL)
+        if unbranded and unbranded[0][0]:
+            brands.append({"name": UNKNOWN_BRAND})
+        return brands
 
     async def get_promocodes(self) -> List[Dict[str, str]]:
-        """Get all unique promocodes for filter dropdown."""
-        async with self.connection() as conn:
-            results = conn.execute("""
-                SELECT DISTINCT promocode FROM silver_orders
-                WHERE promocode IS NOT NULL AND promocode != ''
-                ORDER BY promocode
-            """).fetchall()
-            return [{"name": row[0]} for row in results]
+        """Every promocode the filter can be set to, from whichever engine."""
+        rows = await self._lookups_run(_PROMOCODES_SQL)
+        return [{"name": row[0]} for row in rows]
 
     # ─── Helper Methods ───────────────────────────────────────────────────────
 
