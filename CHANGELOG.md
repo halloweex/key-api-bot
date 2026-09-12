@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.174
+
+- Take the filter bar off DuckDB
+
+
 ## 3.0.173
 
 - Fix the build: a story of a component with required props needs args
