@@ -743,6 +743,51 @@ def _m0029_users_allowed_features(self) -> None:
     )
 
 
+def _m0030_buyer_gender(self) -> None:
+    # Inferred customer gender, and deliberately NOT a column on `buyers`.
+    #
+    # `buyers` is landing: its columns are what KeyCRM served, and `BUYER_COLUMNS`
+    # is the contract the daily mirror compares against Postgres at a tolerance
+    # of zero. A derived column there is either outside that tuple — invisible to
+    # the comparison, so nothing would ever notice it rotting — or inside it, and
+    # then the reconciliation compares a value KeyCRM cannot supply. Neither is
+    # survivable, so the inference gets its own table beside the landing, the way
+    # `manager_classifications` does for the other judgement KeyCRM knows nothing
+    # about.
+    #
+    # `app.customer_profile` is equally closed and for a sharper reason: it is
+    # TRUNCATEd and rebuilt whole on the two-minute warehouse tick, so a human's
+    # correction would survive about ninety seconds.
+    #
+    # gender is NULL for "could not be decided" — about 1.3% of the base: a
+    # company, a marketplace handle, a name whose two tokens are both unknown.
+    # `method` says which layer decided and `confidence` how far to trust it, so
+    # a campaign that spends money can demand 'certain'/'high' while a dashboard
+    # tile takes everything. A boolean could express none of that.
+    #
+    # `override_by_human` is the lesson of `managers.is_retail`, which was
+    # recomputed on every sync until a human's classification became impossible
+    # to keep. The backfill never touches a row where it is TRUE.
+    #
+    # NO PRIMARY KEY, on purpose: an ART index disables vacuum for the whole
+    # table in DuckDB, and this table is rewritten wholesale whenever
+    # RULES_VERSION moves. Uniqueness is guaranteed by the writer, which deletes
+    # before it inserts.
+    self._connection.execute("""
+        CREATE TABLE IF NOT EXISTS buyer_gender (
+            buyer_id          INTEGER NOT NULL,
+            gender            VARCHAR,          -- 'f' | 'm' | NULL
+            method            VARCHAR NOT NULL,
+            confidence        VARCHAR,          -- 'certain' | 'high' | 'medium' | NULL
+            decided_from      VARCHAR,          -- the ROLE, never the token
+            rules_version     INTEGER NOT NULL,
+            override_by_human BOOLEAN NOT NULL DEFAULT FALSE,
+            decided_at        TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    logger.debug("Migration 0030: buyer_gender table added/verified")
+
+
 MIGRATIONS: List[Migration] = [
     Migration("0001_orders_updated_at", ONCE, _m0001_orders_updated_at),
     Migration("0002_orders_status_group_id", ONCE, _m0002_orders_status_group_id),
@@ -772,4 +817,5 @@ MIGRATIONS: List[Migration] = [
     Migration("0027_reset_sequences_after_compaction", ALWAYS, _m0027_reset_sequences_after_compaction),
     Migration("0028_drop_bot_owned_duplicates", ONCE, _m0028_drop_bot_owned_duplicates),
     Migration("0029_users_allowed_features", ONCE, _m0029_users_allowed_features),
+    Migration("0030_buyer_gender", ONCE, _m0030_buyer_gender),
 ]

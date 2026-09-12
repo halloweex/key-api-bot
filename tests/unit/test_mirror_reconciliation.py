@@ -476,6 +476,12 @@ class TestSyncedColumnDualRole:
     }
     WHOLE_TABLE_STAMPS = {
         "app.sku_inventory_status": "updated_at",
+        # `scripts/backfill_gender.py` re-derives every row in one pass
+        # whenever `core.gender.RULES_VERSION` moves, so all 20 145 rows carry
+        # the same stamp from the same run. Comparing it would ask the two
+        # copies to have been taken at the same instant. The verdict columns —
+        # gender, method, confidence, override_by_human — are all compared.
+        "app.buyer_gender": "decided_at",
     }
 
     def _dual_role(self):
