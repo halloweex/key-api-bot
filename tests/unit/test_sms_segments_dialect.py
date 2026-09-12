@@ -41,12 +41,14 @@ def _statements(sql: str) -> str:
     return "\n".join(line.split("--")[0] for line in sql.splitlines())
 
 
-# The four names, longest first so `bronze.buyers` cannot be half-rewritten by
-# a substitution meant for something else.
+# The five names, longest first so `bronze.buyers` cannot be half-rewritten by
+# a substitution meant for something else. `app.buyer_gender` sits above it for
+# the same reason: both bare forms begin with "buyer".
 _NAMES = (
-    ("silver.order_lines", "silver_order_lines"),
     ("app.marketing_optouts", "marketing_optouts"),
     ("bronze.offer_stocks", "offer_stocks"),
+    ("silver.order_lines", "silver_order_lines"),
+    ("app.buyer_gender", "buyer_gender"),
     ("bronze.buyers", "buyers"),
 )
 

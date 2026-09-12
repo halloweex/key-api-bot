@@ -10,6 +10,7 @@ from fastapi import APIRouter, Path, Query, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from typing import Optional
 
+from core.gender import CONFIDENCE_LADDER, GENDERS
 from core.repositories.customers import (
     BUILTIN_AUDIENCE_PRESETS, SMS_GROUPINGS, SMS_LTV_BASES, SMS_TIER_DEFAULTS,
     SmsAudienceFilters,
@@ -246,6 +247,8 @@ def _sms_segment_params(
     first_order_from: Optional[_date] = Query(None),
     first_order_to: Optional[_date] = Query(None),
     city: Optional[str] = Query(None, max_length=500),
+    gender: Optional[str] = Query(None, max_length=20),
+    gender_min_confidence: Optional[str] = Query(None, max_length=10),
     brand: Optional[str] = Query(None, max_length=500),
     category_id: Optional[str] = Query(None, max_length=500),
     source_id: Optional[str] = Query(None, max_length=200),
@@ -307,6 +310,27 @@ def _sms_segment_params(
             detail="reactivation_max_recency must not exceed max_recency_days",
         )
 
+    genders = tuple(g.strip().lower() for g in _text_list(gender))
+    for g in genders:
+        if g not in GENDERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"gender must be one of {', '.join(GENDERS)}",
+            )
+    # Refused rows carry NULL, and NULL never satisfies `IN`. So there is no
+    # spelling of this parameter that selects them, and offering one would be a
+    # campaign addressed by gender to people whose gender nobody could decide.
+    if gender_min_confidence is not None:
+        gender_min_confidence = gender_min_confidence.strip().lower()
+        if gender_min_confidence not in CONFIDENCE_LADDER:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "gender_min_confidence must be one of "
+                    f"{', '.join(CONFIDENCE_LADDER)}"
+                ),
+            )
+
     if grouping not in SMS_GROUPINGS:
         raise HTTPException(
             status_code=400,
@@ -339,6 +363,8 @@ def _sms_segment_params(
         first_order_from=first_order_from,
         first_order_to=first_order_to,
         cities=tuple(_text_list(city)),
+        genders=genders,
+        gender_min_confidence=gender_min_confidence,
         brands=tuple(_text_list(brand)),
         category_ids=tuple(_int_list(category_id, "category_id")),
         source_ids=tuple(_int_list(source_id, "source_id")),

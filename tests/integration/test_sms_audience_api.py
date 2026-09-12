@@ -479,3 +479,70 @@ class TestChannelsCarryTheTariff:
         # price is how a page promises one figure and the gateway charges
         # another.
         assert body["pricePerPart"] == 1.32
+
+
+class TestGenderReachesTheStore:
+    """The filter must arrive as a filter object, not be silently dropped.
+
+    That is the first contract this file names, and it is named because it has
+    been got wrong before: a parameter FastAPI does not declare is discarded
+    without a word, so a control on the screen can do nothing at all and look
+    exactly like one that works.
+    """
+
+    def test_it_arrives_as_a_filter(self, client, store):
+        r = client.get(
+            SEGMENTS, params={"gender": "m", "gender_min_confidence": "high"},
+            headers=_headers(),
+        )
+        assert r.status_code == 200
+        filters = store.calls[-1]["filters"]
+        assert filters.genders == ("m",)
+        assert filters.gender_min_confidence == "high"
+
+    def test_both_values_arrive(self, client, store):
+        r = client.get(SEGMENTS, params={"gender": "f,m"}, headers=_headers())
+        assert r.status_code == 200
+        assert store.calls[-1]["filters"].genders == ("f", "m")
+
+    def test_it_is_absent_when_not_asked_for(self, client, store):
+        """An empty filter set selects exactly what it selected before this
+        existed, or every past campaign becomes unreproducible."""
+        r = client.get(SEGMENTS, headers=_headers())
+        assert r.status_code == 200
+        filters = store.calls[-1]["filters"]
+        assert filters.genders == ()
+        assert filters.gender_min_confidence is None
+        assert filters.is_empty()
+
+    @pytest.mark.parametrize("value", ["x", "female", "1", "unknown", "null"])
+    def test_an_unknown_gender_is_refused_with_the_vocabulary(
+        self, client, store, value,
+    ):
+        r = client.get(SEGMENTS, params={"gender": value}, headers=_headers())
+        assert r.status_code == 400
+        assert "f, m" in r.json()["detail"]
+
+    @pytest.mark.parametrize("value", ["low", "sure", "yes", "0"])
+    def test_an_unknown_confidence_is_refused(self, client, store, value):
+        r = client.get(
+            SEGMENTS, params={"gender_min_confidence": value}, headers=_headers(),
+        )
+        assert r.status_code == 400
+        assert "certain, high, medium" in r.json()["detail"]
+
+    def test_case_and_spacing_are_forgiven(self, client, store):
+        r = client.get(
+            SEGMENTS, params={"gender": " F , M ", "gender_min_confidence": "HIGH"},
+            headers=_headers(),
+        )
+        assert r.status_code == 200
+        filters = store.calls[-1]["filters"]
+        assert filters.genders == ("f", "m")
+        assert filters.gender_min_confidence == "high"
+
+    def test_there_is_no_spelling_that_selects_a_refused_row(self, client, store):
+        """NULL is not a gender, and offering it as one would be a campaign
+        addressing people by a gender nobody could decide."""
+        r = client.get(SEGMENTS, params={"gender": "unknown"}, headers=_headers())
+        assert r.status_code == 400

@@ -257,3 +257,59 @@ describe('the recency window said in dates', () => {
     expect(daysAgoToDate(undefined)).toBe('')
   })
 })
+
+describe('the gender filter', () => {
+  it('travels as flat query parameters, like every other filter', () => {
+    // Flat rather than a JSON body because the CSV download is a link the
+    // browser follows, and the session gate reads the query string.
+    const p = new URLSearchParams(audienceToParams({
+      ...emptyAudience(),
+      filters: { genders: ['m'], genderMinConfidence: 'high' },
+    }))
+    expect(p.get('gender')).toBe('m')
+    expect(p.get('gender_min_confidence')).toBe('high')
+  })
+
+  it('sends both values comma-separated, like every other list filter', () => {
+    // `city` and `brand` travel the same way and the server splits all three
+    // with the same `_text_list`. A repeated parameter would need a second
+    // parsing rule for no gain.
+    const p = new URLSearchParams(audienceToParams({
+      ...emptyAudience(),
+      filters: { genders: ['f', 'm'] },
+    }))
+    expect(p.get('gender')).toBe('f,m')
+  })
+
+  it('is not a parameter when it is not set', () => {
+    // An empty filter set has to select exactly what it selected before this
+    // existed, or every past campaign becomes unreproducible.
+    const p = new URLSearchParams(audienceToParams(emptyAudience()))
+    expect(p.has('gender')).toBe(false)
+    expect(p.has('gender_min_confidence')).toBe(false)
+  })
+
+  it('counts towards the badge on the collapsed panel', () => {
+    expect(countFilters({ genders: ['f'] })).toBe(1)
+    expect(countFilters({ genders: ['f'], genderMinConfidence: 'certain' })).toBe(2)
+    expect(countFilters({ genders: [] })).toBe(0)
+  })
+
+  it('survives a round trip through a saved preset', () => {
+    const restored = audienceFromPreset({
+      filters: { genders: ['m'], genderMinConfidence: 'certain' },
+    })
+    expect(restored.filters.genders).toEqual(['m'])
+    expect(restored.filters.genderMinConfidence).toBe('certain')
+  })
+
+  it('drops a value the API would refuse', () => {
+    // A preset is form state somebody saved. A stored 'x' would reach the API
+    // as a 400 on a screen the person only opened to look at.
+    const restored = audienceFromPreset({
+      filters: { genders: ['f', 'x', ''], genderMinConfidence: 'nonsense' },
+    })
+    expect(restored.filters.genders).toEqual(['f'])
+    expect(restored.filters.genderMinConfidence).toBeUndefined()
+  })
+})

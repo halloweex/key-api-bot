@@ -1377,6 +1377,25 @@ export interface SmsAudienceFilters {
   firstOrderFrom?: string | null
   firstOrderTo?: string | null
   cities?: string[]
+  /**
+   * Inferred gender: 'f', 'm', or both. Aggregate, not content — it describes
+   * the person, not anything they bought.
+   *
+   * About 1.4% of buyers carry no verdict at all, and NULL never satisfies the
+   * server's `IN` clause, so a gendered audience can never reach somebody
+   * nobody could classify. That is deliberate: a message addressing a customer
+   * as a woman must not go to a row the classifier refused.
+   */
+  genders?: Array<'f' | 'm'>
+  /**
+   * How far to trust the inference: 'certain' (patronymic only), 'high'
+   * (adds the name dictionary) or 'medium' (everything decided).
+   *
+   * Worth setting for a campaign that spends money. Measured on the gold set,
+   * every false male the classifier produces comes from one layer, and that
+   * layer is the only one emitting 'medium'.
+   */
+  genderMinConfidence?: 'certain' | 'high' | 'medium' | null
   brands?: string[]
   categoryIds?: number[]
   sourceIds?: number[]

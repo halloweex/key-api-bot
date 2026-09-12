@@ -74,7 +74,29 @@ from typing import Iterable, NamedTuple, Optional
 
 from core import gender_data as D
 
-__all__ = ["Verdict", "classify", "fold", "tokenise", "RULES_VERSION"]
+__all__ = [
+    "Verdict", "classify", "fold", "tokenise", "RULES_VERSION",
+    "GENDERS", "CONFIDENCE_LADDER", "at_least",
+]
+
+# The two values a decided verdict can carry. NULL is the third state and is
+# deliberately not in here: it is the absence of a verdict, not a gender.
+GENDERS = ("f", "m")
+
+# Strongest first. A consumer that says "high or better" means the first two.
+CONFIDENCE_LADDER = ("certain", "high", "medium")
+
+
+def at_least(confidence: str) -> tuple:
+    """The confidence levels that satisfy a floor, as a set for an IN clause.
+
+    An ordered ladder rendered as a SET rather than an inequality: SQL has no
+    ordering over these strings, and inventing one with a CASE would be a
+    second home for the ladder. Both engines read `IN` identically.
+    """
+    if confidence not in CONFIDENCE_LADDER:
+        raise ValueError(f"unknown confidence {confidence!r}")
+    return CONFIDENCE_LADDER[: CONFIDENCE_LADDER.index(confidence) + 1]
 
 # Bumped whenever a table or a rule changes in a way that would move a stored
 # verdict. The backfill re-derives every row whose stored version is behind, so

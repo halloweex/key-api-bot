@@ -233,6 +233,17 @@ class SmsAudienceFilters:
     first_order_from: Optional[date] = None
     first_order_to: Optional[date] = None
     cities: Sequence[str] = ()
+    # Inferred gender, and an AGGREGATE filter: it is a property of the person,
+    # not of anything they bought, so it narrows who is in the audience without
+    # touching what anyone is worth. The content family is an EXISTS over order
+    # lines and this is not that.
+    genders: Sequence[str] = ()
+    # How far to trust the inference. The classifier's own measurement is why
+    # this exists rather than being hardcoded: on the gold set every false male
+    # it produces comes from one layer, and that layer is the only one emitting
+    # `medium`. A campaign that spends money can demand `high`; a dashboard
+    # tile can take everything.
+    gender_min_confidence: Optional[str] = None
     brands: Sequence[str] = ()
     category_ids: Sequence[int] = ()
     source_ids: Sequence[int] = ()
@@ -252,7 +263,8 @@ class SmsAudienceFilters:
                 self.orders_min, self.orders_max,
                 self.ltv_min, self.ltv_max, self.aov_min, self.aov_max,
                 self.first_order_from, self.first_order_to,
-                tuple(self.cities), tuple(self.brands), tuple(self.category_ids),
+                tuple(self.cities), tuple(self.genders), self.gender_min_confidence,
+                tuple(self.brands), tuple(self.category_ids),
                 tuple(self.source_ids), self.promocode,
             )
         )
@@ -316,6 +328,26 @@ class SmsAudienceFilters:
             # city and neither spelling is canonical.
             parts.append(f"lower(city) IN ({placeholders})")
             params += [c.strip().lower() for c in self.cities]
+
+        if self.genders:
+            placeholders = ", ".join("?" * len(self.genders))
+            # `gender IN (...)` and nothing more: NULL never satisfies IN, so
+            # the 1.4% the classifier refused drop out of a gendered audience
+            # on their own. That is the right answer — a campaign addressing
+            # somebody as a woman must not reach a row nobody could decide.
+            parts.append(f"gender IN ({placeholders})")
+            params += list(self.genders)
+
+        if self.gender_min_confidence:
+            from core.gender import at_least
+
+            levels = at_least(self.gender_min_confidence)
+            placeholders = ", ".join("?" * len(levels))
+            # A floor on the inference, expressed as the set of levels that
+            # clear it. Applied whether or not a gender was picked, so
+            # "everybody I am sure about" is sayable on its own.
+            parts.append(f"gender_confidence IN ({placeholders})")
+            params += list(levels)
 
         content: List[str] = []
         content_params: List[Any] = []
