@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.171
+
+- Derive the gender on the hourly tick, so a deploy fills the table itself
+- Infer customer gender from the name, and keep it in both stores
+
+
 ## 3.0.170
 
 - Export the alert handler from the facade the bot actually reads
