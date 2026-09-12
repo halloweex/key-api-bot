@@ -228,3 +228,62 @@ def test_every_table_is_non_empty():
                   D.FEMALE_CONSONANT_ENDING, D.UNISEX_NAMES,
                   D.ORG_MARKERS, D.NON_PERSON_MARKERS, D.SURNAME_LEXICON):
         assert D._words(block), "a name table is empty"
+
+
+class TestTheDerivationRidesTheReplicationTick:
+    """Derived first, shipped second, in one tick.
+
+    A copy that ran before the derivation would carry yesterday's verdict for a
+    buyer DuckDB decided an hour ago, and the daily reconciliation would then
+    report a difference the ordering created rather than a real drift. This is
+    `pg_gold`'s arrangement with `pg_silver` and the test that pins it.
+    """
+
+    def test_the_runner_derives_before_it_replicates(self):
+        import ast
+        import inspect
+
+        from core.scheduler import BackgroundScheduler
+
+        src = inspect.getsource(BackgroundScheduler._run_replicate_operational)
+        tree = ast.parse(src.lstrip() if src.startswith(" ") else src)
+        calls = [
+            n.func.id
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        ]
+        assert "derive_gender" in calls, "the tick no longer derives gender"
+        assert "replicate_operational" in calls
+        assert calls.index("derive_gender") < calls.index("replicate_operational")
+
+    def test_the_cli_and_the_tick_share_one_implementation(self):
+        """Two callers, one home — charter rule 1."""
+        import inspect
+
+        import scripts.backfill_gender as cli
+        from core import gender_backfill
+
+        assert cli.derive_gender is gender_backfill.derive_gender
+        # The CLI must not carry its own copy of the SQL.
+        assert "INSERT INTO buyer_gender" not in inspect.getsource(cli)
+
+    def test_a_human_override_is_never_re_derived(self):
+        """Even under --all. The managers.is_retail lesson."""
+        from core.gender_backfill import _PENDING_ALL, _PENDING_NEW
+
+        for sql in (_PENDING_NEW, _PENDING_ALL):
+            assert "override_by_human = FALSE" in sql
+
+    def test_the_derivation_never_raises_into_the_tick(self):
+        """It shares a runner with the copy of tables nothing can rebuild."""
+        import asyncio
+
+        from core.gender_backfill import derive_gender
+
+        class Exploding:
+            def connection(self):
+                raise RuntimeError("store is gone")
+
+        result = asyncio.run(derive_gender(Exploding()))
+        assert result["error"] and "RuntimeError" in result["error"]
+        assert result["written"] == 0

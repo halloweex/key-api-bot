@@ -945,7 +945,18 @@ class BackgroundScheduler:
 
         with correlation_context():
             store = await get_store()
+            # Derived FIRST, shipped second, in one tick — `pg_gold`'s
+            # arrangement with `pg_silver` and for the same reason: a copy that
+            # ran before the derivation would carry yesterday's verdict for a
+            # buyer DuckDB decided an hour ago, and the daily reconciliation
+            # would report a difference the ordering created. Cheap on an
+            # ordinary tick: the pending query returns the ~19 buyers a day
+            # KeyCRM adds, and KeyCRM has no gender field for any of them.
+            from core.gender_backfill import derive_gender
+
+            gender = await derive_gender(store)
             result = await replicate_operational(store)
+            result["gender"] = gender
             # `data/bot.db` rides the same job rather than getting one of its
             # own: same cadence, same grace window, and one schedule to reason
             # about. It reads the file the web container already opens
