@@ -95,6 +95,19 @@ const meta = {
   title: 'SMS/SmsAudienceForm',
   component: SmsAudienceForm,
   parameters: { layout: 'padded' },
+  // Meta-level args because `audience` and `onChange` are REQUIRED props, and
+  // every story below renders through `Live` rather than through args. Without
+  // them `tsc -b` refuses each story — args are only optional per story when
+  // the component has no required prop, which is why the neighbouring
+  // `AccessRequestsCard` story needs none.
+  //
+  // The values are a placeholder the stories never use: `render` replaces the
+  // whole tree. They exist to satisfy the type and to give the Controls panel
+  // something honest to show.
+  args: {
+    audience: emptyAudience(),
+    onChange: () => {},
+  },
 } satisfies Meta<typeof SmsAudienceForm>
 
 export default meta
