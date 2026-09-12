@@ -37,6 +37,7 @@ from core.mirror_reconciliation import (
 )
 from core.landing_rows import EXPENSE_TYPE_COLUMNS
 from core.pg_operational import (
+    BUYER_GENDER_COLUMNS,
     GOAL_COLUMNS,
     INVENTORY_HISTORY_COLUMNS,
     MANUAL_EXPENSE_COLUMNS,
@@ -481,6 +482,7 @@ class TestTheComparisonSpecs:
             "app.order_backfill_misses": set(MISS_COLUMNS),
             "app.inventory_history": set(INVENTORY_HISTORY_COLUMNS),
             "app.sku_inventory_status": set(SKU_STATUS_COLUMNS),
+            "app.buyer_gender": set(BUYER_GENDER_COLUMNS),
         }
         for spec in OPERATIONAL_TABLES:
             assert set(spec.columns) == shipped[spec.pg_table], spec.pg_table
@@ -600,3 +602,61 @@ class TestTheJob:
             result = await BackgroundScheduler()._run_replicate_operational()
         assert result["movements_appended"] == 3
         assert result["bot_state"]["rows"]["app.authorized_users"] == 24
+
+
+class TestBuyerGenderIsShippedAndCompared:
+    """The inferred-gender twin, wired the way the study's design requires.
+
+    The value has no source but DuckDB — KeyCRM carries no gender field at all
+    — so if the copy silently stopped, nothing downstream could re-derive it
+    and the SMS audience would read a table frozen at whatever it last held.
+    The same two halves as `offer_stocks` above: it is shipped on the hourly
+    path, and it is compared on the daily one.
+    """
+
+    def test_it_is_shipped_by_the_operational_replicator(self):
+        from core.pg_operational import (
+            BUYER_GENDER_COLUMNS, BUYER_GENDER_TABLE, _FULL_REPLACE,
+        )
+
+        entry = next(e for e in _FULL_REPLACE if e[0] == BUYER_GENDER_TABLE)
+        assert entry[1] == "buyer_gender"
+        assert entry[2] == BUYER_GENDER_COLUMNS
+
+    def test_it_is_compared_by_the_operational_reconciliation(self):
+        from core.pg_operational import BUYER_GENDER_COLUMNS, BUYER_GENDER_TABLE
+
+        spec = next(
+            s for s in OPERATIONAL_TABLES if s.pg_table == BUYER_GENDER_TABLE
+        )
+        assert spec.dk_table == "buyer_gender"
+        assert spec.columns == BUYER_GENDER_COLUMNS
+        assert spec.key_columns == ("buyer_id",)
+        # Full replace, so a row missing from Postgres was LOST and is reported
+        # CRITICAL — there is no retired category for a table whose writer
+        # rewrites it whole.
+        assert spec.full_replace
+
+    def test_the_stamp_is_shipped_and_never_compared(self):
+        """A full re-derivation stamps all 20 145 rows in one pass.
+
+        Comparing `decided_at` would ask the two copies to have been taken at
+        the same instant, which they never are — `sku_inventory_status.
+        updated_at` is the same situation and the same exclusion. The verdict
+        itself is compared, which is what the check is for.
+        """
+        from core.pg_operational import BUYER_GENDER_TABLE
+
+        spec = next(
+            s for s in OPERATIONAL_TABLES if s.pg_table == BUYER_GENDER_TABLE
+        )
+        assert spec.synced_column == "decided_at"
+        assert "decided_at" in spec.ignore_columns
+        for column in ("gender", "method", "confidence", "override_by_human"):
+            assert column not in spec.ignore_columns, column
+
+    def test_the_schema_revision_carries_the_table(self):
+        """migrate must be rebuilt alongside web, or every read raises."""
+        from core.pg import REQUIRED_REVISION
+
+        assert REQUIRED_REVISION == "0024_buyer_gender"

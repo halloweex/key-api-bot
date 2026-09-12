@@ -92,6 +92,7 @@ from core.pg_bot_state import (
     REPORT_HISTORY_COLUMNS,
 )
 from core.pg_operational import (
+    BUYER_GENDER_COLUMNS,
     GOAL_COLUMNS,
     INVENTORY_HISTORY_COLUMNS,
     MANUAL_EXPENSE_COLUMNS,
@@ -1906,6 +1907,24 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # to have been taken at the same instant, which they never are.
         ignore_columns=("updated_at",),
         numeric=("price", "purchased_price"),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.buyer_gender",
+        # Not landing's story: the shared tuple never existed here, because no
+        # KeyCRM payload carries a gender. DuckDB decides it and Postgres
+        # receives the decision, so a difference is the copy having drifted.
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="buyer_gender",
+        columns=BUYER_GENDER_COLUMNS,
+        key_columns=("buyer_id",),
+        synced_column="decided_at",
+        # Shipped and never compared, `sku_inventory_status.updated_at`'s
+        # situation exactly: a full re-derivation stamps all 20 145 rows in one
+        # pass, so comparing it would ask the two copies to have been taken at
+        # the same instant. What matters is the verdict, and the verdict IS
+        # compared.
+        ignore_columns=("decided_at",),
         full_replace=True,
     ),
 )

@@ -114,6 +114,12 @@ INVENTORY_HISTORY_TABLE = "app.inventory_history"
 SKU_STATUS_TABLE = "app.sku_inventory_status"
 SKU_HISTORY_TABLE = "app.inventory_sku_history"
 MOVEMENTS_TABLE = "app.stock_movements"
+BUYER_GENDER_TABLE = "app.buyer_gender"
+
+BUYER_GENDER_COLUMNS: Tuple[str, ...] = (
+    "buyer_id", "gender", "method", "confidence", "decided_from",
+    "rules_version", "override_by_human", "decided_at",
+)
 
 # Bookkeeping is excluded by construction: DuckDB stamps `synced_at`, Postgres
 # `mirrored_at`, and two correct copies differ on those.
@@ -188,6 +194,24 @@ _FULL_REPLACE: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
     (MISSES_TABLE, "order_backfill_misses", MISS_COLUMNS, "order_id"),
     (INVENTORY_HISTORY_TABLE, "inventory_history", INVENTORY_HISTORY_COLUMNS, "date"),
     (SKU_STATUS_TABLE, "sku_inventory_status", SKU_STATUS_COLUMNS, "offer_id"),
+    # Replicated for `app.manager_classifications`' reason, not `bronze.*`'s:
+    # KeyCRM has no gender field, so nothing here can ever be re-fetched from
+    # the source. It is decided by `core/gender.py` against the name DuckDB
+    # holds, and a second derivation on the Postgres side would need the same
+    # tables and would drift the day either copy was edited.
+    #
+    # Full replace, like `sku_inventory_status` and for the same reason: the
+    # DuckDB writer is a DELETE+INSERT too (scripts/backfill_gender.py), so
+    # this is the same operation rather than a separate decision. It also means
+    # a row that is present and WRONG is corrected, which matters when
+    # RULES_VERSION moves and every verdict is re-derived at once.
+    #
+    # 20 145 rows an hour to ship the ~19 new buyers a day is the cost. Measured
+    # against the alternative — a `decided_at` watermark — it is not worth the
+    # second mechanism: an upsert keyed on a clock cannot see a row whose
+    # verdict was withdrawn to NULL, and withdrawal is exactly what a rules
+    # change does.
+    (BUYER_GENDER_TABLE, "buyer_gender", BUYER_GENDER_COLUMNS, "buyer_id"),
 )
 
 # How many rows one `executemany` carries. 143,274 in a single call is one
