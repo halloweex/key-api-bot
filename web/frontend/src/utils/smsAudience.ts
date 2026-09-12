@@ -75,9 +75,11 @@ const TEXT_PARAMS: Array<[keyof SmsAudienceFilters, string]> = [
   ['firstOrderFrom', 'first_order_from'],
   ['firstOrderTo', 'first_order_to'],
   ['promocodeUsed', 'promocode_used'],
+  ['genderMinConfidence', 'gender_min_confidence'],
 ]
 
 const LIST_PARAMS: Array<[keyof SmsAudienceFilters, string]> = [
+  ['genders', 'gender'],
   ['cities', 'city'],
   ['brands', 'brand'],
   ['categoryIds', 'category_id'],
@@ -195,6 +197,16 @@ export function audienceFromPreset(raw: unknown): SmsAudienceCriteria {
   }
   const cities = strings(filtersSrc.cities)
   if (cities) filters.cities = cities
+  // Unknown values are dropped rather than carried: a preset is form state
+  // somebody saved, and a stored 'x' would reach the API as a 400 on a screen
+  // the person only opened to look at.
+  const genders = strings(filtersSrc.genders)
+    ?.filter((g): g is 'f' | 'm' => g === 'f' || g === 'm')
+  if (genders?.length) filters.genders = genders
+  const conf = filtersSrc.genderMinConfidence
+  if (conf === 'certain' || conf === 'high' || conf === 'medium') {
+    filters.genderMinConfidence = conf
+  }
   const brands = strings(filtersSrc.brands)
   if (brands) filters.brands = brands
   const categoryIds = numbers(filtersSrc.categoryIds)
@@ -364,6 +376,15 @@ export function describeFrozenCriteria(
   for (const [key, label] of lists) {
     const v = val(key)
     if (Array.isArray(v) && v.length) out.push(`${t(label)}: ${v.join(', ')}`)
+  }
+  const genders = val('genders')
+  if (Array.isArray(genders) && genders.length) {
+    out.push(`${t('sms.filterGender')}: ${genders
+      .map((g) => t(g === 'f' ? 'sms.genderFemale' : 'sms.genderMale'))
+      .join(', ')}`)
+  }
+  if (has('gender_min_confidence')) {
+    out.push(`${t('sms.filterGenderConfidence')}: ${val('gender_min_confidence')}`)
   }
   if (has('promocode')) out.push(`${t('sms.filterPromocode')}: ${val('promocode')}`)
   if (has('bought_within_days')) {

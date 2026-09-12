@@ -64,6 +64,13 @@ class Dialect:
     buyers: str
     offer_stocks: str
     marketing_optouts: str
+    # Inferred gender (DuckDB migration 0030, revision 0024). A `Dialect` field
+    # rather than a name spliced into `filter_sql`, and that is the whole point:
+    # the byte-equality test renders the body for both engines and undoes the
+    # names, so a divergence here fails loudly. A table name hidden inside a
+    # predicate fragment would be invisible to it — the guard passes a constant
+    # `filter_sql`.
+    buyer_gender: str
     # The SMS tab's own state (revision 0013). Operational, and irreplaceable
     # in `stock_movements`' sense — a frozen roster cannot be recomputed.
     sms_campaigns: str
@@ -132,6 +139,7 @@ DUCKDB = Dialect(
     buyers="buyers",
     offer_stocks="offer_stocks",
     marketing_optouts="marketing_optouts",
+    buyer_gender="buyer_gender",
     sms_campaigns="sms_campaigns",
     sms_campaign_members="sms_campaign_members",
     sms_audience_presets="sms_audience_presets",
@@ -168,6 +176,7 @@ POSTGRES = Dialect(
     buyers="bronze.buyers",
     offer_stocks="bronze.offer_stocks",
     marketing_optouts="app.marketing_optouts",
+    buyer_gender="app.buyer_gender",
     sms_campaigns="app.sms_campaigns",
     sms_campaign_members="app.sms_campaign_members",
     sms_audience_presets="app.sms_audience_presets",
@@ -541,10 +550,17 @@ _SMS_SEGMENTS_BODY = """
                     b.full_name,
                     b.city,
                     regexp_replace(COALESCE(b.phone, ''), '[^0-9]', '', 'g') AS phone,
+                    g.gender,
+                    g.confidence AS gender_confidence,
                     {tier_case} AS tier_level
                 FROM cust c
                 JOIN {buyers} b ON b.id = c.buyer_id
                 LEFT JOIN last_order_items lo ON lo.buyer_id = c.buyer_id
+                -- LEFT, never JOIN: 1.4% of buyers carry NULL because the
+                -- classifier refused, and an inner join would drop them from
+                -- every audience — including the ones that do not filter on
+                -- gender at all.
+                LEFT JOIN {buyer_gender} g ON g.buyer_id = c.buyer_id
                 WHERE c.recency <= ?
             ),
             flagged AS (
@@ -648,6 +664,7 @@ def sms_segments_select(
         offer_stocks=dialect.offer_stocks,
         buyers=dialect.buyers,
         marketing_optouts=dialect.marketing_optouts,
+        buyer_gender=dialect.buyer_gender,
         ltv_column=ltv_column,
         sales_type_filter=sales_type_filter,
         tier_case=tier_case,

@@ -2,8 +2,8 @@ import { memo, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   Banknote, CalendarClock, CalendarRange, ChevronDown, ChevronUp, Clock,
-  Layers, MapPin, Receipt, ShoppingBag, Sparkles, Store, Tag, Ticket, UserPlus,
-  Users, X,
+  Layers, MapPin, Receipt, ShieldCheck, ShoppingBag, Sparkles, Store, Tag,
+  Ticket, UserPlus, Users, VenusAndMars, X,
 } from 'lucide-react'
 import { Badge } from './Badge'
 import { Button } from './Button'
@@ -626,6 +626,60 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               title={t('sms.filterGroupWho')}
               hint={t('sms.filterGroupWhoHint')}
             >
+              <Field
+                icon={VenusAndMars}
+                label={t('sms.filterGender')}
+                example={t('sms.exGender')}
+              >
+                <div
+                  className="flex flex-wrap gap-2"
+                  role="group"
+                  aria-label={t('sms.filterGender')}
+                >
+                  {(['f', 'm'] as const).map((g) => (
+                    <Chip
+                      key={g}
+                      active={(filters.genders ?? []).includes(g)}
+                      onClick={() => {
+                        const on = filters.genders ?? []
+                        setFilter(
+                          'genders',
+                          on.includes(g) ? on.filter((x) => x !== g) : [...on, g],
+                        )
+                      }}
+                    >
+                      {t(g === 'f' ? 'sms.genderFemale' : 'sms.genderMale')}
+                    </Chip>
+                  ))}
+                </div>
+                {(filters.genders ?? []).length > 0 && (
+                  <p className="mt-1.5 text-xs text-slate-500">
+                    {t('sms.genderNullNote')}
+                  </p>
+                )}
+              </Field>
+
+              <Field
+                icon={ShieldCheck}
+                label={t('sms.filterGenderConfidence')}
+                example={t('sms.exGenderConfidence')}
+              >
+                <Select
+                  options={[
+                    { value: 'medium', label: t('sms.genderConfAny') },
+                    { value: 'high', label: t('sms.genderConfHigh') },
+                    { value: 'certain', label: t('sms.genderConfCertain') },
+                  ]}
+                  value={filters.genderMinConfidence ?? ''}
+                  onChange={(v) =>
+                    setFilter(
+                      'genderMinConfidence',
+                      (v as 'certain' | 'high' | 'medium') || null,
+                    )}
+                  aria-label={t('sms.filterGenderConfidence')}
+                />
+              </Field>
+
               <Field
                 icon={MapPin}
                 label={t('sms.filterCity')}
