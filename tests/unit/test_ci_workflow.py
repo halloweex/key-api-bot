@@ -200,3 +200,74 @@ class TestItRunsTheRuntimesPython:
         install = next(s for s in STEPS if s.get("name") == "Install dependencies")
         assert "requirements-dev.lock" in install["run"]
         assert "requirements-dev.txt" not in install["run"]
+
+
+class TestTheGatesTestTheCodeInFrontOfThem:
+    """The gate ran the branch's tests against the *published* image.
+
+    `gate_with_stores.sh` defaulted to `halloweex/keycrm-web:latest` and mounted
+    the repository's `tests/` over it, so a branch's tests met the previous
+    release's `core/`. On 2026-09-12 that surfaced as a collection error,
+    because the change under test added a new module the published image did
+    not carry — luck, not design: a change that only edits an existing module
+    would have gone green while testing code that was never in the branch.
+
+    That is the same class of defect as the one the `KS_PG_DSN` block above
+    exists to prevent — a check that quietly checks the wrong thing — and it
+    sat in the script that decides whether something ships.
+
+    Asserted on the image name and the build command rather than on the
+    comments beside them: a grep for the reason passes while the behaviour
+    regresses.
+    """
+
+    GATES = ("gate_with_stores.sh", "quick_gate.sh")
+
+    def _script(self, name):
+        return (REPO / "deploy" / name).read_text()
+
+    def _default_image(self, text):
+        m = re.search(r'IMAGE="\$\{IMAGE:-([^}]+)\}"', text)
+        assert m, "the script no longer has a defaulted IMAGE"
+        return m.group(1)
+
+    def test_neither_gate_defaults_to_an_image_from_a_registry(self):
+        """A name with a namespace in it is pulled, not built — which is
+        exactly how the gate came to test a release instead of a branch."""
+        for name in self.GATES:
+            image = self._default_image(self._script(name))
+            assert "/" not in image, (
+                f"{name} defaults to {image!r}, which names a registry image; "
+                f"the gate would then test what is published, not what is here"
+            )
+
+    def test_each_gate_builds_the_image_it_then_runs(self):
+        for name in self.GATES:
+            text = self._script(name)
+            build = re.search(r'docker build[^\n]*-t "\$IMAGE"[^\n]*', text)
+            assert build, f"{name} never builds $IMAGE"
+            assert "Dockerfile.web" in build.group(0), (
+                f"{name} builds $IMAGE from something other than Dockerfile.web"
+            )
+
+    def test_the_build_happens_before_anything_runs_that_image(self):
+        """Ordering is the whole property: a build after the suite proves
+        nothing about the suite that just ran."""
+        for name in self.GATES:
+            text = self._script(name)
+            build_at = text.index('docker build')
+            runs = [m.start() for m in re.finditer(r'--entrypoint sh "\$IMAGE"', text)]
+            assert runs, f"{name} never runs $IMAGE"
+            assert build_at < min(runs), (
+                f"{name} runs the image before building it"
+            )
+
+    def test_skipping_the_build_checks_the_image_is_actually_there(self):
+        """`SKIP_BUILD=1` against an image that does not exist should say so,
+        not fail later inside a container command."""
+        for name in self.GATES:
+            text = self._script(name)
+            assert "SKIP_BUILD" in text, f"{name} has no way to skip the build"
+            assert 'docker image inspect "$IMAGE"' in text, (
+                f"{name} skips the build without checking the image exists"
+            )
