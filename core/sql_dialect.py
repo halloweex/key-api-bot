@@ -387,6 +387,9 @@ def render_tables(sql: str, dialect: Dialect, **extra: Any) -> str:
         expenses=dialect.expenses,
         expense_types=dialect.expense_types,
         period_measures=marketing_period_measures(dialect),
+        channel_measures=channel_measures(dialect),
+        buyers=dialect.buyers,
+        managers=dialect.managers,
         **extra,
     )
 
@@ -401,17 +404,53 @@ def marketing_period_measures(dialect: Dialect) -> str:
     """
     if dialect.gold_revenue_rollup == "TRUE":       # DuckDB: channels are columns
         items = [f"COALESCE(SUM({m}), 0)" for m in _PERIOD_MEASURES]
-        items += [f"COALESCE(SUM({name}_revenue), 0)" for name, _ in _CHANNELS]
-        items += [f"COALESCE(SUM({name}_orders), 0)" for name, _ in _CHANNELS]
     else:                                            # Postgres: a dimension
         rollup = dialect.gold_revenue_rollup
         items = [f"COALESCE(SUM({m}) FILTER (WHERE {rollup}), 0)"
                  for m in _PERIOD_MEASURES]
-        items += [f"COALESCE(SUM(revenue) FILTER (WHERE source_id = {sid}), 0)"
-                  for _name, sid in _CHANNELS]
-        items += [f"COALESCE(SUM(orders_count) FILTER (WHERE source_id = {sid}), 0)"
-                  for _name, sid in _CHANNELS]
-    return ",\n        ".join(items)
+    return ",\n        ".join(items + _channel_items(dialect))
+
+
+def channel_measures(dialect: Dialect) -> str:
+    """Orders and revenue per channel, in the order `SOURCE_MAPPING` lists them.
+
+    Six select items — `(orders, revenue)` for Instagram, Telegram and Shopify,
+    interleaved, which is the order `/dashboard`'s doughnut unpacks. The
+    eleven-item `marketing_period_measures` groups them differently because its
+    caller does, so the shared thing between them is not the string: it is
+    `_channel_items`, the one place that knows a channel is a *column* in
+    DuckDB's Gold and a *dimension* in Postgres'.
+
+    Splitting it that way rather than reusing the eleven wholesale is the
+    charter's rule 1 read literally. Two callers wanting different orderings of
+    the same measures is not a reason to teach one of them the other's shape —
+    but it is exactly a reason for both to render the channel from one home,
+    because the day somebody adds a fourth channel column is the day two
+    hand-written copies stop agreeing.
+    """
+    items = _channel_items(dialect)
+    rev, orders = items[:3], items[3:]
+    return ",\n        ".join(
+        item for pair in zip(orders, rev) for item in pair
+    )
+
+
+def _channel_items(dialect: Dialect) -> List[str]:
+    """Three revenues then three order counts, one channel each.
+
+    The only place in the repository that knows how a channel is spelled in
+    each Gold. DuckDB has a column per channel and cannot name a source nobody
+    wrote a column for; Postgres carries `source_id` and can, which is why
+    source 5 (Виставка) is ₴266,059.00 that lives in `revenue` and in none of
+    the three columns.
+    """
+    if dialect.gold_revenue_rollup == "TRUE":       # DuckDB: channels are columns
+        return ([f"COALESCE(SUM({name}_revenue), 0)" for name, _ in _CHANNELS]
+                + [f"COALESCE(SUM({name}_orders), 0)" for name, _ in _CHANNELS])
+    return ([f"COALESCE(SUM(revenue) FILTER (WHERE source_id = {sid}), 0)"
+             for _name, sid in _CHANNELS]
+            + [f"COALESCE(SUM(orders_count) FILTER (WHERE source_id = {sid}), 0)"
+               for _name, sid in _CHANNELS])
 
 
 def order_lines_select(dialect: Dialect) -> str:

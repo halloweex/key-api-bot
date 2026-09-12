@@ -52,6 +52,10 @@ BODIES = (
     "_BRANDS_SQL",
     "_UNBRANDED_EXISTS_SQL",
     "_PROMOCODES_SQL",
+    # The category tree joined the filter bar's flag when `/dashboard` became
+    # its second routed caller: it is chrome shared across tabs, so riding one
+    # tab's flag meant another tab's category filter took the DuckDB lock.
+    "_CATEGORY_TREE_SQL",
 )
 
 
@@ -196,7 +200,9 @@ class TestTheRoutedBodies:
         calls = [n for n in ast.walk(tree)
                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                  and n.func.attr == "_lookups_run"]
-        assert len(calls) == 5, f"expected five router calls, found {len(calls)}"
+        assert len(calls) == len(BODIES), (
+            f"expected {len(BODIES)} router calls, found {len(calls)}"
+        )
         for call in calls:
             first = call.args[0]
             assert isinstance(first, ast.Name), (

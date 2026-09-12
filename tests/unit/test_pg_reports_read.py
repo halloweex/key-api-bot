@@ -208,7 +208,7 @@ class TestTheRoutedBodies:
             if isinstance(node, (ast.With, ast.AsyncWith)) and opens_the_store(node)
             for inner in ast.walk(node)
             if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
-            and inner.func.attr in ("_reports_run", "_category_ids")
+            and inner.func.attr in ("_reports_run", "_lookups_run", "_category_ids")
         ]
         assert not offenders, (
             f"routing helper called inside `self.connection()` at {offenders} — "
