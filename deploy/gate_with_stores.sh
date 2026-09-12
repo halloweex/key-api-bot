@@ -27,7 +27,9 @@
 set -uo pipefail
 
 REPO="${REPO:-/opt/key-api-bot}"
-IMAGE="${IMAGE:-halloweex/keycrm-web:latest}"
+# BUILT below, never pulled — see the block after `cleanup`. A registry image
+# here is the defect this default replaced.
+IMAGE="${IMAGE:-keycrm-web:gate}"
 NET=ks-gate
 PG=gate-pg
 CH=gate-ch
@@ -54,6 +56,38 @@ cleanup() {
 trap cleanup EXIT
 
 cleanup
+
+# ─── The image is built here, from the working tree ─────────────────────────
+#
+# It used to default to `halloweex/keycrm-web:latest` — the *published* image —
+# with the repository's `tests/` mounted over it. So the gate ran the branch's
+# tests against the previous release's `core/`, and said nothing about it.
+#
+# On 2026-09-12 that surfaced as an import error, because the change under test
+# added a new module and the published image did not have it. That was luck: a
+# change that only edits an existing module would have gone green while testing
+# code that was never in the branch. This script is what decides whether
+# something ships, so it must not be able to test the wrong code — and a check
+# that can quietly check the wrong thing is the failure mode the whole
+# `KS_PG_DSN` block above exists to prevent.
+#
+# Building rather than verifying, deliberately: a comparison of the image's
+# `core/` against the tree would still leave a way to be wrong, and only tells
+# you afterwards. Measured on the VPS with a warm layer cache and an unchanged
+# tree: **48 s**, against a suite that takes thirteen minutes.
+#
+# `SKIP_BUILD=1` reuses whatever `$IMAGE` names — for a second run on a tree
+# that has not moved, or to gate an image you pulled on purpose.
+if [ "${SKIP_BUILD:-0}" = "1" ]; then
+    echo "GATE: SKIP_BUILD=1 — using $IMAGE as it stands"
+    docker image inspect "$IMAGE" >/dev/null 2>&1 \
+        || { echo "GATE: no such image: $IMAGE"; exit 1; }
+else
+    echo "building $IMAGE from $REPO…"
+    docker build -q -f "$REPO/Dockerfile.web" -t "$IMAGE" "$REPO" >/dev/null \
+        || { echo "GATE: image build failed"; exit 1; }
+fi
+
 docker network create "$NET" >/dev/null
 
 docker run -d --name "$PG" --network "$NET" \
