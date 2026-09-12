@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.173
+
+- Fix the build: a story of a component with required props needs args
+- Give SmsAudienceForm its first Storybook story
+
+
 ## 3.0.172
 
 - Let an SMS audience be narrowed by gender, and by how far to trust it
