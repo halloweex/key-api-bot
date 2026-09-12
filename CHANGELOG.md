@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.172
+
+- Let an SMS audience be narrowed by gender, and by how far to trust it
+
+
 ## 3.0.171
 
 - Derive the gender on the hourly tick, so a deploy fills the table itself
