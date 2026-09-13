@@ -224,6 +224,24 @@ class TestTheyReallyAreAppendOnly:
 # ── reading the two shapes ───────────────────────────────────────────────────
 
 
+def _no_watermarks():
+    """What a first run — and `full=True` — hand to `read_appends`: every table
+    at None, meaning "Postgres holds nothing, send the lot"."""
+    from core.pg_operational import _APPEND_ABOVE
+
+    return {spec.pg_table: None for spec in _APPEND_ABOVE}
+
+
+def _watermarks(**marks):
+    """`_no_watermarks()` with the named tables set. Keyword names are the
+    Postgres table names, so callers pass them through `**{TABLE: value}`."""
+    out = _no_watermarks()
+    for table, value in marks.items():
+        assert table in out, f"{table} is not an append table"
+        out[table] = value
+    return out
+
+
 class TestReadingTheDuckDBSide:
     @pytest.mark.asyncio
     async def test_the_five_small_tables_come_back_whole(self, tmp_path):
@@ -249,9 +267,9 @@ class TestReadingTheDuckDBSide:
         try:
             await _seed(store)
             async with store.connection() as conn:
-                history, movements = read_appends(conn, None, 0)
-            assert len(history) == 6      # three days, two offers
-            assert len(movements) == 4
+                out = read_appends(conn, _no_watermarks())
+            assert len(out[SKU_HISTORY_TABLE]) == 6   # three days, two offers
+            assert len(out[MOVEMENTS_TABLE]) == 4
         finally:
             await store.close()
 
@@ -264,8 +282,9 @@ class TestReadingTheDuckDBSide:
         try:
             await _seed(store)
             async with store.connection() as conn:
-                history, _ = read_appends(conn, date(2026, 8, 2), 0)
-            days = {row[0] for row in history}
+                out = read_appends(
+                    conn, _watermarks(**{SKU_HISTORY_TABLE: date(2026, 8, 2)}))
+            days = {row[0] for row in out[SKU_HISTORY_TABLE]}
             assert days == {date(2026, 8, 2), date(2026, 8, 3)}
         finally:
             await store.close()
@@ -278,8 +297,8 @@ class TestReadingTheDuckDBSide:
         try:
             await _seed(store)
             async with store.connection() as conn:
-                _, movements = read_appends(conn, None, 2)
-            assert [row[0] for row in movements] == [3, 4]
+                out = read_appends(conn, _watermarks(**{MOVEMENTS_TABLE: 2}))
+            assert [row[0] for row in out[MOVEMENTS_TABLE]] == [3, 4]
         finally:
             await store.close()
 
@@ -289,9 +308,11 @@ class TestReadingTheDuckDBSide:
         try:
             await _seed(store)
             async with store.connection() as conn:
-                history, movements = read_appends(conn, date(2026, 8, 4), 4)
-            assert history == []
-            assert movements == []
+                out = read_appends(conn, _watermarks(**{
+                    SKU_HISTORY_TABLE: date(2026, 8, 4), MOVEMENTS_TABLE: 4,
+                }))
+            assert out[SKU_HISTORY_TABLE] == []
+            assert out[MOVEMENTS_TABLE] == []
         finally:
             await store.close()
 
@@ -300,17 +321,31 @@ class TestTheRepairPath:
     """A row lost below the watermark is invisible to `id > MAX(id)` and to
     `date >= MAX(date)` forever. `full=True` is what puts it back."""
 
-    def test_full_ignores_both_watermarks(self):
+    def test_full_ignores_every_watermark(self):
+        """`full` starts every table at None, which `read_appends` reads as
+        "send the lot" — so the repair path cannot be narrowed by forgetting a
+        table when the list grows."""
         source = inspect.getsource(replicate_operational)
-        block = source[source.index("if full:"):]
-        assert "since_date, since_movement_id = None, 0" in block[:120]
+        assert "spec.pg_table: None for spec in _APPEND_ABOVE" in source
+        block = source[source.index("if not full:"):]
+        assert "SELECT MAX({spec.watermark})" in block[:400]
 
-    def test_full_upserts_the_movements_and_the_incremental_path_does_not(self):
+    def test_full_upserts_and_the_incremental_path_does_not(self):
         """On the incremental path a conflict means the watermark logic is
-        wrong and should say so, not overwrite and look fine."""
+        wrong and should say so, not overwrite and look fine.
+
+        Read off the declaration now rather than off the source text: the
+        branch is `spec.always_upsert or full`, so the behaviour lives in the
+        list and asserting the list is asserting the behaviour."""
+        from core.pg_operational import _APPEND_ABOVE
+
         source = inspect.getsource(replicate_operational)
-        assert "_upsert(MOVEMENTS_TABLE, MOVEMENT_COLUMNS, (\"id\",))" in source
-        assert "if full else" in source
+        assert "upsert = spec.always_upsert or full" in source
+        assert "if upsert else" in source
+
+        by_table = {s.pg_table: s for s in _APPEND_ABOVE}
+        assert not by_table[MOVEMENTS_TABLE].always_upsert
+        assert by_table[SKU_HISTORY_TABLE].always_upsert
 
     @pytest.mark.asyncio
     async def test_it_is_never_taken_on_a_schedule(self):
@@ -350,8 +385,8 @@ class TestItNeverRaises:
             if isinstance(node, ast.Await)
         ]
         assert awaits, "expected the function to await something"
-        # `MAX(date)` is fetched, then `store.connection()` is entered.
-        assert source.index("SELECT MAX(date)") < source.index(
+        # The watermarks are fetched, then `store.connection()` is entered.
+        assert source.index("SELECT MAX({spec.watermark})") < source.index(
             "async with store.connection()"
         )
 
@@ -1048,3 +1083,291 @@ class TestRetentionIsNotLoss:
 
         assert "mirror_pruned_rows" in REGISTRY
         assert "mirror_pruned_rows" in HUMAN_CHECK_NAMES
+
+
+class TestTheAppendListIsNowDeclared:
+    """The append path used to be two tables written out longhand in five
+    places: the watermark reads, the reader's signature, its two-tuple return,
+    the write branch and the two row-count stamps. Revision 0027 needed two
+    more and the quality journal needs three after that, so it became a list.
+
+    These tests exist because that refactor touches the path that ships 193 000
+    rows an hour. What they pin is that the two original tables kept their
+    exact behaviour — the `>=` that `inventory_sku_history` needs and the `>`
+    that everything id-keyed needs are not interchangeable, and neither is the
+    upsert.
+    """
+
+    def test_the_two_original_tables_kept_their_operators(self):
+        from core.pg_operational import _APPEND_ABOVE
+
+        by_table = {s.pg_table: s for s in _APPEND_ABOVE}
+        sku = by_table["app.inventory_sku_history"]
+        assert sku.inclusive, (
+            "`date >= MAX(date)` re-ships the day it resumes from on purpose; "
+            "`>` would step over a half-written day and leave a hole nothing "
+            "would ever fill"
+        )
+        assert sku.always_upsert, "it re-ships a day, so it must overwrite it"
+
+        movements = by_table["app.stock_movements"]
+        assert not movements.inclusive
+        assert not movements.always_upsert, (
+            "a plain INSERT on the incremental path is the point: a row above "
+            "MAX(id) cannot already be there, so a conflict means the "
+            "watermark logic is wrong and should say so"
+        )
+
+    def test_every_id_keyed_table_asks_for_strictly_greater(self):
+        """`>=` on a monotone id re-ships the last row every run for nothing —
+        and, on the incremental path where the write is a plain INSERT, it
+        would conflict every single time."""
+        from core.pg_operational import _APPEND_ABOVE
+
+        for spec in _APPEND_ABOVE:
+            if spec.watermark == "id":
+                assert not spec.inclusive, spec.pg_table
+                assert not spec.always_upsert, spec.pg_table
+
+    def test_the_reader_asks_for_the_whole_table_when_there_is_no_watermark(self):
+        """A watermark of None is what `full=True` sets and what a first run
+        finds. It must mean "everything", not "nothing"."""
+        from core.pg_operational import _APPEND_ABOVE, read_appends
+
+        asked = []
+
+        class Conn:
+            def execute(self, sql, params=None):
+                asked.append((" ".join(sql.split()), params))
+                return self
+
+            def fetchall(self):
+                return []
+
+        read_appends(Conn(), {s.pg_table: None for s in _APPEND_ABOVE})
+        assert len(asked) == len(_APPEND_ABOVE)
+        for sql, params in asked:
+            assert "WHERE" not in sql, sql
+            assert params is None
+
+    def test_the_reader_bounds_each_table_by_its_own_watermark(self):
+        from core.pg_operational import _APPEND_ABOVE, read_appends
+
+        asked = []
+
+        class Conn:
+            def execute(self, sql, params=None):
+                asked.append((" ".join(sql.split()), params))
+                return self
+
+            def fetchall(self):
+                return []
+
+        read_appends(Conn(), {s.pg_table: 7 for s in _APPEND_ABOVE})
+        by_sql = {sql: params for sql, params in asked}
+        assert any("WHERE date >= ?" in sql for sql in by_sql), by_sql.keys()
+        assert sum("WHERE id > ?" in sql for sql in by_sql) == 3, (
+            "stock_movements, warehouse_refreshes and reconciliation_log are "
+            "all id-keyed and all ask for strictly greater"
+        )
+
+    def test_the_two_forensic_logs_joined_the_list(self):
+        from core.pg_operational import _APPEND_ABOVE
+
+        tables = {s.pg_table for s in _APPEND_ABOVE}
+        assert "app.warehouse_refreshes" in tables
+        assert "app.reconciliation_log" in tables
+
+    def test_they_are_compared_and_the_columns_match_what_is_shipped(self):
+        """The three-list invariant, for the append shape. A column shipped and
+        not compared is a column copied and never checked."""
+        from core.mirror_reconciliation import APPEND_ONLY_TABLES
+        from core.pg_operational import _APPEND_ABOVE
+
+        shipped = {s.pg_table: set(s.columns) for s in _APPEND_ABOVE}
+        compared = {s.pg_table: set(s.columns) for s in APPEND_ONLY_TABLES}
+        assert set(shipped) == set(compared), (
+            f"only shipped: {sorted(set(shipped) - set(compared))}\n"
+            f"only compared: {sorted(set(compared) - set(shipped))}"
+        )
+        for table in ("app.warehouse_refreshes", "app.reconciliation_log"):
+            assert shipped[table] == compared[table], table
+
+    def test_silver_mode_is_shipped_despite_not_being_in_the_create_table(self):
+        """It arrives by ALTER TABLE in DuckDB migration 0005. A twin built by
+        reading the CREATE TABLE alone is one column short, and the shipper
+        would then never carry the column that says whether Silver was rebuilt
+        whole or incrementally."""
+        from core.pg_operational import REFRESH_COLUMNS
+
+        assert "silver_mode" in REFRESH_COLUMNS
+
+    def test_the_forensic_ids_are_carried_not_generated(self):
+        """`app.stock_movements`' decision, for the same reason: a Postgres
+        IDENTITY would give one warehouse tick two names and the bucketed
+        comparison joins on the id."""
+        import re
+        from pathlib import Path
+
+        ddl = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+               / "0027_forensics.py").read_text(encoding="utf-8")
+        for table in ("warehouse_refreshes", "reconciliation_log"):
+            block = re.search(
+                rf"CREATE TABLE IF NOT EXISTS app\.{table} \((.*?)\n\s*\)",
+                ddl, re.S).group(1)
+            id_line = next(l for l in block.splitlines() if l.strip().startswith("id "))
+            assert "GENERATED" not in id_line.upper(), id_line
+            assert "DEFAULT" not in id_line.upper(), id_line
+
+    def test_the_nullable_columns_that_carry_meaning_stay_nullable(self):
+        """Three columns where NULL is a fact and not an absence.
+
+        `gold_products_rows` is NULL on every row since the products Gold was
+        retired — a 0 would read as "built nothing" when the truth is that
+        there is no such layer. `checksum_match` and `validation_passed` are
+        NULL on the error path, which means "we never got far enough to
+        compare" rather than FALSE. `silver_mode` is NULL both before its
+        migration ran and on every error-path row.
+        """
+        import re
+        from pathlib import Path
+
+        ddl = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+               / "0027_forensics.py").read_text(encoding="utf-8")
+        block = re.search(
+            r"CREATE TABLE IF NOT EXISTS app\.warehouse_refreshes \((.*?)\n\s*\)",
+            ddl, re.S).group(1)
+        for column in ("gold_products_rows", "checksum_match",
+                       "validation_passed", "silver_mode", "error"):
+            line = next(l for l in block.splitlines() if l.strip().startswith(column))
+            assert "NOT NULL" not in line, line
+
+    def test_error_is_unbounded_text(self):
+        """`str(e)` of an arbitrary exception, and the column the self-heal
+        budget keys on — a truncating type would change behaviour, not just
+        storage."""
+        import re
+        from pathlib import Path
+
+        ddl = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+               / "0027_forensics.py").read_text(encoding="utf-8")
+        assert re.search(r"error\s+TEXT", ddl), "error must not be VARCHAR(n)"
+
+
+class TestTheQualityJournal:
+    """A run and its two findings tables, and the one thing that makes them
+    comparable at all: the children have no clock and borrow the run's.
+
+    Neither child carries a timestamp — seven columns and nine columns, none of
+    them a time. The daily comparison forgives a row written between the copy
+    and the check, and it needs a clock to do that; without one, every finding
+    the 07:00 integrity scan wrote is CRITICAL at the 07:30 comparison, most
+    mornings.
+    """
+
+    JOURNAL = ("app.data_quality_runs", "app.data_quality_issues",
+               "app.data_quality_diffs")
+
+    @staticmethod
+    def _spec(table):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+
+        return next(s for s in OPERATIONAL_TABLES if s.pg_table == table)
+
+    def test_all_three_are_shipped_and_compared(self):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+        from core.pg_operational import _FULL_REPLACE
+
+        shipped = {e[0] for e in _FULL_REPLACE}
+        compared = {s.pg_table for s in OPERATIONAL_TABLES}
+        for table in self.JOURNAL:
+            assert table in shipped, table
+            assert table in compared, table
+
+    def test_the_parent_ships_before_its_children(self):
+        """One transaction, and the order inside it still matters: it must
+        never hold findings without the run they belong to, even for a
+        statement."""
+        from core.pg_operational import _FULL_REPLACE
+
+        order = [e[0] for e in _FULL_REPLACE]
+        parent = order.index("app.data_quality_runs")
+        for child in ("app.data_quality_issues", "app.data_quality_diffs"):
+            assert parent < order.index(child), child
+
+    def test_each_child_borrows_the_runs_clock(self):
+        """And borrows it from the run table by name, not from a column of its
+        own that does not exist."""
+        for child in ("app.data_quality_issues", "app.data_quality_diffs"):
+            clock = self._spec(child).synced_column
+            assert clock, child
+            assert "data_quality_runs" in clock, clock
+            assert "started_at" in clock, clock
+
+    def test_the_borrowed_clock_is_not_a_compared_column(self):
+        """It is an expression, not a column the table has — so it can never
+        appear in `columns`, and `stamp_is_per_row` must still hold because
+        each run has its own moment."""
+        for child in ("app.data_quality_issues", "app.data_quality_diffs"):
+            spec = self._spec(child)
+            assert spec.synced_column not in spec.columns
+            assert spec.ignore_columns == ()
+            assert spec.stamp_is_per_row
+
+    def test_the_diff_values_are_not_declared_numeric(self):
+        """They look like money and are DOUBLE on both sides. Declaring them
+        coerces one side to Decimal and reports every row as differing — the
+        same trap as the watchdog measures, arrived at from the opposite
+        direction because these ones really are quantities of hryvnia."""
+        assert self._spec("app.data_quality_diffs").numeric == ()
+
+    def test_the_natural_keys_are_the_measured_ones(self):
+        assert self._spec("app.data_quality_issues").key_columns == (
+            "run_id", "check_name", "table_name")
+        assert self._spec("app.data_quality_diffs").key_columns == (
+            "run_id", "month", "source_id", "diff_class", "field")
+
+    def test_no_foreign_key_is_declared(self):
+        """DuckDB has none, the three ship in one transaction in parent-first
+        order, and an FK would turn a partial shipment into a failure of the
+        whole hourly replication rather than a finding the next comparison
+        reports."""
+        from pathlib import Path
+
+        ddl = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+               / "0028_quality_journal.py").read_text(encoding="utf-8")
+        assert "REFERENCES" not in ddl.upper()
+
+    def test_the_text_columns_are_text_and_not_json(self):
+        """`sample_ids` and `order_ids` hold JSON arrays as strings. A json or
+        jsonb column re-renders them on the round trip and the zero-tolerance
+        comparison then reports every row. `order_ids` NULL is meaningful too —
+        it is None precisely when the discrepancy carries no ids — so no
+        DEFAULT."""
+        import re
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+                  / "0028_quality_journal.py").read_text(encoding="utf-8")
+        # The CREATE TABLE bodies only. The module docstring explains why json
+        # is the wrong type, and a search of the whole file would match that
+        # explanation — which is the prose-versus-structure mistake this suite
+        # keeps relearning. Caught by this very test on its first run.
+        ddl = "\n".join(
+            m.group(0) for m in re.finditer(
+                r"CREATE TABLE IF NOT EXISTS app\.\w+ \(.*?\n\s*\)",
+                source, re.S)
+        )
+        assert ddl.count("CREATE TABLE") == 3, "expected three statements"
+        assert "JSON" not in ddl.upper()
+        for column in ("sample_ids", "order_ids", "description",
+                       "error_message"):
+            # The DDL is inside a docstring as well as in the statements, so
+            # take the declaration line: the one that names the column first
+            # and then a type.
+            line = next(
+                l for l in ddl.splitlines()
+                if l.strip().startswith(column + " ") and "TEXT" in l
+            )
+            assert "NOT NULL" not in line, line
+            assert "DEFAULT" not in line, line

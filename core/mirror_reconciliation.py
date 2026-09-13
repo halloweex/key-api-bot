@@ -104,6 +104,11 @@ from core.pg_operational import (
     OFFER_STOCK_COLUMNS,
     PREDICTION_COLUMNS,
     SEASONAL_COLUMNS,
+    DQ_DIFF_COLUMNS,
+    DQ_ISSUE_COLUMNS,
+    DQ_RUN_COLUMNS,
+    RECONCILIATION_LOG_COLUMNS,
+    REFRESH_COLUMNS,
     SKU_STATUS_COLUMNS,
     TRAFFIC_SEND_COLUMNS,
     WEEKLY_PATTERN_COLUMNS,
@@ -2197,6 +2202,57 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         numeric=("revenue",),
         full_replace=True,
     ),
+    # ── the data-quality journal (revision 0028) ──
+    #
+    # The parent has a clock of its own. Its two children have no timestamp
+    # column at all — seven and nine columns, none of them a time — and without
+    # one every finding written by the 07:00 integrity scan would be CRITICAL
+    # at the 07:30 comparison, most mornings.
+    #
+    # So they borrow the run's. `synced_column` is interpolated into the SELECT
+    # list on the DuckDB side ONLY (`fetch_duckdb_rows`; `fetch_pg_rows` never
+    # reads it), so a correlated subquery is a legal clock and needs no new
+    # machinery. It is sound rather than merely convenient: `persist_run` writes
+    # all three tables inside one DuckDB transaction, so a child is in Postgres
+    # if and only if its parent is, and the parent's clock is exactly this
+    # child's clock. There is no third state for it to be wrong about.
+    MirroredTable(
+        pg_table="app.data_quality_runs",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="data_quality_runs",
+        columns=DQ_RUN_COLUMNS,
+        key_columns=("run_id",),
+        synced_column="started_at",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.data_quality_issues",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="data_quality_issues",
+        columns=DQ_ISSUE_COLUMNS,
+        key_columns=("run_id", "check_name", "table_name"),
+        synced_column=(
+            "(SELECT r.started_at FROM data_quality_runs r "
+            "WHERE r.run_id = data_quality_issues.run_id)"
+        ),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.data_quality_diffs",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="data_quality_diffs",
+        columns=DQ_DIFF_COLUMNS,
+        key_columns=("run_id", "month", "source_id", "diff_class", "field"),
+        synced_column=(
+            "(SELECT r.started_at FROM data_quality_runs r "
+            "WHERE r.run_id = data_quality_diffs.run_id)"
+        ),
+        # dk_value and kc_value stay floats on both sides — DOUBLE against
+        # DOUBLE PRECISION. They look like money, which is the whole trap:
+        # declaring them here would coerce one side to Decimal and report every
+        # row as differing.
+        full_replace=True,
+    ),
 )
 
 # ── the two shipped above a watermark ────────────────────────────────────────
@@ -2215,6 +2271,39 @@ _MOVEMENT_FIELDS: Tuple[Tuple[str, str], ...] = (
 
 _SKU_HISTORY_COLS = tuple(c for c, _ in _SKU_HISTORY_FIELDS)
 _MOVEMENT_COLS = tuple(c for c, _ in _MOVEMENT_FIELDS)
+
+# ── the two forensic logs (revision 0027) ──
+#
+# Both fingerprinted rather than read whole, for `stock_movements`' reason:
+# 74 388 rows cannot be pulled out of both stores every morning. The cost is
+# the fingerprint's one blind spot — a text column rewritten to exactly the
+# same length in a bucket where nothing else moved — and here that is `error`
+# and `status`, both of which are written once when the row is inserted and
+# never touched again, on tables with no UPDATE anywhere.
+#
+# `checksum_match` and `validation_passed` are BOOLEAN and _BOOL folds NULL
+# into FALSE, so the fingerprint cannot tell "we never got far enough to
+# compare" from "they did not match". That is a real gap and it is accepted
+# rather than papered over: both facts live in the same row as `error`, whose
+# LENGTH the fingerprint does see, so an error-path row cannot masquerade as a
+# successful one.
+_REFRESH_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("id", _INT), ("refreshed_at", _TS), ("trigger", _TEXT),
+    ("duration_ms", _NUMERIC), ("bronze_orders", _INT), ("silver_rows", _INT),
+    ("gold_revenue_rows", _INT), ("gold_products_rows", _INT),
+    ("silver_revenue_checksum", _NUMERIC), ("gold_revenue_checksum", _NUMERIC),
+    ("checksum_match", _BOOL), ("validation_passed", _BOOL),
+    ("error", _TEXT), ("silver_mode", _TEXT),
+)
+
+_RECONCILIATION_LOG_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("id", _INT), ("check_date", _DATE), ("api_count", _INT),
+    ("db_count", _INT), ("discrepancy", _INT), ("discrepancy_pct", _NUMERIC),
+    ("status", _TEXT), ("checked_at", _TS),
+)
+
+_REFRESH_COLS = tuple(c for c, _ in _REFRESH_FIELDS)
+_RECONCILIATION_LOG_COLS = tuple(c for c, _ in _RECONCILIATION_LOG_FIELDS)
 
 # Days since 1970-01-01, one bucket per day. Checked against both engines
 # rather than reasoned about: `epoch(DATE '2026-08-27') // 86400` in DuckDB and
@@ -2270,6 +2359,57 @@ APPEND_ONLY_TABLES: Tuple[BucketedTable, ...] = (
         ),
         pg_rows_sql=(
             f"SELECT {', '.join(_MOVEMENT_COLS)} FROM app.stock_movements "
+            f"WHERE (id / {BUCKET_SIZE}) = $1"
+        ),
+    ),
+    # ── the two forensic logs (revision 0027) ──
+    #
+    # Bucketed on `id // 1000` like `stock_movements`, and unlike
+    # `inventory_sku_history`, which buckets by the day because its ~900 offers
+    # would otherwise all land in one bucket. These are keyed by a real
+    # monotone id, so the arithmetic bucket is the natural one: 75 buckets for
+    # `warehouse_refreshes`, 3 for `reconciliation_log`.
+    BucketedTable(
+        pg_table="app.warehouse_refreshes",
+        dk_table="warehouse_refreshes",
+        columns=_REFRESH_COLS,
+        fields=_REFRESH_FIELDS,
+        dk_bucket="id // {}".format(BUCKET_SIZE),
+        pg_bucket="id / {}".format(BUCKET_SIZE),
+        numeric=("duration_ms", "silver_revenue_checksum",
+                 "gold_revenue_checksum"),
+        # `refreshed_at` is both the clock and a compared value, and here that
+        # is right for `app.order_backfill_misses`' reason: it is written once,
+        # when that tick happened, and nothing ever rewrites it. Comparing it
+        # is how a row copied with the wrong timestamp is caught at all, and
+        # the grace window still answers per row because every row carries its
+        # own moment.
+        dk_rows_sql=(
+            "SELECT " + ", ".join(_REFRESH_COLS)
+            + ", refreshed_at FROM warehouse_refreshes "
+            f"WHERE (id // {BUCKET_SIZE}) = ?"
+        ),
+        pg_rows_sql=(
+            f"SELECT {', '.join(_REFRESH_COLS)} FROM app.warehouse_refreshes "
+            f"WHERE (id / {BUCKET_SIZE}) = $1"
+        ),
+    ),
+    BucketedTable(
+        pg_table="app.reconciliation_log",
+        dk_table="reconciliation_log",
+        columns=_RECONCILIATION_LOG_COLS,
+        fields=_RECONCILIATION_LOG_FIELDS,
+        dk_bucket="id // {}".format(BUCKET_SIZE),
+        pg_bucket="id / {}".format(BUCKET_SIZE),
+        numeric=("discrepancy_pct",),
+        dk_rows_sql=(
+            "SELECT " + ", ".join(_RECONCILIATION_LOG_COLS)
+            + ", checked_at FROM reconciliation_log "
+            f"WHERE (id // {BUCKET_SIZE}) = ?"
+        ),
+        pg_rows_sql=(
+            f"SELECT {', '.join(_RECONCILIATION_LOG_COLS)} "
+            "FROM app.reconciliation_log "
             f"WHERE (id / {BUCKET_SIZE}) = $1"
         ),
     ),
