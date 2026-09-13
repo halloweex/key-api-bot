@@ -492,6 +492,13 @@ class TestSyncedColumnDualRole:
         "app.memory_samples": "sampled_at",
         "app.weekly_report_sends": "sent_at",
         "app.traffic_report_sends": "sent_at",
+        # The data-quality journal (revision 0028). `persist_run` inserts one
+        # row per run and stamps it with that run's own start, so this is a
+        # per-row clock in the plainest sense. Its two children are not on this
+        # list at all and cannot be: their clock is a correlated subquery over
+        # the parent, so it is not one of their columns and there is no dual
+        # role to classify.
+        "app.data_quality_runs": "started_at",
     }
     WHOLE_TABLE_STAMPS = {
         "app.sku_inventory_status": "updated_at",

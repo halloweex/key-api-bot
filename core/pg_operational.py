@@ -131,6 +131,10 @@ TRAFFIC_SENDS_TABLE = "app.traffic_report_sends"
 # not as a full replace.
 REFRESHES_TABLE = "app.warehouse_refreshes"
 RECONCILIATION_LOG_TABLE = "app.reconciliation_log"
+# The data-quality journal (revision 0028): one run and its two children.
+DQ_RUNS_TABLE = "app.data_quality_runs"
+DQ_ISSUES_TABLE = "app.data_quality_issues"
+DQ_DIFFS_TABLE = "app.data_quality_diffs"
 # The forecast group (revision 0025). Four tables, 313 rows, and the reason
 # they come first out of the sixteen with no Postgres home: `get_predictions`
 # and `generate_smart_goals` are the last two dashboard reads still tied to
@@ -251,6 +255,25 @@ RECONCILIATION_LOG_COLUMNS: Tuple[str, ...] = (
     "discrepancy_pct", "status", "checked_at",
 )
 
+DQ_RUN_COLUMNS: Tuple[str, ...] = (
+    "run_id", "started_at", "ended_at", "as_of", "window_start", "window_end",
+    "layer", "status", "integrity_issues_count", "discrepancies_count",
+    "critical_count", "warn_count", "api_calls_used", "duration_ms",
+    "error_message",
+)
+
+# `count` is a reserved-ish word in neither engine and is left alone: renaming
+# a column is how two stores stop being copies of each other.
+DQ_ISSUE_COLUMNS: Tuple[str, ...] = (
+    "run_id", "check_name", "table_name", "severity", "count", "sample_ids",
+    "description",
+)
+
+DQ_DIFF_COLUMNS: Tuple[str, ...] = (
+    "run_id", "month", "source_id", "diff_class", "field", "dk_value",
+    "kc_value", "severity", "order_ids",
+)
+
 # The DuckDB table each one is read from. Postgres qualifies by schema and
 # DuckDB does not, so the pair is spelled out rather than derived by stripping
 # a prefix — a rule that guesses a table name is a rule that will guess wrong.
@@ -329,6 +352,29 @@ _FULL_REPLACE: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
      "week_start, sales_type"),
     (TRAFFIC_SENDS_TABLE, "traffic_report_sends", TRAFFIC_SEND_COLUMNS,
      "week_start, sales_type"),
+    # ── the data-quality journal (revision 0028) ──
+    #
+    # Append-only in DuckDB, and full-replaced here anyway. A watermark is the
+    # obvious shape for an append table and it was the first draft, with the
+    # two children shipping under the PARENT's `MAX(run_id)` — because a run
+    # that finds nothing writes no child rows, and a self-derived watermark on
+    # `data_quality_diffs` would sit 336 runs behind (it last gained a row at
+    # run 260; runs are at 596).
+    #
+    # That reasoning was sound and the premise was not: 1 057 rows between the
+    # three is smaller than `bronze.offer_stocks` and `app.sku_inventory_status`,
+    # both rewritten whole every hour already. A watermark buys nothing at this
+    # size and costs a three-table coupling that has to stay right for ever.
+    # Full replace also absorbs a future retention sweep on the journal without
+    # a line of change, where a watermark would accumulate every pruned row.
+    #
+    # Parent first, so that the transaction never holds children without the
+    # run they belong to even for a statement.
+    (DQ_RUNS_TABLE, "data_quality_runs", DQ_RUN_COLUMNS, "run_id"),
+    (DQ_ISSUES_TABLE, "data_quality_issues", DQ_ISSUE_COLUMNS,
+     "run_id, check_name, table_name"),
+    (DQ_DIFFS_TABLE, "data_quality_diffs", DQ_DIFF_COLUMNS,
+     "run_id, month, source_id, diff_class, field"),
 )
 
 # How many rows one `executemany` carries. 143,274 in a single call is one

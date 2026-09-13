@@ -104,6 +104,9 @@ from core.pg_operational import (
     OFFER_STOCK_COLUMNS,
     PREDICTION_COLUMNS,
     SEASONAL_COLUMNS,
+    DQ_DIFF_COLUMNS,
+    DQ_ISSUE_COLUMNS,
+    DQ_RUN_COLUMNS,
     RECONCILIATION_LOG_COLUMNS,
     REFRESH_COLUMNS,
     SKU_STATUS_COLUMNS,
@@ -2197,6 +2200,57 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         key_columns=("week_start", "sales_type"),
         synced_column="sent_at",
         numeric=("revenue",),
+        full_replace=True,
+    ),
+    # ── the data-quality journal (revision 0028) ──
+    #
+    # The parent has a clock of its own. Its two children have no timestamp
+    # column at all — seven and nine columns, none of them a time — and without
+    # one every finding written by the 07:00 integrity scan would be CRITICAL
+    # at the 07:30 comparison, most mornings.
+    #
+    # So they borrow the run's. `synced_column` is interpolated into the SELECT
+    # list on the DuckDB side ONLY (`fetch_duckdb_rows`; `fetch_pg_rows` never
+    # reads it), so a correlated subquery is a legal clock and needs no new
+    # machinery. It is sound rather than merely convenient: `persist_run` writes
+    # all three tables inside one DuckDB transaction, so a child is in Postgres
+    # if and only if its parent is, and the parent's clock is exactly this
+    # child's clock. There is no third state for it to be wrong about.
+    MirroredTable(
+        pg_table="app.data_quality_runs",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="data_quality_runs",
+        columns=DQ_RUN_COLUMNS,
+        key_columns=("run_id",),
+        synced_column="started_at",
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.data_quality_issues",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="data_quality_issues",
+        columns=DQ_ISSUE_COLUMNS,
+        key_columns=("run_id", "check_name", "table_name"),
+        synced_column=(
+            "(SELECT r.started_at FROM data_quality_runs r "
+            "WHERE r.run_id = data_quality_issues.run_id)"
+        ),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.data_quality_diffs",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="data_quality_diffs",
+        columns=DQ_DIFF_COLUMNS,
+        key_columns=("run_id", "month", "source_id", "diff_class", "field"),
+        synced_column=(
+            "(SELECT r.started_at FROM data_quality_runs r "
+            "WHERE r.run_id = data_quality_diffs.run_id)"
+        ),
+        # dk_value and kc_value stay floats on both sides — DOUBLE against
+        # DOUBLE PRECISION. They look like money, which is the whole trap:
+        # declaring them here would coerce one side to Decimal and report every
+        # row as differing.
         full_replace=True,
     ),
 )
