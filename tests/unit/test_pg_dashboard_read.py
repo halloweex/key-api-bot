@@ -43,7 +43,8 @@ TIMEOUT_S = 20
 TODAY = date.today()
 WINDOW = (TODAY - timedelta(days=30), TODAY)
 
-METHODS = ("get_return_orders", "get_sales_by_source", "get_subcategory_breakdown")
+METHODS = ("get_return_orders", "get_sales_by_source", "get_subcategory_breakdown",
+           "get_top_products", "get_product_performance", "get_brand_analytics")
 
 CALLS = (
     ("get_return_orders", {}),
@@ -53,6 +54,10 @@ CALLS = (
     ("get_sales_by_source", {"category_id": 1}),       # …and the category walk
     ("get_subcategory_breakdown", {"parent_category_name": "Care"}),
     ("get_subcategory_breakdown", {"parent_category_name": "Care", "brand": "BrandA"}),
+    ("get_top_products", {}),
+    ("get_top_products", {"category_id": 1}),          # …and the category walk
+    ("get_product_performance", {}),                   # two statements, one call
+    ("get_brand_analytics", {}),
 )
 
 BODIES = (
@@ -60,6 +65,10 @@ BODIES = (
     "_SALES_BY_SOURCE_FILTERED_SQL",
     "_SALES_BY_SOURCE_GOLD_SQL",
     "_SUBCATEGORY_SQL",
+    "_TOP_PRODUCTS_SQL",
+    "_TOP_PRODUCTS_BY_REVENUE_SQL",
+    "_CATEGORY_BREAKDOWN_SQL",
+    "_BRAND_ANALYTICS_SQL",
 )
 
 # The holes each body fills in itself before the dialect renderer sees it.
@@ -255,7 +264,8 @@ class TestTheRoutedBodies:
         LIMIT, where a tie means different *rows* and not a different order."""
         from core.repositories import revenue
 
-        unique = {"l.source_id", "l.category_name", "s.id"}
+        unique = {"l.source_id", "l.category_name", "s.id",
+                  "product_name", "brand_name", "category_name"}
         for name in BODIES:
             sql = getattr(revenue, name)
             upper = sql.upper()
@@ -310,3 +320,60 @@ class TestTheChannelShapeHasOneHome:
                     f"{dialect.name}: the eleven-item rendering no longer uses "
                     f"the shared channel items"
                 )
+
+
+class TestNothingHereReadsTheDeadGold:
+    """`gold_daily_products` exists only in DuckDB, and these three were its
+    last readers on this tab. A body that reached for it again would render a
+    name Postgres does not have and fall back for ever, silently."""
+
+    def test_no_routed_body_names_it(self):
+        from core.repositories import revenue
+
+        for name in BODIES:
+            assert "gold_daily_products" not in getattr(revenue, name), name
+
+    def test_no_dashboard_method_names_it_either(self):
+        """Asserted on the tree, and with the docstring taken out of it.
+
+        The first version of this walked every string constant in the method,
+        and the methods *explain* why they left that table — so it failed on
+        its own prose. That is the fourth time in this file's history the
+        difference between structure and prose has had to be paid for; the
+        docstring is a `Constant` like any other, and it is the one that has
+        to be excluded by name."""
+        source = REPOSITORY.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for name in METHODS:
+            node = next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+            doc = ast.get_docstring(node, clean=False)
+            strings = [n.value for n in ast.walk(node)
+                       if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                       and n.value != doc]
+            for text in strings:
+                assert "gold_daily_products" not in text, (
+                    f"{name} still names the DuckDB-only Gold"
+                )
+
+    def test_the_product_grouping_is_by_id_not_by_the_sold_name(self):
+        """Grouping on the sold name split 193 of 268 production products."""
+        from core.repositories import revenue
+
+        for name in ("_TOP_PRODUCTS_SQL", "_TOP_PRODUCTS_BY_REVENUE_SQL"):
+            body = getattr(revenue, name)
+            assert "GROUP BY COALESCE(CAST(l.product_id AS VARCHAR)" in body, name
+
+    def test_the_brand_order_count_is_distinct(self):
+        """A sum of per-product cells was 35.2 % high on production."""
+        from core.repositories import revenue
+
+        assert "COUNT(DISTINCT l.order_id)" in revenue._BRAND_ANALYTICS_SQL
+
+    def test_the_displayed_name_is_deterministic(self):
+        """`ANY_VALUE` is free to pick a different row in each engine, which is
+        a differential test that flakes rather than a fact."""
+        from core.repositories import revenue
+
+        for name in BODIES:
+            assert "ANY_VALUE" not in getattr(revenue, name).upper(), name

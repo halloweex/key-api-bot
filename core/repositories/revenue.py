@@ -126,6 +126,93 @@ _SALES_BY_SOURCE_GOLD_SQL = """
     WHERE {where}
 """
 
+# ─── The three that used to read `gold_daily_products` ──────────────────────
+#
+# That table exists only in DuckDB, and deriving it in Postgres is the wrong
+# size — the same conclusion `/inventory`, `/marketing`, `/reports` and
+# `/products_intel` each reached. The line level already carries what these
+# ask for, and Gold's own predicate (`NOT is_return AND is_active_source`) is
+# re-applied here because that is what Gold applied when it materialised those
+# rows.
+#
+# Measured on the production backup over a closed 30-day window, per brand:
+# **quantity 0 differing, revenue 0 differing** across all 32. The line level
+# reproduces Gold exactly on everything these read — except the two things
+# below, which it corrects.
+#
+# ONE: the product list was fragmented, and this is the bigger of the two.
+#
+# `gold_daily_products` stores the name *as sold*, and the shop renames
+# products — a Ukrainian description one month, the Latin brand name the next.
+# 193 of 268 products carry more than one name over thirty days, and all 193
+# have exactly one name in the catalogue. `get_product_performance` grouped by
+# that name, so it split those products into two rows or more each, understated
+# every one of them and mis-ranked the chart: its top row showed ₴103,000.26
+# for a product that made ₴145,452.36. Grouping by `product_id` is what
+# `get_top_products` and both promocode paths already did.
+#
+# The name shown is therefore the catalogue's, falling back to the sold one for
+# the 8.2 % of lines that carry no `product_id`. `MIN`, never `ANY_VALUE`: the
+# latter is free to pick a different row in each engine, which is a
+# differential test that flakes rather than a fact.
+#
+# TWO: the brand card's order count was inflated by a third.
+#
+# Gold stores `COUNT(DISTINCT order_id)` per (date, sales_type, source_id,
+# product) cell, so summing the cells of a brand counts one order once per
+# product it contained. Measured over the same window: **3,858 against a true
+# 2,853, a 35.2 % overstatement**, wrong on 22 of 32 brands — NEOGEN showed
+# 1,109 orders against 680. `COUNT(DISTINCT order_id)` is the answer that was
+# wanted, and porting the inflation so two engines agree on a wrong number is
+# the worst outcome available.
+
+_TOP_PRODUCTS_SQL = """
+    SELECT
+        COALESCE(MIN(l.catalog_product_name), MIN(l.product_name)) AS product_name,
+        SUM(l.quantity) AS total_qty
+    FROM {order_lines} l
+    WHERE {where}
+    GROUP BY COALESCE(CAST(l.product_id AS VARCHAR), l.product_name)
+    ORDER BY total_qty DESC, product_name
+    LIMIT ?
+"""
+
+_TOP_PRODUCTS_BY_REVENUE_SQL = """
+    SELECT
+        COALESCE(MIN(l.catalog_product_name), MIN(l.product_name)) AS product_name,
+        SUM(l.line_amount) AS revenue,
+        SUM(l.quantity) AS quantity
+    FROM {order_lines} l
+    WHERE {where}
+    GROUP BY COALESCE(CAST(l.product_id AS VARCHAR), l.product_name)
+    ORDER BY revenue DESC, product_name
+    LIMIT 10
+"""
+
+_CATEGORY_BREAKDOWN_SQL = """
+    SELECT
+        COALESCE(l.parent_category_name, l.category_name, 'Other') AS category_name,
+        SUM(l.line_amount) AS revenue,
+        SUM(l.quantity) AS quantity
+    FROM {order_lines} l
+    WHERE {where}
+    GROUP BY COALESCE(l.parent_category_name, l.category_name, 'Other')
+    ORDER BY revenue DESC, category_name
+"""
+
+_BRAND_ANALYTICS_SQL = """
+    SELECT
+        COALESCE(l.brand, 'Unknown') AS brand_name,
+        SUM(l.line_amount) AS revenue,
+        SUM(l.quantity) AS quantity,
+        COUNT(DISTINCT l.order_id) AS orders
+    FROM {order_lines} l
+    WHERE {where}
+    GROUP BY COALESCE(l.brand, 'Unknown')
+    ORDER BY revenue DESC, brand_name
+"""
+
+
 _SUBCATEGORY_SQL = """
     SELECT
         l.category_name as subcategory_name,
@@ -1126,85 +1213,50 @@ class RevenueMixin:
         limit: int = 10,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """Get top products by quantity (from Gold layer)."""
-        async with self.connection() as conn:
-            if promocode:
-                # Silver path: gold_daily_products lacks promocode
-                silver_params = [start_date, end_date]
-                silver_where = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
-                if sales_type != "all":
-                    silver_where.append("l.sales_type = ?")
-                    silver_params.append(sales_type)
-                if source_id:
-                    silver_where.append("l.source_id = ?")
-                    silver_params.append(source_id)
-                if category_id:
-                    cat_ids = await self._get_category_with_children(conn, category_id)
-                    silver_where.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
-                    silver_params.extend(cat_ids)
-                if brand:
-                    silver_where.append(brand_where(brand, silver_params, "l"))
-                silver_where.append("UPPER(l.promocode) = UPPER(?)")
-                silver_params.append(promocode)
-                silver_params.append(limit)
-                silver_sql = " AND ".join(silver_where)
-                results = conn.execute(f"""
-                    SELECT
-                        ANY_VALUE(l.product_name) as product_name,
-                        SUM(l.quantity) as total_qty
-                    FROM silver_order_lines l
-                    WHERE {silver_sql}
-                    GROUP BY COALESCE(CAST(l.product_id AS VARCHAR), l.product_name)
-                    ORDER BY total_qty DESC
-                    LIMIT ?
-                """, silver_params).fetchall()
-            else:
-                params = [start_date, end_date]
-                where_clauses = ["g.date BETWEEN ? AND ?"]
+        """Top products by quantity, from the order-lines level.
 
-                if sales_type != "all":
-                    where_clauses.append("g.sales_type = ?")
-                    params.append(sales_type)
+        One branch where there were two: the promocode path already read this
+        level because `gold_daily_products` has no promocode, and the Gold path
+        was a shortcut to the same numbers — 0 differing on quantity across
+        every brand, measured.
+        """
+        params: List[Any] = [start_date, end_date]
+        where = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return",
+                 "l.is_active_source"]
 
-                if source_id:
-                    where_clauses.append("g.source_id = ?")
-                    params.append(source_id)
+        if sales_type != "all":
+            where.append("l.sales_type = ?")
+            params.append(sales_type)
+        if source_id:
+            where.append("l.source_id = ?")
+            params.append(source_id)
+        if category_id:
+            cat_ids = await self._category_ids(category_id)
+            where.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
+            params.extend(cat_ids)
+        if brand:
+            where.append(brand_where(brand, params, "l"))
+        if promocode:
+            where.append("UPPER(l.promocode) = UPPER(?)")
+            params.append(promocode)
+        params.append(limit)
 
-                if category_id:
-                    cat_ids = await self._get_category_with_children(conn, category_id)
-                    where_clauses.append(f"g.category_id IN ({','.join('?' * len(cat_ids))})")
-                    params.extend(cat_ids)
+        results = await self._dashboard_run(
+            _TOP_PRODUCTS_SQL.replace("{where}", " AND ".join(where)), params)
 
-                if brand:
-                    where_clauses.append(brand_where(brand, params, "g"))
+        raw_labels = [row[0] or "Unknown" for row in results]
+        labels = [self._wrap_label(row[0]) for row in results]
+        data = [int(row[1]) for row in results]
+        total = sum(data) if data else 1
+        percentages = [round(d / total * 100, 1) for d in data]
 
-                params.append(limit)
-                where_sql = " AND ".join(where_clauses)
-
-                results = conn.execute(f"""
-                    SELECT
-                        ANY_VALUE(g.product_name) as product_name,
-                        SUM(g.quantity_sold) as total_qty
-                    FROM gold_daily_products g
-                    WHERE {where_sql}
-                    GROUP BY COALESCE(CAST(g.product_id AS VARCHAR), g.product_name)
-                    ORDER BY total_qty DESC
-                    LIMIT ?
-                """, params).fetchall()
-
-            raw_labels = [row[0] or "Unknown" for row in results]
-            labels = [self._wrap_label(row[0]) for row in results]
-            data = [int(row[1]) for row in results]
-            total = sum(data) if data else 1
-            percentages = [round(d / total * 100, 1) for d in data]
-
-            return {
-                "labels": raw_labels,
-                "wrappedLabels": labels,
-                "data": data,
-                "percentages": percentages,
-                "backgroundColor": "#2563EB"
-            }
+        return {
+            "labels": raw_labels,
+            "wrappedLabels": labels,
+            "data": data,
+            "percentages": percentages,
+            "backgroundColor": "#2563EB"
+        }
 
     async def get_categories(self) -> List[Dict[str, Any]]:
         """Root categories for the filter dropdown, from whichever engine."""
@@ -1303,117 +1355,63 @@ class RevenueMixin:
         promocode: Optional[str] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """Get product performance: top by revenue, category breakdown (from Gold layer)."""
-        async with self.connection() as conn:
-            if promocode:
-                # Silver path: gold_daily_products lacks promocode
-                silver_params = [start_date, end_date]
-                silver_where = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
-                if sales_type != "all":
-                    silver_where.append("l.sales_type = ?")
-                    silver_params.append(sales_type)
-                if source_id:
-                    silver_where.append("l.source_id = ?")
-                    silver_params.append(source_id)
-                if brand:
-                    silver_where.append(brand_where(brand, silver_params, "l"))
-                silver_where.append("UPPER(l.promocode) = UPPER(?)")
-                silver_params.append(promocode)
-                silver_sql = " AND ".join(silver_where)
+        """Top products by revenue and the category split, from the line level.
 
-                top_results = conn.execute(f"""
-                    SELECT
-                        ANY_VALUE(l.product_name) as product_name,
-                        SUM(l.line_amount) as revenue,
-                        SUM(l.quantity) as quantity
-                    FROM silver_order_lines l
-                    WHERE {silver_sql}
-                    GROUP BY COALESCE(CAST(l.product_id AS VARCHAR), l.product_name)
-                    ORDER BY revenue DESC
-                    LIMIT 10
-                """, silver_params).fetchall()
+        The Gold path this replaces grouped by the *sold* product name, which
+        split 193 of 268 products into two rows or more. See the note above the
+        bodies: this is a correction, not a transliteration.
+        """
+        params: List[Any] = [start_date, end_date]
+        where = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return",
+                 "l.is_active_source"]
 
-                cat_results = conn.execute(f"""
-                    SELECT
-                        COALESCE(l.parent_category_name, l.category_name, 'Other') as category_name,
-                        SUM(l.line_amount) as revenue,
-                        SUM(l.quantity) as quantity
-                    FROM silver_order_lines l
-                    WHERE {silver_sql}
-                    GROUP BY COALESCE(l.parent_category_name, l.category_name, 'Other')
-                    ORDER BY revenue DESC
-                """, silver_params).fetchall()
-            else:
-                params = [start_date, end_date]
-                where_clauses = ["g.date BETWEEN ? AND ?"]
+        if sales_type != "all":
+            where.append("l.sales_type = ?")
+            params.append(sales_type)
+        if source_id:
+            where.append("l.source_id = ?")
+            params.append(source_id)
+        if brand:
+            where.append(brand_where(brand, params, "l"))
+        if promocode:
+            where.append("UPPER(l.promocode) = UPPER(?)")
+            params.append(promocode)
 
-                if sales_type != "all":
-                    where_clauses.append("g.sales_type = ?")
-                    params.append(sales_type)
+        where_sql = " AND ".join(where)
+        top_results = await self._dashboard_run(
+            _TOP_PRODUCTS_BY_REVENUE_SQL.replace("{where}", where_sql), params)
+        cat_results = await self._dashboard_run(
+            _CATEGORY_BREAKDOWN_SQL.replace("{where}", where_sql), params)
 
-                if source_id:
-                    where_clauses.append("g.source_id = ?")
-                    params.append(source_id)
+        category_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4"]
+        category_breakdown = {
+            "labels": [row[0] for row in cat_results],
+            "revenue": [round(float(row[1]), 2) for row in cat_results],
+            "quantity": [int(row[2]) for row in cat_results],
+            "backgroundColor": category_colors[:len(cat_results)]
+        }
 
-                if brand:
-                    where_clauses.append(brand_where(brand, params, "g"))
+        product_colors = "#7C3AED"
+        top_by_revenue = {
+            "labels": [row[0] for row in top_results],
+            "data": [round(float(row[1]), 2) for row in top_results],
+            "quantities": [int(row[2]) for row in top_results],
+            "backgroundColor": product_colors
+        }
 
-                where_sql = " AND ".join(where_clauses)
+        total_revenue = sum(float(row[1]) for row in top_results) if top_results else 0
+        total_quantity = sum(int(row[2]) for row in top_results) if top_results else 0
 
-                # Top products by revenue
-                top_results = conn.execute(f"""
-                    SELECT
-                        g.product_name,
-                        SUM(g.product_revenue) as revenue,
-                        SUM(g.quantity_sold) as quantity
-                    FROM gold_daily_products g
-                    WHERE {where_sql}
-                    GROUP BY g.product_name
-                    ORDER BY revenue DESC
-                    LIMIT 10
-                """, params).fetchall()
-
-                # Category breakdown (use parent_category_name, fall back to category_name)
-                cat_results = conn.execute(f"""
-                    SELECT
-                        COALESCE(g.parent_category_name, g.category_name, 'Other') as category_name,
-                        SUM(g.product_revenue) as revenue,
-                        SUM(g.quantity_sold) as quantity
-                    FROM gold_daily_products g
-                    WHERE {where_sql}
-                    GROUP BY COALESCE(g.parent_category_name, g.category_name, 'Other')
-                    ORDER BY revenue DESC
-                """, params).fetchall()
-
-            category_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4"]
-            category_breakdown = {
-                "labels": [row[0] for row in cat_results],
-                "revenue": [round(float(row[1]), 2) for row in cat_results],
-                "quantity": [int(row[2]) for row in cat_results],
-                "backgroundColor": category_colors[:len(cat_results)]
+        return {
+            "topByRevenue": top_by_revenue,
+            "categoryBreakdown": category_breakdown,
+            "metrics": {
+                "totalProducts": len(top_results),
+                "totalRevenue": round(total_revenue, 2),
+                "totalQuantity": total_quantity,
+                "avgProductRevenue": round(total_revenue / len(top_results), 2) if top_results else 0
             }
-
-            product_colors = "#7C3AED"
-            top_by_revenue = {
-                "labels": [row[0] for row in top_results],
-                "data": [round(float(row[1]), 2) for row in top_results],
-                "quantities": [int(row[2]) for row in top_results],
-                "backgroundColor": product_colors
-            }
-
-            total_revenue = sum(float(row[1]) for row in top_results) if top_results else 0
-            total_quantity = sum(int(row[2]) for row in top_results) if top_results else 0
-
-            return {
-                "topByRevenue": top_by_revenue,
-                "categoryBreakdown": category_breakdown,
-                "metrics": {
-                    "totalProducts": len(top_results),
-                    "totalRevenue": round(total_revenue, 2),
-                    "totalQuantity": total_quantity,
-                    "avgProductRevenue": round(total_revenue / len(top_results), 2) if top_results else 0
-                }
-            }
+        }
 
     async def get_subcategory_breakdown(
         self,
@@ -1486,75 +1484,68 @@ class RevenueMixin:
         source_id: Optional[int] = None,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """Get brand analytics: top brands by revenue and quantity (from Gold layer)."""
-        async with self.connection() as conn:
-            params = [start_date, end_date]
-            where_clauses = ["g.date BETWEEN ? AND ?"]
+        """Top brands by revenue and by quantity, from the order-lines level.
 
-            if sales_type != "all":
-                where_clauses.append("g.sales_type = ?")
-                params.append(sales_type)
+        `orders` is `COUNT(DISTINCT order_id)` here and was a sum of Gold's
+        per-product cells before, which counted one order once per product it
+        contained — 35.2 % high across the base, measured. See the note above
+        the bodies.
+        """
+        params: List[Any] = [start_date, end_date]
+        where = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return",
+                 "l.is_active_source"]
 
-            if source_id:
-                where_clauses.append("g.source_id = ?")
-                params.append(source_id)
+        if sales_type != "all":
+            where.append("l.sales_type = ?")
+            params.append(sales_type)
+        if source_id:
+            where.append("l.source_id = ?")
+            params.append(source_id)
 
-            where_sql = " AND ".join(where_clauses)
+        brand_results = await self._dashboard_run(
+            _BRAND_ANALYTICS_SQL.replace("{where}", " AND ".join(where)), params)
 
-            # Brand stats from gold_daily_products
-            brand_results = conn.execute(f"""
-                SELECT
-                    COALESCE(g.brand, 'Unknown') as brand_name,
-                    SUM(g.product_revenue) as revenue,
-                    SUM(g.quantity_sold) as quantity,
-                    SUM(g.order_count) as orders
-                FROM gold_daily_products g
-                WHERE {where_sql}
-                GROUP BY COALESCE(g.brand, 'Unknown')
-                ORDER BY revenue DESC
-            """, params).fetchall()
+        brand_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4", "#14B8A6", "#EF4444"]
 
-            brand_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4", "#14B8A6", "#EF4444"]
+        top_by_revenue = brand_results[:10]
+        top_brands_revenue = {
+            "labels": [row[0] for row in top_by_revenue],
+            "data": [round(float(row[1]), 2) for row in top_by_revenue],
+            "quantities": [int(row[2]) for row in top_by_revenue],
+            "orders": [int(row[3]) for row in top_by_revenue],
+            "backgroundColor": brand_colors[:len(top_by_revenue)]
+        }
 
-            # Top 10 by revenue
-            top_by_revenue = brand_results[:10]
-            top_brands_revenue = {
-                "labels": [row[0] for row in top_by_revenue],
-                "data": [round(float(row[1]), 2) for row in top_by_revenue],
-                "quantities": [int(row[2]) for row in top_by_revenue],
-                "orders": [int(row[3]) for row in top_by_revenue],
-                "backgroundColor": brand_colors[:len(top_by_revenue)]
+        # Ordered on the same tiebreaker the body uses, so two engines that
+        # returned an equal-quantity pair in either order still agree here.
+        sorted_by_qty = sorted(brand_results, key=lambda x: (-int(x[2]), x[0]))[:10]
+        top_brands_quantity = {
+            "labels": [row[0] for row in sorted_by_qty],
+            "data": [int(row[2]) for row in sorted_by_qty],
+            "revenue": [round(float(row[1]), 2) for row in sorted_by_qty],
+            "backgroundColor": brand_colors[:len(sorted_by_qty)]
+        }
+
+        total_revenue = sum(float(row[1]) for row in brand_results)
+        total_quantity = sum(int(row[2]) for row in brand_results)
+        unique_brands = len([b for b in brand_results if b[0] != "Unknown"])
+
+        top_brand = brand_results[0][0] if brand_results else "N/A"
+        top_brand_revenue = float(brand_results[0][1]) if brand_results else 0
+        top_brand_share = (top_brand_revenue / total_revenue * 100) if total_revenue > 0 else 0
+
+        return {
+            "topByRevenue": top_brands_revenue,
+            "topByQuantity": top_brands_quantity,
+            "metrics": {
+                "totalBrands": unique_brands,
+                "topBrand": top_brand,
+                "topBrandShare": round(top_brand_share, 1),
+                "totalRevenue": round(total_revenue, 2),
+                "totalQuantity": total_quantity,
+                "avgBrandRevenue": round(total_revenue / unique_brands, 2) if unique_brands > 0 else 0
             }
-
-            # Top 10 by quantity
-            sorted_by_qty = sorted(brand_results, key=lambda x: x[2], reverse=True)[:10]
-            top_brands_quantity = {
-                "labels": [row[0] for row in sorted_by_qty],
-                "data": [int(row[2]) for row in sorted_by_qty],
-                "revenue": [round(float(row[1]), 2) for row in sorted_by_qty],
-                "backgroundColor": brand_colors[:len(sorted_by_qty)]
-            }
-
-            total_revenue = sum(float(row[1]) for row in brand_results)
-            total_quantity = sum(int(row[2]) for row in brand_results)
-            unique_brands = len([b for b in brand_results if b[0] != "Unknown"])
-
-            top_brand = brand_results[0][0] if brand_results else "N/A"
-            top_brand_revenue = float(brand_results[0][1]) if brand_results else 0
-            top_brand_share = (top_brand_revenue / total_revenue * 100) if total_revenue > 0 else 0
-
-            return {
-                "topByRevenue": top_brands_revenue,
-                "topByQuantity": top_brands_quantity,
-                "metrics": {
-                    "totalBrands": unique_brands,
-                    "topBrand": top_brand,
-                    "topBrandShare": round(top_brand_share, 1),
-                    "totalRevenue": round(total_revenue, 2),
-                    "totalQuantity": total_quantity,
-                    "avgBrandRevenue": round(total_revenue / unique_brands, 2) if unique_brands > 0 else 0
-                }
-            }
+        }
 
     # ─── Report Methods ──────────────────────────────────────────────────────
 
