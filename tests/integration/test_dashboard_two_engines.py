@@ -61,6 +61,7 @@ PRODUCTS = [
     (100, "Serum", 2, "BrandA", "SKU-A", 500.0),
     (200, "Ampoule", 3, "BrandB", "SKU-B", 100.0),
     (300, "Lipstick", 4, None, "SKU-C", 250.0),
+    (400, "Toner", 2, "BrandA", "SKU-D", 200.0),   # BrandA's second product
 ]
 
 # (buyer_id, full_name, phone). Order 3 below points at buyer 999, which is in
@@ -88,15 +89,25 @@ ORDERS = [
     (6, 1,  300.0, 7, False, B2B_MANAGER_ID, 7),   # b2b, and a named manager
     (7, 2,  500.0, 8, True,  B2B_MANAGER_ID, 7),   # a b2b return
 ]
-# (line_id, order_id, product_id, quantity, price_sold)
+# (line_id, order_id, product_id, quantity, price_sold, sold_name)
+#
+# `sold_name` is `order_products.name` — the name at the moment of the order,
+# which is not the catalogue's. Product 100 is sold under two of them, which is
+# the production shape: 193 of 268 products carry more than one name over
+# thirty days, and grouping on it split each of them into several rows.
+#
+# Order 1 carries two BrandA lines (100 and 400). Summing Gold's per-product
+# cells would count that order twice for BrandA; `COUNT(DISTINCT order_id)`
+# counts it once, and the difference is what was 35.2 % on production.
 LINES = [
-    (1, 1, 100, 2, 500.0),
-    (2, 1, 200, 2, 100.0),
-    (3, 2, 100, 1, 500.0),
-    (4, 3, 200, 1, 100.0),
-    (5, 4, 300, 4, 250.0),
-    (6, 6, 200, 3, 100.0),
-    (7, 7, 100, 1, 500.0),
+    (1, 1, 100, 2, 500.0, "Serum"),
+    (2, 1, 200, 2, 100.0, "Ampoule"),
+    (3, 1, 400, 1, 200.0, "Toner"),          # same order, same brand as line 1
+    (4, 2, 100, 1, 500.0, "Serum — renamed"),  # the same product, another name
+    (5, 3, 200, 1, 100.0, "Ampoule"),
+    (6, 4, 300, 4, 250.0, "Lipstick"),
+    (7, 6, 200, 3, 100.0, "Ampoule"),
+    (8, 7, 100, 1, 500.0, "Serum"),
 ]
 
 PG_TABLES = ("gold.daily_revenue", "silver.orders", "bronze.order_products",
@@ -124,8 +135,9 @@ async def _seed_duckdb(store):
                  now - timedelta(days=days), buyer, manager])
         conn.executemany(
             "INSERT INTO order_products (id, order_id, product_id, name, quantity,"
-            " price_sold) SELECT ?, ?, ?, p.name, ?, ? FROM products p WHERE p.id = ?",
-            [(lid, oid, pid, qty, price, pid) for lid, oid, pid, qty, price in LINES])
+            " price_sold) VALUES (?,?,?,?,?,?)",
+            [(lid, oid, pid, sold, qty, price)
+             for lid, oid, pid, qty, price, sold in LINES])
     await store.refresh_warehouse_layers(trigger="manual")
 
 
@@ -258,6 +270,19 @@ CALLS = (
     ("get_subcategory_breakdown", {"parent_category_name": "Nope"}),     # nothing
     ("get_subcategory_breakdown", {"parent_category_name": "Care", "brand": "BrandA"}),
     ("get_subcategory_breakdown", {"parent_category_name": "Care", "source_id": 1}),
+    # The three that came off `gold_daily_products`.
+    ("get_top_products", {}),
+    ("get_top_products", {"category_id": 1}),
+    ("get_top_products", {"brand": "BrandA"}),
+    ("get_top_products", {"limit": 2}),
+    ("get_top_products", {"promocode": "NOPE"}),        # the old Silver branch
+    ("get_product_performance", {}),
+    ("get_product_performance", {"brand": "BrandA"}),
+    ("get_product_performance", {"source_id": 1}),
+    ("get_product_performance", {"sales_type": "all"}),
+    ("get_brand_analytics", {}),
+    ("get_brand_analytics", {"sales_type": "all"}),
+    ("get_brand_analytics", {"source_id": 1}),
 )
 
 
@@ -324,3 +349,59 @@ class TestTheReturnsListJoinsThatCanMiss:
         assert by_id[3]["buyerName"] is None
         assert by_id[3]["managerName"] is None
         assert by_id[7]["managerName"] == "Wholesale"
+
+
+class TestTheTwoCorrectionsTheGoldPathCarried:
+    """These are not transliterations, so they are asserted as behaviour.
+
+    Both were measured on the production backup before being changed, and both
+    are the kind of defect that shows a plausible number: a chart that ranks
+    fragments of products, and an order count a third too high.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_product_sold_under_two_names_is_one_row(
+        self, both_engines, monkeypatch,
+    ):
+        """Product 100 ships as "Serum" and once as "Serum — renamed".
+        Grouped by the sold name it is two products; grouped by id it is one,
+        and its revenue is the sum."""
+        duck, postgres = await _both(
+            both_engines, monkeypatch, "get_product_performance", {})
+        assert _comparable(duck) == _comparable(postgres)
+
+        labels = postgres["topByRevenue"]["labels"]
+        assert labels.count("Serum") == 1, labels
+        assert "Serum — renamed" not in labels, (
+            "the sold name reached the chart — the grouping is by name again"
+        )
+        revenue = dict(zip(labels, postgres["topByRevenue"]["data"]))
+        # lines 1, 4 and 8: 2×500 + 1×500 + 1×500, the last on a return
+        assert revenue["Serum"] == 1500.0, revenue
+
+    @pytest.mark.asyncio
+    async def test_the_catalogue_name_is_what_is_shown(
+        self, both_engines, monkeypatch,
+    ):
+        """`MIN` over the sold names would have picked "Serum — renamed" for
+        product 100 in DuckDB's collation. The catalogue name is the one a
+        reader recognises, and it is the same in both engines."""
+        _, postgres = await _both(
+            both_engines, monkeypatch, "get_product_performance", {})
+        assert "Serum" in postgres["topByRevenue"]["labels"]
+
+    @pytest.mark.asyncio
+    async def test_one_order_with_two_lines_of_a_brand_counts_once(
+        self, both_engines, monkeypatch,
+    ):
+        """Order 1 carries products 100 and 400, both BrandA. Summing Gold's
+        per-product cells makes that two orders; it is one."""
+        duck, postgres = await _both(
+            both_engines, monkeypatch, "get_brand_analytics", {})
+        assert _comparable(duck) == _comparable(postgres)
+
+        by_brand = dict(zip(postgres["topByRevenue"]["labels"],
+                            postgres["topByRevenue"]["orders"]))
+        # BrandA appears on orders 1 and 2 — order 7 is a return, order 4 is a
+        # retired source. Two, not the three lines that carry it.
+        assert by_brand["BrandA"] == 2, by_brand
