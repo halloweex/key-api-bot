@@ -115,6 +115,16 @@ SKU_STATUS_TABLE = "app.sku_inventory_status"
 SKU_HISTORY_TABLE = "app.inventory_sku_history"
 MOVEMENTS_TABLE = "app.stock_movements"
 BUYER_GENDER_TABLE = "app.buyer_gender"
+# The watchdog samples and the two send ledgers (revision 0026). Five tables
+# that share no subject and do share a shipping shape: every one is rewritten
+# whole or upserted over a fixed key by its DuckDB writer, so `_FULL_REPLACE`
+# carries them with no new machinery. See that revision for why they travel
+# together and why the three watchdogs may not use a watermark.
+DISK_SAMPLES_TABLE = "app.disk_samples"
+DATA_DIR_SAMPLES_TABLE = "app.data_dir_samples"
+MEMORY_SAMPLES_TABLE = "app.memory_samples"
+WEEKLY_SENDS_TABLE = "app.weekly_report_sends"
+TRAFFIC_SENDS_TABLE = "app.traffic_report_sends"
 # The forecast group (revision 0025). Four tables, 313 rows, and the reason
 # they come first out of the sixteen with no Postgres home: `get_predictions`
 # and `generate_smart_goals` are the last two dashboard reads still tied to
@@ -198,6 +208,27 @@ GROWTH_METRIC_COLUMNS = (
     "sample_size", "updated_at",
 )
 
+# The watchdogs. Every measure stays a float on both sides — see revision 0026
+# on why none of them is NUMERIC — so none of these appears in a `numeric=`
+# tuple, and that absence is the deliberate half of the decision.
+DISK_SAMPLE_COLUMNS: Tuple[str, ...] = (
+    "sampled_at", "db_size_mb", "disk_pct_used", "disk_free_gb",
+)
+DATA_DIR_SAMPLE_COLUMNS: Tuple[str, ...] = ("sampled_at", "path_group", "bytes")
+MEMORY_SAMPLE_COLUMNS: Tuple[str, ...] = (
+    "sampled_at", "working_set_mb", "page_cache_mb", "limit_mb", "oom_kills",
+)
+
+# The two ledgers are the same five columns, and they keep two tuples rather
+# than sharing one: the tables are separate on purpose, and a shared constant
+# would be the first step back towards merging them.
+WEEKLY_SEND_COLUMNS: Tuple[str, ...] = (
+    "week_start", "sales_type", "revenue", "orders", "sent_at",
+)
+TRAFFIC_SEND_COLUMNS: Tuple[str, ...] = (
+    "week_start", "sales_type", "revenue", "orders", "sent_at",
+)
+
 # The DuckDB table each one is read from. Postgres qualifies by schema and
 # DuckDB does not, so the pair is spelled out rather than derived by stripping
 # a prefix — a rule that guesses a table name is a rule that will guess wrong.
@@ -252,6 +283,30 @@ _FULL_REPLACE: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
     (SEASONAL_TABLE, "seasonal_indices", SEASONAL_COLUMNS, "month"),
     (WEEKLY_PATTERNS_TABLE, "weekly_patterns", WEEKLY_PATTERN_COLUMNS, "month"),
     (GROWTH_METRICS_TABLE, "growth_metrics", GROWTH_METRIC_COLUMNS, "metric_type"),
+    # ── the watchdog samples and the send ledgers (revision 0026) ──
+    #
+    # These are the first tables here with a *scheduled* retention DELETE —
+    # the memory sweep runs every thirty minutes — and that is what settles
+    # their shape rather than a preference. A watermark can only ever add
+    # rows, so a pruned sample would stay in Postgres for ever and the daily
+    # comparison would report an orphan this copy had created. A full replace
+    # writes exactly what DuckDB holds, so a prune arrives with everything
+    # else and there is nothing left to reconcile.
+    #
+    # Ordered by their key, like every entry above, so `read_full_replace`
+    # returns rows in a stable order and a diff of two runs is readable.
+    (DISK_SAMPLES_TABLE, "disk_samples", DISK_SAMPLE_COLUMNS, "sampled_at"),
+    (DATA_DIR_SAMPLES_TABLE, "data_dir_samples", DATA_DIR_SAMPLE_COLUMNS,
+     "sampled_at, path_group"),
+    (MEMORY_SAMPLES_TABLE, "memory_samples", MEMORY_SAMPLE_COLUMNS, "sampled_at"),
+    # The smallest two tables here and the only ones whose loss is visible to
+    # a person: without them two daily-ticking jobs stop knowing which week
+    # they have already reported, and every approved user gets the same
+    # message seven times.
+    (WEEKLY_SENDS_TABLE, "weekly_report_sends", WEEKLY_SEND_COLUMNS,
+     "week_start, sales_type"),
+    (TRAFFIC_SENDS_TABLE, "traffic_report_sends", TRAFFIC_SEND_COLUMNS,
+     "week_start, sales_type"),
 )
 
 # How many rows one `executemany` carries. 143,274 in a single call is one

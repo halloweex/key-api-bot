@@ -145,9 +145,10 @@ class TestTheTableIsWhereItsMeaningPutsIt:
         """`REQUIRED_REVISION` is what makes deploying `web` before `migrate`
         fail closed instead of writing into a table that is not there.
 
-        The pin moves with the head migration — 0025 since the four forecast
-        tables landed — and this assertion is the speed bump that makes the
-        move a decision rather than a side effect.
+        The pin moves with the head migration — 0026 since the three watchdog
+        sample tables and the two send ledgers landed — and this assertion is
+        the speed bump that makes the move a decision rather than a side
+        effect.
 
         Do not make it derive the newest revision from the directory. That was
         tried on 2026-09-13 in `test_pg_operational.py` and removed the same
@@ -158,7 +159,7 @@ class TestTheTableIsWhereItsMeaningPutsIt:
         Moving it obliges the deploy to run `migrate` before `web`, which
         `docker compose up -d` does and the workflow then checks with
         `docker wait ks-migrate`."""
-        assert pg.REQUIRED_REVISION == "0025_forecast_tables"
+        assert pg.REQUIRED_REVISION == "0026_watchdogs_and_ledgers"
 
     def test_money_keeps_the_scale_it_has_everywhere_else(self):
         """NUMERIC(12,2), as in `bronze.orders` and as DECIMAL(12,2) in DuckDB.

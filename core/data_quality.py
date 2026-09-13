@@ -1701,6 +1701,7 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "mirror_orphan_rows": "extra rows in the copy",
     "mirror_row_values": "rows differ between copies",
     "mirror_retired_rows": "retired in KeyCRM, copy remembers",
+    "mirror_pruned_rows": "aged out of DuckDB, copy still holds them",
     "mirror_never_shipped": "table never shipped",
     "mirror_backfill_pending": "history not carried over yet",
     "mirror_failing": "mirror failing",

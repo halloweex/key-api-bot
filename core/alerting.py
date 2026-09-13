@@ -158,6 +158,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "mirror_orphan_rows": _c("the rows are retired or restored"),
     "mirror_row_values": _c("the next full shipment overwrites the drift"),
     "mirror_retired_rows": _c("the source serves the row again, or never"),
+    # INFO and counted, never a page: a row that aged out of DuckDB between
+    # the copy and the check is the retention sweep working. The count is
+    # what matters — a sweep that suddenly takes far more than usual is the
+    # one thing this cannot tell apart from a loss.
+    "mirror_pruned_rows": _c("the next full replace removes them"),
     "mirror_never_shipped": _c("the table's first successful shipment"),
     "mirror_backfill_pending": _c("the backfill finishes with nothing left"),
     "mirror_buckets_disagree": _c("the fingerprinted buckets agree again"),

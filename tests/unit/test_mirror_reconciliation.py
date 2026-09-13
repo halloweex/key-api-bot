@@ -473,6 +473,25 @@ class TestSyncedColumnDualRole:
         # `parsed_at` is a column DEFAULT, so only the rows a reparse rewrites
         # take a new value. This is the one that fired while the test was green.
         "silver.order_utm": "parsed_at",
+        # The watchdog samples and the send ledgers (revision 0026). The most
+        # clear-cut per-row stamps on this list: a sample IS a reading taken at
+        # one moment, and a ledger row IS one delivery at one moment — the
+        # column is not metadata about the row, it is most of what the row
+        # says. Each writer inserts exactly one row per event.
+        #
+        # `data_dir_samples` is the one worth a sentence, because one sweep
+        # writes seven rows carrying an identical `sampled_at` and that looks
+        # like a whole-table stamp. It is not: the key is
+        # `(sampled_at, path_group)`, so the seven are seven distinct rows of
+        # one event rather than one row restamped seven times, and the next
+        # sweep writes seven new rows rather than rewriting these. The grace
+        # window still asks "was this row in flight" and still gets a per-row
+        # answer.
+        "app.disk_samples": "sampled_at",
+        "app.data_dir_samples": "sampled_at",
+        "app.memory_samples": "sampled_at",
+        "app.weekly_report_sends": "sent_at",
+        "app.traffic_report_sends": "sent_at",
     }
     WHOLE_TABLE_STAMPS = {
         "app.sku_inventory_status": "updated_at",
