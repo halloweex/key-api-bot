@@ -1048,3 +1048,172 @@ class TestRetentionIsNotLoss:
 
         assert "mirror_pruned_rows" in REGISTRY
         assert "mirror_pruned_rows" in HUMAN_CHECK_NAMES
+
+
+class TestTheAppendListIsNowDeclared:
+    """The append path used to be two tables written out longhand in five
+    places: the watermark reads, the reader's signature, its two-tuple return,
+    the write branch and the two row-count stamps. Revision 0027 needed two
+    more and the quality journal needs three after that, so it became a list.
+
+    These tests exist because that refactor touches the path that ships 193 000
+    rows an hour. What they pin is that the two original tables kept their
+    exact behaviour — the `>=` that `inventory_sku_history` needs and the `>`
+    that everything id-keyed needs are not interchangeable, and neither is the
+    upsert.
+    """
+
+    def test_the_two_original_tables_kept_their_operators(self):
+        from core.pg_operational import _APPEND_ABOVE
+
+        by_table = {s.pg_table: s for s in _APPEND_ABOVE}
+        sku = by_table["app.inventory_sku_history"]
+        assert sku.inclusive, (
+            "`date >= MAX(date)` re-ships the day it resumes from on purpose; "
+            "`>` would step over a half-written day and leave a hole nothing "
+            "would ever fill"
+        )
+        assert sku.always_upsert, "it re-ships a day, so it must overwrite it"
+
+        movements = by_table["app.stock_movements"]
+        assert not movements.inclusive
+        assert not movements.always_upsert, (
+            "a plain INSERT on the incremental path is the point: a row above "
+            "MAX(id) cannot already be there, so a conflict means the "
+            "watermark logic is wrong and should say so"
+        )
+
+    def test_every_id_keyed_table_asks_for_strictly_greater(self):
+        """`>=` on a monotone id re-ships the last row every run for nothing —
+        and, on the incremental path where the write is a plain INSERT, it
+        would conflict every single time."""
+        from core.pg_operational import _APPEND_ABOVE
+
+        for spec in _APPEND_ABOVE:
+            if spec.watermark == "id":
+                assert not spec.inclusive, spec.pg_table
+                assert not spec.always_upsert, spec.pg_table
+
+    def test_the_reader_asks_for_the_whole_table_when_there_is_no_watermark(self):
+        """A watermark of None is what `full=True` sets and what a first run
+        finds. It must mean "everything", not "nothing"."""
+        from core.pg_operational import _APPEND_ABOVE, read_appends
+
+        asked = []
+
+        class Conn:
+            def execute(self, sql, params=None):
+                asked.append((" ".join(sql.split()), params))
+                return self
+
+            def fetchall(self):
+                return []
+
+        read_appends(Conn(), {s.pg_table: None for s in _APPEND_ABOVE})
+        assert len(asked) == len(_APPEND_ABOVE)
+        for sql, params in asked:
+            assert "WHERE" not in sql, sql
+            assert params is None
+
+    def test_the_reader_bounds_each_table_by_its_own_watermark(self):
+        from core.pg_operational import _APPEND_ABOVE, read_appends
+
+        asked = []
+
+        class Conn:
+            def execute(self, sql, params=None):
+                asked.append((" ".join(sql.split()), params))
+                return self
+
+            def fetchall(self):
+                return []
+
+        read_appends(Conn(), {s.pg_table: 7 for s in _APPEND_ABOVE})
+        by_sql = {sql: params for sql, params in asked}
+        assert any("WHERE date >= ?" in sql for sql in by_sql), by_sql.keys()
+        assert sum("WHERE id > ?" in sql for sql in by_sql) == 3, (
+            "stock_movements, warehouse_refreshes and reconciliation_log are "
+            "all id-keyed and all ask for strictly greater"
+        )
+
+    def test_the_two_forensic_logs_joined_the_list(self):
+        from core.pg_operational import _APPEND_ABOVE
+
+        tables = {s.pg_table for s in _APPEND_ABOVE}
+        assert "app.warehouse_refreshes" in tables
+        assert "app.reconciliation_log" in tables
+
+    def test_they_are_compared_and_the_columns_match_what_is_shipped(self):
+        """The three-list invariant, for the append shape. A column shipped and
+        not compared is a column copied and never checked."""
+        from core.mirror_reconciliation import APPEND_ONLY_TABLES
+        from core.pg_operational import _APPEND_ABOVE
+
+        shipped = {s.pg_table: set(s.columns) for s in _APPEND_ABOVE}
+        compared = {s.pg_table: set(s.columns) for s in APPEND_ONLY_TABLES}
+        assert set(shipped) == set(compared), (
+            f"only shipped: {sorted(set(shipped) - set(compared))}\n"
+            f"only compared: {sorted(set(compared) - set(shipped))}"
+        )
+        for table in ("app.warehouse_refreshes", "app.reconciliation_log"):
+            assert shipped[table] == compared[table], table
+
+    def test_silver_mode_is_shipped_despite_not_being_in_the_create_table(self):
+        """It arrives by ALTER TABLE in DuckDB migration 0005. A twin built by
+        reading the CREATE TABLE alone is one column short, and the shipper
+        would then never carry the column that says whether Silver was rebuilt
+        whole or incrementally."""
+        from core.pg_operational import REFRESH_COLUMNS
+
+        assert "silver_mode" in REFRESH_COLUMNS
+
+    def test_the_forensic_ids_are_carried_not_generated(self):
+        """`app.stock_movements`' decision, for the same reason: a Postgres
+        IDENTITY would give one warehouse tick two names and the bucketed
+        comparison joins on the id."""
+        import re
+        from pathlib import Path
+
+        ddl = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+               / "0027_forensics.py").read_text(encoding="utf-8")
+        for table in ("warehouse_refreshes", "reconciliation_log"):
+            block = re.search(
+                rf"CREATE TABLE IF NOT EXISTS app\.{table} \((.*?)\n\s*\)",
+                ddl, re.S).group(1)
+            id_line = next(l for l in block.splitlines() if l.strip().startswith("id "))
+            assert "GENERATED" not in id_line.upper(), id_line
+            assert "DEFAULT" not in id_line.upper(), id_line
+
+    def test_the_nullable_columns_that_carry_meaning_stay_nullable(self):
+        """Three columns where NULL is a fact and not an absence.
+
+        `gold_products_rows` is NULL on every row since the products Gold was
+        retired — a 0 would read as "built nothing" when the truth is that
+        there is no such layer. `checksum_match` and `validation_passed` are
+        NULL on the error path, which means "we never got far enough to
+        compare" rather than FALSE. `silver_mode` is NULL both before its
+        migration ran and on every error-path row.
+        """
+        import re
+        from pathlib import Path
+
+        ddl = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+               / "0027_forensics.py").read_text(encoding="utf-8")
+        block = re.search(
+            r"CREATE TABLE IF NOT EXISTS app\.warehouse_refreshes \((.*?)\n\s*\)",
+            ddl, re.S).group(1)
+        for column in ("gold_products_rows", "checksum_match",
+                       "validation_passed", "silver_mode", "error"):
+            line = next(l for l in block.splitlines() if l.strip().startswith(column))
+            assert "NOT NULL" not in line, line
+
+    def test_error_is_unbounded_text(self):
+        """`str(e)` of an arbitrary exception, and the column the self-heal
+        budget keys on — a truncating type would change behaviour, not just
+        storage."""
+        import re
+        from pathlib import Path
+
+        ddl = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+               / "0027_forensics.py").read_text(encoding="utf-8")
+        assert re.search(r"error\s+TEXT", ddl), "error must not be VARCHAR(n)"

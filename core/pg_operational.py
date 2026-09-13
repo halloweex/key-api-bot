@@ -100,8 +100,9 @@ not move is what Reconciliation A reads as "not replicated yet".
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 import time
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,11 @@ DATA_DIR_SAMPLES_TABLE = "app.data_dir_samples"
 MEMORY_SAMPLES_TABLE = "app.memory_samples"
 WEEKLY_SENDS_TABLE = "app.weekly_report_sends"
 TRAFFIC_SENDS_TABLE = "app.traffic_report_sends"
+# The two forensic logs (revision 0027). Append-only and large — 74 388 rows
+# between them — so they ship above a watermark like the two inventory tables,
+# not as a full replace.
+REFRESHES_TABLE = "app.warehouse_refreshes"
+RECONCILIATION_LOG_TABLE = "app.reconciliation_log"
 # The forecast group (revision 0025). Four tables, 313 rows, and the reason
 # they come first out of the sixteen with no Postgres home: `get_predictions`
 # and `generate_smart_goals` are the last two dashboard reads still tied to
@@ -227,6 +233,22 @@ WEEKLY_SEND_COLUMNS: Tuple[str, ...] = (
 )
 TRAFFIC_SEND_COLUMNS: Tuple[str, ...] = (
     "week_start", "sales_type", "revenue", "orders", "sent_at",
+)
+
+# `silver_mode` is LAST because it is not in the DuckDB CREATE TABLE at all —
+# migration 0005 adds it with an ALTER. Anyone rebuilding this tuple from the
+# CREATE TABLE alone ships thirteen columns and silently loses the one that
+# says whether Silver was rebuilt whole or incrementally.
+REFRESH_COLUMNS: Tuple[str, ...] = (
+    "id", "refreshed_at", "trigger", "duration_ms", "bronze_orders",
+    "silver_rows", "gold_revenue_rows", "gold_products_rows",
+    "silver_revenue_checksum", "gold_revenue_checksum", "checksum_match",
+    "validation_passed", "error", "silver_mode",
+)
+
+RECONCILIATION_LOG_COLUMNS: Tuple[str, ...] = (
+    "id", "check_date", "api_count", "db_count", "discrepancy",
+    "discrepancy_pct", "status", "checked_at",
 )
 
 # The DuckDB table each one is read from. Postgres qualifies by schema and
@@ -354,33 +376,100 @@ def read_full_replace(conn) -> Dict[str, List[tuple]]:
     return out
 
 
-def read_appends(
-    conn, since_date, since_movement_id: int,
-) -> Tuple[List[tuple], List[tuple]]:
-    """The two append-only tables, from where Postgres left off.
+@dataclass(frozen=True)
+class _Append:
+    """One table shipped above a watermark, declared rather than hardcoded.
 
-    `since_date` of None and `since_movement_id` of 0 both mean "Postgres holds
-    nothing" and ask for the whole table, which is what the first run does.
+    This was two tables written out longhand in five places — the watermark
+    reads, this reader's signature and its two-tuple return, the write branch
+    and the two row-count stamps. Adding a third meant editing all five, and a
+    fourth meant editing them again; revision 0027 needed two more and the
+    quality journal needs three after that, so the shape became a list.
+
+    The two fields that are not obvious:
+
+    `inclusive` picks `>=` over `>`. `inventory_sku_history` asks for
+    `date >= MAX(date)` because a day is written as ~887 rows in one statement
+    and `>` would step over a day that was half-written, leaving a hole nothing
+    would ever fill. Re-shipping one day costs nothing and an upsert makes it
+    not matter. Everything keyed on a monotone id asks for `> MAX(id)`: those
+    rows go in one transaction ordered by id, so what Postgres holds is always
+    a complete prefix and re-shipping the last row would be pure waste.
+
+    `always_upsert` is the same decision seen from the write side.
+    `inventory_sku_history` re-ships the day it resumes from and must
+    therefore overwrite. The id-keyed tables take a plain INSERT on the
+    incremental path, so that a conflict is an error rather than a silent
+    overwrite — a row above `MAX(id)` cannot already be there, and if it is,
+    the watermark logic is wrong and should say so loudly. Under `full=True`
+    every one of them upserts, because the point of that path is to correct a
+    row below the watermark that is missing *or* wrong.
     """
-    if since_date is None:
-        sku_history = conn.execute(
-            f"SELECT {', '.join(SKU_HISTORY_COLUMNS)} FROM inventory_sku_history "
-            "ORDER BY date, offer_id"
-        ).fetchall()
-    else:
-        sku_history = conn.execute(
-            f"SELECT {', '.join(SKU_HISTORY_COLUMNS)} FROM inventory_sku_history "
-            "WHERE date >= ? ORDER BY date, offer_id",
-            [since_date],
-        ).fetchall()
+    pg_table: str
+    dk_table: str
+    columns: Tuple[str, ...]
+    watermark: str                  # the column MAX() is taken over
+    order_by: str
+    keys: Tuple[str, ...]           # ON CONFLICT target
+    inclusive: bool = False         # `>=` rather than `>`
+    always_upsert: bool = False
 
-    movements = conn.execute(
-        f"SELECT {', '.join(MOVEMENT_COLUMNS)} FROM stock_movements "
-        "WHERE id > ? ORDER BY id",
-        [int(since_movement_id)],
-    ).fetchall()
 
-    return [tuple(r) for r in sku_history], [tuple(r) for r in movements]
+_APPEND_ABOVE: Tuple[_Append, ...] = (
+    _Append(
+        pg_table=SKU_HISTORY_TABLE, dk_table="inventory_sku_history",
+        columns=SKU_HISTORY_COLUMNS, watermark="date",
+        order_by="date, offer_id", keys=("date", "offer_id"),
+        inclusive=True, always_upsert=True,
+    ),
+    _Append(
+        pg_table=MOVEMENTS_TABLE, dk_table="stock_movements",
+        columns=MOVEMENT_COLUMNS, watermark="id",
+        order_by="id", keys=("id",),
+    ),
+    # ── the two forensic logs (revision 0027) ──
+    #
+    # `warehouse_refreshes` is 74 388 rows, more than every other stage-3 table
+    # together, and gains ~400-700 a day. `reconciliation_log` gains ~14. Both
+    # are INSERT-only with no retention anywhere — established by searching the
+    # repository, which is also what disqualified the three watchdogs from this
+    # shape: a watermark can only ever add rows, so a table that sweeps by age
+    # would grow here without bound.
+    _Append(
+        pg_table=REFRESHES_TABLE, dk_table="warehouse_refreshes",
+        columns=REFRESH_COLUMNS, watermark="id", order_by="id", keys=("id",),
+    ),
+    _Append(
+        pg_table=RECONCILIATION_LOG_TABLE, dk_table="reconciliation_log",
+        columns=RECONCILIATION_LOG_COLUMNS, watermark="id",
+        order_by="id", keys=("id",),
+    ),
+)
+
+
+def read_appends(conn, since: Mapping[str, Any]) -> Dict[str, List[tuple]]:
+    """Each append-only table, from where Postgres left off.
+
+    A watermark of None means "Postgres holds nothing" and asks for the whole
+    table, which is what the first run of each does.
+    """
+    out: Dict[str, List[tuple]] = {}
+    for spec in _APPEND_ABOVE:
+        cols = ", ".join(spec.columns)
+        mark = since.get(spec.pg_table)
+        if mark is None:
+            rows = conn.execute(
+                f"SELECT {cols} FROM {spec.dk_table} ORDER BY {spec.order_by}"
+            ).fetchall()
+        else:
+            op = ">=" if spec.inclusive else ">"
+            rows = conn.execute(
+                f"SELECT {cols} FROM {spec.dk_table} "
+                f"WHERE {spec.watermark} {op} ? ORDER BY {spec.order_by}",
+                [mark],
+            ).fetchall()
+        out[spec.pg_table] = [tuple(r) for r in rows]
+    return out
 
 
 async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
@@ -414,29 +503,24 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
         pool = await get_pool()
         await require_revision()
 
-        if full:
-            since_date, since_movement_id = None, 0
-        else:
+        # A watermark of None asks for the whole table, which is what `full`
+        # means and what a first run finds anyway.
+        since: Dict[str, Any] = {spec.pg_table: None for spec in _APPEND_ABOVE}
+        if not full:
             async with pool.acquire() as conn:
-                since_date = await conn.fetchval(
-                    f"SELECT MAX(date) FROM {SKU_HISTORY_TABLE}"
-                )
-                since_movement_id = await conn.fetchval(
-                    f"SELECT COALESCE(MAX(id), 0) FROM {MOVEMENTS_TABLE}"
-                )
+                for spec in _APPEND_ABOVE:
+                    since[spec.pg_table] = await conn.fetchval(
+                        f"SELECT MAX({spec.watermark}) FROM {spec.pg_table}"
+                    )
 
         async with store.connection() as conn:
             replaced = read_full_replace(conn)
-            sku_history, movements = read_appends(
-                conn, since_date, int(since_movement_id or 0),
-            )
+            appended = read_appends(conn, since)
             totals = {
-                SKU_HISTORY_TABLE: conn.execute(
-                    "SELECT COUNT(*) FROM inventory_sku_history"
-                ).fetchone()[0],
-                MOVEMENTS_TABLE: conn.execute(
-                    "SELECT COUNT(*) FROM stock_movements"
-                ).fetchone()[0],
+                spec.pg_table: conn.execute(
+                    f"SELECT COUNT(*) FROM {spec.dk_table}"
+                ).fetchone()[0]
+                for spec in _APPEND_ABOVE
             }
 
         async with pool.acquire() as conn:
@@ -450,43 +534,44 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
                         )
                     await conn.execute(_WATERMARK_OK, pg_table, len(rows))
 
-                if sku_history:
-                    await _write_chunked(
-                        conn,
-                        _upsert(
-                            SKU_HISTORY_TABLE, SKU_HISTORY_COLUMNS,
-                            ("date", "offer_id"),
-                        ),
-                        sku_history,
+                for spec in _APPEND_ABOVE:
+                    rows = appended[spec.pg_table]
+                    if rows:
+                        # A plain INSERT on the incremental path on purpose:
+                        # rows above the watermark cannot already be there, so
+                        # a conflict would mean the watermark logic is wrong
+                        # and should say so loudly rather than overwrite and
+                        # look fine. `inventory_sku_history` is the exception —
+                        # it deliberately re-ships the day it resumed from.
+                        upsert = spec.always_upsert or full
+                        await _write_chunked(
+                            conn,
+                            _upsert(spec.pg_table, spec.columns, spec.keys)
+                            if upsert else
+                            _insert(spec.pg_table, spec.columns),
+                            rows,
+                        )
+                    # `last_rows` is the whole table, not this run's delta. The
+                    # comparison reads it as "how much should be here", and an
+                    # append that shipped nothing would otherwise record zero
+                    # and read as an empty table.
+                    await conn.execute(
+                        _WATERMARK_OK, spec.pg_table, int(totals[spec.pg_table]),
                     )
-                if movements:
-                    # A plain INSERT on the incremental path on purpose: rows
-                    # above `MAX(id)` cannot already be there, so a conflict
-                    # would mean the watermark logic is wrong and should say
-                    # so loudly rather than overwrite and look fine.
-                    await _write_chunked(
-                        conn,
-                        _upsert(MOVEMENTS_TABLE, MOVEMENT_COLUMNS, ("id",))
-                        if full else
-                        _insert(MOVEMENTS_TABLE, MOVEMENT_COLUMNS),
-                        movements,
-                    )
-                # `last_rows` is the whole table, not this run's delta. The
-                # comparison reads it as "how much should be here", and an
-                # append that shipped nothing would otherwise record zero and
-                # read as an empty table.
-                await conn.execute(
-                    _WATERMARK_OK, SKU_HISTORY_TABLE, int(totals[SKU_HISTORY_TABLE]),
-                )
-                await conn.execute(
-                    _WATERMARK_OK, MOVEMENTS_TABLE, int(totals[MOVEMENTS_TABLE]),
-                )
 
         result = {
             "full": full,
             "replaced": {t: len(replaced[t]) for t, _d, _c, _o in _FULL_REPLACE},
-            "sku_history_appended": len(sku_history),
-            "movements_appended": len(movements),
+            "appended": {
+                spec.pg_table: len(appended[spec.pg_table])
+                for spec in _APPEND_ABOVE
+            },
+            # The two original spellings, kept beside the map they are now
+            # read out of. They are what a year of production log lines say
+            # and what anyone grepping back through them will look for; a
+            # rename would make the history harder to read for no gain.
+            "sku_history_appended": len(appended[SKU_HISTORY_TABLE]),
+            "movements_appended": len(appended[MOVEMENTS_TABLE]),
             "duration_ms": int((time.monotonic() - started) * 1000),
         }
         logger.info("Operational history replicated: %s", result)
