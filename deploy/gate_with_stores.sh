@@ -51,6 +51,23 @@ cleanup() {
     # *is* named (`key-api-bot_app-data`), so a blanket `docker volume prune`
     # would be a different and much worse operation.
     docker rm -f -v "$PG" "$CH" >/dev/null 2>&1 || true
+
+    # And the build cache this run added. Bounded here rather than swept by a
+    # cron elsewhere, for `-v`'s reason: the thing that creates it is the thing
+    # that should bound it.
+    #
+    # `--max-used-space`, not `prune -f`. Measured across this September the
+    # cache sits at 2.0–2.7 GB and gains ~0.2 GB a week — it reuses layers, so
+    # it is not the runaway it looks like. Emptying it is actively worse than
+    # leaving it: the disk watchdog differences at a fixed 168h lag, so a cache
+    # emptied today reads as +2 GB of growth a week later when it returns to
+    # normal. That is exactly the WARN standing on 2026-09-13, and it was
+    # manufactured by a `docker builder prune` run on 09-09.
+    #
+    # So the cap sits above the natural size and bites only on a runaway,
+    # and the next build still starts warm.
+    docker builder prune -f --max-used-space "${GATE_CACHE_MAX:-4GB}" \
+        >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT

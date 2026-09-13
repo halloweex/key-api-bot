@@ -148,6 +148,23 @@ class TestTheStoreTestsActuallyRun:
                 "then leaves the stores' anonymous volumes on the host"
             )
 
+    def test_the_gate_bounds_the_cache_it_fills(self):
+        """It builds the web image on the host every run, so it owns that
+        cache. Bounded rather than emptied: measured across September the cache
+        sits at 2.0-2.7 GB and gains ~0.2 GB a week, and emptying it reads as
+        +2 GB of growth to a watchdog differencing at a fixed 168h lag — the
+        2026-09-13 WARN was manufactured by a prune four days earlier."""
+        gate = (REPO / "deploy" / "gate_with_stores.sh").read_text()
+        assert "--max-used-space" in gate, (
+            "the gate fills a build cache and no longer caps it"
+        )
+        assert "builder prune -f --max-used-space" in gate
+        # Not the emptying form, which is what makes the next alert.
+        assert not re.search(r"builder prune -f\s*(\||;|$)", gate, re.M), (
+            "an unbounded `builder prune -f` empties the cache instead of "
+            "capping it"
+        )
+
     def test_the_migrations_are_applied_before_the_suite(self):
         """`require_revision` refuses a schema that is behind or ahead, so an
         unmigrated database would fail every store test rather than skip
