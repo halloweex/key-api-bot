@@ -505,6 +505,105 @@ class _PgTx(_SmsTx):
         await self._conn.executemany(self._sql(sql), [tuple(r) for r in rows])
 
 
+
+# ─── What `/dashboard`'s customer block reads ───────────────────────────────
+#
+# One body per statement, two engines. Three things these no longer do:
+#
+#   * the Gold statement asks only for what survives. It selected
+#     `unique_customers`, `new_customers` and `returning_customers` too, and
+#     every one of them was overwritten a few lines later by a count over
+#     Silver — Gold sums *daily* distinct counts, so a buyer who came back on
+#     Tuesday was two customers. Reading them was work thrown away.
+#   * `{gold_revenue_rollup}` is not optional. Postgres' Gold holds a roll-up
+#     row and a row per source; summing both counts every day twice. That is
+#     the defect the `/traffic` ROAS query shipped with, and it halved a
+#     number nobody could see was halved.
+#   * `DATE_DIFF('day', a, b)` is DuckDB's alone. The portable spelling is the
+#     one this repository already uses — subtract the dates — and it is the
+#     same answer: measured over all 6,822 retail buyers with more than one
+#     order, **zero differing, maximum gap zero**.
+
+_INSIGHTS_GOLD_SQL = """
+    SELECT SUM(orders_count) AS total_orders,
+           SUM(revenue)      AS total_revenue
+    FROM {gold_daily_revenue}
+    WHERE {where} AND {gold_revenue_rollup}
+"""
+
+# THE `GROUP BY date` IS A FIX, NOT A PORT
+#
+# This had no grouping, and the caller folds the rows into a dict keyed on the
+# date — so when more than one row shares a date, the last one silently wins.
+# With `sales_type` filtered there is exactly one row per date and it never
+# mattered. With `sales_type=all` there are up to three (retail, b2b,
+# internal), and the chart showed **one arbitrary sales type's AOV instead of
+# the day's**.
+#
+# Measured on the production backup over a closed 30-day window: 16 days carry
+# all three rows, 7 carry two, and **23 of 30 days disagreed with the blended
+# figure**. On 2026-08-20 the true AOV is ₴5,171.43 — retail ₴2,382.56 over 46
+# orders, b2b ₴19,870.50 over 10, internal ₴495.80 over 4 — and the old chart
+# showed one of the last two. Which one was not even stable: nothing orders
+# the rows within a date, and two runs of the same query returned b2b and
+# internal respectively.
+#
+# `SUM(revenue) / SUM(orders_count)` is the day's average order value, which
+# is what the axis is labelled.
+_INSIGHTS_AOV_SQL = """
+    SELECT date,
+           CASE WHEN SUM(orders_count) > 0
+                THEN SUM(revenue) / SUM(orders_count) ELSE 0 END AS aov
+    FROM {gold_daily_revenue}
+    WHERE {where} AND {gold_revenue_rollup}
+    GROUP BY date
+    ORDER BY date
+"""
+
+_INSIGHTS_CLV_SQL = """
+    WITH customer_stats AS (
+        SELECT s.buyer_id,
+               COUNT(DISTINCT s.id) AS order_count,
+               SUM(s.grand_total)   AS total_spent,
+               CAST(MAX(s.ordered_at) AS DATE)
+                 - CAST(MIN(s.ordered_at) AS DATE) AS lifespan_days
+        FROM {silver_orders} s
+        WHERE s.buyer_id IS NOT NULL
+          AND NOT s.is_return
+          AND s.is_active_source
+          AND {sales_where}
+        GROUP BY s.buyer_id
+        HAVING COUNT(DISTINCT s.id) > 1
+    )
+    SELECT COUNT(*), AVG(order_count), AVG(lifespan_days), AVG(total_spent)
+    FROM customer_stats
+"""
+
+_INSIGHTS_PERIOD_SQL = """
+    SELECT COUNT(DISTINCT s.buyer_id),
+           COUNT(DISTINCT CASE WHEN s.is_new_customer THEN s.buyer_id END),
+           COUNT(DISTINCT CASE WHEN NOT s.is_new_customer THEN s.buyer_id END)
+    FROM {silver_orders} s
+    WHERE {where}
+"""
+
+_INSIGHTS_ALLTIME_SQL = """
+    WITH customer_orders AS (
+        SELECT s.buyer_id, COUNT(DISTINCT s.id) AS order_count
+        FROM {silver_orders} s
+        WHERE s.buyer_id IS NOT NULL
+          AND NOT s.is_return
+          AND s.is_active_source
+          AND {sales_where}
+        GROUP BY s.buyer_id
+    )
+    SELECT COUNT(*),
+           SUM(CASE WHEN order_count >= 2 THEN 1 ELSE 0 END),
+           AVG(order_count)
+    FROM customer_orders
+"""
+
+
 class CustomersMixin:
 
     async def get_customer_insights(
@@ -516,172 +615,128 @@ class CustomersMixin:
         sales_type: str = "retail",
         promocode: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Get customer insights: new vs returning, AOV trend (from Gold/Silver layers)."""
-        async with self.connection() as conn:
-            # ── Base metrics from gold_daily_revenue ──
-            params = [start_date, end_date]
-            where_clauses = ["date BETWEEN ? AND ?"]
+        """Customer insights: new vs returning, AOV trend, CLV, repeat rate.
 
-            if sales_type != "all":
-                where_clauses.append("sales_type = ?")
-                params.append(sales_type)
+        Rides `KS_READ_DASHBOARD` — this is the dashboard's customer block, it
+        reads the same two layers the rest of that tab reads, and a rollback
+        that left it on the other engine would put one card of a page on a
+        different store from the cards beside it.
 
-            where_sql = " AND ".join(where_clauses)
+        `_dashboard_run` lives on `RevenueMixin` and is reached through `self`
+        from here, which is one mixin boundary crossed on purpose. The
+        alternative is a second router with the same flag and the same
+        fallback rule, and two places that have to stay in step about what
+        happens when Postgres is down. `render_tables` was extracted from a
+        mixin for this reason when it gained a *third* consumer; this is the
+        second, and the note is here so the next one moves it.
+        """
+        gold_where = ["date BETWEEN ? AND ?"]
+        gold_params: List[Any] = [start_date, end_date]
+        if sales_type != "all":
+            gold_where.append("sales_type = ?")
+            gold_params.append(sales_type)
+        gold_where_sql = " AND ".join(gold_where)
 
-            gold_result = conn.execute(f"""
-                SELECT
-                    SUM(unique_customers) as total_customers,
-                    SUM(orders_count) as total_orders,
-                    SUM(revenue) as total_revenue,
-                    SUM(new_customers) as new_customers,
-                    SUM(returning_customers) as returning_customers
-                FROM gold_daily_revenue
-                WHERE {where_sql}
-            """, params).fetchone()
+        rows = await self._dashboard_run(
+            _INSIGHTS_GOLD_SQL.replace("{where}", gold_where_sql), gold_params)
+        gold_result = rows[0] if rows else (0, 0)
+        total_orders = int(gold_result[0] or 0)
+        total_revenue = float(gold_result[1] or 0)
 
-            total_customers = int(gold_result[0] or 0)
-            total_orders = int(gold_result[1] or 0)
-            total_revenue = float(gold_result[2] or 0)
-            new_customers = int(gold_result[3] or 0)
-            returning_customers = int(gold_result[4] or 0)
+        aov_results = await self._dashboard_run(
+            _INSIGHTS_AOV_SQL.replace("{where}", gold_where_sql), gold_params)
+        aov_by_day = {row[0]: float(row[1]) for row in aov_results}
 
-            # AOV trend from gold_daily_revenue
-            aov_results = conn.execute(f"""
-                SELECT date,
-                       CASE WHEN orders_count > 0 THEN revenue / orders_count ELSE 0 END as aov
-                FROM gold_daily_revenue
-                WHERE {where_sql}
-                ORDER BY date
-            """, params).fetchall()
-            aov_by_day = {row[0]: float(row[1]) for row in aov_results}
+        labels = []
+        aov_data = []
+        current = start_date
+        while current <= end_date:
+            labels.append(current.strftime("%d.%m"))
+            aov_data.append(round(aov_by_day.get(current, 0), 2))
+            current += timedelta(days=1)
 
-            labels = []
-            aov_data = []
-            current = start_date
-            while current <= end_date:
-                labels.append(current.strftime("%d.%m"))
-                aov_data.append(round(aov_by_day.get(current, 0), 2))
-                current += timedelta(days=1)
+        overall_aov = total_revenue / total_orders if total_orders > 0 else 0
 
-            overall_aov = total_revenue / total_orders if total_orders > 0 else 0
+        # ── CLV, over every order a buyer ever placed ──
+        sales_where = "s.sales_type = ?" if sales_type != "all" else "1=1"
+        clv_params: List[Any] = [sales_type] if sales_type != "all" else []
 
-            # ── CLV metrics from silver_orders (need per-buyer aggregation) ──
-            sales_where = "s.sales_type = ?" if sales_type != "all" else "1=1"
-            clv_params = [sales_type] if sales_type != "all" else []
+        rows = await self._dashboard_run(
+            _INSIGHTS_CLV_SQL.replace("{sales_where}", sales_where), clv_params)
+        clv_result = rows[0] if rows else (0, 0, 0, 0)
+        repeat_customer_count = clv_result[0] or 0
+        avg_purchase_frequency = float(clv_result[1] or 0)
+        avg_lifespan_days = float(clv_result[2] or 0)
+        avg_customer_value = float(clv_result[3] or 0)
+        clv = avg_customer_value if repeat_customer_count > 0 else 0
 
-            clv_result = conn.execute(f"""
-                WITH customer_stats AS (
-                    SELECT
-                        s.buyer_id,
-                        COUNT(DISTINCT s.id) as order_count,
-                        SUM(s.grand_total) as total_spent,
-                        DATE_DIFF('day', MIN(s.ordered_at), MAX(s.ordered_at)) as lifespan_days
-                    FROM silver_orders s
-                    WHERE s.buyer_id IS NOT NULL
-                      AND NOT s.is_return
-                      AND s.is_active_source
-                      AND {sales_where}
-                    GROUP BY s.buyer_id
-                    HAVING COUNT(DISTINCT s.id) > 1
-                )
-                SELECT
-                    COUNT(*) as repeat_customer_count,
-                    AVG(order_count) as avg_purchase_frequency,
-                    AVG(lifespan_days) as avg_lifespan_days,
-                    AVG(total_spent) as avg_customer_value
-                FROM customer_stats
-            """, clv_params).fetchone()
+        # ── The period's customers, counted over Silver ──
+        # Gold sums *daily* distinct counts, so a buyer who came back on
+        # Tuesday is two customers there. These are the numbers that reach the
+        # screen; Gold's are not read at all.
+        pf_where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return",
+                    "s.is_active_source", "s.buyer_id IS NOT NULL"]
+        pf_params: List[Any] = [start_date, end_date]
+        if sales_type != "all":
+            pf_where.append("s.sales_type = ?")
+            pf_params.append(sales_type)
+        if promocode:
+            pf_where.append("UPPER(s.promocode) = UPPER(?)")
+            pf_params.append(promocode)
 
-            repeat_customer_count = clv_result[0] or 0
-            avg_purchase_frequency = float(clv_result[1] or 0)
-            avg_lifespan_days = float(clv_result[2] or 0)
-            avg_customer_value = float(clv_result[3] or 0)
-            clv = avg_customer_value if repeat_customer_count > 0 else 0
+        rows = await self._dashboard_run(
+            _INSIGHTS_PERIOD_SQL.replace("{where}", " AND ".join(pf_where)),
+            pf_params)
+        pf_result = rows[0] if rows else (0, 0, 0)
+        unique_buyers = int(pf_result[0] or 0)
+        new_customers = int(pf_result[1] or 0)
+        returning_customers = int(pf_result[2] or 0)
+        total_customers = unique_buyers
+        purchase_frequency = total_orders / unique_buyers if unique_buyers > 0 else 0
 
-            # Compute accurate unique customer counts from Silver
-            # (Gold sums daily unique counts, double-counting multi-day buyers)
-            pf_where = ["s.order_date BETWEEN ? AND ?", "NOT s.is_return", "s.is_active_source",
-                        "s.buyer_id IS NOT NULL"]
-            pf_params: list = [start_date, end_date]
-            if sales_type != "all":
-                pf_where.append("s.sales_type = ?")
-                pf_params.append(sales_type)
-            if promocode:
-                pf_where.append("UPPER(s.promocode) = UPPER(?)")
-                pf_params.append(promocode)
-            pf_result = conn.execute(f"""
-                SELECT
-                    COUNT(DISTINCT s.buyer_id),
-                    COUNT(DISTINCT CASE WHEN s.is_new_customer THEN s.buyer_id END),
-                    COUNT(DISTINCT CASE WHEN NOT s.is_new_customer THEN s.buyer_id END)
-                FROM silver_orders s
-                WHERE {" AND ".join(pf_where)}
-            """, pf_params).fetchone()
-            unique_buyers = int(pf_result[0] or 0)
-            new_customers = int(pf_result[1] or 0)
-            returning_customers = int(pf_result[2] or 0)
-            total_customers = unique_buyers
-            purchase_frequency = total_orders / unique_buyers if unique_buyers > 0 else 0
+        rows = await self._dashboard_run(
+            _INSIGHTS_ALLTIME_SQL.replace("{sales_where}", sales_where), clv_params)
+        alltime_result = rows[0] if rows else (0, 0, 0)
+        alltime_total_customers = alltime_result[0] or 0
+        alltime_repeat_customers = alltime_result[1] or 0
+        alltime_avg_orders = float(alltime_result[2] or 0)
+        true_repeat_rate = (alltime_repeat_customers / alltime_total_customers * 100) \
+            if alltime_total_customers > 0 else 0
 
-            # All-time repeat rate from silver_orders
-            alltime_result = conn.execute(f"""
-                WITH customer_orders AS (
-                    SELECT
-                        s.buyer_id,
-                        COUNT(DISTINCT s.id) as order_count
-                    FROM silver_orders s
-                    WHERE s.buyer_id IS NOT NULL
-                      AND NOT s.is_return
-                      AND s.is_active_source
-                      AND {sales_where}
-                    GROUP BY s.buyer_id
-                )
-                SELECT
-                    COUNT(*) as total_customers,
-                    SUM(CASE WHEN order_count >= 2 THEN 1 ELSE 0 END) as repeat_customers,
-                    AVG(order_count) as avg_orders_per_customer
-                FROM customer_orders
-            """, clv_params).fetchone()
-
-            alltime_total_customers = alltime_result[0] or 0
-            alltime_repeat_customers = alltime_result[1] or 0
-            alltime_avg_orders = float(alltime_result[2] or 0)
-            true_repeat_rate = (alltime_repeat_customers / alltime_total_customers * 100) if alltime_total_customers > 0 else 0
-
-            return {
-                "newVsReturning": {
-                    "labels": ["New Customers", "Returning Customers"],
-                    "data": [new_customers, returning_customers],
-                    "backgroundColor": ["#2563EB", "#16A34A"]
-                },
-                "aovTrend": {
-                    "labels": labels,
-                    "datasets": [{
-                        "label": "AOV (UAH)",
-                        "data": aov_data,
-                        "borderColor": "#F59E0B",
-                        "backgroundColor": "rgba(245, 158, 11, 0.1)",
-                        "fill": True,
-                        "tension": 0.3
-                    }]
-                },
-                "metrics": {
-                    "totalCustomers": total_customers,
-                    "newCustomers": new_customers,
-                    "returningCustomers": returning_customers,
-                    "totalOrders": total_orders,
-                    "repeatRate": round((returning_customers / total_customers * 100) if total_customers > 0 else 0, 1),
-                    "averageOrderValue": round(overall_aov, 2),
-                    "customerLifetimeValue": round(clv, 2),
-                    "avgPurchaseFrequency": round(avg_purchase_frequency, 2),
-                    "avgCustomerLifespanDays": round(avg_lifespan_days, 0),
-                    "purchaseFrequency": round(purchase_frequency, 2),
-                    "totalCustomersAllTime": alltime_total_customers,
-                    "repeatCustomersAllTime": alltime_repeat_customers,
-                    "trueRepeatRate": round(true_repeat_rate, 1),
-                    "avgOrdersPerCustomer": round(alltime_avg_orders, 2)
-                }
+        return {
+            "newVsReturning": {
+                "labels": ["New Customers", "Returning Customers"],
+                "data": [new_customers, returning_customers],
+                "backgroundColor": ["#2563EB", "#16A34A"]
+            },
+            "aovTrend": {
+                "labels": labels,
+                "datasets": [{
+                    "label": "AOV (UAH)",
+                    "data": aov_data,
+                    "borderColor": "#F59E0B",
+                    "backgroundColor": "rgba(245, 158, 11, 0.1)",
+                    "fill": True,
+                    "tension": 0.3
+                }]
+            },
+            "metrics": {
+                "totalCustomers": total_customers,
+                "newCustomers": new_customers,
+                "returningCustomers": returning_customers,
+                "totalOrders": total_orders,
+                "repeatRate": round((returning_customers / total_customers * 100) if total_customers > 0 else 0, 1),
+                "averageOrderValue": round(overall_aov, 2),
+                "customerLifetimeValue": round(clv, 2),
+                "avgPurchaseFrequency": round(avg_purchase_frequency, 2),
+                "avgCustomerLifespanDays": round(avg_lifespan_days, 0),
+                "purchaseFrequency": round(purchase_frequency, 2),
+                "totalCustomersAllTime": alltime_total_customers,
+                "repeatCustomersAllTime": alltime_repeat_customers,
+                "trueRepeatRate": round(true_repeat_rate, 1),
+                "avgOrdersPerCustomer": round(alltime_avg_orders, 2)
             }
+        }
 
     async def get_cohort_retention(
         self,
