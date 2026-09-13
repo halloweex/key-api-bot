@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.185
+
+- Make the /goals fixture think in the warehouse's timezone
+- Name Telegram in the traffic report, and guard the next platform that isn't
+
+
 ## 3.0.184
 
 - Take the forecast read off DuckDB, and reclassify the method beside it
