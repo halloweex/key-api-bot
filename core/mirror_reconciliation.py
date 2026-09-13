@@ -2267,11 +2267,21 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         columns=OFFER_COLUMNS,
         key_columns=("id",),
         synced_column="synced_at",
-        # Shipped and never compared — a whole-table stamp. The writer is a
-        # loop of `INSERT OR REPLACE ... CURRENT_TIMESTAMP` inside ONE DuckDB
-        # transaction, and `CURRENT_TIMESTAMP` is transaction-stable, so all
-        # 1 057 rows carry one value from one sync. `bronze.offer_stocks`
-        # beside it is the same case.
+        # Shipped and never compared. The writer is a loop of
+        # `INSERT OR REPLACE ... CURRENT_TIMESTAMP` inside ONE DuckDB
+        # transaction, and `CURRENT_TIMESTAMP` is transaction-stable there, so
+        # every row the sync touched takes one value — which is what makes
+        # comparing it meaningless: a sync between the copy and the check moves
+        # the stamp on all of them at once, and the grace stops being per row.
+        #
+        # Measured rather than assumed, and the measurement has a tail: of
+        # 1 057 rows, 1 055 carry the last sync's stamp and TWO are frozen
+        # months back (2026-04-21 and 2026-06-13). Those two are offers KeyCRM
+        # has stopped serving — `INSERT OR REPLACE` never deletes, so they keep
+        # the stamp of their last sighting, the same way product 1055 does one
+        # table up. They are copied like any other row and agree on both sides;
+        # they are noted here because "one stamp for the whole table" is the
+        # obvious thing to write and is not quite what the data says.
         ignore_columns=("synced_at",),
         full_replace=True,
     ),
