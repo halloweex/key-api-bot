@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.176
+
+- Take the dashboard's Silver and Gold reads off DuckDB
+
+
 ## 3.0.175
 
 - Make the gate build the code it is about to test
