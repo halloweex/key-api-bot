@@ -13,7 +13,93 @@ from core.models import OrderStatus
 logger = logging.getLogger(__name__)
 
 
+# ─── The revenue history a goal is measured against ─────────────────────────
+#
+# One body per shape, two engines, and the table name the only difference —
+# `core/pg_goals_read.py` carries the reasoning. Three things these no longer
+# do, each of which was a rule this file kept its own copy of:
+#
+#   * the Kyiv date is not computed — `order_date` *is* it;
+#   * returns come from `is_return`, which prefers KeyCRM's status group,
+#     rather than from a second list of status ids;
+#   * the channel filter is `is_active_source` rather than a literal
+#     `source_id IN (1, 2, 4)` present in one of these bodies and absent from
+#     the other.
+#
+# `{grain}` is `s.order_date` or a `DATE_TRUNC` of it, and `{floor}` the start
+# of the window — both composed here from validated parts, never from user
+# text. The window's upper bound is `TODAY_IN_KYIV` and not `CURRENT_DATE`,
+# because the two engines disagree about what day that is for three hours out
+# of every twenty-four.
+
+_GOALS_PERIOD_REVENUE_SQL = """
+    WITH period_revenue AS (
+        SELECT {grain} AS period_start,
+               SUM(s.grand_total) AS revenue
+        FROM {silver_orders} s
+        WHERE {where}
+        GROUP BY {grain}
+    )
+    SELECT AVG(revenue), MIN(revenue), MAX(revenue), COUNT(*), STDDEV(revenue)
+    FROM period_revenue
+"""
+
+_GOALS_WEEKLY_TREND_SQL = """
+    WITH weekly_revenue AS (
+        SELECT DATE_TRUNC('week', s.order_date) AS week_start,
+               SUM(s.grand_total) AS revenue,
+               ROW_NUMBER() OVER (
+                   ORDER BY DATE_TRUNC('week', s.order_date) DESC) AS week_num
+        FROM {silver_orders} s
+        WHERE {where}
+        GROUP BY DATE_TRUNC('week', s.order_date)
+    )
+    SELECT AVG(CASE WHEN week_num <= 2 THEN revenue END),
+           AVG(CASE WHEN week_num > 2 THEN revenue END)
+    FROM weekly_revenue
+"""
+
+_GOALS_DAILY_FOR_DATES_SQL = """
+    SELECT s.order_date AS day, SUM(s.grand_total) AS revenue
+    FROM {silver_orders} s
+    WHERE {where}
+    GROUP BY s.order_date
+"""
+
+_STORED_GOALS_SQL = """
+    SELECT period_type, goal_amount, is_custom, calculated_goal, growth_factor
+    FROM {revenue_goals}
+    ORDER BY period_type
+"""
+
+
 class GoalsMixin:
+
+    async def _goals_run(self, sql: str, params=None):
+        """Run one goal query against whichever engine the flag names.
+
+        `/goals` keeps its own switch for every other tab's reason, sharpened:
+        this is the one tab that writes from the interface, and
+        `app.revenue_goals` is an hourly read replica. Reading it from Postgres
+        is safe; writing there would land in a copy.
+        """
+        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+
+        from core import pg_goals_read
+
+        params = list(params or [])
+        if pg_goals_read.enabled() and pg_goals_read.available():
+            try:
+                return await pg_goals_read.fetch(
+                    render_tables(sql, POSTGRES), params)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "goals: Postgres failed, falling back to DuckDB: %s",
+                    exc, exc_info=True,
+                )
+
+        async with self.connection() as conn:
+            return conn.execute(render_tables(sql, DUCKDB), params).fetchall()
 
     async def get_historical_revenue(
         self,
@@ -21,129 +107,64 @@ class GoalsMixin:
         weeks_back: int = 4,
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
-        """
-        Get historical revenue data for goal calculation.
+        """Historical revenue for goal calculation, from Silver.
 
         Args:
             period_type: 'daily', 'weekly', or 'monthly'
             weeks_back: Number of weeks of history to analyze
             sales_type: 'retail', 'b2b', or 'all'
-
-        Returns:
-            Historical stats including average, min, max, and trend
         """
-        async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type)
+        from core.sql_dialect import TODAY_IN_KYIV
 
-            if period_type == "daily":
-                # Get daily averages for the same day of week over past N weeks
-                sql = f"""
-                    WITH daily_revenue AS (
-                        SELECT
-                            {_date_in_kyiv('o.ordered_at')} as day,
-                            SUM(o.grand_total) as revenue
-                        FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{int(weeks_back * 7)} days'
-                            AND {_date_in_kyiv('o.ordered_at')} < CURRENT_DATE
-                            AND o.status_id NOT IN {return_statuses}
-                            AND {sales_filter}
-                        GROUP BY {_date_in_kyiv('o.ordered_at')}
-                    )
-                    SELECT
-                        AVG(revenue) as avg_revenue,
-                        MIN(revenue) as min_revenue,
-                        MAX(revenue) as max_revenue,
-                        COUNT(*) as days_count,
-                        STDDEV(revenue) as std_dev
-                    FROM daily_revenue
-                """
-                sql_params = []
-            elif period_type == "weekly":
-                # Get weekly totals for past N weeks
-                sql = f"""
-                    WITH weekly_revenue AS (
-                        SELECT
-                            DATE_TRUNC('week', {_date_in_kyiv('o.ordered_at')}) as week_start,
-                            SUM(o.grand_total) as revenue
-                        FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{int(weeks_back * 7)} days'
-                            AND {_date_in_kyiv('o.ordered_at')} < DATE_TRUNC('week', CURRENT_DATE)
-                            AND o.status_id NOT IN {return_statuses}
-                            AND {sales_filter}
-                        GROUP BY DATE_TRUNC('week', {_date_in_kyiv('o.ordered_at')})
-                    )
-                    SELECT
-                        AVG(revenue) as avg_revenue,
-                        MIN(revenue) as min_revenue,
-                        MAX(revenue) as max_revenue,
-                        COUNT(*) as weeks_count,
-                        STDDEV(revenue) as std_dev
-                    FROM weekly_revenue
-                """
-                sql_params = []
-            else:  # monthly
-                # Get monthly totals for past N months
-                months_back = max(3, weeks_back // 4)
-                sql = f"""
-                    WITH monthly_revenue AS (
-                        SELECT
-                            DATE_TRUNC('month', {_date_in_kyiv('o.ordered_at')}) as month_start,
-                            SUM(o.grand_total) as revenue
-                        FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{int(months_back)} months'
-                            AND {_date_in_kyiv('o.ordered_at')} < DATE_TRUNC('month', CURRENT_DATE)
-                            AND o.status_id NOT IN {return_statuses}
-                            AND {sales_filter}
-                        GROUP BY DATE_TRUNC('month', {_date_in_kyiv('o.ordered_at')})
-                    )
-                    SELECT
-                        AVG(revenue) as avg_revenue,
-                        MIN(revenue) as min_revenue,
-                        MAX(revenue) as max_revenue,
-                        COUNT(*) as months_count,
-                        STDDEV(revenue) as std_dev
-                    FROM monthly_revenue
-                """
-                sql_params = []
+        params: List[Any] = []
+        where = ["NOT s.is_return", "s.is_active_source"]
+        if sales_type != "all":
+            where.append("s.sales_type = ?")
+            params.append(sales_type)
 
-            result = conn.execute(sql, sql_params).fetchone()
+        if period_type == "daily":
+            grain = "s.order_date"
+            floor = f"{TODAY_IN_KYIV} - INTERVAL '{int(weeks_back * 7)} days'"
+            ceiling = TODAY_IN_KYIV
+        elif period_type == "weekly":
+            grain = "DATE_TRUNC('week', s.order_date)"
+            floor = f"{TODAY_IN_KYIV} - INTERVAL '{int(weeks_back * 7)} days'"
+            ceiling = f"DATE_TRUNC('week', {TODAY_IN_KYIV})"
+        else:  # monthly
+            months_back = max(3, weeks_back // 4)
+            grain = "DATE_TRUNC('month', s.order_date)"
+            floor = f"{TODAY_IN_KYIV} - INTERVAL '{int(months_back)} months'"
+            ceiling = f"DATE_TRUNC('month', {TODAY_IN_KYIV})"
 
-            avg_revenue = float(result[0] or 0)
-            min_revenue = float(result[1] or 0)
-            max_revenue = float(result[2] or 0)
-            period_count = result[3] or 0
-            std_dev = float(result[4] or 0)
+        window = [f"s.order_date >= {floor}", f"s.order_date < {ceiling}"]
+        where_sql = " AND ".join(window + where)
 
-            # Calculate trend (compare recent vs older periods)
-            trend = 0.0
-            if period_type == "weekly" and period_count >= 4:
-                trend_sql = f"""
-                    WITH weekly_revenue AS (
-                        SELECT
-                            DATE_TRUNC('week', {_date_in_kyiv('o.ordered_at')}) as week_start,
-                            SUM(o.grand_total) as revenue,
-                            ROW_NUMBER() OVER (ORDER BY DATE_TRUNC('week', {_date_in_kyiv('o.ordered_at')}) DESC) as week_num
-                        FROM orders o
-                        WHERE {_date_in_kyiv('o.ordered_at')} >= CURRENT_DATE - INTERVAL '{int(weeks_back * 7)} days'
-                            AND {_date_in_kyiv('o.ordered_at')} < DATE_TRUNC('week', CURRENT_DATE)
-                            AND o.status_id NOT IN {return_statuses}
-                            AND {sales_filter}
-                        GROUP BY DATE_TRUNC('week', {_date_in_kyiv('o.ordered_at')})
-                    )
-                    SELECT
-                        AVG(CASE WHEN week_num <= 2 THEN revenue END) as recent_avg,
-                        AVG(CASE WHEN week_num > 2 THEN revenue END) as older_avg
-                    FROM weekly_revenue
-                """
-                trend_result = conn.execute(trend_sql).fetchone()
-                recent = float(trend_result[0] or 0)
-                older = float(trend_result[1] or 0)
-                if older > 0:
-                    trend = ((recent - older) / older) * 100
+        rows = await self._goals_run(
+            _GOALS_PERIOD_REVENUE_SQL
+                .replace("{grain}", grain)
+                .replace("{where}", where_sql),
+            params)
+        result = rows[0] if rows else (None,) * 5
 
-            return {
-                "periodType": period_type,
+        avg_revenue = float(result[0] or 0)
+        min_revenue = float(result[1] or 0)
+        max_revenue = float(result[2] or 0)
+        period_count = result[3] or 0
+        std_dev = float(result[4] or 0)
+
+        # Trend: the two most recent weeks against the ones before them.
+        trend = 0.0
+        if period_type == "weekly" and period_count >= 4:
+            trend_rows = await self._goals_run(
+                _GOALS_WEEKLY_TREND_SQL.replace("{where}", where_sql), params)
+            trend_result = trend_rows[0] if trend_rows else (None, None)
+            recent = float(trend_result[0] or 0)
+            older = float(trend_result[1] or 0)
+            if older > 0:
+                trend = ((recent - older) / older) * 100
+
+        return {
+            "periodType": period_type,
                 "average": round(avg_revenue, 2),
                 "min": round(min_revenue, 2),
                 "max": round(max_revenue, 2),
@@ -215,22 +236,16 @@ class GoalsMixin:
         Returns:
             Goals for daily, weekly, and monthly periods
         """
-        async with self.connection() as conn:
-            # Get stored goals
-            results = conn.execute("""
-                SELECT period_type, goal_amount, is_custom, calculated_goal, growth_factor
-                FROM revenue_goals
-            """).fetchall()
-
-            stored_goals = {
-                row[0]: {
-                    "amount": float(row[1]),
-                    "isCustom": row[2],
-                    "calculatedGoal": float(row[3]) if row[3] else None,
-                    "growthFactor": float(row[4]) if row[4] else 1.10
-                }
-                for row in results
+        results = await self._goals_run(_STORED_GOALS_SQL)
+        stored_goals = {
+            row[0]: {
+                "amount": float(row[1]),
+                "isCustom": row[2],
+                "calculatedGoal": float(row[3]) if row[3] else None,
+                "growthFactor": float(row[4]) if row[4] else 1.10
             }
+            for row in results
+        }
 
         # Calculate current suggestions
         suggestions = await self.calculate_suggested_goals(sales_type)
@@ -1043,13 +1058,13 @@ class GoalsMixin:
         smart = await self.generate_smart_goals(target_year, target_month, sales_type)
 
         # Check for custom overrides
-        async with self.connection() as conn:
-            stored_goals = conn.execute("""
-                SELECT period_type, goal_amount, is_custom
-                FROM revenue_goals
-                WHERE is_custom = TRUE
-            """).fetchall()
-            custom_goals = {row[0]: float(row[1]) for row in stored_goals if row[2]}
+        # The same body as `get_goals`, narrowed in Python rather than in SQL:
+        # one statement is one thing to keep identical between two engines, and
+        # `is_custom` is a boolean in Postgres and an integer in DuckDB — a
+        # predicate on it is exactly the sort of thing that would have needed a
+        # dialect of its own.
+        stored_goals = await self._goals_run(_STORED_GOALS_SQL)
+        custom_goals = {row[0]: float(row[1]) for row in stored_goals if row[2]}
 
         return {
             "daily": {
@@ -1184,7 +1199,7 @@ class GoalsMixin:
         dates: list,
         sales_type: str = "retail",
     ) -> Dict[date, float]:
-        """Get daily revenue for a list of specific dates.
+        """Daily revenue for a list of specific dates, from Silver.
 
         Returns dict mapping date -> revenue total.
         Used for extending comparison data to cover forecast dates.
@@ -1192,24 +1207,27 @@ class GoalsMixin:
         if not dates:
             return {}
 
-        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-        placeholders = ", ".join(["?"] * len(dates))
-        date_strs = [d.isoformat() for d in dates]
+        # The dates go over as `date` objects, not as ISO strings. DuckDB
+        # coerces a string to a DATE without being asked; asyncpg encodes by
+        # the type Postgres inferred and raises `invalid input for query
+        # argument … 'str' object has no attribute 'toordinal'`. Under the
+        # flag that fault is not visible: the read falls back to DuckDB, logs
+        # an ERROR, and the method goes on answering — so the tab looks
+        # switched and is not. Found by the differential test, which is the
+        # only kind that can see it: a unit test mocks `fetch` and never meets
+        # the driver.
+        params: List[Any] = [
+            d.date() if isinstance(d, datetime) else d for d in dates
+        ]
+        where = [f"s.order_date IN ({', '.join(['?'] * len(dates))})",
+                 "NOT s.is_return", "s.is_active_source"]
+        if sales_type != "all":
+            where.append("s.sales_type = ?")
+            params.append(sales_type)
 
-        async with self.connection() as conn:
-            sales_filter = self._build_sales_type_filter(sales_type)
-            rows = conn.execute(
-                f"""SELECT {_date_in_kyiv('o.ordered_at')} as day,
-                           SUM(o.grand_total) as revenue
-                    FROM orders o
-                    WHERE {_date_in_kyiv('o.ordered_at')} IN ({placeholders})
-                      AND o.status_id NOT IN {return_statuses}
-                      AND o.source_id IN (1, 2, 4)
-                      AND {sales_filter}
-                    GROUP BY day""",
-                date_strs,
-            ).fetchall()
-
+        rows = await self._goals_run(
+            _GOALS_DAILY_FOR_DATES_SQL.replace("{where}", " AND ".join(where)),
+            params)
         return {row[0]: float(row[1]) for row in rows}
 
     # ═══════════════════════════════════════════════════════════════════════════
