@@ -17,6 +17,7 @@ is only correct while that holds.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 import re
 import textwrap
@@ -758,3 +759,292 @@ class TestTheForecastGroup:
     # that moving the pin is something a human types. Two guards where the
     # weaker one silently covers for the stronger is worse than one.
 
+
+
+class TestTheWatchdogsAndLedgers:
+    """Five tables, 1 240 rows, and one shipping shape between them.
+
+    They share no subject — a disk reading and a record that a report was sent
+    have nothing to say to each other — and that is deliberate. The twelve
+    tables still homeless in DuckDB do not divide usefully by what they mean,
+    but they divide exactly by *mechanism*, and the mechanism is the part that
+    can be wrong. These five are the ones `_FULL_REPLACE` already carries with
+    no new machinery, so a defect found here is a defect in these five and not
+    in a watermark, a parent's watermark, a key filter or a shared parse.
+
+    The two assertions with teeth are the ones about `numeric` and about the
+    clock, because both decide whether the daily comparison is a check or a
+    siren. See revision 0026 for the arguments; these pin the conclusions.
+    """
+
+    WATCHDOGS = ("app.disk_samples", "app.data_dir_samples", "app.memory_samples")
+    LEDGERS = ("app.weekly_report_sends", "app.traffic_report_sends")
+
+    @property
+    def all_five(self):
+        return self.WATCHDOGS + self.LEDGERS
+
+    def _spec(self, table):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+
+        return next(s for s in OPERATIONAL_TABLES if s.pg_table == table)
+
+    def test_all_five_are_shipped_and_compared(self):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+        from core.pg_operational import _FULL_REPLACE
+
+        shipped = {entry[0] for entry in _FULL_REPLACE}
+        compared = {spec.pg_table for spec in OPERATIONAL_TABLES}
+        for table in self.all_five:
+            assert table in shipped, f"{table} is not replicated"
+            assert table in compared, f"{table} is shipped and never compared"
+
+    def test_no_watchdog_measure_is_declared_numeric(self):
+        """The absence is the decision, so it is asserted rather than assumed.
+
+        Every measure on these three is DOUBLE in DuckDB and DOUBLE PRECISION
+        in Postgres, so both sides hand back a Python float. Listing one in
+        `numeric=` coerces that side to `Decimal`, and `_normalise_row` then
+        finds 1.0 != Decimal('1.0') on every row of every sample, for ever, at
+        a tolerance of zero. It is an attractive mistake because the columns
+        are measurements and measurements usually want NUMERIC.
+        """
+        for table in self.WATCHDOGS:
+            assert self._spec(table).numeric == (), (
+                f"{table} declares a numeric column; its measures are floats "
+                f"on both sides and coercing one of them manufactures a "
+                f"difference on every row"
+            )
+
+    def test_both_ledgers_declare_their_money(self):
+        """The mirror image of the rule above, and the same rule: follow the
+        source type. `revenue` is DECIMAL(14, 2) in DuckDB and NUMERIC(14, 2)
+        here, a Decimal on both sides, so it is listed."""
+        for table in self.LEDGERS:
+            assert self._spec(table).numeric == ("revenue",), table
+
+    def test_every_clock_here_is_per_row_and_stays_compared(self):
+        """These are the first specs in a while with an empty `ignore_columns`,
+        and that is the point rather than an oversight.
+
+        The four forecast specs above all hide their stamp, because one
+        re-derivation writes one value to every row and comparing it would ask
+        the two copies to have been taken at the same instant. A sample is the
+        opposite: one reading at one moment, and a ledger row is one delivery
+        at one moment. Hiding those stamps would throw away the only column
+        that can catch a sample copied with the wrong timestamp.
+        """
+        for table in self.all_five:
+            spec = self._spec(table)
+            assert spec.ignore_columns == (), (
+                f"{table} hides a column; its clock dates the row it sits on"
+            )
+            assert spec.stamp_is_per_row, table
+            assert spec.synced_column in spec.columns, (
+                f"{table}'s clock is not among the shipped columns"
+            )
+
+    def test_the_seven_path_groups_need_the_composite_key(self):
+        """One sweep writes one row per path group, all sharing a `sampled_at`
+        — seven of them in production. Keyed on the timestamp alone, six would
+        collide and a healthy sweep would read as six lost rows."""
+        assert self._spec("app.data_dir_samples").key_columns == (
+            "sampled_at", "path_group")
+
+    def test_the_ledgers_are_two_tables_and_not_one(self):
+        """`weekly_report_sends.sales_type` means a sales type, and "traffic"
+        is not one — the reason DuckDB keeps them apart, carried across rather
+        than quietly tidied up on the way."""
+        from core.pg_operational import _FULL_REPLACE
+
+        by_pg = {e[0]: e[1] for e in _FULL_REPLACE}
+        assert by_pg["app.weekly_report_sends"] == "weekly_report_sends"
+        assert by_pg["app.traffic_report_sends"] == "traffic_report_sends"
+
+    def test_the_migration_creates_what_is_shipped(self):
+        """The third list, for these five.
+
+        It searches every revision rather than one named file, unlike the
+        forecast group's version of this test. The invariant is that the DDL
+        exists at all — which revision introduced a table is history, and a
+        test that names one has to be edited whenever a column is added in a
+        later revision. `warehouse_refreshes` will need exactly that: its
+        fourteenth column arrived in a migration after its CREATE TABLE.
+        """
+        import re
+        from pathlib import Path
+
+        from core.pg_operational import _FULL_REPLACE
+
+        versions = Path(__file__).resolve().parents[2] / "migrations" / "versions"
+        ddl = "\n".join(
+            f.read_text(encoding="utf-8") for f in sorted(versions.glob("0*.py"))
+        )
+        by_table = {e[0]: e[2] for e in _FULL_REPLACE}
+        for table in self.all_five:
+            bare = table.split(".", 1)[1]
+            block = re.search(
+                rf"CREATE TABLE IF NOT EXISTS app\.(?:\{{table\}}|{bare}) \((.*?)\n\s*\)",
+                ddl, re.S)
+            assert block, f"{table} has no DDL in any revision"
+            for column in by_table[table]:
+                assert re.search(rf"\b{column}\b", block.group(1)), (
+                    f"{table}.{column} is shipped and not created"
+                )
+
+    def test_limit_mb_is_the_one_nullable_measure(self):
+        """Zero NULLs in production today, and nullable anyway.
+
+        `core/memory_monitor.py` writes None whenever the cgroup reports
+        `memory.max` as the literal "max". Declaring NOT NULL on the strength
+        of today's data means the first unlimited container aborts the whole
+        hourly transaction and takes the other twelve tables with it.
+        """
+        import re
+        from pathlib import Path
+
+        ddl = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+               / "0026_watchdogs_and_ledgers.py").read_text(encoding="utf-8")
+        block = re.search(
+            r"CREATE TABLE IF NOT EXISTS app\.memory_samples \((.*?)\n\s*\)",
+            ddl, re.S).group(1)
+        limit_line = next(l for l in block.splitlines() if "limit_mb" in l)
+        assert "NOT NULL" not in limit_line, limit_line
+        for other in ("working_set_mb", "page_cache_mb", "oom_kills"):
+            line = next(l for l in block.splitlines() if other in l)
+            assert "NOT NULL" in line, line
+
+
+class TestRetentionIsNotLoss:
+    """The one new idea in revision 0026, and the only thing in it that could
+    make the daily comparison lie.
+
+    `full_replace` ends every run with the two copies identical, so an orphan
+    can only be a row that left DuckDB *after* the copy. On twelve of the
+    fourteen tables that is a defect. On the three watchdog samples it is the
+    retention sweep: `DELETE FROM <t> WHERE sampled_at < <cutoff>`, the memory
+    one every thirty minutes, against an hourly replication and a 07:30 check.
+    Left as plain orphans it would have been a WARN a day, for ever, invented
+    entirely by the migration that created the copy.
+    """
+
+    from datetime import datetime, timedelta, timezone as _tz
+
+    @staticmethod
+    def _spec(table):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+
+        return next(s for s in OPERATIONAL_TABLES if s.pg_table == table)
+
+    @staticmethod
+    def _sample_rows(stamps):
+        """`{key: row}` and `{key: clock}` for `app.memory_samples`, keyed on
+        `sampled_at` — which is both the key and the first column."""
+        rows = {s: (s, 100.0, 10.0, 7000.0, 0) for s in stamps}
+        return rows, {s: s for s in stamps}
+
+    def test_the_three_watchdogs_declare_it_and_nothing_else_does(self):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+
+        sweeping = {s.pg_table for s in OPERATIONAL_TABLES if s.prunes_by_age}
+        assert sweeping == {
+            "app.disk_samples", "app.data_dir_samples", "app.memory_samples",
+        }, (
+            "only the tables whose DuckDB writer deletes by age may claim this; "
+            "on every other table an orphan below the floor is a lost row"
+        )
+
+    def test_a_row_older_than_everything_duckdb_holds_is_a_sweep(self):
+        from core.mirror_reconciliation import compare_table
+
+        now = self.datetime(2026, 9, 14, 7, 30, tzinfo=self._tz.utc)
+        kept = [now - self.timedelta(hours=n) for n in (1, 2, 3)]
+        aged = now - self.timedelta(days=14, hours=1)
+
+        dk_rows, dk_synced = self._sample_rows(kept)
+        pg_rows, _ = self._sample_rows(kept + [aged])
+
+        issues = compare_table(
+            self._spec("app.memory_samples"), dk_rows, dk_synced, pg_rows,
+            {"last_ok_at": now - self.timedelta(minutes=20), "last_rows": 3},
+            now=now,
+        )
+        names = {i.check_name for i in issues}
+        assert "mirror_pruned_rows" in names, names
+        assert "mirror_orphan_rows" not in names, (
+            "the aged row was reported as an orphan; this is the daily WARN "
+            "the mechanism exists to prevent"
+        )
+        pruned = next(i for i in issues if i.check_name == "mirror_pruned_rows")
+        assert pruned.count == 1
+        assert pruned.severity.name == "INFO"
+
+    def test_a_row_inside_the_window_is_still_an_orphan(self):
+        """The half that keeps it a check. A row Postgres holds that is *newer*
+        than DuckDB's oldest cannot have aged out — nothing else deletes from
+        these tables, so something is wrong."""
+        from core.mirror_reconciliation import compare_table
+
+        now = self.datetime(2026, 9, 14, 7, 30, tzinfo=self._tz.utc)
+        kept = [now - self.timedelta(hours=n) for n in (1, 3, 5)]
+        intruder = now - self.timedelta(hours=2)   # between the oldest and newest
+
+        dk_rows, dk_synced = self._sample_rows(kept)
+        pg_rows, _ = self._sample_rows(kept + [intruder])
+
+        issues = compare_table(
+            self._spec("app.memory_samples"), dk_rows, dk_synced, pg_rows,
+            {"last_ok_at": now - self.timedelta(minutes=20), "last_rows": 3},
+            now=now,
+        )
+        names = {i.check_name for i in issues}
+        assert "mirror_orphan_rows" in names, names
+        assert "mirror_pruned_rows" not in names, names
+
+    def test_a_table_that_does_not_sweep_reports_the_same_row_as_an_orphan(self):
+        """The flag is the whole difference, and it is asserted rather than
+        described: an `app.revenue_goals` row older than anything DuckDB holds
+        is a row DuckDB lost."""
+        from core.mirror_reconciliation import compare_table
+
+        now = self.datetime(2026, 9, 14, 7, 30, tzinfo=self._tz.utc)
+        spec = self._spec("app.memory_samples")
+        not_sweeping = dataclasses.replace(spec, prunes_by_age=False)
+
+        kept = [now - self.timedelta(hours=n) for n in (1, 2, 3)]
+        aged = now - self.timedelta(days=14, hours=1)
+        dk_rows, dk_synced = self._sample_rows(kept)
+        pg_rows, _ = self._sample_rows(kept + [aged])
+
+        issues = compare_table(
+            not_sweeping, dk_rows, dk_synced, pg_rows,
+            {"last_ok_at": now - self.timedelta(minutes=20), "last_rows": 3},
+            now=now,
+        )
+        assert "mirror_orphan_rows" in {i.check_name for i in issues}
+
+    def test_an_empty_duckdb_side_forgives_nothing(self):
+        """No floor exists, and an empty source is a far larger finding than a
+        sweep. Every orphan stands."""
+        from core.mirror_reconciliation import compare_table
+
+        now = self.datetime(2026, 9, 14, 7, 30, tzinfo=self._tz.utc)
+        aged = now - self.timedelta(days=14, hours=1)
+        pg_rows, _ = self._sample_rows([aged])
+
+        issues = compare_table(
+            self._spec("app.memory_samples"), {}, {}, pg_rows,
+            {"last_ok_at": now - self.timedelta(minutes=20), "last_rows": 0},
+            now=now,
+        )
+        names = {i.check_name for i in issues}
+        assert "mirror_pruned_rows" not in names, names
+
+    def test_the_finding_is_registered_and_has_a_human_name(self):
+        """An unregistered check name is a finding that cannot become an alert
+        — `core/alerting.py`'s registry is exact-match."""
+        from core.alerting import REGISTRY
+        from core.data_quality import HUMAN_CHECK_NAMES
+
+        assert "mirror_pruned_rows" in REGISTRY
+        assert "mirror_pruned_rows" in HUMAN_CHECK_NAMES

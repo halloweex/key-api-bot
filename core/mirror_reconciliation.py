@@ -93,16 +93,21 @@ from core.pg_bot_state import (
 )
 from core.pg_operational import (
     BUYER_GENDER_COLUMNS,
+    DATA_DIR_SAMPLE_COLUMNS,
+    DISK_SAMPLE_COLUMNS,
     GOAL_COLUMNS,
     GROWTH_METRIC_COLUMNS,
     INVENTORY_HISTORY_COLUMNS,
     MANUAL_EXPENSE_COLUMNS,
+    MEMORY_SAMPLE_COLUMNS,
     MISS_COLUMNS,
     OFFER_STOCK_COLUMNS,
     PREDICTION_COLUMNS,
     SEASONAL_COLUMNS,
     SKU_STATUS_COLUMNS,
+    TRAFFIC_SEND_COLUMNS,
     WEEKLY_PATTERN_COLUMNS,
+    WEEKLY_SEND_COLUMNS,
 )
 from core.landing_rows import EXPENSE_COLUMNS, EXPENSE_TYPE_COLUMNS
 from core.pg_order_utm import UTM_COLUMNS
@@ -186,6 +191,31 @@ class MirroredTable:
     # replace there is no such category: the writer wrote every row it holds,
     # so anything missing was lost.
     full_replace: bool = False
+
+    # True when the DuckDB writer deletes rows by age on a schedule of its own.
+    #
+    # This is the third answer to "Postgres has a row and DuckDB does not", and
+    # it exists because `full_replace` alone gets it wrong. A full replace ends
+    # each run with the two copies identical, so an orphan can only be a row
+    # that left DuckDB *after* the copy — and for these tables that is exactly
+    # what retention does. `core/disk_monitor.py` and `core/memory_monitor.py`
+    # both run `DELETE FROM <t> WHERE sampled_at < <cutoff>`, the memory sweep
+    # every thirty minutes, against an hourly replication and a daily 07:30
+    # comparison. Left as plain orphans, roughly one or two rows a day would be
+    # WARN for ever, and the finding would be entirely manufactured by the
+    # migration that created the copy.
+    #
+    # The test is derived, not configured: an orphan whose clock is older than
+    # *everything DuckDB still holds* was removed by the sweep, because the
+    # sweep is the only statement that removes anything and it always removes
+    # the oldest. Nothing here restates "14 days"; a retention constant copied
+    # into the comparison is a second place for it to be wrong.
+    #
+    # Opt-in rather than inferred, because for every other table the same shape
+    # means the opposite. An `app.order_backfill_misses` row older than
+    # anything DuckDB holds is a row DuckDB lost, and calling that a sweep
+    # would silence the one finding that matters.
+    prunes_by_age: bool = False
 
     @property
     def stamp_is_per_row(self) -> bool:
@@ -555,6 +585,56 @@ def _watermark_findings(
     return issues, last_ok_at
 
 
+def _pruned_by_age(
+    spec: MirroredTable,
+    dk_synced: Mapping[Any, Optional[datetime]],
+    pg_rows: Mapping[Any, Tuple[Any, ...]],
+    orphans: Sequence[Any],
+) -> set:
+    """Which orphans DuckDB's own retention sweep removed.
+
+    The rule is "older than everything DuckDB still holds", and it is sound
+    only because the sweep is the sole statement that deletes from these
+    tables and it always deletes the oldest — so nothing else can produce a
+    row below that floor. It deliberately does not know the retention period:
+    a copy of "14 days" here is a second place for it to be wrong, and it
+    would go stale silently the day somebody changed the sweep.
+
+    A genuine loss of the oldest rows is, by construction, indistinguishable
+    from retention — retention *is* deleting the oldest rows. That is why the
+    caller reports the count rather than dropping it.
+    """
+    if not spec.prunes_by_age or not orphans or spec.synced_column is None:
+        return set()
+    stamps = [_as_utc(v) for v in dk_synced.values()]
+    stamps = [v for v in stamps if v is not None]
+    if not stamps:
+        # DuckDB holds no dated row at all. There is no floor to be below, and
+        # an empty source is a much larger finding than a sweep — leave every
+        # orphan standing so it is reported as one.
+        return set()
+    floor = min(stamps)
+    try:
+        clock = spec.columns.index(spec.synced_column)
+    except ValueError:
+        # The clock is read alongside but not shipped, so the orphan's own age
+        # is not available here. Nothing can be established; report as orphans.
+        return set()
+    pruned = set()
+    for row_id in orphans:
+        value = _as_utc(pg_rows[row_id][clock])
+        if value is not None and value < floor:
+            pruned.add(row_id)
+    return pruned
+
+
+def _as_utc(value: Any) -> Optional[datetime]:
+    """A naive timestamp here is UTC — `compare_table` has always read it so."""
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 def compare_table(
     spec: MirroredTable,
     dk_rows: Mapping[int, Tuple[Any, ...]],
@@ -636,6 +716,31 @@ def compare_table(
 
     # ── Postgres has it, DuckDB does not ──
     orphans = sorted(pg_rows.keys() - dk_rows.keys())
+
+    # One of those is not a defect on a table that sweeps by age: a row that
+    # left DuckDB after the copy, because it aged out. Separated rather than
+    # forgiven — the count still reaches the journal, so a sweep that took two
+    # rows and a sweep that took two hundred do not look alike. See
+    # `MirroredTable.prunes_by_age`.
+    pruned = _pruned_by_age(spec, dk_synced, pg_rows, orphans)
+    if pruned:
+        orphans = [row_id for row_id in orphans if row_id not in pruned]
+        issues.append(IntegrityIssue(
+            check_name="mirror_pruned_rows",
+            table_name=table,
+            severity=Severity.INFO,
+            count=len(pruned),
+            sample_ids=_sample(spec, sorted(pruned), max_samples),
+            description=(
+                f"{len(pruned)} row(s) in {table} are older than anything "
+                "DuckDB still holds, on a table DuckDB sweeps by age — so they "
+                "aged out between the copy and this check. The next full "
+                "replace removes them. Not a defect; a number worth watching, "
+                "because a sweep that suddenly takes far more than usual is "
+                "the one thing this cannot tell apart from a loss."
+            ),
+        ))
+
     if orphans:
         issues.append(IntegrityIssue(
             check_name="mirror_orphan_rows",
@@ -2010,6 +2115,86 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # same case.
         ignore_columns=("updated_at",),
         numeric=("value",),
+        full_replace=True,
+    ),
+    # ── the watchdog samples and the send ledgers (revision 0026) ──
+    #
+    # Every clock here is PER ROW, which makes these the first replicated
+    # tables in a while with nothing in `ignore_columns`. The four specs above
+    # all carry a whole-table stamp — one re-derivation writes one value to
+    # every row — and so must hide the stamp or report every row as differing.
+    # These do the opposite: a sample is one reading taken at one moment and a
+    # ledger row is one delivery at one moment, so `sampled_at` and `sent_at`
+    # date the row they sit on. They are both the grace clock and real data,
+    # `app.order_backfill_misses.checked_at`'s arrangement, and comparing them
+    # is how a sample copied with the wrong timestamp is caught at all.
+    #
+    # No measure column appears in `numeric=` on the three watchdogs, and that
+    # absence is load-bearing rather than an omission: they are DOUBLE in
+    # DuckDB and DOUBLE PRECISION in Postgres, so both sides return a float,
+    # and coercing one side to Decimal is what would manufacture a difference.
+    # `revenue` on the two ledgers is the mirror image — DECIMAL(14, 2) against
+    # NUMERIC(14, 2), a Decimal on both sides — and is listed.
+    MirroredTable(
+        pg_table="app.disk_samples",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="disk_samples",
+        columns=DISK_SAMPLE_COLUMNS,
+        key_columns=("sampled_at",),
+        synced_column="sampled_at",
+        full_replace=True,
+        # Swept by age every thirty minutes; see the field.
+        prunes_by_age=True,
+    ),
+    MirroredTable(
+        pg_table="app.data_dir_samples",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="data_dir_samples",
+        columns=DATA_DIR_SAMPLE_COLUMNS,
+        # The composite is the whole point: one sweep writes seven rows, one
+        # per path group, all sharing a `sampled_at`. Keyed on the timestamp
+        # alone, six of the seven would collide and the comparison would read
+        # a healthy sweep as six lost rows.
+        key_columns=("sampled_at", "path_group"),
+        synced_column="sampled_at",
+        full_replace=True,
+        # Swept by age every thirty minutes; see the field.
+        prunes_by_age=True,
+    ),
+    MirroredTable(
+        pg_table="app.memory_samples",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="memory_samples",
+        columns=MEMORY_SAMPLE_COLUMNS,
+        key_columns=("sampled_at",),
+        synced_column="sampled_at",
+        full_replace=True,
+        # Swept by age every thirty minutes; see the field.
+        prunes_by_age=True,
+    ),
+    MirroredTable(
+        pg_table="app.weekly_report_sends",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="weekly_report_sends",
+        columns=WEEKLY_SEND_COLUMNS,
+        key_columns=("week_start", "sales_type"),
+        # `sent_at` is written once, when the message actually went out, and
+        # never touched again — which is what makes it a clock rather than a
+        # timestamp of the copy, and what makes it worth comparing: a row whose
+        # `sent_at` drifted would mean the two stores disagree about when a
+        # week was reported.
+        synced_column="sent_at",
+        numeric=("revenue",),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.traffic_report_sends",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="traffic_report_sends",
+        columns=TRAFFIC_SEND_COLUMNS,
+        key_columns=("week_start", "sales_type"),
+        synced_column="sent_at",
+        numeric=("revenue",),
         full_replace=True,
     ),
 )
