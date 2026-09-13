@@ -913,7 +913,7 @@ class SyncService:
             # genuinely has to widen — but only for gold_daily_products, the
             # one rebuilt table that joins the catalog. This used to mark the
             # whole warehouse dirty, which also rebuilt silver_orders (no
-            # product column at all), gold_daily_revenue and gold_daily_traffic
+            # product column at all), gold_daily_revenue and the traffic Gold
             # from scratch. Those three rewrites were pure waste, and Silver's
             # was the second-largest source of the file growth that forced a
             # weekly stop-the-world compaction.

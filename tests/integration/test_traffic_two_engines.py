@@ -1,7 +1,9 @@
 """`/traffic` means the same thing in DuckDB and Postgres.
 
 The port with the sharpest structural claim: DuckDB aggregates this tab out of
-`gold_daily_traffic`, and Postgres has no such table *on purpose*. Both readers
+`gold_daily_traffic`, and Postgres never had such a table *on purpose* —
+DuckDB no longer has one either, since the layer was retired once this port
+left it with no reader. Both readers
 folded that Gold — `SUM(orders_count)` grouped by a subset of its own primary
 key — and `silver_order_utm` is keyed on `order_id`, so every order lands in
 exactly one cell and the fold is the same arithmetic as the aggregate over the
@@ -115,7 +117,6 @@ async def _seed_duckdb(store):
             f"INSERT INTO silver_order_utm ({', '.join(UTM_COLUMNS)}) "
             f"VALUES ({', '.join('?' * len(UTM_COLUMNS))})",
             [_utm_row(r) for r in UTM])
-    await store.refresh_traffic_gold_layer()
 
 
 async def _seed_postgres(conn, store, pool):
@@ -259,43 +260,21 @@ async def test_both_engines_return_the_same_answer(
     assert _comparable(postgres) == _comparable(duck)
 
 
-@pytest.mark.asyncio
-async def test_postgres_matches_the_gold_duckdb_still_keeps(
-    both_engines, monkeypatch,
-):
-    """The structural claim, stated as arithmetic.
+# `test_postgres_matches_the_gold_duckdb_still_keeps` stood here.
+#
+# It read `gold_daily_traffic` directly and checked that folding its cells gave
+# what Postgres computes from the join — the arithmetic behind the decision not
+# to build that Gold in Postgres at all. The layer has now been retired in
+# DuckDB too, so there is no second computation left to compare against and the
+# check cannot be written.
+#
+# **That is a real loss, and it is the price of retiring the layer.** What
+# remains is not nothing: the two readers are still compared DuckDB against
+# Postgres above, on the same fixture, with the fallback made fatal. What is
+# gone is the comparison against the *old shape* — a migration-time check that
+# has served its purpose, since the line-level read is now the only definition
+# there is.
 
-    DuckDB's `gold_daily_traffic` is still rebuilt, so it can be read directly
-    and compared against what Postgres computes from the join. If folding the
-    cells were not the same as aggregating the orders — a second UTM row per
-    order would be enough — these two would part company here.
-    """
-    monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
-
-    def _no_duckdb(*_a, **_k):
-        raise AssertionError("fell back to DuckDB")
-
-    with patch.object(type(both_engines), "connection", _no_duckdb):
-        pg = await both_engines.get_traffic_analytics(*W)
-    monkeypatch.delenv("KS_READ_TRAFFIC", raising=False)
-
-    async with both_engines.connection() as conn:
-        cells = conn.execute(
-            "SELECT platform, traffic_type, SUM(orders_count), SUM(revenue)"
-            " FROM gold_daily_traffic WHERE date >= ? AND date <= ?"
-            " GROUP BY platform, traffic_type", list(W)).fetchall()
-
-    from_gold = {}
-    for platform, ttype, orders, revenue in cells:
-        if platform == "google":
-            platform = ("google_ads" if ttype in ("paid_confirmed", "paid_likely")
-                        else "google_organic")
-        slot = from_gold.setdefault(platform, {"orders": 0, "revenue": 0.0})
-        slot["orders"] += orders
-        slot["revenue"] += float(revenue)
-
-    assert {k: {"orders": v["orders"], "revenue": round(v["revenue"], 2)}
-            for k, v in from_gold.items()} == pg["by_platform"]
 
 
 @pytest.mark.asyncio

@@ -305,11 +305,14 @@ class TrafficMixin:
         between batches so health checks and other queries aren't blocked.
 
         Returns:
-            The ids of the orders parsed. Callers that only want the count
-            take ``len()``; ``refresh_warehouse_layers`` needs the ids
-            themselves, to work out which dates gold_daily_traffic has to be
-            rebuilt for. Returning a count and leaving the caller to guess
-            is what forced a full rebuild of that table ~240 times a day.
+            The ids of the orders parsed. Callers take ``len()`` for the
+            count.
+
+            They were once needed whole: `refresh_warehouse_layers` used them
+            to work out which dates the traffic Gold had to be rebuilt for,
+            and returning only a count is what forced a full rebuild of that
+            table ~240 times a day. That layer is retired, so the ids are now
+            just the honest return value of a parser.
         """
         # Step 1: fetch IDs + comments that need parsing (short lock)
         async with self.connection() as conn:
@@ -380,86 +383,6 @@ class TrafficMixin:
         logger.info(f"Parsed UTM data for {total} orders ({num_batches} batches)")
         return {order_id for order_id, _, _ in orders}
 
-    async def refresh_traffic_gold_layer(
-        self, affected_dates: set[date] | None = None,
-    ) -> int:
-        """Rebuild gold_daily_traffic from silver layers.
-
-        Uses transactional DELETE+INSERT (preserves indexes).
-        When affected_dates is provided, only rebuilds those dates.
-
-        Args:
-            affected_dates: Dates to rebuild. ``None`` rebuilds every date.
-                An **empty** set also rebuilds every date, because the check
-                below is truthiness — so a caller that means "nothing moved"
-                must skip the call rather than pass an empty set.
-
-        Returns:
-            Number of rows in gold_daily_traffic
-        """
-        _traffic_select = """
-            SELECT
-                s.order_date AS date,
-                s.source_id,
-                s.sales_type,
-                COALESCE(u.platform,
-                    CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END
-                ) AS platform,
-                COALESCE(u.traffic_type,
-                    CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END
-                ) AS traffic_type,
-                COUNT(DISTINCT s.id) AS orders_count,
-                COALESCE(SUM(s.grand_total), 0) AS revenue
-            FROM silver_orders s
-            LEFT JOIN silver_order_utm u ON s.id = u.order_id
-            WHERE NOT s.is_return
-              AND s.is_active_source
-              AND s.order_date IS NOT NULL
-        """
-
-        # GROUP BY must repeat the COALESCE expressions explicitly.
-        # Using just the alias name is ambiguous in DuckDB (may resolve
-        # to the raw u.platform column), and NULL != 'other' creates
-        # separate groups that both map to 'other' after COALESCE → PK violation.
-        _platform_expr = """COALESCE(u.platform,
-            CASE s.source_id WHEN 1 THEN 'instagram' WHEN 2 THEN 'telegram' ELSE 'unattributed' END)"""
-        _traffic_type_expr = """COALESCE(u.traffic_type,
-            CASE WHEN s.source_id IN (1, 2) THEN 'organic' ELSE 'unknown' END)"""
-        _group_by = f"GROUP BY s.order_date, s.source_id, s.sales_type, {_platform_expr}, {_traffic_type_expr}"
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                if affected_dates and len(affected_dates) > 0:
-                    date_params = list(affected_dates)
-                    date_placeholders = ",".join("?" * len(date_params))
-                    conn.execute(f"DELETE FROM gold_daily_traffic WHERE date IN ({date_placeholders})", date_params)
-                    conn.execute(f"""
-                        INSERT INTO gold_daily_traffic
-                        {_traffic_select}
-                          AND s.order_date IN ({date_placeholders})
-                        {_group_by}
-                    """, date_params)
-                else:
-                    conn.execute("DELETE FROM gold_daily_traffic")
-                    conn.execute(f"""
-                        INSERT INTO gold_daily_traffic
-                        {_traffic_select}
-                        {_group_by}
-                    """)
-
-                row_count = conn.execute("SELECT COUNT(*) FROM gold_daily_traffic").fetchone()[0]
-                conn.execute("COMMIT")
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
-
-            logger.info(f"Refreshed gold_daily_traffic: {row_count} rows"
-                        f"{f' (incremental: {len(affected_dates)} dates)' if affected_dates else ''}")
-            return row_count
 
     async def get_traffic_analytics(
         self,

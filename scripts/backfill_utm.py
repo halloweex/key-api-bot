@@ -113,8 +113,6 @@ async def backfill_utm(days_back: int = 730):
     logger.info(f"Parsed UTM for {utm_count} orders")
 
     logger.info("Refreshing traffic gold layer...")
-    traffic_rows = await store.refresh_traffic_gold_layer()
-    logger.info(f"Gold traffic layer: {traffic_rows} rows")
 
     # And on to Postgres, which is what `/traffic` reads since revision 0018.
     # This script rewrites `silver_order_utm` without marking the warehouse

@@ -20,9 +20,10 @@ pick between when its brand table went to the line level.
 
 So both engines now read the join, one body, and this store gained no derived
 layer, no deriver inside the Gold tick and no comparison to keep it honest.
-The visible cost is that DuckDB's `gold_daily_traffic` is left with no reader
-while still being rebuilt on every warehouse tick; whether to stop maintaining
-it is the owner's call, and it is deliberately not made here.
+That left DuckDB's `gold_daily_traffic` with no reader while it went on being
+rebuilt on every warehouse tick — 5,874 rows DELETE+INSERTed roughly 720 times
+a day for nobody. The owner's call, made 2026-09-13: the layer is retired. The
+physical table is not dropped by that change; it simply stops being written.
 
 THE TRAP IN THE ROAS QUERY
 

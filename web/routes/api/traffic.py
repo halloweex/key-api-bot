@@ -209,7 +209,6 @@ async def refresh_traffic_data(
 
     try:
         utm_count = len(await store.refresh_utm_silver_layer())
-        traffic_rows = await store.refresh_traffic_gold_layer()
         # And on to Postgres, which is what the tab reads. These endpoints do
         # not mark the warehouse dirty, so without this the reclassification
         # sits in DuckDB until the next dirty tick while the page keeps
@@ -219,7 +218,6 @@ async def refresh_traffic_data(
         return {
             "success": True,
             "utm_orders_parsed": utm_count,
-            "traffic_rows": traffic_rows,
         }
     except Exception as e:
         logger.error(f"Traffic refresh failed: {e}", exc_info=True)
@@ -246,7 +244,8 @@ async def reclassify_traffic(
         docker compose logs web | grep -E "Parsed UTM data for|reclassify"
 
     A successful run prints `Parsed UTM data for N orders (M batches)`, then
-    `Refreshed gold_daily_traffic`, then `Request completed ... 200`.
+    `Request completed ... 200`. It printed a `Refreshed gold_daily_traffic`
+    line between the two until that layer was retired.
 
     Left synchronous on purpose. `backfill-utm` next door is a background task
     with a status endpoint, and copying that shape here would buy a subsystem
@@ -270,7 +269,6 @@ async def reclassify_traffic(
             conn.execute("DELETE FROM silver_order_utm")
 
         utm_count = len(await store.refresh_utm_silver_layer())
-        traffic_rows = await store.refresh_traffic_gold_layer()
         # And on to Postgres, which is what the tab reads. These endpoints do
         # not mark the warehouse dirty, so without this the reclassification
         # sits in DuckDB until the next dirty tick while the page keeps
@@ -280,7 +278,6 @@ async def reclassify_traffic(
         return {
             "success": True,
             "utm_records": utm_count,
-            "traffic_rows": traffic_rows,
         }
     except Exception as e:
         logger.error(f"Traffic reclassify failed: {e}", exc_info=True)
@@ -408,14 +405,13 @@ async def _run_backfill_inner(days: int):
         logger.info(f"UTM backfill: {remaining_null} orders still have NULL mc (was {null_count})")
 
         utm_count = len(await store.refresh_utm_silver_layer())
-        traffic_rows = await store.refresh_traffic_gold_layer()
         # And on to Postgres, which is what the tab reads. These endpoints do
         # not mark the warehouse dirty, so without this the reclassification
         # sits in DuckDB until the next dirty tick while the page keeps
         # rendering the previous one. Never raises — see `ship_after_reparse`.
         await ship_after_reparse(store)
 
-        logger.info(f"UTM backfill complete: {utm_count} UTM records, {traffic_rows} traffic rows")
+        logger.info(f"UTM backfill complete: {utm_count} UTM records")
 
         _backfill_status.update(running=False, result={
             "status": "success",
@@ -425,7 +421,6 @@ async def _run_backfill_inner(days: int):
             "db_updated": db_updated_total,
             "chunks_processed": chunks_processed,
             "utm_records_parsed": utm_count,
-            "traffic_gold_rows": traffic_rows,
         })
     except Exception as e:
         logger.error(f"UTM backfill failed: {e}", exc_info=True)

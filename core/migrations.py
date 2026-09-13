@@ -294,6 +294,19 @@ def _m0009_gold_daily_traffic_sales_type(self) -> None:
     # No constraint now, which is this codebase's standing rule for ADD COLUMN
     # anyway: a DEFAULT rewrites the whole table to materialise the value and has
     # OOM-killed this container before.
+    # THE TABLE IS GONE, AND THIS STEP STAYS
+    #
+    # `gold_daily_traffic` was dropped when `/traffic` finished moving to
+    # Postgres and the layer was left with no reader. A retired migration is
+    # not deleted — a database old enough to need this one may still carry the
+    # table — but on every database created since, the ALTER would raise
+    # "Table with name gold_daily_traffic does not exist" and this step is
+    # ONCE, so it would fail on that database for ever.
+    exists = self._connection.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'gold_daily_traffic'"
+    ).fetchone()
+    if not exists:
+        return
     self._connection.execute(
         "ALTER TABLE gold_daily_traffic ADD COLUMN IF NOT EXISTS sales_type VARCHAR"
     )
