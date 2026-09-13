@@ -107,6 +107,9 @@ from core.pg_operational import (
     DQ_DIFF_COLUMNS,
     DQ_ISSUE_COLUMNS,
     DQ_RUN_COLUMNS,
+    OFFER_COLUMNS,
+    SYNC_METADATA_COLUMNS,
+    SYNC_METADATA_SOURCE,
     RECONCILIATION_LOG_COLUMNS,
     REFRESH_COLUMNS,
     SKU_STATUS_COLUMNS,
@@ -2251,6 +2254,50 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # DOUBLE PRECISION. They look like money, which is the whole trap:
         # declaring them here would coerce one side to Decimal and report every
         # row as differing.
+        full_replace=True,
+    ),
+    # ── the offer catalogue and the sync watermarks (revision 0029) ──
+    MirroredTable(
+        pg_table="bronze.offers",
+        # Landing data, and still not landing's story: it is copied out of
+        # DuckDB by the replicator rather than parsed twice, because it travels
+        # with `offer_stocks` on one clock. See `core/pg_operational.py`.
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="offers",
+        columns=OFFER_COLUMNS,
+        key_columns=("id",),
+        synced_column="synced_at",
+        # Shipped and never compared. The writer is a loop of
+        # `INSERT OR REPLACE ... CURRENT_TIMESTAMP` inside ONE DuckDB
+        # transaction, and `CURRENT_TIMESTAMP` is transaction-stable there, so
+        # every row the sync touched takes one value — which is what makes
+        # comparing it meaningless: a sync between the copy and the check moves
+        # the stamp on all of them at once, and the grace stops being per row.
+        #
+        # Measured rather than assumed, and the measurement has a tail: of
+        # 1 057 rows, 1 055 carry the last sync's stamp and TWO are frozen
+        # months back (2026-04-21 and 2026-06-13). Those two are offers KeyCRM
+        # has stopped serving — `INSERT OR REPLACE` never deletes, so they keep
+        # the stamp of their last sighting, the same way product 1055 does one
+        # table up. They are copied like any other row and agree on both sides;
+        # they are noted here because "one stamp for the whole table" is the
+        # obvious thing to write and is not quite what the data says.
+        ignore_columns=("synced_at",),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.sync_metadata",
+        origin_note=_COPIED_FROM_DUCKDB,
+        # The same projection the shipper writes, imported rather than
+        # restated: if these two ever disagreed about which keys belong in
+        # Postgres, the difference would be reported as a defect in the copy.
+        dk_table=SYNC_METADATA_SOURCE,
+        columns=SYNC_METADATA_COLUMNS,
+        key_columns=("key",),
+        # Per row, and provably: no statement anywhere touches more than one
+        # key. Each writer sets its own `last_sync_<entity>` and stamps it at
+        # that moment, so `updated_at` dates the row it sits on.
+        synced_column="updated_at",
         full_replace=True,
     ),
 )

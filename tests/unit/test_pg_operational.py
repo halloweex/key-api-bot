@@ -1371,3 +1371,170 @@ class TestTheQualityJournal:
             )
             assert "NOT NULL" not in line, line
             assert "DEFAULT" not in line, line
+
+
+class TestOffersTravelWithTheirStocks:
+    """`bronze.offers` is landing data that is replicated rather than mirrored,
+    and that is the interesting half.
+
+    The obvious home is `core/pg_landing.py` — parse the KeyCRM payload once
+    and write the same tuple to both stores. It is the wrong answer for
+    `bronze.offer_stocks`' reason, and the two now share it: they are halves of
+    one inventory sync, `sku_inventory_status` is built by joining them, and
+    `stock_movements` is a delta against `offer_stocks` computed on the same
+    tick. Split across the mirror and the replicator they would have two clocks
+    and two ways to stand down, which is what silently froze `offer_stocks` at
+    08:00:53 on 2026-09-06 with nothing to report it.
+    """
+
+    def test_offers_and_offer_stocks_ship_in_the_same_call(self):
+        from core.pg_operational import _FULL_REPLACE
+
+        tables = [e[0] for e in _FULL_REPLACE]
+        assert "bronze.offers" in tables
+        assert "bronze.offer_stocks" in tables
+
+    def test_offers_is_not_in_the_landing_mirror(self):
+        """Two shippers for one table is two clocks for one table."""
+        from core.mirror_reconciliation import MIRRORED_TABLES
+
+        assert "bronze.offers" not in {s.pg_table for s in MIRRORED_TABLES}
+
+    def test_the_stamp_is_hidden_because_one_sync_writes_it_to_every_row(self):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+
+        spec = next(s for s in OPERATIONAL_TABLES if s.pg_table == "bronze.offers")
+        assert spec.ignore_columns == ("synced_at",)
+        assert not spec.stamp_is_per_row
+
+
+class TestTheSyncWatermarksAreAProjection:
+    """Ten of the eleven `sync_metadata` keys cross. One does not, and the
+    exclusion is the whole content of this spec.
+
+    `warehouse_catalog_dirty` is a coordination flag — set when a catalogue
+    sync changes something, read every two minutes by the warehouse refresh,
+    and deleted *conditionally on its own `updated_at`*. Postgres runs no
+    warehouse rebuild, so a copy there asserts something that cannot be true;
+    and it would be wrong in a recurring way, because the flag lives about two
+    minutes against an hourly copy and a 07:30 check, so a window that catches
+    it set at the copy and cleared at the check reports an orphan the copy
+    itself created — with no grace, because `mirror_orphan_rows` has none.
+    """
+
+    def test_the_excluded_key_is_named_once(self):
+        """Once, so the shipper and the comparison cannot come to disagree
+        about what the Postgres copy is supposed to contain."""
+        from core.pg_operational import (
+            SYNC_METADATA_SOURCE, TRANSIENT_SYNC_KEY,
+        )
+
+        assert TRANSIENT_SYNC_KEY == "warehouse_catalog_dirty"
+        assert TRANSIENT_SYNC_KEY in SYNC_METADATA_SOURCE
+        assert "key <>" in SYNC_METADATA_SOURCE
+
+    def test_the_shipper_and_the_comparison_read_the_same_source(self):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+        from core.pg_operational import _FULL_REPLACE, SYNC_METADATA_SOURCE
+
+        shipped = next(e for e in _FULL_REPLACE if e[0] == "app.sync_metadata")
+        compared = next(s for s in OPERATIONAL_TABLES
+                        if s.pg_table == "app.sync_metadata")
+        assert shipped[1] == SYNC_METADATA_SOURCE
+        assert compared.dk_table == SYNC_METADATA_SOURCE
+
+    def test_the_derived_table_is_aliased(self):
+        """DuckDB refuses an unnamed derived table, and this one is
+        interpolated straight after `FROM`. Found by a real defect in the
+        /traffic port, not by reading the manual."""
+        from core.pg_operational import SYNC_METADATA_SOURCE
+
+        assert SYNC_METADATA_SOURCE.rstrip().endswith("AS sync_metadata")
+
+    def test_the_durable_keys_are_not_filtered_out(self):
+        """The projection removes one key, not a class of them. A filter that
+        also dropped `last_sync_orders` would leave a stage-4 writer with no
+        idea where it left off."""
+        from core.pg_operational import SYNC_METADATA_SOURCE
+
+        for key in ("last_sync_orders", "last_sync_products",
+                    "dq_digest_last_sent"):
+            assert key not in SYNC_METADATA_SOURCE
+
+    def test_value_is_unbounded_text(self):
+        """DuckDB's VARCHAR has no length. A VARCHAR(n) here raises on the
+        first value that outgrows it, inside the hourly transaction, taking
+        sixteen other tables with it."""
+        import re
+        from pathlib import Path
+
+        ddl = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+               / "0029_offers_and_sync_metadata.py").read_text(encoding="utf-8")
+        block = re.search(
+            r"CREATE TABLE IF NOT EXISTS app\.sync_metadata \((.*?)\n\s*\)",
+            ddl, re.S).group(1)
+        line = next(l for l in block.splitlines() if l.strip().startswith("value "))
+        assert "TEXT" in line, line
+
+
+class TestStageThreeIsComplete:
+    """Every table this migration set out to give a home now has one.
+
+    Sixteen DuckDB tables had no Postgres counterpart when stage 3 began. Four
+    crossed with revision 0025, five with 0026, two with 0027, three with 0028
+    and two with 0029. This asserts the arithmetic rather than trusting a
+    handoff note, because the whole point of the stage is that nothing is left
+    behind when DuckDB goes.
+    """
+
+    STAGE_THREE = (
+        # 0025 — the forecast group
+        "app.revenue_predictions", "app.seasonal_indices",
+        "app.weekly_patterns", "app.growth_metrics",
+        # 0026 — the watchdogs and the ledgers
+        "app.disk_samples", "app.data_dir_samples", "app.memory_samples",
+        "app.weekly_report_sends", "app.traffic_report_sends",
+        # 0027 — the forensic logs
+        "app.warehouse_refreshes", "app.reconciliation_log",
+        # 0028 — the quality journal
+        "app.data_quality_runs", "app.data_quality_issues",
+        "app.data_quality_diffs",
+        # 0029 — the catalogue and the watermarks
+        "bronze.offers", "app.sync_metadata",
+    )
+
+    def test_all_sixteen_are_shipped(self):
+        from core.pg_operational import _APPEND_ABOVE, _FULL_REPLACE
+
+        shipped = ({e[0] for e in _FULL_REPLACE}
+                   | {s.pg_table for s in _APPEND_ABOVE})
+        missing = sorted(set(self.STAGE_THREE) - shipped)
+        assert missing == [], f"shipped by nothing: {missing}"
+
+    def test_all_sixteen_are_compared(self):
+        from core.mirror_reconciliation import (
+            APPEND_ONLY_TABLES, OPERATIONAL_TABLES,
+        )
+
+        compared = ({s.pg_table for s in OPERATIONAL_TABLES}
+                    | {s.pg_table for s in APPEND_ONLY_TABLES})
+        missing = sorted(set(self.STAGE_THREE) - compared)
+        assert missing == [], f"copied and never checked: {missing}"
+
+    def test_every_one_has_ddl_in_some_revision(self):
+        """The third list. A table shipped with no DDL fails at the first
+        INSERT, in production, on the hourly job."""
+        import re
+        from pathlib import Path
+
+        versions = Path(__file__).resolve().parents[2] / "migrations" / "versions"
+        ddl = "\n".join(
+            f.read_text(encoding="utf-8") for f in sorted(versions.glob("0*.py"))
+        )
+        created = set(re.findall(
+            r"CREATE TABLE IF NOT EXISTS ((?:app|bronze|gold|silver)\.\w+)", ddl))
+        # The two ledgers are created in a loop over an f-string, so their
+        # names are not literals anywhere in the DDL.
+        created |= {"app.weekly_report_sends", "app.traffic_report_sends"}
+        missing = sorted(set(self.STAGE_THREE) - created)
+        assert missing == [], f"shipped and never created: {missing}"

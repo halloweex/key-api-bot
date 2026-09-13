@@ -499,9 +499,23 @@ class TestSyncedColumnDualRole:
         # the parent, so it is not one of their columns and there is no dual
         # role to classify.
         "app.data_quality_runs": "started_at",
+        # `app.sync_metadata` (revision 0029). Per row, and provably so: no
+        # statement anywhere touches more than one key. Each writer sets its
+        # own `last_sync_<entity>` and stamps that row at that moment, so the
+        # value dates the row it sits on and nothing else.
+        "app.sync_metadata": "updated_at",
     }
     WHOLE_TABLE_STAMPS = {
         "app.sku_inventory_status": "updated_at",
+        # `bronze.offers` (revision 0029). A loop of single-row
+        # `INSERT OR REPLACE ... CURRENT_TIMESTAMP` inside ONE DuckDB
+        # transaction, where `CURRENT_TIMESTAMP` is transaction-stable — so
+        # every row a sync touches is restamped together and the grace stops
+        # being per row. Measured: 1 055 of 1 057 carry the last sync's value,
+        # and two are frozen months back because KeyCRM stopped serving them.
+        # `bronze.offer_stocks`, which travels in the same call, is the same
+        # case — and the pair is why both are replicated rather than mirrored.
+        "bronze.offers": "synced_at",
         # `scripts/backfill_gender.py` re-derives every row in one pass
         # whenever `core.gender.RULES_VERSION` moves, so all 20 145 rows carry
         # the same stamp from the same run. Comparing it would ask the two
