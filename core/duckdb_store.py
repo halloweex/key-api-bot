@@ -1293,26 +1293,6 @@ class DuckDBStore(
         CREATE INDEX IF NOT EXISTS idx_silver_utm_traffic_type ON silver_order_utm(traffic_type);
 
         -- ═══════════════════════════════════════════════════════════════════════
-        -- GOLD LAYER: Daily traffic analytics
-        -- ═══════════════════════════════════════════════════════════════════════
-        CREATE TABLE IF NOT EXISTS gold_daily_traffic (
-            date DATE NOT NULL,
-            source_id INTEGER NOT NULL,
-            sales_type VARCHAR NOT NULL,       -- retail, b2b, other
-            platform VARCHAR(20) NOT NULL,     -- facebook, tiktok, google, instagram, email, other
-            traffic_type VARCHAR(20) NOT NULL, -- paid_confirmed, paid_likely, organic, pixel_only, unknown
-
-            orders_count INTEGER DEFAULT 0,
-            revenue DECIMAL(12,2) DEFAULT 0,
-
-            PRIMARY KEY (date, source_id, sales_type, platform, traffic_type)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_gold_traffic_date ON gold_daily_traffic(date);
-        CREATE INDEX IF NOT EXISTS idx_gold_traffic_platform ON gold_daily_traffic(platform);
-        CREATE INDEX IF NOT EXISTS idx_gold_traffic_sales_type ON gold_daily_traffic(sales_type);
-
-        -- ═══════════════════════════════════════════════════════════════════════
         -- MANUAL EXPENSES (business expenses not in KeyCRM)
         -- ═══════════════════════════════════════════════════════════════════════
         CREATE SEQUENCE IF NOT EXISTS seq_manual_expenses_id START 1;
@@ -2156,42 +2136,18 @@ class DuckDBStore(
 
             # ── UTM/Traffic layers (after main refresh completes) ──
             utm_count = 0
-            traffic_rows = 0
             try:
                 utm_order_ids = await self.refresh_utm_silver_layer()
                 utm_count = len(utm_order_ids)
 
-                # Rebuild the dates that moved, not all 987 of them.
-                #
-                # This passed affected_dates=None unconditionally — a full
-                # DELETE+INSERT of gold_daily_traffic on every one of ~240
-                # refreshes a day. DuckDB cannot reclaim what that leaves
-                # behind while a writer is live: vacuuming deletes needs an
-                # exclusive lock a 2-minute refresh loop never yields, and
-                # `vacuum_rebuild_indexes` is off by default so an indexed
-                # table is skipped anyway. gold_daily_traffic reached 3.86M
-                # stored rows behind 5 781 live ones — 667x amplification,
-                # and the single largest contributor to the ~90 MB a day the
-                # database file grew between weekly compactions.
-                #
-                # The old comment was right that UTM parsing can touch dates
-                # outside affected_dates. The answer is to ask which ones
-                # rather than to avoid the question: refresh_utm_silver_layer
-                # now returns the ids it parsed, so the two sets union.
-                traffic_dates = await self._traffic_rebuild_dates(
-                    affected_dates, utm_order_ids,
-                )
-                if traffic_dates is None or traffic_dates:
-                    traffic_rows = await self.refresh_traffic_gold_layer(
-                        affected_dates=traffic_dates,
-                    )
-                else:
-                    # Nothing moved and nothing parsed — the layer is already
-                    # right. Report its size without rewriting it.
-                    async with self.connection() as conn:
-                        traffic_rows = conn.execute(
-                            "SELECT COUNT(*) FROM gold_daily_traffic"
-                        ).fetchone()[0]
+                # The traffic Gold is gone, and only the UTM Silver above
+                # remains. That layer is read — `/traffic` folds it against
+                # `silver_orders` on both engines — and it is shipped to
+                # Postgres. The Gold over it was read by nobody after the tab
+                # moved, and was still being DELETE+INSERTed here every two
+                # minutes: 5,874 rows rewritten ~720 times a day into the file
+                # whose growth is the reason `_traffic_rebuild_dates` and the
+                # incremental path existed at all.
             except Exception as utm_error:
                 logger.warning(f"UTM layer refresh failed (non-critical): {utm_error}")
 
@@ -2206,7 +2162,6 @@ class DuckDBStore(
                 "checksum_match": checksum_match,
                 "validation_passed": validation_passed,
                 "utm_orders_parsed": utm_count,
-                "traffic_rows": traffic_rows,
             }
 
         except Exception as e:
@@ -2261,38 +2216,6 @@ class DuckDBStore(
                 "duration_ms": round(duration_ms, 2),
                 "error": error_msg,
             }
-
-    async def _traffic_rebuild_dates(
-        self,
-        affected_dates: "set[date] | None",
-        utm_order_ids: "set[int]",
-    ) -> "set[date] | None":
-        """Which dates gold_daily_traffic must be rebuilt for.
-
-        `None` means every date. A non-empty set means exactly those. An
-        **empty** set means none at all — and the caller must skip the rebuild
-        rather than pass it on, because refresh_traffic_gold_layer reads a
-        falsy value as "rebuild everything".
-        """
-        if affected_dates is None:
-            # Silver was rebuilt whole, so Gold follows it whole. Same rule
-            # the revenue and products layers already obey above.
-            return None
-
-        dates = set(affected_dates)
-        if not utm_order_ids:
-            return dates
-        if len(utm_order_ids) > UTM_DATE_LOOKUP_LIMIT:
-            return None
-
-        async with self.connection() as conn:
-            ids = list(utm_order_ids)
-            ph = ",".join("?" * len(ids))
-            rows = conn.execute(
-                f"SELECT DISTINCT order_date FROM silver_orders WHERE id IN ({ph})",
-                ids,
-            ).fetchall()
-        return dates | {r[0] for r in rows if r[0] is not None}
 
     async def get_warehouse_status(self) -> Dict[str, Any]:
         """Get warehouse layer status for admin monitoring."""
@@ -2391,7 +2314,6 @@ class DuckDBStore(
 
             silver_orders        <- orders                     no catalog
             gold_daily_revenue   <- silver_orders              no catalog
-            gold_daily_traffic   <- silver + silver_order_utm  no catalog
             gold_daily_products  <- silver + order_products
                                     + products + categories    YES
 

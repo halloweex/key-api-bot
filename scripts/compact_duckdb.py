@@ -37,7 +37,6 @@ MANIFEST_PATH = EXPORT_DIR / "_manifest.json"
 DERIVED_TABLES = frozenset({
     "silver_orders", "silver_order_utm",
     "gold_daily_revenue", "gold_daily_products",
-    "gold_daily_traffic",
 
     # ── Dropped from the schema, still present in the production database ──
     #
@@ -58,10 +57,17 @@ DERIVED_TABLES = frozenset({
     #   and phase 2 exits 1 — the whole weekly compact aborts, and with it the
     #   off-site export that runs after it.
     #
+    #   gold_daily_traffic (5,874 rows) is the third and newest of these. Its
+    #   DDL went when `/traffic` finished moving to Postgres and the layer was
+    #   left with no reader; the physical table was deliberately not dropped in
+    #   the same change, so it is exactly `gold_product_pairs`' case — omit it
+    #   and the next compact puts the table back and ships its rows off-site.
+    #
     # Remove a name from here only after a compact has run and the table is
     # gone from the production database.
     "gold_product_pairs",
     "orders_v2",
+    "gold_daily_traffic",
 })
 
 MEM_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "6GB")
