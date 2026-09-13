@@ -902,23 +902,19 @@ class SyncService:
                 await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
 
             # Silver reads only `orders`, but Gold joins products and categories,
-            # so a renamed product or a re-parented category changes gold rows
-            # with no order involved. That used to arrive within two minutes for
-            # the wrong reason: the warehouse was permanently dirty, so every
-            # rebuild swept it up. With dirtiness now telling the truth, the
-            # catalog needs to ask for itself — otherwise a rename made at night
-            # would not reach the dashboard until somebody placed an order.
+            # THE CATALOGUE NO LONGER HAS TO ASK FOR ITSELF
             #
-            # A product touches every date it was ever sold on, so the scope
-            # genuinely has to widen — but only for gold_daily_products, the
-            # one rebuilt table that joins the catalog. This used to mark the
-            # whole warehouse dirty, which also rebuilt silver_orders (no
-            # product column at all), gold_daily_revenue and the traffic Gold
-            # from scratch. Those three rewrites were pure waste, and Silver's
-            # was the second-largest source of the file growth that forced a
-            # weekly stop-the-world compaction.
-            if stats.get("products") or stats.get("offers"):
-                await self.store.mark_catalog_dirty()
+            # A renamed product or a re-parented category used to change Gold
+            # rows with no order involved, because `gold_daily_products` was
+            # the only rebuilt table that joined the catalogue — so this raised
+            # a dirty flag that widened *that* layer's scope to every date, and
+            # nothing else's.
+            #
+            # That layer is retired: three tabs and the weekly report each read
+            # the order-lines level instead, and the level takes the catalogue
+            # name through the same joins at read time. A rename is therefore
+            # visible on the next page load rather than on the next rebuild,
+            # and there is nothing left for a dirty flag to schedule.
 
             # Adaptive backoff follows the same number. Keyed on the inflated
             # count it never saw a quiet period, so it sat on the 60s floor

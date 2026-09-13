@@ -1169,24 +1169,6 @@ class DuckDBStore(
         );
 
         -- ═══════════════════════════════════════════════════════════════════════
-        -- GOLD LAYER: Pre-aggregated daily products
-        -- ═══════════════════════════════════════════════════════════════════════
-        CREATE TABLE IF NOT EXISTS gold_daily_products (
-            date DATE NOT NULL,
-            sales_type VARCHAR NOT NULL,
-            source_id INTEGER NOT NULL,
-            product_id INTEGER,
-            product_name VARCHAR NOT NULL,
-            brand VARCHAR,
-            category_id INTEGER,
-            category_name VARCHAR,
-            parent_category_name VARCHAR,
-            quantity_sold INTEGER NOT NULL DEFAULT 0,
-            product_revenue DECIMAL(14, 2) NOT NULL DEFAULT 0,
-            order_count INTEGER NOT NULL DEFAULT 0
-        );
-
-        -- ═══════════════════════════════════════════════════════════════════════
         -- WAREHOUSE REFRESH AUDIT LOG
         -- ═══════════════════════════════════════════════════════════════════════
         CREATE SEQUENCE IF NOT EXISTS warehouse_refresh_seq START 1;
@@ -1236,26 +1218,18 @@ class DuckDBStore(
         CREATE INDEX IF NOT EXISTS idx_silver_buyer ON silver_orders(buyer_id);
         CREATE INDEX IF NOT EXISTS idx_gold_rev_date ON gold_daily_revenue(date, sales_type);
 
-        -- gold_daily_products deliberately carries NO index. In DuckDB 1.5.5 a
-        -- single ART index — a PRIMARY KEY counts — disables row-group
-        -- vacuuming for the whole table, and it is binary: one index costs
-        -- exactly what six do. Measured on a clone of this table at its real
-        -- size, a full DELETE+INSERT rebuild leaks 0.000 MB/cycle with no
-        -- index and 1.171 MB with any number of them. At ~45 full rebuilds a
-        -- day that was 53 MB/day — the largest single contributor to the file
-        -- growth behind the weekly stop-the-world compaction.
+        -- `gold_daily_products` stood here with a long note on why it carried
+        -- no index. The measurement in it is still the rule for every rebuilt
+        -- table: in DuckDB 1.5.5 a single ART index — a PRIMARY KEY counts —
+        -- disables row-group vacuuming for the whole table, and a full
+        -- DELETE+INSERT then leaked 1.171 MB a cycle against 0.000 MB with no
+        -- index. That is why migration 0004 still drops those six on databases
+        -- that have them, and why none of these tables carries one.
         --
-        -- What the six bought, measured against the real query shapes:
-        --   top products for a month      1.18 ms -> 1.16 ms without
-        --   revenue by brand for a month  0.65 ms -> 0.65 ms
-        --   revenue by category           0.69 ms -> 0.63 ms
-        --   brand breakdown for a year    0.84 ms -> 0.81 ms
-        --   one product, all time         0.16 ms -> 0.26 ms
-        -- Four of five unchanged; the fifth costs a tenth of a millisecond.
-        -- 87 906 rows is nothing to a columnar scan, and the zone maps on
-        -- `date` already do the work these indexes were added for.
-        --
-        -- Do not add one back without measuring both sides again.
+        -- The layer itself is retired: its readers moved to the order-lines
+        -- level, which reproduces it, and rebuilding it every two minutes for
+        -- nobody was the largest thing left writing to this file.
+
         CREATE INDEX IF NOT EXISTS idx_warehouse_refreshes_at ON warehouse_refreshes(refreshed_at);
 
         -- Composite indexes for drill-down queries (30-40% speedup)
@@ -1789,12 +1763,6 @@ class DuckDBStore(
                 if not affected_dates:
                     affected_dates = None  # Fall back to full rebuild
 
-            # gold_daily_products is the only rebuilt table that joins the
-            # catalog, so a product or offer change widens that scope alone.
-            # Everything else keeps whatever scope the orders gave it.
-            catalog_dirty = await self._consume_catalog_dirty()
-            gold_products_dates = None if catalog_dirty else affected_dates
-
             # ── Step 2: Gold daily revenue (lock acquired + released) ──
             # Single SQL template for both incremental and full rebuild
             _GOLD_REVENUE_SQL = "INSERT INTO gold_daily_revenue\n" + GOLD_REVENUE_SELECT_SQL
@@ -1812,57 +1780,6 @@ class DuckDBStore(
                         conn.execute("DELETE FROM gold_daily_revenue")
                         conn.execute(_GOLD_REVENUE_SQL.format(date_filter="order_date IS NOT NULL"))
                     gold_revenue_rows = conn.execute("SELECT COUNT(*) FROM gold_daily_revenue").fetchone()[0]
-                    conn.execute("COMMIT")
-                except Exception:
-                    try:
-                        conn.execute("ROLLBACK")
-                    except Exception:
-                        pass
-                    raise
-
-            # ── Step 3: Gold daily products (lock acquired + released) ──
-            _GOLD_PRODUCTS_SQL = """
-                INSERT INTO gold_daily_products
-                SELECT
-                    s.order_date AS date,
-                    s.sales_type,
-                    s.source_id,
-                    op.product_id,
-                    op.name AS product_name,
-                    p.brand,
-                    p.category_id,
-                    c.name AS category_name,
-                    parent_c.name AS parent_category_name,
-                    SUM(op.quantity) AS quantity_sold,
-                    SUM(op.price_sold * op.quantity) AS product_revenue,
-                    COUNT(DISTINCT s.id) AS order_count
-                FROM silver_orders s
-                JOIN order_products op ON s.id = op.order_id
-                LEFT JOIN products p ON op.product_id = p.id
-                LEFT JOIN categories c ON p.category_id = c.id
-                LEFT JOIN categories parent_c ON c.parent_id = parent_c.id
-                WHERE NOT s.is_return
-                  AND s.is_active_source
-                  AND {date_filter}
-                GROUP BY
-                    s.order_date, s.sales_type, s.source_id,
-                    op.product_id, op.name, p.brand, p.category_id,
-                    c.name, parent_c.name
-            """
-
-            gold_products_rows = 0
-            async with self.connection() as conn:
-                conn.execute("BEGIN TRANSACTION")
-                try:
-                    if gold_products_dates:
-                        date_params = list(gold_products_dates)
-                        date_placeholders = ",".join("?" * len(date_params))
-                        conn.execute(f"DELETE FROM gold_daily_products WHERE date IN ({date_placeholders})", date_params)
-                        conn.execute(_GOLD_PRODUCTS_SQL.format(date_filter=f"s.order_date IN ({date_placeholders})"), date_params)
-                    else:
-                        conn.execute("DELETE FROM gold_daily_products")
-                        conn.execute(_GOLD_PRODUCTS_SQL.format(date_filter="s.order_date IS NOT NULL"))
-                    gold_products_rows = conn.execute("SELECT COUNT(*) FROM gold_daily_products").fetchone()[0]
                     conn.execute("COMMIT")
                 except Exception:
                     try:
@@ -1893,11 +1810,6 @@ class DuckDBStore(
                         (SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue) AS gold_revenue,
                         (SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue
                          WHERE sales_type IN ({known_types_sql})) AS gold_revenue_known,
-                        (SELECT COALESCE(SUM(product_revenue), 0) FROM gold_daily_products) AS gold_product_revenue,
-                        (SELECT COALESCE(SUM(op.price_sold * op.quantity), 0)
-                         FROM order_products op
-                         JOIN silver_orders s ON op.order_id = s.id
-                         WHERE NOT s.is_return AND s.is_active_source) AS bronze_product_revenue
                 """).fetchone()
 
                 bronze_orders = checksums[0]
@@ -1905,12 +1817,25 @@ class DuckDBStore(
                 silver_revenue = float(checksums[2])
                 gold_revenue = float(checksums[3])
                 gold_revenue_known = float(checksums[4])
-                gold_product_revenue = float(checksums[5])
-                bronze_product_revenue = float(checksums[6])
 
                 checksum_match = abs(silver_revenue - gold_revenue) < 0.01
-                product_checksum_match = abs(gold_product_revenue - bronze_product_revenue) < 0.01
                 row_count_match = bronze_orders == silver_rows
+
+                # THE PRODUCT CHECKSUM IS GONE, AND THAT IS NOT A GAP LEFT OPEN
+                #
+                # `validation_passed` carried a fourth check: the sum of
+                # `gold_daily_products.product_revenue` against the same sum
+                # taken over the order lines. Both sides existed because the
+                # layer did. It has no readers left — three tabs and the weekly
+                # report each moved to the order-lines level, finding the
+                # numbers identical — so it is retired, and a check whose
+                # subject is gone cannot be kept by comparing its source to
+                # itself.
+                #
+                # What that check protected has gone with it: a defect in a
+                # layer nobody reads harms nobody. This is the opposite of the
+                # traffic case one change ago, where the retired comparison was
+                # proving a claim about the *replacement*.
 
                 # ── Cell guard ──
                 # Gold holds one row per (date, sales_type) and is built from
@@ -1947,7 +1872,7 @@ class DuckDBStore(
                 # condition no rebuild can repair.
                 validation_passed = (
                     checksum_match and row_count_match
-                    and product_checksum_match and cells_match
+                    and cells_match
                 )
 
                 # ── Partition assertion (P2-2) ──
@@ -2016,9 +1941,7 @@ class DuckDBStore(
                     detail = (
                         f"rows={bronze_orders}→{silver_rows} (match={row_count_match}), "
                         f"cells: {missing_cells} missing/{extra_cells} orphaned, "
-                        f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match}), "
-                        f"product_revenue={bronze_product_revenue:.2f}→{gold_product_revenue:.2f} "
-                        f"(match={product_checksum_match})"
+                        f"revenue={silver_revenue:.2f}→{gold_revenue:.2f} (match={checksum_match})"
                     )
 
                     if consecutive < MAX_VALIDATION_RETRIES:
@@ -2067,7 +1990,11 @@ class DuckDBStore(
 
                 _audit_values = [
                     trigger, round(duration_ms, 2),
-                    bronze_orders, silver_rows, gold_revenue_rows, gold_products_rows,
+                    # `gold_products_rows` stays NULL from here on. The column
+                    # holds 74k rows of history and is not dropped; a 0 would
+                    # read as "built nothing", and the truth is that there is
+                    # no such layer any more.
+                    bronze_orders, silver_rows, gold_revenue_rows, None,
                     round(silver_revenue, 2), round(gold_revenue, 2),
                     checksum_match, validation_passed, None,
                 ]
@@ -2080,7 +2007,7 @@ class DuckDBStore(
                     conn.execute(
                         f"INSERT INTO warehouse_refreshes ({_audit_cols}, silver_mode) "
                         f"VALUES (CURRENT_TIMESTAMP, {', '.join('?' * len(_audit_values))}, ?)",
-                        _audit_values + [f"{silver_mode}{'+catalog' if catalog_dirty else ''}"],
+                        _audit_values + [silver_mode],
                     )
                 except Exception:
                     # The column may not exist yet: a deploy can reach this line
@@ -2129,7 +2056,6 @@ class DuckDBStore(
             logger.info(
                 f"Warehouse layers refreshed ({trigger}): "
                 f"silver={silver_rows} ({silver_mode}), gold_rev={gold_revenue_rows}, "
-                f"gold_prod={gold_products_rows}, "
                 f"duration={duration_ms:.0f}ms, valid={validation_passed}"
                 f"{incremental_info}"
             )
@@ -2158,7 +2084,6 @@ class DuckDBStore(
                 "bronze_orders": bronze_orders,
                 "silver_rows": silver_rows,
                 "gold_revenue_rows": gold_revenue_rows,
-                "gold_products_rows": gold_products_rows,
                 "checksum_match": checksum_match,
                 "validation_passed": validation_passed,
                 "utm_orders_parsed": utm_count,
@@ -2306,46 +2231,19 @@ class DuckDBStore(
                 VALUES ('warehouse_dirty', ?, CURRENT_TIMESTAMP)
             """, [value])
 
-    async def mark_catalog_dirty(self) -> None:
-        """A product, offer or category changed — not an order.
+    # `mark_catalog_dirty` and `_consume_catalog_dirty` stood here.
+    #
+    # They existed for one consumer: `gold_daily_products` was the only rebuilt
+    # table that joined the catalogue, so a product or offer change had to
+    # widen *its* scope to every date while everything else kept the scope the
+    # orders gave it. The flag lived in `sync_metadata` under
+    # `warehouse_catalog_dirty`, and the sync raised it.
+    #
+    # The layer is retired, so the flag has nothing to decide. The key is left
+    # in `sync_metadata` on databases that carry it — one stale row, read by
+    # nobody, and removing rows is not what this change is for.
 
-        Kept apart from `mark_warehouse_dirty` because the two mean different
-        things and only one of the four rebuilt tables cares:
 
-            silver_orders        <- orders                     no catalog
-            gold_daily_revenue   <- silver_orders              no catalog
-            gold_daily_products  <- silver + order_products
-                                    + products + categories    YES
-
-        A rename therefore has to widen exactly one scope. Marking the whole
-        warehouse dirty instead rebuilt all four, and silver_orders — which has
-        no product column at all — was the second-largest contributor to the
-        file growth that forced a weekly stop-the-world compaction.
-        """
-        async with self.connection() as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
-                VALUES ('warehouse_catalog_dirty', '1', CURRENT_TIMESTAMP)
-            """)
-
-    async def _consume_catalog_dirty(self) -> bool:
-        """Read and clear the catalog flag.
-
-        Consumed inside `refresh_warehouse_layers` rather than alongside the
-        order flag so that every caller honours it — the scheduler, a manual
-        trigger and the admin endpoint alike — without each having to know it
-        exists.
-        """
-        async with self.connection() as conn:
-            row = conn.execute(
-                "SELECT value FROM sync_metadata WHERE key = 'warehouse_catalog_dirty'"
-            ).fetchone()
-            if not row or not row[0]:
-                return False
-            conn.execute(
-                "DELETE FROM sync_metadata WHERE key = 'warehouse_catalog_dirty'"
-            )
-            return True
 
     async def peek_warehouse_dirty(self) -> tuple[bool, list[int] | None, Any]:
         """Read the dirty flag without clearing it.

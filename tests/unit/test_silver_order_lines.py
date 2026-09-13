@@ -109,26 +109,23 @@ class TestTheLevel:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_it_reproduces_gold_to_the_kopeck(self, tmp_path):
-        """The load-bearing property. Verified on production too: ₴132,077,453.75
-        on both sides, 986 dates on both sides, zero disagreeing."""
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                gold = conn.execute(
-                    "SELECT date, ROUND(SUM(product_revenue), 2) FROM gold_daily_products "
-                    "GROUP BY 1 ORDER BY 1"
-                ).fetchall()
-                level = conn.execute(
-                    "SELECT order_date, ROUND(SUM(line_amount), 2) FROM silver_order_lines "
-                    "WHERE NOT is_return AND is_active_source GROUP BY 1 ORDER BY 1"
-                ).fetchall()
-            assert gold == level, "the level and the aggregate beside it disagree"
-            assert gold, "the fixture produced no Gold rows, so this proved nothing"
-        finally:
-            await store.close()
+    # `test_it_reproduces_gold_to_the_kopeck` stood here.
+    #
+    # It grouped `gold_daily_products` by date and compared it against the same
+    # grouping of this level — the load-bearing property, verified on
+    # production at ₴132,077,453.75 across 986 dates with nothing disagreeing.
+    #
+    # That Gold is retired: this level replaced it in three tabs and the weekly
+    # report, and rebuilding a layer nobody reads every two minutes was the
+    # single largest thing left writing to the file. With no second computation
+    # there is nothing to compare against, and the property cannot be restated
+    # as a test — only recorded as the measurement that licensed the change.
+    #
+    # What still holds this level honest is the test above (every line agrees
+    # with its order on the four predicate columns) and the one below (it keeps
+    # what Gold excluded rather than hiding it, so a caller's predicate is the
+    # caller's).
+
 
     @pytest.mark.asyncio
     async def test_it_holds_what_gold_excludes_rather_than_hiding_it(self, tmp_path):

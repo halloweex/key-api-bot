@@ -301,19 +301,37 @@ def fetch_product_moves(
     Returns the ranked moves and the net move across all products, so a caller
     can say what fraction of the week the top few explain.
     """
+    # READ FROM THE LINE LEVEL, NOT FROM `gold_daily_products`
+    #
+    # This was that Gold's last reader. Three tabs had already left it, each
+    # finding the same thing: the level carries what the Gold folded, and
+    # re-applying Gold's own predicate (`NOT is_return AND is_active_source`)
+    # reproduces it. Measured per brand over a closed 30-day window on the
+    # production backup: **quantity 0 differing, revenue 0 differing** across
+    # all 32. With this reader gone the table has none, and can be dropped.
+    #
+    # The name is the catalogue's, not `ANY_VALUE` of the name as sold. 193 of
+    # 268 products carry more than one sold name over thirty days — the shop
+    # renames them — so `ANY_VALUE` printed whichever spelling the engine
+    # happened to reach first, in a report that goes to every approved user.
+    # `MIN` is deterministic; the catalogue name is the one a reader knows.
     rows = conn.execute("""
         WITH cur AS (
-            SELECT product_id, ANY_VALUE(product_name) AS name,
-                   SUM(product_revenue) AS revenue
-            FROM gold_daily_products
-            WHERE date BETWEEN ? AND ? AND sales_type = ?
+            SELECT product_id,
+                   COALESCE(MIN(catalog_product_name), MIN(product_name)) AS name,
+                   SUM(line_amount) AS revenue
+            FROM silver_order_lines
+            WHERE order_date BETWEEN ? AND ? AND sales_type = ?
+              AND NOT is_return AND is_active_source
             GROUP BY product_id
         ),
         prev AS (
-            SELECT product_id, ANY_VALUE(product_name) AS name,
-                   SUM(product_revenue) AS revenue
-            FROM gold_daily_products
-            WHERE date BETWEEN ? AND ? AND sales_type = ?
+            SELECT product_id,
+                   COALESCE(MIN(catalog_product_name), MIN(product_name)) AS name,
+                   SUM(line_amount) AS revenue
+            FROM silver_order_lines
+            WHERE order_date BETWEEN ? AND ? AND sales_type = ?
+              AND NOT is_return AND is_active_source
             GROUP BY product_id
         )
         SELECT COALESCE(cur.name, prev.name),
