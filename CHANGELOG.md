@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.187
+
+- Give the data-quality journal a Postgres home
+- Give the two forensic logs a Postgres home, and declare the append list
+
+
 ## 3.0.186
 
 - Give the watchdog samples and the two send ledgers a Postgres home
