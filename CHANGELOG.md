@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.178
+
+- Take the four movable /goals reads off DuckDB
+
+
 ## 3.0.177
 
 - Take the last three dashboard reads off the DuckDB-only Gold
