@@ -99,6 +99,11 @@ class Dialect:
     # The goals a human set. DuckDB writes them; Postgres holds an hourly
     # read replica (revision 0017) — see `core/pg_operational.py`.
     revenue_goals: str
+    # What the model predicted, on the day it predicted it. Revision 0025, and
+    # the same shape as `revenue_goals`: DuckDB's forecast job writes it and
+    # Postgres carries an hourly copy. Not derivable there — re-running the
+    # model tomorrow answers a different question.
+    revenue_predictions: str
     # `/traffic`. `order_utm` is shipped rather than derived — its body is a
     # Python parser, not SQL (revision 0018) — and it is 1:1 with the order,
     # which is what lets the traffic reads fold it against `silver_orders`
@@ -150,6 +155,7 @@ DUCKDB = Dialect(
     # Every row is a roll-up here: this Gold has no source dimension.
     gold_revenue_rollup="TRUE",
     revenue_goals="revenue_goals",
+    revenue_predictions="revenue_predictions",
     order_utm="silver_order_utm",
     manual_expenses="manual_expenses",
     expenses="expenses",
@@ -186,6 +192,7 @@ POSTGRES = Dialect(
     gold_daily_revenue="gold.daily_revenue",
     gold_revenue_rollup="source_id IS NULL",
     revenue_goals="app.revenue_goals",
+    revenue_predictions="app.revenue_predictions",
     order_utm="silver.order_utm",
     manual_expenses="app.manual_expenses",
     expenses="bronze.expenses",
@@ -382,6 +389,7 @@ def render_tables(sql: str, dialect: Dialect, **extra: Any) -> str:
         gold_daily_revenue=dialect.gold_daily_revenue,
         gold_revenue_rollup=dialect.gold_revenue_rollup,
         revenue_goals=dialect.revenue_goals,
+        revenue_predictions=dialect.revenue_predictions,
         order_utm=dialect.order_utm,
         manual_expenses=dialect.manual_expenses,
         expenses=dialect.expenses,

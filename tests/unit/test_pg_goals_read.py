@@ -48,11 +48,20 @@ REPOSITORY = REPO / "core" / "repositories" / "goals.py"
 TIMEOUT_S = 20
 
 ROUTED = ("get_goals", "get_smart_goals", "get_historical_revenue",
-          "get_daily_revenue_for_dates")
+          "get_daily_revenue_for_dates", "get_predictions")
 
-# The two reads whose tables Postgres does not have. They must not reach the
-# router at all — it would fall back for ever while looking switched.
-NOT_ROUTED = ("generate_smart_goals", "get_predictions")
+# `generate_smart_goals` is not a read, and finding that out is why it is
+# alone here now.
+#
+# The audit filed it beside `get_predictions` because it has no INSERT of its
+# own — too shallow a test. It counts `seasonal_indices`, and when the count
+# is short (or `recalculate=True`, which is an argument callers pass) it runs
+# the three calculators, which write those tables **in DuckDB**, and then
+# reads them back. Route the read and the recompute writes to one store while
+# the read comes from another, an hour behind.
+#
+# It belongs to the writes, with the calculators it drives.
+NOT_ROUTED = ("generate_smart_goals",)
 
 # The writes. These *may* reach the router — `set_goal` computes a suggestion
 # from the revenue history before storing it, and reading that history from
@@ -62,7 +71,8 @@ WRITERS = ("set_goal", "calculate_seasonality_indices", "calculate_yoy_growth",
            "calculate_weekly_patterns", "store_predictions")
 
 BODIES = ("_GOALS_PERIOD_REVENUE_SQL", "_GOALS_WEEKLY_TREND_SQL",
-          "_GOALS_DAILY_FOR_DATES_SQL", "_STORED_GOALS_SQL")
+          "_GOALS_DAILY_FOR_DATES_SQL", "_STORED_GOALS_SQL",
+          "_PREDICTIONS_SQL")
 
 CALLS = (
     ("get_historical_revenue", ("daily",), {}),
@@ -71,6 +81,7 @@ CALLS = (
     ("get_historical_revenue", ("weekly",), {"sales_type": "all"}),
     ("get_daily_revenue_for_dates", ([date.today(), date.today() - timedelta(days=1)],), {}),
     ("get_daily_revenue_for_dates", ([],), {}),          # the early return
+    ("get_predictions", (date.today() - timedelta(days=7), date.today()), {}),
 )
 
 
@@ -180,16 +191,27 @@ class TestTheBoundary:
                     assert verb not in upper, f"{name} writes, and it is routed"
         assert seen >= 4, f"expected at least four routed calls, found {seen}"
 
-    def test_the_tables_those_reads_need_are_still_absent_from_the_dialect(self):
-        """If somebody adds them, this test is the reminder that the two reads
-        above are now movable — it fails, and the fix is to move them."""
+    def test_the_forecast_table_now_has_a_postgres_name(self):
+        """This test used to assert the opposite — that none of the four had a
+        home — and said that when one appeared it should be deleted and the
+        read moved. Revision 0025 brought them, so it was."""
+        from core.sql_dialect import DUCKDB, POSTGRES
+
+        assert POSTGRES.revenue_predictions == "app.revenue_predictions"
+        assert DUCKDB.revenue_predictions == "revenue_predictions"
+
+    def test_the_other_three_are_still_only_a_replication_target(self):
+        """They have a Postgres home too, and no dialect entry — deliberately.
+        Nothing reads them through a routed body: `generate_smart_goals` writes
+        them before reading, so it stays whole on DuckDB until the writes
+        move."""
         from core.sql_dialect import POSTGRES
 
-        for missing in ("revenue_predictions", "seasonal_indices",
-                        "weekly_patterns", "growth_metrics"):
-            assert not hasattr(POSTGRES, missing), (
-                f"{missing} has a Postgres home now — `get_predictions` and "
-                f"`generate_smart_goals` can move, and this test should go"
+        for name in ("seasonal_indices", "weekly_patterns", "growth_metrics"):
+            assert not hasattr(POSTGRES, name), (
+                f"{name} gained a dialect entry — if something now reads it "
+                f"through the router, `generate_smart_goals`' compute-then-read "
+                f"loop has to be resolved first"
             )
 
 

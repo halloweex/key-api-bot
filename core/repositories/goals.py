@@ -66,6 +66,20 @@ _GOALS_DAILY_FOR_DATES_SQL = """
     GROUP BY s.order_date
 """
 
+# The forecast a reader sees on the revenue chart. Revision 0025 gave this table
+# a Postgres home, which is the only reason this read can move at all — and the
+# dates go over as `date` objects, never as ISO strings. The sibling method two
+# rows down shipped that bug: DuckDB coerces the string, asyncpg refuses it, and
+# under the flag the read falls back and the tab looks switched while it is not.
+_PREDICTIONS_SQL = """
+    SELECT prediction_date, predicted_revenue, model_mae, model_mape, model_wape
+    FROM {revenue_predictions}
+    WHERE sales_type = ?
+      AND prediction_date >= ?
+      AND prediction_date <= ?
+    ORDER BY prediction_date
+"""
+
 _STORED_GOALS_SQL = """
     SELECT period_type, goal_amount, is_custom, calculated_goal, growth_factor
     FROM {revenue_goals}
@@ -1167,21 +1181,16 @@ class GoalsMixin:
         end_date: date,
         sales_type: str = "retail",
     ) -> List[Dict]:
-        """Get stored revenue predictions for a date range.
+        """Stored revenue predictions for a date range, from whichever engine.
 
-        Returns:
-            List of dicts with date, predicted_revenue, model_mae, model_mape, model_wape.
+        The last read of this tab to move, and it could not until revision 0025
+        gave `revenue_predictions` a Postgres home — `generate_smart_goals`,
+        which the audit filed beside it, turned out not to be a read at all:
+        it recomputes the three seasonality tables in DuckDB and then reads
+        them back, so its read cannot leave without its write.
         """
-        async with self.connection() as conn:
-            rows = conn.execute(
-                """SELECT prediction_date, predicted_revenue, model_mae, model_mape, model_wape
-                   FROM revenue_predictions
-                   WHERE sales_type = ?
-                     AND prediction_date >= ?
-                     AND prediction_date <= ?
-                   ORDER BY prediction_date""",
-                [sales_type, start_date.isoformat(), end_date.isoformat()]
-            ).fetchall()
+        rows = await self._goals_run(
+            _PREDICTIONS_SQL, [sales_type, start_date, end_date])
 
         return [
             {

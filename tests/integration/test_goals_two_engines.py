@@ -59,7 +59,8 @@ ORDERS = [
     (9, 4, 250.0, 52, False, None),
 ]
 
-PG_TABLES = ("gold.daily_revenue", "silver.orders", "app.revenue_goals")
+PG_TABLES = ("gold.daily_revenue", "silver.orders", "app.revenue_goals",
+             "app.revenue_predictions")
 
 GOALS = [
     ("daily", 5000.0, True, 4500.0, 1.10),
@@ -239,3 +240,67 @@ class TestTheStoredGoalsAgree:
         assert duck["daily"]["isCustom"] == postgres["daily"]["isCustom"]
         assert bool(postgres["daily"]["isCustom"]) is True
         assert bool(postgres["weekly"]["isCustom"]) is False
+
+
+PREDICTIONS = [
+    # (prediction_date, sales_type, predicted_revenue, mae, mape, wape)
+    (TODAY - timedelta(days=2), "retail", 101_000.00, 900.0, 5.5, 6.1),
+    (TODAY - timedelta(days=1), "retail", 102_500.50, 900.0, 5.5, 6.1),
+    (TODAY, "retail", 99_999.99, 900.0, 5.5, 6.1),
+    (TODAY, "b2b", 12_000.00, 300.0, 9.9, 8.8),   # another sales type, same day
+]
+
+
+class TestTheForecastReadsTheSameOnBoth:
+    """`get_predictions` is the last read of this tab to move, and it could not
+    until revision 0025 gave the table a Postgres home.
+
+    The case that matters is not the numbers — five columns copied verbatim —
+    but the **parameters**: the method used to hand its bounds over as ISO
+    strings, which DuckDB coerces to DATE and asyncpg refuses. That is invisible
+    to a unit test, which mocks `fetch` and never meets the driver, and in
+    production it does not break the page: the read falls back, logs an ERROR
+    and answers from DuckDB while the tab looks switched.
+    """
+
+    @pytest_asyncio.fixture
+    async def seeded(self, both_engines):
+        store = both_engines
+        async with store.connection() as conn:
+            conn.executemany(
+                "INSERT INTO revenue_predictions (prediction_date, sales_type,"
+                " predicted_revenue, model_mae, model_mape, model_wape)"
+                " VALUES (?,?,?,?,?,?)", PREDICTIONS)
+        from core.pg import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.executemany(
+                "INSERT INTO app.revenue_predictions (prediction_date, sales_type,"
+                " predicted_revenue, model_mae, model_mape, model_wape)"
+                " VALUES ($1,$2,$3,$4,$5,$6)", PREDICTIONS)
+        return store
+
+    @pytest.mark.asyncio
+    async def test_a_window_returns_the_same_rows(self, seeded, monkeypatch):
+        duck, postgres = await _both(
+            seeded, monkeypatch, "get_predictions",
+            (TODAY - timedelta(days=3), TODAY))
+        assert _comparable(duck) == _comparable(postgres)
+        assert len(postgres) == 3, "retail only, and all three days of it"
+
+    @pytest.mark.asyncio
+    async def test_the_sales_type_filter_separates_the_two_rows_of_one_day(
+        self, seeded, monkeypatch,
+    ):
+        duck, postgres = await _both(
+            seeded, monkeypatch, "get_predictions", (TODAY, TODAY),
+            {"sales_type": "b2b"})
+        assert _comparable(duck) == _comparable(postgres)
+        assert len(postgres) == 1 and postgres[0]["predicted_revenue"] == 12_000.00
+
+    @pytest.mark.asyncio
+    async def test_an_empty_window_is_empty_on_both(self, seeded, monkeypatch):
+        duck, postgres = await _both(
+            seeded, monkeypatch, "get_predictions",
+            (TODAY - timedelta(days=400), TODAY - timedelta(days=390)))
+        assert duck == postgres == []
