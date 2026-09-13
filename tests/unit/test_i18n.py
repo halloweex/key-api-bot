@@ -113,3 +113,83 @@ class TestWindow:
             fmt_window(date(2026, 5, 18), date(2026, 5, 24), lang) == window
             for lang in LANGUAGES
         )
+
+
+class TestTrafficPlatformsAreNamed:
+    """Every platform the classifier can emit has a label in the table.
+
+    `_platform_label` falls back to the raw key on purpose, so a new platform
+    reaches the report rather than disappearing from it. That fallback protects
+    the *runtime*; it is not meant to be the delivered spelling, and when it is,
+    nobody finds out until a Monday — `telegram` reached the first traffic
+    report in lowercase beside "Instagram" and "Google Ads", which is what this
+    test exists to stop happening twice.
+
+    Read out of the classifier by walking its tree, not by grepping it: the
+    module documents its own platform names in prose and in SQL comments, and a
+    text search cannot tell a name it emits from a name it discusses.
+    """
+
+    @staticmethod
+    def _emitted_platforms() -> set:
+        import ast
+        import pathlib
+        import re
+
+        src = pathlib.Path("core/repositories/traffic.py").read_text()
+        tree = ast.parse(src)
+
+        fn = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.name == "_classify_traffic"),
+            None,
+        )
+        assert fn is not None, "_classify_traffic has moved or been renamed"
+
+        found = set()
+        for node in ast.walk(fn):
+            # `platform = 'facebook'`
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if (isinstance(target, ast.Name) and target.id == "platform"
+                            and isinstance(node.value, ast.Constant)
+                            and isinstance(node.value.value, str)):
+                        found.add(node.value.value)
+            # `return 'paid_likely', 'facebook'` — the platform is second
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple):
+                elts = node.value.elts
+                if (len(elts) == 2 and isinstance(elts[1], ast.Constant)
+                        and isinstance(elts[1].value, str)):
+                    found.add(elts[1].value)
+
+        # The SQL fallback for an order with no UTM row at all. This one is a
+        # deliberate read of one known literal, not a search of the file.
+        expr = next(
+            (n.value.value for n in ast.walk(tree)
+             if isinstance(n, ast.Assign)
+             and any(isinstance(t, ast.Name) and t.id == "_PLATFORM_EXPR"
+                     for t in n.targets)
+             and isinstance(n.value, ast.Constant)),
+            None,
+        )
+        assert expr is not None, "_PLATFORM_EXPR has moved or been renamed"
+        found |= set(re.findall(r"THEN '([a-z_]+)'", expr))
+        found |= set(re.findall(r"ELSE '([a-z_]+)'", expr))
+        return found
+
+    def test_the_classifier_emits_nothing_the_table_cannot_name(self):
+        unnamed = sorted(
+            p for p in self._emitted_platforms()
+            if f"traffic.platform.{p}" not in _STRINGS
+        )
+        assert unnamed == [], (
+            "these platforms would reach a report as their raw key: "
+            f"{unnamed} — add traffic.platform.<key> to core/i18n.py"
+        )
+
+    def test_it_actually_found_the_platforms(self):
+        # A walk that silently finds nothing would pass the test above for the
+        # wrong reason, which is the failure mode of every structural check.
+        found = self._emitted_platforms()
+        assert {"facebook", "instagram", "telegram", "unattributed"} <= found
