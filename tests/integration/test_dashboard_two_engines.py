@@ -283,6 +283,12 @@ CALLS = (
     ("get_brand_analytics", {}),
     ("get_brand_analytics", {"sales_type": "all"}),
     ("get_brand_analytics", {"source_id": 1}),
+    # The customer block: five statements, two of them over Gold where the
+    # roll-up predicate decides whether every day is counted once or twice.
+    ("get_customer_insights", {}),
+    ("get_customer_insights", {"sales_type": "all"}),
+    ("get_customer_insights", {"sales_type": "b2b"}),
+    ("get_customer_insights", {"promocode": "NOPE"}),
 )
 
 
@@ -405,3 +411,43 @@ class TestTheTwoCorrectionsTheGoldPathCarried:
         # BrandA appears on orders 1 and 2 — order 7 is a return, order 4 is a
         # retired source. Two, not the three lines that carry it.
         assert by_brand["BrandA"] == 2, by_brand
+
+
+class TestTheBlendedAov:
+    """`sales_type=all` used to chart one arbitrary sales type's AOV.
+
+    The query had no `GROUP BY date` and the caller folds rows into a dict
+    keyed on the date, so with three rows for one day the last one won — and
+    nothing orders rows within a date, so *which* one was not stable between
+    runs. Measured on the production backup: 23 of 30 days disagreed with the
+    blended figure.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_day_with_three_sales_types_reports_the_blend(
+        self, both_engines, monkeypatch,
+    ):
+        duck, postgres = await _both(
+            both_engines, monkeypatch, "get_customer_insights", {"sales_type": "all"})
+        assert _comparable(duck) == _comparable(postgres)
+
+        series = postgres["aovTrend"]["datasets"][0]["data"]
+        labels = postgres["aovTrend"]["labels"]
+        # The fixture puts a retail order and a b2b order on different days,
+        # so the blend is exercised by the totals rather than by one cell:
+        # every non-zero point must lie between the smallest and largest
+        # per-order value the fixture contains.
+        nonzero = [v for v in series if v]
+        assert nonzero, "the window missed the fixture entirely"
+        assert min(nonzero) >= 100.0 and max(nonzero) <= 1200.0, (
+            f"an AOV outside every order in the fixture — the day is showing "
+            f"one sales type rather than the blend: {dict(zip(labels, series))}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_retail_case_is_unchanged(self, both_engines, monkeypatch):
+        """One row per date there, so the old and new queries agree — which is
+        why this went unnoticed: `retail` is the default."""
+        duck, postgres = await _both(
+            both_engines, monkeypatch, "get_customer_insights", {})
+        assert _comparable(duck) == _comparable(postgres)

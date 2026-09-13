@@ -43,6 +43,11 @@ TIMEOUT_S = 20
 TODAY = date.today()
 WINDOW = (TODAY - timedelta(days=30), TODAY)
 
+# The routed methods that live in `revenue.py` — the file the structural tests
+# below parse. `get_customer_insights` rides the same flag but lives in the
+# customers mixin, so it is checked by `TestTheCustomerBlock`, against its own
+# file. Adding it here instead made two tests raise `StopIteration` looking for
+# it in the wrong tree.
 METHODS = ("get_return_orders", "get_sales_by_source", "get_subcategory_breakdown",
            "get_top_products", "get_product_performance", "get_brand_analytics")
 
@@ -58,6 +63,8 @@ CALLS = (
     ("get_top_products", {"category_id": 1}),          # …and the category walk
     ("get_product_performance", {}),                   # two statements, one call
     ("get_brand_analytics", {}),
+    ("get_customer_insights", {}),             # five statements, one call
+    ("get_customer_insights", {"sales_type": "all"}),
 )
 
 BODIES = (
@@ -69,6 +76,16 @@ BODIES = (
     "_TOP_PRODUCTS_BY_REVENUE_SQL",
     "_CATEGORY_BREAKDOWN_SQL",
     "_BRAND_ANALYTICS_SQL",
+)
+
+# The customer block lives on `CustomersMixin` and rides the same flag; its
+# bodies are module constants there.
+INSIGHT_BODIES = (
+    "_INSIGHTS_GOLD_SQL",
+    "_INSIGHTS_AOV_SQL",
+    "_INSIGHTS_CLV_SQL",
+    "_INSIGHTS_PERIOD_SQL",
+    "_INSIGHTS_ALLTIME_SQL",
 )
 
 # The holes each body fills in itself before the dialect renderer sees it.
@@ -377,3 +394,60 @@ class TestNothingHereReadsTheDeadGold:
 
         for name in BODIES:
             assert "ANY_VALUE" not in getattr(revenue, name).upper(), name
+
+
+class TestTheCustomerBlock:
+    """`/api/customers/insights` rides this flag too, and its bodies live in
+    the customers mixin. Three things it must not do again."""
+
+    def _bodies(self):
+        from core.repositories import customers
+        return {n: getattr(customers, n) for n in INSIGHT_BODIES}
+
+    def test_both_renderings_leave_no_hole(self):
+        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+
+        for name, sql in self._bodies().items():
+            filled = (sql.replace("{where}", "TRUE")
+                         .replace("{sales_where}", "TRUE"))
+            for dialect in (DUCKDB, POSTGRES):
+                rendered = render_tables(filled, dialect)
+                assert "{" not in rendered and "}" not in rendered, (name, dialect.name)
+
+    def test_every_gold_read_carries_the_rollup_predicate(self):
+        """Postgres' Gold holds a roll-up row *and* a row per source. Summing
+        both counts every day twice — the defect the /traffic ROAS query
+        shipped with, which halved a number nobody could see was halved."""
+        bodies = self._bodies()
+        for name in ("_INSIGHTS_GOLD_SQL", "_INSIGHTS_AOV_SQL"):
+            assert "{gold_revenue_rollup}" in bodies[name], name
+
+    def test_no_body_uses_the_duckdb_only_date_function(self):
+        """`DATE_DIFF` does not exist in PostgreSQL. Subtracting the dates is
+        the portable spelling and the same answer — measured over all 6,822
+        retail buyers with more than one order: zero differing."""
+        for name, sql in self._bodies().items():
+            assert "DATE_DIFF" not in sql.upper(), name
+
+    def test_the_gold_statement_asks_only_for_what_survives(self):
+        """It selected the three customer counts as well, and every one was
+        overwritten a few lines later by a count over Silver — Gold sums
+        *daily* distinct counts, so a buyer who returned on Tuesday was two
+        customers. Reading them was work thrown away."""
+        sql = self._bodies()["_INSIGHTS_GOLD_SQL"].lower()
+        for dead in ("unique_customers", "new_customers", "returning_customers"):
+            assert dead not in sql, dead
+
+    def test_it_does_not_open_the_store_itself(self):
+        import ast as _ast
+        from pathlib import Path as _Path
+
+        source = (_Path(__file__).resolve().parents[2]
+                  / "core" / "repositories" / "customers.py").read_text(encoding="utf-8")
+        node = next(n for n in _ast.walk(_ast.parse(source))
+                    if isinstance(n, _ast.AsyncFunctionDef)
+                    and n.name == "get_customer_insights")
+        calls = {c.func.attr for c in _ast.walk(node)
+                 if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Attribute)}
+        assert "connection" not in calls
+        assert "_dashboard_run" in calls
