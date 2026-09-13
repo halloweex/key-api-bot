@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.184
+
+- Take the forecast read off DuckDB, and reclassify the method beside it
+
+
 ## 3.0.183
 
 - Give the four forecast tables a home in Postgres
