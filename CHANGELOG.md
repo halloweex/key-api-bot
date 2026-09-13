@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.180
+
+- Stop building the traffic Gold nobody reads
+
+
 ## 3.0.179
 
 - Bound the build cache where it is filled, and write down why
