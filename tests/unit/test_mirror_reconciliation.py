@@ -482,6 +482,17 @@ class TestSyncedColumnDualRole:
         # copies to have been taken at the same instant. The verdict columns —
         # gender, method, confidence, override_by_human — are all compared.
         "app.buyer_gender": "decided_at",
+        # The forecast group (revision 0025). Every one of the four is written
+        # whole by its producer in a single statement — the daily retrain
+        # DELETEs and re-INSERTs the forecast, and the three seasonality
+        # tables upsert their entire fixed key space at once — so all rows
+        # carry one stamp from one run. A re-derivation between the copy and
+        # the comparison would make every row differ on the clock alone while
+        # the values it guards are identical.
+        "app.revenue_predictions": "created_at",
+        "app.seasonal_indices": "updated_at",
+        "app.weekly_patterns": "updated_at",
+        "app.growth_metrics": "updated_at",
     }
 
     def _dual_role(self):
