@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.186
+
+- Give the watchdog samples and the two send ledgers a Postgres home
+
+
 ## 3.0.185
 
 - Make the /goals fixture think in the warehouse's timezone
