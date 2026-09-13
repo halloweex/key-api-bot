@@ -26,7 +26,8 @@ Skipped without `KS_PG_DSN`; `deploy/gate_with_stores.sh` supplies one.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -42,7 +43,29 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TODAY = date.today()
+# The fixture has to think in the warehouse's timezone, not the runner's.
+#
+# `order_date` is computed by `_date_in_kyiv()`, so a row seeded at
+# `datetime.now(timezone.utc) - 3 days` is dated by its *Kyiv* date. `TODAY`
+# was `date.today()`, which is the date where the test happens to be running —
+# UTC under `deploy/quick_gate.sh` and in CI. Those two agree for twenty-one
+# hours a day and disagree from 21:00 UTC, when Kyiv has already turned over:
+# the query then asked for 2026-09-10 while the fixture had written
+# 2026-09-11, `get_daily_revenue_for_dates` answered `{}` from both engines,
+# and the assertion that caught it was the one checking the result was not
+# empty. Seen on 2026-09-13, sixteen minutes after midnight in Kyiv, against
+# a CI run that had been green at 20:49 UTC on the same commit.
+#
+# Fixed at the root rather than by shifting the comparison: the seed is
+# anchored to **midday in Kyiv**, so `anchor - n days` is midday on
+# `TODAY - n` in every hour of the day and on both sides of a DST change.
+# Nothing here now depends on when the suite runs.
+#
+# Nine sibling `*_two_engines.py` files open with the same `date.today()` and
+# are deliberately not touched: none of them fails today, and rewriting ten
+# fixtures on the strength of one proof is how nine working tests break.
+KYIV = ZoneInfo("Europe/Kyiv")
+TODAY = datetime.now(timezone.utc).astimezone(KYIV).date()
 
 # Eight weeks of history so the weekly grain has something to trend over, and
 # the monthly grain more than one bucket.
@@ -69,7 +92,11 @@ GOALS = [
 
 
 async def _seed_duckdb(store):
-    now = datetime.now(timezone.utc)
+    # Midday in Kyiv on `TODAY`, so every `now - n days` lands at midday on
+    # `TODAY - n` — twelve hours from either midnight, which is what makes the
+    # date arithmetic immune both to the hour the suite runs and to the one-hour
+    # DST step. See the note on `TODAY`.
+    now = datetime.combine(TODAY, time(12, 0), tzinfo=KYIV)
     async with store.connection() as conn:
         for oid, src, total, days, is_ret, manager in ORDERS:
             conn.execute(
