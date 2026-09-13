@@ -1097,6 +1097,41 @@ month after a day number takes the genitive in both Slavic languages.
 **No flags in the language picker.** This is a Ukrainian company; a Russian
 flag in its internal tooling is not a neutral act. Languages have names.
 
+### Anything that accumulates declares its bound in the same change
+
+Six separate things on this host grew without a limit and were each found by a
+watchdog rather than declared at creation: the WAL archive (nine days of
+segments with no base backup to replay them onto), anonymous Docker volumes
+(173, from `docker rm` without `-v`), journald (3.9 GB, no `SystemMaxUse`),
+pulled images (189 of one repo, one in use), the build cache, and `/var/log/btmp`
+(397 MB of failed logins, still unbounded).
+
+None was a bug in logic. The bound is simply never the job of the change that
+creates the thing — you add `pg-receivewal` thinking about RPO, you tag images
+`sha-<commit>` thinking about traceability — so it becomes somebody's later
+problem, and "later" is a page at 03:00.
+
+**Bind the bound where the thing is created.** `docker rm -v` in the gate that
+starts the container; `--max-used-space` in the gate that fills the cache;
+retention inside `pg_basebackup.sh`, which is also the only moment a WAL
+deletion is provably safe. A cron that sweeps somebody else's mess is the
+version of this that rots, because the sweeper does not know what the creator
+meant to keep.
+
+**Age is never the retention key here.** It is always tempting and it has been
+wrong every time: deleting WAL older than N days removes segments a retained
+base backup still needs; `docker volume prune` takes named volumes; old
+`rollback-step03` is the tag you want most. Anchor retention to something that
+means something — the oldest base backup's START WAL, what is running, a count
+per repository — never to a date. The diagnostic agent recommended the age
+form twice in one week and both would have destroyed a recovery point.
+
+**A one-off cleanup of something that rebounds manufactures the next alert.**
+The disk watchdog differences at a fixed 168h lag, so emptying a cache that
+returns to its natural size reads as growth a week later. The WARN standing on
+2026-09-13 was made by a `docker builder prune` on 09-09, not by anything new.
+Cap what rebounds; only delete what stays deleted.
+
 ### How a failure reaches a human
 - **`KS_ALERTS_DISABLED=1` глушит весь исходящий Telegram** (алерты, дайджест,
   watchdog'и, недельный отчёт, хендлерные уведомления, host-cron скрипты) —
