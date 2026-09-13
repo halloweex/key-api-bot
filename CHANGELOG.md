@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.181
+
+- Retire the products Gold, and the dirty flag that existed for it
+
+
 ## 3.0.180
 
 - Stop building the traffic Gold nobody reads
