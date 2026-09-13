@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.177
+
+- Take the last three dashboard reads off the DuckDB-only Gold
+
+
 ## 3.0.176
 
 - Take the dashboard's Silver and Gold reads off DuckDB
