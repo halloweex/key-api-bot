@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.179
+
+- Bound the build cache where it is filled, and write down why
+
+
 ## 3.0.178
 
 - Take the four movable /goals reads off DuckDB
