@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.183
+
+- Give the four forecast tables a home in Postgres
+
+
 ## 3.0.182
 
 - Take the dashboard's customer block off DuckDB
