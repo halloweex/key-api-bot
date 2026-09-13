@@ -107,6 +107,9 @@ from core.pg_operational import (
     DQ_DIFF_COLUMNS,
     DQ_ISSUE_COLUMNS,
     DQ_RUN_COLUMNS,
+    OFFER_COLUMNS,
+    SYNC_METADATA_COLUMNS,
+    SYNC_METADATA_SOURCE,
     RECONCILIATION_LOG_COLUMNS,
     REFRESH_COLUMNS,
     SKU_STATUS_COLUMNS,
@@ -2251,6 +2254,40 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # DOUBLE PRECISION. They look like money, which is the whole trap:
         # declaring them here would coerce one side to Decimal and report every
         # row as differing.
+        full_replace=True,
+    ),
+    # ── the offer catalogue and the sync watermarks (revision 0029) ──
+    MirroredTable(
+        pg_table="bronze.offers",
+        # Landing data, and still not landing's story: it is copied out of
+        # DuckDB by the replicator rather than parsed twice, because it travels
+        # with `offer_stocks` on one clock. See `core/pg_operational.py`.
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="offers",
+        columns=OFFER_COLUMNS,
+        key_columns=("id",),
+        synced_column="synced_at",
+        # Shipped and never compared — a whole-table stamp. The writer is a
+        # loop of `INSERT OR REPLACE ... CURRENT_TIMESTAMP` inside ONE DuckDB
+        # transaction, and `CURRENT_TIMESTAMP` is transaction-stable, so all
+        # 1 057 rows carry one value from one sync. `bronze.offer_stocks`
+        # beside it is the same case.
+        ignore_columns=("synced_at",),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.sync_metadata",
+        origin_note=_COPIED_FROM_DUCKDB,
+        # The same projection the shipper writes, imported rather than
+        # restated: if these two ever disagreed about which keys belong in
+        # Postgres, the difference would be reported as a defect in the copy.
+        dk_table=SYNC_METADATA_SOURCE,
+        columns=SYNC_METADATA_COLUMNS,
+        key_columns=("key",),
+        # Per row, and provably: no statement anywhere touches more than one
+        # key. Each writer sets its own `last_sync_<entity>` and stamps it at
+        # that moment, so `updated_at` dates the row it sits on.
+        synced_column="updated_at",
         full_replace=True,
     ),
 )

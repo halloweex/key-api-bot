@@ -50,7 +50,7 @@ VERSION_TABLE = "alembic_version"
 # and logged, the checks persist failed runs, and the layer ages go stale —
 # which is what the digest and the canary read. It fails closed and it is not
 # silent, but it is the next morning's message, not a crash loop.
-REQUIRED_REVISION = "0028_quality_journal"
+REQUIRED_REVISION = "0029_offers_and_sync_metadata"
 
 _pool: Optional[Any] = None
 _pool_lock = asyncio.Lock()

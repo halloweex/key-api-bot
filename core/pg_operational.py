@@ -135,6 +135,9 @@ RECONCILIATION_LOG_TABLE = "app.reconciliation_log"
 DQ_RUNS_TABLE = "app.data_quality_runs"
 DQ_ISSUES_TABLE = "app.data_quality_issues"
 DQ_DIFFS_TABLE = "app.data_quality_diffs"
+# The offer catalogue and the sync watermarks (revision 0029).
+OFFERS_TABLE = "bronze.offers"
+SYNC_METADATA_TABLE = "app.sync_metadata"
 # The forecast group (revision 0025). Four tables, 313 rows, and the reason
 # they come first out of the sixteen with no Postgres home: `get_predictions`
 # and `generate_smart_goals` are the last two dashboard reads still tied to
@@ -274,6 +277,35 @@ DQ_DIFF_COLUMNS: Tuple[str, ...] = (
     "kc_value", "severity", "order_ids",
 )
 
+OFFER_COLUMNS: Tuple[str, ...] = ("id", "product_id", "sku", "synced_at")
+
+SYNC_METADATA_COLUMNS: Tuple[str, ...] = ("key", "value", "updated_at")
+
+# The one key that is deliberately not copied, and the only place it is named.
+#
+# `warehouse_catalog_dirty` is a coordination flag, not a fact: set when a
+# catalogue sync changes something, read every two minutes by the warehouse
+# refresh, and deleted CONDITIONALLY on its own `updated_at` — an optimistic
+# concurrency token whose meaning is "a rebuild in this process still has to
+# happen". Postgres runs no warehouse rebuild, so a copy of it there asserts
+# something that cannot be true.
+#
+# It would also be wrong in a specific, recurring way. The flag lives about two
+# minutes, this copy runs hourly and the comparison runs at 07:30, so any
+# window that catches it set at the copy and cleared at the check reports an
+# orphan the copy itself created — with no grace to forgive it, because
+# `mirror_orphan_rows` has none.
+#
+# Expressed as the source the reads use, rather than as a filter the shipper
+# and the comparison each apply: one text, imported by both, so they cannot
+# come to disagree about what the Postgres copy is supposed to contain. The
+# alias is required — DuckDB refuses an unnamed derived table.
+TRANSIENT_SYNC_KEY = "warehouse_catalog_dirty"
+SYNC_METADATA_SOURCE = (
+    f"(SELECT * FROM sync_metadata WHERE key <> '{TRANSIENT_SYNC_KEY}') "
+    "AS sync_metadata"
+)
+
 # The DuckDB table each one is read from. Postgres qualifies by schema and
 # DuckDB does not, so the pair is spelled out rather than derived by stripping
 # a prefix — a rule that guesses a table name is a rule that will guess wrong.
@@ -375,6 +407,18 @@ _FULL_REPLACE: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
      "run_id, check_name, table_name"),
     (DQ_DIFFS_TABLE, "data_quality_diffs", DQ_DIFF_COLUMNS,
      "run_id, month, source_id, diff_class, field"),
+    # ── the offer catalogue and the sync watermarks (revision 0029) ──
+    #
+    # `offers` rides here rather than in `core/pg_landing.py` for exactly
+    # `bronze.offer_stocks`' reason, stated in this module's docstring: the two
+    # are halves of one inventory sync, read together by
+    # `sku_inventory_status`, and `stock_movements` is a delta against
+    # `offer_stocks` computed on this same tick. Splitting them across the
+    # mirror and the replicator would give them two clocks and two ways to
+    # stand down, which is what silently froze `offer_stocks` on 2026-09-06.
+    (OFFERS_TABLE, "offers", OFFER_COLUMNS, "id"),
+    # A projection, not the whole table — see `SYNC_METADATA_SOURCE`.
+    (SYNC_METADATA_TABLE, SYNC_METADATA_SOURCE, SYNC_METADATA_COLUMNS, "key"),
 )
 
 # How many rows one `executemany` carries. 143,274 in a single call is one
