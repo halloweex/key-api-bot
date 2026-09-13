@@ -473,18 +473,22 @@ class TestTheComparisonSpecs:
 
     def test_the_compared_columns_are_the_shipped_columns(self):
         """Two lists a file apart. If the shipper gains a column the comparison
-        does not read, the column is copied and never checked."""
-        shipped = {
-            "bronze.offer_stocks": set(OFFER_STOCK_COLUMNS),
-            "app.revenue_goals": set(GOAL_COLUMNS),
-            "app.manual_expenses": set(MANUAL_EXPENSE_COLUMNS),
-            "bronze.expense_types": set(EXPENSE_TYPE_COLUMNS),
-            "app.order_backfill_misses": set(MISS_COLUMNS),
-            "app.inventory_history": set(INVENTORY_HISTORY_COLUMNS),
-            "app.sku_inventory_status": set(SKU_STATUS_COLUMNS),
-            "app.buyer_gender": set(BUYER_GENDER_COLUMNS),
-        }
+        does not read, the column is copied and never checked.
+
+        Derived from `_FULL_REPLACE`, not restated. It used to carry its own
+        dictionary of eight tables — a *third* list, which then had to be
+        edited every time either of the other two grew, and which failed with
+        a `KeyError` rather than a sentence when revision 0025 added four
+        tables to both. A test that restates the thing it checks is a thing to
+        maintain, not a guard.
+        """
+        from core.pg_operational import _FULL_REPLACE
+
+        shipped = {entry[0]: set(entry[2]) for entry in _FULL_REPLACE}
         for spec in OPERATIONAL_TABLES:
+            assert spec.pg_table in shipped, (
+                f"{spec.pg_table} is compared and never shipped"
+            )
             assert set(spec.columns) == shipped[spec.pg_table], spec.pg_table
 
     def test_the_fingerprinted_tables_check_what_they_ship(self):
@@ -659,4 +663,98 @@ class TestBuyerGenderIsShippedAndCompared:
         """migrate must be rebuilt alongside web, or every read raises."""
         from core.pg import REQUIRED_REVISION
 
-        assert REQUIRED_REVISION == "0024_buyer_gender"
+        # Not a literal any more: this pinned the constant to the revision
+        # that introduced `buyer_gender`, so every later revision broke a test
+        # about a table it does not touch. What matters here is that the
+        # revision carrying this table exists and is not ahead of what the
+        # application demands.
+        versions = Path(__file__).resolve().parents[2] / "migrations" / "versions"
+        assert (versions / "0024_buyer_gender.py").exists()
+        assert REQUIRED_REVISION >= "0024_buyer_gender"
+
+
+class TestTheForecastGroup:
+    """Four tables, 313 rows, and the reason they went first: they are what the
+    last two dashboard reads are waiting on.
+
+    The load-bearing assertion here is not that they replicate — it is that the
+    *two lists* agree. `core/pg_operational.py` decides what is shipped and
+    `core/mirror_reconciliation.py` decides what is compared, and they are
+    separate declarations. A table on the first and not the second is copied
+    and never checked, which is the shape of a mirror rotting quietly.
+    """
+
+    FORECAST = ("app.revenue_predictions", "app.seasonal_indices",
+                "app.weekly_patterns", "app.growth_metrics")
+
+    def test_all_four_are_shipped(self):
+        from core.pg_operational import _FULL_REPLACE
+
+        shipped = {entry[0] for entry in _FULL_REPLACE}
+        for table in self.FORECAST:
+            assert table in shipped, f"{table} is not replicated"
+
+    def test_all_four_are_compared(self):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+
+        compared = {spec.pg_table for spec in OPERATIONAL_TABLES}
+        for table in self.FORECAST:
+            assert table in compared, (
+                f"{table} is shipped and never compared — a copy nobody checks"
+            )
+
+    def test_the_two_lists_agree_on_every_table(self):
+        """Not just the four: the whole of both lists. Adding to one and
+        forgetting the other is the failure this pins, and it does not care
+        which table it happens to."""
+        from core.pg_operational import _FULL_REPLACE
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+
+        shipped = {entry[0] for entry in _FULL_REPLACE}
+        compared = {spec.pg_table for spec in OPERATIONAL_TABLES}
+        assert shipped == compared, (
+            f"only shipped: {sorted(shipped - compared)}\n"
+            f"only compared: {sorted(compared - shipped)}"
+        )
+
+    def test_the_column_tuples_are_the_shipped_ones(self):
+        """The reconciliation imports them rather than restating them, which is
+        what stops the comparison quietly checking a different set of columns
+        from the set being written. Asserted rather than trusted."""
+        from core.pg_operational import _FULL_REPLACE
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+
+        by_table = {e[0]: e[2] for e in _FULL_REPLACE}
+        for spec in OPERATIONAL_TABLES:
+            if spec.pg_table in self.FORECAST:
+                assert tuple(spec.columns) == tuple(by_table[spec.pg_table]), spec.pg_table
+
+    def test_the_migration_creates_what_is_shipped(self):
+        """The third list. A column in the tuple and not in the DDL fails at
+        the first INSERT, in production, on the hourly job."""
+        import re
+        from pathlib import Path
+
+        from core.pg_operational import _FULL_REPLACE
+
+        ddl = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+               / "0025_forecast_tables.py").read_text(encoding="utf-8")
+        by_table = {e[0]: e[2] for e in _FULL_REPLACE}
+        for table in self.FORECAST:
+            bare = table.split(".", 1)[1]
+            block = re.search(
+                rf"CREATE TABLE IF NOT EXISTS app\.{bare} \((.*?)\n        \)",
+                ddl, re.S)
+            assert block, f"{table} has no DDL in revision 0025"
+            for column in by_table[table]:
+                assert re.search(rf"\b{column}\b", block.group(1)), (
+                    f"{table}.{column} is shipped and not created"
+                )
+
+    # A `test_the_required_revision_moved` stood here, asserting the constant
+    # equalled the newest revision file. It was wrong in kind: it derived the
+    # answer from the directory, so it could never trip, and it sat on top of
+    # `test_order_versions.py`'s deliberate literal — which exists precisely so
+    # that moving the pin is something a human types. Two guards where the
+    # weaker one silently covers for the stronger is worse than one.
+

@@ -115,6 +115,14 @@ SKU_STATUS_TABLE = "app.sku_inventory_status"
 SKU_HISTORY_TABLE = "app.inventory_sku_history"
 MOVEMENTS_TABLE = "app.stock_movements"
 BUYER_GENDER_TABLE = "app.buyer_gender"
+# The forecast group (revision 0025). Four tables, 313 rows, and the reason
+# they come first out of the sixteen with no Postgres home: `get_predictions`
+# and `generate_smart_goals` are the last two dashboard reads still tied to
+# DuckDB, and they are tied to it only because these are not here.
+PREDICTIONS_TABLE = "app.revenue_predictions"
+SEASONAL_TABLE = "app.seasonal_indices"
+WEEKLY_PATTERNS_TABLE = "app.weekly_patterns"
+GROWTH_METRICS_TABLE = "app.growth_metrics"
 
 BUYER_GENDER_COLUMNS: Tuple[str, ...] = (
     "buyer_id", "gender", "method", "confidence", "decided_from",
@@ -171,6 +179,25 @@ MOVEMENT_COLUMNS: Tuple[str, ...] = (
     "recorded_at", "source",
 )
 
+PREDICTION_COLUMNS = (
+    "prediction_date", "sales_type", "predicted_revenue",
+    "model_mae", "model_mape", "model_wape", "created_at",
+)
+
+SEASONAL_COLUMNS = (
+    "month", "seasonality_index", "sample_size", "avg_revenue",
+    "min_revenue", "max_revenue", "yoy_growth", "confidence", "updated_at",
+)
+
+WEEKLY_PATTERN_COLUMNS = (
+    "month", "week_of_month", "weight", "sample_size", "updated_at",
+)
+
+GROWTH_METRIC_COLUMNS = (
+    "metric_type", "value", "period_start", "period_end",
+    "sample_size", "updated_at",
+)
+
 # The DuckDB table each one is read from. Postgres qualifies by schema and
 # DuckDB does not, so the pair is spelled out rather than derived by stripping
 # a prefix — a rule that guesses a table name is a rule that will guess wrong.
@@ -212,6 +239,19 @@ _FULL_REPLACE: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
     # verdict was withdrawn to NULL, and withdrawal is exactly what a rules
     # change does.
     (BUYER_GENDER_TABLE, "buyer_gender", BUYER_GENDER_COLUMNS, "buyer_id"),
+    # ── the forecast group ──
+    #
+    # `revenue_predictions` is a full replace because its DuckDB writer is a
+    # DELETE followed by an INSERT — the same operation, so nothing is being
+    # decided here. The other three are written with ON CONFLICT DO UPDATE
+    # over a *fixed* key space — twelve months, sixty month-weeks, one metric
+    # type — so replacing them whole is the same set of rows and additionally
+    # corrects one that is present and wrong. 313 rows in total; the cost of
+    # the decision is nothing and the alternative leaves a stale row standing.
+    (PREDICTIONS_TABLE, "revenue_predictions", PREDICTION_COLUMNS, "prediction_date"),
+    (SEASONAL_TABLE, "seasonal_indices", SEASONAL_COLUMNS, "month"),
+    (WEEKLY_PATTERNS_TABLE, "weekly_patterns", WEEKLY_PATTERN_COLUMNS, "month"),
+    (GROWTH_METRICS_TABLE, "growth_metrics", GROWTH_METRIC_COLUMNS, "metric_type"),
 )
 
 # How many rows one `executemany` carries. 143,274 in a single call is one

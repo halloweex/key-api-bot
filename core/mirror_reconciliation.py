@@ -94,11 +94,15 @@ from core.pg_bot_state import (
 from core.pg_operational import (
     BUYER_GENDER_COLUMNS,
     GOAL_COLUMNS,
+    GROWTH_METRIC_COLUMNS,
     INVENTORY_HISTORY_COLUMNS,
     MANUAL_EXPENSE_COLUMNS,
     MISS_COLUMNS,
     OFFER_STOCK_COLUMNS,
+    PREDICTION_COLUMNS,
+    SEASONAL_COLUMNS,
     SKU_STATUS_COLUMNS,
+    WEEKLY_PATTERN_COLUMNS,
 )
 from core.landing_rows import EXPENSE_COLUMNS, EXPENSE_TYPE_COLUMNS
 from core.pg_order_utm import UTM_COLUMNS
@@ -1925,6 +1929,87 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # the same instant. What matters is the verdict, and the verdict IS
         # compared.
         ignore_columns=("decided_at",),
+        full_replace=True,
+    ),
+    # ── the forecast group (revision 0025) ──
+    #
+    # `full_replace=True` for the reason the four above carry it: the
+    # replicator writes every row it holds, so a row in DuckDB and not in
+    # Postgres means lost, with no retired category to excuse it.
+    #
+    # The clock column is the one each table actually stamps, and for
+    # `revenue_predictions` that is `created_at` — written once per prediction
+    # and never touched again, which is what makes it a clock rather than a
+    # timestamp of the copy.
+    MirroredTable(
+        pg_table="app.revenue_predictions",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="revenue_predictions",
+        columns=PREDICTION_COLUMNS,
+        key_columns=("prediction_date", "sales_type"),
+        synced_column="created_at",
+        # Shipped and never compared — a whole-table stamp.
+        # `store_predictions` DELETEs the forecast and INSERTs it whole after each
+        # daily retrain, so every row carries one stamp from one run.
+        # A re-derivation between the copy and the comparison would then make
+        # every row differ on the clock alone, while the values it guards are
+        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
+        # same case.
+        ignore_columns=("created_at",),
+        numeric=("predicted_revenue", "model_mae", "model_mape", "model_wape"),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.seasonal_indices",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="seasonal_indices",
+        columns=SEASONAL_COLUMNS,
+        key_columns=("month",),
+        synced_column="updated_at",
+        # Shipped and never compared — a whole-table stamp.
+        # `calculate_seasonality_indices` upserts all twelve months in one
+        # statement, stamping every one of them with the same value.
+        # A re-derivation between the copy and the comparison would then make
+        # every row differ on the clock alone, while the values it guards are
+        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
+        # same case.
+        ignore_columns=("updated_at",),
+        numeric=("seasonality_index", "avg_revenue", "min_revenue",
+                 "max_revenue", "yoy_growth"),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.weekly_patterns",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="weekly_patterns",
+        columns=WEEKLY_PATTERN_COLUMNS,
+        key_columns=("month", "week_of_month"),
+        synced_column="updated_at",
+        # Shipped and never compared — a whole-table stamp.
+        # `calculate_weekly_patterns` writes all sixty month-weeks in one pass.
+        # A re-derivation between the copy and the comparison would then make
+        # every row differ on the clock alone, while the values it guards are
+        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
+        # same case.
+        ignore_columns=("updated_at",),
+        numeric=("weight",),
+        full_replace=True,
+    ),
+    MirroredTable(
+        pg_table="app.growth_metrics",
+        origin_note=_COPIED_FROM_DUCKDB,
+        dk_table="growth_metrics",
+        columns=GROWTH_METRIC_COLUMNS,
+        key_columns=("metric_type",),
+        synced_column="updated_at",
+        # Shipped and never compared — a whole-table stamp.
+        # One row, rewritten whole by `calculate_yoy_growth`.
+        # A re-derivation between the copy and the comparison would then make
+        # every row differ on the clock alone, while the values it guards are
+        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
+        # same case.
+        ignore_columns=("updated_at",),
+        numeric=("value",),
         full_replace=True,
     ),
 )
