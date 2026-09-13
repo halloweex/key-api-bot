@@ -381,20 +381,23 @@ class TestOnlyChangesDriveARebuild:
             await store.close()
 
     @pytest.mark.asyncio
-    async def test_a_catalog_sync_asks_for_a_rebuild_on_its_own(self, tmp_path, monkeypatch):
-        """Silver reads only `orders`, but gold_daily_products joins the catalog.
+    async def test_a_catalog_sync_never_widens_silvers_scope(self, tmp_path, monkeypatch):
+        """A catalogue change must not mark the whole warehouse dirty.
 
-        A renamed product changes gold rows with no order involved. That used to
-        arrive because the warehouse was permanently dirty and every rebuild
-        swept it up; once dirtiness tells the truth, the catalog has to ask for
-        itself or a rename made at night waits for the next order.
+        This test used to assert two things, and one of them has gone: a
+        renamed product changed rows in `gold_daily_products`, so the catalogue
+        had to ask for that layer to be rebuilt with `mark_catalog_dirty`. The
+        layer is retired — its readers all moved to the order-lines level,
+        which takes the catalogue name through a join at read time — so a
+        rename is now visible on the next page load and there is nothing to
+        schedule.
 
-        It asks with `mark_catalog_dirty`, not `mark_warehouse_dirty(None)`.
-        The wider signal also rebuilt silver_orders — which has no product
-        column — plus gold_daily_revenue and gold_daily_traffic, neither of
-        which joins the catalog either. Three rewrites of unchanged data, and
-        Silver's was the second-largest source of the file growth behind the
-        weekly stop-the-world compaction.
+        **The expensive half survives and is what is asserted below.** Nothing
+        in `silver_orders` is derived from a product, so a catalogue change
+        must never reach `mark_warehouse_dirty(None)`. That wider signal
+        rebuilt Silver for nothing, and Silver's rewrites were the
+        second-largest source of the file growth behind the weekly
+        stop-the-world compaction.
         """
         from unittest.mock import AsyncMock
 
@@ -429,15 +432,11 @@ class TestOnlyChangesDriveARebuild:
             store.set_last_sync_time = AsyncMock()
             store.upsert_products = AsyncMock(return_value=7)
             store.mark_warehouse_dirty = AsyncMock()
-            store.mark_catalog_dirty = AsyncMock()
 
             await service.incremental_sync()
 
-            # It asks — the property this test has always protected.
-            store.mark_catalog_dirty.assert_awaited_once_with()
-
-            # And it asks narrowly. A catalog change must never widen Silver's
-            # scope; nothing in silver_orders is derived from a product.
+            # A catalog change must never widen Silver's scope; nothing in
+            # silver_orders is derived from a product.
             for call in store.mark_warehouse_dirty.await_args_list:
                 assert call.args[0] is not None, (
                     "a catalog change marked the whole warehouse dirty, "

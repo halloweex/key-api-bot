@@ -36,7 +36,7 @@ MANIFEST_PATH = EXPORT_DIR / "_manifest.json"
 
 DERIVED_TABLES = frozenset({
     "silver_orders", "silver_order_utm",
-    "gold_daily_revenue", "gold_daily_products",
+    "gold_daily_revenue",
 
     # ── Dropped from the schema, still present in the production database ──
     #
@@ -68,6 +68,12 @@ DERIVED_TABLES = frozenset({
     "gold_product_pairs",
     "orders_v2",
     "gold_daily_traffic",
+    #
+    #   gold_daily_products (90,696 rows) is the largest of them and went the
+    #   same way, one change later: three tabs and the weekly report each moved
+    #   to the order-lines level, which reproduces it to the kopeck, and a
+    #   layer with no reader is not worth rebuilding every two minutes.
+    "gold_daily_products",
 })
 
 MEM_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "6GB")

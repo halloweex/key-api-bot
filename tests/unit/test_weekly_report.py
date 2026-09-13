@@ -255,11 +255,34 @@ def _silver_order(conn, oid: int, day: date, total: float, is_new: bool,
 
 def _gold_product(conn, day: date, pid: int, name: str, revenue: float,
                   sales_type="retail"):
+    """A product's revenue on a day, seeded at the order-lines level.
+
+    It seeded `gold_daily_products` until that layer was retired; the report
+    reads the level now, which reproduces it to the kopeck. The name is kept —
+    the fixture's callers say what they mean by it, and it is the same fact.
+
+    The line carries the sold name and the catalogue carries none, so the
+    report's `COALESCE(MIN(catalog_product_name), MIN(product_name))` falls
+    through to this one. That is deliberate: it exercises the fallback that
+    covers the 8.2 % of production lines with no `product_id`.
+    """
     conn.execute(
-        "INSERT INTO gold_daily_products "
-        "(date, sales_type, source_id, product_id, product_name, "
-        " quantity_sold, product_revenue) VALUES (?, ?, 1, ?, ?, 1, ?)",
-        [day, sales_type, pid, name, revenue],
+        "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at,"
+        " buyer_id) VALUES (?, 1, 1, ?, ?, 9)",
+        [900_000 + pid * 100 + day.toordinal() % 100, revenue, day],
+    )
+    oid = 900_000 + pid * 100 + day.toordinal() % 100
+    conn.execute(
+        "INSERT INTO silver_orders (id, source_id, status_id, grand_total,"
+        " ordered_at, order_date, is_return, sales_type, is_active_source,"
+        " source_name, is_new_customer) "
+        "VALUES (?, 1, 1, ?, ?, ?, FALSE, ?, TRUE, 'Instagram', FALSE)",
+        [oid, revenue, day, day, sales_type],
+    )
+    conn.execute(
+        "INSERT INTO order_products (id, order_id, product_id, name, quantity,"
+        " price_sold) VALUES (?, ?, ?, ?, 1, ?)",
+        [oid, oid, pid, name, revenue],
     )
 
 
