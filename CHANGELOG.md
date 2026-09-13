@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.188
+
+- Give the offer catalogue and the sync watermarks a home — stage 3 is complete
+
+
 ## 3.0.187
 
 - Give the data-quality journal a Postgres home
