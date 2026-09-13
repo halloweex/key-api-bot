@@ -979,10 +979,15 @@ built on it would be as fresh as somebody remembered to be.
 
 **Attribution quality is a headline, not a footnote.** Every share in the
 message is a share of what could be attributed, so the orders that could not
-be are what says whether the rest is worth reading. Above
-`UNATTRIBUTED_WARN_PCT` (25% of orders) the summary marks it, and it always
-says what the share was the week before — a share that doubled matters more
-than the share itself.
+be are what says whether the rest is worth reading. The summary's second
+sentence is that share — `named_pct`, the orders whose **campaign** this
+system can name, which is the `paid` bucket and only it, because a campaign
+comes from `utm_campaign` and everything else is placed by inference. It is
+stated **every week rather than above a threshold**, always beside what it was
+the week before: a share that doubled matters more than the share itself, and
+a threshold would have said nothing on the week it moved from 13% to 21%.
+There is no `UNATTRIBUTED_WARN_PCT`; an earlier draft of this section named
+one and it was never built.
 
 **Orders with no attribution at all is a deferral, not a finding.** The UTM
 rows land behind the orders, so a week whose attribution has not arrived

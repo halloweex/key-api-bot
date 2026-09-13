@@ -406,15 +406,23 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "traffic.bucket.manager": {EN: "Sales manager", UK: "Менеджер", RU: "Менеджер"},
     "traffic.bucket.pixel_only": {EN: "Pixel only", UK: "Лише піксель", RU: "Только пиксель"},
     "traffic.bucket.unknown": {EN: "No tracking", UK: "Без міток", RU: "Без меток"},
-    # Platform names are proper nouns and stay as they are; only the two
-    # Google slices need words, because "google_ads" and "google_organic" are
-    # our split and not a name anybody uses.
+    # Platform names are proper nouns and are listed here so they come out
+    # capitalised — the label falls back to the raw key, and a key is
+    # lowercase. Three are not proper nouns at all: "google_ads",
+    # "google_organic" and "ai" are our own groupings, and need words.
     "traffic.platform.google_ads": {EN: "Google Ads", UK: "Google Ads", RU: "Google Ads"},
     "traffic.platform.google_organic": {
         EN: "Google organic", UK: "Google органіка", RU: "Google органика",
     },
+    # Referrals out of ChatGPT, Perplexity, Claude, Gemini and their
+    # neighbours — a group, not a company, so it is named rather than left as
+    # the key the classifier writes.
+    "traffic.platform.ai": {
+        EN: "AI assistants", UK: "AI-асистенти", RU: "AI-ассистенты",
+    },
     "traffic.platform.facebook": {EN: "Facebook", UK: "Facebook", RU: "Facebook"},
     "traffic.platform.instagram": {EN: "Instagram", UK: "Instagram", RU: "Instagram"},
+    "traffic.platform.telegram": {EN: "Telegram", UK: "Telegram", RU: "Telegram"},
     "traffic.platform.tiktok": {EN: "TikTok", UK: "TikTok", RU: "TikTok"},
     "traffic.platform.email": {EN: "Email", UK: "Email", RU: "Email"},
     "traffic.platform.manager": {EN: "Manager", UK: "Менеджер", RU: "Менеджер"},
