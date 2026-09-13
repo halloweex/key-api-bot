@@ -74,6 +74,74 @@ _PROMOCODES_SQL = """
 """
 
 
+# ─── What `/dashboard` reads besides Gold ───────────────────────────────────
+#
+# One body each, two engines. `{where}` and `{ids}` are predicates the caller
+# builds from validated parts and never from user text; everything else is a
+# table name that already existed on `Dialect`.
+
+_RETURN_ORDERS_SQL = """
+    SELECT
+        s.id,
+        s.order_date,
+        s.grand_total,
+        s.status_id,
+        s.source_name,
+        s.buyer_id,
+        b.full_name AS buyer_name,
+        b.phone AS buyer_phone,
+        s.manager_id,
+        m.name AS manager_name
+    FROM {silver_orders} s
+    LEFT JOIN {buyers} b ON s.buyer_id = b.id
+    LEFT JOIN {managers} m ON s.manager_id = m.id
+    WHERE {where}
+    -- `s.id` breaks the tie under the LIMIT. Two orders on one day is the
+    -- ordinary case, and without it the two engines would keep different rows.
+    ORDER BY s.order_date DESC, s.id DESC
+    LIMIT ?
+"""
+
+# The doughnut, filtered. The line level rather than Gold, because a category
+# or brand filter is a fact about a *line* and Gold has already folded them
+# away — and `COUNT(DISTINCT order_id)` rather than `COUNT(*)`, because one
+# order matching on three lines is still one order.
+_SALES_BY_SOURCE_FILTERED_SQL = """
+    SELECT l.source_id,
+           COUNT(DISTINCT l.order_id) as orders,
+           COALESCE(SUM(l.line_amount), 0) as revenue
+    FROM {order_lines} l
+    WHERE {where}
+    GROUP BY l.source_id
+    ORDER BY revenue DESC, l.source_id
+"""
+
+# The doughnut, unfiltered. `{channel_measures}` is the one hole here that is
+# not a name: DuckDB's Gold spells a channel as a column and Postgres' as a
+# dimension, and `core.sql_dialect` renders that from one home.
+_SALES_BY_SOURCE_GOLD_SQL = """
+    SELECT
+        {channel_measures}
+    FROM {gold_daily_revenue}
+    WHERE {where}
+"""
+
+_SUBCATEGORY_SQL = """
+    SELECT
+        l.category_name as subcategory_name,
+        SUM(l.line_amount) as revenue,
+        SUM(l.quantity) as quantity
+    FROM {order_lines} l
+    WHERE {where}
+        AND (l.parent_category_name = ?
+             OR (l.category_name = ? AND l.parent_category_id IS NULL))
+        {brand_filter}
+        {promocode_filter}
+    GROUP BY l.category_name
+    ORDER BY revenue DESC, l.category_name
+"""
+
+
 def _at_least_the_root(category_id: int, found: List[int]) -> List[int]:
     """Never hand back an empty list, because the caller builds `IN (...)`.
 
@@ -181,6 +249,37 @@ class RevenueMixin:
                 self._render_report(sql, DUCKDB, **extra), params,
             ).fetchall()
 
+    async def _dashboard_run(
+        self, sql: str, params: Optional[List[Any]] = None,
+    ) -> List[Tuple]:
+        """`_reports_run`'s twin for what `/dashboard` reads besides Gold.
+
+        Its own switch and not `KS_READ_GOLD`'s: that one is already
+        `postgres` in production, so folding these into it would turn them on
+        at deploy rather than at a decision. `core/pg_dashboard_read.py` has
+        the rest of the reasoning.
+        """
+        from core.sql_dialect import DUCKDB, POSTGRES
+
+        from core import pg_dashboard_read
+
+        params = list(params or [])
+        if pg_dashboard_read.enabled() and pg_dashboard_read.available():
+            try:
+                return await pg_dashboard_read.fetch(
+                    self._render_report(sql, POSTGRES), params,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "dashboard: Postgres failed, falling back to DuckDB: %s",
+                    exc, exc_info=True,
+                )
+
+        async with self.connection() as conn:
+            return conn.execute(
+                self._render_report(sql, DUCKDB), params,
+            ).fetchall()
+
     async def _lookups_run(
         self, sql: str, params: Optional[List[Any]] = None,
     ) -> List[Tuple]:
@@ -219,8 +318,23 @@ class RevenueMixin:
         The routed twin of `_get_category_with_children`, sharing its SQL. The
         older one keeps taking a connection because its six callers are inside
         one; this one must not, for the reentrancy reason above.
+
+        ON `KS_READ_LOOKUPS` RATHER THAN THE CALLING TAB'S FLAG
+
+        It rode `KS_READ_REPORTS` while `/reports` was its only routed caller,
+        and that stopped being right the moment a second tab used it: resolving
+        `?category_id=` on `/dashboard` would then have taken the DuckDB lock
+        unless a *different* tab's flag happened to be on. Found by a lock test
+        that set this tab's flag and watched the category branch reach for
+        DuckDB anyway.
+
+        The tree is filter chrome — the same thing the four header dropdowns
+        are, shared by seven callers across tabs and belonging to none of them
+        — so it belongs on the flag that already means "the filter bar".
+        Production has both set to `postgres`, so this moves nothing today; it
+        stops the next tab inheriting the coupling.
         """
-        rows = await self._reports_run(_CATEGORY_TREE_SQL, [category_id])
+        rows = await self._lookups_run(_CATEGORY_TREE_SQL, [category_id])
         return _at_least_the_root(category_id, [row[0] for row in rows])
 
     # ── Step 1 of «Одна бронза»: the Gold primitives can read Postgres ──────
@@ -478,57 +592,40 @@ class RevenueMixin:
         # Ensure we have a mapping (safety net)
         STATUS_NAMES.setdefault(19, "Returned")
 
-        async with self.connection() as conn:
-            params: list = [start_date, end_date]
-            where_clauses = [
-                "s.order_date BETWEEN ? AND ?",
-                "s.is_return = TRUE",
-                "s.is_active_source = TRUE"
-            ]
+        params: list = [start_date, end_date]
+        where_clauses = [
+            "s.order_date BETWEEN ? AND ?",
+            "s.is_return = TRUE",
+            "s.is_active_source = TRUE"
+        ]
 
-            if sales_type != "all":
-                where_clauses.append("s.sales_type = ?")
-                params.append(sales_type)
+        if sales_type != "all":
+            where_clauses.append("s.sales_type = ?")
+            params.append(sales_type)
 
-            where_sql = " AND ".join(where_clauses)
-            params.append(limit)
+        params.append(limit)
 
-            result = conn.execute(f"""
-                SELECT
-                    s.id,
-                    s.order_date,
-                    s.grand_total,
-                    s.status_id,
-                    s.source_name,
-                    s.buyer_id,
-                    b.full_name AS buyer_name,
-                    b.phone AS buyer_phone,
-                    s.manager_id,
-                    m.name AS manager_name
-                FROM silver_orders s
-                LEFT JOIN buyers b ON s.buyer_id = b.id
-                LEFT JOIN managers m ON s.manager_id = m.id
-                WHERE {where_sql}
-                ORDER BY s.order_date DESC, s.id DESC
-                LIMIT ?
-            """, params).fetchall()
+        result = await self._dashboard_run(
+            _RETURN_ORDERS_SQL.replace("{where}", " AND ".join(where_clauses)),
+            params,
+        )
 
-            return [
-                {
-                    "id": row[0],
-                    "date": row[1].isoformat() if row[1] else None,
-                    "amount": float(row[2] or 0),
-                    "statusId": row[3],
-                    "statusName": STATUS_NAMES.get(row[3], f"Status {row[3]}"),
-                    "source": row[4],
-                    "buyerId": row[5],
-                    "buyerName": row[6],
-                    "buyerPhone": row[7],
-                    "managerId": row[8],
-                    "managerName": row[9],
-                }
-                for row in result
-            ]
+        return [
+            {
+                "id": row[0],
+                "date": row[1].isoformat() if row[1] else None,
+                "amount": float(row[2] or 0),
+                "statusId": row[3],
+                "statusName": STATUS_NAMES.get(row[3], f"Status {row[3]}"),
+                "source": row[4],
+                "buyerId": row[5],
+                "buyerName": row[6],
+                "buyerPhone": row[7],
+                "managerId": row[8],
+                "managerName": row[9],
+            }
+            for row in result
+        ]
 
     def _build_gold_revenue_query(
         self,
@@ -938,93 +1035,85 @@ class RevenueMixin:
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get sales breakdown by source (from Gold/Silver layers)."""
-        async with self.connection() as conn:
-            source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
-            source_colors = {1: "#7C3AED", 2: "#2563EB", 4: "#eb4200"}
+        source_names = {1: "Instagram", 2: "Telegram", 4: "Shopify"}
+        source_colors = {1: "#7C3AED", 2: "#2563EB", 4: "#eb4200"}
 
-            if category_id or brand or promocode:
-                # Use Silver layer with JOINs for correct distinct order counts
-                params = [start_date, end_date]
-                where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
+        if category_id or brand or promocode:
+            # The line level, because a category or brand is a fact about a
+            # line and Gold has folded them away.
+            params = [start_date, end_date]
+            where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
 
-                if sales_type != "all":
-                    where_clauses.append("l.sales_type = ?")
-                    params.append(sales_type)
+            if sales_type != "all":
+                where_clauses.append("l.sales_type = ?")
+                params.append(sales_type)
 
-                if category_id:
-                    cat_ids = await self._get_category_with_children(conn, category_id)
-                    where_clauses.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
-                    params.extend(cat_ids)
+            if category_id:
+                # `_category_ids`, not `_get_category_with_children`: the
+                # latter takes a connection this method no longer holds, and
+                # nesting the store lock does not raise — it hangs.
+                cat_ids = await self._category_ids(category_id)
+                where_clauses.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
+                params.extend(cat_ids)
 
-                if brand:
-                    where_clauses.append(brand_where(brand, params, "l"))
+            if brand:
+                where_clauses.append(brand_where(brand, params, "l"))
 
-                if promocode:
-                    where_clauses.append("UPPER(l.promocode) = UPPER(?)")
-                    params.append(promocode)
+            if promocode:
+                where_clauses.append("UPPER(l.promocode) = UPPER(?)")
+                params.append(promocode)
 
-                where_sql = " AND ".join(where_clauses)
+            results = await self._dashboard_run(
+                _SALES_BY_SOURCE_FILTERED_SQL.replace(
+                    "{where}", " AND ".join(where_clauses)),
+                params,
+            )
 
-                results = conn.execute(f"""
-                    SELECT l.source_id,
-                           COUNT(DISTINCT l.order_id) as orders,
-                           COALESCE(SUM(l.line_amount), 0) as revenue
-                    FROM silver_order_lines l
-                    WHERE {where_sql}
-                    GROUP BY l.source_id
-                    ORDER BY revenue DESC
-                """, params).fetchall()
+            labels = []
+            orders = []
+            revenue = []
+            colors = []
+            for row in results:
+                sid = row[0]
+                if sid in source_names:
+                    labels.append(source_names[sid])
+                    orders.append(int(row[1]))
+                    revenue.append(round(float(row[2]), 2))
+                    colors.append(source_colors.get(sid, "#999999"))
+        else:
+            params = [start_date, end_date]
+            where_clauses = ["date BETWEEN ? AND ?"]
 
-                labels = []
-                orders = []
-                revenue = []
-                colors = []
-                for row in results:
-                    sid = row[0]
-                    if sid in source_names:
-                        labels.append(source_names[sid])
-                        orders.append(int(row[1]))
-                        revenue.append(round(float(row[2]), 2))
-                        colors.append(source_colors.get(sid, "#999999"))
-            else:
-                # Use gold_daily_revenue per-source columns
-                params = [start_date, end_date]
-                where_clauses = ["date BETWEEN ? AND ?"]
+            if sales_type != "all":
+                where_clauses.append("sales_type = ?")
+                params.append(sales_type)
 
-                if sales_type != "all":
-                    where_clauses.append("sales_type = ?")
-                    params.append(sales_type)
+            rows = await self._dashboard_run(
+                _SALES_BY_SOURCE_GOLD_SQL.replace(
+                    "{where}", " AND ".join(where_clauses)),
+                params,
+            )
+            result = rows[0] if rows else (0,) * 6
 
-                where_sql = " AND ".join(where_clauses)
+            # Build source list sorted by revenue desc
+            source_data = [
+                (1, "Instagram", int(result[0] or 0), float(result[1] or 0)),
+                (2, "Telegram", int(result[2] or 0), float(result[3] or 0)),
+                (4, "Shopify", int(result[4] or 0), float(result[5] or 0)),
+            ]
+            source_data.sort(key=lambda x: x[3], reverse=True)
 
-                result = conn.execute(f"""
-                    SELECT
-                        SUM(instagram_orders) as ig_orders, SUM(instagram_revenue) as ig_rev,
-                        SUM(telegram_orders) as tg_orders, SUM(telegram_revenue) as tg_rev,
-                        SUM(shopify_orders) as sh_orders, SUM(shopify_revenue) as sh_rev
-                    FROM gold_daily_revenue
-                    WHERE {where_sql}
-                """, params).fetchone()
+            labels = [s[1] for s in source_data if s[3] > 0 or s[2] > 0]
+            orders = [s[2] for s in source_data if s[3] > 0 or s[2] > 0]
+            revenue = [round(s[3], 2) for s in source_data if s[3] > 0 or s[2] > 0]
+            colors = [source_colors[s[0]] for s in source_data if s[3] > 0 or s[2] > 0]
 
-                # Build source list sorted by revenue desc
-                source_data = [
-                    (1, "Instagram", int(result[0] or 0), float(result[1] or 0)),
-                    (2, "Telegram", int(result[2] or 0), float(result[3] or 0)),
-                    (4, "Shopify", int(result[4] or 0), float(result[5] or 0)),
-                ]
-                source_data.sort(key=lambda x: x[3], reverse=True)
-
-                labels = [s[1] for s in source_data if s[3] > 0 or s[2] > 0]
-                orders = [s[2] for s in source_data if s[3] > 0 or s[2] > 0]
-                revenue = [round(s[3], 2) for s in source_data if s[3] > 0 or s[2] > 0]
-                colors = [source_colors[s[0]] for s in source_data if s[3] > 0 or s[2] > 0]
-
-            return {
-                "labels": labels,
-                "orders": orders,
-                "revenue": revenue,
-                "backgroundColor": colors
-            }
+        return {
+            "labels": labels,
+            "orders": orders,
+            "revenue": revenue,
+            "backgroundColor": colors
+        }
 
     async def get_top_products(
         self,
@@ -1337,70 +1426,58 @@ class RevenueMixin:
         sales_type: str = "retail"
     ) -> Dict[str, Any]:
         """Get sales breakdown by subcategories for a given parent category."""
-        async with self.connection() as conn:
-            params = [start_date, end_date]
-            # This was the last query in the file reading raw `orders`, with its
-            # own date conversion, its own return-status list and its own copy of
-            # the sales_type rule. The level answers all three, and answers them
-            # the way Gold does: `is_return` prefers KeyCRM's status *group*,
-            # which is what caught status 20 in July.
-            where_clauses = [
-                "l.order_date BETWEEN ? AND ?",
-                "NOT l.is_return",
-                "l.source_id IN (1, 2, 4)",  # Exclude Opencart (deprecated)
-            ]
+        params = [start_date, end_date]
+        # This was the last query in the file reading raw `orders`, with its
+        # own date conversion, its own return-status list and its own copy of
+        # the sales_type rule. The level answers all three, and answers them
+        # the way Gold does: `is_return` prefers KeyCRM's status *group*,
+        # which is what caught status 20 in July.
+        where_clauses = [
+            "l.order_date BETWEEN ? AND ?",
+            "NOT l.is_return",
+            "l.source_id IN (1, 2, 4)",  # Exclude Opencart (deprecated)
+        ]
 
-            if sales_type != "all":
-                where_clauses.append("l.sales_type = ?")
-                params.append(sales_type)
+        if sales_type != "all":
+            where_clauses.append("l.sales_type = ?")
+            params.append(sales_type)
 
-            if source_id:
-                where_clauses.append("l.source_id = ?")
-                params.append(source_id)
+        if source_id:
+            where_clauses.append("l.source_id = ?")
+            params.append(source_id)
 
-            where_sql = " AND ".join(where_clauses)
+        brand_filter = ""
+        brand_params: List[Any] = []
+        if brand:
+            brand_filter = "AND " + brand_where(brand, brand_params, "l")
 
-            # Build brand filter
-            brand_filter = ""
-            brand_params = []
-            if brand:
-                brand_filter = "AND " + brand_where(brand, brand_params, "l")
+        promocode_filter = ""
+        promocode_params: List[Any] = []
+        if promocode:
+            promocode_filter = "AND UPPER(l.promocode) = UPPER(?)"
+            promocode_params.append(promocode)
 
-            promocode_filter = ""
-            promocode_params = []
-            if promocode:
-                promocode_filter = "AND UPPER(l.promocode) = UPPER(?)"
-                promocode_params.append(promocode)
+        # Base params, then the parent name twice, then the two optional
+        # filters — the order the holes appear in the body above.
+        final_params = (params + [parent_category_name, parent_category_name]
+                        + brand_params + promocode_params)
 
-            # Get subcategories for the parent category
-            subcategory_sql = f"""
-                SELECT
-                    l.category_name as subcategory_name,
-                    SUM(l.line_amount) as revenue,
-                    SUM(l.quantity) as quantity
-                FROM silver_order_lines l
-                WHERE {where_sql}
-                    AND (l.parent_category_name = ?
-                         OR (l.category_name = ? AND l.parent_category_id IS NULL))
-                    {brand_filter}
-                    {promocode_filter}
-                GROUP BY l.category_name
-                ORDER BY revenue DESC
-            """
-            # Build final params: base params + parent_category (twice) + brand + promocode
-            final_params = params + [parent_category_name, parent_category_name] + brand_params + promocode_params
+        results = await self._dashboard_run(
+            _SUBCATEGORY_SQL.replace("{where}", " AND ".join(where_clauses))
+                            .replace("{brand_filter}", brand_filter)
+                            .replace("{promocode_filter}", promocode_filter),
+            final_params,
+        )
 
-            results = conn.execute(subcategory_sql, final_params).fetchall()
+        category_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4"]
 
-            category_colors = ["#7C3AED", "#2563EB", "#16A34A", "#F59E0B", "#eb4200", "#EC4899", "#8B5CF6", "#06B6D4"]
-
-            return {
-                "parentCategory": parent_category_name,
-                "labels": [row[0] for row in results],
-                "revenue": [round(float(row[1]), 2) for row in results],
-                "quantity": [row[2] for row in results],
-                "backgroundColor": category_colors[:len(results)]
-            }
+        return {
+            "parentCategory": parent_category_name,
+            "labels": [row[0] for row in results],
+            "revenue": [round(float(row[1]), 2) for row in results],
+            "quantity": [row[2] for row in results],
+            "backgroundColor": category_colors[:len(results)]
+        }
 
     async def get_brand_analytics(
         self,

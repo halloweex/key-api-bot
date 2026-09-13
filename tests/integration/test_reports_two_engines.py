@@ -178,8 +178,15 @@ async def _both(store, monkeypatch, name, kwargs):
     alone — and the gate was green.
     """
     monkeypatch.delenv("KS_READ_REPORTS", raising=False)
+    monkeypatch.delenv("KS_READ_LOOKUPS", raising=False)
     duck = await getattr(store, name)(*WINDOW, **kwargs)
     monkeypatch.setenv("KS_READ_REPORTS", "postgres")
+    # The category walk is filter chrome and rides the filter bar's flag, not
+    # this tab's — it moved there when `/dashboard` became its second routed
+    # caller. Without this a `category_id` case resolves its tree from DuckDB
+    # and trips the fatal fallback below for a reason that is not the one
+    # under test.
+    monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
     def _no_duckdb(*_a, **_k):
         raise AssertionError(
             f"{name} fell back to DuckDB — Postgres did not answer, so the "
@@ -189,6 +196,7 @@ async def _both(store, monkeypatch, name, kwargs):
     with patch.object(type(store), "connection", _no_duckdb):
         postgres = await getattr(store, name)(*WINDOW, **kwargs)
     monkeypatch.delenv("KS_READ_REPORTS", raising=False)
+    monkeypatch.delenv("KS_READ_LOOKUPS", raising=False)
     return duck, postgres
 
 
