@@ -5,7 +5,9 @@ import logging
 from datetime import date, timezone
 from typing import Any, Dict, List, Sequence, Tuple
 
-from core.sql_dialect import DUCKDB, POSTGRES, TODAY_IN_KYIV, Dialect
+from core.sql_dialect import (
+    DUCKDB, POSTGRES, TODAY_IN_KYIV, Dialect, sku_status_rebuild_select,
+)
 from core.landing_rows import (
     STOCK_MOVEMENT_COLUMNS,
     offer_rows,
@@ -244,62 +246,18 @@ class InventoryMixin:
         # must not make every later refresh fail on "already exists".
         conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_first_seen AS SELECT offer_id, first_seen_at FROM sku_inventory_status")
         conn.execute("DELETE FROM sku_inventory_status")
-        # The column list is spelled out so that a column added to the table
-        # by a later migration cannot turn this INSERT into the failure above.
-        conn.execute("""
-                INSERT INTO sku_inventory_status (
-                    offer_id, product_id, sku, name, brand, category_id,
-                    quantity, reserve, price, purchased_price,
-                    last_sale_date, first_seen_at, updated_at, last_stock_out_at
-                )
-                SELECT
-                    os.id as offer_id,
-                    COALESCE(o.product_id, 0) as product_id,
-                    COALESCE(os.sku, CAST(os.id AS VARCHAR)) as sku,
-                    p.name,
-                    p.brand,
-                    p.category_id,
-                    os.quantity,
-                    os.reserve,
-                    COALESCE(os.price, 0) as price,
-                    os.purchased_price,
-                    pls.last_sale_date,
-                    COALESCE(
-                        (SELECT first_seen_at FROM _tmp_first_seen WHERE offer_id = os.id),
-                        fod.first_order_date,
-                        CURRENT_DATE
-                    ) as first_seen_at,
-                    CURRENT_TIMESTAMP as updated_at,
-                    smo.last_stock_out_date as last_stock_out_at
-                FROM offer_stocks os
-                LEFT JOIN offers o ON os.id = o.id
-                LEFT JOIN products p ON o.product_id = p.id
-                LEFT JOIN (
-                    SELECT
-                        op.product_id,
-                        MAX(DATE(ord.ordered_at AT TIME ZONE 'Europe/Kyiv')) as last_sale_date
-                    FROM order_products op
-                    JOIN orders ord ON op.order_id = ord.id
-                    WHERE ord.status_id NOT IN (19, 22, 21, 23)
-                    GROUP BY op.product_id
-                ) pls ON o.product_id = pls.product_id
-                LEFT JOIN (
-                    SELECT
-                        op2.product_id,
-                        MIN(DATE(ord2.ordered_at AT TIME ZONE 'Europe/Kyiv')) as first_order_date
-                    FROM order_products op2
-                    JOIN orders ord2 ON op2.order_id = ord2.id
-                    GROUP BY op2.product_id
-                ) fod ON o.product_id = fod.product_id
-                LEFT JOIN (
-                    SELECT
-                        offer_id,
-                        MAX(DATE(recorded_at AT TIME ZONE 'Europe/Kyiv')) as last_stock_out_date
-                    FROM stock_movements
-                    WHERE movement_type = 'stock_out'
-                    GROUP BY offer_id
-                ) smo ON os.id = smo.offer_id
-            """)
+        # The INSERT…SELECT is one body for both engines — see
+        # `core.sql_dialect.sku_status_rebuild_select`. It stays out of this
+        # file for the reason `plan_stock_movements` did: stage 4 gives it a
+        # Postgres caller, and six joined tables reimplemented twice is six
+        # chances to disagree about what "last sold" means.
+        #
+        # The three steps around it are NOT shared, because they are where the
+        # engines genuinely differ: DuckDB's `CREATE OR REPLACE TEMP TABLE`
+        # against Postgres' `ON COMMIT DROP`. `OR REPLACE` matters here — a
+        # temp table left behind by an interrupted earlier call must not make
+        # every later refresh fail on "already exists".
+        conn.execute(sku_status_rebuild_select(DUCKDB))
         conn.execute("DROP TABLE IF EXISTS _tmp_first_seen")
 
     async def record_sku_inventory_snapshot(self) -> bool:
