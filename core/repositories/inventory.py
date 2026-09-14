@@ -6,6 +6,11 @@ from datetime import date, timezone
 from typing import Any, Dict, List, Sequence, Tuple
 
 from core.sql_dialect import DUCKDB, POSTGRES, TODAY_IN_KYIV, Dialect
+from core.landing_rows import (
+    STOCK_MOVEMENT_COLUMNS,
+    offer_rows,
+    plan_stock_movements,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,17 +113,13 @@ class InventoryMixin:
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
-                count = 0
-                for offer in offers:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO offers (id, product_id, sku, synced_at)
-                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                    """, [
-                        offer.get("id"),
-                        offer.get("product_id"),
-                        offer.get("sku"),
-                    ])
-                    count += 1
+                rows = offer_rows(offers)
+                conn.executemany(
+                    "INSERT OR REPLACE INTO offers (id, product_id, sku, synced_at) "
+                    "VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                    [tuple(r) for r in rows],
+                )
+                count = len(rows)
 
                 conn.execute("COMMIT")
                 logger.info(f"Upserted {count} offers to DuckDB")
@@ -158,30 +159,16 @@ class InventoryMixin:
                 for r in conn.execute("SELECT id, product_id FROM offers").fetchall():
                     product_map[r[0]] = r[1]
 
-                count = 0
-                movements = []
-                for stock in stocks:
-                    offer_id = stock.get("id")
-                    new_qty = stock.get("quantity", 0)
-                    new_rsv = stock.get("reserve", 0)
-                    old = current.get(offer_id)
-                    pid = product_map.get(offer_id)
-
-                    if old is None:
-                        # New offer — record initial state if it has stock
-                        if new_qty > 0 or new_rsv > 0:
-                            movements.append((offer_id, pid, "initial",
-                                              0, new_qty, new_qty, 0, new_rsv))
-                    elif old[0] != new_qty or old[1] != new_rsv:
-                        # Changed — classify by delta direction
-                        delta = new_qty - old[0]
-                        if delta != 0:
-                            mtype = "stock_out" if delta < 0 else "stock_in"
-                        else:
-                            mtype = "reserve_change"
-                        movements.append((offer_id, pid, mtype,
-                                          old[0], new_qty, delta, old[1], new_rsv))
-                    count += 1
+                # The classification lives in `core/landing_rows.py`, not here.
+                # A stock movement is recorded once or never — KeyCRM has no
+                # stock history — so a second implementation of this rule would
+                # not fail loudly, it would disagree about the direction of a
+                # change and write the wrong answer into the only record there
+                # will ever be.
+                movements = plan_stock_movements(
+                    stocks, current=current, product_map=product_map,
+                )
+                count = len(stocks)
 
                 conn.executemany("""
                     INSERT OR REPLACE INTO offer_stocks
@@ -195,13 +182,13 @@ class InventoryMixin:
                 ])
 
                 if movements:
-                    conn.executemany("""
-                        INSERT INTO stock_movements
-                        (offer_id, product_id, movement_type,
-                         quantity_before, quantity_after, delta,
-                         reserve_before, reserve_after)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, movements)
+                    placeholders = ", ".join("?" * len(STOCK_MOVEMENT_COLUMNS))
+                    conn.executemany(
+                        f"INSERT INTO stock_movements "
+                        f"({', '.join(STOCK_MOVEMENT_COLUMNS)}) "
+                        f"VALUES ({placeholders})",
+                        [tuple(m) for m in movements],
+                    )
                     logger.info(f"Recorded {len(movements)} stock movements")
 
                 conn.execute("COMMIT")
