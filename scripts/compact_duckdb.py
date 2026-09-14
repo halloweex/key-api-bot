@@ -74,6 +74,18 @@ DERIVED_TABLES = frozenset({
     #   to the order-lines level, which reproduces it to the kopeck, and a
     #   layer with no reader is not worth rebuilding every two minutes.
     "gold_daily_products",
+    #
+    #   bronze_order_events (0 rows) is `orders_v2`' case exactly, and is here
+    #   for the same reason: its DDL went when the H3 staging-merge subsystem
+    #   was retired on 2026-09-14, so an export would be followed by an
+    #   `INSERT INTO "bronze_order_events"` against a schema that no longer
+    #   defines it — which aborts the whole weekly compact and the off-site
+    #   export behind it. Nothing is lost by excluding it: the table has been
+    #   empty since 2026-05-19, when the shadow write became opt-in and the
+    #   default went off. This exclusion is also what physically removes it —
+    #   the next compact builds the new database from `_init_schema()`, which
+    #   no longer declares it.
+    "bronze_order_events",
 })
 
 MEM_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "6GB")
@@ -445,7 +457,6 @@ def phase2_import(manifest: dict) -> float:
         "warehouse_refresh_seq": ("warehouse_refreshes", "id"),
         "reconciliation_seq": ("reconciliation_log", "id"),
         "data_quality_run_seq": ("data_quality_runs", "run_id"),
-        "seq_bronze_order_events_id": ("bronze_order_events", "id"),
     }
     for seq_name, saved_val in seq_values.items():
         try:

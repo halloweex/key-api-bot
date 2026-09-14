@@ -219,7 +219,6 @@ class SyncService:
 
     async def _upsert_orders_with_expenses(
         self, orders: list, force_update: bool = False, skip_products: bool = False,
-        bronze_source: str = "sync_delta",
         changed_ids_out: "list[int] | None" = None,
     ) -> tuple:
         """Upsert orders and their expenses.
@@ -231,58 +230,15 @@ class SyncService:
                          when order status changes.
             skip_products: If True, skip product deletion/insertion to avoid OOM
                           during status refresh (~2000 orders worth of products).
-            bronze_source: Origin tag written to bronze_order_events for audit/
-                          replay. H3 Phase 1 captures every upsert to the bronze
-                          log as a shadow write — failures are logged only.
             changed_ids_out: If given, is extended with the ids actually WRITTEN,
                           which is a subset of what was fetched. An out-list
                           rather than a wider return because six call sites and
                           a stack of mocks depend on the 2-tuple, and only the
-                          incremental sync needs to know what moved. In staging
-                          mode nothing is written to `orders` here, so it stays
-                          empty and the promotion job owns dirtiness.
+                          incremental sync needs to know what moved.
 
         Returns:
             Tuple of (order_count, expense_count)
-
-        Behavior depends on SYNC_MODE:
-        - legacy (default): bronze shadow write + direct upsert to orders
-        - staging: bronze write ONLY. Promotion job handles orders table.
         """
-        from core.config import config
-
-        # Bronze write is the ingestion path in staging mode, and an opt-in
-        # audit log in legacy mode (LEGACY_BRONZE_SHADOW). Default-off in
-        # legacy avoids unbounded growth of an audit log no code reads.
-        bronze_count = 0
-        if config.sync.should_write_bronze:
-            try:
-                bronze_count = await self.store.append_bronze_events(
-                    orders, bronze_source,
-                )
-                if bronze_count:
-                    logger.debug(
-                        f"Bronze: appended {bronze_count} events "
-                        f"(source={bronze_source}, mode={config.sync.mode})"
-                    )
-            except Exception as e:
-                if config.sync.is_staging:
-                    # Staging: bronze is the ONLY ingest path — failure is critical
-                    logger.error(f"Bronze append FAILED in staging mode: {e}")
-                    raise
-                else:
-                    logger.warning(f"Bronze append failed (non-blocking): {e}")
-
-        if config.sync.is_staging:
-            # Staging mode: bronze is the only write path.
-            # Promotion job will batch-write to orders.
-            # Still upsert expenses directly — they're not in the bronze pipeline.
-            orders_with_expenses = [o for o in orders if o.get("expenses")]
-            expense_count = await self.store.upsert_expenses_batch(orders_with_expenses)
-            await mirror_expenses(orders_with_expenses)
-            return bronze_count, expense_count
-
-        # Legacy mode: direct upsert to orders table
         result = await self.store.upsert_orders(
             orders, force_update=force_update, skip_products=skip_products,
         )
@@ -712,7 +668,7 @@ class SyncService:
                 # Save chunk immediately to preserve progress
                 if chunk_orders:
                     order_count, expense_count = await self._upsert_orders_with_expenses(
-                        chunk_orders, bronze_source="sync_full",
+                        chunk_orders,
                         force_update=force_update,
                     )
                     stats["orders"] += order_count
@@ -971,7 +927,7 @@ class SyncService:
 
             if orders:
                 order_count, expense_count = await self._upsert_orders_with_expenses(
-                    orders, bronze_source="sync_today",
+                    orders,
                 )
                 stats["orders"] = order_count
                 stats["expenses"] = expense_count
@@ -1031,7 +987,6 @@ class SyncService:
                 # Without this, orders with changed status but same updated_at won't be updated
                 order_count, expense_count = await self._upsert_orders_with_expenses(
                     orders, force_update=True, skip_products=True,
-                    bronze_source="sync_status",
                 )
                 stats["orders"] = order_count
                 stats["expenses"] = expense_count
@@ -1158,7 +1113,7 @@ class SyncService:
                 # force_update: the whole point is to overwrite what we hold,
                 # and KeyCRM's updated_at may well be older than our last touch.
                 repaired, _ = await self._upsert_orders_with_expenses(
-                    fetched, force_update=True, bronze_source="repair",
+                    fetched, force_update=True,
                 )
                 await self.store.mark_warehouse_dirty([o["id"] for o in fetched])
 
@@ -1290,7 +1245,7 @@ class SyncService:
             stale_orders = [api_full[oid] for oid in set(stale_order_ids) if oid in api_full]
             if stale_orders:
                 resync_count, _ = await self._upsert_orders_with_expenses(
-                    stale_orders, force_update=True, bronze_source="reconciliation",
+                    stale_orders, force_update=True,
                 )
                 logger.info(f"Resynced {resync_count} stale orders (force_update=True)")
                 await self.store.mark_warehouse_dirty(None)

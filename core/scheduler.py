@@ -46,9 +46,12 @@ SCHEDULER_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
 # APScheduler drops a job as MISSED when it cannot be dispatched within this many
 # seconds of its scheduled instant. The default is ONE SECOND, and it was never
-# overridden: production logged 108 missed bronze_promotion runs in five hours,
-# and the 05:00 reconciliation vanished every Sunday because the weekly full sync
-# was still holding the heavy-job lock at the moment it was due. Nothing here is
+# overridden: the 05:00 reconciliation vanished every Sunday because the weekly
+# full sync was still holding the heavy-job lock at the moment it was due. The
+# other half of the original evidence — 108 missed `bronze_promotion` runs in
+# five hours — is kept as a date rather than a name: that job was retired with
+# the H3 subsystem on 2026-09-14, and the measurement is why this number is not
+# one second. Nothing here is
 # time-critical to the second — an invariant check running forty minutes late is
 # worth infinitely more than one that never runs.
 DEFAULT_MISFIRE_GRACE_SECONDS = 3600
@@ -178,7 +181,6 @@ class BackgroundScheduler:
     _HEAVY_JOBS = frozenset({
         "incremental_sync", "full_sync_weekly", "order_status_refresh",
         "revenue_prediction_train", "meilisearch_sync", "warehouse_refresh",
-        "bronze_promotion",
     })
 
     def __init__(self):
@@ -538,45 +540,6 @@ class BackgroundScheduler:
             description="Consistent on-disk backup of analytics.duckdb (retains 2)",
             func=self._run_backup,
             trigger=CronTrigger(hour=4, minute=30),
-            max_instances=1,
-            coalesce=True,
-        )
-
-        # Job: Bronze promotion (every 2 min, staging mode only)
-        # Promotes unprocessed bronze events → orders table.
-        # Only active when SYNC_MODE=staging; no-ops in legacy mode.
-        self._add_job(
-            job_id="bronze_promotion",
-            name="Bronze Promotion",
-            description="Promote bronze events to orders table (staging mode)",
-            func=self._run_bronze_promotion,
-            trigger=IntervalTrigger(minutes=2),
-            max_instances=1,
-            coalesce=True,
-        )
-
-        # Job: Bronze prune (daily at 4 AM)
-        # Deletes processed bronze events older than 7 days
-        self._add_job(
-            job_id="bronze_prune",
-            name="Bronze Prune",
-            description="Delete old processed bronze events (7-day retention)",
-            func=self._run_bronze_prune,
-            trigger=CronTrigger(hour=4, minute=0),
-            max_instances=1,
-            coalesce=True,
-        )
-
-        # Job: Bronze invariant check (every 6 hours)
-        # Catches config drift before it accumulates into a compaction blocker.
-        # The 2026-05-18 incident (4.4M rows) would have fired this within 6h
-        # instead of going undetected for 30 days.
-        self._add_job(
-            job_id="bronze_invariant_check",
-            name="Bronze Invariant Check",
-            description="Verify bronze row count matches mode invariant",
-            func=self._run_bronze_invariant_check,
-            trigger=CronTrigger(hour=INVARIANT_CHECK_HOURS),
             max_instances=1,
             coalesce=True,
         )
@@ -3047,181 +3010,6 @@ class BackgroundScheduler:
             return out
 
     # ─── Bronze Promotion & Prune ────────────────────────────────────────────
-
-    async def _run_bronze_promotion(self) -> Dict[str, Any]:
-        """Promote unprocessed bronze events → orders (staging mode only).
-
-        In legacy mode, this is a no-op. In staging mode, this is the ONLY
-        writer to the orders table — enforcing the single-writer invariant.
-        After promotion, sets the warehouse dirty flag so Silver/Gold rebuild.
-        """
-        from core.config import config
-
-        if not config.sync.is_staging:
-            return {"skipped": True, "reason": "legacy mode"}
-
-        async with self._heavy_job_lock:
-            with correlation_context() as corr_id:
-                from core.duckdb_store import get_store
-                store = await get_store()
-
-                result = await store.promote_bronze_to_orders(batch_size=2000)
-
-                if result["promoted"] > 0:
-                    logger.info(
-                        f"Bronze promotion: {result['promoted']} orders promoted, "
-                        f"{result['skipped']} skipped, {result['batch_event_ids']} events marked"
-                    )
-                    # Trigger warehouse rebuild
-                    await store.mark_warehouse_dirty(None)
-                else:
-                    logger.debug("Bronze promotion: no unprocessed events")
-
-                # Check for bronze backlog and alert if concerning
-                stats = await store.get_bronze_stats()
-                age_s = stats.get("oldest_unprocessed_age_s")
-                if stats["unprocessed"] > 1000 or (age_s and age_s > 300):
-                    await self._send_bronze_alert(stats)
-
-                return result
-
-
-    async def _run_bronze_invariant_check(self) -> Dict[str, Any]:
-        """Assert bronze table size matches the (mode, shadow_enabled) invariant.
-
-        Catches: prune disabled/broken, sync writing despite the opt-out,
-        env-var drift between deploys, accidental staging→legacy mode flip
-        without backlog cleanup. Alert sent at most once per cooldown
-        window to avoid spam if the breach persists across cycles.
-        """
-        with correlation_context() as corr_id:
-            from core.config import config
-            from core.duckdb_store import get_store, evaluate_bronze_invariant
-
-            store = await get_store()
-            stats = await store.get_bronze_stats()
-            mode = config.sync.mode
-            shadow = bool(config.sync.legacy_bronze_shadow)
-
-            healthy, reason = evaluate_bronze_invariant(stats, mode, shadow)
-
-            result = {
-                "healthy": healthy,
-                "reason": reason,
-                "mode": mode,
-                "shadow_enabled": shadow,
-                "total": stats["total"],
-                "unprocessed": stats["unprocessed"],
-            }
-
-            if healthy:
-                logger.debug(
-                    f"Bronze invariant OK: mode={mode}, shadow={shadow}, "
-                    f"total={stats['total']:,}"
-                )
-                try:
-                    from core.alerting import resolve_group
-
-                    await resolve_group("bronze")
-                except Exception as e:
-                    logger.warning(f"Bronze resolve failed: {e}")
-                return result
-
-            logger.warning(f"Bronze invariant VIOLATED: {reason}")
-
-            # The Gate owns the cooldown: loud first hour, then one daily
-            # reminder while the breach stands — this used to be a private
-            # 6h float, the fifth of the six throttles.
-            try:
-                from core.alerting import raise_alert
-
-                await raise_alert(
-                    "⚠️ <b>Bronze invariant violated</b>\n"
-                    f"<code>mode={mode}</code>, <code>shadow={shadow}</code>\n"
-                    f"total: {stats['total']:,} | unprocessed: {stats['unprocessed']:,}\n\n"
-                    f"{reason}\n\n"
-                    "Likely cause: prune misconfigured, or sync writing despite opt-out.",
-                    conditions=["bronze:invariant_violated"],
-                    bucket="bronze:invariant_violated", group="bronze",
-                )
-            except Exception as e:
-                logger.warning(f"Failed to send bronze invariant alert: {e}")
-
-            return result
-
-    async def _run_bronze_prune(self) -> Dict[str, Any]:
-        """Delete old bronze events. Retention rule is mode-aware:
-        staging keeps unprocessed; legacy prunes by age only."""
-        with correlation_context() as corr_id:
-            from core.config import config
-            from core.duckdb_store import get_store
-
-            logger.info(f"Starting bronze prune job (mode={config.sync.mode})")
-            store = await get_store()
-
-            deleted = await store.prune_bronze_events(
-                retention_days=7,
-                mode=config.sync.mode,
-            )
-
-            result = {"deleted": deleted, "mode": config.sync.mode}
-            if deleted > 0:
-                logger.info(f"Bronze prune: deleted {deleted} old events ({config.sync.mode} mode)")
-            return result
-
-    async def _send_bronze_alert(self, stats: Dict[str, Any]) -> None:
-        """Send Telegram alert when bronze backlog is concerning.
-
-        Mode-gated by design: 'unprocessed' is only a meaningful signal in
-        staging mode, where the promotion job is what flips processed_at.
-        In legacy mode processed_at stays NULL by construction, so a high
-        unprocessed count is a config artifact rather than an incident.
-
-        The caller (_run_bronze_promotion) already returns early in legacy
-        mode, so this guard is defence-in-depth: it makes the function safe
-        to call from any future code path without re-introducing alert spam.
-        """
-        from core.config import config
-        if not config.sync.is_staging:
-            logger.debug(
-                f"Bronze alert suppressed in {config.sync.mode} mode "
-                f"(unprocessed={stats.get('unprocessed')})"
-            )
-            return
-
-        try:
-            from core.alerting import raise_alert
-
-            unprocessed = stats["unprocessed"]
-            age_s = stats.get("oldest_unprocessed_age_s")
-            age_str = f"{int(age_s)}s" if age_s else "unknown"
-
-            msg = (
-                "\u26a0\ufe0f <b>Bronze Backlog Alert</b>\n"
-                f"Unprocessed events: {unprocessed}\n"
-                f"Oldest age: {age_str}\n\n"
-                "Promotion may be falling behind. "
-                "Check <code>/api/bronze/stats</code> and scheduler jobs."
-            )
-            await raise_alert(
-                msg, conditions=["bronze:backlog"], bucket="bronze:backlog",
-            )
-        except Exception as e:
-            logger.warning(f"Failed to send bronze alert: {e}")
-
-    # ─── Memory Monitor ───────────────────────────────────────────────────────
-    #
-    # Thresholds, the working-set definition and the evaluator live in
-    # core/memory_monitor.py, which explains at length why this no longer
-    # judges memory.current. Short version: that number is half page cache on
-    # this host, so it tracked database size rather than memory pressure.
-
-    # Cooldowns per level to avoid alert spam (seconds)
-    _MEM_ALERT_COOLDOWNS = {
-        "WARN": 86400,      # 24 hours
-        "CRITICAL": 21600,  # 6 hours
-    }
-    _mem_last_alert: Dict[str, float] = {}
 
     @staticmethod
     def _get_db_size_mb() -> Optional[float]:

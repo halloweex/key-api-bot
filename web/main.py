@@ -134,7 +134,6 @@ async def startup_event():
 
     # Log sync mode for visibility
     from core.config import config as app_config
-    logger.info(f"Sync mode: {app_config.sync.mode}")
 
     # A half-enabled read switch is the same trap as a typo in it: the flag
     # says postgres, the missing DSN quietly serves the old store, and nobody
