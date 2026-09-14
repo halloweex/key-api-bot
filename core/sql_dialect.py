@@ -81,6 +81,14 @@ class Dialect:
     # mirrored — it is derived from state only DuckDB holds — which is why it
     # sits in `app` rather than `bronze` (revision 0008).
     sku_inventory_status: str
+    # The rest of the inventory chain, which stage 4 gives a Postgres writer.
+    # `offers` maps an offer to its product and is what `upsert_stocks` reads to
+    # stamp `product_id` on a movement; `stock_movements` is the record that
+    # exists nowhere else, because KeyCRM serves current stock and no history;
+    # `inventory_sku_history` is the daily photograph of the first.
+    offers: str
+    stock_movements: str
+    inventory_sku_history: str
     # The daily stock snapshot behind the trend chart. Replicated, not
     # mirrored, and in `app` for `sku_inventory_status`' reason: the API
     # serves current stock only, so a day the snapshot job did not run is a
@@ -150,6 +158,9 @@ DUCKDB = Dialect(
     sms_audience_presets="sms_audience_presets",
     sms_dlr_events="sms_dlr_events",
     sku_inventory_status="sku_inventory_status",
+    offers="offers",
+    stock_movements="stock_movements",
+    inventory_sku_history="inventory_sku_history",
     inventory_history="inventory_history",
     gold_daily_revenue="gold_daily_revenue",
     # Every row is a roll-up here: this Gold has no source dimension.
@@ -188,6 +199,13 @@ POSTGRES = Dialect(
     sms_audience_presets="app.sms_audience_presets",
     sms_dlr_events="app.sms_dlr_events",
     sku_inventory_status="app.sku_inventory_status",
+    # `bronze`, because an offer is a KeyCRM payload; the other two are
+    # `app`, because nothing can decide them again — a movement not
+    # recorded when it happened is gone, and a snapshot is a moment that
+    # has passed.
+    offers="bronze.offers",
+    stock_movements="app.stock_movements",
+    inventory_sku_history="app.inventory_sku_history",
     inventory_history="app.inventory_history",
     gold_daily_revenue="gold.daily_revenue",
     gold_revenue_rollup="source_id IS NULL",
@@ -398,7 +416,106 @@ def render_tables(sql: str, dialect: Dialect, **extra: Any) -> str:
         channel_measures=channel_measures(dialect),
         buyers=dialect.buyers,
         managers=dialect.managers,
+        offers=dialect.offers,
+        orders=dialect.orders,
+        stock_movements=dialect.stock_movements,
+        sku_inventory_status=dialect.sku_inventory_status,
+        inventory_sku_history=dialect.inventory_sku_history,
+        inventory_history=dialect.inventory_history,
         **extra,
+    )
+
+
+# ─── The /inventory status rebuild, one body ────────────────────────────────
+#
+# Six tables joined into one row per offer, and the only rule in the inventory
+# chain that is SQL rather than Python — `plan_stock_movements` is the other
+# half and lives in `core/landing_rows.py`.
+#
+# `first_seen_at` is why this is a DELETE + INSERT…SELECT and not an upsert:
+# the value is carried forward out of the table's OWN previous contents, so the
+# rebuild has to read what it is about to destroy. In DuckDB that is a TEMP
+# table; in Postgres the same thing, and the `ON COMMIT DROP` is what makes the
+# caller's transaction the only owner. Lose that carry-forward and every SKU's
+# first-seen date resets to its first order date or today — in both stores
+# within the hour, because the hourly replication full-replaces from whichever
+# one wrote last. That is the failure the surrounding transaction exists to
+# prevent, and it is the reason this body is shared rather than rewritten.
+#
+# The status tuple is spelled here rather than taken from `RETURN_STATUS_IDS`
+# because it is NOT that list: last_sale_date excludes four cancelled states
+# and deliberately keeps 15 and 18. Changing it changes what "last sold" means.
+_SKU_STATUS_REBUILD_BODY = """
+    INSERT INTO {sku_inventory_status} (
+        offer_id, product_id, sku, name, brand, category_id,
+        quantity, reserve, price, purchased_price,
+        last_sale_date, first_seen_at, updated_at, last_stock_out_at
+    )
+    SELECT
+        os.id AS offer_id,
+        COALESCE(o.product_id, 0) AS product_id,
+        COALESCE(os.sku, CAST(os.id AS VARCHAR)) AS sku,
+        p.name,
+        p.brand,
+        p.category_id,
+        os.quantity,
+        os.reserve,
+        COALESCE(os.price, 0) AS price,
+        os.purchased_price,
+        pls.last_sale_date,
+        COALESCE(
+            (SELECT first_seen_at FROM _tmp_first_seen WHERE offer_id = os.id),
+            fod.first_order_date,
+            {today}
+        ) AS first_seen_at,
+        CURRENT_TIMESTAMP AS updated_at,
+        smo.last_stock_out_date AS last_stock_out_at
+    FROM {offer_stocks} os
+    LEFT JOIN {offers} o ON os.id = o.id
+    LEFT JOIN {products} p ON o.product_id = p.id
+    LEFT JOIN (
+        SELECT
+            op.product_id,
+            MAX({ordered_date}) AS last_sale_date
+        FROM {order_products} op
+        JOIN {orders} ord ON op.order_id = ord.id
+        WHERE ord.status_id NOT IN (19, 22, 21, 23)
+        GROUP BY op.product_id
+    ) pls ON o.product_id = pls.product_id
+    LEFT JOIN (
+        SELECT
+            op2.product_id,
+            MIN({ordered_date2}) AS first_order_date
+        FROM {order_products} op2
+        JOIN {orders} ord2 ON op2.order_id = ord2.id
+        GROUP BY op2.product_id
+    ) fod ON o.product_id = fod.product_id
+    LEFT JOIN (
+        SELECT
+            offer_id,
+            MAX({recorded_date}) AS last_stock_out_date
+        FROM {stock_movements}
+        WHERE movement_type = 'stock_out'
+        GROUP BY offer_id
+    ) smo ON os.id = smo.offer_id
+"""
+
+
+def sku_status_rebuild_select(dialect: Dialect) -> str:
+    """The rebuild's INSERT…SELECT, for one engine.
+
+    `CURRENT_DATE` is not portable through this project's rules — it reads the
+    session's zone, and the two engines run in different ones — so the default
+    comes from `TODAY_IN_KYIV`, which both render as the warehouse's date. The
+    three date expressions are the dialect's own Kyiv template.
+    """
+    return render_tables(
+        _SKU_STATUS_REBUILD_BODY,
+        dialect,
+        today=TODAY_IN_KYIV,
+        ordered_date=dialect.kyiv_date("ord.ordered_at"),
+        ordered_date2=dialect.kyiv_date("ord2.ordered_at"),
+        recorded_date=dialect.kyiv_date("recorded_at"),
     )
 
 
