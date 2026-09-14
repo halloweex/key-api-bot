@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.192
+
+- Teach the inventory chain to write Postgres, behind a flag that is off
+
+
 ## 3.0.191
 
 - Give the /inventory status rebuild one body too
