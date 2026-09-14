@@ -166,4 +166,4 @@ jobs:
 
       - name: Stop the throwaway PostgreSQL
         if: always()
-        run: docker rm -f ci-pg || true
+        run: docker rm -f -v ci-pg || true

@@ -42,7 +42,7 @@ for arg in "$@"; do
 done
 
 cleanup() {
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
     rm -rf "$SCRATCH"
 }
 trap cleanup EXIT

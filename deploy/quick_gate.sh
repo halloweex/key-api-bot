@@ -45,7 +45,7 @@ PW=quick-only
 FILES="${1:?usage: quick_gate.sh \"<test file> [test file ...]\"}"
 
 cleanup() {
-    docker rm -f "$PG" >/dev/null 2>&1 || true
+    docker rm -f -v "$PG" >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
