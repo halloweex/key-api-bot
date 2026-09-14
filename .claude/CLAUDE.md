@@ -1131,6 +1131,23 @@ means something — the oldest base backup's START WAL, what is running, a count
 per repository — never to a date. The diagnostic agent recommended the age
 form twice in one week and both would have destroyed a recovery point.
 
+**A bound written into one script is not written into its siblings.**
+`gate_with_stores.sh` got `docker rm -v` on 2026-09-09 and the test pinning it
+named that file. `quick_gate.sh` runs the same `postgres:17.2-alpine`, removes
+it the same way, and runs far more often — it kept leaking one 49 MB volume per
+invocation for five days behind a green suite, and the diagnostic agent found
+it on 2026-09-14 (65 dangling volumes, 3.52 GB) before the test did. The guard
+now walks `deploy/`, `scripts/` and `.github/workflows/` instead of naming a
+file, which is the same lesson as the mirror-spec guard: **a guard that names
+its subjects only ever guards the ones you were already thinking about.**
+
+The rule it enforces is flat because `-v` is safe everywhere: it removes
+**only** anonymous volumes, so a named volume and a bind mount are untouched.
+A script that mounts its own directory over the image's `VOLUME` — the PITR
+drill, the weekly compact — loses nothing by carrying the flag and gains the
+bound the day somebody drops the mount. An exception list here would be a list
+of the places the next leak is allowed to appear.
+
 **A one-off cleanup of something that rebounds manufactures the next alert.**
 The disk watchdog differences at a fixed 168h lag, so emptying a cache that
 returns to its natural size reads as growth a week later. The WARN standing on

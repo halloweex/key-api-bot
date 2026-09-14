@@ -31,7 +31,7 @@ source "$COMPOSE_DIR/deploy/notify.sh"
 cleanup_artifacts() {
     rm -f "$DATA_DIR/analytics_clean.duckdb" "$DATA_DIR/analytics_clean.duckdb.wal" 2>/dev/null
     rm -rf "$DATA_DIR/export_parquet" 2>/dev/null
-    docker rm -f duckdb-compact 2>/dev/null
+    docker rm -f -v duckdb-compact 2>/dev/null
 }
 
 start_services() {
@@ -86,7 +86,7 @@ while docker ps --filter name=duckdb-compact --format '{{.Status}}' | grep -q '^
     sleep 30
     ELAPSED=$((ELAPSED + 30))
     if [ "$ELAPSED" -ge "$TIMEOUT_SEC" ]; then
-        docker rm -f duckdb-compact 2>/dev/null
+        docker rm -f -v duckdb-compact 2>/dev/null
         abort "compact timeout after ${TIMEOUT_SEC}s"
     fi
 done
@@ -127,7 +127,7 @@ else
     log "Health check pending (Silver/Gold warming up — normal)"
 fi
 
-docker rm duckdb-compact 2>/dev/null || true
+docker rm -v duckdb-compact 2>/dev/null || true
 
 # Ship the Parquet export off the box while it is fresh.
 #

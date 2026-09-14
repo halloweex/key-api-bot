@@ -27,6 +27,18 @@ TRIGGERS = CI[True] if True in CI else CI["on"]
 
 STEPS = CI["jobs"]["tests"]["steps"]
 
+# Everything in this repository that can start or stop a container. The
+# runbooks under deploy/agent/ are prose for the diagnostician, not scripts.
+SHELL_AND_WORKFLOW_FILES = [
+    p
+    for p in (
+        list((REPO / "deploy").rglob("*.sh"))
+        + list((REPO / "scripts").glob("*.sh"))
+        + list((REPO / ".github" / "workflows").glob("*.yml"))
+    )
+    if "runbooks" not in p.parts
+]
+
 
 class TestItRunsWhenItMatters:
     def test_it_runs_on_every_pull_request(self):
@@ -130,22 +142,47 @@ class TestTheStoreTestsActuallyRun:
         assert image.group(0) in gate
         assert image.group(0) in compose
 
-    def test_the_gate_takes_its_volumes_with_its_containers(self):
-        """`docker rm` without `-v` orphans the anonymous volume each store
-        container mints, so the gate leaked two per run. Measured on the VPS
+    def test_every_container_removal_takes_its_volumes_with_it(self):
+        """`docker rm` without `-v` orphans the anonymous volume an image with
+        a `VOLUME` line mints on every `docker run`. Measured on the VPS
         2026-09-09: 173 dangling volumes, 7.13 GB — enough to take the disk
         watchdog from WARN to CRITICAL, which is how it was found.
 
+        **This walks the repository rather than naming the gate**, because the
+        first version of this test named `gate_with_stores.sh` alone and
+        `quick_gate.sh` — same shape, same `postgres:17.2-alpine`, run far more
+        often — kept leaking one 49 MB volume per invocation behind a green
+        suite. Measured 2026-09-14: 65 dangling volumes, 3.52 GB, and the
+        diagnostic agent found it before this test did.
+
+        `-v` is safe to require everywhere and that is what makes the rule flat
+        rather than a list of exceptions: it removes **only** anonymous
+        volumes. A named volume and a bind mount are untouched, so a script
+        that mounts its own directory over the image's `VOLUME` — the PITR
+        drill, the weekly compact — loses nothing by carrying the flag, and
+        gains the bound the day somebody drops the mount.
+
         Asserted on the flag rather than on the comment beside it: a grep for
         the reason passes while the behaviour regresses."""
-        gate = (REPO / "deploy" / "gate_with_stores.sh").read_text()
-        removals = re.findall(r"docker rm[^\n]*", gate)
-        assert removals, "the gate no longer removes its containers"
-        for line in removals:
-            flags = line.split('"')[0]
-            assert "-v" in flags, (
-                f"{line.strip()!r} removes containers without -v; every run "
-                "then leaves the stores' anonymous volumes on the host"
+        removals = []
+        for path in sorted(SHELL_AND_WORKFLOW_FILES):
+            for line in path.read_text().splitlines():
+                if "docker rm" not in line or line.lstrip().startswith("#"):
+                    continue
+                removals.append((path, line))
+
+        assert len(removals) >= 6, (
+            "the removals this walk is meant to cover have moved or gone; "
+            f"found {len(removals)}"
+        )
+        for path, line in removals:
+            # Searched, not anchored: in a workflow the command is the value
+            # of a `run:` key, so the line does not start with it.
+            flags = re.search(r"docker rm((?:\s+-[A-Za-z]+)*)", line)
+            assert flags and "v" in flags.group(1), (
+                f"{path.relative_to(REPO)}: {line.strip()!r} removes a "
+                "container without -v; every run then leaves its anonymous "
+                "volumes on the host"
             )
 
     def test_the_gate_bounds_the_cache_it_fills(self):
