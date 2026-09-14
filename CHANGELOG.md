@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.193
+
+- The gate got the bound; its sibling kept leaking
+
+
 ## 3.0.192
 
 - Teach the inventory chain to write Postgres, behind a flag that is off
