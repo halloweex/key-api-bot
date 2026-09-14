@@ -200,47 +200,6 @@ class MilestoneConfig:
 
 
 @dataclass(frozen=True)
-class SyncConfig:
-    """Sync pipeline configuration (H3 staging-merge)."""
-
-    # "legacy" = direct upsert (old path, default)
-    # "staging" = write ONLY to bronze, promotion job writes to orders
-    mode: str = field(
-        default_factory=lambda: os.getenv("SYNC_MODE", "legacy")
-    )
-
-    # In legacy mode, bronze_order_events is a shadow audit log that no
-    # production code reads — promotion (which would set processed_at) runs
-    # only in staging mode. Writing it anyway costs ~150K INSERTs/day and
-    # blocks compaction when bronze grows to millions of rows.
-    #
-    # Default off: opt back in (LEGACY_BRONZE_SHADOW=1) only if you're using
-    # bronze as a replay buffer for sync debugging.
-    legacy_bronze_shadow: bool = field(
-        default_factory=lambda: os.getenv(
-            "LEGACY_BRONZE_SHADOW", "false"
-        ).strip().lower() in {"1", "true", "yes"}
-    )
-
-    @property
-    def is_staging(self) -> bool:
-        return self.mode == "staging"
-
-    @property
-    def is_legacy(self) -> bool:
-        return self.mode == "legacy"
-
-    @property
-    def should_write_bronze(self) -> bool:
-        """True if sync should append to bronze_order_events.
-
-        - staging: always (bronze is the ingestion path).
-        - legacy : only if LEGACY_BRONZE_SHADOW=1 (audit/debug opt-in).
-        """
-        return self.is_staging or (self.is_legacy and self.legacy_bronze_shadow)
-
-
-@dataclass(frozen=True)
 class AppConfig:
     """Main application configuration."""
 
@@ -253,7 +212,6 @@ class AppConfig:
     milestones: MilestoneConfig = field(default_factory=MilestoneConfig)
     meilisearch: MeilisearchConfig = field(default_factory=MeilisearchConfig)
     chat: ChatConfig = field(default_factory=ChatConfig)
-    sync: SyncConfig = field(default_factory=SyncConfig)
 
 
 # Global config instance
@@ -274,7 +232,6 @@ RETURN_STATUS_IDS = config.orders.return_status_ids
 TELEGRAM_MANAGER_IDS = config.orders.telegram_manager_ids
 API_PAGE_LIMIT = config.api.page_limit
 API_REQUEST_DELAY = config.api.rate_limit_delay
-SYNC_MODE = config.sync.mode
 
 
 def is_admin(user_id: int) -> bool:

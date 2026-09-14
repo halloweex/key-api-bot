@@ -136,9 +136,6 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # The OOM-kill alerts are deliberately unkeyed (each kill is its own
     # fact, throttling them would hide a second kill) and so have no entry.
 
-    # ── bronze (staging mode only — dead in this deployment, kept honest) ──
-    "bronze:invariant_violated": _c("table size matches the mode invariant"),
-    "bronze:backlog": _c("the backlog drains under the threshold"),
 
     # ── prediction (web, Mon+Thu 03:30; only retail is trained) ──
     "prediction:retrain_rejected:retail": _EVENT,

@@ -187,7 +187,11 @@ class TestAuthorizationStructure:
         assert not leaked, \
             "audit-invariant drift — /api/* routes outside api_gate:\n  " + "\n  ".join(leaked)
 
-    @pytest.mark.parametrize("path", ["/api/jobs", "/api/sync/stats", "/api/warehouse/status", "/api/bronze/stats"])
+    # `/api/bronze/stats` stood here until 2026-09-14. It went with the H3
+    # staging-merge subsystem, whose table had been empty since 2026-05-19.
+    # The remaining three are the admin-ops surface this invariant is about.
+    @pytest.mark.parametrize(
+        "path", ["/api/jobs", "/api/sync/stats", "/api/warehouse/status"])
     def test_admin_ops_endpoints_require_admin(self, path):
         route = _route(path)
         assert route is not None

@@ -690,7 +690,6 @@ def _m0027_reset_sequences_after_compaction(self) -> None:
         ("seq_stock_movements_id", "stock_movements", "id"),
         ("seq_buyer_contacts_id", "buyer_contacts", "id"),
         ("seq_manual_expenses_id", "manual_expenses", "id"),
-        ("seq_bronze_order_events_id", "bronze_order_events", "id"),
     ]
     for seq_name, table_name, col in _seq_table_map:
         try:

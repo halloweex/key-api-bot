@@ -64,7 +64,6 @@ MONOTONE = frozenset({
 MAY_BE_EMPTY = frozenset({
     "revenue_goals",
     "manual_expenses",
-    "bronze_order_events",
     "marketing_optouts",
 })
 
