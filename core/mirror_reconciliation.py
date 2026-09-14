@@ -2677,12 +2677,27 @@ async def reconcile_operational(
     await require_revision()
     watermarks = await fetch_watermarks(pool)
 
+    # Tables DuckDB no longer writes are not compared, `reconcile_sms`'
+    # arrangement and its reason: once the writer moves, the DuckDB side is a
+    # frozen artefact, and every row written since the switch would be reported
+    # as a discrepancy the check itself created. Standing down is not losing
+    # the guarantee — it is declining to assert one about a copy that has
+    # stopped being a copy.
+    #
+    # It reads the same tuple the shipper stands down on, so the two cannot
+    # disagree about which tables have changed hands.
+    from core.pg_inventory_write import CHAIN_TABLES, writes_postgres
+
+    stood_down = frozenset(CHAIN_TABLES) if writes_postgres() else frozenset()
+
+    whole = tuple(s for s in OPERATIONAL_TABLES if s.pg_table not in stood_down)
+
     # ── the four read whole ──
     async with store.connection() as conn:
-        dk_side = read_duckdb_side(conn, OPERATIONAL_TABLES)
+        dk_side = read_duckdb_side(conn, whole)
 
     issues: List[IntegrityIssue] = []
-    for spec in OPERATIONAL_TABLES:
+    for spec in whole:
         dk_rows, dk_synced = dk_side[spec.pg_table]
         pg_rows = await fetch_pg_rows(pool, spec)
         issues += compare_table(
@@ -2692,11 +2707,13 @@ async def reconcile_operational(
         )
 
     # ── the two fingerprinted ──
+    appended = tuple(
+        s for s in APPEND_ONLY_TABLES if s.pg_table not in stood_down)
     async with store.connection() as conn:
-        dk_prints = {s.pg_table: fingerprints(conn, s) for s in APPEND_ONLY_TABLES}
+        dk_prints = {s.pg_table: fingerprints(conn, s) for s in appended}
 
     suspects: Dict[str, List[int]] = {}
-    for spec in APPEND_ONLY_TABLES:
+    for spec in appended:
         dk_print = dk_prints[spec.pg_table]
         dk_count = sum(int(v[0]) for v in dk_print.values())
         found, last_ok_at = _watermark_findings(

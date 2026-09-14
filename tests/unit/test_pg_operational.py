@@ -178,15 +178,122 @@ class TestTheWriterAndTheMigrationAgree:
             f"{set(columns) - set(declared)} shipped into app.{table} and not declared"
         )
 
-    def test_the_movement_id_is_carried_not_generated(self):
-        """DuckDB assigns it from `seq_stock_movements_id`. A Postgres sequence
-        would give the same movement two names and the daily comparison would
-        be meaningless before it started."""
+    def test_the_movement_id_is_carried_while_duckdb_writes(self):
+        """The rule with its condition made explicit, which revision 0030
+        supplied and this assertion used to hide.
+
+        0008 said the id is carried and never generated here, because a second
+        allocator would give one movement two names. That is right *while
+        DuckDB is the writer*. Stage 4 makes Postgres the writer, and then the
+        same argument points the other way — so the rule is really:
+
+            exactly one store writes this table, and that store names the row.
+
+        What must stay true in the DDL is that 0008 did not declare an
+        allocator of its own: the sequence arrives in 0030, deliberately and
+        separately, and `KS_WRITE_INVENTORY` is what keeps "exactly one" true
+        by gating the shipper as well as the writer.
+        """
         ddl = _MIGRATION.read_text(encoding="utf-8")
         body = ddl.split("CREATE TABLE app.stock_movements (", 1)[1]
         assert "GENERATED" not in body
         assert "serial" not in body.lower()
         assert "id" in MOVEMENT_COLUMNS, "the id must be shipped, not defaulted"
+
+    def test_the_allocator_arrives_separately_and_starts_above_duckdb(self):
+        """Revision 0030. `setval` rather than `START WITH`, because the first
+        safe id is data — 55,721 on production when this was written — and a
+        literal would be stale the moment it was typed."""
+        from pathlib import Path
+
+        ddl = (Path(__file__).resolve().parents[2] / "migrations" / "versions"
+               / "0030_stock_movement_ids.py").read_text(encoding="utf-8")
+        assert 'SEQUENCE = "app.stock_movements_id_seq"' in ddl
+        assert "CREATE SEQUENCE IF NOT EXISTS {SEQUENCE}" in ddl
+        assert "MAX(id) FROM app.stock_movements" in ddl
+        assert "false" in ddl, (
+            "is_called must be false so the first nextval returns MAX(id)+1 "
+            "rather than skipping it"
+        )
+        assert "OWNED BY app.stock_movements.id" in ddl
+
+
+class TestTheInventoryChainStandsDown:
+    """`KS_WRITE_INVENTORY=postgres` has to silence two things, not one.
+
+    The shipper, because a full replace out of a frozen DuckDB rolls back every
+    row written since the switch, once an hour, looking healthy in between —
+    `replicate_sms`' recorded failure. And the comparison, because a copy that
+    has stopped being a copy reports every new row as a discrepancy the check
+    itself created.
+
+    Both read the same tuple, so they cannot come to disagree about which
+    tables have changed hands.
+    """
+
+    def test_the_shipper_and_the_comparison_read_one_list(self):
+        import inspect
+
+        from core import mirror_reconciliation, pg_operational
+        from core.pg_inventory_write import CHAIN_TABLES
+
+        for module in (pg_operational.replicate_operational,
+                       mirror_reconciliation.reconcile_operational):
+            src = inspect.getsource(module)
+            assert "CHAIN_TABLES" in src, module.__name__
+            assert "writes_postgres()" in src, module.__name__
+        assert len(CHAIN_TABLES) == 6
+
+    def test_the_chain_names_every_table_it_writes(self):
+        """A table written by the chain and missing from this tuple keeps being
+        full-replaced out of a frozen DuckDB — which is the silent rollback."""
+        from core.pg_inventory_write import CHAIN_TABLES
+
+        assert set(CHAIN_TABLES) == {
+            "bronze.offers",
+            "bronze.offer_stocks",
+            "app.stock_movements",
+            "app.sku_inventory_status",
+            "app.inventory_sku_history",
+            "app.inventory_history",
+        }
+
+    def test_an_unknown_flag_value_raises(self):
+        """`KS_BOT_STORE`'s rule: a typo in the variable deciding which store
+        owns the only record of a stock change must stop the process."""
+        import os
+
+        import pytest
+
+        from core.pg_inventory_write import WRITE_ENV, writes_postgres
+
+        before = os.environ.get(WRITE_ENV)
+        try:
+            os.environ[WRITE_ENV] = "postgres "
+            assert writes_postgres() is True          # whitespace is forgiven
+            os.environ[WRITE_ENV] = "postgre"
+            with pytest.raises(RuntimeError):
+                writes_postgres()
+            os.environ.pop(WRITE_ENV)
+            assert writes_postgres() is False          # default is duckdb
+        finally:
+            os.environ.pop(WRITE_ENV, None)
+            if before is not None:
+                os.environ[WRITE_ENV] = before
+
+    def test_the_watermark_router_refuses_a_key_it_does_not_own(self):
+        """`sync_metadata` holds three families with three owners, and stage 4
+        moves them chain by chain. A writer that could set any key would let
+        this chain move a watermark belonging to a chain still on DuckDB."""
+        import asyncio
+
+        import pytest
+
+        from core.pg_inventory_write import CHAIN_SYNC_KEYS, set_last_sync_time
+
+        assert CHAIN_SYNC_KEYS == ("last_sync_offers", "last_sync_stocks")
+        with pytest.raises(ValueError):
+            asyncio.run(set_last_sync_time("last_sync_orders", "x"))
 
     def test_insert_binds_every_column(self):
         sql = _insert("app.t", ("a", "b", "c"))

@@ -2169,13 +2169,29 @@ class DuckDBStore(
             return None
 
     async def set_last_sync_time(self, key: str = "orders", timestamp: datetime = None) -> None:
-        """Update last sync timestamp."""
+        """Update last sync timestamp.
+
+        One `sync_metadata` row, and the routing is per KEY rather than per
+        table. That table holds three families with three different owners —
+        the nine `last_sync_*` watermarks, the warehouse dirty flag and the
+        digest marker — and stage 4 moves them chain by chain. A watermark
+        written to the store its chain no longer uses is a sync that repeats
+        its whole window on the next tick, or never runs again.
+        """
         timestamp = timestamp or datetime.now(DEFAULT_TZ)
+        full_key = f"last_sync_{key}"
+        from core.pg_inventory_write import (
+            CHAIN_SYNC_KEYS, set_last_sync_time as pg_set_last_sync_time,
+            writes_postgres,
+        )
+        if writes_postgres() and full_key in CHAIN_SYNC_KEYS:
+            await pg_set_last_sync_time(full_key, timestamp.isoformat())
+            return
         async with self.connection() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
                 VALUES (?, ?, CURRENT_TIMESTAMP)
-            """, [f"last_sync_{key}", timestamp.isoformat()])
+            """, [full_key, timestamp.isoformat()])
 
     async def mark_warehouse_dirty(self, changed_order_ids: list[int] | None = None) -> None:
         """Set dirty flag so the warehouse refresh job picks it up."""

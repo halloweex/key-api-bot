@@ -164,6 +164,30 @@ class JobInfo:
     last_error: Optional[str] = None
 
 
+async def _inventory_snapshot_taken_today_pg():
+    """Whether today's per-SKU snapshot exists in Postgres.
+
+    Returns a truthy row or an empty tuple, matching the DuckDB probe's shape
+    so the caller's `if not inventory_today` reads the same either way. A
+    Postgres fault answers "taken" rather than raising: the catch-up is an
+    optimisation, and a boot that cannot reach the database has a larger
+    problem than a missed snapshot.
+    """
+    try:
+        from core.pg import get_pool
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchval(
+                "SELECT 1 FROM app.inventory_sku_history "
+                "WHERE date = (now() AT TIME ZONE 'Europe/Kyiv')::date LIMIT 1"
+            )
+        return (row,) if row else None
+    except Exception as exc:                       # pragma: no cover
+        logger.debug("inventory catch-up probe (postgres) skipped: %s", exc)
+        return ()
+
+
 class BackgroundScheduler:
     """
     Background job scheduler with monitoring.
@@ -282,6 +306,7 @@ class BackgroundScheduler:
         try:
             from core.data_quality import fetch_last_success_ages
             from core.duckdb_store import get_store
+            from core.pg_inventory_write import writes_postgres
 
             store = await get_store()
             async with store.connection() as conn:
@@ -296,6 +321,13 @@ class BackgroundScheduler:
                 except Exception as exc:
                     logger.debug("inventory catch-up probe skipped: %s", exc)
                     inventory_today = ()  # treat as present → queue nothing
+
+            # The probe has to ask whichever store the chain actually writes.
+            # Left on DuckDB after the writer moves, it finds no snapshot for
+            # today ever again and queues a catch-up on every boot — for a
+            # table that is being written correctly somewhere else.
+            if writes_postgres():
+                inventory_today = await _inventory_snapshot_taken_today_pg()
         except Exception as e:
             logger.warning(f"Catch-up check skipped: {e}")
             return

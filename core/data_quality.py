@@ -558,6 +558,33 @@ def _inventory_snapshot_continuity_check(
     today = now.date()
     yesterday = today - timedelta(days=1)
 
+    # This check reads DuckDB, and stage 4 can move the writer out from under
+    # it. Reporting gaps against a frozen table would file a CRITICAL for every
+    # day since the switch — for snapshots that are being taken correctly, in
+    # the other store. Staying silent would be worse: this is the one check
+    # standing over the one thing that cannot be reconstructed at any price.
+    #
+    # So it says which, once a run, and stops. Porting it to follow the writer
+    # is the first precondition of turning `KS_WRITE_INVENTORY=postgres` on,
+    # and this finding is what makes forgetting that impossible to miss.
+    from core.pg_inventory_write import writes_postgres
+
+    if writes_postgres():
+        return [IntegrityIssue(
+            check_name="inventory_continuity_unwatched",
+            table_name="inventory_sku_history",
+            severity=Severity.WARN,
+            count=1,
+            sample_ids=(),
+            description=(
+                "KS_WRITE_INVENTORY=postgres, so the per-SKU snapshot is "
+                "written to app.inventory_sku_history and this check still "
+                "reads DuckDB. It is therefore NOT watching the only table "
+                "here that cannot be reconstructed from any source. Port it "
+                "to the writer's store, or turn the flag back off."
+            ),
+        )]
+
     row = conn.execute(
         "SELECT MIN(date), MAX(date) FROM inventory_sku_history"
     ).fetchone()
@@ -1702,6 +1729,7 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "mirror_row_values": "rows differ between copies",
     "mirror_retired_rows": "retired in KeyCRM, copy remembers",
     "mirror_pruned_rows": "aged out of DuckDB, copy still holds them",
+    "inventory_continuity_unwatched": "snapshot gaps no longer watched",
     "mirror_never_shipped": "table never shipped",
     "mirror_backfill_pending": "history not carried over yet",
     "mirror_failing": "mirror failing",

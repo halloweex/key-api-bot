@@ -160,6 +160,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # what matters — a sweep that suddenly takes far more than usual is the
     # one thing this cannot tell apart from a loss.
     "mirror_pruned_rows": _c("the next full replace removes them"),
+    # Not a data defect: the writer moved and its watchdog did not. It
+    # clears when the check is ported or the flag goes back to duckdb.
+    "inventory_continuity_unwatched": _c(
+        "the continuity check follows the writer, or the flag goes back"),
     "mirror_never_shipped": _c("the table's first successful shipment"),
     "mirror_backfill_pending": _c("the backfill finishes with nothing left"),
     "mirror_buckets_disagree": _c("the fingerprinted buckets agree again"),
