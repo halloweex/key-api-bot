@@ -42,7 +42,9 @@ back because of it.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, NamedTuple, Optional, TYPE_CHECKING
+from typing import (
+    Any, Dict, List, Mapping, NamedTuple, Optional, Tuple, TYPE_CHECKING,
+)
 
 if TYPE_CHECKING:  # pragma: no cover — types only, no import cost at runtime
     from core.models import Order
@@ -73,6 +75,132 @@ class ProductRow(NamedTuple):
 
 CATEGORY_COLUMNS = CategoryRow._fields
 PRODUCT_COLUMNS = ProductRow._fields
+
+
+# ── offers and their stock, and the one computation that is not a parse ──────
+#
+# `offers` is an ordinary payload read and looks like its neighbours above.
+# `plan_stock_movements` is the exception in this module and the reason it is
+# here anyway: it is not a reading of a payload, it is a reading of the payload
+# *against the previous state*, and it is the single most dangerous rule in the
+# inventory chain to have two copies of.
+#
+# A stock movement exists nowhere else. KeyCRM serves current stock only — it
+# has no history endpoint — so a movement that is not computed at the moment it
+# happens is gone, and no backfill can ever recover it. That is why the whole
+# of stage 4 puts this chain first. Two implementations of the classification
+# would not fail loudly; they would disagree about whether a change was
+# `stock_in`, `stock_out` or `reserve_change`, and the wrong answer would be
+# written into the only record there will ever be.
+#
+# So: previous state in, payload in, movements out. No connection, no store, no
+# SQL. Whichever engine holds the previous state reads it and hands it here.
+
+
+class OfferRow(NamedTuple):
+    """An offer as KeyCRM serves it: which product it belongs to, and its SKU."""
+    id: int
+    product_id: int
+    sku: Optional[str]
+
+
+class StockMovement(NamedTuple):
+    """One change to one offer's stock, classified.
+
+    `product_id` is denormalised onto the movement rather than joined at read
+    time, and it is Optional because it comes from a lookup that can miss: an
+    offer whose `offers` row has not arrived yet produces a movement with no
+    product. That is the failure mode which makes the ordering inside this
+    chain matter — see `plan_stock_movements`.
+    """
+    offer_id: int
+    product_id: Optional[int]
+    movement_type: str
+    quantity_before: int
+    quantity_after: int
+    delta: int
+    reserve_before: int
+    reserve_after: int
+
+
+OFFER_COLUMNS = OfferRow._fields
+STOCK_MOVEMENT_COLUMNS = StockMovement._fields
+
+# The four verdicts, named once. `initial` is not a change — it is the first
+# time this store ever saw the offer carrying stock.
+MOVEMENT_INITIAL = "initial"
+MOVEMENT_IN = "stock_in"
+MOVEMENT_OUT = "stock_out"
+MOVEMENT_RESERVE = "reserve_change"
+
+
+def offer_row(payload: Dict[str, Any]) -> OfferRow:
+    return OfferRow(
+        id=payload.get("id"),
+        product_id=payload.get("product_id"),
+        sku=payload.get("sku"),
+    )
+
+
+def offer_rows(payloads: List[Dict[str, Any]]) -> List[OfferRow]:
+    return [offer_row(p) for p in payloads]
+
+
+def plan_stock_movements(
+    stocks: List[Dict[str, Any]],
+    *,
+    current: Mapping[int, Tuple[int, int]],
+    product_map: Mapping[int, Optional[int]],
+) -> List[StockMovement]:
+    """Which movements this batch of stock levels implies.
+
+    Args:
+        stocks: the KeyCRM `offers/stocks` payload.
+        current: offer_id -> (quantity, reserve) as the store holds it *now*.
+            This is the delta base and it exists in exactly one place; an
+            empty or stale mapping does not fail, it re-labels every changed
+            offer as `initial` against a zero base, which is why the caller
+            must read it inside the same transaction it writes.
+        product_map: offer_id -> product_id. A miss yields None and the
+            movement is still recorded — losing the movement would be worse
+            than losing the denormalised product, and the column is nullable
+            for exactly that reason.
+
+    Behaviour is preserved verbatim from the DuckDB implementation, including
+    the two edges worth naming:
+
+      * a brand-new offer with **no** stock produces no movement at all. It is
+        not interesting and it would otherwise write one row per new SKU per
+        catalogue sync.
+      * a change with `delta == 0` is a `reserve_change`. Quantity did not
+        move, so calling it `stock_in` or `stock_out` would put a zero into a
+        column that is read as a direction.
+    """
+    movements: List[StockMovement] = []
+    for stock in stocks:
+        offer_id = stock.get("id")
+        new_qty = stock.get("quantity", 0)
+        new_rsv = stock.get("reserve", 0)
+        old = current.get(offer_id)
+        pid = product_map.get(offer_id)
+
+        if old is None:
+            if new_qty > 0 or new_rsv > 0:
+                movements.append(StockMovement(
+                    offer_id, pid, MOVEMENT_INITIAL,
+                    0, new_qty, new_qty, 0, new_rsv,
+                ))
+        elif old[0] != new_qty or old[1] != new_rsv:
+            delta = new_qty - old[0]
+            if delta != 0:
+                mtype = MOVEMENT_OUT if delta < 0 else MOVEMENT_IN
+            else:
+                mtype = MOVEMENT_RESERVE
+            movements.append(StockMovement(
+                offer_id, pid, mtype,
+                old[0], new_qty, delta, old[1], new_rsv,
+            ))
+    return movements
 
 
 def brand_of(product: Dict[str, Any]) -> Optional[str]:
