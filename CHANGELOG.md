@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.190
+
+- Give the stock-movement classification one home, before it gains a second caller
+
+
 ## 3.0.189
 
 - Retire the H3 bronze subsystem, and let the compaction remove its table
