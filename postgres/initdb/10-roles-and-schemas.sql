@@ -44,6 +44,16 @@ CREATE SCHEMA IF NOT EXISTS meta   AUTHORIZATION ks_app;
 REVOKE ALL ON DATABASE ks FROM PUBLIC;
 GRANT CONNECT ON DATABASE ks TO ks_app, ks_readonly;
 
+-- `ks_app` creates one temporary table, and only one: the `first_seen_at`
+-- carry-forward in the /inventory status rebuild, which has to read the table
+-- it is about to delete. `REVOKE ALL ON DATABASE` above takes TEMPORARY away
+-- with everything else — it is granted to PUBLIC by default — so without this
+-- line the rebuild fails with "permission denied to create temporary tables"
+-- the first time Postgres is the writer of that chain.
+--
+-- NOT granted to ks_readonly: that role reads, and a temp table is a write.
+GRANT TEMPORARY ON DATABASE ks TO ks_app;
+
 GRANT USAGE ON SCHEMA bronze, silver, gold, meta TO ks_readonly;
 
 -- Applies to tables ks_app creates later. Without this, every new table would

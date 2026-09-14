@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Sequence, Tuple
 from core.sql_dialect import (
     DUCKDB, POSTGRES, TODAY_IN_KYIV, Dialect, sku_status_rebuild_select,
 )
+from core import pg_inventory_write
+from core.pg_inventory_write import writes_postgres
 from core.landing_rows import (
     STOCK_MOVEMENT_COLUMNS,
     offer_rows,
@@ -112,10 +114,13 @@ class InventoryMixin:
         if not offers:
             return 0
 
+        rows = offer_rows(offers)
+        if writes_postgres():
+            return await pg_inventory_write.upsert_offers(rows)
+
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
-                rows = offer_rows(offers)
                 conn.executemany(
                     "INSERT OR REPLACE INTO offers (id, product_id, sku, synced_at) "
                     "VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
@@ -147,6 +152,10 @@ class InventoryMixin:
         """
         if not stocks:
             return 0
+
+        if writes_postgres():
+            written, _movements = await pg_inventory_write.upsert_stocks(stocks)
+            return written
 
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
@@ -221,6 +230,11 @@ class InventoryMixin:
         # Postgres, the leftover temp table wedged every later call until a
         # restart, and the next boot rebuilt from an empty carry-forward, so
         # every SKU's first-seen date reset to today in both stores at once.
+        if writes_postgres():
+            count = await pg_inventory_write.rebuild_sku_inventory_status()
+            logger.info(f"Refreshed sku_inventory_status: {count} SKUs")
+            return count
+
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
@@ -265,6 +279,9 @@ class InventoryMixin:
 
         Only records one snapshot per day. Returns True if recorded, False if already exists.
         """
+        if writes_postgres():
+            return await pg_inventory_write.record_sku_inventory_snapshot()
+
         async with self.connection() as conn:
             today = date.today()
 
@@ -478,6 +495,9 @@ class InventoryMixin:
         Args:
             force: If True, delete existing snapshot and re-record
         """
+        if writes_postgres():
+            return await pg_inventory_write.record_inventory_snapshot(force=force)
+
         async with self.connection() as conn:
             today = conn.execute("SELECT CURRENT_DATE").fetchone()[0]
 

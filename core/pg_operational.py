@@ -593,6 +593,19 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
         pool = await get_pool()
         await require_revision()
 
+        # Tables this run must not touch, because DuckDB is no longer their
+        # writer. A full replace out of a frozen DuckDB would roll back every
+        # row written since the switch, once an hour, looking healthy in
+        # between — `replicate_sms`' recorded failure, and the reason it stands
+        # down as a whole rather than per row.
+        #
+        # The set comes from `core/pg_inventory_write.CHAIN_TABLES` rather than
+        # being spelled here, so the writer and the shipper cannot come to
+        # disagree about which tables have changed hands.
+        from core.pg_inventory_write import CHAIN_TABLES, writes_postgres
+
+        stood_down = frozenset(CHAIN_TABLES) if writes_postgres() else frozenset()
+
         # A watermark of None asks for the whole table, which is what `full`
         # means and what a first run finds anyway.
         since: Dict[str, Any] = {spec.pg_table: None for spec in _APPEND_ABOVE}
@@ -616,6 +629,8 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 for pg_table, _dk, columns, _order in _FULL_REPLACE:
+                    if pg_table in stood_down:
+                        continue
                     rows = replaced[pg_table]
                     await conn.execute(f"DELETE FROM {pg_table}")
                     if rows:
@@ -625,6 +640,8 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
                     await conn.execute(_WATERMARK_OK, pg_table, len(rows))
 
                 for spec in _APPEND_ABOVE:
+                    if spec.pg_table in stood_down:
+                        continue
                     rows = appended[spec.pg_table]
                     if rows:
                         # A plain INSERT on the incremental path on purpose:
@@ -664,6 +681,8 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
             "movements_appended": len(appended[MOVEMENTS_TABLE]),
             "duration_ms": int((time.monotonic() - started) * 1000),
         }
+        if stood_down:
+            result["stood_down"] = sorted(stood_down)
         logger.info("Operational history replicated: %s", result)
         return result
     except Exception as e:
