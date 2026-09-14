@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.191
+
+- Give the /inventory status rebuild one body too
+
+
 ## 3.0.190
 
 - Give the stock-movement classification one home, before it gains a second caller
