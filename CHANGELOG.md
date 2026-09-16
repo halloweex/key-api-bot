@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.208
+
+- Pin that a successful mark puts the lock timeout back
+- Chain 2, step 2: the Postgres derivation's own signal and journal, no callers
+
+
 ## 3.0.207
 
 - Chain 2, step 1: an integrity check that raises is named, not swallowed
