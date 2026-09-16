@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.198
+
+- Stage 1b: route the Silver-grain escapes of /summary and /trend
+
+
 ## 3.0.197
 
 - nginx: route /rivo/ to ks-tg-bot from the repo, not by hand
