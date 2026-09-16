@@ -158,7 +158,7 @@ class TestTheTableIsWhereItsMeaningPutsIt:
         Moving it obliges the deploy to run `migrate` before `web`, which
         `docker compose up -d` does and the workflow then checks with
         `docker wait ks-migrate`."""
-        assert pg.REQUIRED_REVISION == "0032_chain_watermarks"
+        assert pg.REQUIRED_REVISION == "0033_derivation_signal"
 
     def test_money_keeps_the_scale_it_has_everywhere_else(self):
         """NUMERIC(12,2), as in `bronze.orders` and as DECIMAL(12,2) in DuckDB.
