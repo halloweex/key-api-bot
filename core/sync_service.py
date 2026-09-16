@@ -303,8 +303,20 @@ class SyncService:
         """
         logger.info("Syncing missing buyers...")
         try:
-            # Get buyer IDs from orders that don't have buyer records
-            missing_ids = await self.store.get_missing_buyer_ids(limit)
+            # Get buyer IDs from orders that don't have buyer records.
+            #
+            # A failed selection returns without moving the buyers watermark:
+            # the next tick retries, `freshness_buyers` reports a stall that
+            # lasts, and the offers and stocks syncs after this one in the same
+            # tick still run — an unreadable selection must not cost the
+            # inventory an hour. It used to propagate out of the whole tick.
+            try:
+                missing_ids = await self.store.get_missing_buyer_ids(limit)
+            except Exception as e:  # noqa: BLE001 — logged, watermark held
+                logger.error(
+                    f"Buyer selection failed, buyers watermark not moved: {e}",
+                    exc_info=True)
+                return 0
 
             if not missing_ids:
                 logger.info("No missing buyers to sync")

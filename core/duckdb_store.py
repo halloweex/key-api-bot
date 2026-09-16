@@ -3100,24 +3100,38 @@ class DuckDBStore(
         Returns:
             List of buyer IDs that need to be synced
         """
-        async with self.connection() as conn:
-            # Use silver_orders which has is_return flag, prioritize returns
-            # Also include buyers with NULL full_name (need re-sync)
-            # Use subquery to properly handle DISTINCT with ORDER BY
-            result = conn.execute("""
+        from core import pg_buyer_sync_read
+        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+
+        # Use silver_orders which has is_return flag, prioritize returns
+        # Also include buyers with NULL full_name (need re-sync)
+        # Use subquery to properly handle DISTINCT with ORDER BY
+        #
+        # `buyer_id DESC` is new: buyers level on both keys fell either side of
+        # LIMIT in engine order, so the two engines could fetch different
+        # buyers in the same hour.
+        sql = """
                 SELECT buyer_id FROM (
                     SELECT s.buyer_id,
                            MAX(CASE WHEN s.is_return THEN 1 ELSE 0 END) as has_return,
                            MAX(s.order_date) as latest_order
-                    FROM silver_orders s
-                    LEFT JOIN buyers b ON s.buyer_id = b.id
+                    FROM {silver_orders} s
+                    LEFT JOIN {buyers} b ON s.buyer_id = b.id
                     WHERE s.buyer_id IS NOT NULL
                       AND (b.id IS NULL OR b.full_name IS NULL OR b.full_name = '')
                     GROUP BY s.buyer_id
                 ) sub
-                ORDER BY has_return DESC, latest_order DESC
+                ORDER BY has_return DESC, latest_order DESC, buyer_id DESC
                 LIMIT ?
-            """, [limit]).fetchall()
+            """
+        # No fallback — `core/pg_buyer_sync_read.py` says why, and where a
+        # failure is contained instead.
+        if pg_buyer_sync_read.enabled() and pg_buyer_sync_read.available():
+            rows = await pg_buyer_sync_read.fetch(render_tables(sql, POSTGRES), [limit])
+            return [row[0] for row in rows]
+
+        async with self.connection() as conn:
+            result = conn.execute(render_tables(sql, DUCKDB), [limit]).fetchall()
             return [row[0] for row in result]
 
     async def update_manager_stats(self) -> int:
