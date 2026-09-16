@@ -130,6 +130,22 @@ class TestTheJob:
         assert raise_alert.await_count == 0
 
     @pytest.mark.asyncio
+    async def test_the_first_tick_of_a_process_rebuilds_with_nothing_owed(self, own):
+        """A deploy is exactly when an owed rebuild used to be lost, so a new
+        process does not trust a debt settled by the old one: nothing owed,
+        heartbeat not due, and it still rebuilds once — then goes quiet."""
+        pool, scheduler, _a = own
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE meta.derivation_signal SET requested = 1, built = 1,"
+                " built_at = now() WHERE layer = 'warehouse'")
+
+        result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "success" and result["trigger"] == "first_tick"
+        assert await scheduler._run_pg_derivation() == {"skipped": True, "reason": "nothing owed"}
+
+    @pytest.mark.asyncio
     async def test_nothing_owed_after_a_run_is_quiet(self, own):
         pool, scheduler, _a = own
         assert (await scheduler._run_pg_derivation())["status"] == "success"
