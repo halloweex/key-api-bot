@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.204
+
+- Stage 4, chain 1: its watermarks live where no copy out of DuckDB reaches them
+
+
 ## 3.0.203
 
 - Stage 4, chain 8: manual expenses written to Postgres, behind KS_WRITE_EXPENSES
