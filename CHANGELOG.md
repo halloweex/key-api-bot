@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.196
+
+- The rich-report tests call the routed reads too
+- Fix the orphaned fetchall in the product-moves port
+- Teach the weekly-report tests the routed signature
+- Stage 1b: take the weekly sales report off DuckDB
+
+
 ## 3.0.195
 
 - The exclusion predicted this alert exactly, and named the wrong key
