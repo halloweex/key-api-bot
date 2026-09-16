@@ -65,3 +65,18 @@ class TestOneDoorToTheStore:
         for name, text in texts.items():
             has = "gold_revenue_rollup}" in text
             assert has is (name != "_get_source_breakdown"), name
+
+
+class TestTheTopProductsTiebreak:
+    def test_the_order_ends_on_an_id(self):
+        """Structural on purpose. A two-engine test of a tie passes whenever
+        both engines happen to emit the level rows in the same order, and on
+        the fixture they do — removing the tiebreak left it green. What makes
+        the cut deterministic is the ORDER BY itself, so that is what is read:
+        its last key is an id, never a name, because the engines collate text
+        differently."""
+        fn = _functions()["_get_top_products"]
+        sql = "".join(n.value for n in ast.walk(fn)
+                      if isinstance(n, ast.Constant) and isinstance(n.value, str))
+        order_by = sql[sql.index("ORDER BY"):sql.index("LIMIT")]
+        assert order_by.rstrip().endswith("MIN(l.product_id)"), order_by
