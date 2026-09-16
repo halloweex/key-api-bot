@@ -1519,26 +1519,70 @@ class TestTheSyncWatermarksAreAProjection:
     """Ten of the eleven `sync_metadata` keys cross. One does not, and the
     exclusion is the whole content of this spec.
 
-    `warehouse_catalog_dirty` is a coordination flag — set when a catalogue
-    sync changes something, read every two minutes by the warehouse refresh,
-    and deleted *conditionally on its own `updated_at`*. Postgres runs no
-    warehouse rebuild, so a copy there asserts something that cannot be true;
-    and it would be wrong in a recurring way, because the flag lives about two
-    minutes against an hourly copy and a 07:30 check, so a window that catches
-    it set at the copy and cleared at the check reports an orphan the copy
-    itself created — with no grace, because `mirror_orphan_rows` has none.
+    `warehouse_dirty` is a coordination flag — set when a sync changes
+    something, read every two minutes by the warehouse refresh, and deleted
+    *conditionally on its own `updated_at`*. Postgres runs no warehouse
+    rebuild, so a copy there asserts something that cannot be true; and it is
+    wrong in a recurring way, because the flag lives about two minutes against
+    an hourly copy and a 07:30 check, so a window that catches it set at the
+    copy and cleared at the check reports an orphan the copy itself created —
+    with no grace, because `mirror_orphan_rows` has none.
+
+    The test below used to assert the constant equalled a literal, and the
+    literal was `warehouse_catalog_dirty` — retired nine hours before this
+    exclusion was written. It passed every run while the live flag shipped
+    hourly, and prod reported the orphan on 2026-09-15. Asserting a name only
+    ever checks the name you were already thinking of, so the assertion now
+    derives the set from the statements DuckDB actually issues.
     """
 
-    def test_the_excluded_key_is_named_once(self):
-        """Once, so the shipper and the comparison cannot come to disagree
-        about what the Postgres copy is supposed to contain."""
+    def test_every_key_duckdb_deletes_is_excluded(self):
+        """The set is derived from the store, not recited beside it.
+
+        A key deleted from `sync_metadata` is transient by definition: the row
+        exists to be consumed. Parsing for the deletes means adding one to the
+        store without adding it here fails in CI rather than on a mirror
+        comparison eight months later.
+        """
+        import pathlib
+        import re
+
         from core.pg_operational import (
-            SYNC_METADATA_SOURCE, TRANSIENT_SYNC_KEY,
+            SYNC_METADATA_SOURCE, TRANSIENT_SYNC_KEYS,
         )
 
-        assert TRANSIENT_SYNC_KEY == "warehouse_catalog_dirty"
-        assert TRANSIENT_SYNC_KEY in SYNC_METADATA_SOURCE
-        assert "key <>" in SYNC_METADATA_SOURCE
+        import core.duckdb_store as _store
+        src = pathlib.Path(_store.__file__).read_text()
+        deleted = set(re.findall(
+            r"DELETE\s+FROM\s+sync_metadata\s+WHERE\s+key\s*=\s*'([^']+)'",
+            src, re.IGNORECASE,
+        ))
+        assert deleted, "no sync_metadata deletes found — has the store moved?"
+
+        missing = deleted - set(TRANSIENT_SYNC_KEYS)
+        assert not missing, (
+            f"{sorted(missing)} are deleted from sync_metadata in DuckDB but "
+            f"still shipped to Postgres. The copy will report them as "
+            f"mirror_orphan_rows whenever it catches one set."
+        )
+        for key in deleted:
+            assert f"'{key}'" in SYNC_METADATA_SOURCE
+
+    def test_the_live_flag_is_the_one_excluded(self):
+        """Named explicitly, because the derivation above would also be
+        satisfied by a store that had stopped deleting anything."""
+        from core.pg_operational import TRANSIENT_SYNC_KEYS
+
+        assert "warehouse_dirty" in TRANSIENT_SYNC_KEYS
+
+    def test_the_retired_key_stays_excluded(self):
+        """`warehouse_catalog_dirty` went with the products Gold it existed
+        for, and the row was deliberately left in `sync_metadata` on databases
+        that carry it. Dropping it from the exclusion would start shipping a
+        stale row that Postgres has never seen."""
+        from core.pg_operational import TRANSIENT_SYNC_KEYS
+
+        assert "warehouse_catalog_dirty" in TRANSIENT_SYNC_KEYS
 
     def test_the_shipper_and_the_comparison_read_the_same_source(self):
         from core.mirror_reconciliation import OPERATIONAL_TABLES

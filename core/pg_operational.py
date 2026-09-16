@@ -101,6 +101,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+import re
 import time
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
@@ -281,29 +282,71 @@ OFFER_COLUMNS: Tuple[str, ...] = ("id", "product_id", "sku", "synced_at")
 
 SYNC_METADATA_COLUMNS: Tuple[str, ...] = ("key", "value", "updated_at")
 
-# The one key that is deliberately not copied, and the only place it is named.
+# The keys that are deliberately not copied, and the only place they are named.
 #
-# `warehouse_catalog_dirty` is a coordination flag, not a fact: set when a
-# catalogue sync changes something, read every two minutes by the warehouse
-# refresh, and deleted CONDITIONALLY on its own `updated_at` — an optimistic
-# concurrency token whose meaning is "a rebuild in this process still has to
-# happen". Postgres runs no warehouse rebuild, so a copy of it there asserts
-# something that cannot be true.
+# `warehouse_dirty` is a coordination flag, not a fact: set when a sync changes
+# something, read every two minutes by the warehouse refresh, and deleted
+# CONDITIONALLY on its own `updated_at` — an optimistic concurrency token whose
+# meaning is "a rebuild in this process still has to happen". Postgres runs no
+# warehouse rebuild, so a copy of it there asserts something that cannot be
+# true.
 #
-# It would also be wrong in a specific, recurring way. The flag lives about two
+# It is also wrong in a specific, recurring way. The flag lives about two
 # minutes, this copy runs hourly and the comparison runs at 07:30, so any
 # window that catches it set at the copy and cleared at the check reports an
 # orphan the copy itself created — with no grace to forgive it, because
 # `mirror_orphan_rows` has none.
 #
+# That paragraph was already written here on 2026-09-14 and it named the wrong
+# key. `warehouse_catalog_dirty` had been retired nine hours earlier with the
+# products Gold it existed for; the live flag has always been `warehouse_dirty`.
+# The prediction was exact and the exclusion missed it, so the mirror shipped
+# the flag at 04:22 on 2026-09-15, DuckDB cleared it at 04:22:53, and the 04:30
+# comparison reported the orphan this comment describes. A guard that names its
+# subject guards only the subject you were thinking of.
+#
+# So the set is DERIVED, not recited: `_transient_sync_keys()` parses the
+# statements DuckDB actually issues against `sync_metadata`, and a key that is
+# deleted there is transient by definition. The retired key stays in the set
+# because DuckDB was never asked to drop the row — databases that carry it hold
+# one stale row, and this projection is why Postgres has never seen it.
+#
 # Expressed as the source the reads use, rather than as a filter the shipper
 # and the comparison each apply: one text, imported by both, so they cannot
 # come to disagree about what the Postgres copy is supposed to contain. The
 # alias is required — DuckDB refuses an unnamed derived table.
-TRANSIENT_SYNC_KEY = "warehouse_catalog_dirty"
+def _transient_sync_keys() -> Tuple[str, ...]:
+    """Every `sync_metadata` key DuckDB ever deletes, read out of the source.
+
+    Parsed rather than listed because the listed form has already been wrong
+    once, in the direction that is invisible until an alert fires: a key added
+    to the store and not to a constant here gets shipped, and one retired from
+    the store and left here stops protecting anything. Reading the statements
+    means the two cannot drift apart without the parse noticing.
+
+    Falls back to the known pair if the source cannot be read — an installed
+    package with no .py beside it must not lose the exclusion and start
+    shipping a flag hourly.
+    """
+    known = ("warehouse_dirty", "warehouse_catalog_dirty")
+    try:
+        import pathlib
+
+        src = (pathlib.Path(__file__).with_name("duckdb_store.py")).read_text()
+    except OSError:
+        return known
+    found = set(re.findall(
+        r"DELETE\s+FROM\s+sync_metadata\s+WHERE\s+key\s*=\s*'([^']+)'",
+        src, re.IGNORECASE,
+    ))
+    return tuple(sorted(found | set(known)))
+
+
+TRANSIENT_SYNC_KEYS: Tuple[str, ...] = _transient_sync_keys()
 SYNC_METADATA_SOURCE = (
-    f"(SELECT * FROM sync_metadata WHERE key <> '{TRANSIENT_SYNC_KEY}') "
-    "AS sync_metadata"
+    "(SELECT * FROM sync_metadata WHERE key NOT IN ("
+    + ", ".join(f"'{k}'" for k in TRANSIENT_SYNC_KEYS)
+    + ")) AS sync_metadata"
 )
 
 # The DuckDB table each one is read from. Postgres qualifies by schema and
