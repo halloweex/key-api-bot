@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import os
 import sys
@@ -127,12 +128,34 @@ def fixture_report() -> WeeklyReport:
     )
 
 
-def live_report(db_path: str, sales_type: str) -> WeeklyReport:
+class _FileStore:
+    """The one `store` method `build_report` uses, over a file opened here.
+
+    This script reads a DuckDB *file* on purpose — usually a backup, for a
+    laptop whose own copy is stale — so it has no `DuckDBStore` and wants
+    none: taking one would open the live database and the single-writer lock
+    with it. `build_report` needs exactly `async with store.connection()`, so
+    that is exactly what this provides.
+
+    It never consults `KS_READ_WEEKLY`. A preview is for looking at what a
+    given file says; pointing it at Postgres would make `--db` a lie.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    @asynccontextmanager
+    async def connection(self):
+        yield self._conn
+
+
+async def live_report(db_path: str, sales_type: str) -> WeeklyReport:
     import duckdb
 
     conn = duckdb.connect(db_path, read_only=True)
     try:
-        return build_report(conn, datetime.now().date(), sales_type)
+        return await build_report(
+            _FileStore(conn), datetime.now().date(), sales_type)
     finally:
         conn.close()
 
@@ -240,7 +263,8 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
-    report = fixture_report() if args.fixture else live_report(args.db, args.sales_type)
+    report = (fixture_report() if args.fixture
+              else asyncio.run(live_report(args.db, args.sales_type)))
     if report.current.orders == 0:
         print("the week has no orders in this copy; use --fixture", file=sys.stderr)
         return 1

@@ -2739,20 +2739,26 @@ class BackgroundScheduler:
             week_start, week_end = last_complete_week(today)
             week = week_start.isoformat()
 
+            # The ledger is still DuckDB's, so it keeps its connection block.
+            # `warehouse_max_date` and `build_report` must stay OUTSIDE it:
+            # both are routed by KS_READ_WEEKLY now, and the DuckDB side of
+            # that router takes `store.connection()` itself. The store lock is
+            # not reentrant — a nested acquisition hangs rather than raises,
+            # which on a weekly job means a scheduler thread parked forever.
             async with store.connection() as conn:
                 if already_sent(conn, week_start, sales_type):
                     logger.debug("Weekly report for %s already sent", week)
                     return {"sent": False, "week": week, "reason": "already_sent"}
 
-                max_date = warehouse_max_date(conn)
-                if max_date is None or max_date < week_end:
-                    logger.info(
-                        "Weekly report deferred: warehouse at %s, week ends %s",
-                        max_date, week_end,
-                    )
-                    return {"sent": False, "week": week, "reason": "warehouse_behind"}
+            max_date = await warehouse_max_date(store)
+            if max_date is None or max_date < week_end:
+                logger.info(
+                    "Weekly report deferred: warehouse at %s, week ends %s",
+                    max_date, week_end,
+                )
+                return {"sent": False, "week": week, "reason": "warehouse_behind"}
 
-                report = build_report(conn, today, sales_type)
+            report = await build_report(store, today, sales_type)
 
             if report.current.orders == 0:
                 logger.warning("Weekly report skipped: no orders in %s", week)
@@ -2937,13 +2943,16 @@ class BackgroundScheduler:
                 if already_sent(conn, week_start, sales_type):
                     logger.debug("Traffic report for %s already sent", week)
                     return {"sent": False, "week": week, "reason": "already_sent"}
-                max_date = warehouse_max_date(conn)
-                if max_date is None or max_date < week_end:
-                    logger.info(
-                        "Traffic report deferred: warehouse at %s, week ends %s",
-                        max_date, week_end,
-                    )
-                    return {"sent": False, "week": week, "reason": "warehouse_behind"}
+
+            # Outside the block, for the weekly job's reason: the gate is
+            # routed now and its DuckDB path takes the same non-reentrant lock.
+            max_date = await warehouse_max_date(store)
+            if max_date is None or max_date < week_end:
+                logger.info(
+                    "Traffic report deferred: warehouse at %s, week ends %s",
+                    max_date, week_end,
+                )
+                return {"sent": False, "week": week, "reason": "warehouse_behind"}
 
             report = await build_report(store, today, sales_type)
 

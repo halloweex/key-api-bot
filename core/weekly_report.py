@@ -216,7 +216,9 @@ def share_of(part: float, whole: float) -> Optional[float]:
 
 # ─── Reads ──────────────────────────────────────────────────────────────────
 
-def fetch_week_totals(conn, start: date, end: date, sales_type: str) -> WeekTotals:
+async def fetch_week_totals(
+    store, start: date, end: date, sales_type: str,
+) -> WeekTotals:
     """Revenue and orders from Gold, split by customer type from Silver.
 
     Revenue and the order count come from `gold_daily_revenue` so the message
@@ -227,19 +229,19 @@ def fetch_week_totals(conn, start: date, end: date, sales_type: str) -> WeekTota
     exactly, and Gold is built from Silver in the same tick, so the two are
     always equally fresh.
     """
-    row = conn.execute("""
+    row = await _weekly_run(store, """
         SELECT COALESCE(SUM(revenue), 0), COALESCE(SUM(orders_count), 0)
-        FROM gold_daily_revenue
-        WHERE date BETWEEN ? AND ? AND sales_type = ?
-    """, [start, end, sales_type]).fetchone()
+        FROM {gold_daily_revenue}
+        WHERE date BETWEEN ? AND ? AND sales_type = ? AND {gold_revenue_rollup}
+    """, [start, end, sales_type], mode="one")
 
-    split = conn.execute("""
+    split = await _weekly_run(store, """
         SELECT COUNT(DISTINCT CASE WHEN is_new_customer THEN id END),
                COUNT(DISTINCT CASE WHEN NOT is_new_customer THEN id END)
-        FROM silver_orders
+        FROM {silver_orders}
         WHERE order_date BETWEEN ? AND ?
           AND NOT is_return AND is_active_source AND sales_type = ?
-    """, [start, end, sales_type]).fetchone()
+    """, [start, end, sales_type], mode="one")
 
     return WeekTotals(
         revenue=float(row[0] or 0),
@@ -249,8 +251,8 @@ def fetch_week_totals(conn, start: date, end: date, sales_type: str) -> WeekTota
     )
 
 
-def fetch_weekly_series(
-    conn, before: date, sales_type: str, weeks: int = BASELINE_WEEKS,
+async def fetch_weekly_series(
+    store, before: date, sales_type: str, weeks: int = BASELINE_WEEKS,
 ) -> List[float]:
     """Weekly revenue for the `weeks` complete weeks ending before `before`.
 
@@ -260,21 +262,23 @@ def fetch_weekly_series(
     orders at all are kept as zeros, because for a quiet sales type a dead week
     is a real observation and dropping it would flatter the average.
     """
-    first_row = conn.execute(
-        "SELECT MIN(date) FROM gold_daily_revenue WHERE sales_type = ?",
-        [sales_type],
-    ).fetchone()
+    first_row = await _weekly_run(
+        store,
+        "SELECT MIN(date) FROM {gold_daily_revenue} "
+        "WHERE sales_type = ? AND {gold_revenue_rollup}",
+        [sales_type], mode="one",
+    )
     if first_row is None or first_row[0] is None:
         return []
     first_date = first_row[0]
 
     window_start = before - timedelta(days=7 * weeks)
-    rows = conn.execute("""
+    rows = await _weekly_run(store, """
         SELECT date_trunc('week', date) AS wk, SUM(revenue)
-        FROM gold_daily_revenue
-        WHERE sales_type = ? AND date >= ? AND date < ?
+        FROM {gold_daily_revenue}
+        WHERE sales_type = ? AND date >= ? AND date < ? AND {gold_revenue_rollup}
         GROUP BY 1
-    """, [sales_type, window_start, before]).fetchall()
+    """, [sales_type, window_start, before])
 
     by_week = {}
     for wk, revenue in rows:
@@ -288,8 +292,9 @@ def fetch_weekly_series(
     ]
 
 
-def fetch_product_moves(
-    conn, start: date, end: date, prev_start: date, prev_end: date, sales_type: str,
+async def fetch_product_moves(
+    store, start: date, end: date, prev_start: date, prev_end: date,
+    sales_type: str,
 ) -> Tuple[List[ProductMove], float]:
     """Every product's week-on-week revenue move, largest in magnitude first.
 
@@ -315,12 +320,12 @@ def fetch_product_moves(
     # renames them — so `ANY_VALUE` printed whichever spelling the engine
     # happened to reach first, in a report that goes to every approved user.
     # `MIN` is deterministic; the catalogue name is the one a reader knows.
-    rows = conn.execute("""
+    rows = await _weekly_run(store, """
         WITH cur AS (
             SELECT product_id,
                    COALESCE(MIN(catalog_product_name), MIN(product_name)) AS name,
                    SUM(line_amount) AS revenue
-            FROM silver_order_lines
+            FROM {order_lines}
             WHERE order_date BETWEEN ? AND ? AND sales_type = ?
               AND NOT is_return AND is_active_source
             GROUP BY product_id
@@ -329,7 +334,7 @@ def fetch_product_moves(
             SELECT product_id,
                    COALESCE(MIN(catalog_product_name), MIN(product_name)) AS name,
                    SUM(line_amount) AS revenue
-            FROM silver_order_lines
+            FROM {order_lines}
             WHERE order_date BETWEEN ? AND ? AND sales_type = ?
               AND NOT is_return AND is_active_source
             GROUP BY product_id
@@ -349,16 +354,18 @@ def fetch_product_moves(
     return moves, total
 
 
-def fetch_daily(conn, start: date, end: date, sales_type: str) -> List[DayTotals]:
+async def fetch_daily(
+    store, start: date, end: date, sales_type: str,
+) -> List[DayTotals]:
     """Every day of the window, zeros where Gold has no row.
 
     A quiet type has days with no orders; a missing row there is a real
     observation, and the day table must keep its seven rows either way.
     """
-    rows = conn.execute("""
-        SELECT date, revenue, orders_count FROM gold_daily_revenue
-        WHERE date BETWEEN ? AND ? AND sales_type = ?
-    """, [start, end, sales_type]).fetchall()
+    rows = await _weekly_run(store, """
+        SELECT date, revenue, orders_count FROM {gold_daily_revenue}
+        WHERE date BETWEEN ? AND ? AND sales_type = ? AND {gold_revenue_rollup}
+    """, [start, end, sales_type])
     by_day = {
         (d.date() if hasattr(d, "date") else d): (float(r or 0), int(o or 0))
         for d, r, o in rows
@@ -372,43 +379,90 @@ def fetch_daily(conn, start: date, end: date, sales_type: str) -> List[DayTotals
 # Gold names a channel by column, so the split can only see the channels
 # somebody wrote a column for. For retail that is all of them: the exhibition
 # source is its own sales_type and never lands in a retail row.
-_CHANNEL_COLUMNS = (
-    ("Instagram", "instagram_revenue", "instagram_orders"),
-    ("Telegram", "telegram_revenue", "telegram_orders"),
-    ("Shopify", "shopify_revenue", "shopify_orders"),
-)
+# `_CHANNEL_COLUMNS` used to live here — three names and their two DuckDB
+# columns each. It was a *second* home for the rule that says how a channel is
+# spelled, and a DuckDB-only one: Postgres' Gold has no channel columns at all,
+# it carries `source_id` as a dimension. `core.sql_dialect._channel_items` is
+# the one place that knows both spellings, so this asks it instead. Source 5
+# (Виставка) is the standing proof the second home was wrong — ₴266,059.00 that
+# lives in `revenue` and in none of the three columns.
 
 
-def fetch_channels(
-    conn, start: date, end: date, prev_start: date, prev_end: date, sales_type: str,
+async def _weekly_run(store, sql: str, params=None, *, mode: str = "all"):
+    """Run one statement against whichever engine `KS_READ_WEEKLY` names.
+
+    The bodies below carry `{gold_daily_revenue}`, `{silver_orders}`,
+    `{order_lines}` and `{gold_revenue_rollup}` holes; `render_tables` fills
+    them for the engine that is about to answer, **inside this function** and
+    never at the call site. A caller that picked the fragment from the flag
+    would render the Postgres shape into the DuckDB body, which is how
+    `/marketing` was broken for an hour.
+
+    `{gold_revenue_rollup}` is the one that bites. DuckDB's Gold has a single
+    grain, so it renders `TRUE`; Postgres' holds both the roll-up and a row per
+    `source_id`, so it renders `source_id IS NULL`. A body that forgets it
+    counts every order twice in Postgres and once in DuckDB — the defect that
+    halved ROAS on /traffic, found there by porting rather than by reading.
+
+    **No fallback.** See `core/pg_weekly_read.py`: a Postgres failure raises so
+    the daily tick defers, because falling back to a store that is going to
+    stop being written would send a plausible week of zeros.
+    """
+    from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+    from core import pg_weekly_read
+
+    params = list(params or [])
+    if pg_weekly_read.enabled() and pg_weekly_read.available():
+        rows = await pg_weekly_read.fetch(render_tables(sql, POSTGRES), params)
+        return (rows[0] if rows else None) if mode == "one" else rows
+
+    duck = render_tables(sql, DUCKDB)
+    async with store.connection() as conn:
+        cur = conn.execute(duck, params)
+        return cur.fetchone() if mode == "one" else cur.fetchall()
+
+
+async def fetch_channels(
+    store, start: date, end: date, prev_start: date, prev_end: date,
+    sales_type: str,
 ) -> List[ChannelTotals]:
     """Revenue and orders per channel, this week and the week before.
 
     Largest first. A channel with nothing in either week is dropped rather
     than rendered as a row of zeros.
     """
-    def totals(a: date, b: date):
-        cols = ", ".join(
-            f"COALESCE(SUM({rev}), 0), COALESCE(SUM({orders}), 0)"
-            for _, rev, orders in _CHANNEL_COLUMNS
-        )
-        return conn.execute(
-            f"SELECT {cols} FROM gold_daily_revenue "
-            "WHERE date BETWEEN ? AND ? AND sales_type = ?",
-            [a, b, sales_type],
-        ).fetchone()
+    # Deliberately NO `{gold_revenue_rollup}` here. Postgres spells a channel
+    # as `SUM(...) FILTER (WHERE source_id = n)`, which reads the *fine* rows;
+    # the roll-up row carries no source_id, so keeping it would filter to
+    # nothing. Every other body in this module needs the predicate and this one
+    # must not have it — which is why it is stated rather than left to inference.
+    from core.sql_dialect import DUCKDB, POSTGRES, channel_totals_items
+    from core import pg_weekly_read
 
-    cur, prev = totals(start, end), totals(prev_start, prev_end)
+    dialect = (POSTGRES if (pg_weekly_read.enabled() and pg_weekly_read.available())
+               else DUCKDB)
+    channels = channel_totals_items(dialect)
+    cols = ", ".join(f"{rev}, {orders}" for _name, rev, orders in channels)
+
+    async def totals(a: date, b: date):
+        return await _weekly_run(
+            store,
+            f"SELECT {cols} FROM {{gold_daily_revenue}} "
+            "WHERE date BETWEEN ? AND ? AND sales_type = ?",
+            [a, b, sales_type], mode="one",
+        )
+
+    cur, prev = await totals(start, end), await totals(prev_start, prev_end)
     out = [
         ChannelTotals(name, float(cur[2 * i]), int(cur[2 * i + 1]), float(prev[2 * i]))
-        for i, (name, _, _) in enumerate(_CHANNEL_COLUMNS)
+        for i, (name, _rev, _orders) in enumerate(channels)
     ]
     out = [c for c in out if c.revenue or c.orders or c.previous_revenue]
     out.sort(key=lambda c: c.revenue, reverse=True)
     return out
 
 
-def warehouse_max_date(conn) -> Optional[date]:
+async def warehouse_max_date(store) -> Optional[date]:
     """The last date the Gold layer knows about, across every sales type.
 
     The readiness gate. Asking whether the reported week has seven rows for
@@ -416,30 +470,40 @@ def warehouse_max_date(conn) -> Optional[date]:
     zero-order day — b2b runs nine orders a week. Asking whether the warehouse
     has moved past the week end is the same question without that trap.
     """
-    row = conn.execute("SELECT MAX(date) FROM gold_daily_revenue").fetchone()
+    row = await _weekly_run(
+        store,
+        "SELECT MAX(date) FROM {gold_daily_revenue} WHERE {gold_revenue_rollup}",
+        mode="one",
+    )
     return row[0] if row else None
 
 
-def build_report(
-    conn, today: date, sales_type: str = "retail", weeks: int = BASELINE_WEEKS,
+async def build_report(
+    store, today: date, sales_type: str = "retail", weeks: int = BASELINE_WEEKS,
 ) -> WeeklyReport:
-    """Assemble every number the message needs, in four queries per window."""
+    """Assemble every number the message needs, in four queries per window.
+
+    Async and store-taking since the reads moved behind `KS_READ_WEEKLY` —
+    the same shape `core/traffic_report.build_report` has had since it shipped.
+    The queries stay sequential rather than gathered: they are cheap, and one
+    of them failing must abort the report rather than race the others to it.
+    """
     start, end = last_complete_week(today)
     prev_start, prev_end = start - timedelta(days=7), start - timedelta(days=1)
     ly_start, ly_end = same_week_last_year(start)
 
-    current = fetch_week_totals(conn, start, end, sales_type)
-    previous = fetch_week_totals(conn, prev_start, prev_end, sales_type)
-    year_ago = fetch_week_totals(conn, ly_start, ly_end, sales_type)
+    current = await fetch_week_totals(store, start, end, sales_type)
+    previous = await fetch_week_totals(store, prev_start, prev_end, sales_type)
+    year_ago = await fetch_week_totals(store, ly_start, ly_end, sales_type)
 
-    series = fetch_weekly_series(conn, start, sales_type, weeks)
+    series = await fetch_weekly_series(store, start, sales_type, weeks)
     mean = statistics.fmean(series) if series else None
     # Sample standard deviation, not population: with a dozen points the wider
     # estimator is the honest one, and it errs towards calling a week normal.
     sd = statistics.stdev(series) if len(series) > 1 else None
 
-    movers, product_total = fetch_product_moves(
-        conn, start, end, prev_start, prev_end, sales_type
+    movers, product_total = await fetch_product_moves(
+        store, start, end, prev_start, prev_end, sales_type
     )
 
     has_previous = bool(previous.orders or previous.revenue)
@@ -455,11 +519,13 @@ def build_report(
         baseline_weeks=len(series),
         movers=movers[:TOP_MOVERS],
         product_move_total=product_total,
-        days=fetch_daily(conn, start, end, sales_type),
+        days=await fetch_daily(store, start, end, sales_type),
         previous_days=(
-            fetch_daily(conn, prev_start, prev_end, sales_type) if has_previous else []
+            await fetch_daily(store, prev_start, prev_end, sales_type)
+            if has_previous else []
         ),
-        channels=fetch_channels(conn, start, end, prev_start, prev_end, sales_type),
+        channels=await fetch_channels(
+            store, start, end, prev_start, prev_end, sales_type),
     )
 
 
