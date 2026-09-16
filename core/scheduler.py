@@ -1462,9 +1462,9 @@ class BackgroundScheduler:
             except Exception as journal_error:  # noqa: BLE001 — already logged above
                 logger.error("Postgres derivation journal unwritable: %s", journal_error)
             await self._pg_derivation_alert(
-                "warehouse_pg:derive_failed",
                 f"Postgres derivation: failed at {html.escape(stage)} — {type(e).__name__}\n"
                 "→ The rebuild stays owed; check the web log, then POST /api/warehouse/refresh",
+                key="warehouse_pg:derive_failed",
             )
             return {"status": "error", "stage": stage, "error": str(e), "trigger": trigger}
 
@@ -1474,11 +1474,11 @@ class BackgroundScheduler:
             failed = [k for k in ("row_count_match", "checksum_match", "cells_match",
                                   "rollup_match") if not validation[k]]
             await self._pg_derivation_alert(
-                "warehouse_pg:validation_failed",
                 f"Postgres derivation: validation failed ({', '.join(failed)})\n"
                 f"missing cells {validation['missing_cells']}, extra {validation['extra_cells']}, "
                 f"roll-up mismatches {validation['rollup_mismatch_cells']}\n"
                 "→ Read meta.derivation_runs.validation for the last run",
+                key="warehouse_pg:validation_failed",
             )
         if not validation["partition_exhaustive"]:
             still.append("warehouse_pg:sales_type_partition")
@@ -1486,9 +1486,9 @@ class BackgroundScheduler:
                 f"{html.escape(str(u['sales_type'] or 'NULL'))}=₴{u['revenue']:,.2f}"
                 for u in validation["unknown_sales_types"]) or "Gold is short of Silver"
             await self._pg_derivation_alert(
-                "warehouse_pg:sales_type_partition",
                 f"Postgres Gold: revenue in an unknown sales_type — {detail}\n"
                 "→ A type outside the known set; check the managers",
+                key="warehouse_pg:sales_type_partition",
             )
         try:
             from core.alerting import resolve_group
@@ -1503,7 +1503,7 @@ class BackgroundScheduler:
         return result
 
     @staticmethod
-    async def _pg_derivation_alert(key: str, message: str) -> None:
+    async def _pg_derivation_alert(message: str, *, key: str) -> None:
         try:
             from core.alerting import raise_alert
 
