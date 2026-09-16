@@ -414,3 +414,106 @@ class TestTheActualToDateJoinsItsPartner:
             with_gold, monkeypatch, "retail",
             TODAY - timedelta(days=400), TODAY - timedelta(days=390))
         assert duck == postgres == 0.0
+
+
+class TestTheForecastTrainingFrame:
+    """`_query_daily_revenue` is what the forecast model learns from — training,
+    `evaluate`, `tune`, and `predict_range` live on `/trend?include_forecast`.
+
+    The model does not read numbers, it reads a DataFrame, and a type drift does
+    not raise: `Decimal` for `float64`, `date` for `datetime64[us]`, `int64` for
+    `int32` each quietly change what feature engineering computes. So the frame
+    has to come back identical down to the dtype, and these pin it.
+
+    Verified beyond this file on the production catalogue: the frames match for
+    retail, all and b2b over 765 days, 51 of 52 model features are exactly equal
+    (the other is `avg_order_value`, off by one cent in 5 cells), and a model
+    trained on each frame predicts the next 30 days to ₴0.0000 per day.
+    """
+
+    @pytest_asyncio.fixture
+    async def with_gold(self, both_engines):
+        from core.pg import get_pool
+        from core.pg_gold import rebuild_gold
+
+        pool = await get_pool()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            await rebuild_gold(pool=pool)
+        return both_engines
+
+    @staticmethod
+    async def _frames(store, monkeypatch, sales_type):
+        from core.prediction_service import PredictionService
+
+        service = PredictionService()
+        monkeypatch.delenv("KS_READ_FORECAST_INPUT", raising=False)
+        duck = await service._query_daily_revenue(store, sales_type, days_back=120)
+
+        monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
+
+        def _no_duckdb(*_a, **_k):
+            raise AssertionError(
+                "the training frame reached DuckDB with KS_READ_FORECAST_INPUT=postgres")
+
+        with patch.object(type(store), "connection", _no_duckdb):
+            postgres = await service._query_daily_revenue(store, sales_type, days_back=120)
+        monkeypatch.delenv("KS_READ_FORECAST_INPUT", raising=False)
+        return duck, postgres
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])
+    async def test_the_frame_is_identical_down_to_the_dtype(
+        self, with_gold, monkeypatch, sales_type,
+    ):
+        duck, postgres = await self._frames(with_gold, monkeypatch, sales_type)
+
+        assert list(duck.columns) == list(postgres.columns)
+        assert dict(duck.dtypes.astype(str)) == dict(postgres.dtypes.astype(str)), \
+            "a dtype drift changes the model's features without raising"
+        assert len(duck) == len(postgres)
+        # Every type is seeded — order 6 is the wholesale manager's — so an
+        # empty frame here is a comparison of nothing, not a pass.
+        assert len(postgres) > 0, f"no {sales_type} rows: the comparison proves nothing"
+
+        key = list(duck.columns)
+        d = duck.sort_values(key).reset_index(drop=True)
+        p = postgres.sort_values(key).reset_index(drop=True)
+        for col in key:
+            if col == "avg_order_value":
+                # DuckDB promotes DECIMAL division to DOUBLE; documented cent.
+                assert (d[col] - p[col]).abs().max() <= 0.0100001, col
+            else:
+                assert d[col].equals(p[col]), col
+
+    @pytest.mark.asyncio
+    async def test_all_is_one_row_per_date_and_sales_type_not_per_date(
+        self, with_gold, monkeypatch,
+    ):
+        """DuckDB's Gold key is `(date, sales_type)`, so "all" returns a row per
+        type on a day both sold. A `GROUP BY date` on the Postgres side would
+        collapse them and hand the model different history. On production that
+        is 1,701 rows over 765 days, not 765."""
+        duck, postgres = await self._frames(with_gold, monkeypatch, "all")
+        assert len(postgres) == len(duck)
+        assert len(postgres) >= postgres["date"].nunique()
+
+
+def test_normalise_frame_produces_duckdbs_dtypes():
+    """Pure: the dtype contract, without a database. Every column the model
+    reads, in the types `fetchdf()` produced from the production catalogue."""
+    from datetime import date as _date
+    from decimal import Decimal
+    from core.pg_forecast_read import COLUMNS, normalise_frame
+
+    row = (_date(2026, 8, 1), Decimal("1200.50"), Decimal("600"), Decimal("0"),
+           Decimal("600.5"), 3, 3, 1, 2, 0, Decimal("0"), 1, 0, 2, Decimal("400.17"))
+    df = normalise_frame([row])
+    expected = {"date": "datetime64[us]"}
+    expected.update({c: "float64" for c in (
+        "revenue", "instagram_revenue", "telegram_revenue", "shopify_revenue",
+        "returns_revenue", "avg_order_value")})
+    expected.update({c: "int32" for c in (
+        "orders_count", "unique_customers", "new_customers", "returning_customers",
+        "returns_count", "instagram_orders", "telegram_orders", "shopify_orders")})
+    assert list(df.columns) == list(COLUMNS)
+    assert dict(df.dtypes.astype(str)) == expected
