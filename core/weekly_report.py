@@ -343,7 +343,7 @@ async def fetch_product_moves(
                COALESCE(cur.revenue, 0),
                COALESCE(prev.revenue, 0)
         FROM cur FULL OUTER JOIN prev USING (product_id)
-    """, [start, end, sales_type, prev_start, prev_end, sales_type]).fetchall()
+    """, [start, end, sales_type, prev_start, prev_end, sales_type])
 
     moves = [
         ProductMove(name=name or "(unnamed)", current=float(cur), previous=float(prev))
