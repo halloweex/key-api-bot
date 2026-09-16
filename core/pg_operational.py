@@ -642,12 +642,13 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
         # between — `replicate_sms`' recorded failure, and the reason it stands
         # down as a whole rather than per row.
         #
-        # The set comes from `core/pg_inventory_write.CHAIN_TABLES` rather than
-        # being spelled here, so the writer and the shipper cannot come to
-        # disagree about which tables have changed hands.
-        from core.pg_inventory_write import CHAIN_TABLES, writes_postgres
+        # The set comes from `core.write_chains.stood_down_tables()` rather than
+        # being spelled here — every write chain's `CHAIN_TABLES`, for the chains
+        # whose flag is on — so no writer and the shipper can come to disagree
+        # about which tables have changed hands.
+        from core.write_chains import stood_down_tables
 
-        stood_down = frozenset(CHAIN_TABLES) if writes_postgres() else frozenset()
+        stood_down = stood_down_tables()
 
         # A watermark of None asks for the whole table, which is what `full`
         # means and what a first run finds anyway.

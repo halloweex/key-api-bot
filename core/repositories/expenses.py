@@ -441,21 +441,30 @@ class ExpensesMixin:
         Returns:
             Created expense dict with id
         """
-        async with self.connection() as conn:
-            result = conn.execute("""
-                INSERT INTO manual_expenses (expense_date, category, expense_type, amount, currency, note, platform)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                RETURNING id, expense_date, category, expense_type, amount, currency, note, created_at, platform
-            """, [expense_date, category, expense_type, amount, currency, note, platform]).fetchone()
+        # Chain 8: `KS_WRITE_EXPENSES` decides which store holds money nobody
+        # else can reconstruct. See `core/pg_expenses_write.py`.
+        from core import pg_expenses_write
 
-        # And on to Postgres now, not within the hour. The form writes this
-        # store and the page it returns to reads the other once
-        # KS_READ_EXPENSES=postgres, so without this the amount a human just
-        # typed does not appear. Never raises — the DuckDB write has already
-        # committed.
-        from core.pg_operational import replicate_after_manual_expense
+        if pg_expenses_write.writes_postgres():
+            result = await pg_expenses_write.add_expense(
+                expense_date, category, expense_type, amount, currency, note, platform)
+        else:
+            async with self.connection() as conn:
+                result = conn.execute("""
+                    INSERT INTO manual_expenses (expense_date, category, expense_type, amount, currency, note, platform)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    RETURNING id, expense_date, category, expense_type, amount, currency, note, created_at, platform
+                """, [expense_date, category, expense_type, amount, currency, note, platform]).fetchone()
 
-        await replicate_after_manual_expense(self)
+            # And on to Postgres now, not within the hour. The form writes this
+            # store and the page it returns to reads the other once
+            # KS_READ_EXPENSES=postgres, so without this the amount a human just
+            # typed does not appear. Never raises — the DuckDB write has already
+            # committed. Not reached under KS_WRITE_EXPENSES=postgres: there
+            # Postgres IS the write, and the hourly shipper stands down.
+            from core.pg_operational import replicate_after_manual_expense
+
+            await replicate_after_manual_expense(self)
 
         return {
             "id": result[0],
@@ -488,6 +497,30 @@ class ExpensesMixin:
         Returns:
             Updated expense dict or None if not found
         """
+        # Chain 8. `update_expense` has NO HTTP route — the chat tool is its only
+        # caller — which is exactly why the routing lives here, where every
+        # caller arrives, and not in `web/routes/api/expenses.py`.
+        from core import pg_expenses_write
+
+        if pg_expenses_write.writes_postgres():
+            result = await pg_expenses_write.update_expense(
+                expense_id, expense_date=expense_date, category=category,
+                expense_type=expense_type, amount=amount, currency=currency,
+                note=note)
+            if not result:
+                return None
+            return {
+                "id": result[0],
+                "expense_date": result[1].isoformat() if result[1] else None,
+                "category": result[2],
+                "expense_type": result[3],
+                "amount": float(result[4]),
+                "currency": result[5],
+                "note": result[6],
+                "created_at": result[7].isoformat() if result[7] else None,
+                "updated_at": result[8].isoformat() if result[8] else None
+            }
+
         async with self.connection() as conn:
             # Build dynamic update query
             updates = []
@@ -556,6 +589,14 @@ class ExpensesMixin:
         Returns:
             True if deleted, False if not found
         """
+        # Chain 8. A DELETE stays a DELETE in the store that writes — the reason
+        # the replica is a full replace and not an upsert is that a withdrawn
+        # spend must not survive as a ghost still dividing the ROAS.
+        from core import pg_expenses_write
+
+        if pg_expenses_write.writes_postgres():
+            return await pg_expenses_write.delete_expense(expense_id)
+
         async with self.connection() as conn:
             result = conn.execute("""
                 DELETE FROM manual_expenses WHERE id = ? RETURNING id
