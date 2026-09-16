@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.205
+
+- Pin the buyer selection tiebreak by structure
+- Pin the top-products tiebreak by structure
+- Stage 1b: the hourly buyer selection behind KS_READ_BUYER_SYNC
+- Stage 1b: the chat assistant's numbers behind KS_READ_CHAT
+
+
 ## 3.0.204
 
 - Stage 4, chain 1: its watermarks live where no copy out of DuckDB reaches them
