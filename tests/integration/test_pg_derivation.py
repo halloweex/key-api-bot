@@ -71,6 +71,20 @@ class TestMarks:
         assert (requested, built) == (51, 0)
 
     @pytest.mark.asyncio
+    async def test_a_successful_mark_leaves_the_callers_lock_timeout_alone(self, pool):
+        """The one-second timeout is the mark's. A landing that keeps writing
+        after it — or a caller with a timeout of its own — must not inherit it.
+        The failure path cannot show this: a rolled-back savepoint takes its
+        settings with it whether or not they were put back."""
+        from core.pg_derivation import mark
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SET LOCAL lock_timeout = '7s'")
+                assert await mark(conn) is True
+                assert await conn.fetchval("SELECT current_setting('lock_timeout')") == "7s"
+
+    @pytest.mark.asyncio
     async def test_a_mark_in_a_rolled_back_transaction_never_happened(self, pool):
         """No mark without the rows: the landing that rolls back takes its mark."""
         from core.pg_derivation import mark
