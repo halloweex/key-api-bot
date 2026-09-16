@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.207
+
+- Chain 2, step 1: an integrity check that raises is named, not swallowed
+
+
 ## 3.0.206
 
 
