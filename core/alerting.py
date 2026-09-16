@@ -168,6 +168,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # and the freshness check was not handed them.
     "sync_watermarks_unwatched": _c(
         "the freshness check reads the moved watermarks, or the flag goes back"),
+    # A check that raised reported nothing; its findings are absent, not clean.
+    "integrity_check_raised": _c("every integrity check completes again"),
     "mirror_never_shipped": _c("the table's first successful shipment"),
     "mirror_backfill_pending": _c("the backfill finishes with nothing left"),
     "mirror_buckets_disagree": _c("the fingerprinted buckets agree again"),

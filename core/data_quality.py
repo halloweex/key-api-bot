@@ -1487,6 +1487,25 @@ def check_internal_integrity(
     """
     issues: List[IntegrityIssue] = []
 
+    # A check that raises is named, never swallowed. Seven checks here read
+    # tables that "may not exist yet on a fresh DB", and each used to catch
+    # everything at DEBUG — so a dropped, renamed or moved Silver/Gold/UTM
+    # table made its check vanish while the run persisted as a clean success.
+    # Stage 4 stands checks down and moves tables; every one of those steps
+    # relies on a raising check being seen. `error_message` is not touched:
+    # the other checks ran, and the layer's age, the canary and paging stay
+    # exactly where they were.
+    raised: List[str] = []
+
+    def guarded(name: str, run) -> List[IntegrityIssue]:
+        try:
+            return run()
+        except Exception as exc:  # noqa: BLE001 — named in `integrity_check_raised`
+            logger.error("integrity check %s raised: %s: %s",
+                         name, type(exc).__name__, exc)
+            raised.append(f"{name} ({type(exc).__name__})")
+            return []
+
     # PK uniqueness on critical tables.
     issues += _pk_uniqueness_check(conn, "orders", "id")
     issues += _pk_uniqueness_check(conn, "order_products", "id")
@@ -1508,10 +1527,8 @@ def check_internal_integrity(
     )
 
     # Our copy of "what counts as revenue" against KeyCRM's own grouping.
-    try:
-        issues += _status_group_agreement_check(conn)
-    except Exception as exc:  # status_group_id predates some schemas
-        logger.debug("status_group agreement check skipped: %s", exc)
+    issues += guarded("status_group_agreement",
+                      lambda: _status_group_agreement_check(conn))
     issues += _value_domain_check(
         conn, "orders", "source_id", KNOWN_SOURCE_IDS, Severity.WARN,
     )
@@ -1521,43 +1538,31 @@ def check_internal_integrity(
 
     # Cross-metric consistency — revenue and product pages read different
     # columns, so orders billed at zero make them disagree without saying so.
-    try:
-        issues += _headline_vs_line_items_check(conn)
-    except Exception as exc:  # silver_orders may not exist yet on a fresh DB
-        logger.debug("headline_vs_line_items check skipped: %s", exc)
+    issues += guarded("headline_vs_line_items",
+                      lambda: _headline_vs_line_items_check(conn))
 
     # The landing→Silver arc. Everything above reads landing in isolation and
     # everything below reads Silver→Gold; this is the arc between them, which
     # had nothing on it at all. Incremental rebuilds only touch rows in scope,
     # and `silver_mode` has never once been `full`, so a row that fell out of
     # scope stayed wrong while every other check reported clean.
-    try:
-        issues += _silver_arc_check(conn)
-    except Exception as exc:  # silver_orders may not exist yet on a fresh DB
-        logger.debug("silver_arc check skipped: %s", exc)
+    issues += guarded("silver_arc", lambda: _silver_arc_check(conn))
 
     # The first check here that reads the *meaning* of the data rather than
     # the fidelity of its copying. Everything above proves rows moved intact;
     # this asks whether they still say anything. See the docstring for the
     # five-week outage that nothing else could have seen.
-    try:
-        issues += _attribution_coverage_check(conn)
-    except Exception as exc:  # silver_order_utm may not exist yet
-        logger.debug("attribution_coverage check skipped: %s", exc)
+    issues += guarded("attribution_coverage",
+                      lambda: _attribution_coverage_check(conn))
 
     # Fourteen Gold columns against a recompute from Silver. Report-only by
     # construction: an integrity finding cannot reach validation_passed.
-    try:
-        issues += _gold_cell_values_check(conn)
-    except Exception as exc:  # gold_daily_revenue may not exist yet
-        logger.debug("gold_cell_values check skipped: %s", exc)
+    issues += guarded("gold_cell_values", lambda: _gold_cell_values_check(conn))
 
     # The same shape, deliberately: goods leaving with no sale is the whole
     # job of an influence manager. Counted, not warned about.
-    try:
-        issues += _goods_shipped_without_sale_check(conn)
-    except Exception as exc:
-        logger.debug("goods_shipped_without_sale check skipped: %s", exc)
+    issues += guarded("goods_shipped_without_sale",
+                      lambda: _goods_shipped_without_sale_check(conn))
 
     # An order with revenue and no products is a half-written order. The header
     # makes it look complete, so nothing goes back for it on its own.
@@ -1566,11 +1571,24 @@ def check_internal_integrity(
     # A missed inventory snapshot is the one loss here with no second chance:
     # the API serves current stock, so yesterday's is gone the moment yesterday
     # is. Twenty-five days went missing in 2026 without anything saying so.
-    try:
-        issues += _inventory_snapshot_continuity_check(
-            conn, calendar=inventory_calendar)
-    except Exception as exc:  # inventory_sku_history predates some schemas
-        logger.debug("inventory_snapshot_continuity check skipped: %s", exc)
+    issues += guarded("inventory_snapshot_continuity",
+                      lambda: _inventory_snapshot_continuity_check(
+                          conn, calendar=inventory_calendar))
+
+    if raised:
+        issues.append(IntegrityIssue(
+            check_name="integrity_check_raised",
+            table_name="(integrity scan)",
+            severity=Severity.WARN,
+            count=len(raised),
+            sample_ids=(),
+            description=(
+                f"{len(raised)} integrity check(s) raised and reported nothing: "
+                + ", ".join(raised)
+                + ". Their findings are absent from this run, not clean — "
+                "the table each reads is missing, renamed or unreadable."
+            ),
+        ))
 
     return issues
 
@@ -1776,6 +1794,8 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("gold_", "POST /api/warehouse/refresh rebuilds both layers"),
     ("customer_profile_", "Rebuilt on the same tick; survives one — suspect Silver"),
     ("freshness_", "The sync, not the warehouse: see the sync block in /api/health"),
+    ("integrity_check_raised",
+     "A check's table is gone or renamed — find which in the ERROR log; its findings are absent, not clean"),
     ("sync_watermarks_unwatched",
      "The integrity job must pre-read meta.chain_watermarks, or the chain's flag goes back"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),
@@ -1810,6 +1830,7 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "mirror_pruned_rows": "aged out of DuckDB, copy still holds them",
     "inventory_continuity_unwatched": "snapshot gaps no longer watched",
     "sync_watermarks_unwatched": "sync stalls no longer watched",
+    "integrity_check_raised": "integrity checks crashed",
     "mirror_never_shipped": "table never shipped",
     "mirror_backfill_pending": "history not carried over yet",
     "mirror_failing": "mirror failing",
