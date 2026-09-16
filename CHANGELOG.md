@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.195
+
+- The exclusion predicted this alert exactly, and named the wrong key
+
+
 ## 3.0.194
 
 - Let the continuity check follow the writer it guards
