@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.194
+
+- Let the continuity check follow the writer it guards
+
+
 ## 3.0.193
 
 - The gate got the bound; its sibling kept leaking
