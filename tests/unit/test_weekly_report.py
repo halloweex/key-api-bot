@@ -12,6 +12,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
+from contextlib import asynccontextmanager
 
 from core.duckdb_store import DuckDBStore
 from core.weekly_report import (
@@ -228,6 +229,25 @@ class TestFormatting:
 
 # ─── The reads ──────────────────────────────────────────────────────────────
 
+class _Held:
+    """A `store` that hands back a connection the test already holds.
+
+    The reads take a store and open their own connection now, because
+    `KS_READ_WEEKLY` routes them. These tests seed and assert inside one
+    `async with store.connection()` block, and the store lock is not
+    reentrant — passing the real store from in there would hang rather than
+    fail. This yields the open connection instead, so the block keeps its
+    shape and the test still exercises the real DuckDB body.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    @asynccontextmanager
+    async def connection(self):
+        yield self._conn
+
+
 async def _store(tmp_path: Path) -> DuckDBStore:
     s = DuckDBStore(db_path=tmp_path / "weekly.duckdb")
     await s.connect()
@@ -301,8 +321,8 @@ class TestWeekTotals:
                 _silver_order(conn, 5, date(2026, 5, 21), 9_000, is_new=True,
                               is_return=True)
 
-                totals = fetch_week_totals(
-                    conn, date(2026, 5, 18), date(2026, 5, 24), "retail",
+                totals = await fetch_week_totals(
+                    _Held(conn), date(2026, 5, 18), date(2026, 5, 24), "retail",
                 )
             assert totals.new_customer_orders == 1
             assert totals.repeat_orders == 2
@@ -321,8 +341,8 @@ class TestWeekTotals:
                 _gold_day(conn, date(2026, 5, 26), 999_999, 1)   # next week
                 _gold_day(conn, date(2026, 5, 20), 777_777, 7, sales_type="b2b")
 
-                totals = fetch_week_totals(
-                    conn, date(2026, 5, 18), date(2026, 5, 24), "retail",
+                totals = await fetch_week_totals(
+                    _Held(conn), date(2026, 5, 18), date(2026, 5, 24), "retail",
                 )
             assert totals.revenue == 150_000
             assert totals.orders == 50
@@ -349,8 +369,8 @@ class TestProductMoves:
                 _gold_product(conn, prev, 2, "The one that mattered", 101_885)
                 _gold_product(conn, cur, 2, "The one that mattered", 19_966)
 
-                moves, total = fetch_product_moves(
-                    conn, cur, cur + timedelta(days=6),
+                moves, total = await fetch_product_moves(
+                    _Held(conn), cur, cur + timedelta(days=6),
                     prev, prev + timedelta(days=6),
                     "retail",
                 )
@@ -370,8 +390,8 @@ class TestProductMoves:
                 _gold_product(conn, cur, 1, "Launched this week", 11_130)
                 _gold_product(conn, prev, 2, "Sold out", 8_000)
 
-                moves, _ = fetch_product_moves(
-                    conn, cur, cur + timedelta(days=6),
+                moves, _ = await fetch_product_moves(
+                    _Held(conn), cur, cur + timedelta(days=6),
                     prev, prev + timedelta(days=6),
                     "retail",
                 )
@@ -395,8 +415,8 @@ class TestBaselineSeries:
                         continue  # no orders at all that week
                     _gold_day(conn, day, 100_000, 40)
 
-                series = fetch_weekly_series(
-                    conn, date(2026, 5, 18), "retail", weeks=4,
+                series = await fetch_weekly_series(
+                    _Held(conn), date(2026, 5, 18), "retail", weeks=4,
                 )
             assert series == [100_000, 100_000, 0.0, 100_000]
         finally:
@@ -409,8 +429,8 @@ class TestBaselineSeries:
         try:
             async with store.connection() as conn:
                 _gold_day(conn, date(2026, 5, 11), 100_000, 40)
-                series = fetch_weekly_series(
-                    conn, date(2026, 5, 18), "retail", weeks=12,
+                series = await fetch_weekly_series(
+                    _Held(conn), date(2026, 5, 18), "retail", weeks=12,
                 )
             assert series == [100_000]
         finally:
@@ -463,10 +483,10 @@ class TestReadinessGate:
         store = await _store(tmp_path)
         try:
             async with store.connection() as conn:
-                assert warehouse_max_date(conn) is None
+                assert await warehouse_max_date(_Held(conn)) is None
                 _gold_day(conn, date(2026, 5, 20), 50_000, 2, sales_type="b2b")
                 _gold_day(conn, date(2026, 5, 24), 60_000, 3, sales_type="retail")
-                assert warehouse_max_date(conn) == date(2026, 5, 24)
+                assert await warehouse_max_date(_Held(conn)) == date(2026, 5, 24)
         finally:
             await store.close()
 
@@ -1056,7 +1076,7 @@ class TestBuildReport:
                     _gold_day(conn, day, 5_000, 1)
                     _silver_order(conn, 100 + n, day, 5_000, is_new=(n < 3))
 
-                report = build_report(conn, date(2026, 5, 25), "retail")
+                report = await build_report(_Held(conn), date(2026, 5, 25), "retail")
 
             assert (report.start, report.end) == (date(2026, 5, 18), date(2026, 5, 24))
             assert (report.current.revenue, report.current.orders) == (35_000, 7)

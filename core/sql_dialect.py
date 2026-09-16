@@ -578,6 +578,32 @@ def _channel_items(dialect: Dialect) -> List[str]:
                for _name, sid in _CHANNELS])
 
 
+def channel_totals_items(dialect: Dialect) -> "List[Tuple[str, str, str]]":
+    """`(display name, revenue expression, orders expression)` per channel.
+
+    A third arrangement of `_channel_items`, beside `channel_measures` and
+    `marketing_period_measures`, and a third rather than a reuse for the reason
+    written there: two callers wanting different orderings of the same measures
+    is not a reason to teach one of them the other's shape. The weekly report
+    pairs each channel's revenue with its own order count and needs the label;
+    the doughnut wants them interleaved and flat.
+
+    What all three share is `_channel_items` — the one place that knows a
+    channel is a column in DuckDB's Gold and a dimension in Postgres'.
+
+    Note for callers: the Postgres spelling is `SUM(...) FILTER (WHERE
+    source_id = n)`, which selects the *fine* rows. A query using these must
+    therefore NOT also carry `{gold_revenue_rollup}` — that predicate keeps the
+    roll-up row, which has no source_id and would filter to nothing.
+    """
+    items = _channel_items(dialect)
+    revenues, orders = items[:len(_CHANNELS)], items[len(_CHANNELS):]
+    return [
+        (name.title(), revenues[i], orders[i])
+        for i, (name, _sid) in enumerate(_CHANNELS)
+    ]
+
+
 def order_lines_select(dialect: Dialect) -> str:
     """The order-lines SELECT, rendered for one engine."""
     return _ORDER_LINES_BODY.format(
