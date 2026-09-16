@@ -450,3 +450,91 @@ class TestInventorySnapshotContinuity:
             assert "inventory_snapshot_gaps" in names
         finally:
             await store.close()
+
+    # ── Following the writer (stage 4, KS_WRITE_INVENTORY) ──────────────────
+    #
+    # Under the flag the snapshot is taken into `app.inventory_sku_history`,
+    # so this check must read that and not the DuckDB table it used to own.
+    # The facts arrive pre-read because the check is sync and the Postgres
+    # read is async; these pin the three states that arrangement can be in.
+
+    @pytest.mark.asyncio
+    async def test_the_flag_without_a_calendar_says_it_is_not_watching(
+        self, tmp_path, monkeypatch,
+    ):
+        """A caller that forgot is loud, not silent and not wrong.
+
+        This is the one table here that cannot be reconstructed at any price,
+        so 'I am not watching it' has to reach a human. It must not report
+        gaps either — the DuckDB copy is frozen under the flag and every day
+        since the switch would look missing.
+        """
+        monkeypatch.setenv("KS_WRITE_INVENTORY", "postgres")
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now().astimezone()
+            async with store.connection() as conn:
+                for n in (2, 3, 4):
+                    _snapshot(conn, _days_back(now, n))
+                issues = _inventory_snapshot_continuity_check(conn, now=now)
+            assert [i.check_name for i in issues] == ["inventory_continuity_unwatched"]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_supplied_calendar_is_believed_over_the_local_table(
+        self, tmp_path, monkeypatch,
+    ):
+        """The calendar decides, so the check genuinely follows the writer.
+
+        DuckDB is given a complete run of snapshots and the calendar a gap at
+        yesterday. Reading the wrong one returns [], so this fails loudly if
+        the local table is still consulted.
+        """
+        monkeypatch.setenv("KS_WRITE_INVENTORY", "postgres")
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now().astimezone()
+            async with store.connection() as conn:
+                for n in range(1, 6):
+                    _snapshot(conn, _days_back(now, n))
+                first = _days_back(now, 5)
+                present = frozenset(_days_back(now, n) for n in range(2, 6))
+                issues = _inventory_snapshot_continuity_check(
+                    conn, now=now, calendar=(first, present))
+            assert [i.check_name for i in issues] == ["inventory_snapshot_gaps"]
+            assert _days_back(now, 1).isoformat() in issues[0].description
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_both_readings_agree_on_the_same_facts(self, tmp_path):
+        """One body, two engines — so the two enumerations must not differ.
+
+        The DuckDB path enumerates the window with GENERATE_SERIES in SQL; the
+        supplied-calendar path enumerates it with a Python range, because
+        `generate_series` spells differently in the two engines and a Python
+        range spells the same everywhere. That is only safe if they agree, so
+        this drives both over identical facts and compares the findings.
+        """
+        store = await _make_store(tmp_path)
+        try:
+            now = datetime.now().astimezone()
+            kept = (2, 3, 5, 6, 9)
+            async with store.connection() as conn:
+                for n in kept:
+                    _snapshot(conn, _days_back(now, n))
+                from_duckdb = _inventory_snapshot_continuity_check(conn, now=now)
+
+                first = _days_back(now, max(kept))
+                present = frozenset(_days_back(now, n) for n in kept)
+                from_calendar = _inventory_snapshot_continuity_check(
+                    conn, now=now, calendar=(first, present))
+
+            assert from_duckdb and from_calendar, "both must find the gaps"
+            assert [(i.check_name, i.severity, i.count, i.description)
+                    for i in from_duckdb] == \
+                   [(i.check_name, i.severity, i.count, i.description)
+                    for i in from_calendar]
+        finally:
+            await store.close()

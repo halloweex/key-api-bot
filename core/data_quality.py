@@ -29,7 +29,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -534,7 +536,10 @@ INVENTORY_CONTINUITY_WINDOW_DAYS = 30
 
 
 def _inventory_snapshot_continuity_check(
-    conn, now: Optional[datetime] = None,
+    conn,
+    now: Optional[datetime] = None,
+    *,
+    calendar: "Optional[Tuple[Optional[date], FrozenSet[date]]]" = None,
 ) -> List[IntegrityIssue]:
     """Flag days with no per-SKU inventory snapshot.
 
@@ -558,18 +563,26 @@ def _inventory_snapshot_continuity_check(
     today = now.date()
     yesterday = today - timedelta(days=1)
 
-    # This check reads DuckDB, and stage 4 can move the writer out from under
-    # it. Reporting gaps against a frozen table would file a CRITICAL for every
-    # day since the switch — for snapshots that are being taken correctly, in
-    # the other store. Staying silent would be worse: this is the one check
-    # standing over the one thing that cannot be reconstructed at any price.
+    # This check follows the writer. Under `KS_WRITE_INVENTORY=postgres` the
+    # snapshot is taken into `app.inventory_sku_history`, and reading DuckDB
+    # here would file a finding for every day since the switch — about
+    # snapshots that are being taken correctly, in the other store.
     #
-    # So it says which, once a run, and stops. Porting it to follow the writer
-    # is the first precondition of turning `KS_WRITE_INVENTORY=postgres` on,
-    # and this finding is what makes forgetting that impossible to miss.
+    # The facts arrive pre-read rather than being fetched here, because this
+    # runs inside the **sync** `check_internal_integrity` while a Postgres read
+    # is async. `core.pg_inventory_write.read_snapshot_calendar` is the reader
+    # and `_run_dq_integrity` is the caller that knows which engine to ask.
+    # Below this line the check does not know or care which store answered —
+    # `compare_table`'s arrangement, and the reason there is one body and not
+    # two.
+    #
+    # The guard stays, narrowed to what it now protects: a caller that has the
+    # flag on and supplied nothing. That is a forgotten call site, not a
+    # migration, and it must still be loud — this is the one check standing
+    # over the one table that cannot be reconstructed at any price.
     from core.pg_inventory_write import writes_postgres
 
-    if writes_postgres():
+    if calendar is None and writes_postgres():
         return [IntegrityIssue(
             check_name="inventory_continuity_unwatched",
             table_name="inventory_sku_history",
@@ -578,40 +591,56 @@ def _inventory_snapshot_continuity_check(
             sample_ids=(),
             description=(
                 "KS_WRITE_INVENTORY=postgres, so the per-SKU snapshot is "
-                "written to app.inventory_sku_history and this check still "
-                "reads DuckDB. It is therefore NOT watching the only table "
-                "here that cannot be reconstructed from any source. Port it "
-                "to the writer's store, or turn the flag back off."
+                "written to app.inventory_sku_history, and this check was "
+                "called without a pre-read calendar — so it is NOT watching "
+                "the only table here that cannot be reconstructed from any "
+                "source. The caller must pass `calendar=` from "
+                "core.pg_inventory_write.read_snapshot_calendar."
             ),
         )]
 
-    row = conn.execute(
-        "SELECT MIN(date), MAX(date) FROM inventory_sku_history"
-    ).fetchone()
-    if not row or row[0] is None:
+    if calendar is None:
+        row = conn.execute(
+            "SELECT MIN(date), MAX(date) FROM inventory_sku_history"
+        ).fetchone()
+        first_day = row[0] if row else None
+        present: Optional[FrozenSet[date]] = None
+    else:
+        first_day, present = calendar
+
+    if first_day is None:
         # No history at all → fresh install, not a stall. Same reasoning as
         # _freshness_check: do not accuse a bootstrap of losing data.
         return []
-
-    first_day = row[0]
     # A snapshot cannot be missing from before the first one ever taken.
     window_start = max(first_day, today - timedelta(days=INVENTORY_CONTINUITY_WINDOW_DAYS))
     if window_start > yesterday:
         return []
 
-    missing = [r[0] for r in conn.execute(
-        """
-        WITH cal AS (
-            SELECT UNNEST(GENERATE_SERIES(?::DATE, ?::DATE, INTERVAL 1 DAY))::DATE AS d
-        )
-        SELECT cal.d
-        FROM cal
-        LEFT JOIN (SELECT DISTINCT date FROM inventory_sku_history) h ON h.date = cal.d
-        WHERE h.date IS NULL
-        ORDER BY cal.d
-        """,
-        [window_start, yesterday],
-    ).fetchall()]
+    if present is None:
+        missing = [r[0] for r in conn.execute(
+            """
+            WITH cal AS (
+                SELECT UNNEST(GENERATE_SERIES(?::DATE, ?::DATE, INTERVAL 1 DAY))::DATE AS d
+            )
+            SELECT cal.d
+            FROM cal
+            LEFT JOIN (SELECT DISTINCT date FROM inventory_sku_history) h ON h.date = cal.d
+            WHERE h.date IS NULL
+            ORDER BY cal.d
+            """,
+            [window_start, yesterday],
+        ).fetchall()]
+    else:
+        # The calendar is enumerated here rather than in SQL, so the two
+        # engines cannot disagree about what a day is. `generate_series` exists
+        # in both and spells differently in each; a Python range spells the
+        # same everywhere and is the same arithmetic.
+        span_days = (yesterday - window_start).days
+        missing = [
+            d for d in (window_start + timedelta(days=i) for i in range(span_days + 1))
+            if d not in present
+        ]
 
     if not missing:
         return []
@@ -1400,7 +1429,11 @@ def _silver_arc_check(
     return issues
 
 
-def check_internal_integrity(conn) -> List[IntegrityIssue]:
+def check_internal_integrity(
+    conn,
+    *,
+    inventory_calendar: "Optional[Tuple[Optional[date], FrozenSet[date]]]" = None,
+) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
 
     Cheap by design: only DB scans, no external I/O. Suitable for running
@@ -1491,7 +1524,8 @@ def check_internal_integrity(conn) -> List[IntegrityIssue]:
     # the API serves current stock, so yesterday's is gone the moment yesterday
     # is. Twenty-five days went missing in 2026 without anything saying so.
     try:
-        issues += _inventory_snapshot_continuity_check(conn)
+        issues += _inventory_snapshot_continuity_check(
+            conn, calendar=inventory_calendar)
     except Exception as exc:  # inventory_sku_history predates some schemas
         logger.debug("inventory_snapshot_continuity check skipped: %s", exc)
 
