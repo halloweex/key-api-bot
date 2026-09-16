@@ -1,6 +1,9 @@
 ### OS files
 .DS_Store
 Thumbs.db
+# macOS AppleDouble metadata, left behind when a directory is copied from a
+# Mac: four `._test_*.py` sat in tests/ on the server on 2026-09-16.
+._*
 
 ### Python template
 # Byte-compiled / optimized / DLL files
@@ -130,6 +133,12 @@ celerybeat.pid
 
 # Environments
 .env
+# Hand-made copies of .env carry every secret, and this repository is public:
+# on 2026-09-16 twelve `.env.bak*` sat in the server's tree root, one `git add .`
+# away from being published. Copies belong in /root/env-backups/key-api-bot/ —
+# this rule is the second line of defence, not the first.
+.env.*
+!.env.example
 # Server-specific backup target (see deploy/backup.env.example). Being ignored
 # is what keeps it alive: the deploy does `git reset --hard <sha>`, so tracked
 # files are overwritten on every release and ignored ones survive.

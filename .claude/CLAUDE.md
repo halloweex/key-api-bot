@@ -96,6 +96,22 @@ ADMIN_USER_IDS=123456789,987654321
 DASHBOARD_URL=https://ksanalytics.duckdns.org
 ```
 
+**Copies of `.env` on the server go to `/root/env-backups/key-api-bot/`, never
+into the repository root.** A copy carries every secret and the repository is
+public. On 2026-09-16 the server's tree root held twelve `.env.bak*` files, all
+world-readable, none ignored — one `git add .` from being published. Ten were
+moved there; `.env.*` is now in `.gitignore`, as the second line of defence and
+not the first. Make a copy with
+
+```
+install -m 600 /opt/key-api-bot/.env \
+  /root/env-backups/key-api-bot/.env.bak-<what>-$(date -u +%Y%m%d-%H%M%S)
+```
+
+and keep `.env` itself at mode 600. Everything that reads it — compose, the
+root crontab, `ks-alert-agent.service` — runs as root, and no container mounts
+the file.
+
 ### Key Constants
 ```python
 # bot/config.py
