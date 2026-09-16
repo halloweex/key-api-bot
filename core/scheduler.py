@@ -1463,10 +1463,25 @@ class BackgroundScheduler:
                     "inventory snapshot calendar unreadable, continuity check "
                     "will report itself unwatched: %s", e)
 
+            # Same reason for the sync watermarks a chain took with it: the
+            # freshness check is sync, `meta.chain_watermarks` is not.
+            chain_watermarks = None
+            try:
+                from core.write_chains import stood_down_sync_keys
+                moved_keys = stood_down_sync_keys()
+                if moved_keys:
+                    from core.pg_chain_watermarks import read_values
+                    chain_watermarks = await read_values(moved_keys)
+            except Exception as e:
+                logger.error(
+                    "chain watermarks unreadable, freshness check will report "
+                    "the moved syncs unwatched: %s", e)
+
             try:
                 async with store.connection() as conn:
                     issues = check_internal_integrity(
-                        conn, inventory_calendar=inventory_calendar)
+                        conn, inventory_calendar=inventory_calendar,
+                        chain_watermarks=chain_watermarks)
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("DQ integrity scan raised")

@@ -36,3 +36,17 @@ def stood_down_tables() -> FrozenSet[str]:
         if chain.writes_postgres():
             tables.update(chain.CHAIN_TABLES)
     return frozenset(tables)
+
+
+def stood_down_sync_keys() -> FrozenSet[str]:
+    """Every `last_sync_*` key whose chain currently writes Postgres.
+
+    The getter, the setter and the freshness check all ask this, so they cannot
+    come to disagree about where a watermark lives. A chain with no sync keys —
+    chain 8 — simply contributes none.
+    """
+    keys = set()
+    for chain in WRITE_CHAINS:
+        if chain.writes_postgres():
+            keys.update(getattr(chain, "CHAIN_SYNC_KEYS", ()))
+    return frozenset(keys)
