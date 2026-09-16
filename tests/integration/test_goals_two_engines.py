@@ -331,3 +331,86 @@ class TestTheForecastReadsTheSameOnBoth:
             seeded, monkeypatch, "get_predictions",
             (TODAY - timedelta(days=400), TODAY - timedelta(days=390)))
         assert duck == postgres == []
+
+
+class TestTheActualToDateJoinsItsPartner:
+    """`get_forecast` returns `actual_to_date + predicted_remaining`, and the
+    second term has ridden `KS_READ_GOALS` since #183. The first read DuckDB
+    unconditionally — so with the flag on, as in production, one sum took one
+    term from each engine. It rides the same flag now.
+
+    The case that bites is `sales_type="all"`. DuckDB's Gold has one grain and
+    answers with `1=1`; Postgres' holds a roll-up row and a row per source for
+    every `(date, sales_type)`, so without `{gold_revenue_rollup}` the same
+    query counts every order twice there and once here.
+    """
+
+    @pytest_asyncio.fixture
+    async def with_gold(self, both_engines):
+        """Postgres Gold, derived the production way.
+
+        This file's fixture seeds `silver.orders` and never derives
+        `gold.daily_revenue` — nothing here read Gold until this class, so it
+        never had to. DuckDB builds its Gold while seeding, so without this the
+        first run compared DuckDB's ₴5,100 with an empty Postgres table's zero
+        and failed, correctly. Scoped to this class rather than added to the
+        shared fixture, so the tests that never needed Gold stay exactly as
+        they were.
+        """
+        from unittest.mock import AsyncMock
+        from core.pg import get_pool
+        from core.pg_gold import rebuild_gold
+
+        pool = await get_pool()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            await rebuild_gold(pool=pool)
+        return both_engines
+
+    @staticmethod
+    async def _both(store, monkeypatch, sales_type, start, end):
+        from core.prediction_service import PredictionService
+
+        service = PredictionService()
+        monkeypatch.delenv("KS_READ_GOALS", raising=False)
+        duck = await service._get_actual_month_revenue(store, sales_type, start, end)
+
+        monkeypatch.setenv("KS_READ_GOALS", "postgres")
+
+        def _no_duckdb(*_a, **_k):
+            raise AssertionError(
+                "_get_actual_month_revenue fell back to DuckDB — the comparison "
+                "would have compared DuckDB with itself")
+
+        with patch.object(type(store), "connection", _no_duckdb):
+            postgres = await service._get_actual_month_revenue(
+                store, sales_type, start, end)
+        monkeypatch.delenv("KS_READ_GOALS", raising=False)
+        return duck, postgres
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])
+    async def test_every_sales_type_agrees(self, with_gold, monkeypatch, sales_type):
+        duck, postgres = await self._both(
+            with_gold, monkeypatch, sales_type,
+            TODAY - timedelta(days=60), TODAY)
+        assert round(duck, 2) == round(postgres, 2)
+
+    @pytest.mark.asyncio
+    async def test_the_window_is_not_empty_so_the_comparison_means_something(
+        self, with_gold, monkeypatch,
+    ):
+        """Two zeros agree about nothing. This pins that the seed actually lands
+        inside the window, so a green result above is a comparison of money."""
+        duck, postgres = await self._both(
+            with_gold, monkeypatch, "all", TODAY - timedelta(days=60), TODAY)
+        assert duck > 0 and postgres > 0
+        retail, _ = await self._both(
+            with_gold, monkeypatch, "retail", TODAY - timedelta(days=60), TODAY)
+        assert duck > retail, "the b2b order must be inside 'all' and outside retail"
+
+    @pytest.mark.asyncio
+    async def test_an_empty_window_is_zero_on_both(self, with_gold, monkeypatch):
+        duck, postgres = await self._both(
+            with_gold, monkeypatch, "retail",
+            TODAY - timedelta(days=400), TODAY - timedelta(days=390))
+        assert duck == postgres == 0.0

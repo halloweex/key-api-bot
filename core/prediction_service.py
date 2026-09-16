@@ -1580,21 +1580,39 @@ class PredictionService:
     async def _get_actual_month_revenue(
         self, store: Any, sales_type: str, month_start: date, up_to: date
     ) -> float:
-        """Get actual revenue from month start to given date (from Gold layer)."""
+        """Actual revenue from month start to `up_to`, from whichever engine
+        `KS_READ_GOALS` names.
+
+        **Why that flag, and not one of its own.** `get_forecast` returns
+        `predicted_total = actual_to_date + predicted_remaining`, and
+        `predicted_remaining` comes from `store.get_predictions`, which has
+        ridden `KS_READ_GOALS` since #183. This read did not, so with that flag
+        on — as it is in production — one sum took one term from Postgres and
+        the other from DuckDB. The two halves of a sum have to come from one
+        engine, and giving this read a separate flag would only rebuild the
+        mixed state for as long as the two flags disagreed.
+
+        `{gold_revenue_rollup}` is not optional: Postgres' Gold holds both
+        grains, so a bare `SUM(revenue)` there counts every order twice.
+
+        `store._goals_run` takes the store lock itself on the DuckDB path and
+        the lock is not reentrant; the one caller, `get_forecast`, does not
+        hold it.
+        """
         sales_filter = "sales_type = ?" if sales_type != "all" else "1=1"
         params = [month_start, up_to]
         if sales_type != "all":
             params.append(sales_type)
 
-        async with store.connection() as conn:
-            result = conn.execute(f"""
-                SELECT COALESCE(SUM(revenue), 0) as revenue
-                FROM gold_daily_revenue
-                WHERE date >= ? AND date <= ?
-                  AND {sales_filter}
-            """, params).fetchone()
+        rows = await store._goals_run(f"""
+            SELECT COALESCE(SUM(revenue), 0) AS revenue
+            FROM {{gold_daily_revenue}}
+            WHERE date >= ? AND date <= ?
+              AND {{gold_revenue_rollup}}
+              AND {sales_filter}
+        """, params)
 
-        return float(result[0]) if result else 0.0
+        return float(rows[0][0]) if rows else 0.0
 
     def _save_model(self) -> None:
         """Save model, DOW corrections, and clip_ratio to disk.
