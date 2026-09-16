@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.199
+
+- Stage 1b: the forecast's actual-to-date follows its partner onto KS_READ_GOALS
+
+
 ## 3.0.198
 
 - Stage 1b: route the Silver-grain escapes of /summary and /trend
