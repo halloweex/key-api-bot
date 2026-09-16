@@ -519,80 +519,66 @@ class RevenueMixin:
             pg_totals = await self._pg_gold_summary(
                 start_date, end_date, sales_type, source_id
             )
-            if pg_totals is not None:
-                total_orders, total_revenue = int(pg_totals[0]), float(pg_totals[1])
-                total_returns, returns_revenue = int(pg_totals[2]), float(pg_totals[3])
-                avg_check = total_revenue / total_orders if total_orders > 0 else 0
-                # The same seven keys the DuckDB tail builds — the API shape
-                # must not change with the engine.
-                return {
-                    "totalOrders": total_orders,
-                    "totalRevenue": round(total_revenue, 2),
-                    "avgCheck": round(avg_check, 2),
-                    "totalReturns": total_returns,
-                    "returnsRevenue": round(returns_revenue, 2),
-                    "startDate": start_date.isoformat(),
-                    "endDate": end_date.isoformat(),
-                }
+        else:
+            # The Silver grain, under the same rule: before the lock. The
+            # category tree comes from the routed `_category_ids`, because
+            # `_get_category_with_children` needs a connection and taking one
+            # here is exactly the lock this block exists to avoid.
+            pg_totals = None
+            from core import pg_silver_read
+            if pg_silver_read.enabled() and pg_silver_read.available():
+                cat_ids = (await self._category_ids(category_id)
+                           if category_id else None)
+                lines_sql, lines_params, ret_sql, ret_params = (
+                    self._build_silver_filtered_summary_queries(
+                        start_date, end_date, sales_type, source_id,
+                        cat_ids, brand, promocode,
+                    ))
+                lines = await self._pg_silver(lines_sql, lines_params)
+                # Both halves from one engine, or not at all: returns from
+                # Postgres beside orders from DuckDB is two stores in one tile.
+                returns = (await self._pg_silver(ret_sql, ret_params)
+                           if lines is not None else None)
+                if lines is not None and returns is not None:
+                    pg_totals = (lines[0][0], lines[0][1],
+                                 returns[0][0], returns[0][1])
+        if pg_totals is not None:
+            total_orders, total_revenue = int(pg_totals[0]), float(pg_totals[1])
+            total_returns, returns_revenue = int(pg_totals[2]), float(pg_totals[3])
+            avg_check = total_revenue / total_orders if total_orders > 0 else 0
+            # The same seven keys the DuckDB tail builds — the API shape
+            # must not change with the engine.
+            return {
+                "totalOrders": total_orders,
+                "totalRevenue": round(total_revenue, 2),
+                "avgCheck": round(avg_check, 2),
+                "totalReturns": total_returns,
+                "returnsRevenue": round(returns_revenue, 2),
+                "startDate": start_date.isoformat(),
+                "endDate": end_date.isoformat(),
+            }
 
         async with self.connection() as conn:
             if category_id or brand or promocode:
-                # Use Silver layer with JOINs for correct distinct order counts
-                # (gold_daily_products can't deduplicate orders with multiple matching products)
-                params = [start_date, end_date]
-                where_clauses = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
+                # The line level keeps distinct order counts correct: it holds
+                # the order id beside every line. One body with the Postgres
+                # read above — `_build_silver_filtered_summary_queries`.
+                from core.sql_dialect import DUCKDB, render_tables
 
-                if sales_type != "all":
-                    where_clauses.append("l.sales_type = ?")
-                    params.append(sales_type)
-
-                if source_id:
-                    where_clauses.append("l.source_id = ?")
-                    params.append(source_id)
-
-                cat_ids = None
-                if category_id:
-                    cat_ids = await self._get_category_with_children(conn, category_id)
-                    where_clauses.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
-                    params.extend(cat_ids)
-
-                if brand:
-                    where_clauses.append(brand_where(brand, params, "l"))
-
-                if promocode:
-                    where_clauses.append("UPPER(l.promocode) = UPPER(?)")
-                    params.append(promocode)
-
-                where_sql = " AND ".join(where_clauses)
-
-                # The line level: distinct order counts stay correct because the
-                # level keeps the order id beside every line.
-                result = conn.execute(f"""
-                    SELECT
-                        COUNT(DISTINCT l.order_id) as total_orders,
-                        COALESCE(SUM(l.line_amount), 0) as total_revenue
-                    FROM silver_order_lines l
-                    WHERE {where_sql}
-                """, params).fetchone()
-
+                cat_ids = (await self._get_category_with_children(conn, category_id)
+                           if category_id else None)
+                lines_sql, lines_params, ret_sql, ret_params = (
+                    self._build_silver_filtered_summary_queries(
+                        start_date, end_date, sales_type, source_id,
+                        cat_ids, brand, promocode,
+                    ))
+                result = conn.execute(
+                    render_tables(lines_sql, DUCKDB), lines_params).fetchone()
                 total_orders = int(result[0] or 0)
                 total_revenue = float(result[1] or 0)
 
-                # Returns from silver_orders — consistent with the filtered orders query above
-                # (Gold doesn't have category/brand/source breakdown for returns)
-                ret_params = [start_date, end_date]
-                ret_where = ["s.order_date BETWEEN ? AND ?", "s.is_return", "s.is_active_source"]
-                if sales_type != "all":
-                    ret_where.append("s.sales_type = ?")
-                    ret_params.append(sales_type)
-                if source_id:
-                    ret_where.append("s.source_id = ?")
-                    ret_params.append(source_id)
-                ret_result = conn.execute(f"""
-                    SELECT COUNT(DISTINCT s.id), COALESCE(SUM(s.grand_total), 0)
-                    FROM silver_orders s
-                    WHERE {" AND ".join(ret_where)}
-                """, ret_params).fetchone()
+                ret_result = conn.execute(
+                    render_tables(ret_sql, DUCKDB), ret_params).fetchone()
                 total_returns = int(ret_result[0])
                 returns_revenue = float(ret_result[1])
             else:
@@ -791,6 +777,96 @@ class RevenueMixin:
     # asked about here — it is not a missing filter but an absent column.
     _GOLD_SOURCE_COLUMNS = {1: "instagram", 2: "telegram", 4: "shopify"}
 
+    def _build_silver_filtered_summary_queries(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str,
+        source_id: Optional[int],
+        cat_ids: Optional[List[int]],
+        brand: Optional[str],
+        promocode: Optional[str],
+    ) -> Tuple[str, list, str, list]:
+        """`/api/summary`'s answer when a product filter is set, as one body.
+
+        Returns `(lines_sql, lines_params, returns_sql, returns_params)` with
+        `{order_lines}` and `{silver_orders}` holes, so the DuckDB fallback and
+        the Postgres read render the same text rather than two copies of it.
+
+        `cat_ids` arrives resolved. The two callers resolve it differently —
+        the Postgres path through the routed `_category_ids` before the lock,
+        the DuckDB path through `_get_category_with_children` inside it — and
+        the tree is the same data either way.
+
+        **Returns are not narrowed by category, brand or promocode**, only by
+        date, sales type and source. That is how this branch has always
+        answered and the port preserves it exactly; whether a brand's "returns"
+        tile should mean that brand's returns is a separate question and is
+        deliberately not decided inside a change whose claim is that no number
+        moved.
+        """
+        params: list = [start_date, end_date]
+        where = ["l.order_date BETWEEN ? AND ?", "NOT l.is_return", "l.is_active_source"]
+        if sales_type != "all":
+            where.append("l.sales_type = ?")
+            params.append(sales_type)
+        if source_id:
+            where.append("l.source_id = ?")
+            params.append(source_id)
+        if cat_ids:
+            where.append(f"l.category_id IN ({','.join('?' * len(cat_ids))})")
+            params.extend(cat_ids)
+        if brand:
+            where.append(brand_where(brand, params, "l"))
+        if promocode:
+            where.append("UPPER(l.promocode) = UPPER(?)")
+            params.append(promocode)
+
+        lines_sql = f"""
+            SELECT COUNT(DISTINCT l.order_id) AS total_orders,
+                   COALESCE(SUM(l.line_amount), 0) AS total_revenue
+            FROM {{order_lines}} l
+            WHERE {" AND ".join(where)}
+        """
+
+        ret_params: list = [start_date, end_date]
+        ret_where = ["s.order_date BETWEEN ? AND ?", "s.is_return", "s.is_active_source"]
+        if sales_type != "all":
+            ret_where.append("s.sales_type = ?")
+            ret_params.append(sales_type)
+        if source_id:
+            ret_where.append("s.source_id = ?")
+            ret_params.append(source_id)
+        returns_sql = f"""
+            SELECT COUNT(DISTINCT s.id), COALESCE(SUM(s.grand_total), 0)
+            FROM {{silver_orders}} s
+            WHERE {" AND ".join(ret_where)}
+        """
+        return lines_sql, params, returns_sql, ret_params
+
+    async def _pg_silver(self, sql: str, params: list):
+        """One Silver-grain query from Postgres, or None to let DuckDB answer.
+
+        None on the flag being off, on no DSN, and on any failure — the
+        `_pg_gold_summary` contract, so the two grains of one endpoint fail the
+        same way. Rendered here, never by the caller: a caller that picks the
+        fragment from the flag renders the Postgres shape into the DuckDB
+        fallback, which is how `/marketing` was broken for an hour.
+        """
+        from core import pg_silver_read
+        from core.sql_dialect import POSTGRES, render_tables
+
+        if not (pg_silver_read.enabled() and pg_silver_read.available()):
+            return None
+        try:
+            return await pg_silver_read.fetch(render_tables(sql, POSTGRES), params)
+        except Exception as e:
+            logger.error(
+                "KS_READ_SILVER=postgres but the read failed, "
+                "falling back to DuckDB: %s", e,
+            )
+            return None
+
     def _build_silver_orders_revenue_query(
         self,
         start_date: date,
@@ -843,7 +919,7 @@ class RevenueMixin:
             SELECT order_date AS day,
                    COALESCE(SUM(grand_total), 0) AS revenue,
                    COUNT(*) AS order_count
-            FROM silver_orders
+            FROM {{silver_orders}}
             WHERE {" AND ".join(where)}
             GROUP BY order_date
             ORDER BY order_date
@@ -897,7 +973,7 @@ class RevenueMixin:
             SELECT l.order_date AS day,
                    COALESCE(SUM(l.line_amount), 0) AS revenue,
                    COUNT(DISTINCT l.order_id) AS order_count
-            FROM silver_order_lines l
+            FROM {{order_lines}} l
             WHERE {where_sql}
             GROUP BY l.order_date
             ORDER BY l.order_date
@@ -968,18 +1044,47 @@ class RevenueMixin:
                 prev_pg_series = await self._pg_gold_series(
                     prev_start, prev_end, sales_type, source_id
                 )
+        else:
+            # Everything Gold cannot answer — a line-level filter, a promocode,
+            # a source with no Gold column — under `KS_READ_SILVER`, and under
+            # the same rule: before the lock. The bodies are the builders the
+            # DuckDB fallback below uses, rendered for Postgres by `_pg_silver`.
+            from core import pg_silver_read
+            if pg_silver_read.enabled() and pg_silver_read.available():
+                pre_cat_ids = (await self._category_ids(category_id)
+                               if category_id else None)
+
+                def silver_query(a: date, b: date):
+                    if use_lines:
+                        return self._build_silver_products_revenue_query(
+                            a, b, sales_type, source_id, pre_cat_ids, brand, promocode)
+                    return self._build_silver_orders_revenue_query(
+                        a, b, sales_type, source_id, promocode)
+
+                pg_series = await self._pg_silver(*silver_query(start_date, end_date))
+                if include_comparison and pg_series is not None:
+                    prev_start, prev_end = self._comparison_window(
+                        start_date, end_date, compare_type
+                    )
+                    # Same engine for both periods, the Gold branch's reason.
+                    prev_pg_series = await self._pg_silver(
+                        *silver_query(prev_start, prev_end))
 
         # When Postgres answered everything the method will ask for, the store
         # is not touched at all — not even an empty lock acquisition, which
-        # would still serialise this request behind a running rebuild.
+        # would still serialise this request behind a running rebuild. It no
+        # longer depends on the grain: either branch above can answer fully.
         fully_pg = (
-            not use_lines
-            and pg_series is not None
+            pg_series is not None
             and (not include_comparison or prev_pg_series is not None)
         )
         async with (nullcontext(None) if fully_pg else self.connection()) as conn:
+            from core.sql_dialect import DUCKDB, render_tables
+
+            # `conn` is None when Postgres answered everything, and the tree is
+            # then not needed — the builders below are only rendered, never run.
             cat_ids = None
-            if category_id:
+            if category_id and conn is not None:
                 cat_ids = await self._get_category_with_children(conn, category_id)
 
             if use_lines:
@@ -999,7 +1104,7 @@ class RevenueMixin:
 
             results = (
                 pg_series if pg_series is not None
-                else conn.execute(sql, params).fetchall()
+                else conn.execute(render_tables(sql, DUCKDB), params).fetchall()
             )
             daily_data = {row[0]: (float(row[1]), int(row[2])) for row in results}
 
@@ -1052,7 +1157,7 @@ class RevenueMixin:
                 # Only need day + revenue for comparison
                 prev_results = (
                     prev_pg_series if prev_pg_series is not None
-                    else conn.execute(prev_sql, prev_params).fetchall()
+                    else conn.execute(render_tables(prev_sql, DUCKDB), prev_params).fetchall()
                 )
                 prev_daily = {row[0]: float(row[1]) for row in prev_results}
 

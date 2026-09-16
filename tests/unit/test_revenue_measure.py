@@ -229,7 +229,10 @@ class TestTheTwoOrderGrainPathsAgree:
                 g_sql, g_params = store._build_gold_revenue_query(*WINDOW, "retail")
                 s_sql, s_params = store._build_silver_orders_revenue_query(*WINDOW, "retail")
                 gold = conn.execute(g_sql, g_params).fetchall()
-                silver = conn.execute(s_sql, s_params).fetchall()
+                # The Silver builders carry `{silver_orders}`-style holes since
+                # `KS_READ_SILVER`, so the same text renders for either engine.
+                from core.sql_dialect import DUCKDB, render_tables
+                silver = conn.execute(render_tables(s_sql, DUCKDB), s_params).fetchall()
 
             assert {r[0]: (float(r[1]), int(r[2])) for r in gold} == \
                    {r[0]: (float(r[1]), int(r[2])) for r in silver}
