@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.200
+
+- Stage 1b: the forecast's training frame, behind KS_READ_FORECAST_INPUT
+
+
 ## 3.0.199
 
 - Stage 1b: the forecast's actual-to-date follows its partner onto KS_READ_GOALS
