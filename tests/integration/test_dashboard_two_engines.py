@@ -451,3 +451,104 @@ class TestTheBlendedAov:
         duck, postgres = await _both(
             both_engines, monkeypatch, "get_customer_insights", {})
         assert _comparable(duck) == _comparable(postgres)
+
+
+# ─── The Silver-grain escapes of /summary and /trend (KS_READ_SILVER) ────────
+#
+# `KS_READ_GOLD` covers exactly the two Gold primitives. Every request Gold
+# cannot answer — a category or brand, a promocode, a source with no Gold
+# column — fell through to DuckDB Silver, so with a filter set the headline
+# number came from a different engine than without one. Stage 1's "16 of 16"
+# could not see it: it counted methods, and these are branches inside two
+# methods it had already counted.
+
+REVENUE_CALLS = (
+    ("get_summary_stats", {}),                               # the Gold path, still
+    ("get_summary_stats", {"category_id": 1}),               # a parent: the tree walk
+    ("get_summary_stats", {"category_id": 4}),               # a leaf root
+    ("get_summary_stats", {"category_id": 99999}),           # absent
+    ("get_summary_stats", {"brand": "BrandA"}),              # two lines in one order
+    ("get_summary_stats", {"brand": "Unknown"}),             # the NULL-brand bucket
+    ("get_summary_stats", {"promocode": "NOPE"}),            # no Gold column at all
+    ("get_summary_stats", {"brand": "BrandA", "source_id": 1}),
+    ("get_summary_stats", {"category_id": 1, "sales_type": "all"}),
+    ("get_summary_stats", {"brand": "BrandA", "sales_type": "b2b"}),
+    ("get_revenue_trend", {}),
+    ("get_revenue_trend", {"category_id": 1}),
+    ("get_revenue_trend", {"brand": "BrandA"}),
+    ("get_revenue_trend", {"brand": "Unknown"}),
+    ("get_revenue_trend", {"promocode": "NOPE"}),            # the order-grain escape
+    ("get_revenue_trend", {"source_id": 5}),                 # Виставка: no Gold column
+    ("get_revenue_trend", {"brand": "BrandA", "source_id": 1}),
+    ("get_revenue_trend", {"category_id": 1, "sales_type": "all"}),
+    ("get_revenue_trend", {"brand": "BrandA", "compare_type": "year_ago"}),
+    ("get_revenue_trend", {"brand": "BrandA", "include_comparison": False}),
+)
+
+_REVENUE_FLAGS = ("KS_READ_GOLD", "KS_READ_SILVER", "KS_READ_LOOKUPS")
+
+
+async def _both_revenue(store, monkeypatch, name, kwargs):
+    """`_both`, for the three flags these two methods read.
+
+    Postgres leg with DuckDB made fatal, and for the same reason: `_pg_silver`
+    returns None on any failure, so a broken Postgres body falls back and a
+    plain double call compares DuckDB with itself — green, and proving nothing.
+    """
+    for flag in _REVENUE_FLAGS:
+        monkeypatch.delenv(flag, raising=False)
+    duck = await getattr(store, name)(*WINDOW, **kwargs)
+
+    for flag in _REVENUE_FLAGS:
+        monkeypatch.setenv(flag, "postgres")
+
+    def _no_duckdb(*_a, **_k):
+        raise AssertionError(
+            f"{name}{kwargs} fell back to DuckDB — Postgres did not answer, so "
+            f"the comparison would have compared DuckDB with itself"
+        )
+
+    with patch.object(type(store), "connection", _no_duckdb):
+        postgres = await getattr(store, name)(*WINDOW, **kwargs)
+    for flag in _REVENUE_FLAGS:
+        monkeypatch.delenv(flag, raising=False)
+    return duck, postgres
+
+
+class TestTheSilverEscapesAgree:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "name,kwargs", REVENUE_CALLS,
+        ids=[f"{n}{tuple(k.items()) if k else ''}" for n, k in REVENUE_CALLS],
+    )
+    async def test_the_whole_result_is_identical(
+        self, both_engines, monkeypatch, name, kwargs,
+    ):
+        duck, postgres = await _both_revenue(both_engines, monkeypatch, name, kwargs)
+        assert _comparable(duck) == _comparable(postgres)
+
+
+class TestTheSilverFlagIsTheSwitch:
+    """`KS_READ_SILVER` ships off, and turning `KS_READ_GOLD` on must not be
+    enough to move a filtered request. If it were, the flag would be decoration
+    and "ships off" would be false the day this deploys."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["get_summary_stats", "get_revenue_trend"])
+    async def test_gold_alone_leaves_a_filtered_request_on_duckdb(
+        self, both_engines, monkeypatch, name,
+    ):
+        monkeypatch.setenv("KS_READ_GOLD", "postgres")
+        monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
+        monkeypatch.delenv("KS_READ_SILVER", raising=False)
+
+        calls = []
+        real = type(both_engines).connection
+
+        def _spy(self_, *a, **k):
+            calls.append(1)
+            return real(self_, *a, **k)
+
+        with patch.object(type(both_engines), "connection", _spy):
+            await getattr(both_engines, name)(*WINDOW, brand="BrandA")
+        assert calls, f"{name} with a brand never reached DuckDB with KS_READ_SILVER unset"
