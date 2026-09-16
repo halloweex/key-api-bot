@@ -434,10 +434,11 @@ class TestTheJob:
     def test_the_reconciliation_runs_it(self):
         from core.scheduler import BackgroundScheduler
 
-        source = inspect.getsource(BackgroundScheduler._run_dq_mirror_landing)
-        assert source.index("await reconcile_operational(store)") < source.index(
-            "await reconcile_bot_state()"
-        )
+        # Parsed, not grepped — the function's comments name every check.
+        from tests.unit.test_mirror_landing_isolation import check_order
+
+        order = check_order()
+        assert order.index("reconcile_operational") < order.index("reconcile_bot_state")
 
     def test_the_copy_path_still_does_not_touch_the_bot(self):
         """Step 03's first half needed no change to the bot at all — it reads

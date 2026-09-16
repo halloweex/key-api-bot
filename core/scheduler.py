@@ -1567,59 +1567,92 @@ class BackgroundScheduler:
             store = await get_store()
             error_message = None
             issues = []
+            # Each check in its own try, and why that is not a second layer.
+            #
+            # This used to be one try around all fifteen, so an exception in
+            # any check skipped every check after it — including the five
+            # irreplaceable tables, the bot's state and the order archive —
+            # and the alert gate below then withheld the page for any CRITICAL
+            # already found above it. One flaky round-trip silenced fourteen
+            # verdicts. The ClickHouse comment below already states the rule
+            # for one store ("an optional store being down must not silence
+            # the comparisons of the mandatory ones"); this applies it to all.
+            #
+            # What deliberately does NOT change: the run is still ONE verdict
+            # with ONE age. If any check raised, `error_message` is set — naming
+            # every one, not only the first — so the run still counts as failed
+            # for the run-age watchdog, the digest's delta and alert resolution.
+            # A check that fails every day still goes stale for the canary. The
+            # only change is that the checks that did complete are no longer
+            # thrown away, and a CRITICAL among them still pages.
+            raised: list = []
+
+            async def check(name, run):
+                nonlocal issues
+                try:
+                    issues += await run()
+                except Exception as exc:  # noqa: BLE001 — recorded and named
+                    raised.append(f"{name}: {type(exc).__name__}: {exc}")
+                    logger.exception("Mirror reconciliation check %s raised", name)
+
             try:
                 # The DuckDB read and the Postgres round-trips are deliberately
                 # in separate blocks: the store's lock is not held across the
                 # network.
-                async with store.connection() as conn:
-                    dk_side = read_duckdb_side(conn)
-                issues = await reconcile_mirror(dk_side)
+                async def _landing():
+                    async with store.connection() as conn:
+                        dk_side = read_duckdb_side(conn)
+                    return await reconcile_mirror(dk_side)
+
+                await check("reconcile_mirror", _landing)
                 # Orders are compared by fingerprint and drill-down instead,
                 # and that interleaves the two stores — so it takes the store
                 # and manages its own short acquisitions.
-                issues += await reconcile_orders(store)
+                await check("reconcile_orders", lambda: reconcile_orders(store))
                 # And the two computations of Silver. Same layer: it is the
                 # same question — do the stores agree — asked one level up.
-                issues += await reconcile_silver(store)
+                await check("reconcile_silver", lambda: reconcile_silver(store))
                 # And the UTM classification beside it — the one Silver object
                 # Postgres is shipped rather than computes, so a difference is
                 # a defect in the shipper and not in a projection. Read whole
                 # rather than fingerprinted: the table is almost all text, and
                 # a campaign renamed to another name of the same length moves
                 # no number and no length. Revision 0018.
-                issues += await reconcile_order_utm(store)
+                await check("reconcile_order_utm", lambda: reconcile_order_utm(store))
                 # And the order-level expenses — landing, like the catalogue,
                 # but delta-shipped like orders, so gated on `backfilled_at`
                 # and read whole rather than fingerprinted (revision 0020).
                 from core.mirror_reconciliation import reconcile_expenses
-                issues += await reconcile_expenses(store)
+                await check("reconcile_expenses", lambda: reconcile_expenses(store))
                 # And of Gold, one level up again. Still the same layer, and
                 # here the argument is stronger than for Silver: all three run
-                # inside this one call, so an exception from any of them fails
-                # the whole run. They cannot have different ages, and separate
-                # layers would only invent an age that does not exist. That is
-                # the opposite of `reconciliation_pg`, which is a separate
-                # layer precisely because it *can* stop running on its own.
-                issues += await reconcile_gold(store)
+                # inside this one call, so they cannot have different ages, and
+                # separate layers would only invent an age that does not exist.
+                # That is the opposite of `reconciliation_pg`, which is a
+                # separate layer precisely because it *can* stop running on its
+                # own. (An exception here used to skip every check below it;
+                # see `check` — the layer still has one age and the run is still
+                # failed, but the checks below still run and still page.)
+                await check("reconcile_gold", lambda: reconcile_gold(store))
                 # And the five tables that are neither landing nor computed —
                 # the ones with no source to be rebuilt from. Last because they
                 # are the least likely to be wrong and the most expensive to
                 # read, and because a Silver or Gold finding above them is
                 # almost certainly the better explanation of both.
-                issues += await reconcile_operational(store)
+                await check("reconcile_operational", lambda: reconcile_operational(store))
                 # And the third store. `data/bot.db` is SQLite, not DuckDB, and
                 # it is the only one of the three that is in no backup — which
                 # is the whole reason its fifty rows are being copied at all.
-                issues += await reconcile_bot_state()
+                await check("reconcile_bot_state", lambda: reconcile_bot_state())
                 # And the archive, which is none of the above: it has no
                 # counterpart to be compared against, so this asks whether it
                 # is still being written rather than whether it agrees with
                 # anything. Same layer as the rest for the same reason — one
                 # call, one age, and a fourth layer would invent one.
-                issues += await reconcile_order_versions()
+                await check("reconcile_order_versions", lambda: reconcile_order_versions())
                 # And the buyer landing — step 2. Same layer, same argument.
                 from core.mirror_reconciliation import reconcile_buyers
-                issues += await reconcile_buyers(store)
+                await check("reconcile_buyers", lambda: reconcile_buyers(store))
                 # And the SMS tab's own six (revision 0013), on the way to
                 # answering /sms without DuckDB. Five of them are irreplaceable
                 # in `stock_movements`' sense — a frozen roster cannot be
@@ -1627,16 +1660,16 @@ class BackgroundScheduler:
                 # and with it any measurable lift. Stands down once
                 # KS_SMS_STORE=postgres freezes the DuckDB side.
                 from core.mirror_reconciliation import reconcile_sms
-                issues += await reconcile_sms(store)
+                await check("reconcile_sms", lambda: reconcile_sms(store))
                 # And who may open the dashboard (revision 0016). Same layer,
                 # so it cannot have an age of its own; stands down once
                 # KS_USER_STORE=postgres makes Postgres the writer.
                 from core.mirror_reconciliation import reconcile_dashboard_users
-                issues += await reconcile_dashboard_users(store)
+                await check("reconcile_dashboard_users", lambda: reconcile_dashboard_users(store))
                 # And the витрина, which rebuilds itself and then checks the
                 # materialisation against the same Silver snapshot.
                 from core.pg_vitrina import reconcile_customer_profile
-                issues += await reconcile_customer_profile()
+                await check("reconcile_customer_profile", lambda: reconcile_customer_profile())
                 # And the third engine — steps 5–6. Silver round-trips, then
                 # the two engines' independent Gold aggregations are set
                 # against each other («сверка навсегда»), then the archive's
@@ -1646,11 +1679,14 @@ class BackgroundScheduler:
                 # of the mandatory ones.
                 from core.ch_history import reconcile_ch_history
                 from core.ch_silver import reconcile_clickhouse
-                issues += await reconcile_clickhouse()
-                issues += await reconcile_ch_history()
+                await check("reconcile_clickhouse", lambda: reconcile_clickhouse())
+                await check("reconcile_ch_history", lambda: reconcile_ch_history())
             except Exception as e:
-                error_message = f"{type(e).__name__}: {e}"
-                logger.exception("Mirror reconciliation raised")
+                # Only the imports between the checks can land here now.
+                raised.append(f"setup: {type(e).__name__}: {e}")
+                logger.exception("Mirror reconciliation raised outside a check")
+            if raised:
+                error_message = f"{len(raised)} check(s) raised — " + " | ".join(raised)
 
             ended_at = datetime.now(timezone.utc)
             window_day = ended_at.date()
@@ -1671,7 +1707,14 @@ class BackgroundScheduler:
                 logger.exception(f"Mirror reconciliation persist failed: {e}")
 
             sev = overall_severity(issues, [])
-            if sev == Severity.CRITICAL and not error_message:
+            # A CRITICAL from a check that completed is a verdict, whatever any
+            # other check did; withholding it because an unrelated check raised
+            # is how one flaky round-trip used to silence a lost row. The four
+            # other DQ jobs keep `and not error_message`: each produces a single
+            # verdict, so for them an exception really does mean there is none.
+            # Resolution below stays gated: a run with an unverified check
+            # cannot announce that anything recovered.
+            if sev == Severity.CRITICAL:
                 msg = format_alert_message(
                     MIRROR_LAYER, sev, issues, [],
                     machine_note=machine_attempts_note(),
