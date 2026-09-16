@@ -552,3 +552,195 @@ class TestTheSilverFlagIsTheSwitch:
         with patch.object(type(both_engines), "connection", _spy):
             await getattr(both_engines, name)(*WINDOW, brand="BrandA")
         assert calls, f"{name} with a brand never reached DuckDB with KS_READ_SILVER unset"
+
+
+# ─── The Meilisearch index (KS_READ_SEARCH_INDEX) ────────────────────────────
+#
+# `sync_to_meilisearch` had no tests at all before it moved. These run the real
+# method end to end against a client that captures what it would index, once
+# per engine, and compare the documents — because here the rendering IS the
+# value: `.isoformat()` output is what the index stores and a person sees.
+#
+# Verified beyond this file on the production catalogue: across 20,415 buyers,
+# 47,694 orders and 1,009 products, not one rendered field differed; every
+# difference was a data change between the backup and live Postgres.
+
+class _CaptureMeili:
+    """Stands in for the Meilisearch client and keeps what it would store —
+    passed through the client's own sanitiser, so NaN→None and dates match."""
+
+    def __init__(self):
+        self.docs = {"buyers": {}, "orders": {}, "products": {}}
+
+    async def _take(self, kind, docs):
+        from core.meilisearch_client import _sanitize_documents
+        for d in _sanitize_documents(docs):
+            self.docs[kind][d["id"]] = d
+        return len(docs)
+
+    async def index_buyers(self, docs):
+        return await self._take("buyers", docs)
+
+    async def index_orders(self, docs):
+        return await self._take("orders", docs)
+
+    async def index_products(self, docs):
+        return await self._take("products", docs)
+
+
+async def _index_once(store, monkeypatch, engine):
+    """Run `sync_to_meilisearch` once, as a first (full) sync, on one engine.
+
+    Returns the captured documents and the watermark keys it read and wrote.
+    On the Postgres leg DuckDB's connection is fatal. The watermark primitives
+    are stubbed on both legs: they are `sync_metadata` bookkeeping that stays on
+    DuckDB, and the question here is what the index is built from.
+    """
+    from core.sync_service import SyncService
+
+    capture, keys = _CaptureMeili(), {"read": [], "written": []}
+
+    async def get_last(key="orders"):
+        keys["read"].append(key)
+        return None                      # no watermark → full sync
+
+    async def set_last(key="orders", timestamp=None):
+        keys["written"].append(key)
+
+    if engine == "postgres":
+        monkeypatch.setenv("KS_READ_SEARCH_INDEX", "postgres")
+    else:
+        monkeypatch.delenv("KS_READ_SEARCH_INDEX", raising=False)
+
+    svc = SyncService.__new__(SyncService)
+    svc.store = store
+    patches = [
+        patch("core.sync_service.get_meili_client", return_value=capture),
+        patch.object(store, "get_last_sync_time", side_effect=get_last),
+        patch.object(store, "set_last_sync_time", side_effect=set_last),
+    ]
+    if engine == "postgres":
+        def _no_duckdb(*_a, **_k):
+            raise AssertionError("the index read DuckDB with KS_READ_SEARCH_INDEX=postgres")
+        patches.append(patch.object(type(store), "connection", _no_duckdb))
+
+    for p_ in patches:
+        p_.start()
+    try:
+        stats = await svc.sync_to_meilisearch()
+    finally:
+        for p_ in reversed(patches):
+            p_.stop()
+        monkeypatch.delenv("KS_READ_SEARCH_INDEX", raising=False)
+    return capture.docs, keys, stats
+
+
+class TestTheSearchIndexDocumentsAgree:
+    @pytest.mark.asyncio
+    async def test_every_document_is_identical_including_its_rendered_dates(
+        self, both_engines, monkeypatch,
+    ):
+        duck, _, duck_stats = await _index_once(both_engines, monkeypatch, "duckdb")
+        pg, _, pg_stats = await _index_once(both_engines, monkeypatch, "postgres")
+
+        for kind in ("buyers", "orders", "products"):
+            assert duck[kind], f"no {kind} indexed — the comparison would prove nothing"
+            assert duck[kind] == pg[kind], kind
+        assert duck_stats == pg_stats
+
+    @pytest.mark.asyncio
+    async def test_ordered_at_is_rendered_in_the_zone_duckdb_uses(
+        self, both_engines, monkeypatch,
+    ):
+        """The trap this port exists to avoid. DuckDB renders TIMESTAMPTZ in the
+        session's zone — Kyiv in production, `Etc/UTC` in this image — and
+        asyncpg returns UTC whatever the zone. The contract is not "Kyiv": it is
+        "the same offset DuckDB would have indexed", in whichever environment."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from core.pg_search_index_read import local_zone
+
+        duck, _, _ = await _index_once(both_engines, monkeypatch, "duckdb")
+        pg, _, _ = await _index_once(both_engines, monkeypatch, "postgres")
+
+        duck_off = {i: d["ordered_at"][-6:] for i, d in duck["orders"].items() if d["ordered_at"]}
+        pg_off = {i: d["ordered_at"][-6:] for i, d in pg["orders"].items() if d["ordered_at"]}
+        assert duck_off and duck_off == pg_off
+
+        # And it is the local zone's offset for that instant, DST included.
+        for i, d in pg["orders"].items():
+            if d["ordered_at"]:
+                instant = datetime.fromisoformat(d["ordered_at"])
+                expected = instant.astimezone(ZoneInfo(local_zone())).isoformat()[-6:]
+                assert d["ordered_at"][-6:] == expected, (i, d["ordered_at"], expected)
+
+
+class TestTheSearchIndexUnderANonUtcZone:
+    """The same comparison, with the trap made visible.
+
+    The gate and CI run with `TZ` unset, so DuckDB renders UTC — and UTC is the
+    one zone in which "forgot to convert asyncpg's UTC" and "converted
+    correctly" produce the same string. A mutation that left every timestamp in
+    UTC passed `TestTheSearchIndexDocumentsAgree` in this image, which is how
+    this class came to exist. Production runs `TZ=Europe/Kyiv`, where the defect
+    would show a UTC time on every search result.
+
+    So both sides are put in Kyiv here, and only here: `TZ` for `local_zone()`,
+    and `SET TimeZone` on DuckDB's own session. The suite's zone is left alone,
+    because other two-engine tests compare rendered timestamps and pass in UTC.
+    """
+
+    @pytest.mark.asyncio
+    async def test_both_engines_index_kyiv_offsets_across_dst(self, both_engines, monkeypatch):
+        monkeypatch.setenv("TZ", "Europe/Kyiv")
+        async with both_engines.connection() as conn:
+            conn.execute("SET TimeZone = 'Europe/Kyiv'")
+
+        duck, _, _ = await _index_once(both_engines, monkeypatch, "duckdb")
+        monkeypatch.setenv("TZ", "Europe/Kyiv")      # _index_once cleans env on exit
+        pg, _, _ = await _index_once(both_engines, monkeypatch, "postgres")
+
+        duck_off = {i: d["ordered_at"][-6:] for i, d in duck["orders"].items() if d["ordered_at"]}
+        pg_off = {i: d["ordered_at"][-6:] for i, d in pg["orders"].items() if d["ordered_at"]}
+        assert duck_off, "no orders with ordered_at — the comparison proves nothing"
+        assert set(duck_off.values()) <= {"+02:00", "+03:00"}, (
+            f"DuckDB is not rendering Kyiv here, so this test is not testing the trap: "
+            f"{set(duck_off.values())}")
+        assert pg_off == duck_off
+
+
+class TestTheSearchIndexKeepsAWatermarkPerEngine:
+    """Each engine's watermark is a timestamp on its own clock — `synced_at` in
+    DuckDB, `mirrored_at` in Postgres. Sharing one key works forward and fails
+    on rollback, silently skipping every row stamped between the two clocks."""
+
+    @pytest.mark.asyncio
+    async def test_the_keys_never_meet(self, both_engines, monkeypatch):
+        _, duck_keys, _ = await _index_once(both_engines, monkeypatch, "duckdb")
+        _, pg_keys, _ = await _index_once(both_engines, monkeypatch, "postgres")
+        assert duck_keys == {"read": ["meilisearch"], "written": ["meilisearch"]}
+        assert pg_keys == {"read": ["meilisearch_pg"], "written": ["meilisearch_pg"]}
+
+
+class TestTheZoneIsResolvedTheWayDuckDBResolvesIt:
+    """Pure. Measured in both images before `local_zone` was written: production
+    sets `TZ=Europe/Kyiv` while `/etc/localtime` points at `Etc/UTC`, and DuckDB
+    renders Kyiv; the gate leaves `TZ` unset and DuckDB renders `Etc/UTC`."""
+
+    def test_tz_wins_when_it_is_set(self, monkeypatch):
+        from core.pg_search_index_read import local_zone
+        monkeypatch.setenv("TZ", "Europe/Kyiv")
+        assert local_zone() == "Europe/Kyiv"
+
+    def test_a_leading_colon_is_the_posix_spelling_of_the_same_zone(self, monkeypatch):
+        from core.pg_search_index_read import local_zone
+        monkeypatch.setenv("TZ", ":Europe/Kyiv")
+        assert local_zone() == "Europe/Kyiv"
+
+    def test_without_tz_it_is_whatever_localtime_names(self, monkeypatch):
+        from pathlib import Path
+        from core.pg_search_index_read import local_zone
+        monkeypatch.delenv("TZ", raising=False)
+        resolved = str(Path("/etc/localtime").resolve())
+        expected = resolved.split("zoneinfo/", 1)[1] if "zoneinfo/" in resolved else "UTC"
+        assert local_zone() == expected
