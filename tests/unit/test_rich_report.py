@@ -14,6 +14,7 @@ import re
 from datetime import date
 
 import pytest
+from contextlib import asynccontextmanager
 
 from core import telegram_alerts
 from core.telegram_alerts import sign_html_for, signature_line
@@ -57,6 +58,23 @@ def _report(**overrides) -> WeeklyReport:
     )
     fields.update(overrides)
     return WeeklyReport(**fields)
+
+
+class _Held:
+    """A `store` handing back a connection the test already holds.
+
+    `fetch_daily` and `fetch_channels` take a store and open their own
+    connection since `KS_READ_WEEKLY` routes them; the store lock is not
+    reentrant, so passing the real store from inside an open block would hang.
+    Same shim as `tests/unit/test_weekly_report.py`.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    @asynccontextmanager
+    async def connection(self):
+        yield self._conn
 
 
 class TestFormatReportRich:
@@ -379,7 +397,8 @@ class TestFetchDaily:
             async with store.connection() as conn:
                 _gold(conn, date(2026, 8, 31), 1_000, 3)
                 _gold(conn, date(2026, 9, 6), 500, 1)
-                days = fetch_daily(conn, date(2026, 8, 31), date(2026, 9, 6), "retail")
+                days = await fetch_daily(
+                    _Held(conn), date(2026, 8, 31), date(2026, 9, 6), "retail")
         finally:
             await store.close()
         assert [d.day.weekday() for d in days] == list(range(7))
@@ -398,8 +417,8 @@ class TestFetchChannels:
                       shopify_revenue=200, shopify_orders=2)
                 _gold(conn, date(2026, 8, 24), 50, 1,
                       shopify_revenue=50, shopify_orders=1)
-                channels = fetch_channels(
-                    conn, date(2026, 8, 31), date(2026, 9, 6),
+                channels = await fetch_channels(
+                    _Held(conn), date(2026, 8, 31), date(2026, 9, 6),
                     date(2026, 8, 24), date(2026, 8, 30), "retail")
         finally:
             await store.close()
