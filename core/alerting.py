@@ -120,6 +120,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "warehouse:sales_type_partition": _c("Gold's known types cover Silver again"),
     "warehouse:refresh_errored": _c("a refresh completes without raising"),
     "warehouse:refresh_errored_exhausted": _c("a refresh completes without raising"),
+    # The Postgres derivation on its own signal (chain 2, KS_PG_DERIVE=own).
+    # Its own group, so a DuckDB tick's clean pass cannot resolve them.
+    "warehouse_pg:derive_failed": _c("a Postgres derivation completes"),
+    "warehouse_pg:validation_failed": _c("a Postgres derivation passes validation"),
+    "warehouse_pg:sales_type_partition": _c("Postgres Gold's known types cover Silver again"),
     "warehouse:backup_preflight": _EVENT,   # one refused attempt, that night's fact
     "warehouse:backup_failed": _EVENT,      # one failed copy/validation
 

@@ -241,6 +241,13 @@ class BackgroundScheduler:
             EVENT_JOB_MISSED
         )
 
+        # Who derives Postgres' Silver and Gold, read once for the life of the
+        # process — never on the write path, where the marks ride inside the
+        # landing writers' transactions. See `core/pg_derivation.py`.
+        from core import pg_derivation
+
+        pg_derivation.configure_mode()
+
         # Register jobs
         await self._register_jobs()
 
@@ -697,6 +704,24 @@ class BackgroundScheduler:
         # ('clickhouse.silver_orders' / 'gold_daily_revenue' /
         # 'order_versions'); fidelity and the engine-vs-engine Gold verdict
         # are checked daily inside dq_mirror_landing.
+        # Job: Postgres derives on its own signal (chain 2, KS_PG_DERIVE=own).
+        # Registered only in that mode; under `piggyback` the DuckDB tick below
+        # keeps waking the Postgres rebuild exactly as before. Every minute,
+        # but it rebuilds only when something is owed, on the first tick of a
+        # process, or on the hourly heartbeat — and never inside the floor.
+        from core import pg_derivation
+
+        if pg_derivation.owns():
+            self._add_job(
+                job_id="pg_warehouse_derive",
+                name="Postgres: derive Silver, Gold and the customer profile",
+                description="Rebuild the derived layers when meta.derivation_signal says one is owed",
+                func=self._run_pg_derivation,
+                trigger=IntervalTrigger(minutes=1),
+                max_instances=1,
+                coalesce=True,
+            )
+
         self._add_job(
             job_id="ch_sync",
             name="ClickHouse: silver → gold + history",
@@ -1297,16 +1322,24 @@ class BackgroundScheduler:
         what should happen — a Gold rebuilt over a stale Silver would
         stamp a fresh watermark on a stale answer, and that reads clean.
         """
-        logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
-        logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
-        # And the витрина, from the same Silver in the same tick — one
-        # floor, one тик, Gold's own reasoning one consumer down.
-        from core.pg_vitrina import rebuild_customer_profile
+        from core import pg_derivation
 
-        logger.info(
-            "Rebuilding customer profile in Postgres: %s",
-            await rebuild_customer_profile(),
-        )
+        # Under KS_PG_DERIVE=own the three derivations belong to
+        # `_run_pg_derivation`, on Postgres' own signal. Only the UTM ship
+        # stays on this tick, deliberately: it copies DuckDB's parse, and this
+        # is the one moment that parse is known to be finished. Moving it onto
+        # the Postgres signal would copy an empty table after a Sunday compact.
+        if not pg_derivation.owns():
+            logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
+            logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
+            # And the витрина, from the same Silver in the same tick — one
+            # floor, one тик, Gold's own reasoning one consumer down.
+            from core.pg_vitrina import rebuild_customer_profile
+
+            logger.info(
+                "Rebuilding customer profile in Postgres: %s",
+                await rebuild_customer_profile(),
+            )
         # And the UTM classification — shipped, not derived, because its body
         # is a Python parser (revision 0018). It rides this floor rather than
         # the hourly operational one because a stale row here does not read as
@@ -1325,6 +1358,159 @@ class BackgroundScheduler:
             "Shipping order UTM to Postgres: %s",
             await ship_order_utm(await get_store()),
         )
+
+    # Whether this process has derived yet. The first tick rebuilds regardless
+    # of the signal: a deploy is exactly when an owed rebuild used to be lost.
+    _pg_derive_ran = False
+
+    async def _run_pg_derivation(
+        self, *, trigger: Optional[str] = None, force: bool = False,
+    ) -> Dict[str, Any]:
+        """Rebuild Postgres' derived layers on Postgres' own signal. Never raises.
+
+        Chain 2, steps 4–6. Owed state is durable (`meta.derivation_signal`),
+        so a kill or a deploy cannot lose a rebuild; the floor is measured
+        against the last attempt recorded there, not a process clock; every
+        attempt writes a journal row; a failure is stamped on the layer that
+        raised, alerted, and leaves `built` where it was.
+
+        `requested` is read before Silver's snapshot is taken, so a mark that
+        lands during the rebuild stays owed and is rebuilt next time — at least
+        once, and every rebuild is whole, so twice is harmless.
+
+        Takes `_heavy_job_lock`: the validation's exact row count relies on no
+        orders writer running beside it, and every one of them holds that lock.
+        """
+        import os
+
+        from core import pg_derivation as derivation
+        from core.pg import get_pool, require_revision
+
+        if not derivation.owns():
+            return {"skipped": True, "reason": "KS_PG_DERIVE is not own"}
+
+        try:
+            pool = await get_pool()
+            await require_revision()
+            floor = timedelta(seconds=int(os.getenv("KS_PG_SILVER_INTERVAL_S", "600")))
+            async with pool.acquire() as conn:
+                requested, built, built_at = await derivation.read_owed(conn)
+                last_attempt = await derivation.last_attempt_at(conn)
+            run, why = derivation.due(
+                requested=requested, built=built, built_at=built_at,
+                last_attempt=last_attempt, now=datetime.now(timezone.utc),
+                floor=floor, first_tick=not BackgroundScheduler._pg_derive_ran,
+                force=force,
+            )
+        except Exception as e:
+            logger.error("Postgres derivation could not read its signal: %s", e,
+                         exc_info=True)
+            return {"skipped": True, "reason": f"signal unreadable: {e}"}
+        if not run:
+            return {"skipped": True, "reason": why}
+
+        async with self._heavy_job_lock:
+            return await self._derive_pg_layers(pool, trigger or why)
+
+    async def _derive_pg_layers(self, pool, trigger: str) -> Dict[str, Any]:
+        """One whole derivation, its validation, its journal row and its alerts."""
+        import html
+
+        from core import pg_derivation as derivation
+        from core.pg_gold import GOLD_TABLE, rebuild_gold
+        from core.pg_landing import _record_failure
+        from core.pg_silver import PG_LAYER_LOCK, SILVER_TABLE, rebuild_silver
+        from core.pg_vitrina import rebuild_customer_profile
+
+        started = datetime.now(timezone.utc)
+        counts: Dict[str, Optional[int]] = {}
+        stage = "signal"
+        seen: Optional[int] = None
+        BackgroundScheduler._pg_derive_ran = True
+        try:
+            async with PG_LAYER_LOCK:
+                async with pool.acquire() as conn:
+                    seen, _built, _at = await derivation.read_owed(conn)
+                stage = SILVER_TABLE
+                counts["silver_rows"] = (await rebuild_silver(pool))["rows"]
+                stage = GOLD_TABLE
+                gold = await rebuild_gold(pool)
+                counts["gold_rows"], counts["gold_cells"] = gold["rows"], gold["cells"]
+                stage = "app.customer_profile"
+                counts["profile_rows"] = (await rebuild_customer_profile(pool))["rows"]
+                stage = "validation"
+                async with pool.acquire() as conn:
+                    validation = await derivation.validate(conn)
+                    await derivation.complete(conn, seen)
+                    await derivation.record_run(
+                        conn, trigger=trigger, started_at=started,
+                        ended_at=datetime.now(timezone.utc), requested_seen=seen,
+                        counts=counts, validation_passed=validation["passed"],
+                        validation=validation,
+                    )
+        except Exception as e:
+            logger.error("Postgres derivation failed at %s: %s", stage, e, exc_info=True)
+            if stage in (SILVER_TABLE, GOLD_TABLE):
+                await _record_failure(stage, f"{type(e).__name__}: {e}")
+            try:
+                async with pool.acquire() as conn:
+                    await derivation.record_run(
+                        conn, trigger=trigger, started_at=started,
+                        ended_at=datetime.now(timezone.utc), requested_seen=seen,
+                        counts=counts, error=f"{stage}: {type(e).__name__}: {e}",
+                    )
+            except Exception as journal_error:  # noqa: BLE001 — already logged above
+                logger.error("Postgres derivation journal unwritable: %s", journal_error)
+            await self._pg_derivation_alert(
+                "warehouse_pg:derive_failed",
+                f"Postgres derivation: failed at {html.escape(stage)} — {type(e).__name__}\n"
+                "→ The rebuild stays owed; check the web log, then POST /api/warehouse/refresh",
+            )
+            return {"status": "error", "stage": stage, "error": str(e), "trigger": trigger}
+
+        still: List[str] = []
+        if not validation["passed"]:
+            still.append("warehouse_pg:validation_failed")
+            failed = [k for k in ("row_count_match", "checksum_match", "cells_match",
+                                  "rollup_match") if not validation[k]]
+            await self._pg_derivation_alert(
+                "warehouse_pg:validation_failed",
+                f"Postgres derivation: validation failed ({', '.join(failed)})\n"
+                f"missing cells {validation['missing_cells']}, extra {validation['extra_cells']}, "
+                f"roll-up mismatches {validation['rollup_mismatch_cells']}\n"
+                "→ Read meta.derivation_runs.validation for the last run",
+            )
+        if not validation["partition_exhaustive"]:
+            still.append("warehouse_pg:sales_type_partition")
+            detail = ", ".join(
+                f"{html.escape(str(u['sales_type'] or 'NULL'))}=₴{u['revenue']:,.2f}"
+                for u in validation["unknown_sales_types"]) or "Gold is short of Silver"
+            await self._pg_derivation_alert(
+                "warehouse_pg:sales_type_partition",
+                f"Postgres Gold: revenue in an unknown sales_type — {detail}\n"
+                "→ A type outside the known set; check the managers",
+            )
+        try:
+            from core.alerting import resolve_group
+
+            await resolve_group("warehouse_pg", still_firing=still)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("warehouse_pg resolve failed: %s", e)
+
+        result = {"status": "success", "trigger": trigger, "requested_seen": seen,
+                  **counts, "validation_passed": validation["passed"]}
+        logger.info("Postgres derivation complete: %s", result)
+        return result
+
+    @staticmethod
+    async def _pg_derivation_alert(key: str, message: str) -> None:
+        try:
+            from core.alerting import raise_alert
+
+            await raise_alert(message, conditions=[key], bucket=key,
+                              group="warehouse_pg")
+        except Exception as e:  # noqa: BLE001 — an alert must not break the job
+            logger.warning("warehouse_pg alert failed (%s): %s", key, e)
 
     async def _run_backup(self) -> Dict[str, Any]:
         """Daily consistent backup of the DuckDB warehouse (A9-1)."""

@@ -133,6 +133,13 @@ async def _write(buyers_rows, contacts_by_buyer) -> None:
                 contact_count = 0
             await conn.execute(_WATERMARK_OK, BUYERS_STATE, len(buyers_rows))
             await conn.execute(_WATERMARK_OK, CONTACTS_STATE, contact_count)
+            # `app.customer_profile` joins `bronze.buyers`. A no-op unless
+            # KS_PG_DERIVE=own; `core/pg_derivation.py` says why it cannot
+            # cost this transaction.
+            if buyers_rows:
+                from core.pg_derivation import mark_if_owned
+
+                await mark_if_owned(conn)
 
 
 async def _record_failure(error: str) -> None:

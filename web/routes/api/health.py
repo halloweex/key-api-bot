@@ -42,10 +42,19 @@ async def _mirror_freshness() -> "dict | None":
         if _mirror_cache["data"] is not None and now < _mirror_cache["expires_at"]:
             return _mirror_cache["data"]
         try:
-            from core.mirror_reconciliation import fetch_mirror_freshness
+            from core import pg_derivation
+            from core.mirror_reconciliation import WATCHED_MIRRORS, fetch_mirror_freshness
             from core.pg import get_pool
 
-            data = await fetch_mirror_freshness(await get_pool())
+            # Under KS_PG_DERIVE=own the derived layers are watched too, with
+            # the limit declared here: a derivation that simply stops being
+            # triggered raises nothing anywhere, and only its watermarks age.
+            owned = pg_derivation.owns()
+            tables = WATCHED_MIRRORS + (pg_derivation.DERIVED_TABLES if owned else ())
+            data = await fetch_mirror_freshness(await get_pool(), tables=tables)
+            if owned:
+                for table in pg_derivation.DERIVED_TABLES:
+                    data[table]["max_age_s"] = pg_derivation.DERIVED_MAX_AGE_S
         except Exception as e:
             # A host with no Postgres configured raises here on every call, and
             # that is not an error worth a warning every minute.

@@ -111,6 +111,11 @@ async def write_managers(
             await conn.execute(
                 _WATERMARK_OK, CLASSIFICATIONS_TABLE, len(classifications),
             )
+            # `sales_type` is decided from these two tables, so Silver owes a
+            # rebuild. `core/pg_derivation.py`; a no-op unless KS_PG_DERIVE=own.
+            from core.pg_derivation import mark_if_owned
+
+            await mark_if_owned(conn)
 
 
 async def replicate_managers(store) -> Dict[str, Any]:
