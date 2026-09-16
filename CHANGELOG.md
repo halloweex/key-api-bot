@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.203
+
+- Stage 4, chain 8: manual expenses written to Postgres, behind KS_WRITE_EXPENSES
+- Keep .env copies out of a public tree
+
+
 ## 3.0.202
 
 - Reconciliations must not silence each other
