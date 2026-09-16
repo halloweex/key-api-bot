@@ -694,16 +694,6 @@ class BackgroundScheduler:
             first_run_delay_s=90,
         )
 
-        # Job: ClickHouse sync (hourly) — steps 5–6 of «Одна бронза»
-        #
-        # Silver ships whole (staging + EXCHANGE), Gold is then DERIVED inside
-        # ClickHouse from that silver — the same GOLD_MEASURES text, third
-        # engine — and the archive appends above its own MAX(id). Stands down
-        # silently while KS_CH_URL is unset, so registering it is safe on a
-        # host with no ClickHouse at all. Freshness rides meta.mirror_state
-        # ('clickhouse.silver_orders' / 'gold_daily_revenue' /
-        # 'order_versions'); fidelity and the engine-vs-engine Gold verdict
-        # are checked daily inside dq_mirror_landing.
         # Job: Postgres derives on its own signal (chain 2, KS_PG_DERIVE=own).
         # Registered only in that mode; under `piggyback` the DuckDB tick below
         # keeps waking the Postgres rebuild exactly as before. Every minute,
@@ -722,6 +712,16 @@ class BackgroundScheduler:
                 coalesce=True,
             )
 
+        # Job: ClickHouse sync (hourly) — steps 5–6 of «Одна бронза»
+        #
+        # Silver ships whole (staging + EXCHANGE), Gold is then DERIVED inside
+        # ClickHouse from that silver — the same GOLD_MEASURES text, third
+        # engine — and the archive appends above its own MAX(id). Stands down
+        # silently while KS_CH_URL is unset, so registering it is safe on a
+        # host with no ClickHouse at all. Freshness rides meta.mirror_state
+        # ('clickhouse.silver_orders' / 'gold_daily_revenue' /
+        # 'order_versions'); fidelity and the engine-vs-engine Gold verdict
+        # are checked daily inside dq_mirror_landing.
         self._add_job(
             job_id="ch_sync",
             name="ClickHouse: silver → gold + history",
