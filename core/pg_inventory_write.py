@@ -69,7 +69,9 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
+)
 
 from core.landing_rows import (
     OFFER_COLUMNS,
@@ -373,6 +375,41 @@ async def record_inventory_snapshot(
                 day,
             )
             return True
+
+
+async def read_snapshot_calendar(
+    window_floor: date,
+) -> Tuple[Optional[date], FrozenSet[date]]:
+    """The two facts the continuity check needs, from the store that writes.
+
+    Returns `(first_day, present_days)` — the earliest snapshot ever taken, and
+    every distinct day on or after `window_floor` that has one. Both come from
+    one round trip because the check needs them together and a second call
+    could straddle the 01:00 job.
+
+    This exists because the check that guards `inventory_sku_history` runs in a
+    **sync** function (`check_internal_integrity`) while Postgres reads are
+    async. Rather than bridge a loop inside the check — which would put an
+    event loop underneath twenty other checks that do not need one — the async
+    job reads the facts and hands them over, and the check stays pure. That is
+    `compare_table`'s arrangement exactly: it takes two already-read mappings
+    and does not care which engine either came out of.
+    """
+    from core.pg import get_pool, require_revision
+
+    pool = await get_pool()
+    await require_revision()
+    async with pool.acquire() as conn:
+        first_day = await conn.fetchval(
+            "SELECT MIN(date) FROM app.inventory_sku_history")
+        if first_day is None:
+            return None, frozenset()
+        rows = await conn.fetch(
+            "SELECT DISTINCT date FROM app.inventory_sku_history "
+            "WHERE date >= $1",
+            window_floor,
+        )
+    return first_day, frozenset(r["date"] for r in rows)
 
 
 async def set_last_sync_time(key: str, value: str) -> None:

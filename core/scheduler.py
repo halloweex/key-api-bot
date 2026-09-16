@@ -1420,7 +1420,7 @@ class BackgroundScheduler:
 
     async def _run_dq_integrity(self) -> Dict[str, Any]:
         """Layer-1 integrity scan. Pure DB reads, no external I/O."""
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
         from core.data_quality import (
             Severity,
             alert_fingerprint,
@@ -1440,9 +1440,33 @@ class BackgroundScheduler:
             store = await get_store()
             error_message = None
             issues = []
+
+            # The continuity check over `inventory_sku_history` follows the
+            # writer, and it runs inside a sync function. This is the one
+            # caller that knows which engine owns the table, so it reads the
+            # facts and hands them over; everything else in the scan reads
+            # DuckDB through `conn` as before. A read that fails leaves the
+            # calendar None, and the check then says out loud that it is not
+            # watching rather than reporting gaps it cannot see.
+            inventory_calendar = None
+            try:
+                from core.pg_inventory_write import (
+                    writes_postgres, read_snapshot_calendar,
+                )
+                if writes_postgres():
+                    from core.data_quality import INVENTORY_CONTINUITY_WINDOW_DAYS
+                    floor = (datetime.now().astimezone().date()
+                             - timedelta(days=INVENTORY_CONTINUITY_WINDOW_DAYS))
+                    inventory_calendar = await read_snapshot_calendar(floor)
+            except Exception as e:
+                logger.error(
+                    "inventory snapshot calendar unreadable, continuity check "
+                    "will report itself unwatched: %s", e)
+
             try:
                 async with store.connection() as conn:
-                    issues = check_internal_integrity(conn)
+                    issues = check_internal_integrity(
+                        conn, inventory_calendar=inventory_calendar)
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("DQ integrity scan raised")
