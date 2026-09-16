@@ -730,10 +730,11 @@ class TestTheJob:
         an operational one, so it should be read first."""
         from core.scheduler import BackgroundScheduler
 
-        source = inspect.getsource(BackgroundScheduler._run_dq_mirror_landing)
-        assert source.index("await reconcile_gold(store)") < source.index(
-            "await reconcile_operational(store)"
-        )
+        # Parsed, not grepped — the function's comments name every check.
+        from tests.unit.test_mirror_landing_isolation import check_order
+
+        order = check_order()
+        assert order.index("reconcile_gold") < order.index("reconcile_operational")
 
     @pytest.mark.asyncio
     async def test_the_job_returns_both_copies(self):

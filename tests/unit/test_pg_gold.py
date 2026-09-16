@@ -617,10 +617,11 @@ class TestTheJobRunsIt:
 
         from core.scheduler import BackgroundScheduler
 
-        source = inspect.getsource(BackgroundScheduler._run_dq_mirror_landing)
-        assert source.index("await reconcile_silver(store)") < source.index(
-            "await reconcile_gold(store)"
-        )
+        # Parsed, not grepped — the function's comments name every check.
+        from tests.unit.test_mirror_landing_isolation import check_order
+
+        order = check_order()
+        assert order.index("reconcile_silver") < order.index("reconcile_gold")
 
     def test_the_gold_table_is_watched_under_the_same_layer(self):
         """All three comparisons run inside one call, so they cannot have
