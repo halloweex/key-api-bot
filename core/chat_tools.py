@@ -419,6 +419,52 @@ def _get_date_range(period: str) -> tuple[date, date]:
         return today, today
 
 
+async def _chat_run(sql: str, params, *, mode: str = "all"):
+    """Run one tool query against whichever engine `KS_READ_CHAT` names.
+
+    The bodies carry `{gold_daily_revenue}`, `{order_lines}` and
+    `{gold_revenue_rollup}` holes, filled **here** for the engine about to
+    answer, never at the call site. `{gold_revenue_rollup}` is the one that
+    bites: Postgres' Gold holds a roll-up row and a row per `source_id`, so a
+    bare `SUM(revenue)` there counts every order twice. No fallback — see
+    `core/pg_chat_read.py`.
+    """
+    from core import pg_chat_read
+    from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+
+    params = list(params)
+    if pg_chat_read.enabled() and pg_chat_read.available():
+        rows = await pg_chat_read.fetch(render_tables(sql, POSTGRES), params)
+        return (rows[0] if rows else None) if mode == "one" else rows
+
+    store = await get_store()
+    async with store.connection() as conn:
+        cur = conn.execute(render_tables(sql, DUCKDB), params)
+        return cur.fetchone() if mode == "one" else cur.fetchall()
+
+
+def _revenue_totals_sql(sales_type: str) -> str:
+    """The totals body `_get_revenue_summary` and `_get_revenue_by_dates` share
+    — it was written out twice, identically."""
+    sales_filter = ""
+    if sales_type == "retail":
+        sales_filter = "AND sales_type = 'retail'"
+    elif sales_type == "b2b":
+        sales_filter = "AND sales_type = 'b2b'"
+    return f"""
+            SELECT
+                COALESCE(SUM(revenue), 0) as total_revenue,
+                COALESCE(SUM(orders_count), 0) as total_orders,
+                COALESCE(AVG(avg_order_value), 0) as avg_order_value,
+                COALESCE(SUM(returns_revenue), 0) as returns_revenue,
+                COALESCE(SUM(returns_count), 0) as returns_count
+            FROM {{gold_daily_revenue}}
+            WHERE date BETWEEN ? AND ?
+                AND {{gold_revenue_rollup}}
+            {sales_filter}
+        """
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # TOOL EXECUTORS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -533,55 +579,41 @@ async def execute_tool(name: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _get_revenue_summary(period: str, sales_type: str) -> Dict[str, Any]:
     """Get revenue summary for a period."""
-    store = await get_store()
     start_date, end_date = _get_date_range(period)
 
-    async with store.connection() as conn:
-        sales_filter = ""
-        if sales_type == "retail":
-            sales_filter = "AND sales_type = 'retail'"
-        elif sales_type == "b2b":
-            sales_filter = "AND sales_type = 'b2b'"
+    sql = _revenue_totals_sql(sales_type)
+    result = await _chat_run(sql, [start_date, end_date], mode="one")
 
-        result = conn.execute(f"""
-            SELECT
-                COALESCE(SUM(revenue), 0) as total_revenue,
-                COALESCE(SUM(orders_count), 0) as total_orders,
-                COALESCE(AVG(avg_order_value), 0) as avg_order_value,
-                COALESCE(SUM(returns_revenue), 0) as returns_revenue,
-                COALESCE(SUM(returns_count), 0) as returns_count
-            FROM gold_daily_revenue
-            WHERE date BETWEEN ? AND ?
-            {sales_filter}
-        """, [start_date, end_date]).fetchone()
-
-        return {
-            "period": period,
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "total_revenue": float(result[0] or 0),
-            "total_orders": int(result[1] or 0),
-            "avg_order_value": float(result[2] or 0),
-            "returns_revenue": float(result[3] or 0),
-            "returns_count": int(result[4] or 0)
-        }
+    return {
+        "period": period,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "total_revenue": float(result[0] or 0),
+        "total_orders": int(result[1] or 0),
+        "avg_order_value": float(result[2] or 0),
+        "returns_revenue": float(result[3] or 0),
+        "returns_count": int(result[4] or 0)
+    }
 
 
 async def _get_top_products(period: str, by: str, limit: int) -> Dict[str, Any]:
     """Get top products by revenue or quantity."""
-    store = await get_store()
     start_date, end_date = _get_date_range(period)
 
-    async with store.connection() as conn:
-        order_by = "total_revenue DESC" if by == "revenue" else "total_quantity DESC"
+    order_by = "total_revenue DESC" if by == "revenue" else "total_quantity DESC"
 
-        results = conn.execute(f"""
+    # The tiebreak is new, and it is the port's one change of behaviour: two
+    # products level on the sort key fell either side of `LIMIT` in whatever
+    # order the engine happened to produce, so the two engines — or two calls
+    # to one — could name different "top" products. An id, never a name: the
+    # engines collate text differently.
+    results = await _chat_run(f"""
             SELECT
                 COALESCE(l.catalog_product_name, l.product_name) as product_name,
                 l.brand,
                 SUM(l.quantity) as total_quantity,
                 SUM(l.line_amount) as total_revenue
-            FROM silver_order_lines l
+            FROM {{order_lines}} l
             -- NOTE: no `is_active_source` here, unlike every dashboard page.
             -- Deliberately left as it was — this is a conversion, not a fix —
             -- but it means the assistant counts Opencart, which was retired,
@@ -590,65 +622,59 @@ async def _get_top_products(period: str, by: str, limit: int) -> Dict[str, Any]:
                 AND NOT l.is_return
                 AND l.sales_type = 'retail'
             GROUP BY COALESCE(l.catalog_product_name, l.product_name), l.brand
-            ORDER BY {order_by}
+            ORDER BY {order_by}, MIN(l.product_id)
             LIMIT ?
-        """, [start_date, end_date, limit]).fetchall()
+        """, [start_date, end_date, limit])
 
-        products = []
-        for row in results:
-            products.append({
-                "name": row[0],
-                "brand": row[1],
-                "quantity": int(row[2] or 0),
-                "revenue": float(row[3] or 0)
-            })
+    products = []
+    for row in results:
+        products.append({
+            "name": row[0],
+            "brand": row[1],
+            "quantity": int(row[2] or 0),
+            "revenue": float(row[3] or 0)
+        })
 
-        return {
-            "period": period,
-            "sorted_by": by,
-            "products": products
-        }
+    return {
+        "period": period,
+        "sorted_by": by,
+        "products": products
+    }
 
 
 async def _get_source_breakdown(period: str) -> Dict[str, Any]:
     """Get sales breakdown by source."""
-    store = await get_store()
+    from core import pg_chat_read
+    from core.sql_dialect import DUCKDB, POSTGRES, channel_totals_items
+
     start_date, end_date = _get_date_range(period)
 
-    async with store.connection() as conn:
-        result = conn.execute("""
-            SELECT
-                COALESCE(SUM(instagram_revenue), 0) as instagram_revenue,
-                COALESCE(SUM(instagram_orders), 0) as instagram_orders,
-                COALESCE(SUM(telegram_revenue), 0) as telegram_revenue,
-                COALESCE(SUM(telegram_orders), 0) as telegram_orders,
-                COALESCE(SUM(shopify_revenue), 0) as shopify_revenue,
-                COALESCE(SUM(shopify_orders), 0) as shopify_orders
-            FROM gold_daily_revenue
-            WHERE date BETWEEN ? AND ?
-                AND sales_type = 'retail'
-        """, [start_date, end_date]).fetchone()
+    # Deliberately NO `{gold_revenue_rollup}`: Postgres spells a channel as
+    # `SUM(...) FILTER (WHERE source_id = n)`, which reads the fine rows, and
+    # the roll-up row has no source_id. The expressions differ by engine, so
+    # the dialect is chosen here — the same compromise as the weekly report's
+    # `fetch_channels`, and safe for the same reason: there is no fallback to
+    # carry one engine's spelling into the other.
+    dialect = (POSTGRES if (pg_chat_read.enabled() and pg_chat_read.available())
+               else DUCKDB)
+    channels = channel_totals_items(dialect)
+    cols = ", ".join(f"{rev}, {orders}" for _name, rev, orders in channels)
+    result = await _chat_run(
+        f"SELECT {cols} FROM {{gold_daily_revenue}} "
+        "WHERE date BETWEEN ? AND ? AND sales_type = 'retail'",
+        [start_date, end_date], mode="one")
 
-        return {
-            "period": period,
-            "sources": [
-                {
-                    "name": "Instagram",
-                    "revenue": float(result[0] or 0),
-                    "orders": int(result[1] or 0)
-                },
-                {
-                    "name": "Telegram",
-                    "revenue": float(result[2] or 0),
-                    "orders": int(result[3] or 0)
-                },
-                {
-                    "name": "Shopify",
-                    "revenue": float(result[4] or 0),
-                    "orders": int(result[5] or 0)
-                }
-            ]
-        }
+    return {
+        "period": period,
+        "sources": [
+            {
+                "name": name,
+                "revenue": float(result[2 * i] or 0),
+                "orders": int(result[2 * i + 1] or 0)
+            }
+            for i, (name, _rev, _orders) in enumerate(channels)
+        ]
+    }
 
 
 async def _compare_periods(current_period: str, previous_period: str) -> Dict[str, Any]:
@@ -677,38 +703,21 @@ async def _compare_periods(current_period: str, previous_period: str) -> Dict[st
 
 async def _get_revenue_by_dates(start_date: str, end_date: str, sales_type: str) -> Dict[str, Any]:
     """Get revenue summary for custom date range."""
-    store = await get_store()
     start = date.fromisoformat(start_date)
     end = date.fromisoformat(end_date)
 
-    async with store.connection() as conn:
-        sales_filter = ""
-        if sales_type == "retail":
-            sales_filter = "AND sales_type = 'retail'"
-        elif sales_type == "b2b":
-            sales_filter = "AND sales_type = 'b2b'"
+    sql = _revenue_totals_sql(sales_type)
+    result = await _chat_run(sql, [start, end], mode="one")
 
-        result = conn.execute(f"""
-            SELECT
-                COALESCE(SUM(revenue), 0) as total_revenue,
-                COALESCE(SUM(orders_count), 0) as total_orders,
-                COALESCE(AVG(avg_order_value), 0) as avg_order_value,
-                COALESCE(SUM(returns_revenue), 0) as returns_revenue,
-                COALESCE(SUM(returns_count), 0) as returns_count
-            FROM gold_daily_revenue
-            WHERE date BETWEEN ? AND ?
-            {sales_filter}
-        """, [start, end]).fetchone()
-
-        return {
-            "start_date": start_date,
-            "end_date": end_date,
-            "total_revenue": float(result[0] or 0),
-            "total_orders": int(result[1] or 0),
-            "avg_order_value": float(result[2] or 0),
-            "returns_revenue": float(result[3] or 0),
-            "returns_count": int(result[4] or 0)
-        }
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "total_revenue": float(result[0] or 0),
+        "total_orders": int(result[1] or 0),
+        "avg_order_value": float(result[2] or 0),
+        "returns_revenue": float(result[3] or 0),
+        "returns_count": int(result[4] or 0)
+    }
 
 
 async def _compare_date_ranges(
@@ -742,34 +751,33 @@ async def _compare_date_ranges(
 
 async def _get_customer_insights(period: str) -> Dict[str, Any]:
     """Get customer insights for a period."""
-    store = await get_store()
     start_date, end_date = _get_date_range(period)
 
-    async with store.connection() as conn:
-        result = conn.execute("""
+    result = await _chat_run("""
             SELECT
                 COALESCE(SUM(unique_customers), 0) as total_customers,
                 COALESCE(SUM(new_customers), 0) as new_customers,
                 COALESCE(SUM(returning_customers), 0) as returning_customers,
                 COALESCE(AVG(avg_order_value), 0) as avg_order_value
-            FROM gold_daily_revenue
+            FROM {gold_daily_revenue}
             WHERE date BETWEEN ? AND ?
+                AND {gold_revenue_rollup}
                 AND sales_type = 'retail'
-        """, [start_date, end_date]).fetchone()
+        """, [start_date, end_date], mode="one")
 
-        total = int(result[0] or 0)
-        new_customers = int(result[1] or 0)
-        returning = int(result[2] or 0)
-        repeat_rate = (returning / total * 100) if total > 0 else 0
+    total = int(result[0] or 0)
+    new_customers = int(result[1] or 0)
+    returning = int(result[2] or 0)
+    repeat_rate = (returning / total * 100) if total > 0 else 0
 
-        return {
-            "period": period,
-            "total_customers": total,
-            "new_customers": new_customers,
-            "returning_customers": returning,
-            "repeat_rate": round(repeat_rate, 1),
-            "avg_order_value": float(result[3] or 0)
-        }
+    return {
+        "period": period,
+        "total_customers": total,
+        "new_customers": new_customers,
+        "returning_customers": returning,
+        "repeat_rate": round(repeat_rate, 1),
+        "avg_order_value": float(result[3] or 0)
+    }
 
 
 async def _search_buyer(query: str, limit: int) -> Dict[str, Any]:
