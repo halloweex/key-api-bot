@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.197
+
+- nginx: route /rivo/ to ks-tg-bot from the repo, not by hand
+
+
 ## 3.0.196
 
 - The rich-report tests call the routed reads too
