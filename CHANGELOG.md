@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.202
+
+- Reconciliations must not silence each other
+
+
 ## 3.0.201
 
 - Stage 1b: the Meilisearch index, behind KS_READ_SEARCH_INDEX
