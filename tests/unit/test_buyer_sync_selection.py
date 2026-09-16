@@ -35,3 +35,23 @@ class TestAFailedSelectionIsContained:
         monkeypatch.setenv("KS_READ_BUYER_SYNC", "postgre")
         with pytest.raises(ValueError):
             pg_buyer_sync_read.enabled()
+
+
+class TestTheTiebreak:
+    def test_the_order_ends_on_the_id(self):
+        """Structural, for the chat tools' reason: a two-engine test of a tie
+        passes whenever both engines happen to emit level rows in the same
+        order. The ORDER BY is what makes the cut at LIMIT deterministic."""
+        import ast
+        import inspect
+        import textwrap
+
+        from core.duckdb_store import DuckDBStore
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(DuckDBStore.get_missing_buyer_ids)))
+        doc = ast.get_docstring(tree.body[0], clean=False)
+        sql = "".join(n.value for n in ast.walk(tree)
+                      if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                      and n.value != doc)
+        order_by = sql[sql.index("ORDER BY"):sql.index("LIMIT")]
+        assert order_by.rstrip().endswith("buyer_id DESC"), order_by
