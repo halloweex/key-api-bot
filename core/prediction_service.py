@@ -1542,6 +1542,19 @@ class PredictionService:
         today = _today_kyiv()
         start_date = today - timedelta(days=days_back)
 
+        # `KS_READ_FORECAST_INPUT` — see `core/pg_forecast_read.py` for why this
+        # is two queries and not one body, and why the frame has to come back
+        # identical down to its dtypes. There is deliberately NO fallback:
+        # training on a store that has stopped being written is a wrong model
+        # rather than an error, and both callers already degrade — `/trend`
+        # drops the forecast and returns the chart, `_train_impl` returns
+        # `status: error` and keeps the previous model.
+        from core import pg_forecast_read
+
+        if pg_forecast_read.enabled() and pg_forecast_read.available():
+            return await pg_forecast_read.fetch_frame(
+                start_date, today, sales_type, exclude_today)
+
         sales_filter = "sales_type = ?" if sales_type != "all" else "1=1"
         date_upper = "AND date < ?" if exclude_today else ""
         params: list = [start_date]
