@@ -234,14 +234,14 @@ class TestTheInventoryChainStandsDown:
     def test_the_shipper_and_the_comparison_read_one_list(self):
         import inspect
 
-        from core import mirror_reconciliation, pg_operational
+        # Both sites now ask `core.write_chains.stood_down_tables()`, which is
+        # pinned — by walking `core/`, not by a list — in test_write_chains.py.
+        # What stays here is chain 1's own contribution to that answer.
         from core.pg_inventory_write import CHAIN_TABLES
+        from core.write_chains import WRITE_CHAINS
+        import core.pg_inventory_write as chain1
 
-        for module in (pg_operational.replicate_operational,
-                       mirror_reconciliation.reconcile_operational):
-            src = inspect.getsource(module)
-            assert "CHAIN_TABLES" in src, module.__name__
-            assert "writes_postgres()" in src, module.__name__
+        assert chain1 in WRITE_CHAINS
         assert len(CHAIN_TABLES) == 6
 
     def test_the_chain_names_every_table_it_writes(self):

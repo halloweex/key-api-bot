@@ -2686,9 +2686,9 @@ async def reconcile_operational(
     #
     # It reads the same tuple the shipper stands down on, so the two cannot
     # disagree about which tables have changed hands.
-    from core.pg_inventory_write import CHAIN_TABLES, writes_postgres
+    from core.write_chains import stood_down_tables
 
-    stood_down = frozenset(CHAIN_TABLES) if writes_postgres() else frozenset()
+    stood_down = stood_down_tables()
 
     whole = tuple(s for s in OPERATIONAL_TABLES if s.pg_table not in stood_down)
 
