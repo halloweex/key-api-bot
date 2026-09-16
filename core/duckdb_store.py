@@ -2158,11 +2158,23 @@ class DuckDBStore(
                 }
 
     async def get_last_sync_time(self, key: str = "orders") -> Optional[datetime]:
-        """Get last sync timestamp for incremental updates."""
+        """Get last sync timestamp for incremental updates.
+
+        Asks the same registry as the setter, so the two cannot disagree about
+        where a watermark lives — they did once, and a sync gated on a value
+        that never moves again runs every tick (revision 0032). A key absent
+        from Postgres is None, which the sync reads as due: the first tick
+        after a switch syncs, and its stamp is the first one there.
+        """
+        full_key = f"last_sync_{key}"
+        from core.write_chains import stood_down_sync_keys
+        if full_key in stood_down_sync_keys():
+            from core.pg_chain_watermarks import get_value
+            return await get_value(full_key)
         async with self.connection() as conn:
             result = conn.execute(
                 "SELECT value FROM sync_metadata WHERE key = ?",
-                [f"last_sync_{key}"]
+                [full_key]
             ).fetchone()
             if result and result[0]:
                 return datetime.fromisoformat(result[0])
@@ -2180,12 +2192,10 @@ class DuckDBStore(
         """
         timestamp = timestamp or datetime.now(DEFAULT_TZ)
         full_key = f"last_sync_{key}"
-        from core.pg_inventory_write import (
-            CHAIN_SYNC_KEYS, set_last_sync_time as pg_set_last_sync_time,
-            writes_postgres,
-        )
-        if writes_postgres() and full_key in CHAIN_SYNC_KEYS:
-            await pg_set_last_sync_time(full_key, timestamp.isoformat())
+        from core.write_chains import stood_down_sync_keys
+        if full_key in stood_down_sync_keys():
+            from core.pg_chain_watermarks import set_value
+            await set_value(full_key, timestamp.isoformat())
             return
         async with self.connection() as conn:
             conn.execute("""

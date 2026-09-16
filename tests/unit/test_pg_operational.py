@@ -281,20 +281,6 @@ class TestTheInventoryChainStandsDown:
             if before is not None:
                 os.environ[WRITE_ENV] = before
 
-    def test_the_watermark_router_refuses_a_key_it_does_not_own(self):
-        """`sync_metadata` holds three families with three owners, and stage 4
-        moves them chain by chain. A writer that could set any key would let
-        this chain move a watermark belonging to a chain still on DuckDB."""
-        import asyncio
-
-        import pytest
-
-        from core.pg_inventory_write import CHAIN_SYNC_KEYS, set_last_sync_time
-
-        assert CHAIN_SYNC_KEYS == ("last_sync_offers", "last_sync_stocks")
-        with pytest.raises(ValueError):
-            asyncio.run(set_last_sync_time("last_sync_orders", "x"))
-
     def test_insert_binds_every_column(self):
         sql = _insert("app.t", ("a", "b", "c"))
         assert sql == "INSERT INTO app.t (a, b, c) VALUES ($1, $2, $3)"

@@ -469,13 +469,28 @@ FRESHNESS_THRESHOLDS: Dict[str, Tuple[float, "Severity"]] = {
 }
 
 
-def _freshness_check(conn, now: Optional[datetime] = None) -> List[IntegrityIssue]:
+def _freshness_check(
+    conn,
+    now: Optional[datetime] = None,
+    *,
+    chain_watermarks: Optional[Dict[str, str]] = None,
+) -> List[IntegrityIssue]:
     """Flag sync_metadata entities whose last_sync_* is older than its threshold.
 
     Catches silent sync-pipeline stalls — e.g. categories/expense_types going
     45 days stale while orders kept current — which neither the warehouse
     validation nor the reconciliation checks cover.
+
+    A watermark whose write chain has moved to Postgres is read from
+    `chain_watermarks` — `{key: value}` out of `meta.chain_watermarks`, read by
+    the caller, which is async where this is not. DuckDB's copy of that key
+    stopped moving at the switch, so judging it would page "offers stalled" two
+    days after a switch that changed nothing. Called without it while a chain
+    has moved, the moved entities are left out and the check says so, rather
+    than judging a frozen copy or going quiet.
     """
+    from core.write_chains import stood_down_sync_keys
+
     issues: List[IntegrityIssue] = []
     if now is None:
         now = datetime.now().astimezone()
@@ -489,15 +504,42 @@ def _freshness_check(conn, now: Optional[datetime] = None) -> List[IntegrityIssu
     if not seen:
         return []
 
+    moved = {key[len("last_sync_"):] for key in stood_down_sync_keys()}
+    if moved and chain_watermarks is None:
+        issues.append(IntegrityIssue(
+            check_name="sync_watermarks_unwatched",
+            table_name="sync_metadata",
+            severity=Severity.WARN,
+            count=len(moved),
+            sample_ids=(),
+            description=(
+                f"the watermarks of {', '.join(sorted(moved))} are written to "
+                "meta.chain_watermarks because their chain writes Postgres, and "
+                "this check was called without them — so a stall of those syncs "
+                "is NOT being watched. The caller must pass `chain_watermarks=` "
+                "from core.pg_chain_watermarks.read_values."
+            ),
+        ))
+    for entity in moved:
+        seen.pop(entity, None)
+        if chain_watermarks is not None:
+            value = chain_watermarks.get(f"last_sync_{entity}")
+            if value:
+                seen[entity] = value
+
     for entity, (max_hours, sev) in FRESHNESS_THRESHOLDS.items():
+        if entity in moved and chain_watermarks is None:
+            continue
         raw = seen.get(entity)
         if not raw:
+            where = ("meta.chain_watermarks" if entity in moved
+                     else "sync_metadata")
             issues.append(IntegrityIssue(
                 check_name=f"freshness_{entity}",
                 table_name=entity,
                 severity=sev,
                 count=1,
-                description=f"sync_metadata has no last_sync_{entity} — entity never synced",
+                description=f"{where} has no last_sync_{entity} — entity never synced",
             ))
             continue
         try:
@@ -1433,6 +1475,7 @@ def check_internal_integrity(
     conn,
     *,
     inventory_calendar: "Optional[Tuple[Optional[date], FrozenSet[date]]]" = None,
+    chain_watermarks: Optional[Dict[str, str]] = None,
 ) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
 
@@ -1474,7 +1517,7 @@ def check_internal_integrity(
     )
 
     # Freshness — catch silent sync-pipeline stalls (e.g. categories 45d stale).
-    issues += _freshness_check(conn)
+    issues += _freshness_check(conn, chain_watermarks=chain_watermarks)
 
     # Cross-metric consistency — revenue and product pages read different
     # columns, so orders billed at zero make them disagree without saying so.
@@ -1733,6 +1776,8 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("gold_", "POST /api/warehouse/refresh rebuilds both layers"),
     ("customer_profile_", "Rebuilt on the same tick; survives one — suspect Silver"),
     ("freshness_", "The sync, not the warehouse: see the sync block in /api/health"),
+    ("sync_watermarks_unwatched",
+     "The integrity job must pre-read meta.chain_watermarks, or the chain's flag goes back"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),
     # No lever in this repository: the tags stop arriving at the website, so
     # the fix is the order-comment template and nothing here can repair it.
@@ -1764,6 +1809,7 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "mirror_retired_rows": "retired in KeyCRM, copy remembers",
     "mirror_pruned_rows": "aged out of DuckDB, copy still holds them",
     "inventory_continuity_unwatched": "snapshot gaps no longer watched",
+    "sync_watermarks_unwatched": "sync stalls no longer watched",
     "mirror_never_shipped": "table never shipped",
     "mirror_backfill_pending": "history not carried over yet",
     "mirror_failing": "mirror failing",

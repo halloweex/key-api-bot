@@ -105,7 +105,9 @@ CHAIN_TABLES: Tuple[str, ...] = (
 
 # The two `sync_metadata` keys the chain owns. Named rather than derived,
 # because `sync_metadata` holds three families of key with three different
-# owners and only these two move with this chain.
+# owners and only these two move with this chain. `core.write_chains` reads
+# them, and the store's getter and setter both route through it to
+# `meta.chain_watermarks` — revision 0032 says why not `app.sync_metadata`.
 CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_offers", "last_sync_stocks")
 
 
@@ -410,31 +412,3 @@ async def read_snapshot_calendar(
             window_floor,
         )
     return first_day, frozenset(r["date"] for r in rows)
-
-
-async def set_last_sync_time(key: str, value: str) -> None:
-    """One `sync_metadata` key, stamped at this row's own moment.
-
-    Refuses a key this chain does not own. `sync_metadata` holds three families
-    with three different owners — the nine `last_sync_*` watermarks, the
-    warehouse dirty flag and the digest marker — and stage 4 moves them at
-    different times. A writer that could set any key would let this chain move
-    a watermark belonging to a chain still writing DuckDB.
-    """
-    if key not in CHAIN_SYNC_KEYS:
-        raise ValueError(
-            f"{key!r} is not owned by the inventory chain; "
-            f"expected one of {CHAIN_SYNC_KEYS}"
-        )
-    from core.pg import get_pool, require_revision
-
-    pool = await get_pool()
-    await require_revision()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO app.sync_metadata (key, value, updated_at) "
-            "VALUES ($1, $2, now()) "
-            "ON CONFLICT (key) DO UPDATE SET "
-            "value = EXCLUDED.value, updated_at = EXCLUDED.updated_at",
-            key, value,
-        )

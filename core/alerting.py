@@ -164,6 +164,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # clears when the check is ported or the flag goes back to duckdb.
     "inventory_continuity_unwatched": _c(
         "the continuity check follows the writer, or the flag goes back"),
+    # The same shape one table over: a chain's watermarks moved to Postgres
+    # and the freshness check was not handed them.
+    "sync_watermarks_unwatched": _c(
+        "the freshness check reads the moved watermarks, or the flag goes back"),
     "mirror_never_shipped": _c("the table's first successful shipment"),
     "mirror_backfill_pending": _c("the backfill finishes with nothing left"),
     "mirror_buckets_disagree": _c("the fingerprinted buckets agree again"),
