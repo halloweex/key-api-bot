@@ -106,6 +106,10 @@ def test_the_reconciliation_resync_writes_inside_the_lock_and_fetches_outside_it
 
     with patch("core.sync_service.get_async_client", AsyncMock(return_value=Client())), \
          patch.object(service, "_upsert_orders_with_expenses", side_effect=upsert):
-        asyncio.run(service.reconcile_with_api(days_back=2, lock=lock))
+        # Bounded: a lock taken and never released is a deadlock, and a test
+        # that hangs on it fails nobody in time. Found by a mutation that took
+        # the lock around the fetch and stalled the run for ten minutes.
+        asyncio.run(asyncio.wait_for(
+            service.reconcile_with_api(days_back=2, lock=lock), timeout=5))
 
     assert seen == {"fetch_locked": False, "write_locked": True, "mark_locked": True}
