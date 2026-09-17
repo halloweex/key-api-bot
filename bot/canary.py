@@ -281,7 +281,7 @@ def check_mirror_freshness(
     is failing says so on the next sync tick, long before its age crosses
     anything, so the failure count is checked first and reported on its own.
     """
-    thresholds = max_age_s if max_age_s is not None else MIRROR_MAX_AGE_S
+    thresholds = dict(max_age_s if max_age_s is not None else MIRROR_MAX_AGE_S)
     failures: list[tuple[str, str]] = []
     ages: dict[str, Optional[int]] = {}
 
@@ -289,6 +289,13 @@ def check_mirror_freshness(
     if not isinstance(block, dict):
         return [("mirror_block_missing",
                  "no mirrors block in health")], ages
+
+    # Tables web declares a limit for — the layers Postgres derives on its own
+    # signal. Declared there because only web knows its KS_PG_DERIVE; a
+    # threshold kept here would page on every deploy that has not switched.
+    for table, entry in block.items():
+        if isinstance(entry, dict) and isinstance(entry.get("max_age_s"), int):
+            thresholds.setdefault(table, entry["max_age_s"])
 
     for table, limit in thresholds.items():
         entry = block.get(table)

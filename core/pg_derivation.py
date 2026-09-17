@@ -22,10 +22,76 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
-from typing import Any, Dict, Mapping, Optional, Tuple
+import os
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# ─── Who derives: DuckDB's tick (piggyback) or Postgres' own signal (own) ─────
+#
+# Read ONCE, when the scheduler starts, and cached. Never parsed on the write
+# path: the marks ride inside `write_orders`' transaction, and a typo evaluated
+# there must not be able to reach the archive of order versions. An unknown
+# value therefore does not raise the way `KS_BOT_STORE` does — it falls back to
+# `piggyback`, today's behaviour, and says so at ERROR and in `/api/health`.
+# Refusing to start would take the dashboard down over a derivation setting.
+ENV = "KS_PG_DERIVE"
+PIGGYBACK = "piggyback"
+OWN = "own"
+_VALID = (PIGGYBACK, OWN)
+
+_mode: Optional[str] = None
+_mode_error: Optional[str] = None
+
+
+def configure_mode() -> str:
+    """Read `KS_PG_DERIVE` once. Called by the scheduler at start."""
+    global _mode, _mode_error
+    value = os.getenv(ENV, PIGGYBACK).strip().lower() or PIGGYBACK
+    if value in _VALID:
+        _mode, _mode_error = value, None
+    else:
+        _mode = PIGGYBACK
+        _mode_error = (f"{ENV}={value!r} is not one of {_VALID}; "
+                       f"falling back to {PIGGYBACK!r}")
+        logger.error(_mode_error)
+    return _mode
+
+
+def mode() -> str:
+    """The configured mode; `piggyback` until `configure_mode` has run."""
+    return _mode or PIGGYBACK
+
+
+def mode_error() -> Optional[str]:
+    return _mode_error
+
+
+def owns() -> bool:
+    """Postgres derives on its own signal. Reads the cache, never the env."""
+    return _mode == OWN
+
+
+# Every function that writes a table the derivation reads, and so must raise
+# the signal in its own transaction. Silver reads `bronze.orders` and the
+# manager classification; the customer profile reads `bronze.buyers`. A test
+# walks the code for writers of those tables and fails on one not listed here,
+# and fails on a listed one that does not call `mark_if_owned`.
+MARK_SITES: Dict[str, str] = {
+    "core.pg_landing": "write_orders",
+    "core.pg_replication": "write_managers",
+    "core.pg_buyers": "_write",
+}
+SOURCE_TABLES = ("bronze.orders", "bronze.managers",
+                 "app.manager_classifications", "bronze.buyers")
+
+# Rebuild at least this often with nothing owed, so a quiet night still moves
+# the watermarks the canary judges. The canary's limit is this, plus the floor,
+# plus a tick and some grace.
+HEARTBEAT = timedelta(minutes=60)
+DERIVED_TABLES = ("silver.orders", "gold.daily_revenue")
+DERIVED_MAX_AGE_S = 90 * 60
 
 LAYER = "warehouse"
 SIGNAL_TABLE = "meta.derivation_signal"
@@ -44,6 +110,12 @@ _MARK = """
        SET requested = requested + 1, requested_at = now()
      WHERE layer = $1
 """
+
+
+async def mark_if_owned(conn, layer: str = LAYER) -> None:
+    """The call every writer in `MARK_SITES` makes, last in its transaction."""
+    if owns():
+        await mark(conn, layer)
 
 
 async def mark(conn, layer: str = LAYER) -> bool:
@@ -139,3 +211,142 @@ async def record_run(
         await conn.execute(
             "DELETE FROM meta.derivation_runs WHERE id <= $1", run_id - keep)
     return run_id
+
+
+# ─── Validation: DuckDB's refresh checks, ported to the Postgres derivation ──
+#
+# `refresh_warehouse_layers` validates every DuckDB tick: Bronze→Silver row
+# count, Silver→Gold revenue checksum, the cell guard, and — reported apart —
+# the sales_type partition. When DuckDB stops deriving those detectors go with
+# it, so they run here, after the rebuild, from one REPEATABLE READ snapshot.
+# Plus the roll-up check, which only Postgres' two-grain Gold needs.
+#
+# The row count is exact only because every orders writer holds
+# `_heavy_job_lock`, which the derivation job holds too. A writer outside it
+# would read here as a mismatch — loud, not silent — and that is the dependency
+# stated rather than hidden.
+#
+# No retry ladder, unlike DuckDB's: its ladder exists for incremental-scope
+# faults, and this rebuild is whole every time. A failure is recorded and
+# alerted; the next owed rebuild is the retry.
+
+_ADDITIVE = ("revenue", "orders_count", "returns_count", "returns_revenue")
+
+
+async def validate(conn) -> Dict[str, Any]:
+    """Checks over the derived layers. `passed` excludes the partition, for
+    DuckDB's reason: no rebuild can repair a sales_type the code does not know."""
+    from core.duckdb_constants import KNOWN_SALES_TYPES
+
+    known = list(KNOWN_SALES_TYPES)
+    async with conn.transaction(isolation="repeatable_read", readonly=True):
+        totals = await conn.fetchrow(
+            """
+            SELECT
+                (SELECT count(*) FROM bronze.orders) AS bronze_orders,
+                (SELECT count(*) FROM silver.orders) AS silver_rows,
+                (SELECT COALESCE(SUM(grand_total), 0) FROM silver.orders
+                  WHERE NOT is_return AND is_active_source) AS silver_revenue,
+                (SELECT COALESCE(SUM(revenue), 0) FROM gold.daily_revenue
+                  WHERE source_id IS NULL) AS gold_revenue,
+                (SELECT COALESCE(SUM(revenue), 0) FROM gold.daily_revenue
+                  WHERE source_id IS NULL AND sales_type = ANY($1::text[]))
+                    AS gold_revenue_known
+            """,
+            known)
+        missing_cells = await conn.fetchval(
+            """
+            SELECT count(*) FROM (
+                SELECT DISTINCT order_date, sales_type FROM silver.orders
+                EXCEPT
+                SELECT date, sales_type FROM gold.daily_revenue WHERE source_id IS NULL
+            ) m
+            """)
+        extra_cells = await conn.fetchval(
+            """
+            SELECT count(*) FROM (
+                SELECT date, sales_type FROM gold.daily_revenue WHERE source_id IS NULL
+                EXCEPT
+                SELECT DISTINCT order_date, sales_type FROM silver.orders
+            ) e
+            """)
+        differ = " OR ".join(
+            f"COALESCE(SUM({c}) FILTER (WHERE source_id IS NOT NULL), 0)"
+            f" <> COALESCE(SUM({c}) FILTER (WHERE source_id IS NULL), 0)"
+            for c in _ADDITIVE)
+        rollup_mismatch = await conn.fetchval(
+            f"""
+            SELECT count(*) FROM (
+                SELECT date, sales_type FROM gold.daily_revenue
+                GROUP BY date, sales_type
+                HAVING bool_or(source_id IS NULL) AND ({differ})
+            ) r
+            """)
+        unknown: List[Tuple[Optional[str], float]] = []
+        silver_revenue = totals["silver_revenue"]
+        partition_exhaustive = abs(silver_revenue - totals["gold_revenue_known"]) < 0.01
+        if not partition_exhaustive:
+            unknown = [
+                (r["sales_type"], float(r["revenue"]))
+                for r in await conn.fetch(
+                    """
+                    SELECT sales_type, COALESCE(SUM(revenue), 0) AS revenue
+                    FROM gold.daily_revenue
+                    WHERE source_id IS NULL
+                      AND (sales_type IS NULL OR NOT sales_type = ANY($1::text[]))
+                    GROUP BY sales_type ORDER BY revenue DESC
+                    """,
+                    known)
+            ]
+
+    row_count_match = totals["bronze_orders"] == totals["silver_rows"]
+    checksum_match = abs(silver_revenue - totals["gold_revenue"]) < 0.01
+    cells_match = missing_cells == 0 and extra_cells == 0
+    rollup_match = rollup_mismatch == 0
+    return {
+        "passed": row_count_match and checksum_match and cells_match and rollup_match,
+        "row_count_match": row_count_match,
+        "checksum_match": checksum_match,
+        "cells_match": cells_match,
+        "rollup_match": rollup_match,
+        "partition_exhaustive": partition_exhaustive,
+        "bronze_orders": int(totals["bronze_orders"]),
+        "silver_rows": int(totals["silver_rows"]),
+        "silver_revenue": float(silver_revenue),
+        "gold_revenue": float(totals["gold_revenue"]),
+        "gold_revenue_known": float(totals["gold_revenue_known"]),
+        "missing_cells": int(missing_cells),
+        "extra_cells": int(extra_cells),
+        "rollup_mismatch_cells": int(rollup_mismatch),
+        "unknown_sales_types": [
+            {"sales_type": t, "revenue": r} for t, r in unknown],
+    }
+
+
+async def last_attempt_at(conn, layer: str = LAYER) -> Optional[datetime]:
+    return await conn.fetchval(
+        "SELECT max(started_at) FROM meta.derivation_runs WHERE layer = $1", layer)
+
+
+def due(
+    *, requested: int, built: int, built_at: Optional[datetime],
+    last_attempt: Optional[datetime], now: datetime, floor: timedelta,
+    first_tick: bool, force: bool = False,
+) -> Tuple[bool, str]:
+    """Whether to derive now, and why. Pure, so the schedule is testable.
+
+    The floor is measured against the last attempt recorded in Postgres, not a
+    process clock: a deploy must neither lose an owed rebuild nor reset the
+    floor. `force` is the admin lever and skips the floor.
+    """
+    if force:
+        return True, "manual"
+    owed = requested > built
+    heartbeat = built_at is None or now - built_at >= HEARTBEAT
+    if not (owed or first_tick or heartbeat):
+        return False, "nothing owed"
+    if last_attempt is not None and now - last_attempt < floor:
+        return False, "floor"
+    if owed:
+        return True, "signal"
+    return True, "first_tick" if first_tick else "heartbeat"

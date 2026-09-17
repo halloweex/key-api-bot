@@ -55,6 +55,13 @@ class MirrorFreshness(BaseModel):
     age_seconds: Optional[int] = Field(None, description="Seconds since that shipment; null means never shipped")
     failures_since_ok: Optional[int] = Field(None, description="Consecutive failed attempts since the last success")
     failing: bool = Field(False, description="Whether the last attempt recorded an error")
+    max_age_s: Optional[int] = Field(
+        None,
+        description="The age limit this table is judged by, when web declares one. "
+        "Declared for the tables Postgres derives on its own signal, so the "
+        "watchdog's list switches with KS_PG_DERIVE instead of being kept in "
+        "a second container.",
+    )
 
 
 class SyncStatus(BaseModel):

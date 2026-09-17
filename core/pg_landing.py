@@ -409,6 +409,16 @@ async def write_orders(
                     _WATERMARK_OK, ORDER_PRODUCTS_TABLE, len(products),
                 )
 
+            # Chain 2: Postgres owes a rebuild of what it derives from these
+            # rows. Last, inside this transaction — no mark without the rows,
+            # no rows without the mark — and unable to cost this transaction
+            # anything, the order versions above included: see
+            # `core/pg_derivation.py`. A no-op unless KS_PG_DERIVE=own.
+            if orders:
+                from core.pg_derivation import mark_if_owned
+
+                await mark_if_owned(conn)
+
 
 async def mirror_orders(
     orders: Sequence[Any],

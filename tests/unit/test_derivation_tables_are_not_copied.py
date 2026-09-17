@@ -21,18 +21,3 @@ def test_no_copy_or_comparison_names_the_derivation_tables():
                  if isinstance(n, ast.Constant) and isinstance(n.value, str)
                  and id(n) not in docstrings and "derivation_" in n.value]
         assert named == [], f"{name} names meta.derivation_*: {named}"
-
-
-def test_the_primitives_have_no_callers_yet():
-    """Step 2 ships inert. A caller arrives with the flag that gates it."""
-    hits = []
-    for path in CORE.rglob("*.py"):
-        if path.name == "pg_derivation.py":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "core.pg_derivation":
-                hits.append(str(path))
-            if isinstance(node, ast.Import) and any(a.name == "core.pg_derivation" for a in node.names):
-                hits.append(str(path))
-    assert hits == []

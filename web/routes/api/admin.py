@@ -201,7 +201,54 @@ async def backfill_mirror_expenses(
 async def get_warehouse_status(request: Request):
     """Get warehouse layer (Silver/Gold) status and last refresh info."""
     store = await get_store()
-    return await store.get_warehouse_status()
+    status = await store.get_warehouse_status()
+    # Under KS_PG_DERIVE=own Postgres derives on its own signal, and a status
+    # page that showed only DuckDB's refreshes would describe the engine the
+    # dashboard is leaving.
+    from core import pg_derivation
+
+    if pg_derivation.owns():
+        status = {**status, "postgres": await _pg_derivation_status()}
+    return status
+
+
+async def _pg_derivation_status() -> dict:
+    """The owed state and the last journalled run, or the error reading them."""
+    from core import pg_derivation
+    from core.pg import get_pool
+
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            requested, built, built_at = await pg_derivation.read_owed(conn)
+            last = await conn.fetchrow(
+                "SELECT trigger, started_at, ended_at, validation_passed, error"
+                " FROM meta.derivation_runs ORDER BY id DESC LIMIT 1")
+    except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail
+        return {"mode": pg_derivation.mode(), "error": f"{type(e).__name__}: {e}"}
+    return {
+        "mode": pg_derivation.mode(),
+        "requested": requested,
+        "built": built,
+        "owed": requested > built,
+        "built_at": built_at.isoformat() if built_at else None,
+        "last_run": None if last is None else {
+            "trigger": last["trigger"],
+            "started_at": last["started_at"].isoformat(),
+            "ended_at": last["ended_at"].isoformat() if last["ended_at"] else None,
+            "validation_passed": last["validation_passed"],
+            "error": last["error"],
+        },
+    }
+
+
+async def _derive_postgres_now(trigger: str) -> dict:
+    """Run the Postgres derivation immediately, past its floor. Under
+    KS_PG_DERIVE=own only; takes the heavy lock itself, so call it after
+    releasing yours."""
+    from core.scheduler import get_scheduler
+
+    return await get_scheduler()._run_pg_derivation(trigger=trigger, force=True)
 
 
 @router.post("/warehouse/refresh")
@@ -220,7 +267,15 @@ async def refresh_warehouse(
     # a correct rebuild as failed, and the two raced each other's fired and
     # resolved notices for the same alert group.
     async with get_scheduler()._heavy_job_lock:
-        return await store.refresh_warehouse_layers(trigger="manual")
+        result = await store.refresh_warehouse_layers(trigger="manual")
+    # The lever every Silver/Gold alert names. Under KS_PG_DERIVE=own it
+    # rebuilds the Postgres layers too — otherwise it would repair the engine
+    # the dashboard no longer reads and leave the one it does as it was.
+    from core import pg_derivation
+
+    if pg_derivation.owns():
+        result = {**result, "postgres": await _derive_postgres_now("manual")}
+    return result
 
 
 @router.post("/warehouse/rebuild-silver")
@@ -254,7 +309,12 @@ async def rebuild_silver_from_scratch(
     # hands the result to the next refresh tick, which validates it and, if it
     # is half-done, rebuilds it.
     await store.mark_warehouse_dirty(None)
-    return {"status": "ok", "silver_rows": count, "max_order_date": str(max_date)}
+    result = {"status": "ok", "silver_rows": count, "max_order_date": str(max_date)}
+    from core import pg_derivation
+
+    if pg_derivation.owns():
+        result["postgres"] = await _derive_postgres_now("manual")
+    return result
 
 
 @router.post("/duckdb/purge-orders")

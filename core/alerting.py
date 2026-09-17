@@ -120,6 +120,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "warehouse:sales_type_partition": _c("Gold's known types cover Silver again"),
     "warehouse:refresh_errored": _c("a refresh completes without raising"),
     "warehouse:refresh_errored_exhausted": _c("a refresh completes without raising"),
+    # The Postgres derivation on its own signal (chain 2, KS_PG_DERIVE=own).
+    # Its own group, so a DuckDB tick's clean pass cannot resolve them.
+    "warehouse_pg:derive_failed": _c("a Postgres derivation completes"),
+    "warehouse_pg:validation_failed": _c("a Postgres derivation passes validation"),
+    "warehouse_pg:sales_type_partition": _c("Postgres Gold's known types cover Silver again"),
     "warehouse:backup_preflight": _EVENT,   # one refused attempt, that night's fact
     "warehouse:backup_failed": _EVENT,      # one failed copy/validation
 
@@ -232,6 +237,16 @@ REGISTRY: Dict[str, ConditionSpec] = {
 # added here — the registry stays the single place a human declared intent.
 for _table in ("orders", "order_products", "products", "buyers", "categories"):
     REGISTRY[f"pk_uniqueness_{_table}"] = _c("the duplicate rows are gone")
+# The layers Postgres derives on its own signal (chain 2, KS_PG_DERIVE=own).
+# Web declares their age limit in /api/health and the canary judges whatever
+# declares one, so their keys are a family over `pg_derivation.DERIVED_TABLES`
+# rather than entries in the canary's own threshold dict. No `mirror_missing`:
+# an entry the canary learns about from the block cannot be absent from it.
+for _table in ("silver.orders", "gold.daily_revenue"):
+    REGISTRY[f"mirror_never:{_table}"] = _c("the layer's first successful derivation")
+    REGISTRY[f"mirror_stale:{_table}"] = _c("a derivation inside the age limit")
+    REGISTRY[f"mirror_failing:{_table}"] = _c("failures_since_ok back to zero")
+
 REGISTRY["fk_orphan_order_products_order_id"] = _c("the parent order lands or the orphans go")
 for _col in ("ordered_at", "source_id", "status_id"):
     REGISTRY[f"not_null_orders_{_col}"] = _c("the null rows are repaired")

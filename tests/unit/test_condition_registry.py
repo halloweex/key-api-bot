@@ -197,6 +197,13 @@ def collect_canary_keys() -> set:
     for table in MIRROR_MAX_AGE_S:
         keys |= {f"mirror_missing:{table}", f"mirror_never:{table}",
                  f"mirror_stale:{table}", f"mirror_failing:{table}"}
+    # Tables web declares a limit for (chain 2): judged by the same loop, never
+    # absent from the block they are learnt from.
+    from core.pg_derivation import DERIVED_TABLES
+
+    for table in DERIVED_TABLES:
+        keys |= {f"mirror_never:{table}", f"mirror_stale:{table}",
+                 f"mirror_failing:{table}"}
     keys.add("dq_block_missing")
     keys.add("mirror_block_missing")
     keys.add("unkeyed")  # the guaranteed-fallback bucket in decide()
