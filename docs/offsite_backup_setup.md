@@ -131,10 +131,30 @@ never calls the swap. Nothing canonical is touched.
 crontab -e
 # add:
 0 9 * * *  /opt/key-api-bot/deploy/offsite_check.sh
+# and, for the Postgres half (DN-09) — the shipment, then its weekly rehearsal:
+40 7 * * *  /opt/key-api-bot/deploy/pg_offsite.sh
+20 8 * * 1  /opt/key-api-bot/deploy/pg_restore_drill.sh --from-remote
 ```
 
-It reads the marker `data/.offsite_last_ok` and alerts if no copy has left in
-9 days. It runs from the **host** crontab rather than the app scheduler on
+07:40 and 08:20 are the two gaps in this host's morning: `pg_backup.sh` is at
+06:50 and finishes within a couple of minutes, the local restore drill is at
+07:20, the base backup at 08:10, the PITR drill at 08:40, and `offsite_check`
+speaks at 09:00 — so a shipment or a drill that failed is already an
+80-minute-old fact by the time the morning's verdicts are read. Nothing here
+is near 02:00 Sunday, when the compaction stops the containers.
+
+Both new entries alert on their own through `deploy/notify.sh`
+(`backup:pg_offsite_failed`, `backup:pg_offsite_drill_failed`), so neither
+depends on anybody reading root's local mail. The drill takes `--quiet` when
+you are iterating on it at a keyboard; cron runs without it.
+
+`offsite_check.sh` reads the marker `data/.offsite_last_ok` and alerts if no
+copy has left in 36 h, and since DN-09 also reads
+`data/.pg_offsite_last_ok` on the same threshold. Its three checks each record
+a verdict and the run continues: on a host where the 07:40 cron is not
+installed yet the Postgres marker is absent every morning, and under the old
+fail-fast shape that would have silenced the disk-watchdog check indefinitely.
+It runs from the **host** crontab rather than the app scheduler on
 purpose: an in-process check cannot attest to its own liveness, and a monitor
 that has gone quiet is indistinguishable from one with nothing to report. Host
 cron is a separate failure domain, and on this box it has the better record.
@@ -170,3 +190,10 @@ Not a drill — the machine is gone and you are rebuilding.
    from KeyCRM on its own; a full rebuild from the API instead costs thousands
    of requests, dominated by one call per buyer, and is the third line of
    defence rather than the second.
+6. **Then restore Postgres**, which is a different directory on the same box
+   and the half nothing can re-fetch: `key-api-bot/postgres/`, three files per
+   stamp, and the roles file goes in before the dump or the restored cluster
+   has tables nobody can log in to read. The commands are in
+   `docs/backup_runbook.md` under "Postgres off-site"; they are the same ones
+   `deploy/pg_restore_drill.sh --from-remote` runs every Monday, so they are
+   not being tried for the first time here.

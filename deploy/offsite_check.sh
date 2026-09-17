@@ -25,6 +25,14 @@ CONFIG="deploy/backup.env"
 [ -f "$CONFIG" ] && . "$CONFIG"
 
 MARKER="${BACKUP_MARKER:-data/.offsite_last_ok}"
+# The second marker, written by deploy/pg_offsite.sh. Postgres left this host
+# in no form at all until that script existed, and it holds the six tables
+# nothing can rebuild — order_versions, stock_movements, the access list, the
+# SMS roster — so the copy that must not stop is this one.
+PG_MARKER="${BACKUP_PG_MARKER:-data/.pg_offsite_last_ok}"
+# Shipped daily at 07:40, so 36h is one missed run plus slack — the same
+# allowance the warehouse copy gets, and for the same reason.
+PG_MAX_AGE_HOURS="${BACKUP_PG_MAX_ARCHIVE_AGE_HOURS:-36}"
 # The in-app disk watchdog touches this on every 6-hourly sample. Two periods
 # plus slack: later than this and it has stopped, whatever it last logged.
 WATCHDOG_MARKER="${WATCHDOG_MARKER:-data/health/watchdog_last_sample}"
@@ -39,6 +47,12 @@ MAX_AGE_HOURS="${BACKUP_MAX_ARCHIVE_AGE_HOURS:-36}"
 # status instead of reaching its own `exit 1`. A missing token must degrade to
 # "cannot alert", not to a different exit code than the one the check meant.
 _env_value() { grep -m1 "^$1=" .env 2>/dev/null | cut -d= -f2- | tr -d '\r' || true; }
+
+# `stat -c` is GNU and this runs on Linux, but the BSD spelling costs one
+# fallback and is what lets the check be driven end to end from a test rather
+# than only read — which is how tests/unit/test_pg_offsite_scripts.py proves a
+# stale marker actually exits non-zero.
+_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
 
 # Technical alerts go to every admin, not the first one. The app-side path
 # (bot/main.py:88, core/telegram_alerts.py:122) has always broadcast to the
@@ -63,6 +77,16 @@ source deploy/notify.sh
 
 _where() { printf '%s · %s' "$(hostname)" "$(date '+%F %H:%M')"; }
 
+# Each check records its verdict and the run continues. It used to `exit 1` on
+# the first failure, which was harmless while there was one copy to watch: the
+# watchdog check below simply did not run on a day the off-site copy was
+# already stale. With a second marker that stops being harmless — a host where
+# deploy/pg_offsite.sh has not been installed yet has no PG marker at all, so
+# a fail-fast run would alert about that every morning and never again reach
+# the question of whether the disk watchdog is alive. One stopped instrument
+# must not hide another.
+RC=0
+
 if [ ! -f "$MARKER" ]; then
     echo "CRITICAL: no off-site copy has ever succeeded (no $MARKER)"
     notify "$(printf '%s\n\n%s\n\n%s\n\n%s' \
@@ -70,20 +94,51 @@ if [ ! -f "$MARKER" ]; then
         "The database, its local backups and the export all share one volume, so any failure that takes the volume takes every copy with it." \
         "Set it up: docs/offsite_backup_setup.md — then run deploy/offsite_parquet.sh and deploy/restore-test.sh" \
         "$(_where)")"
-    exit 1
+    RC=1
+    AGE_HOURS=9999
+else
+    AGE_HOURS=$(( ( $(date +%s) - $(_mtime "$MARKER") ) / 3600 ))
+
+    if [ "$AGE_HOURS" -gt "$MAX_AGE_HOURS" ]; then
+        echo "CRITICAL: newest off-site copy is ${AGE_HOURS}h old (max ${MAX_AGE_HOURS}h)"
+        notify "$(printf '%s\n\n%s\n%s\n\n%s\n\n%s' \
+            "🚨 Warehouse: off-site copy is stale" \
+            "Newest copy: ${AGE_HOURS}h old" \
+            "Allowed: ${MAX_AGE_HOURS}h" \
+            "The weekly compact ships it — check /var/log/keycrm-compact.log and run deploy/offsite_parquet.sh by hand." \
+            "$(_where)")"
+        RC=1
+    fi
 fi
 
-AGE_HOURS=$(( ( $(date +%s) - $(stat -c %Y "$MARKER") ) / 3600 ))
-
-if [ "$AGE_HOURS" -gt "$MAX_AGE_HOURS" ]; then
-    echo "CRITICAL: newest off-site copy is ${AGE_HOURS}h old (max ${MAX_AGE_HOURS}h)"
-    notify "$(printf '%s\n\n%s\n%s\n\n%s\n\n%s' \
-        "🚨 Warehouse: off-site copy is stale" \
-        "Newest copy: ${AGE_HOURS}h old" \
-        "Allowed: ${MAX_AGE_HOURS}h" \
-        "The weekly compact ships it — check /var/log/keycrm-compact.log and run deploy/offsite_parquet.sh by hand." \
-        "$(_where)")"
-    exit 1
+# --- has a copy of Postgres left this machine? --------------------------------
+# The warehouse can be rebuilt from KeyCRM; app.order_versions and
+# app.stock_movements cannot be rebuilt from anything. Until deploy/pg_offsite.sh
+# ships, this says "never" every morning — which is correct and is the same
+# deliberate red first reading the header describes for the marker above.
+if [ ! -f "$PG_MARKER" ]; then
+    echo "CRITICAL: no Postgres copy has ever left this host (no $PG_MARKER)"
+    notify "$(printf '%s\n\n%s\n%s\n\n%s' \
+        "🚨 Postgres: off-site copy age = never" \
+        "order_versions, stock_movements, the access list and the SMS roster exist on this one disk." \
+        "The dumps and the cluster share a volume." \
+        "→ install the 07:40 cron and run deploy/pg_offsite.sh once by hand")" \
+        "backup:pg_offsite_never"
+    RC=1
+    PG_LINE="never"
+else
+    PG_AGE=$(( ( $(date +%s) - $(_mtime "$PG_MARKER") ) / 3600 ))
+    PG_LINE="${PG_AGE}h ago"
+    if [ "$PG_AGE" -gt "$PG_MAX_AGE_HOURS" ]; then
+        echo "CRITICAL: newest Postgres copy off-site is ${PG_AGE}h old (max ${PG_MAX_AGE_HOURS}h)"
+        notify "$(printf '%s\n\n%s\n%s\n\n%s' \
+            "🚨 Postgres: off-site copy is stale" \
+            "Newest verified copy: ${PG_AGE}h old (allowed ${PG_MAX_AGE_HOURS}h)" \
+            "Every run that fails writes why into data/logs/pg_offsite.log." \
+            "→ deploy/pg_offsite.sh by hand; it says which step refused")" \
+            "backup:pg_offsite_stale"
+        RC=1
+    fi
 fi
 
 # --- is the in-app watchdog still sampling? -----------------------------------
@@ -91,7 +146,7 @@ fi
 # crossed but a job having quietly stopped, and it cannot live in the process
 # it is judging.
 if [ -f "$WATCHDOG_MARKER" ]; then
-    WD_AGE=$(( ( $(date +%s) - $(stat -c %Y "$WATCHDOG_MARKER") ) / 3600 ))
+    WD_AGE=$(( ( $(date +%s) - $(_mtime "$WATCHDOG_MARKER") ) / 3600 ))
     WD_LINE="${WD_AGE}h ago"
 else
     # No marker is not the same fact as a stopped watchdog, and conflating them
@@ -118,13 +173,17 @@ if [ "$WD_AGE" -gt "$WATCHDOG_MAX_AGE_HOURS" ]; then
         "Last sample: $WD_LINE. It runs every 6h, so this is not a late run." \
         "It has done this before and went unnoticed for eleven weeks, because a monitor that stops and a monitor with nothing to report look identical. That is what this line exists to tell apart." \
         "$(_where)")"
-    exit 1
+    RC=1
+fi
+
+if [ "$RC" -ne 0 ]; then
+    exit "$RC"
 fi
 
 # Speak on a good day too. A check that only ever appears when something is
 # wrong teaches nobody what its silence means, and its own absence becomes
 # invisible — which is the failure it is here to prevent, applied to itself.
-echo "instruments ok: off-site ${AGE_HOURS}h, watchdog ${WD_LINE}"
+echo "instruments ok: off-site ${AGE_HOURS}h, postgres ${PG_LINE}, watchdog ${WD_LINE}"
 # Weekly, not daily (owner's no-noise pass, 30.08): a daily "all fine" is
 # noise the reader learns to swipe, but this heartbeat is also the only
 # dead-man's switch on the off-site path itself — so it survives, on
@@ -132,8 +191,9 @@ echo "instruments ok: off-site ${AGE_HOURS}h, watchdog ${WD_LINE}"
 # 29.08 this message reached nobody at all — the delivery bug in the old
 # notify(); the first heartbeat anyone actually receives is a weekly one.)
 if [ "$(date +%u)" = "1" ]; then
-    notify "$(printf '%s\n%s\n%s' \
+    notify "$(printf '%s\n%s\n%s\n%s' \
         "🫀 Приборы в порядке (недельный)" \
         "внешняя копия: ${AGE_HOURS}ч назад (порог ${MAX_AGE_HOURS}ч)" \
+        "копия Postgres: ${PG_LINE} (порог ${PG_MAX_AGE_HOURS}ч)" \
         "сторож диска: ${WD_LINE} (порог ${WATCHDOG_MAX_AGE_HOURS}ч)")"
 fi
