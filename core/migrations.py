@@ -32,6 +32,8 @@ from __future__ import annotations
 import logging
 from typing import Callable, List, NamedTuple
 
+from core.duckdb_sequences import advance_to
+
 logger = logging.getLogger(__name__)
 
 ONCE = "once"
@@ -678,35 +680,55 @@ def _m0026_data_dir_samples(self) -> None:
     logger.debug("Migration: data_dir_samples table added/verified")
 
 
+# (sequence, table, id column) for every table whose id is a sequence DEFAULT.
+# The floor for each sequence is MAX(column) of its table.
+SEQUENCE_ID_COLUMNS = (
+    ("warehouse_refresh_seq", "warehouse_refreshes", "id"),
+    ("reconciliation_seq", "reconciliation_log", "id"),
+    ("data_quality_run_seq", "data_quality_runs", "run_id"),
+    ("seq_stock_movements_id", "stock_movements", "id"),
+    ("seq_buyer_contacts_id", "buyer_contacts", "id"),
+    ("seq_manual_expenses_id", "manual_expenses", "id"),
+)
+
+
 def _m0027_reset_sequences_after_compaction(self) -> None:
-    # Migration: Fix sequences after EXPORT/IMPORT compaction.
-    # DuckDB doesn't support ALTER SEQUENCE, and IMPORT resets sequences to
-    # START value (1) even though tables already have rows. Fix by DROP+CREATE
-    # with START = max(id) + 1.
-    _seq_table_map = [
-        ("warehouse_refresh_seq", "warehouse_refreshes", "id"),
-        ("reconciliation_seq", "reconciliation_log", "id"),
-        ("data_quality_run_seq", "data_quality_runs", "run_id"),
-        ("seq_stock_movements_id", "stock_movements", "id"),
-        ("seq_buyer_contacts_id", "buyer_contacts", "id"),
-        ("seq_manual_expenses_id", "manual_expenses", "id"),
-    ]
-    for seq_name, table_name, col in _seq_table_map:
+    # Keep every id sequence above the rows its table already holds. A
+    # sequence can fall behind whenever rows arrive with explicit ids — a
+    # compaction that rebuilds the schema and copies the data in, or rows
+    # copied back from Postgres — and the next DEFAULT insert then collides
+    # with an id that exists.
+    #
+    # This used to DROP and re-CREATE each sequence with START = MAX(id) + 1.
+    # On DuckDB 1.5.5 that cannot work: every one of these sequences backs a
+    # column DEFAULT, so DROP SEQUENCE raises DependencyException, and the
+    # error went to DEBUG, where nobody reads. The peek that decided whether
+    # to reset also consumed a value each time it ran. The sequence is
+    # now advanced by burning values instead (core/duckdb_sequences.py says
+    # why that is the only lever and how its position is read without
+    # consuming one), and a failure is a WARNING that names the table.
+    #
+    # One entry failing does not stop the others: they are independent, and a
+    # sequence left behind is a collision waiting on its own table only.
+    for seq_name, table_name, col in SEQUENCE_ID_COLUMNS:
         try:
             row = self._connection.execute(
                 f"SELECT COALESCE(MAX({col}), 0) FROM {table_name}"
             ).fetchone()
-            max_id = row[0] if row else 0
-            if max_id > 0:
-                # Check current sequence value by peeking at nextval
-                cur = self._connection.execute(f"SELECT nextval('{seq_name}')").fetchone()[0]
-                if cur <= max_id:
-                    new_start = max_id + 1
-                    self._connection.execute(f"DROP SEQUENCE {seq_name}")
-                    self._connection.execute(f"CREATE SEQUENCE {seq_name} START {new_start}")
-                    logger.info(f"Sequence {seq_name} reset: {cur} → {new_start}")
+            floor = int(row[0]) if row else 0
+            burned = advance_to(self._connection, seq_name, floor)
+            if burned:
+                logger.info(
+                    "Migration 0027: advanced %s by %d so it hands out ids above "
+                    "%s.%s = %d",
+                    seq_name, burned, table_name, col, floor,
+                )
         except Exception as e:
-            logger.debug(f"Sequence fix note ({seq_name}): {e}")
+            logger.warning(
+                "Migration 0027: could not move %s above MAX(%s.%s); the next "
+                "default insert there may collide with an existing id: %s",
+                seq_name, table_name, col, e,
+            )
 
 
 def _m0028_drop_bot_owned_duplicates(self) -> None:
