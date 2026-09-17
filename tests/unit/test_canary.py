@@ -388,3 +388,23 @@ def test_format_alert_includes_dq_ages():
     msg = format_alert(result, DASHBOARD)
     assert "reconciliation: молчит 2д 6ч" in msg     # сам провал — да
     assert "integrity" not in msg                     # приборная панель — нет
+
+
+@pytest.mark.asyncio
+async def test_run_canary_warns_on_a_derivation_mode_web_did_not_understand():
+    """The wiring, not only the judge: a KS_PG_DERIVE typo reaches a failure
+    key and a warn, and the site is otherwise healthy."""
+    payload = _healthy_payload()
+    payload["derivation"] = {"mode": "piggyback",
+                             "error": "KS_PG_DERIVE='owned' is not one of ('piggyback', 'own')"}
+
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    future = datetime.now(timezone.utc) + timedelta(days=60)
+    fake_cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+    async with _mock_transport(handler) as client:
+        with patch.object(canary, "_fetch_peer_cert", return_value=fake_cert):
+            result = await run_canary(DASHBOARD, client=client)
+    assert result.severity == "warn"
+    assert result.failure_keys == ["derivation_mode_invalid"]
