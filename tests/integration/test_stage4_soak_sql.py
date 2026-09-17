@@ -43,7 +43,7 @@ SQL_DIR = REPO / "deploy" / "stage4_soak"
 FILES = sorted(SQL_DIR.glob("*.sql"))
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
 VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on": "0"}
-RUN_AS_POSTGRES = "-- soak:run-as postgres"
+RUN_AS_OWNER = "-- soak:run-as ks_app"
 
 KYIV = ZoneInfo("Europe/Kyiv")
 # A Wednesday, noon in Kyiv: inside no heavy-lock window, after the 07:30 run.
@@ -100,11 +100,11 @@ class TestTheFiles:
         assert not verbs, f"{path.name} contains {sorted(set(verbs))}"
 
     @pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
-    def test_only_sequence_reads_run_as_postgres(self, path):
-        """`postgres` is for what `ks_readonly` cannot read, and nothing else."""
+    def test_only_sequence_reads_run_as_the_owner(self, path):
+        """`ks_app` is for what `ks_readonly` cannot read, and nothing else."""
         text = path.read_text(encoding="utf-8")
         reads_sequence = bool(re.search(r"\b\w+_id_seq\b", _code(text)))
-        assert (text.splitlines()[0] == RUN_AS_POSTGRES) == reads_sequence, path.name
+        assert (text.splitlines()[0] == RUN_AS_OWNER) == reads_sequence, path.name
 
     @pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
     def test_only_documented_variables(self, path):

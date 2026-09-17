@@ -4,7 +4,7 @@ The SQL files are tested against a real Postgres in
 `tests/integration/test_stage4_soak_sql.py`. What is left is the script's own
 contract, and it is the part a daily reader acts on: the exit code, the S0 log
 grep, what a check that did not run turns into, and the promises the header
-makes — every session read-only, `postgres` only where a file asks for it, and
+makes — every session read-only, `ks_app` only where a file asks for it, and
 the web container's environment asked for by name, never listed.
 
 The fake answers the way the real commands do: `inspect` prints the running
@@ -183,12 +183,13 @@ class TestWhatTheScriptPromises:
             assert "PGOPTIONS=-c default_transaction_read_only=on" in call, call
             assert "ON_ERROR_STOP=1" in call, call
 
-    def test_postgres_only_where_a_file_asks(self, healthy):
+    def test_the_owner_only_where_a_file_asks_and_never_the_superuser(self, healthy):
         users = [re.search(r"-U (\S+)", c).group(1) for c in healthy.psql]
         asking = sum(1 for p in FILES if p.read_text(encoding="utf-8").splitlines()[0]
-                     == "-- soak:run-as postgres")
+                     == "-- soak:run-as ks_app")
         assert asking == 2
-        assert users.count("postgres") == asking
+        assert users.count("ks_app") == asking
+        assert "postgres" not in users
         assert users.count("ks_readonly") == len(FILES) - asking
 
     def test_the_environment_is_asked_by_name_and_never_listed(self, healthy):

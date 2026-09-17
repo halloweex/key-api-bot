@@ -1,9 +1,9 @@
--- soak:run-as postgres
+-- soak:run-as ks_app
 --
 -- I5 (chain 1) — the stock movement id allocator is above every id.
 --
 -- Only under KS_WRITE_INVENTORY=postgres; the variables are I1's. Runs as
--- postgres for E2's reason: `ks_readonly` cannot read the sequence, and
+-- ks_app, the sequence's owner, for E2's reason: `ks_readonly` cannot read the sequence, and
 -- `pg_sequences.last_value` is NULL for a sequence nothing has called yet.
 -- deploy/stage4_soak.sh keeps the session read-only.
 --

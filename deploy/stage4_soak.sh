@@ -20,10 +20,10 @@
 # READ-ONLY, AND HOST-SIDE
 # Nothing here writes anywhere: no file, no temp file, no alert, no row. Every
 # psql session starts with `default_transaction_read_only=on`; the checks run
-# as `ks_readonly` except the two sequence reads, which name `postgres` in
-# their first line because only the owner or a superuser can read a sequence
-# (see 14_e2_expenses_allocator.sql). It lives here and in no image: it
-# inspects containers from outside them.
+# as `ks_readonly` except the two sequence reads, which name `ks_app` in their
+# first line because only a sequence's owner (or a superuser) can read it,
+# and the owner is the narrower of the two (see 14_e2_expenses_allocator.sql).
+# It lives here and in no image: it inspects containers from outside them.
 #
 # Usage, on the host:
 #   deploy/stage4_soak.sh
@@ -116,8 +116,8 @@ log_check() {
 run_check() {
     local file="$1" name user="ks_readonly" out rc rows
     name="$(basename "$file" .sql)"
-    if grep -qx -- '-- soak:run-as postgres' "$file"; then
-        user="postgres"
+    if grep -qx -- '-- soak:run-as ks_app' "$file"; then
+        user="ks_app"
     fi
     if out="$(docker exec -i -e "PGOPTIONS=-c default_transaction_read_only=on" \
             "$PG_CONTAINER" psql -U "$user" -d ks -X -A -t -F '|' \

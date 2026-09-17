@@ -1,4 +1,4 @@
--- soak:run-as postgres
+-- soak:run-as ks_app
 --
 -- E2 (chain 8) — the id allocator is above every id in the table.
 --
@@ -11,13 +11,15 @@
 -- typed expense heals it; anything that inserts without going through the
 -- writer collides on the primary key instead.
 --
--- WHY IT RUNS AS postgres
--- `ks_readonly` has no privilege on the sequence, and `pg_sequences.last_value`
--- reads NULL both for a role without one and for a sequence nothing has called
--- yet — which is exactly production's state with zero rows. So this reads the
--- sequence relation itself, which needs the owner or a superuser.
--- deploy/stage4_soak.sh starts every session with
--- `default_transaction_read_only=on`, this one included, so the superuser's
+-- WHY IT RUNS AS ks_app
+-- `ks_readonly` has no privilege on the sequence (checked in production
+-- 2026-09-17: permission denied), and `pg_sequences.last_value` reads NULL both
+-- for a role without one and for a sequence nothing has called yet — which is
+-- exactly production's state with zero rows. So this reads the sequence
+-- relation itself, which needs its owner or a superuser. The owner is `ks_app`
+-- (migrations run as it), the narrower of the two, and it reaches the local
+-- socket without a password. deploy/stage4_soak.sh starts every session with
+-- `default_transaction_read_only=on`, this one included, so the owner's
 -- transaction is read-only like everybody else's.
 --
 -- WHAT A FAIL MEANS

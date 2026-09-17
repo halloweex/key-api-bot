@@ -102,6 +102,7 @@ docker run --rm --user root --network "$NET" \
 docker run --rm --user root --network "$NET" \
     -e "KS_PG_DSN=postgresql://ks_app:$PW@$PG:5432/ks" \
     -v "$REPO/tests:/app/tests:ro" \
+    -v "$REPO/web/frontend/src:/app/web/frontend/src:ro" \
     -v "$REPO/pytest.ini:/app/pytest.ini:ro" \
     -v "$REPO/requirements-dev.lock:/app/requirements-dev.lock:ro" \
     -v "$REPO/migrations:/app/migrations:ro" \
