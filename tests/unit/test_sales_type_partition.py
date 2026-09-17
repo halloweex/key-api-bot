@@ -241,6 +241,152 @@ class TestSalesTypeSurfacesAgree:
                 assert keys.get(key), f"{key} missing or empty in {lang}.json"
 
 
+# ─── DN-10: the CASE may only say what the partition knows ──────────────────
+#
+# The partition check — `warehouse:sales_type_partition` in DuckDB,
+# `warehouse_pg:sales_type_partition` from `core.pg_derivation.validate` — is
+# the only thing that notices a sales_type outside KNOWN_SALES_TYPES, and it
+# runs on production data after a deploy. The attack is one new branch,
+# `THEN 'wholesale'`: every checksum still balances (they sum all types), the
+# test above narrows the known set rather than widening the CASE, and the
+# revenue vanishes from every page, which filters on a known type. So the
+# literals are read out of the rendered CASE by parsing it — a grep over the
+# source would also match a comment or a WHEN condition.
+
+def _sql_tokens(sql: str) -> list[tuple[str, str]]:
+    """(kind, text) with kind 'str', 'ident', 'word' (upper-cased) or 'sym'.
+
+    Whitespace and both comment forms are dropped; `''` inside a string and
+    `""` inside a quoted identifier are escapes, not terminators.
+    """
+    tokens: list[tuple[str, str]] = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch.isspace():
+            i += 1
+        elif sql.startswith("--", i):
+            end = sql.find("\n", i)
+            i = n if end == -1 else end + 1
+        elif sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            assert end != -1, "unterminated block comment"
+            i = end + 2
+        elif ch in "'\"":
+            buf, j = [], i + 1
+            while True:
+                assert j < n, f"unterminated {ch}-quoted token"
+                if sql[j] == ch:
+                    if sql.startswith(ch * 2, j):
+                        buf.append(ch)
+                        j += 2
+                        continue
+                    break
+                buf.append(sql[j])
+                j += 1
+            tokens.append(("str" if ch == "'" else "ident", "".join(buf)))
+            i = j + 1
+        elif ch.isalnum() or ch == "_":
+            j = i
+            while j < n and (sql[j].isalnum() or sql[j] in "_."):
+                j += 1
+            tokens.append(("word", sql[i:j].upper()))
+            i = j
+        else:
+            tokens.append(("sym", ch))
+            i += 1
+    return tokens
+
+
+def _case_results(sql: str) -> tuple[list[str], bool]:
+    """Every THEN and ELSE value of the outermost CASE, and whether it has an ELSE.
+
+    WHEN conditions are walked past, nested CASEs included. A result that is
+    not exactly one string literal fails rather than being skipped: a column
+    or an expression could yield a value nobody can enumerate here.
+    """
+    tokens = _sql_tokens(sql)
+    assert tokens[:1] == [("word", "CASE")], "the fragment does not start with CASE"
+    clauses: list[tuple[str, list[tuple[str, str]]]] = []
+    depth = 0
+    for pos, tok in enumerate(tokens[1:], start=1):
+        kind, text = tok
+        if kind == "word" and text == "END" and depth == 0:
+            assert pos == len(tokens) - 1, f"text after the CASE's END: {tokens[pos + 1:]}"
+            break
+        if kind == "word" and text == "CASE":
+            depth += 1
+        elif kind == "word" and text == "END":
+            depth -= 1
+        elif depth == 0 and kind == "word" and text in ("WHEN", "THEN", "ELSE"):
+            clauses.append((text, []))
+            continue
+        assert clauses, f"{tok} before the first WHEN"
+        clauses[-1][1].append(tok)
+    else:
+        raise AssertionError("the CASE has no END")
+
+    keywords = [k for k, _ in clauses]
+    has_else = keywords[-1:] == ["ELSE"]
+    pairs = keywords[:-1] if has_else else keywords
+    assert pairs and pairs == ["WHEN", "THEN"] * (len(pairs) // 2), (
+        f"not WHEN…THEN pairs with an optional trailing ELSE: {keywords}"
+    )
+
+    results = []
+    for keyword, body in clauses:
+        if keyword == "WHEN":
+            continue
+        assert len(body) == 1 and body[0][0] == "str", (
+            f"{keyword} {body} is not a single string literal"
+        )
+        results.append(body[0][1])
+    return results, has_else
+
+
+class TestSalesTypeCaseSpeaksOnlyKnownTypes:
+    def test_the_extractor_reads_structure_not_text(self):
+        """Literals in comments and WHEN conditions are not results."""
+        sql = """CASE
+            -- THEN 'wholesale'
+            /* ELSE 'wholesale' */
+            WHEN x = 'wholesale' THEN 'it''s'
+            WHEN (CASE WHEN y THEN 'nested' ELSE 'n' END) = 'n' THEN 'b2b'
+            ELSE 'internal'
+        END"""
+        assert _case_results(sql) == (["it's", "b2b", "internal"], True)
+
+    @staticmethod
+    def _results_by_dialect() -> dict[str, tuple[list[str], bool]]:
+        from core.duckdb_store import silver_sales_type_case
+        from core.sql_dialect import DUCKDB, POSTGRES
+
+        return {d.name: _case_results(silver_sales_type_case(d)) for d in (DUCKDB, POSTGRES)}
+
+    def test_every_branch_yields_a_known_type(self):
+        for dialect, (results, has_else) in self._results_by_dialect().items():
+            assert results, f"{dialect}: no THEN/ELSE literal found"
+            assert has_else, (
+                f"{dialect}: without an ELSE an unmatched order gets NULL, "
+                "which is outside the partition too"
+            )
+            unknown = set(results) - set(KNOWN_SALES_TYPES)
+            assert not unknown, (
+                f"{dialect}: the sales_type CASE produces {sorted(unknown)}, which "
+                "is not in KNOWN_SALES_TYPES — its revenue would balance every "
+                "checksum and appear on no page"
+            )
+
+    def test_both_engines_produce_the_same_types(self):
+        by_dialect = self._results_by_dialect()
+        assert by_dialect["duckdb"] == by_dialect["postgres"]
+
+    def test_every_known_type_is_produced(self):
+        """All four are reachable today; a known type no branch yields is dead."""
+        for dialect, (results, _) in self._results_by_dialect().items():
+            assert set(results) == set(KNOWN_SALES_TYPES), dialect
+
+
 class TestClassificationReachesTheWarehouse:
     """A classification nobody rebuilds for changes nothing a reader can see.
 
