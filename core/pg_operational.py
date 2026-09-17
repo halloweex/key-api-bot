@@ -710,12 +710,18 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
                         _WATERMARK_OK, spec.pg_table, int(totals[spec.pg_table]),
                     )
 
+        # Only what was written. A stood-down table is read out of DuckDB with
+        # the rest but never written, and reporting its read count under
+        # "replaced" made the first log line after KS_WRITE_EXPENSES was
+        # switched on (2026-09-17) read as the hourly copy wiping the table it
+        # had in fact left alone.
         result = {
             "full": full,
-            "replaced": {t: len(replaced[t]) for t, _d, _c, _o in _FULL_REPLACE},
+            "replaced": {t: len(replaced[t]) for t, _d, _c, _o in _FULL_REPLACE
+                         if t not in stood_down},
             "appended": {
                 spec.pg_table: len(appended[spec.pg_table])
-                for spec in _APPEND_ABOVE
+                for spec in _APPEND_ABOVE if spec.pg_table not in stood_down
             },
             # The two original spellings, kept beside the map they are now
             # read out of. They are what a year of production log lines say
