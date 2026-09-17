@@ -1530,7 +1530,8 @@ class BackgroundScheduler:
 
             from core.sync_service import get_sync_service
             sync_service = await get_sync_service()
-            results = await sync_service.reconcile_with_api(days_back=14)
+            results = await sync_service.reconcile_with_api(
+                days_back=14, lock=self._heavy_job_lock)
 
             ok = sum(1 for r in results if r["status"] == "ok")
             drift = sum(1 for r in results if r["status"] == "drift")

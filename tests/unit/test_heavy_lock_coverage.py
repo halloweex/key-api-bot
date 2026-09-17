@@ -41,6 +41,27 @@ def test_the_backfill_route_passes_the_lock():
     assert "lock=get_scheduler()._heavy_job_lock" in src
 
 
+def test_every_reconciliation_caller_passes_the_lock():
+    """The daily reconciliation resyncs drifted orders through the same writer
+    as a repair, and wrote without the lock — found reviewing chain 2, where it
+    would page a false Postgres validation failure. Walks every module that
+    could call it rather than naming the two callers of today."""
+    import ast
+    import pathlib
+
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    calls = []
+    for root in ("core", "web", "bot", "scripts"):
+        for path in (repo / root).rglob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "reconcile_with_api"):
+                    calls.append((path.name, node))
+    assert calls, "no reconcile_with_api callers found"
+    for name, node in calls:
+        assert any(k.arg == "lock" for k in node.keywords), name
+
+
 def test_every_repair_caller_passes_the_lock():
     src = inspect.getsource(scheduler_module.BackgroundScheduler)
     calls = [line for line in src.splitlines() if "repair_orders(" in line]

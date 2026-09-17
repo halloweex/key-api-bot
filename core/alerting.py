@@ -99,6 +99,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "dq_stale:integrity": _c("a successful run inside the age limit"),
     "dq_stale:mirror_landing": _c("a successful run inside the age limit"),
     "mirror_block_missing": _c("health payload carries a mirrors block again"),
+    # KS_PG_DERIVE set to a value web did not understand (fell back to piggyback).
+    "derivation_mode_invalid": _c("web restarts with a valid KS_PG_DERIVE"),
     "mirror_missing:bronze.orders": _c("the table reports freshness again"),
     "mirror_never:bronze.orders": _c("the table's first successful shipment"),
     "mirror_stale:bronze.orders": _c("a shipment inside the age limit"),

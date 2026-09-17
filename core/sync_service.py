@@ -1175,13 +1175,22 @@ class SyncService:
         )
         return result
 
-    async def reconcile_with_api(self, days_back: int = 14, auto_resync: bool = True) -> list[dict]:
+    async def reconcile_with_api(
+        self, days_back: int = 14, auto_resync: bool = True,
+        *, lock: "asyncio.Lock | None" = None,
+    ) -> list[dict]:
         """Compare orders between DuckDB and KeyCRM API per day.
 
         Fetches actual orders from API, groups by ordered_at in Kyiv TZ,
         and compares with DuckDB per-order (count, status, revenue).
         When auto_resync=True, re-fetches stale orders individually.
         Returns list of per-day results with status 'ok' or 'drift'.
+
+        `lock` is the scheduler's heavy-job lock, held around the resync write
+        and the dirty mark only — `repair_orders`' contract, for its reasons:
+        a write landing between a derivation's Silver commit and its validation
+        read reports a correct rebuild as failed, in DuckDB and — under
+        KS_PG_DERIVE=own — in Postgres. The KeyCRM fetch stays outside it.
         """
         from collections import defaultdict
         from datetime import date
@@ -1285,11 +1294,13 @@ class SyncService:
         if stale_order_ids and auto_resync:
             stale_orders = [api_full[oid] for oid in set(stale_order_ids) if oid in api_full]
             if stale_orders:
-                resync_count, _ = await self._upsert_orders_with_expenses(
-                    stale_orders, force_update=True,
-                )
+                held = lock if lock is not None else contextlib.nullcontext()
+                async with held:
+                    resync_count, _ = await self._upsert_orders_with_expenses(
+                        stale_orders, force_update=True,
+                    )
+                    await self.store.mark_warehouse_dirty(None)
                 logger.info(f"Resynced {resync_count} stale orders (force_update=True)")
-                await self.store.mark_warehouse_dirty(None)
 
         ok_count = sum(1 for r in results if r["status"] == "ok")
         drift_count = sum(1 for r in results if r["status"] == "drift")

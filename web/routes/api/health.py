@@ -65,6 +65,13 @@ async def _mirror_freshness() -> "dict | None":
         return data
 
 
+def _derivation_mode() -> dict:
+    """KS_PG_DERIVE as the scheduler understood it at start. Local state, no I/O."""
+    from core import pg_derivation
+
+    return {"mode": pg_derivation.mode(), "error": pg_derivation.mode_error()}
+
+
 @router.get("/health", response_model=HealthResponse)
 @limiter.limit("60/minute")
 async def health_check(request: Request):
@@ -192,6 +199,7 @@ async def health_check(request: Request):
         "data_quality": data_quality,
         "mirrors": mirrors,
         "alerting": alerting,
+        "derivation": _derivation_mode(),
     }
 
 

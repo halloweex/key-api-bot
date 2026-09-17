@@ -961,12 +961,14 @@ async def run_reconciliation(
     _=Depends(require_admin),
 ):
     """Manually trigger reconciliation check."""
+    from core.scheduler import get_scheduler
     from core.sync_service import get_sync_service
 
     async def run_check():
         sync_service = await get_sync_service()
         results = await sync_service.reconcile_with_api(
             days_back=days_back, auto_resync=auto_resync,
+            lock=get_scheduler()._heavy_job_lock,
         )
         ok = sum(1 for r in results if r["status"] == "ok")
         drift = sum(1 for r in results if r["status"] == "drift")
