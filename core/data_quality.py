@@ -2031,7 +2031,11 @@ def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, An
                critical_count, warn_count, api_calls_used, duration_ms, error_message
         FROM data_quality_runs
         {where}
-        ORDER BY started_at DESC
+        -- By id, not by `started_at`. `fetch_baseline_run` bounds on
+        -- `run_id`, and a reconstruction that ranks by one key while its
+        -- bound uses another is right only while the two never disagree.
+        -- Verified on all 350 production rows: identical ranking today.
+        ORDER BY run_id DESC
         LIMIT 1
     """, params).fetchone()
     if not row:
@@ -2207,6 +2211,46 @@ def fetch_previous_run(conn, layer: str, before_run_id: int) -> Optional[Dict[st
     if not row:
         return None
     return fetch_latest_run_by_id(conn, int(row[0]))
+
+
+def fetch_baseline_run(conn, layer: str, *, sent_at, before_run_id: int):
+    """The run of `layer` that the last *delivered* digest reported on.
+
+    `fetch_previous_run` answers a different question — the run before this
+    one — and the digest was using it to say "(=)". For a layer that runs four
+    times a day against a digest that goes out once, that compares a six-hour
+    window and prints the answer under a heading the reader takes to mean
+    "since yesterday". A finding that stepped and settled between two digests
+    was marked unchanged in both: `goods_shipped_without_sale` went 809 → 812
+    at the 13:00 Kyiv run on 2026-09-14, and the mornings either side of it
+    both said "=". Nothing ever announced it.
+
+    So the baseline is the newest run that had **finished** when the marker was
+    written — `ended_at <= sent_at`, because a run still in flight cannot have
+    been in a message. Derived from `dq_digest_last_sent`, which already
+    exists, rather than recorded per layer: a stored cursor is a second thing
+    to be wrong, and there is nothing here that recomputing cannot recover.
+
+    Falls back to the previous run — today's behaviour — when there is no
+    marker yet or no run finished before it. That is the first digest after
+    this ships, and a layer younger than the marker; both must read as an
+    ordinary morning rather than marking everything `new`.
+
+    Failed runs are skipped for `fetch_previous_run`'s reason: their zero
+    counts read as "fixed, then broke again".
+    """
+    if sent_at is not None:
+        row = conn.execute("""
+            SELECT run_id FROM data_quality_runs
+            WHERE layer = ? AND run_id < ?
+              AND error_message IS NULL AND status <> 'FAILED'
+              AND ended_at IS NOT NULL AND ended_at <= ?
+            ORDER BY run_id DESC
+            LIMIT 1
+        """, [layer, before_run_id, sent_at]).fetchone()
+        if row:
+            return fetch_latest_run_by_id(conn, int(row[0]))
+    return fetch_previous_run(conn, layer, before_run_id)
 
 
 def fetch_latest_run_by_id(conn, run_id: int) -> Optional[Dict[str, Any]]:
