@@ -473,39 +473,67 @@ class DuckDBStore(
         self._schema_status: Dict[str, Any] = {"status": "unknown", "reason": "not connected"}
 
     async def connect(self) -> None:
-        """Initialize database connection, schema, and thread pool."""
+        """Initialize database connection, schema, and thread pool.
+
+        All or nothing: if anything here raises, the store is left with no
+        connection, so the next use of it connects again from the start.
+        """
         DB_DIR.mkdir(parents=True, exist_ok=True)
 
         async with self._lock:
             if self._connection is None:
                 self._connection = duckdb.connect(str(self.db_path))
-                # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM).
-                # 3GB verified safe for checkpoint on 19GB DB via compact_duckdb.py spike runs
-                # (also exercises full export). 2GB OOMs WAL flush — keep 3GB as floor.
-                #
-                # 3GB was too tight: on 2026-08-02 seven consecutive warehouse refreshes died
-                # at 2.7/2.7 GiB while the container sat at ~950 MiB of its 7g budget, and the
-                # first refresh to complete afterwards left Gold truncated by 763 revenue rows.
-                # The ceiling is now configurable so it can be raised without a code deploy.
-                self._connection.execute(f"SET memory_limit='{_memory_limit()}'")
-                # Reduce memory usage for bulk operations
-                self._connection.execute("SET preserve_insertion_order=false")
-                # Large WAL threshold; rely on the explicit 6h CHECKPOINT job.
-                # 2MB caused checkpoint-during-write races on DuckDB 1.5.x
-                # (corrupted in-memory column: row group rows mismatched column rows).
-                self._connection.execute("SET wal_autocheckpoint='1GB'")
-                # Enable disk spilling: DuckDB writes to disk instead of OOM crash
-                tmp_dir = Path(self.db_path).parent / "duckdb_tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                self._connection.execute(f"SET temp_directory='{tmp_dir}'")
+                try:
+                    # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM).
+                    # 3GB verified safe for checkpoint on 19GB DB via compact_duckdb.py spike runs
+                    # (also exercises full export). 2GB OOMs WAL flush — keep 3GB as floor.
+                    #
+                    # 3GB was too tight: on 2026-08-02 seven consecutive warehouse refreshes died
+                    # at 2.7/2.7 GiB while the container sat at ~950 MiB of its 7g budget, and the
+                    # first refresh to complete afterwards left Gold truncated by 763 revenue rows.
+                    # The ceiling is now configurable so it can be raised without a code deploy.
+                    self._connection.execute(f"SET memory_limit='{_memory_limit()}'")
+                    # Reduce memory usage for bulk operations
+                    self._connection.execute("SET preserve_insertion_order=false")
+                    # Large WAL threshold; rely on the explicit 6h CHECKPOINT job.
+                    # 2MB caused checkpoint-during-write races on DuckDB 1.5.x
+                    # (corrupted in-memory column: row group rows mismatched column rows).
+                    self._connection.execute("SET wal_autocheckpoint='1GB'")
+                    # Enable disk spilling: DuckDB writes to disk instead of OOM crash
+                    tmp_dir = Path(self.db_path).parent / "duckdb_tmp"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    self._connection.execute(f"SET temp_directory='{tmp_dir}'")
 
-                await self._init_schema()
+                    await self._init_schema()
 
-                # Thread pool for offloading blocking operations
-                self._executor = ThreadPoolExecutor(
-                    max_workers=1,  # Single worker - DuckDB requires serialized access
-                    thread_name_prefix="duckdb"
-                )
+                    # Thread pool for offloading blocking operations
+                    self._executor = ThreadPoolExecutor(
+                        max_workers=1,  # Single worker - DuckDB requires serialized access
+                        thread_name_prefix="duckdb"
+                    )
+                except BaseException:
+                    # The schema and the migrations run on `self._connection`,
+                    # so it is set before they start — and a failure used to
+                    # leave it set. `connection()` reconnects only when it is
+                    # None, so every later caller took the half-built store as
+                    # connected: views that failed to build meant not one
+                    # migration ever ran, 0027 included, while the ledger
+                    # stayed "unknown" — which /api/health does not count as
+                    # degraded — and named no failure. The same held for
+                    # anything above that raised, a spill directory that could
+                    # not be created among them. Drop the connection instead,
+                    # so the next use of the store runs all of this again.
+                    #
+                    # What still reaches here is what leaves no usable store:
+                    # the connection settings, the table DDL, the ledger. A
+                    # view no longer does — it is built after the migrations
+                    # and a failure is published instead (`_build_view`),
+                    # because it fails the same way on every attempt and
+                    # would otherwise keep web from starting at all.
+                    connection, self._connection = self._connection, None
+                    with contextlib.suppress(Exception):
+                        connection.close()
+                    raise
 
                 logger.info(f"DuckDB connected: {self.db_path}")
 
@@ -1373,17 +1401,63 @@ class DuckDBStore(
         self._connection.execute(SILVER_ORDERS_DDL)
         self._connection.execute(schema_sql)
 
-        # The order-line level. A view, so it is always exactly as fresh as
-        # Silver and costs the file nothing — see SILVER_ORDER_LINES_VIEW_SQL.
-        self._connection.execute(SILVER_ORDER_LINES_VIEW_SQL)
-
-        # Create analytics views (Layer 3 & 4)
-        await self._create_inventory_views()
-
-        # Migration: add updated_at column to existing orders table
+        # Migrations BEFORE the views, and a view that fails does not take the
+        # store down with it.
+        #
+        # The views used to come first, and a view is exactly the statement
+        # that reads a column a later migration adds: `silver_order_lines`
+        # reads `silver_orders.promocode`, which 0020 adds to a file created
+        # before it. On such a file the view raised on every boot before a
+        # single migration ran — 0020 and 0027, the only net under the weekly
+        # compaction's restore, among them. Raising is also the wrong answer
+        # for an all-or-nothing `connect()`: the same view fails the same way
+        # on every attempt, so web would never start. No migration reads a
+        # view (read, not assumed: none of core/migrations.py names one), and
+        # every view is rebuilt on every boot, so this order costs nothing.
         await self._run_migrations()
 
+        # The order-line level. A view, so it is always exactly as fresh as
+        # Silver and costs the file nothing — see SILVER_ORDER_LINES_VIEW_SQL.
+        await self._build_view("silver_order_lines", SILVER_ORDER_LINES_VIEW_SQL)
+
+        # Create analytics views (Layer 3 & 4)
+        await self._build_view("inventory", self._create_inventory_views)
+
         logger.info("DuckDB schema initialized")
+
+    async def _build_view(self, name: str, build) -> None:
+        """Build a view, and publish a failure rather than raise it.
+
+        `build` is the statement, or the coroutine method that issues it. A
+        view that cannot be built costs the readers of that view and nothing
+        else — they read the definition the file last held, or fail if it
+        held none — while the tables are there and every migration has run.
+        Raising here would cost everything instead — `connect()` drops the
+        connection on any failure, and a view whose SQL fails on this file
+        fails the same way on the next attempt, so web would restart into it
+        until a fix shipped.
+
+        So it goes where a failed migration goes: into `_failed_migrations`,
+        with the snapshot taken again, so `schema_status()` reads "failed",
+        /api/health "degraded", and the canary pages. Not into
+        `schema_migrations` — a view is rebuilt on every boot, and a "failed"
+        row would outlive the boot that built it.
+        """
+        try:
+            if callable(build):
+                await build()
+            else:
+                self._connection.execute(build)
+        except Exception as e:
+            logger.error(
+                "View %s could not be built; it keeps whatever definition the "
+                "file last held, if any: %s", name, e, exc_info=True,
+            )
+            self._failed_migrations.append({
+                "id": f"view:{name}",
+                "error": f"{type(e).__name__}: {e}",
+            })
+            self._schema_status = self._read_schema_status()
 
     async def _run_migrations(self) -> None:
         """Apply every pending migration, in order, and record what happened.
@@ -1474,7 +1548,8 @@ class DuckDBStore(
     def schema_status(self) -> Dict[str, Any]:
         """What the ledger knew at connect time, for /api/health.
 
-        Returns the snapshot taken during `_run_migrations` rather than querying.
+        Returns the snapshot taken at connect rather than querying — after the
+        migrations, and again after any view that could not be built.
         The ledger only changes when migrations run, which is once per process,
         and `/api/health` is served from the event loop while a refresh may be
         using the one DuckDB connection from the executor — reading here would be
@@ -1484,7 +1559,8 @@ class DuckDBStore(
         return dict(self._schema_status)
 
     def _read_schema_status(self) -> Dict[str, Any]:
-        """Snapshot the ledger. Called once, from `_run_migrations`.
+        """Snapshot the ledger. Called at connect only: from `_run_migrations`,
+        and from `_build_view` when a view adds a failure after them.
 
         `pending` and `failed` are kept apart on purpose: a step that has never
         run and a step that ran and blew up look identical from outside unless
@@ -3382,8 +3458,14 @@ async def get_store() -> DuckDBStore:
     global _store_instance
     async with _store_lock:
         if _store_instance is None:
-            _store_instance = DuckDBStore()
-            await _store_instance.connect()
+            # Published only once connected. It used to be assigned before
+            # `connect()`, so a connect that raised still left a singleton
+            # behind, and web's startup — which catches a failed first
+            # sync and asks for the store again to serve stale data — was
+            # handed that store instead of a second attempt at opening it.
+            store = DuckDBStore()
+            await store.connect()
+            _store_instance = store
     return _store_instance
 
 

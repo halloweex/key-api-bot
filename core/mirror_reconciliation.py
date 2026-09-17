@@ -225,6 +225,29 @@ class MirroredTable:
     # would silence the one finding that matters.
     prunes_by_age: bool = False
 
+    # True for a table `core.pg_operational.replicate_operational` copies.
+    #
+    # That copy is one transaction every hour, and a failed run stamps the
+    # failure on every table it was copying. One failed run is usually repaired
+    # by the next — a lock held through a deploy's migration, the old web
+    # container meeting the new revision, a pool blip — and read as CRITICAL
+    # it would page about ~26 tables at 07:30 for a copy an hour from healthy.
+    # So `mirror_failing` is WARN while that repair is still on schedule: one
+    # failure, with the last success inside the comparison's grace (the same
+    # grace that forgives rows in flight). It is CRITICAL from the second
+    # failure in a row, or once that success is older than the grace — which,
+    # with only the hourly copy running and a 90-minute grace, is a lone
+    # failure more than half an hour before the check; by then rows written
+    # since the success read as lost too. A failure that repeats — a duplicate id in DuckDB's
+    # `reconciliation_log` fails every run the same way — is CRITICAL within
+    # two hourly runs.
+    #
+    # Opt-in, and set only on `OPERATIONAL_TABLES` and `APPEND_ONLY_TABLES`.
+    # The landing mirrors and the other replicated copies keep every failure
+    # CRITICAL: they have their own cadences, and whether one failure is noise
+    # there is a separate question this flag does not answer.
+    one_failure_warns: bool = False
+
     @property
     def stamp_is_per_row(self) -> bool:
         """Whether `synced_column` dates *this row* or the whole rebuild.
@@ -539,6 +562,9 @@ def _sample(spec: MirroredTable, keys, limit: int) -> Tuple[int, ...]:
 
 def _watermark_findings(
     table: str, watermark: Optional[Mapping[str, Any]], dk_count: int,
+    *,
+    one_failure_warns_within: Optional[timedelta] = None,
+    now: Optional[datetime] = None,
 ) -> Tuple[List[IntegrityIssue], Optional[datetime]]:
     """What `meta.mirror_state` alone says about a table.
 
@@ -547,24 +573,48 @@ def _watermark_findings(
     both comparison shapes because both need exactly this gate first: a table
     the mirror has never reached, or is failing to reach, cannot be compared
     row by row without the report becoming a restatement of that one fact.
+
+    `one_failure_warns_within` is the grace, passed only for a table whose
+    spec sets `one_failure_warns`: a single failure since a success inside it
+    is WARN rather than CRITICAL. None keeps every failure CRITICAL.
     """
     issues: List[IntegrityIssue] = []
 
     failures = int((watermark or {}).get("failures_since_ok") or 0)
     if failures:
         last_error = (watermark or {}).get("last_error") or "no message recorded"
-        issues.append(IntegrityIssue(
-            check_name="mirror_failing",
-            table_name=table,
-            severity=Severity.CRITICAL,
-            count=failures,
-            description=(
-                f"The mirror has failed {failures} time(s) in a row since its "
-                f"last success, writing {table}. Last error: {last_error[:300]}. "
-                "Postgres is behind by everything that has changed since, and "
-                "the row counts below are measured against a stale copy."
-            ),
-        ))
+        if _repair_still_on_schedule(
+            failures, (watermark or {}).get("last_ok_at"),
+            one_failure_warns_within, now,
+        ):
+            issues.append(IntegrityIssue(
+                check_name="mirror_failing",
+                table_name=table,
+                severity=Severity.WARN,
+                count=failures,
+                description=(
+                    f"The last copy of {table} failed, once since its last "
+                    "success, which is still inside the "
+                    f"{int(one_failure_warns_within.total_seconds() // 60)}-minute "
+                    "grace this schedule allows; the next hourly run usually "
+                    f"repairs it. Last error: {last_error[:300]}. CRITICAL if "
+                    "the next run fails too, or once the last success is older "
+                    "than the grace."
+                ),
+            ))
+        else:
+            issues.append(IntegrityIssue(
+                check_name="mirror_failing",
+                table_name=table,
+                severity=Severity.CRITICAL,
+                count=failures,
+                description=(
+                    f"The mirror has failed {failures} time(s) in a row since its "
+                    f"last success, writing {table}. Last error: {last_error[:300]}. "
+                    "Postgres is behind by everything that has changed since, and "
+                    "the row counts below are measured against a stale copy."
+                ),
+            ))
 
     last_ok_at = (watermark or {}).get("last_ok_at")
     if last_ok_at is None:
@@ -591,6 +641,21 @@ def _watermark_findings(
     if last_ok_at.tzinfo is None:
         last_ok_at = last_ok_at.replace(tzinfo=timezone.utc)
     return issues, last_ok_at
+
+
+def _repair_still_on_schedule(
+    failures: int,
+    last_ok_at: Optional[datetime],
+    grace: Optional[timedelta],
+    now: Optional[datetime],
+) -> bool:
+    """One failure, and a last success recent enough that the next run can
+    still repair it before the copy is staler than its schedule allows."""
+    if grace is None or failures != 1 or last_ok_at is None:
+        return False
+    if last_ok_at.tzinfo is None:
+        last_ok_at = last_ok_at.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) - last_ok_at <= grace
 
 
 def _pruned_by_age(
@@ -659,10 +724,15 @@ def compare_table(
     issues: List[IntegrityIssue] = []
     table = spec.pg_table
 
-    issues, last_ok_at = _watermark_findings(table, watermark, len(dk_rows))
+    grace = timedelta(minutes=int(grace_minutes))
+    issues, last_ok_at = _watermark_findings(
+        table, watermark, len(dk_rows),
+        one_failure_warns_within=grace if spec.one_failure_warns else None,
+        now=now,
+    )
     if last_ok_at is None:
         return issues
-    cutoff = now - timedelta(minutes=int(grace_minutes))
+    cutoff = now - grace
 
     # ── DuckDB has it, Postgres does not ──
     lost: List[int] = []
@@ -965,6 +1035,9 @@ class BucketedTable:
     numeric: Tuple[str, ...]
     dk_rows_sql: str                        # one bucket, plus DuckDB's synced_at
     pg_rows_sql: str
+    # `MirroredTable.one_failure_warns`, for the appended tables the same
+    # hourly copy ships.
+    one_failure_warns: bool = False
 
 
 _ORDER_FIELDS: Tuple[Tuple[str, str], ...] = (
@@ -1948,6 +2021,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         synced_column="synced_at",
         numeric=("price", "purchased_price"),
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.revenue_goals",
@@ -1960,6 +2034,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         synced_column="updated_at",
         numeric=("goal_amount", "calculated_goal", "growth_factor"),
         full_replace=True,
+        one_failure_warns=True,
     ),
     # Landing, replicated rather than mirrored — `bronze.offer_stocks`'
     # situation exactly. KeyCRM serves this dictionary only to the weekly full
@@ -1973,6 +2048,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         dk_table="expense_types",
         columns=tuple(EXPENSE_TYPE_COLUMNS),
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.manual_expenses",
@@ -1987,6 +2063,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         synced_column="COALESCE(updated_at, created_at)",
         numeric=("amount",),
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.order_backfill_misses",
@@ -2001,6 +2078,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # forgives a row it also compared.
         synced_column="checked_at",
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.inventory_history",
@@ -2011,6 +2089,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         synced_column="recorded_at",
         numeric=("total_value",),
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.sku_inventory_status",
@@ -2025,6 +2104,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         ignore_columns=("updated_at",),
         numeric=("price", "purchased_price"),
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.buyer_gender",
@@ -2043,6 +2123,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # compared.
         ignore_columns=("decided_at",),
         full_replace=True,
+        one_failure_warns=True,
     ),
     # ── the forecast group (revision 0025) ──
     #
@@ -2071,6 +2152,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         ignore_columns=("created_at",),
         numeric=("predicted_revenue", "model_mae", "model_mape", "model_wape"),
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.seasonal_indices",
@@ -2090,6 +2172,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         numeric=("seasonality_index", "avg_revenue", "min_revenue",
                  "max_revenue", "yoy_growth"),
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.weekly_patterns",
@@ -2107,6 +2190,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         ignore_columns=("updated_at",),
         numeric=("weight",),
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.growth_metrics",
@@ -2124,6 +2208,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         ignore_columns=("updated_at",),
         numeric=("value",),
         full_replace=True,
+        one_failure_warns=True,
     ),
     # ── the watchdog samples and the send ledgers (revision 0026) ──
     #
@@ -2153,6 +2238,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         full_replace=True,
         # Swept by age every thirty minutes; see the field.
         prunes_by_age=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.data_dir_samples",
@@ -2168,6 +2254,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         full_replace=True,
         # Swept by age every thirty minutes; see the field.
         prunes_by_age=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.memory_samples",
@@ -2179,6 +2266,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         full_replace=True,
         # Swept by age every thirty minutes; see the field.
         prunes_by_age=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.weekly_report_sends",
@@ -2194,6 +2282,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         synced_column="sent_at",
         numeric=("revenue",),
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.traffic_report_sends",
@@ -2204,6 +2293,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         synced_column="sent_at",
         numeric=("revenue",),
         full_replace=True,
+        one_failure_warns=True,
     ),
     # ── the data-quality journal (revision 0028) ──
     #
@@ -2227,6 +2317,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         key_columns=("run_id",),
         synced_column="started_at",
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.data_quality_issues",
@@ -2239,6 +2330,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
             "WHERE r.run_id = data_quality_issues.run_id)"
         ),
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.data_quality_diffs",
@@ -2255,6 +2347,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # declaring them here would coerce one side to Decimal and report every
         # row as differing.
         full_replace=True,
+        one_failure_warns=True,
     ),
     # ── the offer catalogue and the sync watermarks (revision 0029) ──
     MirroredTable(
@@ -2284,6 +2377,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # obvious thing to write and is not quite what the data says.
         ignore_columns=("synced_at",),
         full_replace=True,
+        one_failure_warns=True,
     ),
     MirroredTable(
         pg_table="app.sync_metadata",
@@ -2299,6 +2393,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # that moment, so `updated_at` dates the row it sits on.
         synced_column="updated_at",
         full_replace=True,
+        one_failure_warns=True,
     ),
 )
 
@@ -2385,6 +2480,7 @@ APPEND_ONLY_TABLES: Tuple[BucketedTable, ...] = (
             "FROM app.inventory_sku_history "
             f"WHERE ({_DAY_BUCKET_PG}) = $1"
         ),
+        one_failure_warns=True,
     ),
     BucketedTable(
         pg_table="app.stock_movements",
@@ -2408,6 +2504,7 @@ APPEND_ONLY_TABLES: Tuple[BucketedTable, ...] = (
             f"SELECT {', '.join(_MOVEMENT_COLS)} FROM app.stock_movements "
             f"WHERE (id / {BUCKET_SIZE}) = $1"
         ),
+        one_failure_warns=True,
     ),
     # ── the two forensic logs (revision 0027) ──
     #
@@ -2440,6 +2537,7 @@ APPEND_ONLY_TABLES: Tuple[BucketedTable, ...] = (
             f"SELECT {', '.join(_REFRESH_COLS)} FROM app.warehouse_refreshes "
             f"WHERE (id / {BUCKET_SIZE}) = $1"
         ),
+        one_failure_warns=True,
     ),
     BucketedTable(
         pg_table="app.reconciliation_log",
@@ -2459,6 +2557,7 @@ APPEND_ONLY_TABLES: Tuple[BucketedTable, ...] = (
             "FROM app.reconciliation_log "
             f"WHERE (id / {BUCKET_SIZE}) = $1"
         ),
+        one_failure_warns=True,
     ),
 )
 
@@ -2718,6 +2817,11 @@ async def reconcile_operational(
         dk_count = sum(int(v[0]) for v in dk_print.values())
         found, last_ok_at = _watermark_findings(
             spec.pg_table, watermarks.get(spec.pg_table), dk_count,
+            one_failure_warns_within=(
+                timedelta(minutes=int(grace_minutes))
+                if spec.one_failure_warns else None
+            ),
+            now=now,
         )
         issues += found
         if last_ok_at is None:
