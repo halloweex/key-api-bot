@@ -2926,6 +2926,7 @@ class BackgroundScheduler:
             DigestSection,
             build_digest,
             fetch_latest_run,
+            fetch_baseline_run,
             fetch_previous_run,
             fetch_run_diffs,
             fetch_run_issues,
@@ -2963,7 +2964,12 @@ class BackgroundScheduler:
                         started = datetime.fromisoformat(run["started_at"])
                         age_hours = (now - started).total_seconds() / 3600
 
-                    previous = fetch_previous_run(conn, layer, run["run_id"])
+                    # "=" must mean "since you last read this", not
+                    # "since a run six hours ago".
+                    previous = fetch_baseline_run(
+                        conn, layer,
+                        sent_at=last_sent_at, before_run_id=run["run_id"],
+                    )
                     sections.append(DigestSection(
                         layer=layer,
                         run=run,

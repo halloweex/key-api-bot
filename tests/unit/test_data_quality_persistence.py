@@ -17,8 +17,10 @@ from core.data_quality import (
     DiscrepancyClass,
     IntegrityIssue,
     Severity,
+    fetch_baseline_run,
     fetch_last_success_ages,
     fetch_latest_run,
+    fetch_previous_run,
     persist_run,
 )
 from core.duckdb_store import DuckDBStore
@@ -321,3 +323,211 @@ class TestFetchLastSuccessAges:
             assert ages["integrity"]["age_seconds"] is not None
         finally:
             await store.close()
+
+
+class TestTheDigestBaselineIsWhatYouLastRead:
+    """`(=)` must mean "unchanged since the last digest", not "since the last
+    run". The integrity layer runs four times a day and the digest goes out
+    once, so the old comparison covered six hours of a twenty-four hour
+    reporting cycle — and a finding that moved and settled inside that gap was
+    reported unchanged on both sides of it.
+    """
+
+    # The integrity layer's real slots. `dq_integrity_check` is scheduled at
+    # 01/07/13/19 **Kyiv**, which is 22/04/10/16 UTC, and the digest goes out
+    # at 09:00 Kyiv = 06:00 UTC. Writing the Kyiv numbers as UTC here would
+    # put the digest between the wrong pair of runs and prove nothing — this
+    # repo has a standing note about fixtures that think in the wrong zone.
+    SLOTS_UTC = [
+        datetime(2026, 9, 13, 22, 0, tzinfo=timezone.utc),
+        datetime(2026, 9, 14, 4, 0, tzinfo=timezone.utc),
+        datetime(2026, 9, 14, 10, 0, tzinfo=timezone.utc),
+        datetime(2026, 9, 14, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 9, 14, 22, 0, tzinfo=timezone.utc),
+        datetime(2026, 9, 15, 4, 0, tzinfo=timezone.utc),
+    ]
+    # 09:00 Kyiv on 2026-09-14.
+    SENT_AT = datetime(2026, 9, 14, 6, 0, tzinfo=timezone.utc)
+
+    @classmethod
+    async def _layer_with_runs(cls, store, counts, layer="integrity"):
+        """One run per count, in the layer's real slots. Returns run ids."""
+        ids = []
+        async with store.connection() as conn:
+            for i, count in enumerate(counts):
+                started = cls.SLOTS_UTC[i]
+                ids.append(persist_run(
+                    conn,
+                    started_at=started, ended_at=started + timedelta(seconds=3),
+                    as_of=started,
+                    window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
+                    layer=layer,
+                    issues=[IntegrityIssue(
+                        check_name="goods_shipped_without_sale",
+                        table_name="orders",
+                        severity=Severity.INFO,
+                        count=count,
+                        description="shipments without a sale",
+                    )],
+                    discrepancies=[],
+                ))
+        return ids
+
+    @pytest.mark.asyncio
+    async def test_a_step_between_two_digests_is_not_reported_unchanged(
+            self, tmp_path):
+        """The 2026-09-14 case, reproduced.
+
+        809 at 01:00 and 07:00, then 812 from 13:00 onward. The digest goes
+        out at 09:00, so it reports the 07:00 run. Next morning it reports the
+        following 07:00 run, by which time the count is 812 — and the run
+        before *that* is also 812, so the old baseline printed "=".
+        """
+        store = await _make_store(tmp_path)
+        try:
+            # 809 through the 07:00 Kyiv run, 812 from 13:00 Kyiv onward.
+            ids = await self._layer_with_runs(
+                store, [809, 809, 812, 812, 812, 812])
+            sent_at = self.SENT_AT
+            today = ids[-1]
+
+            async with store.connection() as conn:
+                stale = fetch_previous_run(conn, "integrity", today)
+                fresh = fetch_baseline_run(
+                    conn, "integrity", sent_at=sent_at, before_run_id=today)
+
+            # What it used to compare against: the 22:00 UTC run, already
+            # 812 — so the morning printed "=" over a count that had moved.
+            assert stale["run_id"] == ids[-2]
+            # What the reader was actually last shown: the run the previous
+            # digest reported, still 809. The step becomes visible.
+            assert fresh["run_id"] == ids[1]
+            assert fresh["run_id"] != stale["run_id"]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_layer_that_runs_once_a_day_is_unaffected(self, tmp_path):
+        """`mirror_landing` and `reconciliation` fire once daily, so their
+        previous run already *is* the previous digest. The change must be a
+        no-op there, or it would move two layers nobody asked to move."""
+        store = await _make_store(tmp_path)
+        try:
+            # 07:30 Kyiv = 04:30 UTC, once a day.
+            base = datetime(2026, 9, 13, 4, 30, tzinfo=timezone.utc)
+            ids = []
+            async with store.connection() as conn:
+                for i in range(3):
+                    started = base + timedelta(days=i)
+                    ids.append(persist_run(
+                        conn,
+                        started_at=started,
+                        ended_at=started + timedelta(seconds=3),
+                        as_of=started,
+                        window_start=date(2026, 1, 1),
+                        window_end=date(2026, 5, 1),
+                        layer="mirror_landing",
+                        issues=[], discrepancies=[],
+                    ))
+                sent_at = datetime(2026, 9, 14, 6, 0, tzinfo=timezone.utc)
+                stale = fetch_previous_run(conn, "mirror_landing", ids[-1])
+                fresh = fetch_baseline_run(
+                    conn, "mirror_landing",
+                    sent_at=sent_at, before_run_id=ids[-1])
+
+            assert stale["run_id"] == fresh["run_id"] == ids[1]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_no_marker_falls_back_to_todays_behaviour(self, tmp_path):
+        """The first digest after this ships has no marker to derive from. It
+        must read as an ordinary morning, not mark everything `new`: a digest
+        that cries wolf once is a digest people learn to skim."""
+        store = await _make_store(tmp_path)
+        try:
+            ids = await self._layer_with_runs(store, [809, 809, 812])
+            async with store.connection() as conn:
+                stale = fetch_previous_run(conn, "integrity", ids[-1])
+                fresh = fetch_baseline_run(
+                    conn, "integrity", sent_at=None, before_run_id=ids[-1])
+            assert fresh["run_id"] == stale["run_id"]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_marker_older_than_every_run_falls_back(self, tmp_path):
+        """A layer younger than the marker has no run that finished before it.
+        Falling back is right; returning None would print `new` against every
+        finding the layer has ever had."""
+        store = await _make_store(tmp_path)
+        try:
+            ids = await self._layer_with_runs(store, [809, 812])
+            ancient = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            async with store.connection() as conn:
+                fresh = fetch_baseline_run(
+                    conn, "integrity", sent_at=ancient, before_run_id=ids[-1])
+                stale = fetch_previous_run(conn, "integrity", ids[-1])
+            assert fresh["run_id"] == stale["run_id"]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_run_still_in_flight_at_send_is_not_the_baseline(
+            self, tmp_path):
+        """The baseline keys on `ended_at`, not `started_at`: a run that had
+        begun but not finished when the digest went out cannot have been in
+        it, and using it would compare against numbers nobody was shown."""
+        store = await _make_store(tmp_path)
+        try:
+            early = datetime(2026, 9, 14, 1, 0, tzinfo=timezone.utc)
+            async with store.connection() as conn:
+                finished = persist_run(
+                    conn,
+                    started_at=early, ended_at=early + timedelta(seconds=3),
+                    as_of=early,
+                    window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
+                    layer="integrity", issues=[], discrepancies=[],
+                )
+                # Starts before the marker, ends after it.
+                straddling = persist_run(
+                    conn,
+                    started_at=early + timedelta(hours=4),
+                    ended_at=early + timedelta(hours=8),
+                    as_of=early,
+                    window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
+                    layer="integrity", issues=[], discrepancies=[],
+                )
+                today = persist_run(
+                    conn,
+                    started_at=early + timedelta(hours=30),
+                    ended_at=early + timedelta(hours=30, seconds=3),
+                    as_of=early,
+                    window_start=date(2026, 1, 1), window_end=date(2026, 5, 1),
+                    layer="integrity", issues=[], discrepancies=[],
+                )
+                sent_at = early + timedelta(hours=6)
+                fresh = fetch_baseline_run(
+                    conn, "integrity",
+                    sent_at=sent_at, before_run_id=today)
+
+            assert fresh["run_id"] == finished
+            assert fresh["run_id"] != straddling
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_the_two_rankings_ask_the_same_question(self, tmp_path):
+        """`fetch_baseline_run` bounds on `run_id`; `fetch_latest_run` ranks
+        the same rows. Ranking by one key while bounding with another is right
+        only while the two never disagree — verified identical on all 350
+        production rows, and made structural here."""
+        import inspect
+
+        import core.data_quality as dq
+
+        src = inspect.getsource(dq.fetch_latest_run)
+        assert "ORDER BY run_id DESC" in src, (
+            "fetch_latest_run no longer ranks by run_id, so the digest "
+            "baseline reconstruction is only coincidentally correct"
+        )
