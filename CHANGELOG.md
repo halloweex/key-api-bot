@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.213
+
+- Fixes from an adversarial review of #215
+- Move both mirror_state stamps together in the twins' fixture
+- Chain 2, step 8a: Postgres twins of the Silver integrity checks, behind KS_DQ_PG_WAREHOUSE
+
+
 ## 3.0.212
 
 - Bound the reconciliation lock test so a deadlock fails fast
