@@ -185,21 +185,61 @@ class TestTheStoreTestsActuallyRun:
                 "volumes on the host"
             )
 
-    def test_the_gate_bounds_the_cache_it_fills(self):
-        """It builds the web image on the host every run, so it owns that
-        cache. Bounded rather than emptied: measured across September the cache
-        sits at 2.0-2.7 GB and gains ~0.2 GB a week, and emptying it reads as
-        +2 GB of growth to a watchdog differencing at a fixed 168h lag — the
-        2026-09-13 WARN was manufactured by a prune four days earlier."""
-        gate = (REPO / "deploy" / "gate_with_stores.sh").read_text()
-        assert "--max-used-space" in gate, (
-            "the gate fills a build cache and no longer caps it"
+    def test_every_script_that_builds_an_image_bounds_the_cache(self):
+        """Whoever fills the cache caps it — and the set is derived, not named.
+
+        This assertion used to read one file, `gate_with_stores.sh`. Its
+        sibling `quick_gate.sh` builds the same image from the same Dockerfile,
+        is the one run by hand while iterating on a test, and capped nothing;
+        between 2026-09-14 and 09-17 the cache went 1.6 GB / 90 entries to
+        2.5 GB / 752 while this test was green. That is the third time a guard
+        that named its subject guarded only the subject somebody was thinking
+        of — after the mirror specs and after `docker rm -v` in this very file.
+
+        So the subjects come from behaviour: any tracked script that shells out
+        to `docker build` owns a cache and must bound it. Adding a third gate
+        without the cap now fails here.
+        """
+        builders = []
+        for path in SHELL_AND_WORKFLOW_FILES:
+            body = path.read_text()
+            if re.search(r"(?:^|[^-\w])docker build\b", body):
+                builders.append((path, body))
+
+        assert builders, (
+            "no script runs `docker build` any more — has the gate moved?"
         )
-        assert "builder prune -f --max-used-space" in gate
-        # Not the emptying form, which is what makes the next alert.
-        assert not re.search(r"builder prune -f\s*(\||;|$)", gate, re.M), (
-            "an unbounded `builder prune -f` empties the cache instead of "
-            "capping it"
+
+        for path, body in builders:
+            rel = path.relative_to(REPO)
+            assert "builder prune -f --max-used-space" in body, (
+                f"{rel} runs `docker build` and never caps the cache it "
+                f"fills. Every invocation then adds layers the host keeps "
+                f"for good."
+            )
+            # Not the emptying form, which is what makes the next alert: the
+            # disk watchdog differences at a fixed 168h lag, so a cache
+            # emptied today reads as +2 GB of growth a week later when it
+            # returns to its natural size. The 2026-09-13 WARN was made that
+            # way by a prune on 09-09.
+            assert not re.search(r"builder prune -f\s*(\||;|$)", body, re.M), (
+                f"{rel}: an unbounded `builder prune -f` empties the cache "
+                f"instead of capping it"
+            )
+
+    def test_the_two_gates_agree_on_how_big_the_cache_may_get(self):
+        """One cache, one bound. Two gates that disagreed would each undo the
+        other's judgement on whichever ran last."""
+        caps = {}
+        for path in SHELL_AND_WORKFLOW_FILES:
+            body = path.read_text()
+            for cap in re.findall(r"--max-used-space\s+\"?\$\{(\w+):-([^}]+)\}",
+                                  body):
+                caps[path.name] = cap
+
+        assert len(caps) >= 2, f"expected both gates to carry a cap, got {caps}"
+        assert len(set(caps.values())) == 1, (
+            f"the gates disagree about the cache bound: {caps}"
         )
 
     def test_the_migrations_are_applied_before_the_suite(self):
