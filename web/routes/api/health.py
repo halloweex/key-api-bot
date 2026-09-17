@@ -66,8 +66,16 @@ async def _mirror_freshness() -> "dict | None":
 
 
 def _write_chains() -> dict:
-    """Each write chain's KS_WRITE_* as understood now. Local state, no I/O.
-    Judged by the canary: a value not understood stops that chain's writers."""
+    """Each write chain's KS_WRITE_* as understood now, and whether the chain
+    has already written Postgres. Local state: the environment, plus the latch,
+    which is a cached read of the marker files beside the DuckDB database and
+    never a query — that is what lets this block answer while Postgres is down.
+
+    Judged by the canary: a value not understood stops that chain's writers,
+    and `mismatch` says the chain owns its tables in Postgres while its
+    variable says otherwise (DN-06). The two copies of the latch are compared
+    against each other by the daily `reconcile_operational`, which is the only
+    thing that can read both."""
     from core.write_chains import chain_modes
 
     return chain_modes()

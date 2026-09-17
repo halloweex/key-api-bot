@@ -1,11 +1,19 @@
 -- I1 (chain 1) — the hourly copy stays stood down for the six inventory tables.
 --
--- Only under KS_WRITE_INVENTORY=postgres. SQL cannot read the web container's
--- environment, so deploy/stage4_soak.sh reads it and passes two psql variables:
---   inventory_on       1 (postgres), 0 (duckdb or unset), invalid, unknown
+-- Only while chain 1 writes Postgres. SQL cannot read the web container's
+-- environment or its latch marker, so deploy/stage4_soak.sh reads both and
+-- passes two psql variables:
+--   inventory_on       1 (KS_WRITE_INVENTORY=postgres, OR the chain is latched
+--                      whatever the variable says — DN-06, which is how
+--                      `writes_postgres()` itself resolves it), 0 (duckdb or
+--                      unset and not latched), invalid, unknown
 --   inventory_flip_at  when the flag was flipped, if the operator gave it
 --                      (SOAK_INVENTORY_FLIP_AT), else empty
--- With 0 every I-check is a "not applicable" PASS.
+-- With 0 every I-check is a "not applicable" PASS — which is why the latch has
+-- to be in that 1: latched with the variable put back is precisely the state
+-- an operator reaches while believing they have rolled the chain back, and
+-- reading the flag alone would report the whole chain-1 half as PASS through
+-- it.
 --
 -- WHY IT EXISTS
 -- E1's reason, six tables over: under the Postgres writer, a full replace or an
@@ -66,7 +74,7 @@ SELECT 'I1 inventory copy stood down'::text AS "check",
            ELSE 'UNKNOWN'
        END AS verdict,
        CASE flag.state
-           WHEN '0' THEN 'not applicable: KS_WRITE_INVENTORY is not postgres'
+           WHEN '0' THEN 'not applicable: chain 1 still writes DuckDB (KS_WRITE_INVENTORY is not postgres and no latch marker)'
            WHEN '1' THEN CASE WHEN agg.n > 0 THEN left(agg.listed, 500)
                               ELSE format('none of the six tables written by the copy %s',
                                           CASE WHEN flag.flip_at IS NULL

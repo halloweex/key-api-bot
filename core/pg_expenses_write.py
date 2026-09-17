@@ -31,6 +31,14 @@ The replica is a full replace rather than an upsert precisely so that a
 withdrawn spend disappears on both sides; an upsert would leave a ghost that
 keeps dividing the ROAS, and no check would call that a discrepancy because the
 row is present on both sides. Writing Postgres directly keeps a DELETE a DELETE.
+
+AND THE FIRST WRITE TAKES THE FLAG'S PLACE
+
+Every write here latches the chain (`core/chain_latch.py`, OD-19 (a)) — after
+the connection is in hand and before the statement runs. From the first typed
+expense onward the flag cannot move these writes back to DuckDB — only
+`scripts/chain_copy_back.py` can — because a flag flip after a row has landed
+here starts a second writer rather than undoing anything.
 """
 from __future__ import annotations
 
@@ -39,9 +47,16 @@ import os
 from datetime import date
 from typing import Any, List, Optional, Tuple
 
+from core import chain_latch
+
 logger = logging.getLogger(__name__)
 
 WRITE_ENV = "KS_WRITE_EXPENSES"
+
+# What this chain is called in `core.write_chains`, in the local latch marker
+# and in the `/api/health` block. One spelling, so a marker written by one
+# release is still read by the next.
+CHAIN = "pg_expenses_write"
 
 # The tables this chain writes. `core.write_chains` reads this, and through it
 # both the hourly shipper and the daily comparison.
@@ -59,12 +74,13 @@ _UPDATE_RETURNING = ("id, expense_date, category, expense_type, amount, currency
 _UPDATABLE = ("expense_date", "category", "expense_type", "amount", "currency", "note")
 
 
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres.
+def env_writes_postgres() -> bool:
+    """What `KS_WRITE_EXPENSES` alone says.
 
     An unrecognised value raises — `KS_BOT_STORE`'s rule: a typo in the variable
     deciding which store holds money nobody else can reconstruct must stop the
-    process, not quietly pick the other store.
+    process, not quietly pick the other store. Since DN-01 it stops this chain
+    and nothing else.
     """
     value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
     if value not in {"duckdb", "postgres"}:
@@ -73,6 +89,41 @@ def writes_postgres() -> bool:
             f"'duckdb' or 'postgres'"
         )
     return value == "postgres"
+
+
+def writes_postgres() -> bool:
+    """Whether this chain writes Postgres — the one answer every caller reads.
+
+    The latch outranks the flag (OD-19 (a)): once an expense has been written
+    to Postgres, setting the variable back to `duckdb` must not start a second
+    writer beside the first. It also outranks a value nobody can read, so a
+    latched chain keeps routing to the store that holds its rows while the typo
+    is published, paged and stamped — see `core/chain_latch.py`.
+    """
+    if chain_latch.latched(CHAIN):
+        return True
+    return env_writes_postgres()
+
+
+def _latch() -> str:
+    """Take the local half of the latch before this process writes Postgres.
+
+    Raises if the marker cannot be written, and the write is then not attempted:
+    a row in Postgres that no marker records is how the next boot comes to
+    believe DuckDB is still the writer.
+
+    **Called after the connection is in hand, never before it.** The latch is
+    permanent — only `scripts/chain_copy_back.py` releases it — so taking it for
+    a write that never reaches Postgres spends the rollback this chain still
+    has. Postgres being unreachable, the pool being exhausted and
+    `require_revision` raising because `web` came up ahead of `migrate` are all
+    ordinary events, and today's production state (`KS_WRITE_EXPENSES=postgres`
+    since 2026-09-17 08:33 UTC, `app.manual_expenses` at zero rows) is exactly
+    the state one of them would have latched away with nothing written. After
+    `_pool()` the remaining window is the statement itself failing, which is the
+    case the two copies are designed to report rather than prevent.
+    """
+    return chain_latch.latch(CHAIN, WRITE_ENV)
 
 
 async def _ensure_expense_id_floor(conn) -> None:
@@ -113,8 +164,10 @@ async def add_expense(
     record every typed expense with no time at all.
     """
     pool = await _pool()
+    stamp = _latch()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             await _ensure_expense_id_floor(conn)
             row = await conn.fetchrow(
                 "INSERT INTO app.manual_expenses "
@@ -146,21 +199,30 @@ async def update_expense(expense_id: int, **fields: Any) -> Optional[Tuple[Any, 
     params.append(expense_id)
 
     pool = await _pool()
+    stamp = _latch()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            f"UPDATE app.manual_expenses SET {', '.join(sets)} "
-            f"WHERE id = ${len(params)} RETURNING {_UPDATE_RETURNING}",
-            *params,
-        )
+        # A transaction where DuckDB's original needed none: the owner row and
+        # the write it records land together or neither does, so a claim can
+        # never outlive the statement that earned it.
+        async with conn.transaction():
+            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
+            row = await conn.fetchrow(
+                f"UPDATE app.manual_expenses SET {', '.join(sets)} "
+                f"WHERE id = ${len(params)} RETURNING {_UPDATE_RETURNING}",
+                *params,
+            )
     return tuple(row) if row else None
 
 
 async def delete_expense(expense_id: int) -> bool:
     """Delete one expense. A deletion stays a deletion — see the module note."""
     pool = await _pool()
+    stamp = _latch()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "DELETE FROM app.manual_expenses WHERE id = $1 RETURNING id",
-            expense_id,
-        )
+        async with conn.transaction():
+            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
+            row = await conn.fetchrow(
+                "DELETE FROM app.manual_expenses WHERE id = $1 RETURNING id",
+                expense_id,
+            )
     return row is not None

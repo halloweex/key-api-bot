@@ -218,9 +218,11 @@ def collect_canary_keys() -> set:
     # check_alerting_health returns its keys as tuple literals rather than
     # through fail(); a declared family, like disk's and memory's.
     keys |= {"alerting_block_missing", "alerting_transport_failing"}
-    # check_derivation_mode and check_write_chains return their keys the same way.
+    # check_derivation_mode, check_write_chains and check_write_chain_latch
+    # return their keys the same way.
     keys.add("derivation_mode_invalid")
     keys.add("write_chain_flag_invalid")
+    keys.add("write_chain_flag_mismatch")
     # check_derivation_marks too; it returns its key alongside what it read.
     keys.add("derivation_marks_failing")
     return keys

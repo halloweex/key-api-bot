@@ -27,6 +27,10 @@ async def writer(monkeypatch):
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM app.manual_expenses")
+        # The owner rows the latch writes on its first Postgres write. Left
+        # behind, they read in the next module as a chain owning a table with
+        # no local marker — a real CRITICAL, manufactured by a fixture.
+        await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
 
     store = DuckDBStore(db_path="/nonexistent/never-opened.duckdb")
 
@@ -39,6 +43,7 @@ async def writer(monkeypatch):
         yield store, pool
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM app.manual_expenses")
+        await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
     await pool.close()
 
 
@@ -121,7 +126,8 @@ class TestTheHourlyShipperCannotRollTheWriterBack:
     `replicate_operational` never raises: a run that failed internally wipes
     nothing, so "the row survived" alone could pass for the wrong reason. Both
     therefore require a run with no `error`, and the control proves the replace
-    is real by showing the same row wiped when the flag is off.
+    is real by showing the same row wiped once the chain no longer owns the
+    table — which since DN-06 means releasing the latch, not clearing the flag.
     """
 
     @pytest_asyncio.fixture
@@ -134,11 +140,13 @@ class TestTheHourlyShipperCannotRollTheWriterBack:
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM app.manual_expenses")
+            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
              patch("core.pg.require_revision", new=AsyncMock()):
             yield store, pool
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM app.manual_expenses")
+            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
         await pool.close()
         await store.close()
 
@@ -173,13 +181,25 @@ class TestTheHourlyShipperCannotRollTheWriterBack:
         self, empty_duckdb_and_postgres, monkeypatch,
     ):
         """Proves the replace is real — so the survival above is the stand-down
-        working, not a run that quietly did nothing."""
+        working, not a run that quietly did nothing.
+
+        Removing the variable is no longer enough to get here, and that is the
+        point of DN-06: the first typed expense LATCHES the chain, and from then
+        on the writes, the shipper and the comparison all follow the latch
+        rather than the flag (OD-19 (a)). So the control releases both copies of
+        it, which is what `scripts/chain_copy_back.py` will do after it has
+        carried the rows back to DuckDB — and only then does the replace bite.
+        """
+        from core import chain_latch
         from core.pg_operational import replicate_operational
 
         store, pool = empty_duckdb_and_postgres
         monkeypatch.setenv("KS_WRITE_EXPENSES", "postgres")
         expense_id = await self._typed_in_postgres(pool)
         monkeypatch.delenv("KS_WRITE_EXPENSES", raising=False)   # DuckDB is the writer again
+        chain_latch.release("pg_expenses_write")
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
 
         result = await replicate_operational(store)
 
@@ -206,12 +226,14 @@ class TestAFlagNotUnderstoodStandsDownOnlyItsChain:
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM app.manual_expenses")
+            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
             await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = 'app.manual_expenses'")
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
              patch("core.pg.require_revision", new=AsyncMock()):
             yield store, pool, monkeypatch
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM app.manual_expenses")
+            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
             await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = 'app.manual_expenses'")
         await pool.close()
         await store.close()
@@ -238,7 +260,12 @@ class TestAFlagNotUnderstoodStandsDownOnlyItsChain:
         async with pool.acquire() as conn:
             state = await conn.fetchrow(
                 "SELECT failures_since_ok, last_error FROM meta.mirror_state WHERE table_name = 'app.manual_expenses'")
-        assert state["failures_since_ok"] >= 1 and "postgrse" in state["last_error"]
+        # Two stamps now, because the typed row also latched the chain and the
+        # variable no longer says `postgres` — both are true and both are
+        # recorded. `last_error` keeps the typo: correcting it ends the
+        # mismatch too, where releasing the latch would leave the typo.
+        assert state["failures_since_ok"] >= 2 and "postgrse" in state["last_error"]
+        assert list(result["chain_flag_mismatch"]) == ["pg_expenses_write"]
 
     @pytest.mark.asyncio
     async def test_stood_down_tables_are_not_even_read_out_of_duckdb(self, stores):

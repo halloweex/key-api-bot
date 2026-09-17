@@ -45,6 +45,13 @@ case "$1" in
         exit 0 ;;
     exec)
         if [ "$2" = "keycrm-web" ]; then
+            if [ "$3" = "test" ]; then
+                # `test -f <marker>`: the latch, read the way the script reads it.
+                case "$5" in
+                    */pg_inventory_write) [ -n "${FAKE_INVENTORY_LATCHED:-}" ] && exit 0 ;;
+                esac
+                exit 1
+            fi
             case "$4" in
                 KS_WRITE_INVENTORY) v="${FAKE_KS_WRITE_INVENTORY-__unset__}" ;;
                 KS_DQ_PG_WAREHOUSE) v="${FAKE_KS_DQ_PG_WAREHOUSE-__unset__}" ;;
@@ -196,7 +203,8 @@ class TestWhatTheScriptPromises:
         """The web container's environment holds every secret on the host."""
         web = [c for c in healthy.calls if c.startswith("exec keycrm-web")]
         assert web, healthy.calls
-        assert all(re.fullmatch(r"exec keycrm-web printenv KS_[A-Z_]+", c) for c in web), web
+        assert all(re.fullmatch(
+            r"exec keycrm-web (printenv KS_[A-Z_]+|test -f \S+)", c) for c in web), web
         assert not [c for c in healthy.calls if "Config.Env" in c]
 
     def test_unset_flags_are_zero(self, healthy):
@@ -210,6 +218,49 @@ class TestWhatTheScriptPromises:
         run = _run(tmp_path, FAKE_KS_WRITE_INVENTORY="postgress", FAKE_KS_DQ_PG_WAREHOUSE="yes")
         assert all("inventory_on=invalid " in c and "dq_pg_warehouse_on=invalid" in c
                    for c in run.psql)
+
+    def test_the_latch_outranks_the_flag(self, tmp_path):
+        """The state DN-06 exists for: chain 1 has written Postgres, so it goes
+        on writing Postgres, and somebody has put `KS_WRITE_INVENTORY` back
+        expecting a rollback. Reading the flag alone made `inventory_on` 0, and
+        0 is what turns all five I-checks — I1 included, the soak half of the
+        E1 detector that watches for the hourly copy overwriting the six
+        inventory tables — into "not applicable" PASSes. The chain would then
+        be unwatched in the one state nobody has practised."""
+        run = _run(tmp_path, FAKE_KS_WRITE_INVENTORY="duckdb", FAKE_INVENTORY_LATCHED="1")
+        assert all("inventory_on=1 " in c for c in run.psql), run.psql
+        assert "latched" in run.out, "the report does not say the two disagree"
+
+    def test_a_latched_chain_whose_flag_agrees_reads_as_one_state(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_INVENTORY="postgres", FAKE_INVENTORY_LATCHED="1")
+        assert all("inventory_on=1 " in c for c in run.psql)
+        assert "latched" not in run.out, "nothing disagrees — do not say it does"
+
+    def test_a_typo_on_a_latched_chain_still_routes_to_postgres(self, tmp_path):
+        """`writes_postgres()` answers True over an unreadable value too, so
+        the stand-down must still be checked. The typo itself stays visible:
+        S0 greps the log for the message the shipper writes every hour."""
+        run = _run(tmp_path, FAKE_KS_WRITE_INVENTORY="postgress",
+                   FAKE_INVENTORY_LATCHED="1")
+        assert all("inventory_on=1 " in c for c in run.psql)
+
+    def test_the_marker_path_is_the_one_the_application_writes(self):
+        """A path spelled twice drifts once. `/app` is the image's WORKDIR
+        (Dockerfile.web) and `./data:/app/data` is the mount both services
+        carry, so the container path is the repository path with that prefix.
+
+        Read out of the source rather than from `core.chain_latch.MARKER_DIR`,
+        because the suite's own fixture redirects that attribute into a
+        tmp_path so no test can latch a chain in the real data directory."""
+        latch_src = (REPO / "core" / "chain_latch.py").read_text(encoding="utf-8")
+        consts_src = (REPO / "core" / "duckdb_constants.py").read_text(encoding="utf-8")
+        marker = re.search(r'MARKER_DIR[^=]*= DB_DIR / "([^"]+)"', latch_src)
+        db_dir = re.search(r'DB_DIR = Path\(__file__\)\.parent\.parent / "([^"]+)"',
+                           consts_src)
+        assert marker and db_dir, "the marker directory is no longer spelled this way"
+        expected = f"/app/{db_dir.group(1)}/{marker.group(1)}"
+        assert f'MARKER_DIR_IN_CONTAINER="{expected}"' in SCRIPT.read_text()
+        assert "./data:/app/data" in (REPO / "docker-compose.yml").read_text()
 
     def test_a_bar_inside_a_detail_survives(self, healthy):
         assert healthy.rows["D1 owed rebuild"][1] == "detail for D1 owed rebuild | with a bar"

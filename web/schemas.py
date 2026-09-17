@@ -108,7 +108,12 @@ class HealthResponse(BaseModel):
             "Each stage-4 write chain: its KS_WRITE_* variable, the mode it "
             "writes (duckdb or postgres) and, when the value is not understood, "
             "the error — that chain's writers raise and its tables are neither "
-            "shipped nor compared until it is corrected."
+            "shipped nor compared until it is corrected. `latched` and "
+            "`latched_at` say the chain has already written Postgres and now "
+            "routes there whatever the variable says (DN-06); `mismatch` is "
+            "that state against a variable which disagrees — a rollback "
+            "somebody believes happened has not, and only "
+            "scripts/chain_copy_back.py undoes it."
         ),
     )
     derivation: Optional[Dict[str, Any]] = Field(

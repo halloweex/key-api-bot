@@ -1,8 +1,9 @@
 """Shared fixtures, and the environment the suite is entitled to assume.
 
-Both fixtures here are autouse guards rather than conveniences: they stop the
-suite from reaching something real — the Telegram Bot API and the production
-database. Markers and collection settings live in pytest.ini.
+The fixtures here are autouse guards rather than conveniences: they stop the
+suite from reaching something real — the Telegram Bot API, the production
+database, and the write-chain latch that sits beside it. Markers and collection
+settings live in pytest.ini.
 
 THE ENVIRONMENT BLOCK BELOW RUNS BEFORE ANY TEST MODULE IS IMPORTED
 
@@ -135,3 +136,22 @@ def _never_the_production_database(monkeypatch, tmp_path):
     monkeypatch.setattr("core.duckdb_store._store_instance", None, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _never_the_real_chain_latch(monkeypatch, tmp_path):
+    """No test may latch a write chain in the real data directory.
+
+    The latch marker beside the database decides, for the life of the machine,
+    that a chain writes Postgres and no `KS_WRITE_*` may move it back
+    (`core/chain_latch.py`). A test that wrote one into `data/` would hand that
+    decision to whatever runs next on the developer's machine — and the suite
+    reaches the writers through the repository methods, so it is one
+    `KS_WRITE_EXPENSES=postgres` away from doing it.
+
+    Redirected and reset per test, `_never_the_production_database`'s
+    arrangement: each test starts with nothing latched, and no test can see
+    another's marker.
+    """
+    from core import chain_latch
+
+    monkeypatch.setattr(chain_latch, "MARKER_DIR", tmp_path / "write-chain-owners")
+    monkeypatch.setattr(chain_latch, "_latched", None, raising=False)

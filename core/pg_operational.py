@@ -656,13 +656,39 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
         # being spelled here — every write chain's `CHAIN_TABLES`, for the chains
         # whose flag is on — so no writer and the shipper can come to disagree
         # about which tables have changed hands.
-        from core.write_chains import WRITE_CHAINS, chain_name, stood_down_tables_checked
+        from core.write_chains import (
+            WRITE_CHAINS, chain_name, mismatched_chains, stood_down_tables_checked,
+        )
 
         # A chain whose KS_WRITE_* is not understood stands down with the chains
         # that write Postgres — shipping could overwrite rows Postgres alone
         # holds — and its tables are stamped failing, so the watermark says so
         # rather than aging quietly. Every other table still ships (DN-01).
         stood_down, chain_errors = stood_down_tables_checked()
+
+        # A chain that owns its tables in Postgres while its variable says
+        # otherwise (DN-06). It stands down through `stood_down` like any other
+        # Postgres-writing chain — the latch decides, not the flag — and the
+        # disagreement is stamped on its tables so an operator who flipped the
+        # variable back finds out from the store rather than from a number that
+        # stopped moving.
+        mismatches = mismatched_chains()
+
+        # The second copy of the latch, asked because this function is already
+        # holding the connection that carries it. `stood_down_tables_checked()`
+        # reads the local markers, and the markers live on a bind mount: an
+        # older `./data` snapshot, a wrong mount or a rebuilt data directory
+        # loses them while Postgres keeps the owner rows and the rows they were
+        # taken for. This copy is what stops the full replace below from
+        # putting `app.manual_expenses` back the way a frozen DuckDB remembers
+        # it — a destruction the daily comparison would report 24 h later, of
+        # rows only Postgres held.
+        from core import chain_latch
+
+        owners = await chain_latch.read_owners(pool)
+        marker_lost = {name: at for name, at in chain_latch.claimed_chains(owners).items()
+                       if not chain_latch.latched(name)}
+        stood_down = stood_down | chain_latch.claimed_tables(owners)
 
         # A watermark of None asks for the whole table, which is what `full`
         # means and what a first run finds anyway.
@@ -753,12 +779,36 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
             result["stood_down"] = sorted(stood_down)
         if chain_errors:
             result["chain_flag_errors"] = chain_errors
+        if mismatches:
+            result["chain_flag_mismatch"] = mismatches
+        if marker_lost:
+            result["chain_marker_lost"] = marker_lost
+        # One stamp per table per reason, so a chain that is both latched and
+        # misspelt says both things rather than the first one found. The flag
+        # error is written LAST and so is the one `last_error` keeps: it is the
+        # actionable half — correcting the variable to `postgres` also ends the
+        # mismatch, while releasing the latch would not fix a typo.
+        stamps = [(name, f"owned by Postgres since {at}; "
+                         "run scripts/chain_copy_back.py")
+                  for name, at in mismatches.items()]
+        # A chain held down by its owner rows alone is stamped too, because a
+        # stand-down that says nothing is a watermark ageing quietly — and this
+        # one also means the routing copy is gone, so the writers are following
+        # KS_WRITE_* again while this job declines to ship. The daily
+        # comparison files `chain_latch_disagrees` for the same state.
+        stamps += [(name, f"owner rows in Postgres since {at} and no local "
+                          "marker: restore data/write-chain-owners or run "
+                          "scripts/chain_copy_back.py")
+                   for name, at in marker_lost.items()]
+        stamps += [(name, f"not shipped: {error}")
+                   for name, error in chain_errors.items()]
+        if stamps:
             from core.pg_landing import _record_failure
 
-            for name, error in chain_errors.items():
+            for name, note in stamps:
                 chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
                 for table in chain.CHAIN_TABLES:
-                    await _record_failure(table, f"not shipped: {error}")
+                    await _record_failure(table, note)
         logger.info("Operational history replicated: %s", result)
         return result
     except Exception as e:

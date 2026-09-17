@@ -45,23 +45,78 @@ WRITE_CHAINS = (pg_inventory_write, pg_expenses_write)
 #   shipped nor compared, because shipping could overwrite rows Postgres alone
 #   holds — and the error is carried out to be seen, never swallowed;
 # - the chain's own writers still raise on their own typo.
+#
+# And since DN-06 the flag is not the last word. A chain that has already
+# written Postgres is LATCHED (`core/chain_latch.py`, owner decision OD-19 (a)),
+# and `writes_postgres()` answers True whatever the variable says — including a
+# value nobody can read, because routing a latched chain back to DuckDB would
+# start a second writer beside the first. Everything here reads that one answer,
+# so the writers, the sync keys, the shipper and the comparison move together.
 
 
 def chain_name(chain: ModuleType) -> str:
     return chain.__name__.rsplit(".", 1)[-1]
 
 
-def chain_modes() -> Dict[str, Dict[str, Optional[str]]]:
-    """`{chain: {"env", "mode", "error"}}` — mode is "postgres", "duckdb" or
-    None when the value was not understood. Never raises."""
-    out: Dict[str, Dict[str, Optional[str]]] = {}
+def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
+    """`{chain: {"env", "mode", "error", "latched", "latched_at", "mismatch"}}`.
+
+    `mode` is where the chain's writes actually go — "postgres", "duckdb", or
+    None when the environment was not understood and no latch overrides it.
+    `mismatch` is the state DN-06 exists to make visible: the chain has already
+    written Postgres, so it keeps writing Postgres (OD-19 (a)), while its
+    variable says something else. Both halves are published, because a latched
+    chain with an unreadable flag is two problems and reporting one would hide
+    the other. Never raises.
+
+    **`mismatch` is latch against environment, and never latch against owner
+    row.** The other disagreement — a marker whose first Postgres write failed,
+    or an owner row whose marker was lost — needs the copy that lives in
+    Postgres, and this block is read from the local marker cache precisely so
+    it still answers while Postgres is down. A query here would make the one
+    place that can say "the writes are going to a store you cannot reach" fail
+    with that store. So the two copies are compared where both are already in
+    hand: the daily `reconcile_operational`, which files
+    `chain_latch_disagrees` (CRITICAL) either way and reaches a human through
+    the 09:00 digest. The cost is named rather than discovered: a failed first
+    write is invisible until the next morning, and `latched: true` with
+    `mismatch: false` is what it looks like here in the meantime.
+    """
+    from core import chain_latch
+
+    out: Dict[str, Dict[str, Optional[object]]] = {}
     for chain in WRITE_CHAINS:
+        name = chain_name(chain)
+        # The environment on its own, so the published error survives the latch
+        # answering over it.
         try:
-            mode, error = ("postgres" if chain.writes_postgres() else "duckdb"), None
+            env_mode, error = (
+                "postgres" if chain.env_writes_postgres() else "duckdb"), None
         except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-            mode, error = None, str(exc)
-        out[chain_name(chain)] = {"env": chain.WRITE_ENV, "mode": mode, "error": error}
+            env_mode, error = None, str(exc)
+        since = chain_latch.latched_at(name)
+        out[name] = {
+            "env": chain.WRITE_ENV,
+            "mode": "postgres" if (since or env_mode == "postgres") else env_mode,
+            "error": error,
+            "latched": since is not None,
+            "latched_at": since,
+            "mismatch": since is not None and env_mode != "postgres",
+        }
     return out
+
+
+def mismatched_chains() -> Dict[str, str]:
+    """`{chain: latched_at}` for chains that own their tables in Postgres while
+    their variable says otherwise.
+
+    The shipper stamps these tables failing and the canary pages WARN on them.
+    Neither may repair it: the only way back is `scripts/chain_copy_back.py`,
+    which copies the rows to DuckDB, compares them at zero and releases both
+    copies of the latch.
+    """
+    return {name: str(state["latched_at"])
+            for name, state in chain_modes().items() if state["mismatch"]}
 
 
 def chain_for_sync_key(key: str) -> Optional[ModuleType]:

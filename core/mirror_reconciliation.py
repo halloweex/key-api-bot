@@ -2643,6 +2643,141 @@ async def reconcile_expenses(
     )
 
 
+def _chain_flag_findings(chain_errors: Dict[str, str]) -> List[IntegrityIssue]:
+    """A KS_WRITE_* value no chain understands: its tables were stood down here
+    and by the shipper, so nothing compares or copies them until it is fixed.
+    CRITICAL — the chain's own writers raise on every call in the meantime,
+    unless it is latched, in which case they keep writing Postgres and the
+    finding below says the flag and the latch disagree as well."""
+    if not chain_errors:
+        return []
+    return [IntegrityIssue(
+        check_name="write_chain_flag_invalid",
+        table_name="(write chains)",
+        severity=Severity.CRITICAL,
+        count=len(chain_errors),
+        description=(
+            "Write chain flag(s) not understood — "
+            + "; ".join(f"{name}: {err}" for name, err in sorted(chain_errors.items()))
+            + ". Those chains' writers raise, and their tables are neither "
+            "shipped nor compared until the value is corrected."
+        ),
+    )]
+
+
+def _chain_latch_findings(
+    owners: Dict[str, str], watermarks: Dict[str, Dict[str, Any]],
+) -> List[IntegrityIssue]:
+    """The two ways the ownership latch can be wrong (DN-06).
+
+    The latch has two copies — a local marker file that decides where writes go
+    and an `owner:<table>` row in `meta.chain_watermarks` written inside the
+    first writing transaction — and this is the only place that sees both.
+
+    **`chain_latch_disagrees`.** A marker with no owner row means the first
+    Postgres write failed after the marker was taken: the chain is latched,
+    which is the safe direction, and nothing else would ever say so. An owner
+    row with no marker is the dangerous direction — the marker is what routes
+    the writes, so without it the flag decides again and a second writer starts
+    the moment somebody flips it back. Both are CRITICAL and neither is
+    repaired here: a "repair" would be guessing which store a human meant.
+
+    **`chain_shipper_overwrote`.** The shipper full-replaces these tables out
+    of DuckDB, so a successful shipment dated after the handover wrote over
+    rows only Postgres held. `last_ok_at` newer than the latch is exactly that
+    event, and it is the detector the stage-4 plan calls E1. It cannot fire on
+    a shipment that predates the handover, which is why the owner row stores
+    the moment ownership passed and never moves it forward.
+
+    Takes the owner rows the caller has already read rather than reading them
+    itself: the same query decides which tables this run may compare at all,
+    and two reads could disagree about that within one run.
+    """
+    from core import chain_latch
+    from core.write_chains import WRITE_CHAINS, chain_name
+
+    issues: List[IntegrityIssue] = []
+    for chain in WRITE_CHAINS:
+        name = chain_name(chain)
+        tables = tuple(chain.CHAIN_TABLES)
+        local = chain_latch.latched_at(name)
+        claimed = {t: owners[t] for t in tables if t in owners}
+
+        if local and len(claimed) < len(tables):
+            issues.append(IntegrityIssue(
+                check_name="chain_latch_disagrees",
+                table_name=name,
+                severity=Severity.CRITICAL,
+                count=len(tables) - len(claimed),
+                description=(
+                    f"{name} is latched locally since {local}, but only "
+                    f"{len(claimed)} of {len(tables)} of its tables carry an "
+                    "owner row in Postgres. The first write there failed after "
+                    "the marker was taken, or the row was deleted. The chain "
+                    "keeps writing Postgres; run scripts/chain_copy_back.py to "
+                    "go back deliberately."
+                ),
+            ))
+        elif claimed and not local:
+            issues.append(IntegrityIssue(
+                check_name="chain_latch_disagrees",
+                table_name=name,
+                severity=Severity.CRITICAL,
+                count=len(claimed),
+                description=(
+                    f"{name} owns {len(claimed)} table(s) in Postgres since "
+                    f"{min(claimed.values())}, and the local marker is gone. "
+                    "The marker is what routes the writes, so this chain will "
+                    "follow its KS_WRITE_* again and a second writer starts "
+                    "the moment it says duckdb."
+                ),
+            ))
+
+        for table in tables:
+            # The owner row where there is one, the marker otherwise: a table
+            # whose first write failed is still a table the chain has taken.
+            since = claimed.get(table) or local
+            if not since:
+                continue
+            last_ok = (watermarks.get(table) or {}).get("last_ok_at")
+            if last_ok is None or not _after(last_ok, since):
+                continue
+            issues.append(IntegrityIssue(
+                check_name="chain_shipper_overwrote",
+                table_name=table,
+                severity=Severity.CRITICAL,
+                count=1,
+                description=(
+                    f"{table} changed hands at {since}, and the hourly "
+                    f"replication recorded a successful shipment at "
+                    f"{last_ok.isoformat()} — after it. That shipment replaced "
+                    "the table out of a DuckDB that has stopped receiving "
+                    "these rows, so whatever was written here since the "
+                    "handover is gone. Do not re-run the shipper."
+                ),
+            ))
+    return issues
+
+
+def _after(moment: datetime, stamp: str) -> bool:
+    """Is `moment` later than the ISO-8601 `stamp`? Unparseable reads as no.
+
+    A latch stamp that cannot be parsed must not manufacture a CRITICAL about
+    an overwrite: the marker's own fallback already covers a marker written by
+    a future release, and a false alarm here would send somebody looking for
+    rows nothing lost.
+    """
+    try:
+        latched = datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return False
+    if latched.tzinfo is None:
+        latched = latched.replace(tzinfo=timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment > latched
+
+
 async def reconcile_operational(
     store,
     *,
@@ -2686,17 +2821,39 @@ async def reconcile_operational(
     #
     # It reads the same tuple the shipper stands down on, so the two cannot
     # disagree about which tables have changed hands.
+    from core import chain_latch
     from core.write_chains import stood_down_tables_checked
 
     stood_down, chain_errors = stood_down_tables_checked()
 
+    # The owner rows, read once: they say which tables to stand down as well as
+    # what the two copies of the latch disagree about. A chain whose local
+    # marker was lost still owns its rows here, and comparing its tables
+    # against a DuckDB that stopped receiving them would file one CRITICAL per
+    # row for a state one finding already describes — `chain_latch_disagrees`,
+    # built below out of these same rows. Same query as the shipper's, for the
+    # standing reason that the two must not disagree about which tables have
+    # changed hands.
+    owners = await chain_latch.read_owners(pool)
+    stood_down = stood_down | chain_latch.claimed_tables(owners)
+
     whole = tuple(s for s in OPERATIONAL_TABLES if s.pg_table not in stood_down)
+
+    # ── what the chains themselves say, before any row is read ──
+    #
+    # First, because these findings are about the chains and not about the
+    # tables: a flag typo or a broken latch reports the same way whether or not
+    # a fingerprint happened to disagree, and the drill-down below returns
+    # early when nothing does. Filed after it, `write_chain_flag_invalid` was
+    # unreachable on every run where the copies agreed — which is every healthy
+    # run, and the only kind this has had.
+    issues: List[IntegrityIssue] = _chain_flag_findings(chain_errors)
+    issues += _chain_latch_findings(owners, watermarks)
 
     # ── the four read whole ──
     async with store.connection() as conn:
         dk_side = read_duckdb_side(conn, whole)
 
-    issues: List[IntegrityIssue] = []
     for spec in whole:
         dk_rows, dk_synced = dk_side[spec.pg_table]
         pg_rows = await fetch_pg_rows(pool, spec)
@@ -2763,23 +2920,6 @@ async def reconcile_operational(
                 now=now, grace_minutes=grace_minutes,
             )
         issues += _divergence_findings(spec, found, max_samples=max_samples)
-
-    # A KS_WRITE_* value no chain understands: its tables were stood down here
-    # and by the shipper, so nothing compares or copies them until it is fixed.
-    # CRITICAL — the chain's own writers raise on every call in the meantime.
-    if chain_errors:
-        issues.append(IntegrityIssue(
-            check_name="write_chain_flag_invalid",
-            table_name="(write chains)",
-            severity=Severity.CRITICAL,
-            count=len(chain_errors),
-            description=(
-                "Write chain flag(s) not understood — "
-                + "; ".join(f"{name}: {err}" for name, err in sorted(chain_errors.items()))
-                + ". Those chains' writers raise, and their tables are neither "
-                "shipped nor compared until the value is corrected."
-            ),
-        ))
 
     return issues
 

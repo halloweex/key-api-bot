@@ -107,6 +107,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # A KS_WRITE_* not understood: that chain's writers raise, its tables stand
     # down. Emitted by the canary and by reconcile_operational (DN-01).
     "write_chain_flag_invalid": _c("web restarts with a valid KS_WRITE_* value"),
+    # A chain that has already written Postgres while its KS_WRITE_* says
+    # duckdb. The latch wins (OD-19 (a)), so nothing is failing — but a
+    # rollback somebody believes happened has not (DN-06).
+    "write_chain_flag_mismatch": _c(
+        "the variable is set back to postgres, or scripts/chain_copy_back.py "
+        "hands the tables back to DuckDB"),
     "mirror_missing:bronze.orders": _c("the table reports freshness again"),
     "mirror_never:bronze.orders": _c("the table's first successful shipment"),
     "mirror_stale:bronze.orders": _c("a shipment inside the age limit"),
@@ -188,6 +194,14 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "mirror_buckets_disagree": _c("the fingerprinted buckets agree again"),
     "mirror_disabled": _c("KS_PG_DSN is configured"),
     "mirror_failing": _c("failures_since_ok back to zero"),
+    # The ownership latch's two copies, compared daily (DN-06). Neither clears
+    # by itself: one is a human putting the missing copy back, the other is a
+    # shipment that has already overwritten rows and cannot be un-shipped.
+    "chain_latch_disagrees": _c(
+        "the marker and the owner rows agree again — a human, not a job"),
+    "chain_shipper_overwrote": _c(
+        "nothing repairs the rows it replaced; it stops when the chain is "
+        "handed back with scripts/chain_copy_back.py, which releases the latch"),
 
     # ── data-quality findings: Silver / Gold arcs ──
     "silver_missing_rows": _c("the next rebuild carries the rows"),
