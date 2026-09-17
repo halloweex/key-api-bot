@@ -177,6 +177,75 @@ async def complete(conn, seen: int, layer: str = LAYER) -> None:
         seen, layer)
 
 
+# ─── A dropped mark, once a rebuild has covered it ───────────────────────────
+#
+# `mark` records a drop against SIGNAL_TABLE in `meta.mirror_state`, and until
+# DN-05b nothing ever wrote that row again: a mark that succeeds touches the
+# signal, not the watermark, and `_record_failure` only counts up. So one lock
+# timeout left `failures_since_ok` above zero for good, and a watchdog reading
+# it would page for ever on a loss the next rebuild had repaired within the hour.
+#
+# The margin is for the writers outside `_heavy_job_lock`; see
+# `heal_dropped_marks`. Thirty seconds is a round trip with room to spare, and
+# with room for the web container's clock and Postgres' to disagree — `started`
+# is read from the one and `last_attempted_at` written by the other.
+DROPPED_MARK_MARGIN = timedelta(seconds=30)
+
+_HEAL = """
+    UPDATE meta.mirror_state
+       SET failures_since_ok = 0,
+           last_error        = NULL,
+           last_attempted_at = now(),
+           last_ok_at        = now()
+     WHERE table_name = $1
+       AND failures_since_ok > 0
+       AND last_attempted_at < $2::timestamptz - $3::interval
+"""
+
+
+async def heal_dropped_marks(conn, started: datetime) -> bool:
+    """Clear the drops a validated rebuild that began at `started` covered.
+
+    Never raises: the rebuild has already succeeded and settled its debt, and a
+    heal that failed costs one stale count the next validated run clears. True
+    when a count was cleared.
+
+    WHY A DROP RECORDED BEFORE `started` IS COVERED. `mark` records the drop on a
+    second connection while the writer's transaction is still open, and the
+    writer commits one statement later — so the rows a dropped mark stood for
+    become visible just *after* `last_attempted_at`, not at it. Silver, Gold and
+    the profile each read bronze in a transaction opened after `started`, so
+    they see every writer that committed before `started`:
+
+    - the writers that hold `_heavy_job_lock` across their write — the sync
+      jobs and the orders backfill's chunks, which carry nearly every order —
+      committed before the derivation could take that lock, and it takes the
+      lock before it stamps `started`, so they are covered whatever the clocks
+      say;
+    - the rest — the retail-status endpoint among them, which does not hold
+      the lock — commit a round trip after the drop is recorded, and
+      `DROPPED_MARK_MARGIN` is that round trip with room to spare.
+
+    A drop inside the margin, or recorded while this rebuild ran, is left for
+    the next validated run. Only a row that owes something is rewritten, so
+    `last_ok_at` keeps meaning "when the drops were last covered" rather than
+    "when the last rebuild ran". Both stamps move together, because the table's
+    constraint forbids a success after the last attempt, and because equal
+    stamps are what that table has always meant by healthy.
+    """
+    try:
+        status = await conn.execute(_HEAL, SIGNAL_TABLE, started, DROPPED_MARK_MARGIN)
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        logger.warning("dropped derivation marks not healed: %s: %s",
+                       type(exc).__name__, exc)
+        return False
+    healed = not status.endswith(" 0")
+    if healed:
+        logger.info("dropped derivation marks healed by the rebuild started at %s",
+                    started.isoformat())
+    return healed
+
+
 async def record_run(
     conn,
     *,

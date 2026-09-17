@@ -118,7 +118,11 @@ class HealthResponse(BaseModel):
             "and `error` names a KS_PG_DERIVE value that was not understood and "
             "fell back to piggyback. Judged by the canary, because a typo "
             "otherwise leaves one log line and an operator believing the own "
-            "derivation is running."
+            "derivation is running. `marks_dropped_unhealed` counts the "
+            "derivation marks dropped since a validated rebuild last covered "
+            "them, and `last_mark_drop_age_s` is how long ago the latest was "
+            "dropped while that count is above zero — both null under "
+            "piggyback or when Postgres cannot be read."
         ),
     )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(

@@ -101,6 +101,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "mirror_block_missing": _c("health payload carries a mirrors block again"),
     # KS_PG_DERIVE set to a value web did not understand (fell back to piggyback).
     "derivation_mode_invalid": _c("web restarts with a valid KS_PG_DERIVE"),
+    # Derivation marks dropped and demonstrably not being healed: the latest
+    # older than a heartbeat's rebuild, or ten failing in a row (DN-05b).
+    "derivation_marks_failing": _c("a validated derivation covers the dropped marks"),
     # A KS_WRITE_* not understood: that chain's writers raise, its tables stand
     # down. Emitted by the canary and by reconcile_operational (DN-01).
     "write_chain_flag_invalid": _c("web restarts with a valid KS_WRITE_* value"),

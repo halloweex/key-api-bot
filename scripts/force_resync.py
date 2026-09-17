@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.sync_service import force_resync
 from core.duckdb_store import get_store
+from core.runtime_modes import configure_modes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 async def main(days_back: int = 365):
     """Run force resync."""
+    # A process of its own, so its cached modes are its own to read: without
+    # this the resync rewrites the window's orders into Postgres unmarked under
+    # KS_PG_DERIVE=own. See `core/runtime_modes.py`.
+    configure_modes()
+
     logger.info(f"Starting force resync for last {days_back} days...")
 
     # Show current stats before resync

@@ -221,6 +221,8 @@ def collect_canary_keys() -> set:
     # check_derivation_mode and check_write_chains return their keys the same way.
     keys.add("derivation_mode_invalid")
     keys.add("write_chain_flag_invalid")
+    # check_derivation_marks too; it returns its key alongside what it read.
+    keys.add("derivation_marks_failing")
     return keys
 
 

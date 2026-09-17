@@ -240,3 +240,145 @@ class TestValidation:
             " (SELECT ctid FROM gold.daily_revenue WHERE source_id IS NULL AND revenue > 0 LIMIT 1)"):
             await scheduler._run_pg_derivation()
         assert "warehouse_pg:sales_type_partition" in _alerted(raise_alert)
+
+
+async def _dropped(pool, *, ago: timedelta, failures: int = 2):
+    """A mark failure as `_record_failure` would have left it, `ago` in the past."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO meta.mirror_state
+                   (table_name, last_attempted_at, failures_since_ok, last_error)
+            VALUES ('meta.derivation_signal', now() - $1::interval, $2,
+                    'LockNotAvailableError: simulated')
+            ON CONFLICT (table_name) DO UPDATE SET
+                last_attempted_at = EXCLUDED.last_attempted_at,
+                last_ok_at        = NULL,
+                failures_since_ok = EXCLUDED.failures_since_ok,
+                last_error        = EXCLUDED.last_error
+            """,
+            ago, failures)
+
+
+async def _signal_state(pool):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT last_attempted_at, last_ok_at, failures_since_ok, last_error"
+            " FROM meta.mirror_state WHERE table_name = 'meta.derivation_signal'")
+
+
+class TestADroppedMarkHeals:
+    """DN-05b: a successful mark never touched the watermark and a failure only
+    counted up, so one lock timeout read as failing for ever. A validated
+    rebuild that began after the drop covered its rows, and says so."""
+
+    @staticmethod
+    async def _write(pool):
+        from core.pg_landing import write_orders
+
+        await write_orders([_order(IDS[0], total=120), _order(IDS[1], source_id=2, total=80)],
+                           [], replace_products=False)
+
+    @pytest.mark.asyncio
+    async def test_a_drop_before_the_run_is_healed_by_a_validated_rebuild(self, own):
+        pool, scheduler, _a = own
+        await self._write(pool)
+        await _dropped(pool, ago=timedelta(minutes=5))
+
+        result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "success" and result["validation_passed"] is True, result
+        state = await _signal_state(pool)
+        assert state["failures_since_ok"] == 0 and state["last_error"] is None
+        # Both stamps moved in one statement: equal is what this table calls
+        # healthy, and the constraint forbids a success after the attempt.
+        assert state["last_ok_at"] is not None
+        assert state["last_ok_at"] == state["last_attempted_at"]
+
+    @pytest.mark.asyncio
+    async def test_a_drop_recorded_during_the_run_is_not(self, own):
+        """Its writer may commit after Silver's snapshot, so this rebuild
+        cannot vouch for its rows; the next validated run will."""
+        from core import pg_vitrina
+        from core.pg_landing import _record_failure
+
+        pool, scheduler, _a = own
+        await self._write(pool)
+        real = pg_vitrina.rebuild_customer_profile
+
+        async def drop_while_running(pool=None):
+            await _record_failure("meta.derivation_signal", "LockNotAvailableError: mid-run")
+            return await real(pool)
+
+        with patch("core.pg_vitrina.rebuild_customer_profile", drop_while_running):
+            result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "success" and result["validation_passed"] is True, result
+        state = await _signal_state(pool)
+        assert state["failures_since_ok"] == 1 and "mid-run" in state["last_error"]
+        assert state["last_ok_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_drop_inside_the_margin_before_the_run_is_not(self, own):
+        """The writers outside `_heavy_job_lock` commit a round trip after the
+        drop is recorded; inside the margin that commit may postdate `started`."""
+        pool, scheduler, _a = own
+        await self._write(pool)
+        await _dropped(pool, ago=timedelta(seconds=5))
+
+        result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "success" and result["validation_passed"] is True, result
+        assert (await _signal_state(pool))["failures_since_ok"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_failed_derivation_does_not_heal(self, own):
+        pool, scheduler, _a = own
+        await _dropped(pool, ago=timedelta(minutes=5))
+
+        with patch("core.pg_gold.rebuild_gold", AsyncMock(side_effect=RuntimeError("boom"))):
+            result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "error"
+        state = await _signal_state(pool)
+        assert state["failures_since_ok"] == 2 and state["last_ok_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_rebuild_that_fails_validation_does_not_heal(self, own):
+        pool, scheduler, _a = own
+        await _dropped(pool, ago=timedelta(minutes=5))
+        await self._write(pool)
+        with TestValidation._tamper(
+            "DELETE FROM gold.daily_revenue WHERE source_id IS NULL AND ctid IN"
+            " (SELECT ctid FROM gold.daily_revenue WHERE source_id IS NULL LIMIT 1)"):
+            result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "success" and result["validation_passed"] is False
+        assert (await _signal_state(pool))["failures_since_ok"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_signal_that_never_dropped_a_mark_gains_no_row(self, own):
+        pool, scheduler, _a = own
+        await self._write(pool)
+        assert (await scheduler._run_pg_derivation())["status"] == "success"
+        assert await _signal_state(pool) is None
+
+    @pytest.mark.asyncio
+    async def test_a_healed_row_is_not_rewritten_by_every_later_run(self, own):
+        """Only a row that owes something moves, so `last_ok_at` keeps saying
+        when the drops were last covered, not when the last rebuild ran."""
+        pool, scheduler, _a = own
+        await self._write(pool)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO meta.mirror_state"
+                " (table_name, last_attempted_at, last_ok_at, failures_since_ok)"
+                " VALUES ('meta.derivation_signal', now() - interval '2 hours',"
+                "         now() - interval '2 hours', 0)")
+        before = await _signal_state(pool)
+
+        assert (await scheduler._run_pg_derivation())["validation_passed"] is True
+
+        after = await _signal_state(pool)
+        assert (after["last_ok_at"], after["last_attempted_at"]) == (
+            before["last_ok_at"], before["last_attempted_at"])
