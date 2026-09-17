@@ -70,3 +70,42 @@ def test_every_repair_caller_passes_the_lock():
         # Either on the same line or the argument list continues below.
         idx = src.index(line)
         assert "lock=self._heavy_job_lock" in src[idx: idx + 200], line
+
+
+def test_the_reconciliation_resync_writes_inside_the_lock_and_fetches_outside_it():
+    """Behavioural, because the caller test above only proves the lock is
+    handed over — not that the write happens under it, nor that the KeyCRM
+    fetch does not."""
+    import asyncio
+    from datetime import date, timedelta
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from core.sync_service import SyncService
+
+    lock = asyncio.Lock()
+    seen = {}
+    day = date.today() - timedelta(days=1)
+    order = {"id": 7, "status_id": 1, "grand_total": 100,
+             "ordered_at": f"{day.isoformat()}T12:00:00+03:00"}
+
+    class Client:
+        async def paginate(self, *_a, **_k):
+            seen["fetch_locked"] = lock.locked()
+            yield [order]
+
+    store = MagicMock()
+    store.get_order_summaries_by_date = AsyncMock(return_value={})
+    store.log_reconciliation = AsyncMock(return_value={"status": "drift"})
+    store.mark_warehouse_dirty = AsyncMock(
+        side_effect=lambda *_a: seen.__setitem__("mark_locked", lock.locked()))
+    service = SyncService(store=store)
+
+    async def upsert(orders, force_update):
+        seen["write_locked"] = lock.locked()
+        return len(orders), 0
+
+    with patch("core.sync_service.get_async_client", AsyncMock(return_value=Client())), \
+         patch.object(service, "_upsert_orders_with_expenses", side_effect=upsert):
+        asyncio.run(service.reconcile_with_api(days_back=2, lock=lock))
+
+    assert seen == {"fetch_locked": False, "write_locked": True, "mark_locked": True}
