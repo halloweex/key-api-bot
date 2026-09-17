@@ -2119,6 +2119,7 @@ class BackgroundScheduler:
             evaluate_growth,
             evidence_for_growth,
             fetch_dir_sample_at_age,
+            fetch_remainder_series,
             fetch_sample_at_age,
             insert_dir_samples,
             insert_sample,
@@ -2161,14 +2162,25 @@ class BackgroundScheduler:
                 if dir_now:
                     insert_dir_samples(conn, dir_now)
                     prune_old_dir_samples(conn, retention_days=21)
+                # After the insert, deliberately: the recent window is
+                # supposed to contain this very sample. The two lookups above
+                # are read first for the opposite reason — a "168h ago" search
+                # must not be able to find today.
+                remainder = fetch_remainder_series(conn, hours=180)
 
-            growth = evaluate_growth(current=dir_now, baseline=dir_week_ago)
+            growth = evaluate_growth(
+                current=dir_now, baseline=dir_week_ago,
+                remainder_series=remainder,
+            )
             if growth is None and dir_week_ago is None:
                 # Bootstrap: no week of history yet. A step change is still a
                 # step change, and a detector silent for its first seven days is
                 # missing exactly when a fresh deploy is most likely to regress.
                 # One GB in six hours is a step wherever it lands, so the
                 # remainder gets the same bootstrap limits as the directory.
+                # No `remainder_series` here on purpose: persistence needs a
+                # week-old window to hold anything above, and this branch runs
+                # precisely because there is not one yet.
                 growth = evaluate_growth(
                     current=dir_now, baseline=dir_six_ago, window_hours=6,
                     warn_gb=BOOTSTRAP_STEP_GB, critical_gb=BOOTSTRAP_STEP_GB * 2,

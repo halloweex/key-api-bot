@@ -820,3 +820,200 @@ class TestEvidenceForGrowth:
         big = {f"g{i}": i * _GB for i in range(50)}
         ev = evidence_for_growth(current=big, baseline={}, sample=self._sample())
         assert len(json.dumps(ev).encode()) < 8192
+
+
+# ── The remainder is judged by persistence ───────────────────────────────────
+
+# 67 real `unattributed` samples from production, 2026-08-31 to 09-17, as
+# (hours since the first sample, GB). Embedded rather than synthesised because
+# the property being guarded is *statistical* — a 168h delta with a spread of
+# 4.14 GB around a mean of -0.93 — and no hand-written fixture reproduces that
+# honestly.
+PROD_SERIES = [
+    (0.0, 26.8653), (6.0, 27.2410), (12.0, 27.2033), (18.0, 27.3972),
+    (24.0, 27.8487), (30.0, 27.9717), (36.0, 28.1342), (42.0, 28.4068),
+    (48.0, 28.8449), (54.0, 29.0346), (60.0, 29.2250), (66.0, 28.4691),
+    (72.0, 28.8234), (78.0, 25.9014), (84.0, 26.0005), (90.0, 24.3050),
+    (96.0, 24.5666), (102.0, 24.8016), (108.0, 25.0384), (114.0, 24.1406),
+    (120.0, 24.4557), (126.0, 24.7307), (132.0, 24.8459), (138.0, 23.4035),
+    (144.0, 26.9070), (150.0, 27.6173), (156.0, 28.0519), (162.0, 27.9450),
+    (168.0, 30.0857), (174.0, 31.9079), (180.0, 31.9358), (186.0, 32.1162),
+    (192.0, 33.0647), (198.0, 33.5464), (204.0, 33.7147), (210.0, 23.7389),
+    (216.0, 24.1147), (222.0, 24.3162), (228.0, 24.4758), (234.0, 23.7023),
+    (240.0, 24.0808), (246.0, 24.2846), (252.0, 24.4481), (258.0, 23.6803),
+    (264.0, 24.0392), (270.0, 24.1783), (276.0, 24.2071), (282.0, 23.5242),
+    (288.0, 23.8631), (294.0, 26.2829), (300.0, 26.2016), (306.0, 25.4799),
+    (312.0, 26.2281), (318.0, 29.8283), (324.0, 28.3939), (330.0, 25.1370),
+    (336.0, 25.4544), (342.0, 25.7885), (348.0, 25.8272), (354.0, 25.2412),
+    (360.0, 25.5273), (366.0, 25.9074), (372.0, 25.9368), (378.0, 25.3501),
+    (384.0, 26.1040), (390.0, 27.0287), (396.0, 27.1078),
+]
+
+
+def _prod_series(step_after_h=None, step_gb=0.0):
+    """The production series as (datetime, bytes), optionally with a step."""
+    from datetime import datetime, timedelta, timezone
+    # The real first sample. Not midnight: the watchdog runs at
+    # 01/07/13/19 Kyiv, so its samples land on 22/04/10/16 UTC, and a
+    # fixture anchored to midnight shifts every verdict by four hours.
+    base = datetime(2026, 8, 31, 16, 0, tzinfo=timezone.utc)
+    out = []
+    for hours, gb in PROD_SERIES:
+        v = gb + (step_gb if step_after_h is not None and hours >= step_after_h
+                  else 0.0)
+        out.append((base + timedelta(hours=hours), int(v * (1024 ** 3))))
+    return out
+
+
+class TestTheRemainderIsJudgedByPersistence:
+    """The remainder is deploy churn, and differencing two points of it is
+    close to a coin toss: over every window the watchdog could have judged, 8
+    crossed WARN and 3 crossed CRITICAL on a series whose mean 168h delta is
+    **negative**. Those are the eight disk:WARN fires between 2026-09-07 and
+    09-17. Growth now has to hold to count.
+    """
+
+    def test_the_real_series_fires_twice_and_both_are_the_volume_leak(self):
+        """The whole point, replayed on production data.
+
+        Two windows survive, 2026-09-08 22:00 and 09-09 04:00, and they are
+        the 173 anonymous volumes (7.13 GB) leaked by container removal
+        without its volume flag. That was real, this alert found it, and a
+        detector that lost it would have bought quiet at the price of the one
+        thing it ever caught.
+        """
+        from core.disk_monitor import Severity, evaluate_remainder_growth
+
+        series = _prod_series()
+        fired = [
+            (now, alert.severity)
+            for now, _ in series
+            if (alert := evaluate_remainder_growth(series=series, now=now))
+        ]
+
+        assert len(fired) == 2, (
+            "expected the volume leak and nothing else, got "
+            + repr([(t.isoformat(), s.value) for t, s in fired])
+        )
+        assert all(s is Severity.WARN for _, s in fired)
+        assert [t.strftime("%m-%d %H") for t, _ in fired] == [
+            "09-08 22", "09-09 04",
+        ]
+
+    def test_the_series_it_is_judging_has_no_upward_trend(self):
+        """Guards the premise, not the code. If this fixture is ever replaced
+        by one that genuinely grows, the test above stops meaning what it
+        claims and should fail loudly rather than pass for the wrong reason."""
+        import statistics
+
+        deltas = []
+        for hours, gb in PROD_SERIES:
+            base = [g for hh, g in PROD_SERIES if abs(hh - (hours - 168)) <= 12]
+            if base:
+                deltas.append(gb - base[len(base) // 2])
+        assert len(deltas) > 20
+        assert statistics.mean(deltas) < 0.5, (
+            "the fixture now trends upward; the false-positive claim it "
+            "supports is no longer about noise"
+        )
+
+    def test_a_spike_in_either_window_cannot_carry_the_verdict(self):
+        """Taking the minimum of the recent window and the maximum of the
+        baseline is what this is for. One tall sample now, or one low sample a
+        week back, is exactly how the old comparison manufactured growth."""
+        from datetime import datetime, timedelta, timezone
+
+        from core.disk_monitor import evaluate_remainder_growth
+
+        gb = 1024 ** 3
+        base = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        flat = [(base + timedelta(hours=6 * i), 20 * gb) for i in range(40)]
+        now = flat[-1][0]
+        assert evaluate_remainder_growth(series=flat, now=now) is None
+
+        spiked = list(flat)
+        spiked[-2] = (spiked[-2][0], 30 * gb)
+        assert evaluate_remainder_growth(series=spiked, now=now) is None
+
+        dipped = list(flat)
+        for i, (t, _b) in enumerate(dipped):
+            if now - timedelta(hours=180) <= t <= now - timedelta(hours=156):
+                dipped[i] = (t, 10 * gb)
+                break
+        assert evaluate_remainder_growth(series=dipped, now=now) is None
+
+    def test_growth_that_holds_is_reported(self):
+        """The other half of the bargain: persistence must not mean deaf."""
+        from datetime import datetime, timedelta, timezone
+
+        from core.disk_monitor import Severity, evaluate_remainder_growth
+
+        gb = 1024 ** 3
+        base = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        series = [
+            (base + timedelta(hours=6 * i), (20 + (6 if i >= 20 else 0)) * gb)
+            for i in range(40)
+        ]
+        alert = evaluate_remainder_growth(series=series, now=series[-1][0])
+        assert alert is not None
+        assert alert.severity is Severity.CRITICAL
+        assert alert.total_delta_gb == 6.0
+        assert "stayed there" in alert.reason
+
+    def test_a_cliff_is_critical_without_waiting(self):
+        """Persistence needs about a day to confirm even a large step, and the
+        2026-08-05 event put +8.93 GB on the disk in an afternoon."""
+        from datetime import datetime, timedelta, timezone
+
+        from core.disk_monitor import Severity, evaluate_remainder_growth
+
+        gb = 1024 ** 3
+        base = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        series = [(base + timedelta(hours=6 * i), 20 * gb) for i in range(40)]
+        series.append((series[-1][0] + timedelta(hours=6), 29 * gb))
+
+        alert = evaluate_remainder_growth(series=series, now=series[-1][0])
+        assert alert is not None
+        assert alert.severity is Severity.CRITICAL
+        assert "jumped" in alert.reason
+        assert alert.window_hours == 0
+
+    def test_the_cliff_stays_above_every_rise_the_host_has_shown(self):
+        """A fast path that speaks when nothing happened costs more than the
+        hours it saves, so it is set from the data rather than chosen."""
+        from core.disk_monitor import FS_CLIFF_STEP_GB
+
+        rises = [
+            PROD_SERIES[i + 1][1] - PROD_SERIES[i][1]
+            for i in range(len(PROD_SERIES) - 1)
+        ]
+        assert max(rises) < FS_CLIFF_STEP_GB, (
+            "the cliff threshold is below the largest rise this host has "
+            "actually shown: " + repr(round(max(rises), 2))
+        )
+
+    def test_thin_windows_say_nothing(self):
+        """Day one after deploy. A window without a spread cannot tell a held
+        rise from a spike, and inventing a verdict there is how a new series
+        reads as a week of growth against a baseline that does not exist."""
+        from datetime import datetime, timedelta, timezone
+
+        from core.disk_monitor import evaluate_remainder_growth
+
+        gb = 1024 ** 3
+        base = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        young = [(base + timedelta(hours=6 * i), (20 + i) * gb) for i in range(4)]
+        assert evaluate_remainder_growth(series=young, now=young[-1][0]) is None
+        assert evaluate_remainder_growth(series=[], now=None) is None
+
+    def test_shrinkage_is_never_an_alert(self):
+        from datetime import datetime, timedelta, timezone
+
+        from core.disk_monitor import evaluate_remainder_growth
+
+        gb = 1024 ** 3
+        base = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        series = [
+            (base + timedelta(hours=6 * i), (40 - i) * gb) for i in range(40)
+        ]
+        assert evaluate_remainder_growth(series=series, now=series[-1][0]) is None
