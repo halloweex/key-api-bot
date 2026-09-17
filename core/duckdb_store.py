@@ -2045,7 +2045,20 @@ class DuckDBStore(
                 # whose growth is the reason `_traffic_rebuild_dates` and the
                 # incremental path existed at all.
             except Exception as utm_error:
-                logger.warning(f"UTM layer refresh failed (non-critical): {utm_error}")
+                # Non-critical for *this* refresh — revenue does not read the
+                # UTM level, so the tick still reports success — but no longer
+                # silent downstream. The parser has recorded the failure on the
+                # store (`last_utm_parse_error`), and while it stands
+                # `ship_order_utm` refuses to copy the table to Postgres: a
+                # parse that raised between two write batches leaves exactly
+                # the partial table that `/traffic` would otherwise read as
+                # orders turned organic. That covers the deferred ship in
+                # `_run_warehouse_refresh` too, which runs with a synthetic
+                # success and no parse of its own.
+                logger.warning(
+                    f"UTM layer refresh failed — Postgres keeps its previous "
+                    f"copy until a parse succeeds: {utm_error}"
+                )
 
             return {
                 "status": "success",

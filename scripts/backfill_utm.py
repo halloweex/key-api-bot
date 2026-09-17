@@ -9,6 +9,7 @@ and updates the manager_comment column, then refreshes UTM layers.
 Usage:
     PYTHONPATH=. python scripts/backfill_utm.py
     PYTHONPATH=. python scripts/backfill_utm.py --days 90   # Only last 90 days
+    PYTHONPATH=. python scripts/backfill_utm.py --force-ship  # Ship even a shrink
 
 In Docker:
     docker exec keycrm-web python /app/scripts/backfill_utm.py
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TZ = ZoneInfo("Europe/Kyiv")
 
 
-async def backfill_utm(days_back: int = 730):
+async def backfill_utm(days_back: int = 730, force_ship: bool = False):
     from core.duckdb_store import get_store
     from core.keycrm import get_async_client
 
@@ -119,9 +120,18 @@ async def backfill_utm(days_back: int = 730):
     # dirty, so without this the operator who just ran it would look at the
     # tab and see the classification they replaced. The three admin endpoints
     # that do the same thing call the same function; never raises.
+    #
+    # It refuses a copy under 90% of what Postgres holds, or one made while
+    # the last parse is recorded as failed, and logs the refusal rather than
+    # raising — so read the line below. `--force-ship` is the only way past
+    # that guard anywhere in the repository, and it is here, behind a flag an
+    # operator types, because this is the one caller that may mean a shrink.
     from core.pg_order_utm import ship_after_reparse
 
-    logger.info("Shipping UTM to Postgres: %s", await ship_after_reparse(store))
+    logger.info(
+        "Shipping UTM to Postgres: %s",
+        await ship_after_reparse(store, force=force_ship),
+    )
 
     # Show results
     async with store.connection() as conn:
@@ -137,6 +147,14 @@ async def backfill_utm(days_back: int = 730):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backfill UTM data from KeyCRM")
     parser.add_argument("--days", type=int, default=730, help="Days of history to backfill (default: 730)")
+    parser.add_argument(
+        "--force-ship", action="store_true",
+        help=(
+            "Replace Postgres' silver.order_utm even when DuckDB now holds under "
+            "90%% of its rows, or the last parse failed. /traffic reads that "
+            "table: use only when the smaller table is the one you mean."
+        ),
+    )
     args = parser.parse_args()
 
-    asyncio.run(backfill_utm(args.days))
+    asyncio.run(backfill_utm(args.days, force_ship=args.force_ship))

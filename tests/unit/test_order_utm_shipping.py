@@ -7,13 +7,18 @@ one the port shipped wrong or left unguarded:
 1. the routed reads lost the thread-pool offload and the query timeout;
 2. a failing shipper left no trace in the watermark;
 3. three admin endpoints rewrote the UTM in DuckDB and never shipped it;
-4. `reconcile_order_utm` was written and nothing exercised it.
+4. `reconcile_order_utm` was written and nothing exercised it;
+5. a full replace copied whatever DuckDB held, a half-finished re-parse
+   included (DN-04) — the row guard, from `TestTheShrinkRule` down, and
+   against a real Postgres in `tests/integration/test_order_utm_row_guard.py`.
 """
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import textwrap
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -339,3 +344,374 @@ class TestTheSpecItself:
         from core.mirror_reconciliation import _COPIED_FROM_DUCKDB
         assert ORDER_UTM_TABLE.origin_note != _COPIED_FROM_DUCKDB
         assert "organic" in ORDER_UTM_TABLE.origin_note
+
+
+# ── DN-04: the row guard ────────────────────────────────────────────────────
+
+
+async def _store_with_utm_rows(tmp_path, n: int):
+    """A real DuckDB store holding `n` UTM rows, ids 1..n.
+
+    `range()` rather than an `executemany` of tuples: the guard's cases are
+    about a thousand rows, and building them in Python would be the slow half
+    of every test here.
+    """
+    from core.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(db_path=tmp_path / "utm.duckdb")
+    await store.connect()
+    async with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO silver_order_utm (order_id, utm_source, utm_medium, "
+            "utm_campaign, traffic_type, platform, parsed_at) "
+            "SELECT i, 'fbads', 'paid', 'spring', 'paid_confirmed', 'facebook', "
+            "TIMESTAMPTZ '2026-09-07 06:00:00+00' FROM range(1, ?) t(i)",
+            [n + 1],
+        )
+    return store
+
+
+class _FakePostgres:
+    """Just enough of an asyncpg pool to watch what the shipper sends.
+
+    The count is what `SELECT count(*)` answers; every statement is kept, so a
+    test can say a TRUNCATE never happened rather than inferring it.
+    """
+
+    def __init__(self, count: int):
+        self.count = count
+        self.statements: list = []
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self
+
+    @asynccontextmanager
+    async def _no_transaction(self):
+        yield
+
+    def transaction(self):
+        return self._no_transaction()
+
+    async def fetchval(self, sql, *args):
+        self.statements.append(sql)
+        return self.count
+
+    async def execute(self, sql, *args):
+        self.statements.append(sql)
+
+    async def executemany(self, sql, rows):
+        self.statements.append(sql)
+
+
+class TestTheShrinkRule:
+    """`refusal` is the whole decision, and pure, so its edges are pinned here
+    without either database."""
+
+    def test_a_first_ship_into_an_empty_table_is_never_refused(self):
+        assert pg_order_utm.refusal(0, 0, None) is None
+        assert pg_order_utm.refusal(7, 0, None) is None
+
+    def test_a_copy_within_the_floor_ships(self):
+        assert pg_order_utm.refusal(950, 1000, None) is None
+        assert pg_order_utm.refusal(1200, 1000, None) is None
+
+    def test_the_floor_itself_ships_and_one_row_under_it_does_not(self):
+        """Integer arithmetic, so the line is exactly where the constant says."""
+        assert pg_order_utm.SHRINK_FLOOR_PCT == 90
+        assert pg_order_utm.refusal(900, 1000, None) is None
+        assert pg_order_utm.refusal(899, 1000, None) is not None
+
+    def test_a_shrink_is_refused_and_names_both_counts(self):
+        why = pg_order_utm.refusal(100, 1000, None)
+        assert why.startswith("refused:")
+        assert "100" in why and "1000" in why
+
+    def test_a_failed_parse_refuses_even_an_equal_copy(self):
+        why = pg_order_utm.refusal(1000, 1000, "RuntimeError: boom")
+        assert why and "RuntimeError: boom" in why
+        assert "1000" in why
+
+    @pytest.mark.parametrize("args", [
+        (100, 1000, None),
+        (1000, 1000, "RuntimeError: " + "x" * 500),
+    ])
+    def test_the_lever_survives_the_findings_truncation(self, args):
+        """`mirror_failing` quotes the first 300 characters of `last_error`. A
+        refusal whose `→` fell past that would reach the digest as a count
+        with no instruction beside it."""
+        why = pg_order_utm.refusal(*args)
+        assert "→" in why[:300]
+
+    def test_a_mock_store_is_not_a_failed_parse(self):
+        """An `AsyncMock` attribute is a truthy mock; reading it as an error
+        would refuse every ship in the suite."""
+        assert pg_order_utm._parse_error(AsyncMock()) is None
+
+        class _Store:
+            last_utm_parse_error = "ValueError: bad comment"
+
+        assert pg_order_utm._parse_error(_Store()) == "ValueError: bad comment"
+
+
+class TestAShrinkIsNotShipped:
+    """The shipper around the rule: a refusal writes nothing, is recorded, and
+    returns rather than raises."""
+
+    async def _ship(self, store, count, **kwargs):
+        recorded = []
+
+        async def _fail(table, error):
+            recorded.append((table, error))
+
+        fake = _FakePostgres(count)
+        with patch("core.pg.require_revision", new=AsyncMock()), \
+             patch("core.pg_landing._record_failure", new=_fail):
+            result = await pg_order_utm.ship_order_utm(store, pool=fake, **kwargs)
+        return result, fake, recorded
+
+    @pytest.mark.asyncio
+    async def test_a_shrink_is_refused_without_a_write(self, tmp_path):
+        store = await _store_with_utm_rows(tmp_path, 100)
+        try:
+            result, fake, recorded = await self._ship(store, 1000)
+        finally:
+            await store.close()
+
+        assert result["duckdb_rows"] == 100 and result["postgres_rows"] == 1000
+        assert result["refused"].startswith("refused:")
+        assert not any("TRUNCATE" in sql for sql in fake.statements)
+        assert not any("INSERT" in sql for sql in fake.statements)
+        assert len(recorded) == 1
+        table, error = recorded[0]
+        assert table == pg_order_utm.UTM_TABLE
+        assert "100" in error and "1000" in error
+
+    @pytest.mark.asyncio
+    async def test_a_copy_within_the_floor_ships(self, tmp_path):
+        store = await _store_with_utm_rows(tmp_path, 950)
+        try:
+            result, fake, recorded = await self._ship(store, 1000)
+        finally:
+            await store.close()
+
+        assert result["rows"] == 950 and "refused" not in result
+        assert any(sql.startswith("TRUNCATE") for sql in fake.statements)
+        assert any("meta.mirror_state" in sql for sql in fake.statements)
+        assert recorded == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_parse_is_refused_and_force_ships_anyway(self, tmp_path):
+        store = await _store_with_utm_rows(tmp_path, 1000)
+        store.last_utm_parse_error = "RuntimeError: boom"
+        try:
+            refused, _fake, recorded = await self._ship(store, 1000)
+            forced, fake, forced_recorded = await self._ship(store, 1000, force=True)
+        finally:
+            await store.close()
+
+        assert "refused" in refused and len(recorded) == 1
+        assert "boom" in recorded[0][1]
+        assert forced["rows"] == 1000 and forced.get("forced") is True
+        assert any(sql.startswith("TRUNCATE") for sql in fake.statements)
+        assert forced_recorded == []
+
+    @pytest.mark.asyncio
+    async def test_force_ships_a_shrink(self, tmp_path):
+        store = await _store_with_utm_rows(tmp_path, 100)
+        try:
+            result, fake, recorded = await self._ship(store, 1000, force=True)
+        finally:
+            await store.close()
+
+        assert result["rows"] == 100
+        assert any(sql.startswith("TRUNCATE") for sql in fake.statements)
+        assert recorded == []
+
+    def test_the_count_is_taken_before_the_truncate(self):
+        """Parsed: the comparison has to read the table it would replace, so
+        the count comes before the write in the function, not after it."""
+        tree = ast.parse(textwrap.dedent(inspect.getsource(pg_order_utm.ship_order_utm)))
+        counts, truncates = [], []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            text = ast.unparse(node)
+            if node.func.attr == "fetchval" and "count(*)" in text:
+                counts.append(node.lineno)
+            if node.func.attr == "execute" and "TRUNCATE" in text:
+                truncates.append(node.lineno)
+        assert counts and truncates and max(counts) < min(truncates)
+
+
+class TestTheParserRecordsItsOutcome:
+    """`last_utm_parse_error` is set by the parser itself, so every one of its
+    five callers leaves a verdict the shipper can read — not only the tick."""
+
+    async def _store_with_a_comment(self, tmp_path):
+        from core.duckdb_store import DuckDBStore
+
+        stamp = datetime(2026, 9, 7, 9, 0, tzinfo=timezone.utc)
+        store = DuckDBStore(db_path=tmp_path / "parse.duckdb")
+        await store.connect()
+        async with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO orders (id, source_id, status_id, grand_total, "
+                "ordered_at, updated_at, buyer_id, manager_id, manager_comment) "
+                "VALUES (1, 4, 1, 100, ?, ?, 10, NULL, ?)",
+                [stamp, stamp,
+                 "utm_source: fbads; utm_medium: paid; utm_campaign: spring"],
+            )
+        return store
+
+    @pytest.mark.asyncio
+    async def test_a_raising_parse_is_recorded_and_a_clean_one_clears_it(self, tmp_path):
+        from core.duckdb_store import DuckDBStore
+
+        store = await self._store_with_a_comment(tmp_path)
+        try:
+            assert store.last_utm_parse_error is None
+            with patch.object(DuckDBStore, "_parse_utm_from_comment",
+                              side_effect=RuntimeError("bad comment")):
+                with pytest.raises(RuntimeError):
+                    await store.refresh_utm_silver_layer()
+            assert store.last_utm_parse_error == "RuntimeError: bad comment"
+
+            assert len(await store.refresh_utm_silver_layer()) == 1
+            assert store.last_utm_parse_error is None
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_parse_counts_as_failed(self, tmp_path):
+        """`CancelledError` is not an `Exception`, and a parse cancelled between
+        two write batches leaves the same partial table an error does."""
+        from core.duckdb_store import DuckDBStore
+
+        store = await self._store_with_a_comment(tmp_path)
+        try:
+            with patch.object(DuckDBStore, "_parse_utm_from_comment",
+                              side_effect=asyncio.CancelledError()):
+                with pytest.raises(asyncio.CancelledError):
+                    await store.refresh_utm_silver_layer()
+            assert store.last_utm_parse_error.startswith("CancelledError")
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_the_tick_swallows_the_error_and_the_flag_survives(self, tmp_path):
+        """The case the flag exists for: `refresh_warehouse_layers` logs a
+        failed parse as a warning and reports success, and the scheduler ships
+        straight after — or later, from the deferred path, with no parse of
+        its own at all."""
+        from core.duckdb_store import DuckDBStore
+
+        store = await self._store_with_a_comment(tmp_path)
+        try:
+            with patch.object(DuckDBStore, "_parse_utm_from_comment",
+                              side_effect=RuntimeError("bad comment")):
+                result = await store.refresh_warehouse_layers(trigger="manual")
+            assert result["status"] == "success"
+            assert store.last_utm_parse_error == "RuntimeError: bad comment"
+        finally:
+            await store.close()
+
+
+class TestOnlyTheCliForces:
+    """`force=True` defeats the guard, so where it may come from is pinned by
+    structure, not left to convention."""
+
+    SHIPPERS = {"ship_order_utm", "ship_after_reparse"}
+
+    @pytest.mark.asyncio
+    async def test_ship_after_reparse_as_the_endpoints_call_it_does_not_force(
+        self, monkeypatch,
+    ):
+        """A fresh lock: the module's own may already be bound to the loop of
+        whichever test first waited on it."""
+        import core.pg_silver
+
+        monkeypatch.setattr(core.pg_silver, "PG_LAYER_LOCK", asyncio.Lock())
+        ship = AsyncMock(return_value={"rows": 1})
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg_order_utm.ship_order_utm", new=ship):
+            await pg_order_utm.ship_after_reparse(AsyncMock())
+        assert ship.await_count == 1
+        assert ship.await_args.kwargs.get("force", False) is False
+
+    def _calls_passing_force(self, path):
+        """Every call to a shipper in `path` that passes `force`, and whether
+        it merely forwards a `force` parameter of an enclosing function."""
+        tree = ast.parse(path.read_text())
+        parents = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+
+        def _enclosing_params(node):
+            names = set()
+            while node in parents:
+                node = parents[node]
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    a = node.args
+                    names |= {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs}
+            return names
+
+        found = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = (node.func.attr if isinstance(node.func, ast.Attribute)
+                    else getattr(node.func, "id", None))
+            if name not in self.SHIPPERS:
+                continue
+            for kw in node.keywords:
+                if kw.arg == "force":
+                    forwards = (isinstance(kw.value, ast.Name)
+                                and kw.value.id == "force"
+                                and "force" in _enclosing_params(node))
+                    found.append((path, node.lineno, kw.value, forwards))
+        return found
+
+    def test_nothing_in_the_application_originates_a_force(self):
+        """Forwarding the parameter — `ship_after_reparse` handing its own
+        `force` on — is allowed; deciding to force is not. Walks the trees
+        rather than naming files, so a fifth reparse site is covered the day
+        it is written."""
+        offenders = []
+        for root in ("core", "web", "bot"):
+            for path in (REPO / root).rglob("*.py"):
+                offenders += [
+                    (str(p.relative_to(REPO)), line)
+                    for p, line, _value, forwards in self._calls_passing_force(path)
+                    if not forwards
+                ]
+        assert offenders == [], f"force passed outside the CLI: {offenders}"
+
+    def test_the_backfill_script_forces_only_behind_its_flag(self):
+        path = REPO / "scripts" / "backfill_utm.py"
+        tree = ast.parse(path.read_text())
+
+        passes = self._calls_passing_force(path)
+        assert len(passes) == 1, "the script should ship exactly once"
+        value = passes[0][2]
+        assert isinstance(value, ast.Name) and value.id == "force_ship", (
+            "the script must forward its flag, never a literal"
+        )
+
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "backfill_utm")
+        names = [a.arg for a in fn.args.args]
+        defaults = dict(zip(names[len(names) - len(fn.args.defaults):], fn.args.defaults))
+        assert isinstance(defaults["force_ship"], ast.Constant)
+        assert defaults["force_ship"].value is False
+
+        flags = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "add_argument" and n.args
+            and isinstance(n.args[0], ast.Constant) and n.args[0].value == "--force-ship"
+        ]
+        assert len(flags) == 1
+        action = next(k.value for k in flags[0].keywords if k.arg == "action")
+        assert action.value == "store_true"

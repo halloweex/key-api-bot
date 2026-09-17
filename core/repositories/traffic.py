@@ -298,6 +298,17 @@ class TrafficMixin:
 
     _UTM_BATCH_SIZE = 1000
 
+    # How the last parse in this process ended: None when it finished, or when
+    # none has run yet, and the error text when it raised. Read by
+    # `core.pg_order_utm.ship_order_utm`, which will not copy a table that a
+    # parse may have left half-written.
+    #
+    # A class default and not an `__init__` assignment, because this is a mixin
+    # and `DuckDBStore.__init__` does not know about it; the parser sets it on
+    # the instance, and the store is a process singleton, so the instance is
+    # the process.
+    last_utm_parse_error: Optional[str] = None
+
     async def refresh_utm_silver_layer(self) -> set[int]:
         """Parse UTM data from orders and populate silver_order_utm table.
 
@@ -313,7 +324,38 @@ class TrafficMixin:
             and returning only a count is what forced a full rebuild of that
             table ~240 times a day. That layer is retired, so the ids are now
             just the honest return value of a parser.
+
+        **Records its own outcome in `last_utm_parse_error`, here rather than
+        in `refresh_warehouse_layers`.** The warehouse tick is one of five
+        callers — the traffic refresh, the reclassify, the `manager_comment`
+        backfill endpoint and `scripts/backfill_utm.py` are the others — and
+        the tick swallows the error while the rest do not. A flag written only
+        by the tick would miss a reclassify whose DELETE committed and whose
+        re-parse raised, which is the most partial this table ever gets. It
+        would also refuse wrongly the other way: a reclassify that finished
+        after a failed tick has put every row back, and a flag only the tick
+        can clear would keep refusing its ship until the next dirty tick.
+
+        A finished parse is a complete table, which is what makes clearing
+        the flag on success sound: the predicate below selects every order
+        with a comment and no current row, so when it returns there is none
+        left. The one thing it cannot see is a DELETE running beside it on
+        another path, and that is what the shipper's row-count guard is for.
         """
+        try:
+            parsed = await self._parse_utm_into_silver()
+        except BaseException as exc:
+            # `BaseException`, so a cancelled parse counts. A shutdown or a
+            # `wait_for` that cancels between two write batches leaves exactly
+            # the partial table an exception does, and `CancelledError` is not
+            # an `Exception`. Re-raised untouched either way.
+            self.last_utm_parse_error = f"{type(exc).__name__}: {exc}"
+            raise
+        self.last_utm_parse_error = None
+        return parsed
+
+    async def _parse_utm_into_silver(self) -> set[int]:
+        """The parse itself; `refresh_utm_silver_layer` is the entry point."""
         # Step 1: fetch IDs + comments that need parsing (short lock)
         async with self.connection() as conn:
             orders = conn.execute("""
