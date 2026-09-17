@@ -71,11 +71,18 @@ SMS_FRAGMENTS = dict(
 
 def _rendered_bodies():
     """(label, sql) for every body that reaches more than one engine."""
+    from core.repositories.revenue import _MANAGER_SALES_365D_SQL
+    from core.sql_dialect import render_tables
+
     for dialect in (DUCKDB, POSTGRES):
         for name, sql in inventory_view_selects(dialect):
             yield f"inventory:{dialect.name}:{name}", sql
         yield f"sms_segments:{dialect.name}", sms_segments_select(
             dialect, **SMS_FRAGMENTS)
+        # The managers screen's year. It used to start from `CURRENT_DATE`,
+        # which on the Postgres server is UTC's day.
+        yield f"manager_sales_365d:{dialect.name}", render_tables(
+            _MANAGER_SALES_365D_SQL, dialect)
 
     import core.sql_dialect as dialects
     cohort_bodies = (

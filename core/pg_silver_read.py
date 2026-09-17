@@ -28,6 +28,14 @@ first — the ordering every other port here has kept. This one ships off.
 means that with only one set, the same endpoint answers from two engines
 depending on whether a filter is present — which is today's state, and the
 reason this exists.
+
+THE MANAGERS SCREEN RIDES IT TOO
+
+`GET /api/managers` sums a year of `silver_orders` per manager and sales type,
+which is this grain and nothing else, so it takes this switch rather than a
+flag of its own — one more variable to flip on the way off DuckDB would buy a
+rollback nobody needs for an admin-only screen. Same fallback as the rest:
+a failed Postgres read is an ERROR in the log and a DuckDB answer.
 """
 from __future__ import annotations
 

@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 from core.duckdb_constants import UNKNOWN_BRAND, brand_where
 from core.models import OrderStatus
+from core.sql_dialect import TODAY_IN_KYIV
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +227,34 @@ _SUBCATEGORY_SQL = """
         {promocode_filter}
     GROUP BY l.category_name
     ORDER BY revenue DESC, l.category_name
+"""
+
+
+# ─── The managers screen ────────────────────────────────────────────────────
+#
+# What each manager sold in a year, split by the `sales_type` Silver gave it —
+# the one screen an admin classifies managers from. It reads Silver and only
+# Silver, so it rides `KS_READ_SILVER` beside the `/summary` and `/trend`
+# escapes rather than a flag of its own.
+#
+# The window starts from Kyiv's day in both engines, not from `CURRENT_DATE`.
+# That was the container's day: Kyiv in production DuckDB, because `web` runs
+# `TZ=Europe/Kyiv`, and UTC on the Postgres server — so between 21:00 and
+# midnight UTC a Postgres read would have reached one day further back than
+# the DuckDB one. `order_date` is already the Kyiv date in both Silvers, so
+# once today is too, the two sides of the comparison are the same calendar.
+#
+# The `ORDER BY` is not cosmetic. The route joins a manager's sales types in
+# descending revenue and keeps the arrival order on a tie; without it that
+# order is whatever each engine's hash aggregate produced, and the label on
+# the screen would depend on which engine answered.
+_MANAGER_SALES_365D_SQL = """
+    SELECT manager_id, sales_type, COALESCE(SUM(grand_total), 0) AS revenue
+    FROM {silver_orders}
+    WHERE NOT is_return AND is_active_source
+      AND order_date >= """ + TODAY_IN_KYIV + """ - INTERVAL '365 days'
+    GROUP BY manager_id, sales_type
+    ORDER BY manager_id NULLS FIRST, sales_type
 """
 
 
@@ -979,6 +1008,24 @@ class RevenueMixin:
             ORDER BY l.order_date
         """
         return sql, params
+
+    async def get_manager_sales_365d(self) -> List[Tuple]:
+        """`(manager_id, sales_type, revenue)` over the last 365 Kyiv days.
+
+        Postgres first and before the store lock, `get_summary_stats`' rule;
+        DuckDB when the flag is off, when there is no DSN, or when the read
+        fails — `_pg_silver`'s contract, so this screen fails over the same way
+        the other Silver reads do. One body, rendered for whichever engine
+        answers.
+        """
+        from core.sql_dialect import DUCKDB, render_tables
+
+        rows = await self._pg_silver(_MANAGER_SALES_365D_SQL, [])
+        if rows is not None:
+            return rows
+        async with self.connection() as conn:
+            return conn.execute(
+                render_tables(_MANAGER_SALES_365D_SQL, DUCKDB)).fetchall()
 
     async def get_revenue_trend(
         self,

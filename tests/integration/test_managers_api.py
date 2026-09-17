@@ -74,22 +74,6 @@ def _deps(path: str, method: str = "GET") -> set:
     return set(route_dependencies(app, path, method))
 
 
-class _FakeConn:
-    """Silver grouped by (manager_id, sales_type), as the endpoint reads it."""
-
-    def execute(self, sql, params=None):
-        self.sql = sql
-        return self
-
-    def fetchall(self):
-        return [
-            (34, "other", 230_300.0),
-            (22, "retail", 8_215_717.77),
-            (15, "b2b", 15_549_070.0),
-            (None, "retail", 1_000_000.0),
-        ]
-
-
 class _FakeStore:
     def __init__(self):
         self.set_calls = []
@@ -115,17 +99,19 @@ class _FakeStore:
     async def mark_warehouse_dirty(self, changed_order_ids=None):
         self.dirty_calls.append(changed_order_ids)
 
-    def connection(self):
-        store = self
+    async def get_manager_sales_365d(self):
+        """Silver grouped by (manager_id, sales_type), as the endpoint reads it.
 
-        class _Ctx:
-            async def __aenter__(self):
-                return _FakeConn()
-
-            async def __aexit__(self, *exc):
-                return False
-
-        return _Ctx()
+        No `connection()` on this fake, on purpose: the route asks the store
+        which engine answers, and a route that opened DuckDB itself again would
+        be a 500 here rather than a green test.
+        """
+        return [
+            (34, "other", 230_300.0),
+            (22, "retail", 8_215_717.77),
+            (15, "b2b", 15_549_070.0),
+            (None, "retail", 1_000_000.0),
+        ]
 
 
 @pytest.fixture(autouse=True)

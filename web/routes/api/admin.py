@@ -607,15 +607,8 @@ async def list_managers(request: Request, admin: dict = Depends(require_admin)):
     # is FALSE for them, which is not the same as unclassified — and labelled
     # ₴15.5M of wholesale as `other` on the very screen meant to tell the two
     # apart. There is one CASE for this, it lives in Silver, and this reports
-    # its output.
-    async with store.connection() as conn:
-        rows = conn.execute("""
-            SELECT manager_id, sales_type, COALESCE(SUM(grand_total), 0) AS revenue
-            FROM silver_orders
-            WHERE NOT is_return AND is_active_source
-              AND order_date >= CURRENT_DATE - INTERVAL '365 days'
-            GROUP BY manager_id, sales_type
-        """).fetchall()
+    # its output — from whichever Silver `KS_READ_SILVER` names.
+    rows = await store.get_manager_sales_365d()
 
     revenue: dict = {}
     by_type: dict = {}
