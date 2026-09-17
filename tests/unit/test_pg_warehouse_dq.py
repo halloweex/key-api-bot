@@ -169,22 +169,40 @@ class TestBlindness:
 
 
 class TestWhatABlindRunHolds:
-    def test_not_run_holds_every_twin_condition(self):
-        assert set(twins.unverified_pg_conditions([], ran=False)) == twins.all_conditions()
+    def test_switched_off_holds_nothing(self):
+        """Stood down, not blind: a page from while they were on resolves once
+        rather than standing for as long as the flag stays off."""
+        assert twins.unverified_pg_conditions(ran=False, flag_invalid=False) == []
 
-    @pytest.mark.parametrize("name", ["pg_warehouse_unwatched", "pg_warehouse_dq_flag_invalid"])
-    def test_whole_blindness_holds_everything(self, name):
-        issues = [IntegrityIssue(check_name=name, table_name="x", severity=Severity.WARN, count=1)]
-        assert set(twins.unverified_pg_conditions(issues, ran=True)) == twins.all_conditions()
+    def test_a_flag_not_understood_holds_everything(self):
+        assert set(twins.unverified_pg_conditions(ran=False, flag_invalid=True)) == twins.all_conditions()
 
-    def test_a_group_holds_its_own(self):
-        issues = [IntegrityIssue(check_name="pg_line_items_unwatched", table_name="x",
-                                 severity=Severity.WARN, count=1)]
-        assert twins.unverified_pg_conditions(issues, ran=True) == sorted(
-            twins.GUARD_CONDITIONS["line_items"])
+    def test_a_run_holds_exactly_what_could_not_look(self):
+        assert twins.unverified_pg_conditions(
+            ran=True, flag_invalid=False, held=["pg_line_items_disagree"]) == ["pg_line_items_disagree"]
 
-    def test_a_clean_run_holds_nothing(self):
-        assert twins.unverified_pg_conditions([], ran=True) == []
+    def test_whole_blindness_holds_every_group(self):
+        held = []
+        twins.check_pg_warehouse(Facts.blind("x"), held_out=held)
+        assert set(held) == twins.all_conditions()
+
+    def test_a_collapsed_finding_holds_only_the_blind_groups(self):
+        """One line for two blind groups — but silver_arc, read clean in the same
+        run, still announces its recovery. Found reviewing #215."""
+        held = []
+        issues = twins.check_pg_warehouse(
+            _facts(attribution=Unwatched("a"), line_items=Unwatched("b")), held_out=held)
+        assert _names(issues) == ["pg_warehouse_unwatched"]
+        assert set(held) == set(twins.GUARD_CONDITIONS["attribution"]) | set(twins.GUARD_CONDITIONS["line_items"])
+        assert not set(held) & set(twins.GUARD_CONDITIONS["silver_arc"])
+
+    def test_a_judge_that_raises_holds_its_group(self, monkeypatch):
+        def boom(*_a, **_k):
+            raise ValueError("bad")
+        monkeypatch.setattr(twins, "_line_items_check", boom)
+        held = []
+        twins.check_pg_warehouse(_facts(), held_out=held)
+        assert sorted(held) == sorted(twins.GUARD_CONDITIONS["line_items"])
 
     def test_every_guard_has_an_unwatched_name_and_every_condition_is_registered(self):
         from core.alerting import REGISTRY
@@ -193,6 +211,36 @@ class TestWhatABlindRunHolds:
         names = (twins.all_conditions() | set(twins.UNWATCHED_NAMES.values())
                  | {twins.WHOLE_UNWATCHED, twins.FLAG_INVALID})
         assert names <= set(REGISTRY)
+
+
+class TestReadFactsNeverRaises:
+    """It promises not to, and the job relies on it for the DuckDB half's sake.
+    Found reviewing #215: a floor that is not a number raised past it."""
+
+    def test_a_floor_that_is_not_a_number_is_blindness(self, monkeypatch):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://x")
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "10m")
+        with patch("core.pg.get_pool", AsyncMock(return_value=object())), \
+             patch("core.pg.require_revision", AsyncMock()):
+            facts = asyncio.run(twins.read_facts())
+        assert facts.whole is not None and "ValueError" in facts.whole.reason
+
+
+class TestResolveOnlyAPrefix:
+    def test_only_prefix_leaves_every_other_key_delivered(self, tmp_path):
+        from core.alerting import AlertGate
+
+        gate = AlertGate(state_path=tmp_path / "gate.json")
+        gate._delivered.update({
+            "pg_silver_missing_rows": {"group": "dq:integrity", "first_delivered": 1.0},
+            "silver_missing_rows": {"group": "dq:integrity", "first_delivered": 1.0},
+        })
+        taken = gate.take_resolved("dq:integrity", [], now=2.0, only_prefix="pg_")
+        assert set(taken) == {"pg_silver_missing_rows"}
+        assert set(gate._delivered) == {"silver_missing_rows"}
 
 
 class TestTheJobWiring:
@@ -215,8 +263,7 @@ class TestTheJobWiring:
         calls = [n for n in ast.walk(self._tree()) if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Attribute) and n.func.attr == "_resolve_dq_layer"]
         assert calls
-        text = ast.unparse(calls[0])
-        assert "unverified_pg_conditions" in text
+        assert "pg_unverified" in ast.unparse(calls[0])
 
     def test_a_postgres_critical_pages_when_the_duckdb_half_failed(self):
         ifs = [n for n in ast.walk(self._tree()) if isinstance(n, ast.If)

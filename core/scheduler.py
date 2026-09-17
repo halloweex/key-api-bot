@@ -1702,15 +1702,22 @@ class BackgroundScheduler:
 
             pg_on, pg_flag_error = pg_warehouse_dq.flag()
             pg_issues: list = []
+            pg_held: list = []
+            pg_ran = pg_on and not pg_flag_error
             if pg_flag_error:
                 logger.error(pg_flag_error)
                 pg_issues = [pg_warehouse_dq.flag_invalid_issue(pg_flag_error)]
             elif pg_on:
                 duckdb_looked = (frozenset() if error_message else
                                  frozenset(GUARDED_CHECK_CONDITIONS) - frozenset(raised_checks))
+                try:
+                    pg_facts = await pg_warehouse_dq.read_facts()
+                except Exception as e:  # noqa: BLE001 — it promises not to; if it does, it is blindness
+                    logger.exception("Postgres twins' read raised")
+                    pg_facts = pg_warehouse_dq.Facts.blind(f"{type(e).__name__}: {e}")
                 pg_issues = pg_warehouse_dq.check_pg_warehouse(
-                    await pg_warehouse_dq.read_facts(),
-                    duckdb_issues=issues, duckdb_looked=duckdb_looked)
+                    pg_facts, duckdb_issues=issues, duckdb_looked=duckdb_looked,
+                    held_out=pg_held)
             issues = issues + pg_issues
 
             ended_at = datetime.now(timezone.utc)
@@ -1751,11 +1758,25 @@ class BackgroundScheduler:
                 )
             from core.data_quality import unverified_conditions
 
+            pg_unverified = pg_warehouse_dq.unverified_pg_conditions(
+                ran=pg_ran, flag_invalid=bool(pg_flag_error), held=pg_held)
             await self._resolve_dq_layer(
                 "integrity", issues, error_message,
-                unverified=unverified_conditions(raised_checks, issues)
-                + pg_warehouse_dq.unverified_pg_conditions(
-                    pg_issues, ran=pg_on and not pg_flag_error))
+                unverified=unverified_conditions(raised_checks, issues) + pg_unverified)
+            if error_message and pg_ran:
+                # The DuckDB half failed, so its conditions stay unknown — but
+                # the twins did look, and a pg_* page they now see clear must
+                # not wait for DuckDB to recover before it is announced.
+                try:
+                    from core.alerting import resolve_group
+
+                    await resolve_group(
+                        "dq:integrity",
+                        still_firing=[i.check_name for i in pg_issues
+                                      if i.severity == Severity.CRITICAL] + pg_unverified,
+                        only_prefix="pg_")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"DQ resolve for the Postgres twins failed: {e}")
 
             result = {
                 "run_id": run_id,

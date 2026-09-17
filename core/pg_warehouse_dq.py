@@ -313,7 +313,10 @@ async def read_facts(*, today: Optional[date] = None, pool=None) -> Facts:
     except Exception as e:  # noqa: BLE001 — becomes the blindness reason
         return Facts.blind(f"{type(e).__name__}: {e}")
 
-    grace, page_after = silver_grace_minutes(), page_after_minutes()
+    try:
+        grace, page_after = silver_grace_minutes(), page_after_minutes()
+    except Exception as e:  # noqa: BLE001 — e.g. a KS_PG_SILVER_INTERVAL_S that is not a number
+        return Facts.blind(f"the windows could not be computed: {type(e).__name__}: {e}")
     state: Dict[str, object] = {}
     groups: Dict[str, object] = {}
 
@@ -325,6 +328,8 @@ async def read_facts(*, today: Optional[date] = None, pool=None) -> Facts:
         return Facts.blind(
             f"PG_LAYER_LOCK was not free within {LOCK_WAIT_S} s — a derivation "
             "or a ClickHouse ship held it")
+    except Exception as e:  # noqa: BLE001 — never raises; CancelledError still propagates
+        return Facts.blind(f"PG_LAYER_LOCK could not be taken: {type(e).__name__}: {e}")
     try:
         async with asyncio.timeout(HOLD_BUDGET_S):
             async with pool.acquire(timeout=HOLD_BUDGET_S) as conn:
@@ -515,17 +520,27 @@ def check_pg_warehouse(
     facts: Optional[Facts], *, duckdb_issues: Sequence = (),
     duckdb_looked: FrozenSet[str] = frozenset(),
     raised_out: Optional[List[str]] = None,
+    held_out: Optional[List[str]] = None,
 ) -> list:
     """The twins over pre-read facts. Pure; never raises.
 
     `duckdb_looked` are the DuckDB guard names that ran this scan (empty when
     the DuckDB half failed). A twin whose raise is caught files its group's
-    unwatched finding, and its guard name goes to `raised_out`.
+    unwatched finding, and its guard name goes to `raised_out`. `held_out`
+    receives the conditions of every group that could not look — only those:
+    the collapsed finding is one line, but a group read clean in the same run
+    still announces its recovery.
     """
     from core.data_quality import Severity
 
+    def hold(group: str) -> None:
+        if held_out is not None:
+            held_out.extend(GUARD_CONDITIONS[group])
+
     if facts is None or facts.whole is not None:
         reason = "facts were not read" if facts is None else facts.whole.reason
+        for group in GROUPS:
+            hold(group)
         return [_issue(
             check_name=WHOLE_UNWATCHED, table_name="(postgres twins)",
             severity=Severity.WARN, count=len(GROUPS),
@@ -533,6 +548,8 @@ def check_pg_warehouse(
                          "condition is held, not cleared."))]
 
     blind = {g: getattr(facts, g) for g in GROUPS if isinstance(getattr(facts, g), Unwatched)}
+    for group in blind:
+        hold(group)
     issues = []
     if len(blind) >= 2:
         reasons = "; ".join(f"{g}: {u.reason}" for g, u in blind.items())
@@ -561,21 +578,24 @@ def check_pg_warehouse(
             logger.error("Postgres twin %s raised: %s: %s", group, type(exc).__name__, exc)
             if raised_out is not None:
                 raised_out.append(group)
+            hold(group)
             issues.append(_unwatched_issue(group, f"the check raised {type(exc).__name__}: {exc}"))
     return issues
 
 
-def unverified_pg_conditions(issues: Sequence, *, ran: bool) -> List[str]:
-    """What the twins could not re-examine this run: everything when they did not
-    run (flag off or invalid — a no-op unless a pg_* page was delivered), all of
-    them for the collapsed finding, a group's conditions for its own."""
+def unverified_pg_conditions(*, ran: bool, flag_invalid: bool, held: Sequence[str] = ()) -> List[str]:
+    """What the twins' part of the run could not verify.
+
+    - **Ran:** exactly the conditions of the groups that could not look (`held`,
+      from `check_pg_warehouse(held_out=)`).
+    - **Flag not understood:** everything — the twins were meant to run and did
+      not, so nothing about them is known.
+    - **Flag off:** nothing. Switched off on purpose is stood down, not blind: a
+      page delivered while they were on resolves once rather than standing for
+      as long as the flag stays off. Found reviewing #215.
+    """
+    if flag_invalid:
+        return sorted(all_conditions())
     if not ran:
-        return sorted(all_conditions())
-    found = {i.check_name for i in issues}
-    if WHOLE_UNWATCHED in found or FLAG_INVALID in found:
-        return sorted(all_conditions())
-    held = set()
-    for group, name in UNWATCHED_NAMES.items():
-        if name in found:
-            held.update(GUARD_CONDITIONS[group])
-    return sorted(held)
+        return []
+    return sorted(set(held))

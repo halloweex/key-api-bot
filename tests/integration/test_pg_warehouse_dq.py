@@ -165,14 +165,71 @@ class TestAttributionAndLineItems:
         assert "pg_headline_vs_line_items" in _judge(facts)   # DuckDB did not look here
 
 
+class TestExactCounts:
+    """Exact, not `>=`: found reviewing #215, where inflating in_flight or
+    moving a window edge would have survived every assertion."""
+
+    @pytest.mark.asyncio
+    async def test_in_flight_counts_only_orders_inside_the_grace(self, pool):
+        from core.pg_warehouse_dq import read_facts
+
+        before = (await read_facts(pool=pool)).watermark.in_flight
+        async with pool.acquire() as conn:
+            await _bronze(conn, IDS[0], minutes_ago=5)
+            await _bronze(conn, IDS[1], minutes_ago=30)
+            await _bronze(conn, IDS[2], minutes_ago=120)
+        after = (await read_facts(pool=pool)).watermark.in_flight
+        assert after - before == 1
+
+    @pytest.mark.asyncio
+    async def test_the_attribution_windows_edge_by_edge(self, pool):
+        """A date on which no real row lives, so every count compares with ==.
+        Current window [today-7, today), baseline [today-35, today-7)."""
+        from datetime import date
+
+        from core.pg_warehouse_dq import Attribution, read_facts
+
+        today = date(2001, 3, 10)
+
+        async def website(oid, days, *, tagged, source=4, is_return=False):
+            day = today - timedelta(days=days)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    f"INSERT INTO silver.orders ({SILVER_COLS}) VALUES "
+                    "($1,$2,1,100,$3,NULL,NULL,$4,$5,'retail',true,'x',false,NULL,NULL)",
+                    oid, source, datetime(day.year, day.month, day.day, 12, tzinfo=KYIV),
+                    day, is_return)
+                await conn.execute(
+                    "INSERT INTO silver.order_utm (order_id, utm_source, utm_campaign) VALUES ($1, 's', $2)",
+                    oid, "c" if tagged else None)
+
+        await website(IDS[20], 0, tagged=True)             # today — excluded
+        await website(IDS[21], 1, tagged=True)             # current
+        await website(IDS[22], 7, tagged=False)            # current edge
+        await website(IDS[23], 8, tagged=True)             # baseline
+        await website(IDS[24], 35, tagged=False)           # baseline edge
+        await website(IDS[25], 36, tagged=True)            # excluded
+        await website(IDS[26], 2, tagged=True, is_return=True)    # a return — excluded
+        await website(IDS[27], 2, tagged=True, source=1)          # not the website — excluded
+        await website(IDS[28], 3, tagged=False)            # utm_source but no campaign — untagged
+
+        facts = await read_facts(pool=pool, today=today)
+        assert facts.attribution == Attribution(orders=3, tagged=1, base_orders=2, base_tagged=1)
+
+
 class TestBlindness:
     @pytest.mark.asyncio
     async def test_a_held_layer_lock_blinds_the_snapshot_quickly(self, pool, monkeypatch):
-        from core import pg_warehouse_dq
-        from core.pg_silver import PG_LAYER_LOCK
+        """A lock of this test's own. Waiting on the module's lock would bind it
+        to this test's event loop for good, and the next test to contend for it
+        in another loop — test_order_utm_shipping's — would fail on it. Found
+        reviewing #215."""
+        from core import pg_silver, pg_warehouse_dq
 
+        lock = asyncio.Lock()
+        monkeypatch.setattr(pg_silver, "PG_LAYER_LOCK", lock)
         monkeypatch.setattr(pg_warehouse_dq, "LOCK_WAIT_S", 1)
-        async with PG_LAYER_LOCK:
+        async with lock:
             facts = await asyncio.wait_for(pg_warehouse_dq.read_facts(pool=pool), timeout=10)
         assert facts.whole is not None and "PG_LAYER_LOCK" in facts.whole.reason
         assert list(_judge(facts)) == ["pg_warehouse_unwatched"]
@@ -268,4 +325,78 @@ class TestTheJobEndToEnd:
         assert not any(name.startswith("pg_") for name in issues)
         assert sent.await_count == 0
         unverified = set(scheduler._resolve_dq_layer.await_args.kwargs["unverified"])
+        assert not unverified & pg_warehouse_dq.all_conditions()   # stood down, not blind
+
+    @pytest.mark.asyncio
+    async def test_a_flag_not_understood_is_filed_and_holds_everything(self, pool, job, monkeypatch):
+        from core import pg_warehouse_dq
+
+        scheduler, store, _sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "yes")
+        result = await scheduler._run_dq_integrity()
+        assert "pg_warehouse_dq_flag_invalid" in await self._issues(store, result["run_id"])
+        unverified = set(scheduler._resolve_dq_layer.await_args.kwargs["unverified"])
         assert pg_warehouse_dq.all_conditions() <= unverified
+
+    @pytest.mark.asyncio
+    async def test_the_duckdb_half_failing_still_pages_a_postgres_critical_and_resolves_the_twins(
+        self, pool, job, monkeypatch,
+    ):
+        scheduler, store, sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        async with pool.acquire() as conn:
+            await _bronze(conn, IDS[0], total=555, minutes_ago=150)
+        resolve = AsyncMock(return_value=0)
+        with patch("core.data_quality.check_internal_integrity", side_effect=RuntimeError("duckdb")), \
+             patch("core.alerting.resolve_group", resolve):
+            result = await scheduler._run_dq_integrity()
+
+        assert result["error"]
+        assert sent.await_count == 1
+        assert sent.await_args.kwargs["conditions"] == ["pg_silver_missing_rows"]
+        (call,) = resolve.await_args_list
+        assert call.kwargs["only_prefix"] == "pg_"
+        assert "pg_silver_missing_rows" in call.kwargs["still_firing"]
+
+    @pytest.mark.asyncio
+    async def test_the_duckdb_half_failing_with_only_postgres_warnings_pages_nobody(
+        self, pool, job, monkeypatch,
+    ):
+        scheduler, store, sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        async with pool.acquire() as conn:
+            await _bronze(conn, IDS[0], total=555, minutes_ago=30)   # inside the repair window
+        with patch("core.data_quality.check_internal_integrity", side_effect=RuntimeError("duckdb")), \
+             patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
+            await scheduler._run_dq_integrity()
+        assert sent.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_duckdb_line_items_check_that_raised_is_stood_in_for_not_compared(
+        self, pool, job, monkeypatch,
+    ):
+        """DuckDB's headline guard raised: the twin files the standing finding
+        and does not report DuckDB's count as 0 against its own."""
+        from core import data_quality
+
+        scheduler, store, _sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        async with pool.acquire() as conn:
+            await _bronze(conn, IDS[70], total=0, minutes_ago=150)
+            await _silver(conn, IDS[70], total=0)
+            await conn.execute(
+                "INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity, price_sold)"
+                " VALUES ($1, $2, NULL, 'x', 2, 150)", IDS[70] * 1000 + 1, IDS[70])
+
+        real = data_quality.check_internal_integrity
+
+        def raising_headline(conn, **kw):
+            out = real(conn, **kw)
+            kw["raised_out"].append("headline_vs_line_items")
+            return [i for i in out if i.check_name != "headline_vs_line_items"]
+
+        with patch("core.data_quality.check_internal_integrity", side_effect=raising_headline):
+            result = await scheduler._run_dq_integrity()
+        issues = await self._issues(store, result["run_id"])
+        assert "pg_headline_vs_line_items" in issues
+        assert "pg_line_items_disagree" not in issues
