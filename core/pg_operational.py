@@ -94,11 +94,13 @@ FAILURE POLICY
 
 Never raises. This is called from the inventory sync and from the repair jobs,
 and neither may be broken by a Postgres fault — charter rule 8, and the same
-policy `pg_landing` and `pg_replication` already have. The watermark it does
-not move is what Reconciliation A reads as "not replicated yet".
+policy `pg_landing` and `pg_replication` already have. A run that fails does
+not move a watermark, and it writes the failure into the watermark of every
+table it was copying, which is what Reconciliation A reads as `mirror_failing`.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 import re
@@ -615,7 +617,43 @@ def read_appends(
     return out
 
 
-async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
+# One copy at a time. `replicate_operational` has two callers — the hourly job
+# and `replicate_after_manual_expense` on every expense form submit — and
+# APScheduler's `max_instances=1` covers only the first. Two runs that overlap
+# read the same `MAX(id)` watermarks and both INSERT the rows above them; the
+# one that commits second fails on the primary key, and then stamps that
+# failure on every table it was copying *after* the winner's OK. A copy that is
+# fully up to date then reads as failing until the next hour — a `mirror_failing`
+# on every one of them at 07:30, from a run nothing was wrong with. Serialised,
+# the second run reads the watermarks the first one left and ships nothing twice.
+#
+# `core.pg_silver.PG_LAYER_LOCK`'s shape and its rule: a coordination lock over
+# network-bound work, never the DuckDB store's lock, which is not held across
+# the network. The form submit waits out a copy already in flight — ~120 ms
+# incremental, measured — rather than racing it.
+OPERATIONAL_REPLICATION_LOCK = asyncio.Lock()
+
+# How long the expense form waits for a copy already in flight before it leaves
+# the row to the hourly job. Three seconds is longer than the whole incremental
+# copy (116 ms measured against the production catalogue) and shorter than
+# anyone's patience with a form that has already saved.
+FORM_COPY_WAIT_S = 3.0
+
+
+def _tables_to_ship(stood_down) -> Tuple[str, ...]:
+    """Every table `replicate_operational` copies, minus the stood-down ones."""
+    return tuple(
+        table for table in (
+            *(t for t, _d, _c, _o in _FULL_REPLACE),
+            *(spec.pg_table for spec in _APPEND_ABOVE),
+        )
+        if table not in stood_down
+    )
+
+
+async def replicate_operational(
+    store, *, full: bool = False, wait_s: Optional[float] = None,
+) -> Dict[str, Any]:
     """Copy all nine tables from DuckDB to Postgres. Never raises.
 
     `full=True` ignores both watermarks and re-ships everything, upserting the
@@ -638,186 +676,235 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
     if not configured():
         return {"skipped": "KS_PG_DSN is not set"}
 
-    started = time.monotonic()
+    # Serialised: see OPERATIONAL_REPLICATION_LOCK. The hourly job waits for
+    # however long a copy in flight takes, because it has nowhere else to be.
+    # A form submit passes `wait_s` and gives up instead: the copy it wanted is
+    # the one already running, and the hourly job ships its row within the hour
+    # in any case. Waiting out a slow Postgres there — a migration's ACCESS
+    # EXCLUSIVE lock during a deploy, a saturated pool — would hold the expense
+    # form open for the length of somebody else's copy.
+    if wait_s is None:
+        await OPERATIONAL_REPLICATION_LOCK.acquire()
+    else:
+        try:
+            await asyncio.wait_for(OPERATIONAL_REPLICATION_LOCK.acquire(), wait_s)
+        except asyncio.TimeoutError:
+            return {"skipped": f"another copy was still in flight after {wait_s:g}s"}
     try:
-        from core.pg import get_pool, require_revision
-        from core.pg_landing import _WATERMARK_OK
+        started = time.monotonic()
+        # The tables this run is copying, known before the first round trip so
+        # that a failure anywhere after it can be written against each of them.
+        shipping: Tuple[str, ...] = ()
+        try:
+            from core.pg import get_pool, require_revision
+            from core.pg_landing import _WATERMARK_OK
 
-        pool = await get_pool()
-        await require_revision()
+            # Tables this run must not touch, because DuckDB is no longer their
+            # writer. A full replace out of a frozen DuckDB would roll back every
+            # row written since the switch, once an hour, looking healthy in
+            # between — `replicate_sms`' recorded failure, and the reason it stands
+            # down as a whole rather than per row.
+            #
+            # The set comes from `core.write_chains.stood_down_tables()` rather than
+            # being spelled here — every write chain's `CHAIN_TABLES`, for the chains
+            # whose flag is on — so no writer and the shipper can come to disagree
+            # about which tables have changed hands.
+            from core.write_chains import (
+                WRITE_CHAINS, chain_name, mismatched_chains, stood_down_tables_checked,
+            )
 
-        # Tables this run must not touch, because DuckDB is no longer their
-        # writer. A full replace out of a frozen DuckDB would roll back every
-        # row written since the switch, once an hour, looking healthy in
-        # between — `replicate_sms`' recorded failure, and the reason it stands
-        # down as a whole rather than per row.
-        #
-        # The set comes from `core.write_chains.stood_down_tables()` rather than
-        # being spelled here — every write chain's `CHAIN_TABLES`, for the chains
-        # whose flag is on — so no writer and the shipper can come to disagree
-        # about which tables have changed hands.
-        from core.write_chains import (
-            WRITE_CHAINS, chain_name, mismatched_chains, stood_down_tables_checked,
-        )
+            # A chain whose KS_WRITE_* is not understood stands down with the chains
+            # that write Postgres — shipping could overwrite rows Postgres alone
+            # holds — and its tables are stamped failing, so the watermark says so
+            # rather than aging quietly. Every other table still ships (DN-01).
+            stood_down, chain_errors = stood_down_tables_checked()
+            shipping = _tables_to_ship(stood_down)
 
-        # A chain whose KS_WRITE_* is not understood stands down with the chains
-        # that write Postgres — shipping could overwrite rows Postgres alone
-        # holds — and its tables are stamped failing, so the watermark says so
-        # rather than aging quietly. Every other table still ships (DN-01).
-        stood_down, chain_errors = stood_down_tables_checked()
+            # A chain that owns its tables in Postgres while its variable says
+            # otherwise (DN-06). It stands down through `stood_down` like any
+            # other Postgres-writing chain — the latch decides, not the flag —
+            # and the disagreement is stamped on its tables so an operator who
+            # flipped the variable back finds out from the store rather than
+            # from a number that stopped moving.
+            mismatches = mismatched_chains()
 
-        # A chain that owns its tables in Postgres while its variable says
-        # otherwise (DN-06). It stands down through `stood_down` like any other
-        # Postgres-writing chain — the latch decides, not the flag — and the
-        # disagreement is stamped on its tables so an operator who flipped the
-        # variable back finds out from the store rather than from a number that
-        # stopped moving.
-        mismatches = mismatched_chains()
+            pool = await get_pool()
+            await require_revision()
 
-        # The second copy of the latch, asked because this function is already
-        # holding the connection that carries it. `stood_down_tables_checked()`
-        # reads the local markers, and the markers live on a bind mount: an
-        # older `./data` snapshot, a wrong mount or a rebuilt data directory
-        # loses them while Postgres keeps the owner rows and the rows they were
-        # taken for. This copy is what stops the full replace below from
-        # putting `app.manual_expenses` back the way a frozen DuckDB remembers
-        # it — a destruction the daily comparison would report 24 h later, of
-        # rows only Postgres held.
-        from core import chain_latch
+            # The second copy of the latch, asked because this function is
+            # already holding the connection that carries it.
+            # `stood_down_tables_checked()` reads the local markers, and the
+            # markers live on a bind mount: an older `./data` snapshot, a wrong
+            # mount or a rebuilt data directory loses them while Postgres keeps
+            # the owner rows and the rows they were taken for. This copy is what
+            # stops the full replace below from putting `app.manual_expenses`
+            # back the way a frozen DuckDB remembers it — a destruction the daily
+            # comparison would report 24 h later, of rows only Postgres held.
+            from core import chain_latch
 
-        owners = await chain_latch.read_owners(pool)
-        marker_lost = {name: at for name, at in chain_latch.claimed_chains(owners).items()
-                       if not chain_latch.latched(name)}
-        stood_down = stood_down | chain_latch.claimed_tables(owners)
+            owners = await chain_latch.read_owners(pool)
+            marker_lost = {name: at for name, at in chain_latch.claimed_chains(owners).items()
+                           if not chain_latch.latched(name)}
+            stood_down = stood_down | chain_latch.claimed_tables(owners)
+            # Narrowed again, so that a failure from here on is stamped only on
+            # tables this run was really going to write — never on one Postgres
+            # owns, whose watermark describes a copy that is standing down.
+            shipping = _tables_to_ship(stood_down)
 
-        # A watermark of None asks for the whole table, which is what `full`
-        # means and what a first run finds anyway.
-        since: Dict[str, Any] = {spec.pg_table: None for spec in _APPEND_ABOVE}
-        if not full:
+            # A watermark of None asks for the whole table, which is what `full`
+            # means and what a first run finds anyway.
+            since: Dict[str, Any] = {spec.pg_table: None for spec in _APPEND_ABOVE}
+            if not full:
+                async with pool.acquire() as conn:
+                    for spec in _APPEND_ABOVE:
+                        if spec.pg_table in stood_down:
+                            continue
+                        since[spec.pg_table] = await conn.fetchval(
+                            f"SELECT MAX({spec.watermark}) FROM {spec.pg_table}"
+                        )
+
+            async with store.connection() as conn:
+                replaced = read_full_replace(conn, skip=stood_down)
+                appended = read_appends(conn, since, skip=stood_down)
+                totals = {
+                    spec.pg_table: conn.execute(
+                        f"SELECT COUNT(*) FROM {spec.dk_table}"
+                    ).fetchone()[0]
+                    for spec in _APPEND_ABOVE if spec.pg_table not in stood_down
+                }
+
             async with pool.acquire() as conn:
-                for spec in _APPEND_ABOVE:
-                    if spec.pg_table in stood_down:
-                        continue
-                    since[spec.pg_table] = await conn.fetchval(
-                        f"SELECT MAX({spec.watermark}) FROM {spec.pg_table}"
-                    )
+                async with conn.transaction():
+                    for pg_table, _dk, columns, _order in _FULL_REPLACE:
+                        if pg_table in stood_down:
+                            continue
+                        rows = replaced[pg_table]
+                        await conn.execute(f"DELETE FROM {pg_table}")
+                        if rows:
+                            await _write_chunked(
+                                conn, _insert(pg_table, columns), rows,
+                            )
+                        await conn.execute(_WATERMARK_OK, pg_table, len(rows))
 
-        async with store.connection() as conn:
-            replaced = read_full_replace(conn, skip=stood_down)
-            appended = read_appends(conn, since, skip=stood_down)
-            totals = {
-                spec.pg_table: conn.execute(
-                    f"SELECT COUNT(*) FROM {spec.dk_table}"
-                ).fetchone()[0]
-                for spec in _APPEND_ABOVE if spec.pg_table not in stood_down
+                    for spec in _APPEND_ABOVE:
+                        if spec.pg_table in stood_down:
+                            continue
+                        rows = appended[spec.pg_table]
+                        if rows:
+                            # A plain INSERT on the incremental path on purpose:
+                            # rows above the watermark cannot already be there, so
+                            # a conflict would mean the watermark logic is wrong
+                            # and should say so loudly rather than overwrite and
+                            # look fine. `inventory_sku_history` is the exception —
+                            # it deliberately re-ships the day it resumed from.
+                            upsert = spec.always_upsert or full
+                            await _write_chunked(
+                                conn,
+                                _upsert(spec.pg_table, spec.columns, spec.keys)
+                                if upsert else
+                                _insert(spec.pg_table, spec.columns),
+                                rows,
+                            )
+                        # `last_rows` is the whole table, not this run's delta. The
+                        # comparison reads it as "how much should be here", and an
+                        # append that shipped nothing would otherwise record zero
+                        # and read as an empty table.
+                        await conn.execute(
+                            _WATERMARK_OK, spec.pg_table, int(totals[spec.pg_table]),
+                        )
+
+            # Only what was written. A stood-down table is read out of DuckDB with
+            # the rest but never written, and reporting its read count under
+            # "replaced" made the first log line after KS_WRITE_EXPENSES was
+            # switched on (2026-09-17) read as the hourly copy wiping the table it
+            # had in fact left alone.
+            result = {
+                "full": full,
+                "replaced": {t: len(replaced[t]) for t, _d, _c, _o in _FULL_REPLACE
+                             if t not in stood_down},
+                "appended": {
+                    spec.pg_table: len(appended[spec.pg_table])
+                    for spec in _APPEND_ABOVE if spec.pg_table not in stood_down
+                },
+                # The two original spellings, kept beside the map they are now
+                # read out of. They are what a year of production log lines say
+                # and what anyone grepping back through them will look for; a
+                # rename would make the history harder to read for no gain.
+                "sku_history_appended": (len(appended[SKU_HISTORY_TABLE])
+                                         if SKU_HISTORY_TABLE in appended else None),
+                "movements_appended": (len(appended[MOVEMENTS_TABLE])
+                                       if MOVEMENTS_TABLE in appended else None),
+                "duration_ms": int((time.monotonic() - started) * 1000),
             }
+            if stood_down:
+                result["stood_down"] = sorted(stood_down)
+            if chain_errors:
+                result["chain_flag_errors"] = chain_errors
+            if mismatches:
+                result["chain_flag_mismatch"] = mismatches
+            if marker_lost:
+                result["chain_marker_lost"] = marker_lost
+            # One stamp per table per reason, so a chain that is both latched
+            # and misspelt says both things rather than the first one found. The
+            # flag error is written LAST and so is the one `last_error` keeps:
+            # it is the actionable half — correcting the variable to `postgres`
+            # also ends the mismatch, while releasing the latch would not fix a
+            # typo.
+            stamps = [(name, f"owned by Postgres since {at}; "
+                             "run scripts/chain_copy_back.py")
+                      for name, at in mismatches.items()]
+            # A chain held down by its owner rows alone is stamped too, because
+            # a stand-down that says nothing is a watermark ageing quietly — and
+            # this one also means the routing copy is gone, so the writers are
+            # following KS_WRITE_* again while this job declines to ship. The
+            # daily comparison files `chain_latch_disagrees` for the same state.
+            stamps += [(name, f"owner rows in Postgres since {at} and no local "
+                              "marker: restore data/write-chain-owners or run "
+                              "scripts/chain_copy_back.py")
+                       for name, at in marker_lost.items()]
+            stamps += [(name, f"not shipped: {error}")
+                       for name, error in chain_errors.items()]
+            if stamps:
+                from core.pg_landing import _record_failure
 
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                for pg_table, _dk, columns, _order in _FULL_REPLACE:
-                    if pg_table in stood_down:
-                        continue
-                    rows = replaced[pg_table]
-                    await conn.execute(f"DELETE FROM {pg_table}")
-                    if rows:
-                        await _write_chunked(
-                            conn, _insert(pg_table, columns), rows,
-                        )
-                    await conn.execute(_WATERMARK_OK, pg_table, len(rows))
-
-                for spec in _APPEND_ABOVE:
-                    if spec.pg_table in stood_down:
-                        continue
-                    rows = appended[spec.pg_table]
-                    if rows:
-                        # A plain INSERT on the incremental path on purpose:
-                        # rows above the watermark cannot already be there, so
-                        # a conflict would mean the watermark logic is wrong
-                        # and should say so loudly rather than overwrite and
-                        # look fine. `inventory_sku_history` is the exception —
-                        # it deliberately re-ships the day it resumed from.
-                        upsert = spec.always_upsert or full
-                        await _write_chunked(
-                            conn,
-                            _upsert(spec.pg_table, spec.columns, spec.keys)
-                            if upsert else
-                            _insert(spec.pg_table, spec.columns),
-                            rows,
-                        )
-                    # `last_rows` is the whole table, not this run's delta. The
-                    # comparison reads it as "how much should be here", and an
-                    # append that shipped nothing would otherwise record zero
-                    # and read as an empty table.
-                    await conn.execute(
-                        _WATERMARK_OK, spec.pg_table, int(totals[spec.pg_table]),
-                    )
-
-        # Only what was written. A stood-down table is read out of DuckDB with
-        # the rest but never written, and reporting its read count under
-        # "replaced" made the first log line after KS_WRITE_EXPENSES was
-        # switched on (2026-09-17) read as the hourly copy wiping the table it
-        # had in fact left alone.
-        result = {
-            "full": full,
-            "replaced": {t: len(replaced[t]) for t, _d, _c, _o in _FULL_REPLACE
-                         if t not in stood_down},
-            "appended": {
-                spec.pg_table: len(appended[spec.pg_table])
-                for spec in _APPEND_ABOVE if spec.pg_table not in stood_down
-            },
-            # The two original spellings, kept beside the map they are now
-            # read out of. They are what a year of production log lines say
-            # and what anyone grepping back through them will look for; a
-            # rename would make the history harder to read for no gain.
-            "sku_history_appended": (len(appended[SKU_HISTORY_TABLE])
-                                     if SKU_HISTORY_TABLE in appended else None),
-            "movements_appended": (len(appended[MOVEMENTS_TABLE])
-                                   if MOVEMENTS_TABLE in appended else None),
-            "duration_ms": int((time.monotonic() - started) * 1000),
-        }
-        if stood_down:
-            result["stood_down"] = sorted(stood_down)
-        if chain_errors:
-            result["chain_flag_errors"] = chain_errors
-        if mismatches:
-            result["chain_flag_mismatch"] = mismatches
-        if marker_lost:
-            result["chain_marker_lost"] = marker_lost
-        # One stamp per table per reason, so a chain that is both latched and
-        # misspelt says both things rather than the first one found. The flag
-        # error is written LAST and so is the one `last_error` keeps: it is the
-        # actionable half — correcting the variable to `postgres` also ends the
-        # mismatch, while releasing the latch would not fix a typo.
-        stamps = [(name, f"owned by Postgres since {at}; "
-                         "run scripts/chain_copy_back.py")
-                  for name, at in mismatches.items()]
-        # A chain held down by its owner rows alone is stamped too, because a
-        # stand-down that says nothing is a watermark ageing quietly — and this
-        # one also means the routing copy is gone, so the writers are following
-        # KS_WRITE_* again while this job declines to ship. The daily
-        # comparison files `chain_latch_disagrees` for the same state.
-        stamps += [(name, f"owner rows in Postgres since {at} and no local "
-                          "marker: restore data/write-chain-owners or run "
-                          "scripts/chain_copy_back.py")
-                   for name, at in marker_lost.items()]
-        stamps += [(name, f"not shipped: {error}")
-                   for name, error in chain_errors.items()]
-        if stamps:
+                for name, note in stamps:
+                    chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
+                    for table in chain.CHAIN_TABLES:
+                        await _record_failure(table, note)
+            logger.info("Operational history replicated: %s", result)
+            return result
+        except Exception as e:
+            # ERROR, not DEBUG. A copy that fails quietly is the 2026-08-09 shape.
+            logger.error(
+                "Operational history replication failed: %s", e, exc_info=True,
+            )
+            detail = f"{type(e).__name__}: {e}"
+            # And into the watermark of every table the run was copying, because
+            # a watermark that merely stops moving says too little, too late.
+            # Every table here is written in one transaction, so one bad row fails
+            # all of them: a duplicate id in DuckDB's `reconciliation_log`, which
+            # has no key there and a primary key here, does it every hour until
+            # somebody removes the row. Without this stamp that froze the stock
+            # movements, the refresh log and the quality journal with an ERROR
+            # line as the only trace — `last_ok_at` kept the last success and
+            # `failures_since_ok` stayed at zero, so the 07:30 comparison read a
+            # healthy copy and could at most report the rows it lacked, as a
+            # symptom.
+            # Now it reports `mirror_failing` with the error, and the next run that
+            # succeeds clears the count through `_WATERMARK_OK`, as for every
+            # other copy.
             from core.pg_landing import _record_failure
 
-            for name, note in stamps:
-                chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
-                for table in chain.CHAIN_TABLES:
-                    await _record_failure(table, note)
-        logger.info("Operational history replicated: %s", result)
-        return result
-    except Exception as e:
-        # ERROR, not DEBUG. A copy that fails quietly is the 2026-08-09 shape,
-        # and the watermark it did not move is what Reconciliation A reads.
-        logger.error(
-            "Operational history replication failed: %s", e, exc_info=True,
-        )
-        return {"error": f"{type(e).__name__}: {e}"}
+            for table in shipping:
+                if not await _record_failure(table, detail):
+                    # The watermark table is behind the same server. When one
+                    # stamp cannot be written the rest will not be either, and
+                    # each attempt at an unreachable server can cost a connect
+                    # timeout.
+                    break
+            return {"error": detail}
+    finally:
+        OPERATIONAL_REPLICATION_LOCK.release()
 
 
 async def replicate_after_manual_expense(store) -> Dict[str, Any]:
@@ -841,7 +928,12 @@ async def replicate_after_manual_expense(store) -> Dict[str, Any]:
 
     Measured: the incremental replication is 116 ms against the production
     catalogue, which is nothing on a form submit. The full first run is 9.3 s,
-    and only ever happens once.
+    and only ever happens once. A submit that lands during the hourly copy
+    waits for it (`OPERATIONAL_REPLICATION_LOCK`) instead of racing it to the
+    same rows — but only for `FORM_COPY_WAIT_S`. Past that, the copy in flight
+    is the one this call wanted and the hourly job carries the row within the
+    hour, so the endpoint returns rather than holding the form open for the
+    length of somebody else's copy.
 
     **Never raises.** The DuckDB write has already committed and the endpoint
     must report it; a Postgres fault costs freshness until the hourly job,
@@ -852,7 +944,7 @@ async def replicate_after_manual_expense(store) -> Dict[str, Any]:
     if not configured():
         return {"skipped": "KS_PG_DSN is not set"}
     try:
-        return await replicate_operational(store)
+        return await replicate_operational(store, wait_s=FORM_COPY_WAIT_S)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "Manual expense not replicated — Postgres keeps the previous "

@@ -183,6 +183,15 @@ async def startup_event():
     except Exception as e:
         logger.error(f"DuckDB sync failed on startup: {e}", exc_info=True)
         # Don't crash if store has data — serve stale data, scheduler will retry sync
+        #
+        # If it was the store's connect that failed rather than the sync, this
+        # is a second, complete attempt at it — schema and migrations included
+        # — and a second failure ends the startup, as a file that cannot be
+        # opened always has. It used to hand back the half-connected store the
+        # first attempt left behind, and serve it with no migration applied.
+        # A view that cannot be built is not such a failure: the store
+        # connects with it published on /api/health (`_build_view`), so what
+        # still ends the startup here is a file, a table or a ledger.
         store = await get_store()
         stats = await store.get_stats()
         if stats.get("orders", 0) == 0:

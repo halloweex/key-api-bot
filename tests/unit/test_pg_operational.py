@@ -467,6 +467,49 @@ class TestItNeverRaises:
         assert "postgres is down" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_a_failure_is_stamped_on_every_table_it_was_copying(self, monkeypatch):
+        """The run's own failure goes into each shipped table's watermark —
+        and not into a stood-down table's, which this run was never copying.
+        `tests/integration/test_operational_failure_watermark.py` proves the
+        same against a real Postgres."""
+        from core import pg_expenses_write
+        from core.pg_operational import _APPEND_ABOVE, _FULL_REPLACE
+        from core.write_chains import WRITE_CHAINS
+
+        for chain in WRITE_CHAINS:
+            monkeypatch.delenv(chain.WRITE_ENV, raising=False)
+        monkeypatch.setenv(pg_expenses_write.WRITE_ENV, "postgres")
+        stamps = AsyncMock(return_value=True)
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg.get_pool",
+                   new=AsyncMock(side_effect=RuntimeError("schema is behind"))), \
+             patch("core.pg_landing._record_failure", new=stamps):
+            result = await replicate_operational(object())
+
+        stamped = [c.args[0] for c in stamps.await_args_list]
+        every_table = (*(t for t, _d, _c, _o in _FULL_REPLACE),
+                       *(s.pg_table for s in _APPEND_ABOVE))
+        assert set(pg_expenses_write.CHAIN_TABLES) <= set(every_table)
+        assert stamped == [t for t in every_table
+                           if t not in pg_expenses_write.CHAIN_TABLES]
+        assert {c.args[1] for c in stamps.await_args_list} == {result["error"]}
+        assert "schema is behind" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_an_unwritable_watermark_is_not_retried_once_per_table(self):
+        """When the first stamp cannot be written the server is not answering,
+        and each further attempt could wait out a connect timeout."""
+        stamps = AsyncMock(return_value=False)
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg.get_pool",
+                   new=AsyncMock(side_effect=RuntimeError("postgres is down"))), \
+             patch("core.pg_landing._record_failure", new=stamps):
+            result = await replicate_operational(object())
+
+        assert "postgres is down" in result["error"]
+        assert stamps.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_it_reads_the_watermarks_before_reading_duckdb(self):
         """The other order loses rows: one written between the two reads would
         be above the watermark Postgres reports next time and below the one
@@ -482,6 +525,263 @@ class TestItNeverRaises:
         assert source.index("SELECT MAX({spec.watermark})") < source.index(
             "async with store.connection()"
         )
+
+
+class TestOneCopyAtATime:
+    """The hourly job and a manual expense's immediate copy used to overlap.
+
+    Both read the same watermarks and inserted the same rows above them; the
+    run that committed second failed on the primary key and stamped that
+    failure over the winner's OK on every table.
+    `tests/integration/test_operational_failure_watermark.py` shows the
+    outcome against a real Postgres; this shows the runs do not interleave.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_overlapping_calls_run_one_after_the_other(self, monkeypatch):
+        import asyncio
+
+        from core import pg_operational
+
+        # A lock bound to one test's event loop would break the next test that
+        # waits on it, so each test that contends gets its own.
+        monkeypatch.setattr(pg_operational, "OPERATIONAL_REPLICATION_LOCK", asyncio.Lock())
+        inside = 0
+        peak = 0
+
+        async def first_round_trip():
+            nonlocal inside, peak
+            inside += 1
+            peak = max(peak, inside)
+            await asyncio.sleep(0.02)   # the network, where the other run could start
+            inside -= 1
+            raise RuntimeError("stopped after the first round trip")
+
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg.get_pool", new=first_round_trip), \
+             patch("core.pg_landing._record_failure", new=AsyncMock(return_value=False)):
+            results = await asyncio.gather(
+                replicate_operational(object()),
+                pg_operational.replicate_after_manual_expense(object()),
+            )
+
+        assert peak == 1, "the two copies were inside Postgres at the same time"
+        assert all("stopped after the first round trip" in r["error"] for r in results)
+
+    @pytest.mark.asyncio
+    async def test_the_form_gives_up_rather_than_hold_the_page(self, monkeypatch):
+        """Serialised is not the same as queued behind a slow Postgres.
+
+        `replicate_after_manual_expense` is awaited inline by the /expenses
+        endpoints. The copy it wanted is the one already running, and the
+        hourly job carries its row within the hour, so past `FORM_COPY_WAIT_S`
+        it returns instead of holding the form open for somebody else's copy.
+        """
+        import asyncio
+
+        from core import pg_operational
+
+        monkeypatch.setattr(pg_operational, "OPERATIONAL_REPLICATION_LOCK", asyncio.Lock())
+        monkeypatch.setattr(pg_operational, "FORM_COPY_WAIT_S", 0.05)
+        await pg_operational.OPERATIONAL_REPLICATION_LOCK.acquire()
+        try:
+            with patch("core.mirror_reconciliation.configured", return_value=True):
+                started = asyncio.get_running_loop().time()
+                # Bounded here too: an unbounded form path would hang this test
+                # rather than fail it, and a mutation that hangs teaches nobody
+                # anything (the V6 lesson from the chain-2 gate).
+                try:
+                    result = await asyncio.wait_for(
+                        pg_operational.replicate_after_manual_expense(object()),
+                        timeout=2,
+                    )
+                except asyncio.TimeoutError:
+                    raise AssertionError(
+                        "the form waited out a copy in flight with no bound")
+                waited = asyncio.get_running_loop().time() - started
+        finally:
+            pg_operational.OPERATIONAL_REPLICATION_LOCK.release()
+
+        assert "skipped" in result, result
+        assert "in flight" in result["skipped"], result
+        assert waited < 1.0, f"the form waited {waited:.2f}s on a copy in flight"
+
+    @pytest.mark.asyncio
+    async def test_the_hourly_job_has_nowhere_else_to_be(self, monkeypatch):
+        """No `wait_s`, no giving up: the scheduled copy waits out the one in
+        flight, or an hour of movements would be skipped rather than deferred."""
+        import asyncio
+
+        from core import pg_operational
+
+        monkeypatch.setattr(pg_operational, "OPERATIONAL_REPLICATION_LOCK", asyncio.Lock())
+        await pg_operational.OPERATIONAL_REPLICATION_LOCK.acquire()
+
+        async def release_soon():
+            await asyncio.sleep(0.05)
+            pg_operational.OPERATIONAL_REPLICATION_LOCK.release()
+
+        async def first_round_trip():
+            raise RuntimeError("reached Postgres")
+
+        with patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg.get_pool", new=first_round_trip), \
+             patch("core.pg_landing._record_failure", new=AsyncMock(return_value=False)):
+            try:
+                _, result = await asyncio.wait_for(
+                    asyncio.gather(release_soon(), replicate_operational(object())),
+                    timeout=5,
+                )
+            except asyncio.TimeoutError:
+                raise AssertionError("the hourly copy never took the lock it waited for")
+
+        assert "skipped" not in result, result
+        assert "reached Postgres" in result["error"], result
+
+
+class TestBothComparisonsAskTheSameQuestion:
+    """The WARN rule is carried by a keyword at two call sites.
+
+    `compare_table` (the tables read whole) and `reconcile_operational`'s
+    fingerprinted branch (the append-only ones) each call
+    `_watermark_findings`, and only the second is exercised by the real-Postgres
+    test. Dropping the keyword there would leave the four appended tables paging
+    CRITICAL on a single failed hour while `pytest -q` stayed green, so the
+    keyword is checked structurally, in the source, for every call site.
+    """
+
+    def test_both_operational_comparisons_pass_the_spec_s_own_rule(self):
+        import ast
+        import inspect
+
+        from core import mirror_reconciliation
+
+        tree = ast.parse(inspect.getsource(mirror_reconciliation))
+        # Only these two judge the replicated operational tables. The Silver,
+        # Gold and landing call sites keep every failure CRITICAL on purpose:
+        # their copies do not run hourly, so there is no next run to repair it.
+        wanted = {"compare_table", "reconcile_operational"}
+        seen = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name not in wanted:
+                continue
+            calls = [n for n in ast.walk(node)
+                     if isinstance(n, ast.Call)
+                     and getattr(n.func, "id", None) == "_watermark_findings"]
+            assert calls, f"{node.name} no longer asks the watermark anything"
+            for call in calls:
+                seen.add(node.name)
+                passed = {kw.arg: kw.value for kw in call.keywords}
+                assert "one_failure_warns_within" in passed, (
+                    f"{node.name}, line {call.lineno}: every failed hour would page "
+                    "CRITICAL on tables whose next run repairs them")
+                rendered = ast.dump(passed["one_failure_warns_within"])
+                assert "one_failure_warns" in rendered, (
+                    f"{node.name}, line {call.lineno}: the grace is not read from the "
+                    "spec, so a table that may warn and one that may not are judged alike")
+        assert seen == wanted, f"call sites not found: {sorted(wanted - seen)}"
+
+
+class TestOneFailedHourIsNotAPage:
+    """A failed copy stamps every table it was copying, and the next hourly
+    run usually repairs it. One failure with a recent success is WARN; the
+    second in a row, or a success older than the grace, is CRITICAL.
+    `tests/integration/test_operational_failure_watermark.py` runs the same
+    through `reconcile_operational` against a real Postgres."""
+
+    NOW = datetime(2026, 9, 21, 4, 30, tzinfo=timezone.utc)   # 07:30 Kyiv
+
+    @staticmethod
+    def _failing(failures: int, minutes_since_ok: int) -> dict:
+        return {
+            "last_ok_at": TestOneFailedHourIsNotAPage.NOW - timedelta(minutes=minutes_since_ok),
+            "failures_since_ok": failures,
+            "last_error": "UniqueViolationError: duplicate key value",
+        }
+
+    def _severity(self, spec, watermark, **kwargs):
+        from core.mirror_reconciliation import compare_table
+
+        kwargs.setdefault("grace_minutes", OPERATIONAL_GRACE_MINUTES)
+        found = [i for i in compare_table(spec, {}, {}, {}, watermark, now=self.NOW, **kwargs)
+                 if i.check_name == "mirror_failing"]
+        assert len(found) == 1, found
+        return found[0]
+
+    @pytest.mark.parametrize("spec", OPERATIONAL_TABLES, ids=lambda s: s.pg_table)
+    def test_one_failure_inside_the_grace_is_a_warning(self, spec):
+        from core.data_quality import Severity
+
+        issue = self._severity(spec, self._failing(1, OPERATIONAL_GRACE_MINUTES))
+        assert issue.severity is Severity.WARN
+        assert "UniqueViolationError" in issue.description
+
+    def test_one_failure_past_the_grace_is_critical(self):
+        from core.data_quality import Severity
+
+        spec = OPERATIONAL_TABLES[0]
+        issue = self._severity(spec, self._failing(1, OPERATIONAL_GRACE_MINUTES + 1))
+        assert issue.severity is Severity.CRITICAL
+
+    def test_the_second_failure_in_a_row_is_critical_however_recent(self):
+        """The shape of a failure that repeats every hour, the duplicate id
+        among them: two runs, two stamps, CRITICAL."""
+        from core.data_quality import Severity
+
+        spec = OPERATIONAL_TABLES[0]
+        issue = self._severity(spec, self._failing(2, 5))
+        assert issue.severity is Severity.CRITICAL
+        assert issue.count == 2
+
+    def test_a_table_never_shipped_is_critical_on_its_first_failure(self):
+        from core.data_quality import Severity
+
+        spec = OPERATIONAL_TABLES[0]
+        watermark = {"last_ok_at": None, "failures_since_ok": 1, "last_error": "boom"}
+        assert self._severity(spec, watermark).severity is Severity.CRITICAL
+
+    def test_a_landing_mirror_keeps_every_failure_critical(self):
+        from core.data_quality import Severity
+        from core.mirror_reconciliation import MIRRORED_TABLES
+
+        issue = self._severity(MIRRORED_TABLES[0], self._failing(1, 5))
+        assert issue.severity is Severity.CRITICAL
+
+    def test_the_flag_is_on_exactly_the_tables_this_copy_ships(self):
+        from core.pg_operational import _APPEND_ABOVE, _FULL_REPLACE
+
+        shipped = {t for t, _d, _c, _o in _FULL_REPLACE} | {s.pg_table for s in _APPEND_ABOVE}
+        flagged = {s.pg_table for s in (*OPERATIONAL_TABLES, *APPEND_ONLY_TABLES)
+                   if s.one_failure_warns}
+        assert flagged == shipped
+
+    def test_no_other_spec_in_the_module_sets_it(self):
+        """Walked over every spec the module constructs — in the tuples, in
+        the spec helpers and inside the functions — because a guard that names
+        its subjects only guards the ones already thought of."""
+        from core import mirror_reconciliation
+
+        tree = ast.parse(inspect.getsource(mirror_reconciliation))
+        allowed = set()
+        for node in tree.body:
+            if (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                    and node.target.id in ("OPERATIONAL_TABLES", "APPEND_ONLY_TABLES")):
+                allowed |= {id(call) for call in ast.walk(node.value)}
+
+        constructions = [
+            call for call in ast.walk(tree)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            and call.func.id in ("MirroredTable", "BucketedTable")
+        ]
+        assert len(constructions) > len(OPERATIONAL_TABLES) + len(APPEND_ONLY_TABLES)
+        stray = [
+            call.lineno for call in constructions
+            if id(call) not in allowed
+            and any(k.arg == "one_failure_warns" for k in call.keywords)
+        ]
+        assert stray == []
 
 
 # ── the sixth table, and why it is here ──────────────────────────────────────

@@ -12,12 +12,17 @@ step now has a name, runs once, and has its outcome written to
 A step that fails is logged at ERROR, surfaced on /api/health, and retried on
 the next boot rather than being forgotten.
 
-Two steps are deliberately `ALWAYS`:
+Three steps are deliberately `ALWAYS`:
 
 * `0006_seed_manager_classifications` — a manager who syncs for the first time
   tomorrow still needs a baseline interval, so this cannot be a one-off.
-* `0027_reset_sequences_after_compaction` — IMPORT resets every sequence to 1
-  while the tables keep their rows, so this runs after every weekly compaction.
+* `0027_reset_sequences_after_compaction` — the weekly compaction builds a fresh
+  schema, whose sequences start at 1, and imports the rows with their ids. Its
+  own restore advances the sequences, but on DuckDB 1.5.5 (measured on a
+  laptop, not yet in the production image) that restore stops at 129,024
+  values and is lost when the CHECKPOINT after it has nothing else to write.
+  So every boot moves each sequence above MAX(id) again, and says so on
+  /api/health when it cannot.
 * `0004_drop_gold_daily_products_indexes` — a guard, not a one-off. Any ART
   index on that table disables row-group vacuuming for the whole of it, which
   measured 53 MB/day of file growth and was the reason a weekly stop-the-world
@@ -692,6 +697,9 @@ SEQUENCE_ID_COLUMNS = (
 )
 
 
+M0027_ID = "0027_reset_sequences_after_compaction"
+
+
 def _m0027_reset_sequences_after_compaction(self) -> None:
     # Keep every id sequence above the rows its table already holds. A
     # sequence can fall behind whenever rows arrive with explicit ids — a
@@ -699,17 +707,27 @@ def _m0027_reset_sequences_after_compaction(self) -> None:
     # copied back from Postgres — and the next DEFAULT insert then collides
     # with an id that exists.
     #
-    # This used to DROP and re-CREATE each sequence with START = MAX(id) + 1.
-    # On DuckDB 1.5.5 that cannot work: every one of these sequences backs a
-    # column DEFAULT, so DROP SEQUENCE raises DependencyException, and the
-    # error went to DEBUG, where nobody reads. The peek that decided whether
-    # to reset also consumed a value each time it ran. The sequence is
-    # now advanced by burning values instead (core/duckdb_sequences.py says
-    # why that is the only lever and how its position is read without
-    # consuming one), and a failure is a WARNING that names the table.
+    # This used to DROP and re-CREATE each sequence with START = MAX(id) + 1,
+    # and DN-02 replaced that believing DROP SEQUENCE always raises
+    # DependencyException on DuckDB 1.5.5, because each sequence backs a
+    # column DEFAULT. Measured since, on 1.5.5: it raises only in the session
+    # that created the dependent table. After a reopen — which is what a boot
+    # is, even after the schema's IF NOT EXISTS statements have run — DROP
+    # plus CREATE START n succeeded and the DEFAULT went on using the new
+    # sequence, so the old step most likely did repair real post-compaction
+    # boots. What was wrong with it regardless: the peek that decided whether
+    # to reset consumed a value every time it ran, and a failure went to
+    # DEBUG. Advancing by burning values (core/duckdb_sequences.py) is still
+    # the lever used here, because it is not DDL, it reads the position
+    # without consuming one, and the fetched burn was measured to survive a
+    # reopen with no checkpoint at all.
     #
     # One entry failing does not stop the others: they are independent, and a
-    # sequence left behind is a collision waiting on its own table only.
+    # sequence left behind is a collision waiting on its own table only. But a
+    # failure is published, not only logged. This step is the only net under
+    # the compaction's own restore, and a failure here used to be a WARNING
+    # and nothing else: the step itself returned normally, so neither the
+    # ledger nor /api/health could say the net had a hole in it.
     for seq_name, table_name, col in SEQUENCE_ID_COLUMNS:
         try:
             row = self._connection.execute(
@@ -729,6 +747,19 @@ def _m0027_reset_sequences_after_compaction(self) -> None:
                 "default insert there may collide with an existing id: %s",
                 seq_name, table_name, col, e,
             )
+            # `_run_migrations` empties this list before the first step and
+            # snapshots it for /api/health after the last, so an entry added
+            # here turns the published status to "failed" and the health
+            # response to "degraded", as a step that raised would, without
+            # stopping the sequences after this one. It is deliberately not
+            # written to `schema_migrations`: an ALWAYS step never records its
+            # successes there, so a "failed" row would outlive the next boot
+            # that moved the sequence.
+            self._failed_migrations.append({
+                "id": M0027_ID,
+                "sequence": seq_name,
+                "error": f"{seq_name}: {type(e).__name__}: {e}",
+            })
 
 
 def _m0028_drop_bot_owned_duplicates(self) -> None:
@@ -848,7 +879,7 @@ MIGRATIONS: List[Migration] = [
     Migration("0024_disk_samples", ONCE, _m0024_disk_samples),
     Migration("0025_memory_samples", ONCE, _m0025_memory_samples),
     Migration("0026_data_dir_samples", ONCE, _m0026_data_dir_samples),
-    Migration("0027_reset_sequences_after_compaction", ALWAYS, _m0027_reset_sequences_after_compaction),
+    Migration(M0027_ID, ALWAYS, _m0027_reset_sequences_after_compaction),
     Migration("0028_drop_bot_owned_duplicates", ONCE, _m0028_drop_bot_owned_duplicates),
     Migration("0029_users_allowed_features", ONCE, _m0029_users_allowed_features),
     Migration("0030_buyer_gender", ONCE, _m0030_buyer_gender),

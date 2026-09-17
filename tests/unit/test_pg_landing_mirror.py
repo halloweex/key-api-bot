@@ -112,6 +112,30 @@ class TestItNeverRaises:
             out = await mirror_categories([{"id": 1, "name": "X"}])
         assert out.ok is False
 
+    @pytest.mark.asyncio
+    async def test_recording_a_failure_says_whether_it_was_written(self):
+        """A caller stamping many tables stops at the first stamp that could
+        not be written, so the answer must be False only when it was not."""
+        with patch("core.pg.get_pool", side_effect=ConnectionRefusedError()):
+            assert await pg_landing._record_failure("app.stock_movements", "boom") is False
+
+        conn = AsyncMock()
+
+        class _Acquire:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class _Pool:
+            def acquire(self):
+                return _Acquire()
+
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=_Pool())):
+            assert await pg_landing._record_failure("app.stock_movements", "boom") is True
+        assert conn.execute.await_args.args[1:] == ("app.stock_movements", "boom")
+
 
 class TestFailuresAreVisible:
     @pytest.mark.asyncio
