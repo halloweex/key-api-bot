@@ -11,8 +11,9 @@ The failure is injected for real: `offer_stocks.quantity` is nullable and the
 target column is NOT NULL, so one bad stock row makes the INSERT…SELECT die
 exactly where a schema drift or a kill would — after the DELETE.
 """
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -46,6 +47,18 @@ async def _temp_table_exists(store) -> bool:
         ).fetchone()[0] > 0
 
 
+def _kyiv_today() -> date:
+    """The date the store writes, which is not always the date here.
+
+    `first_seen_at` comes from `TODAY_IN_KYIV` (core/sql_dialect.py), so from
+    21:00 UTC until midnight the row says tomorrow while `date.today()` on a UTC
+    runner still says today. The full gate caught exactly that at 21:12 UTC on
+    2026-09-17, on a branch that touched none of this — the third time a fixture
+    has compared a warehouse date against the runner's own clock.
+    """
+    return datetime.now(ZoneInfo("Europe/Kyiv")).date()
+
+
 @pytest.mark.asyncio
 async def test_a_failed_rebuild_leaves_the_table_and_the_carry_forward_intact(tmp_path):
     store = await _store_with_two_offers(tmp_path)
@@ -59,7 +72,7 @@ async def test_a_failed_rebuild_leaves_the_table_and_the_carry_forward_intact(tm
     with pytest.raises(Exception):
         await store.refresh_sku_inventory_status()
 
-    assert await _rows(store) == {11: date(2025, 3, 1), 12: date.today()}, \
+    assert await _rows(store) == {11: date(2025, 3, 1), 12: _kyiv_today()}, \
         "the DELETE must have been rolled back with the failed INSERT"
     assert not await _temp_table_exists(store), \
         "a leftover temp table used to wedge every later refresh"
