@@ -102,6 +102,16 @@ class HealthResponse(BaseModel):
             "switch on itself."
         ),
     )
+    derivation: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Who derives Postgres' Silver and Gold: `mode` is piggyback or own, "
+            "and `error` names a KS_PG_DERIVE value that was not understood and "
+            "fell back to piggyback. Judged by the canary, because a typo "
+            "otherwise leaves one log line and an operator believing the own "
+            "derivation is running."
+        ),
+    )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(
         None,
         description=(

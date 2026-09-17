@@ -34,8 +34,10 @@ logger = logging.getLogger(__name__)
 # path: the marks ride inside `write_orders`' transaction, and a typo evaluated
 # there must not be able to reach the archive of order versions. An unknown
 # value therefore does not raise the way `KS_BOT_STORE` does — it falls back to
-# `piggyback`, today's behaviour, and says so at ERROR and in `/api/health`.
-# Refusing to start would take the dashboard down over a derivation setting.
+# `piggyback`, today's behaviour, logs at ERROR, publishes the error in
+# `/api/health` under `derivation`, and the canary pages on it. Refusing to
+# start would take the dashboard down over a derivation setting; falling back
+# silently would let an operator believe a soak was running that was not.
 ENV = "KS_PG_DERIVE"
 PIGGYBACK = "piggyback"
 OWN = "own"

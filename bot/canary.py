@@ -359,6 +359,21 @@ def check_alerting_health(
     return []
 
 
+def check_derivation_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `derivation` block: a KS_PG_DERIVE value web did not understand.
+
+    Not a liveness signal, so an absent block is not a failure — a web image
+    older than the block publishes none. What it catches is a typo: web falls
+    back to piggyback, and without this the only trace is one log line while
+    whoever set the variable believes the own derivation is running.
+    """
+    block = (payload or {}).get("derivation")
+    if isinstance(block, dict) and block.get("error"):
+        return [("derivation_mode_invalid",
+                 f"derivation: {block['error']}")]
+    return []
+
+
 # ─── Orchestration ──────────────────────────────────────────────────────────
 
 async def run_canary(
@@ -444,6 +459,15 @@ async def run_canary(
         for key, message in alerting_failures:
             fail(key, message)
         if alerting_failures and severity == "ok":
+            severity = "warn"
+
+        # A derivation setting web could not read. Warn: nothing is broken —
+        # piggyback is today's behaviour — but a soak believed to be running
+        # is not.
+        derivation_failures = check_derivation_mode(payload)
+        for key, message in derivation_failures:
+            fail(key, message)
+        if derivation_failures and severity == "ok":
             severity = "warn"
 
     if cert_err:

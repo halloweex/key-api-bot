@@ -271,3 +271,30 @@ class TestHealthDeclaresTheDerivedTablesUnderOwn:
     def test_piggyback(self, mode):
         mode(None)
         assert set(self._mirrors()) == {"bronze.orders"}
+
+
+class TestATypoIsVisible:
+    """Found reviewing #210: an unknown KS_PG_DERIVE fell back to piggyback and
+    left one log line — while the comment promised /api/health would say so."""
+
+    def test_health_publishes_the_mode_and_the_error(self, mode):
+        from web.routes.api.health import _derivation_mode
+
+        mode("owned")
+        block = _derivation_mode()
+        assert block["mode"] == "piggyback" and "owned" in block["error"]
+        mode("own")
+        assert _derivation_mode() == {"mode": "own", "error": None}
+
+    def test_the_canary_pages_on_the_error(self):
+        from bot.canary import check_derivation_mode
+
+        assert [k for k, _ in check_derivation_mode(
+            {"derivation": {"mode": "piggyback", "error": "KS_PG_DERIVE='owned' ..."}})] == [
+            "derivation_mode_invalid"]
+
+    def test_the_canary_is_quiet_on_a_valid_mode_or_an_older_web(self):
+        from bot.canary import check_derivation_mode
+
+        assert check_derivation_mode({"derivation": {"mode": "own", "error": None}}) == []
+        assert check_derivation_mode({}) == []
