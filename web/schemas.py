@@ -102,6 +102,15 @@ class HealthResponse(BaseModel):
             "switch on itself."
         ),
     )
+    write_chains: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Each stage-4 write chain: its KS_WRITE_* variable, the mode it "
+            "writes (duckdb or postgres) and, when the value is not understood, "
+            "the error — that chain's writers raise and its tables are neither "
+            "shipped nor compared until it is corrected."
+        ),
+    )
     derivation: Optional[Dict[str, Any]] = Field(
         None,
         description=(

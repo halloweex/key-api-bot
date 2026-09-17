@@ -489,7 +489,7 @@ def _freshness_check(
     has moved, the moved entities are left out and the check says so, rather
     than judging a frozen copy or going quiet.
     """
-    from core.write_chains import stood_down_sync_keys
+    from core.write_chains import WRITE_CHAINS, chain_name, stood_down_sync_keys_checked
 
     issues: List[IntegrityIssue] = []
     if now is None:
@@ -504,20 +504,30 @@ def _freshness_check(
     if not seen:
         return []
 
-    moved = {key[len("last_sync_"):] for key in stood_down_sync_keys()}
-    if moved and chain_watermarks is None:
+    moved_keys, chain_errors = stood_down_sync_keys_checked()
+    moved = {key[len("last_sync_"):] for key in moved_keys}
+    # Entities whose watermark cannot be judged this run: every moved one when
+    # the caller brought no watermarks, and those of a chain whose KS_WRITE_* is
+    # not understood (DN-01) — nobody knows which store holds theirs.
+    blind = set(moved) if chain_watermarks is None else set()
+    for name in chain_errors:
+        chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
+        blind.update(k[len("last_sync_"):] for k in getattr(chain, "CHAIN_SYNC_KEYS", ()))
+    if blind:
+        why = ("; ".join(f"{n}: {e}" for n, e in sorted(chain_errors.items()))
+               if chain_errors else "")
         issues.append(IntegrityIssue(
             check_name="sync_watermarks_unwatched",
             table_name="sync_metadata",
             severity=Severity.WARN,
-            count=len(moved),
+            count=len(blind),
             sample_ids=(),
             description=(
-                f"the watermarks of {', '.join(sorted(moved))} are written to "
-                "meta.chain_watermarks because their chain writes Postgres, and "
-                "this check was called without them — so a stall of those syncs "
-                "is NOT being watched. The caller must pass `chain_watermarks=` "
-                "from core.pg_chain_watermarks.read_values."
+                f"the watermarks of {', '.join(sorted(blind))} are not judged this "
+                "run, so a stall of those syncs is NOT being watched. "
+                + (f"Their chain's flag is not understood — {why}." if why else
+                   "Their chain writes Postgres and this check was called without "
+                   "`chain_watermarks=` from core.pg_chain_watermarks.read_values.")
             ),
         ))
     for entity in moved:
@@ -528,7 +538,7 @@ def _freshness_check(
                 seen[entity] = value
 
     for entity, (max_hours, sev) in FRESHNESS_THRESHOLDS.items():
-        if entity in moved and chain_watermarks is None:
+        if entity in blind:
             continue
         raw = seen.get(entity)
         if not raw:
@@ -1838,6 +1848,8 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("freshness_", "The sync, not the warehouse: see the sync block in /api/health"),
     ("integrity_check_raised",
      "A check's table is gone or renamed — find which in the ERROR log; its findings are absent, not clean"),
+    ("write_chain_flag_invalid",
+     "Correct the named KS_WRITE_* in .env (duckdb or postgres) and recreate web; until then that chain's writes fail"),
     ("sync_watermarks_unwatched",
      "The integrity job must pre-read meta.chain_watermarks, or the chain's flag goes back"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),
@@ -1882,6 +1894,7 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "mirror_pruned_rows": "aged out of DuckDB, copy still holds them",
     "inventory_continuity_unwatched": "snapshot gaps no longer watched",
     "sync_watermarks_unwatched": "sync stalls no longer watched",
+    "write_chain_flag_invalid": "a write chain's flag is not understood",
     "integrity_check_raised": "integrity checks crashed",
     "mirror_never_shipped": "table never shipped",
     "mirror_backfill_pending": "history not carried over yet",

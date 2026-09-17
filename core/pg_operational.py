@@ -498,10 +498,15 @@ async def _write_chunked(conn, sql: str, rows: Sequence[tuple]) -> None:
         await conn.executemany(sql, rows[start:start + CHUNK])
 
 
-def read_full_replace(conn) -> Dict[str, List[tuple]]:
-    """The seven small tables out of DuckDB, in the column order Postgres wants."""
+def read_full_replace(conn, skip: "FrozenSet[str]" = frozenset()) -> Dict[str, List[tuple]]:
+    """The seven small tables out of DuckDB, in the column order Postgres wants.
+
+    `skip` are stood-down tables, not read at all: DuckDB is no longer their
+    writer, and after stage 5 they will not exist to read."""
     out: Dict[str, List[tuple]] = {}
     for pg_table, dk_table, columns, order_by in _FULL_REPLACE:
+        if pg_table in skip:
+            continue
         rows = conn.execute(
             f"SELECT {', '.join(columns)} FROM {dk_table} ORDER BY {order_by}"
         ).fetchall()
@@ -580,14 +585,19 @@ _APPEND_ABOVE: Tuple[_Append, ...] = (
 )
 
 
-def read_appends(conn, since: Mapping[str, Any]) -> Dict[str, List[tuple]]:
+def read_appends(
+    conn, since: Mapping[str, Any], skip: "FrozenSet[str]" = frozenset(),
+) -> Dict[str, List[tuple]]:
     """Each append-only table, from where Postgres left off.
 
     A watermark of None means "Postgres holds nothing" and asks for the whole
-    table, which is what the first run of each does.
+    table, which is what the first run of each does. `skip` as in
+    `read_full_replace`.
     """
     out: Dict[str, List[tuple]] = {}
     for spec in _APPEND_ABOVE:
+        if spec.pg_table in skip:
+            continue
         cols = ", ".join(spec.columns)
         mark = since.get(spec.pg_table)
         if mark is None:
@@ -646,9 +656,13 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
         # being spelled here — every write chain's `CHAIN_TABLES`, for the chains
         # whose flag is on — so no writer and the shipper can come to disagree
         # about which tables have changed hands.
-        from core.write_chains import stood_down_tables
+        from core.write_chains import WRITE_CHAINS, chain_name, stood_down_tables_checked
 
-        stood_down = stood_down_tables()
+        # A chain whose KS_WRITE_* is not understood stands down with the chains
+        # that write Postgres — shipping could overwrite rows Postgres alone
+        # holds — and its tables are stamped failing, so the watermark says so
+        # rather than aging quietly. Every other table still ships (DN-01).
+        stood_down, chain_errors = stood_down_tables_checked()
 
         # A watermark of None asks for the whole table, which is what `full`
         # means and what a first run finds anyway.
@@ -656,18 +670,20 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
         if not full:
             async with pool.acquire() as conn:
                 for spec in _APPEND_ABOVE:
+                    if spec.pg_table in stood_down:
+                        continue
                     since[spec.pg_table] = await conn.fetchval(
                         f"SELECT MAX({spec.watermark}) FROM {spec.pg_table}"
                     )
 
         async with store.connection() as conn:
-            replaced = read_full_replace(conn)
-            appended = read_appends(conn, since)
+            replaced = read_full_replace(conn, skip=stood_down)
+            appended = read_appends(conn, since, skip=stood_down)
             totals = {
                 spec.pg_table: conn.execute(
                     f"SELECT COUNT(*) FROM {spec.dk_table}"
                 ).fetchone()[0]
-                for spec in _APPEND_ABOVE
+                for spec in _APPEND_ABOVE if spec.pg_table not in stood_down
             }
 
         async with pool.acquire() as conn:
@@ -727,12 +743,22 @@ async def replicate_operational(store, *, full: bool = False) -> Dict[str, Any]:
             # read out of. They are what a year of production log lines say
             # and what anyone grepping back through them will look for; a
             # rename would make the history harder to read for no gain.
-            "sku_history_appended": len(appended[SKU_HISTORY_TABLE]),
-            "movements_appended": len(appended[MOVEMENTS_TABLE]),
+            "sku_history_appended": (len(appended[SKU_HISTORY_TABLE])
+                                     if SKU_HISTORY_TABLE in appended else None),
+            "movements_appended": (len(appended[MOVEMENTS_TABLE])
+                                   if MOVEMENTS_TABLE in appended else None),
             "duration_ms": int((time.monotonic() - started) * 1000),
         }
         if stood_down:
             result["stood_down"] = sorted(stood_down)
+        if chain_errors:
+            result["chain_flag_errors"] = chain_errors
+            from core.pg_landing import _record_failure
+
+            for name, error in chain_errors.items():
+                chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
+                for table in chain.CHAIN_TABLES:
+                    await _record_failure(table, f"not shipped: {error}")
         logger.info("Operational history replicated: %s", result)
         return result
     except Exception as e:
