@@ -46,6 +46,19 @@ FILES="${1:?usage: quick_gate.sh \"<test file> [test file ...]\"}"
 
 cleanup() {
     docker rm -f -v "$PG" >/dev/null 2>&1 || true
+    # This gate builds the web image too, so it fills the same cache
+    # `gate_with_stores.sh` bounds — and it is the one run by hand, over and
+    # over, while iterating on a test. The bound lived only in the sibling
+    # until 2026-09-17, and the cache went 1.6 GB / 90 entries to 2.5 GB / 752
+    # in three days. Same shape as the `-v` that leaked here for five days:
+    # a bound written into one script is not written into its siblings.
+    #
+    # `--max-used-space`, not `prune -f` — see the sibling for why emptying a
+    # cache that rebounds manufactures next week's WARN. Same default and the
+    # same variable, because two gates filling one cache must not disagree
+    # about how big it is allowed to get.
+    docker builder prune -f --max-used-space "${GATE_CACHE_MAX:-4GB}" \
+        >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
