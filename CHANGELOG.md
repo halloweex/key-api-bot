@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.214
+
+- The hourly copy reports only what it wrote
+
+
 ## 3.0.213
 
 - Fixes from an adversarial review of #215
