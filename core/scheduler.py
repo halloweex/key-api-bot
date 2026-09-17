@@ -1543,6 +1543,7 @@ class BackgroundScheduler:
 
     async def _resolve_dq_layer(
         self, layer: str, issues, error_message: "Optional[str]",
+        unverified: "Sequence[str]" = (),
     ) -> None:
         """Announce the layer's cleared page-conditions after a run.
 
@@ -1552,6 +1553,11 @@ class BackgroundScheduler:
         still present at CRITICAL stay firing; a check that dropped to WARN
         cleared as a *page* condition — the digest still carries it, which
         is the page/digest lane split the charter draws.
+
+        `unverified` are conditions a check in this run could not re-examine —
+        it raised, or said it was not watching. They are held as still firing:
+        unknown, not cleared, for the same reason a failed run resolves nothing.
+        Everything the run did verify still resolves.
         """
         if error_message:
             return
@@ -1562,7 +1568,7 @@ class BackgroundScheduler:
             still = [
                 i.check_name for i in issues
                 if i.severity == Severity.CRITICAL
-            ]
+            ] + list(unverified)
             await resolve_group(f"dq:{layer}", still_firing=still)
         except Exception as e:
             logger.warning(f"DQ resolve for {layer} failed: {e}")
@@ -1663,11 +1669,13 @@ class BackgroundScheduler:
                     "chain watermarks unreadable, freshness check will report "
                     "the moved syncs unwatched: %s", e)
 
+            raised_checks: list = []
             try:
                 async with store.connection() as conn:
                     issues = check_internal_integrity(
                         conn, inventory_calendar=inventory_calendar,
-                        chain_watermarks=chain_watermarks)
+                        chain_watermarks=chain_watermarks,
+                        raised_out=raised_checks)
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("DQ integrity scan raised")
@@ -1704,7 +1712,11 @@ class BackgroundScheduler:
                                 if i.severity == Severity.CRITICAL],
                     evidence=evidence_for_agent("integrity", issues, run_id=run_id),
                 )
-            await self._resolve_dq_layer("integrity", issues, error_message)
+            from core.data_quality import unverified_conditions
+
+            await self._resolve_dq_layer(
+                "integrity", issues, error_message,
+                unverified=unverified_conditions(raised_checks, issues))
 
             result = {
                 "run_id": run_id,

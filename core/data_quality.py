@@ -1476,6 +1476,7 @@ def check_internal_integrity(
     *,
     inventory_calendar: "Optional[Tuple[Optional[date], FrozenSet[date]]]" = None,
     chain_watermarks: Optional[Dict[str, str]] = None,
+    raised_out: Optional[List[str]] = None,
 ) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
 
@@ -1504,6 +1505,8 @@ def check_internal_integrity(
             logger.error("integrity check %s raised: %s: %s",
                          name, type(exc).__name__, exc)
             raised.append(f"{name} ({type(exc).__name__})")
+            if raised_out is not None:
+                raised_out.append(name)
             return []
 
     # PK uniqueness on critical tables.
@@ -1591,6 +1594,45 @@ def check_internal_integrity(
         ))
 
     return issues
+
+
+# What each guarded check reports on. A run in which a check could not look —
+# it raised, or it said it is not watching — has no verdict on these, so the
+# run must neither fire nor resolve them: "✅ Resolved" posted for a page the
+# check never re-examined is a recovery nobody verified. Keyed by the name
+# `check_internal_integrity` guards each check under; a test derives every
+# tuple from the check_name values the check itself emits, so the two cannot
+# drift.
+GUARDED_CHECK_CONDITIONS: Dict[str, Tuple[str, ...]] = {
+    "status_group_agreement": ("status_group_vs_return_list",),
+    "headline_vs_line_items": ("headline_vs_line_items",),
+    "silver_arc": ("silver_missing_rows", "silver_orphan_rows", "silver_row_values"),
+    "attribution_coverage": ("attribution_coverage_website",),
+    "gold_cell_values": ("gold_cell_values",),
+    "goods_shipped_without_sale": ("goods_shipped_without_sale",),
+    "inventory_snapshot_continuity": ("inventory_snapshot_gaps",),
+}
+
+
+def unverified_conditions(raised: Sequence[str], issues: List[IntegrityIssue]) -> List[str]:
+    """Conditions this run could not re-examine, from both kinds of blindness.
+
+    `raised` are the guard names `check_internal_integrity` reported through
+    `raised_out`. The `*_unwatched` findings are the other kind: the check ran
+    but was not handed what it needs to look.
+    """
+    names = set()
+    for check in raised:
+        names.update(GUARDED_CHECK_CONDITIONS.get(check, ()))
+    found = {i.check_name for i in issues}
+    if "inventory_continuity_unwatched" in found:
+        names.add("inventory_snapshot_gaps")
+    if "sync_watermarks_unwatched" in found:
+        from core.write_chains import stood_down_sync_keys
+
+        names.update(f"freshness_{key[len('last_sync_'):]}"
+                     for key in stood_down_sync_keys())
+    return sorted(names)
 
 
 def summarize_issues(issues: List[IntegrityIssue]) -> Dict[str, int]:
