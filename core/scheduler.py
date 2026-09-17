@@ -1329,6 +1329,17 @@ class BackgroundScheduler:
         # stays on this tick, deliberately: it copies DuckDB's parse, and this
         # is the one moment that parse is known to be finished. Moving it onto
         # the Postgres signal would copy an empty table after a Sunday compact.
+        #
+        # THE COST OF THAT, STATED: under own, Silver and this ship run on two
+        # clocks, so a new order can reach `silver.orders` up to one floor
+        # before its `silver.order_utm` row, and /traffic files it through the
+        # COALESCE as unattributed/organic for those minutes. Under piggyback
+        # the same order was simply absent from Postgres for the same floor.
+        # Found reviewing #210 and accepted rather than patched: shipping on
+        # every DuckDB tick costs a ~220 ms global-lock read (measured on the
+        # 2026-09-17 backup, 33,203 rows) and a TRUNCATE that stalls /traffic
+        # every two minutes, and the real fix is step 9 — parsing UTM inside
+        # the Postgres derivation, where the two are one transaction's work.
         if not pg_derivation.owns():
             logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
             logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
