@@ -163,6 +163,9 @@ class TestTheHourlyShipperCannotRollTheWriterBack:
 
         assert "error" not in result, result
         assert "app.manual_expenses" in result.get("stood_down", []), result
+        # Reported as stood down, never as replaced: the log line is what an
+        # operator reads to learn whether the copy touched the table.
+        assert "app.manual_expenses" not in result["replaced"], result
         assert await _row(pool, expense_id) is not None, "the hourly replace rolled it back"
 
     @pytest.mark.asyncio
