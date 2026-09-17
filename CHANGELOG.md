@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.221
+
+- DN-03 review: sequence checks read as the owner, not the superuser; quick_gate mounts the frontend
+- DN-03: one-command stage 4 soak report, with UNKNOWN for stale evidence
+- DN-11: the managers screen reads Silver through KS_READ_SILVER; the 05:15 read-back is gone
+
+
 ## 3.0.220
 
 - DN-05b: cached modes configured before the boot sync; dropped marks heal and are published
