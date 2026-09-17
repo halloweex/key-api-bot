@@ -46,6 +46,62 @@ abort() {
     exit 1
 }
 
+# The sidecar colours its level tags; neither the log file nor Telegram wants
+# the escape codes.
+strip_ansi() {
+    sed $'s/\033\\[[0-9;]*m//g'
+}
+
+# The sequence restore and its read-back are the part of a compact whose
+# evidence leaves with the sidecar: `docker rm -v` takes its log, and on
+# 2026-09-17 nobody could say from this host whether the burn of 13.09 had
+# reached disk. Copied on success, on failure and on a timeout alike, before
+# anything removes the container, as whole sections, so an image older than
+# this wrapper — whose restore lines read differently and which has no
+# sequence check at all — still leaves what it printed. Never a reason to
+# abort.
+#
+# Finding no section means one of two things, and the line says which. A
+# sidecar that got past the restore ("Flushing WAL" follows it in every image,
+# "ALL VALIDATIONS PASSED" follows everything) and printed none is an older
+# image. One that did not get that far — a preflight refusal, a failed import,
+# an OOM kill in the export, a stall — simply never restored anything, and
+# pointing the reader at image drift there sends them after the wrong fault.
+copy_sequence_evidence() {
+    local logs lines
+    logs=$(docker logs duckdb-compact 2>&1 | strip_ansi || true)
+    lines=$(printf '%s\n' "$logs" \
+        | sed -n -e '/Restoring sequences:/,/Flushing WAL/p' \
+                 -e '/Sequence check/,/Derived table placeholders/p' || true)
+    if [ -n "$lines" ]; then
+        log "Sequences, as the sidecar printed them:"
+        printf '%s\n' "$lines" >> "$LOG"
+    elif printf '%s\n' "$logs" | grep -qE 'Flushing WAL|ALL VALIDATIONS PASSED'; then
+        log "Sequences: the sidecar printed no restore section (an image older than this wrapper?)"
+    else
+        log "Sequences: none restored — the sidecar did not get as far as the restore"
+    fi
+}
+
+# The one line the Telegram alert quotes: the sidecar's last ERROR or FAIL
+# line, which from this version on is phase 3's summary of every failure, with
+# its timestamp and level tag taken off. An ERROR tag with nothing after it is
+# skipped: the script logs "\nDO NOT SWAP" that way, and quoting the empty tag
+# line is how an older image's alert would otherwise say nothing. Bounded and
+# flattened to printable ASCII, so a byte cut cannot split a character into
+# invalid UTF-8 and cost the alert. Credentials in a URL and anything shaped
+# like a bot token are masked — the sidecar runs with the whole .env and a
+# driver error can quote a DSN. `$` and backticks go too: notify.sh archives
+# the text inside a $$-quoted SQL literal. Empty when nothing matches, and the
+# alert then says what it said before.
+failure_reason() {
+    docker logs duckdb-compact 2>&1 | strip_ansi \
+        | grep -E '^\[[0-9:]+\] +ERROR +[^ ]|FAIL|Error|Exception' | tail -n 1 \
+        | LC_ALL=C tr -cd '[:print:]' | LC_ALL=C tr -d '$`' \
+        | sed -E 's#^\[[0-9:]+\] +[A-Z]+ +##; s#://[^/@[:space:]]+@#://***@#g; s#[0-9]{6,}:[A-Za-z0-9_-]{30,}#***#g' \
+        | cut -c1-300 || true
+}
+
 log "=== WEEKLY COMPACT START ==="
 SIZE_BEFORE=$(du -h "$DATA_DIR/analytics.duckdb" 2>/dev/null | cut -f1)
 DISK_BEFORE=$(df -h / | awk 'NR==2 {print $5}')
@@ -86,22 +142,32 @@ while docker ps --filter name=duckdb-compact --format '{{.Status}}' | grep -q '^
     sleep 30
     ELAPSED=$((ELAPSED + 30))
     if [ "$ELAPSED" -ge "$TIMEOUT_SEC" ]; then
+        # The container is removed next and its log with it, so what it printed
+        # is copied first — a sidecar that stalls in the final CHECKPOINT or the
+        # swap has already printed its restore and its read-back.
+        copy_sequence_evidence
+        log "Compact still running after ${TIMEOUT_SEC}s. Last log:"
+        docker logs duckdb-compact --tail 30 2>&1 | strip_ansi | tee -a "$LOG"
+        REASON=$(failure_reason)
         docker rm -f -v duckdb-compact 2>/dev/null
-        abort "compact timeout after ${TIMEOUT_SEC}s"
+        abort "compact timeout after ${TIMEOUT_SEC}s${REASON:+: $REASON}"
     fi
 done
 
 EXIT_CODE=$(docker inspect duckdb-compact --format '{{.State.ExitCode}}' 2>/dev/null || echo "?")
+copy_sequence_evidence
 if [ "$EXIT_CODE" != "0" ]; then
     log "Compact exited $EXIT_CODE. Last log:"
-    docker logs duckdb-compact --tail 30 2>&1 | tee -a "$LOG"
-    abort "compact failed (exit $EXIT_CODE)"
+    docker logs duckdb-compact --tail 30 2>&1 | strip_ansi | tee -a "$LOG"
+    REASON=$(failure_reason)
+    abort "compact failed (exit $EXIT_CODE)${REASON:+: $REASON}"
 fi
 
 if ! docker logs duckdb-compact 2>&1 | grep -q "ALL VALIDATIONS PASSED"; then
     log "Validation didn't pass. Last log:"
-    docker logs duckdb-compact --tail 30 2>&1 | tee -a "$LOG"
-    abort "compact validation did not pass"
+    docker logs duckdb-compact --tail 30 2>&1 | strip_ansi | tee -a "$LOG"
+    REASON=$(failure_reason)
+    abort "compact validation did not pass${REASON:+: $REASON}"
 fi
 
 # Phase 4 (atomic swap) ran inside the sidecar. Verify the post-condition:
