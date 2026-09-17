@@ -1692,6 +1692,27 @@ class BackgroundScheduler:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("DQ integrity scan raised")
 
+            # Chain 2 step 8a: the Postgres twins of the Silver checks, beside the
+            # DuckDB ones, behind KS_DQ_PG_WAREHOUSE. Outside the DuckDB lock and
+            # after the DuckDB half whatever it did — their facts are read here
+            # and judged purely, so a DuckDB fault cannot discard a Postgres
+            # finding. `core/pg_warehouse_dq.py` has the design.
+            from core import pg_warehouse_dq
+            from core.data_quality import GUARDED_CHECK_CONDITIONS
+
+            pg_on, pg_flag_error = pg_warehouse_dq.flag()
+            pg_issues: list = []
+            if pg_flag_error:
+                logger.error(pg_flag_error)
+                pg_issues = [pg_warehouse_dq.flag_invalid_issue(pg_flag_error)]
+            elif pg_on:
+                duckdb_looked = (frozenset() if error_message else
+                                 frozenset(GUARDED_CHECK_CONDITIONS) - frozenset(raised_checks))
+                pg_issues = pg_warehouse_dq.check_pg_warehouse(
+                    await pg_warehouse_dq.read_facts(),
+                    duckdb_issues=issues, duckdb_looked=duckdb_looked)
+            issues = issues + pg_issues
+
             ended_at = datetime.now(timezone.utc)
             window_day = ended_at.date()
 
@@ -1712,7 +1733,11 @@ class BackgroundScheduler:
                 logger.exception(f"DQ integrity persist failed: {e}")
 
             sev = overall_severity(issues, [])
-            if sev == Severity.CRITICAL and not error_message:
+            # A failed DuckDB half leaves `issues` holding only the Postgres
+            # twins' findings, and a CRITICAL among them still pages: the twins
+            # did look, and their verdict does not depend on DuckDB's.
+            pg_critical = any(i.severity == Severity.CRITICAL for i in pg_issues)
+            if sev == Severity.CRITICAL and (not error_message or pg_critical):
                 msg = format_alert_message(
                     "integrity", sev, issues, [],
                     machine_note=machine_attempts_note(),
@@ -1728,7 +1753,9 @@ class BackgroundScheduler:
 
             await self._resolve_dq_layer(
                 "integrity", issues, error_message,
-                unverified=unverified_conditions(raised_checks, issues))
+                unverified=unverified_conditions(raised_checks, issues)
+                + pg_warehouse_dq.unverified_pg_conditions(
+                    pg_issues, ran=pg_on and not pg_flag_error))
 
             result = {
                 "run_id": run_id,

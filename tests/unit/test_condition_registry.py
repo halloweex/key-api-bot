@@ -45,6 +45,7 @@ def collect_static_check_names() -> set:
     for path in ("core/data_quality.py", "core/mirror_reconciliation.py",
                  "core/ch_silver.py", "core/ch_gold.py", "core/ch_history.py",
                  "core/pg_order_versions.py", "core/pg_vitrina.py",
+                 "core/pg_warehouse_dq.py",
                  # The scheduler builds two gating findings of its own:
                  # mirror_backfill_pending (the PG arm) and
                  # ch_reconcile_pending (the ClickHouse arm).
@@ -54,6 +55,13 @@ def collect_static_check_names() -> set:
                 for kw in node.keywords:
                     if kw.arg == "check_name" and _const_str(kw.value) is not None:
                         names.add(kw.value.value)
+    # The Postgres twins name their blindness findings from module constants,
+    # one per guard plus the collapsed and invalid-flag forms — a declared
+    # family, like disk's and memory's.
+    from core import pg_warehouse_dq
+
+    names |= set(pg_warehouse_dq.UNWATCHED_NAMES.values())
+    names |= {pg_warehouse_dq.WHOLE_UNWATCHED, pg_warehouse_dq.FLAG_INVALID}
     return names
 
 

@@ -193,6 +193,22 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "gold_rollup_mismatch": _c("fine rows add up to the roll-up again"),
     "customer_profile_mismatch": _c("the next витрина rebuild on the same tick"),
 
+    # ── data-quality findings: Postgres twins of the Silver checks ──
+    # Chain 2 step 8a, KS_DQ_PG_WAREHOUSE. Their own names, never DuckDB's: the
+    # Gate and the ledger key on the name alone, so a shared one would let one
+    # engine hold or announce the other's recovery.
+    "pg_silver_missing_rows": _c("a Postgres derivation carries the rows"),
+    "pg_silver_orphan_rows": _c("a Postgres derivation drops the orphans"),
+    "pg_attribution_coverage_website": _c("website orders carry campaign tags again"),
+    "pg_headline_vs_line_items": _c("never fully — the standing ones are certificates"),
+    "pg_goods_shipped_without_sale": _c("by design it never fully clears"),
+    "pg_line_items_disagree": _c("both engines count the same line-item findings"),
+    "pg_silver_arc_unwatched": _c("the twin reads Postgres Silver again"),
+    "pg_attribution_coverage_unwatched": _c("the twin can tell a quiet week from a stopped mirror"),
+    "pg_line_items_unwatched": _c("the twin reads Postgres line items again"),
+    "pg_warehouse_unwatched": _c("the twins read their snapshot again"),
+    "pg_warehouse_dq_flag_invalid": _c("web restarts with a valid KS_DQ_PG_WAREHOUSE"),
+
     # ── data-quality findings: ClickHouse copies and derivations ──
     "ch_reconcile_pending": _c("silver ships fresh again (hourly ch_sync)"),
     "ch_silver_unreachable": _c("ClickHouse answers again"),
