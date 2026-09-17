@@ -25,6 +25,7 @@ import os
 import time
 import shutil
 import json
+import re
 import duckdb
 from pathlib import Path
 
@@ -89,6 +90,34 @@ DERIVED_TABLES = frozenset({
 })
 
 MEM_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "6GB")
+
+# The sidecar runs `python /app/scripts/compact_duckdb.py`. Python puts the
+# script's own directory at sys.path[0] — /app/scripts, not /app and not the
+# working directory — and the image sets no PYTHONPATH, so `core` cannot be
+# imported until the application root is added by hand. A module-level
+# `from core ...` here would raise ModuleNotFoundError at 02:00 on a Sunday
+# while every unit test stayed green, because the tests import this file with
+# the repository already on sys.path.
+#
+# Derived from this file rather than written as "/app" so that the same lines
+# work from a checkout: tests/unit/test_compact_sequences.py runs the script by
+# path from another directory, which is the only check that sees the imports
+# the way the sidecar does. In the image this file is /app/scripts/..., so the
+# root is /app, exactly what the literal used to say.
+APP_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _ensure_app_importable() -> None:
+    """Put the application root on sys.path; the imports stay at the call site.
+
+    At the call site, and through the module attribute, on purpose: a test that
+    replaces core.duckdb_sequences.advance_to must reach the call this script
+    makes, or a mutation test would pass against code it never touched.
+    """
+    root = str(APP_ROOT)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
 
 BOLD = "\033[1m"
 GREEN = "\033[32m"
@@ -195,6 +224,17 @@ def preflight() -> None:
 
 # ─── Phase 1: Export ─────────────────────────────────────────────────────────
 
+# `CREATE SEQUENCE s INCREMENT BY 1 MINVALUE 1 MAXVALUE ... START 42 NO CYCLE;`
+# The rendering core/duckdb_sequences.py reads too; its docstring records the
+# states in which `START` was measured to be the stored counter.
+_SEQUENCE_START = re.compile(r"\bSTART\s+(-?\d+)\b")
+
+
+def _rendered_start(sql):
+    match = _SEQUENCE_START.search(sql or "")
+    return int(match.group(1)) if match else None
+
+
 def phase1_export() -> dict:
     section("PHASE 1: EXPORT TO PARQUET")
 
@@ -231,14 +271,53 @@ def phase1_export() -> dict:
         log(f"  {t}: {cnt:,}{marker}")
 
     # ── Sequences ──
+    # What is recorded is the value the source would hand out next, and it
+    # takes two readings to get it. last_value, on a fresh read-only open, is
+    # the stored counter: after a clean close that is the next value, but after
+    # a WAL replay (web killed without a checkpoint) it is the counter as of the
+    # last checkpoint. Measured on 1.5.5 with a checkpoint at 50,001 and the WAL
+    # burning on to 300,004: last_value and start_value both read 50,001, while
+    # the rendered `START` in duckdb_sequences().sql read 300,004 — the value a
+    # real nextval then returned. A sequence first used after the checkpoint
+    # read last_value 1 against START 31. core.duckdb_sequences.next_value
+    # cannot be asked here: it trusts the rendering only within one increment
+    # of last_value, so in exactly this state it returns the low reading.
+    #
+    # So the larger of the two is recorded. The rendering is not a documented
+    # interface, and taking the maximum makes either way it could go wrong
+    # safe: a reading too high costs a gap in the ids, never a collision, and
+    # a reading too low still meets phase 2's MAX(id) floor. Both raw readings
+    # stay in the manifest, and the log gives both wherever they differ, so a
+    # gap can be explained later.
     seq_values = {}
+    seq_readings = {}
     log("\nSequences:")
     seq_rows = src.execute(
-        "SELECT sequence_name, last_value FROM duckdb_sequences()"
+        "SELECT sequence_name, start_value, last_value, sql FROM duckdb_sequences()"
     ).fetchall()
-    for seq_name, last_val in seq_rows:
-        seq_values[seq_name] = last_val
-        log(f"  {seq_name} = {last_val}")
+    for seq_name, start_val, last_val, sql in seq_rows:
+        # NULL last_value: never used, so the counter is still the start.
+        counter = last_val if last_val is not None else start_val
+        rendered = _rendered_start(sql)
+        candidates = [v for v in (counter, rendered) if v is not None]
+        seq_values[seq_name] = max(candidates) if candidates else None
+        seq_readings[seq_name] = {"last_value": last_val, "rendered_start": rendered}
+        recorded = _fmt_saved(seq_values[seq_name])
+        if rendered is None:
+            # The same change in DuckDB fails test_duckdb_sequences in CI first.
+            log(f"  {seq_name}: next {recorded} from the stored counter alone — "
+                f"the rendered START could not be read, and after a WAL replay "
+                f"the counter is as of the last checkpoint; MAX(id) is the "
+                f"floor that still holds", "WARN")
+        elif counter is not None and rendered > counter:
+            log(f"  {seq_name}: next {recorded} (stored counter {counter:,}, as "
+                f"of the last checkpoint; the WAL replay moved it on)")
+        elif counter is not None and rendered < counter:
+            log(f"  {seq_name}: next {recorded} from the stored counter — the "
+                f"rendered START, {rendered:,}, reads lower, which no measured "
+                f"state does", "WARN")
+        else:
+            log(f"  {seq_name}: next {recorded}")
 
     # ── Checksums for validation ──
     log("\nChecksums:")
@@ -290,7 +369,10 @@ def phase1_export() -> dict:
         "source_db": str(SOURCE_DB),
         "tables": export_tables,
         "counts": counts,
+        # The value each sequence would hand out next. Phases 2 and 3 read
+        # this key; archives written before 2026-09-17 hold last_value here.
         "seq_values": seq_values,
+        "seq_readings": seq_readings,
         "checksums": checksums,
         "duckdb_version": duckdb.__version__,
     }
@@ -302,6 +384,124 @@ def phase1_export() -> dict:
 
 
 # ─── Phase 2: Import ─────────────────────────────────────────────────────────
+
+def _fmt_saved(saved) -> str:
+    return "unknown" if saved is None else f"{int(saved):,}"
+
+
+def _fail_line(failures) -> str:
+    """The summary weekly_compact.sh quotes in its alert, on one line.
+
+    Flattened because DuckDB's messages run over several lines — the Binder
+    Error for a column the target lacks ends two lines down in a `Did you
+    mean` hint — and the wrapper quotes the last *line* that matches. Left as
+    they come, the summary is no longer the last line of the run, its tail is
+    cut from the alert, and a continuation that happens to say Error would be
+    quoted in its place.
+    """
+    return "FAIL: " + "; ".join(" ".join(str(f).split()) for f in failures)
+
+
+def restore_sequences(conn, seq_values: dict, created_tables) -> None:
+    """Leave every id sequence above the ids its table holds, and no lower than
+    where the source left it.
+
+    The new database is built from DDL, so every sequence in it starts at 1
+    while the imported tables keep their ids. DuckDB 1.5.5 cannot *set* a
+    sequence: `ALTER SEQUENCE ... RESTART` is not implemented, and in this
+    session — the one that has just created the tables whose DEFAULTs name
+    these sequences — DROP SEQUENCE raises DependencyException. The one lever
+    is burning values, and core/duckdb_sequences.advance_to is the tested form
+    of it.
+
+    Until 2026-09-17 this function burned with `SELECT nextval(..) FROM
+    range(n)` and never read the result. DuckDB evaluates only the chunks a
+    client pulls, so the burn stopped at 129,024 values whatever n was, the
+    abandoned statement wrote no position to the WAL, and the log line printed
+    the target rather than a reading. A table whose MAX(id) reached 129,025
+    would have gone live handing out ids below that MAX — a primary-key error
+    where its ids are dense, a silent write into a hole where they are not —
+    behind a phase 3 that passed. advance_to burns with a fetched aggregate and
+    reads the position back; the line logged here is that reading.
+
+    Floor, per sequence, is max(MAX(id), saved - 1):
+
+    * `saved` is the value the source would hand out next, as phase 1 records
+      it, so the last id it handed out is saved - 1 and the new file hands out
+      exactly `saved`. The old `saved + 1` skipped one id per sequence every
+      Sunday. It also keeps ids a table no longer holds from being handed out
+      twice — reconciliation_seq stood at 2,614 over a MAX of 2,597 in the
+      2026-09-17 backup.
+    * MAX(id) stays a floor because `saved` has not always been that value.
+      Until 2026-09-17 phase 1 recorded last_value alone, which after a WAL
+      replay is the counter as of the last checkpoint — measured 50,001
+      against a true next value of 300,004 — and an archive written then still
+      holds it. Phase 1 now also reads the rendered START, which carried
+      300,004, and records the larger. Should that rendering ever stop being
+      readable, MAX(id) still protects every row that exists; what it cannot
+      protect is an id handed out after the checkpoint and deleted since.
+
+    The map is core.migrations.SEQUENCE_ID_COLUMNS, the list the boot
+    migration 0027 repairs from. This file used to keep a second copy of it.
+    """
+    _ensure_app_importable()
+    from core import duckdb_sequences
+    from core.migrations import SEQUENCE_ID_COLUMNS
+
+    log("\nRestoring sequences:")
+    mapped = set()
+    for seq_name, table, col in SEQUENCE_ID_COLUMNS:
+        mapped.add(seq_name)
+        # A table dropped from the schema while its entry stayed behind. The
+        # DuckDB exit is dropping tables one write chain at a time, and an
+        # entry that outlives its table must cost a warning, not every Sunday's
+        # compaction; migration 0027 treats the same state the same way.
+        # tests/unit/test_compact_sequences.py fails CI on the stale entry.
+        if table not in created_tables:
+            log(f"  sequence {seq_name}: {table} is not in this version's "
+                f"schema — skipped", "WARN")
+            continue
+        saved = seq_values.get(seq_name)
+        try:
+            max_id = int(conn.execute(
+                f'SELECT COALESCE(MAX("{col}"), 0) FROM "{table}"'
+            ).fetchone()[0])
+            floor = max_id if saved is None else max(max_id, int(saved) - 1)
+            burned = duckdb_sequences.advance_to(conn, seq_name, floor)
+            after = duckdb_sequences.next_value(conn, seq_name)
+        except Exception as e:
+            log(f"  sequence {seq_name}: restore FAILED — {e}", "ERROR")
+            raise
+        log(f"  sequence {seq_name}: next {after:,} ({table}.{col} MAX "
+            f"{max_id:,}, source next {_fmt_saved(saved)}, burned {burned:,})",
+            "OK")
+
+    unmapped = sorted(set(seq_values) - mapped)
+    if not unmapped:
+        return
+    declared = {r[0] for r in conn.execute(
+        "SELECT sequence_name FROM duckdb_sequences()"
+    ).fetchall()}
+    for seq_name in unmapped:
+        saved = seq_values.get(seq_name)
+        if seq_name not in declared:
+            # The source still holds a sequence whose DDL is gone. This build
+            # is what removes it, so the warning appears on one Sunday only.
+            log(f"  sequence {seq_name}: in the source only — this schema no "
+                f"longer declares it, nothing to restore", "WARN")
+            continue
+        # Declared, but nobody said which table it numbers, so there is no
+        # MAX to floor on. The source's own position is still known and is the
+        # most that can be done — what the old loop did for every sequence.
+        # The schema-walk test exists so this never runs.
+        burned = 0
+        if saved is not None:
+            burned = duckdb_sequences.advance_to(conn, seq_name, int(saved) - 1)
+        after = duckdb_sequences.next_value(conn, seq_name)
+        log(f"  sequence {seq_name}: not in SEQUENCE_ID_COLUMNS — next {after:,} "
+            f"from the source's position alone (source next {_fmt_saved(saved)}, "
+            f"burned {burned:,}), no MAX(id) floor", "WARN")
+
 
 def phase2_import(manifest: dict) -> float:
     section("PHASE 2: CREATE CLEAN DB + IMPORT")
@@ -323,7 +523,7 @@ def phase2_import(manifest: dict) -> float:
 
     # ── Create schema via app's own DuckDBStore ──
     log("Creating schema via DuckDBStore._init_schema()...")
-    sys.path.insert(0, "/app")
+    _ensure_app_importable()
     from core.duckdb_store import DuckDBStore
 
     async def create_schema():
@@ -353,8 +553,20 @@ def phase2_import(manifest: dict) -> float:
         parquet_path = EXPORT_DIR / f"{t}.parquet"
         if not parquet_path.exists():
             continue
+        # The import loop below reports a table this schema no longer defines,
+        # and every one of its columns would otherwise be "missing" here too.
+        if t not in created_tables:
+            continue
+        # DESCRIBE, not parquet_schema(). parquet_schema() lists every element
+        # of the file's schema tree: the root, which DuckDB names
+        # `duckdb_schema`, and the children of nested columns (`list`,
+        # `element`, struct fields). The root alone made this check report
+        # `duckdb_schema` as a dropped column on every table, every Sunday.
+        # DESCRIBE gives the top-level columns of the very SELECT * the import
+        # below runs, so nothing real can hide behind the change.
         pq_cols = set(r[0] for r in conn.execute(
-            f"SELECT name FROM parquet_schema('{parquet_path}')"
+            f"SELECT column_name FROM "
+            f"(DESCRIBE SELECT * FROM read_parquet('{parquet_path}'))"
         ).fetchall())
         tbl_cols = set(r[0] for r in conn.execute(
             f"SELECT column_name FROM information_schema.columns "
@@ -362,8 +574,13 @@ def phase2_import(manifest: dict) -> float:
         ).fetchall())
         missing = pq_cols - tbl_cols
         if missing:
-            log(f"  {t}: source columns not in target: {missing}", "WARN")
-            log(f"    These columns will be DROPPED during import", "WARN")
+            log(f"  {t}: source columns not in target: {sorted(missing)}", "WARN")
+            # Not dropped: measured on 1.5.5, INSERT BY NAME raises a Binder
+            # Error for a column the target lacks, so the import below fails
+            # and phase 2 exits 1. Saying "dropped" sent the reader to the
+            # wrong conclusion about why the run stopped.
+            log("    INSERT BY NAME refuses a column the target does not have — "
+                "this table's import will fail and abort the run", "WARN")
         extra = tbl_cols - pq_cols
         if extra:
             log(f"  {t}: target columns not in source: {extra} (will be NULL/DEFAULT)")
@@ -446,53 +663,20 @@ def phase2_import(manifest: dict) -> float:
         for t, err in import_errors:
             log(f"  {t}: {err}", "ERROR")
         log("ABORTING — clean DB is incomplete", "ERROR")
+        # Last, as in phase 3: weekly_compact.sh quotes the final ERROR/FAIL
+        # line, and without this that is ABORTING, which names neither the
+        # table nor the error. This is the abort a table or column dropped from
+        # the schema produces — see DERIVED_TABLES — so it is the one the alert
+        # most needs to name.
+        log(_fail_line(f"{t}: {err}" for t, err in import_errors), "ERROR")
         sys.exit(1)
 
     # ── Restore sequences ──
-    log("\nRestoring sequences:")
-    seq_table_map = {
-        "seq_stock_movements_id": ("stock_movements", "id"),
-        "seq_buyer_contacts_id": ("buyer_contacts", "id"),
-        "seq_manual_expenses_id": ("manual_expenses", "id"),
-        "warehouse_refresh_seq": ("warehouse_refreshes", "id"),
-        "reconciliation_seq": ("reconciliation_log", "id"),
-        "data_quality_run_seq": ("data_quality_runs", "run_id"),
-    }
-    for seq_name, saved_val in seq_values.items():
-        try:
-            restart_val = max((saved_val or 0) + 1, 1)
-            if seq_name in seq_table_map:
-                table, col = seq_table_map[seq_name]
-                try:
-                    max_id = conn.execute(
-                        f'SELECT COALESCE(MAX("{col}"), 0) FROM "{table}"'
-                    ).fetchone()[0]
-                    restart_val = max(restart_val, max_id + 1)
-                except Exception:
-                    pass
-            # DuckDB 1.5.5 has no way to *set* a sequence. `ALTER SEQUENCE ...
-            # RESTART` raises "Not implemented Error", and CREATE OR REPLACE
-            # cannot run at all here — every one of these sequences backs a
-            # column DEFAULT, so replacing it is a DependencyException and
-            # DROP ... CASCADE would take the DEFAULT with it.
-            #
-            # So advance it instead: read where it stands, then burn the
-            # difference in one statement. duckdb_sequences().last_value gives
-            # the position without consuming a value (NULL when untouched,
-            # which is the state right after phase 2 builds the schema).
-            row = conn.execute(
-                "SELECT last_value FROM duckdb_sequences() "
-                f"WHERE sequence_name = '{seq_name}'"
-            ).fetchone()
-            current = row[0] if row and row[0] is not None else 0
-            gap = restart_val - 1 - current
-            if gap > 0:
-                conn.execute(f"SELECT nextval('{seq_name}') FROM range({gap})")
-                log(f"  {seq_name}: advanced {gap:,} to hand out {restart_val} next", "OK")
-            else:
-                log(f"  {seq_name}: already past {restart_val}", "OK")
-        except Exception as e:
-            log(f"  {seq_name}: {e}", "WARN")
+    # Deliberately not wrapped: a restore that fails leaves the clean file with
+    # sequences that may hand out ids its tables already hold. The exception
+    # ends the run here, before phase 3 and before any swap, with the source
+    # untouched; weekly_compact.sh restarts the services on it.
+    restore_sequences(conn, seq_values, created_tables)
 
     # ── Checkpoint ──
     log("\nFlushing WAL...")
@@ -632,9 +816,69 @@ def phase3_validate(manifest: dict) -> None:
         w.execute("CHECKPOINT")
         w.close()
 
+    v2 = duckdb.connect(str(NEW_DB), read_only=True)
+
+    # ── Sequences, read back from the closed file ──
+    # Read on a fresh read-only connection after the write test has
+    # checkpointed and closed, so what is checked is what reached disk rather
+    # than a position one process still holds in memory. Nothing checked this
+    # until 2026-09-17: a file whose sequences handed out ids its tables
+    # already held passed every line above and was swapped in.
+    _ensure_app_importable()
+    from core import duckdb_sequences
+    from core.migrations import SEQUENCE_ID_COLUMNS
+
+    log("\nSequence check (reopened read-only):")
+    source_next = manifest.get("seq_values", {})
+    mapped = set()
+    for seq_name, table, col in SEQUENCE_ID_COLUMNS:
+        mapped.add(seq_name)
+        if table not in present:
+            log(f"  sequence {seq_name}: {table} is not in this version's "
+                f"schema — not checked", "WARN")
+            continue
+        try:
+            # next_value can only err low, so a surprise in how the engine
+            # reports a sequence refuses a good file rather than passing a bad one.
+            nxt = duckdb_sequences.next_value(v2, seq_name)
+            max_id = int(v2.execute(
+                f'SELECT COALESCE(MAX("{col}"), 0) FROM "{table}"'
+            ).fetchone()[0])
+        except Exception as e:
+            msg = f"sequence {seq_name}: could not be read back — {e}"
+            log(f"  {msg}", "ERROR")
+            failures.append(msg)
+            continue
+        saved = source_next.get(seq_name)
+        if nxt <= max_id:
+            msg = (f"sequence {seq_name}: hands out {nxt:,} but "
+                   f"{table}.{col} MAX is {max_id:,}")
+        elif saved is not None and nxt < int(saved):
+            # Ids between the two were handed out by the source and may already
+            # sit in Postgres, which ships these tables by `id > MAX`.
+            msg = (f"sequence {seq_name}: hands out {nxt:,}, below the "
+                   f"source's next value {int(saved):,}")
+        else:
+            log(f"  sequence {seq_name}: next {nxt:,} > {table}.{col} MAX "
+                f"{max_id:,} (source next {_fmt_saved(saved)})", "OK")
+            continue
+        log(f"  {msg}", "ERROR")
+        failures.append(msg)
+
+    # A warning, not a failure: an unlisted sequence is a collision risk on its
+    # own table only, and refusing the swap for it would turn one forgotten
+    # entry into a compaction that aborts every Sunday. The schema-walk test in
+    # tests/unit/test_compact_sequences.py fails CI on it instead.
+    declared = sorted(r[0] for r in v2.execute(
+        "SELECT sequence_name FROM duckdb_sequences()"
+    ).fetchall())
+    for seq_name in declared:
+        if seq_name not in mapped:
+            log(f"  sequence {seq_name}: not in SEQUENCE_ID_COLUMNS — nothing "
+                f"checks it against the ids of its table", "WARN")
+
     # ── Derived tables exist (empty, for app startup) ──
     log("\nDerived table placeholders:")
-    v2 = duckdb.connect(str(NEW_DB), read_only=True)
     for t in sorted(DERIVED_TABLES):
         try:
             cnt = v2.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
@@ -651,11 +895,28 @@ def phase3_validate(manifest: dict) -> None:
     log(f"\nFinal DB size: {db_size}")
     v2.close()
 
+    # ── No WAL left behind ──
+    # atomic_swap renames the database file alone, and weekly_compact.sh
+    # deletes analytics_clean.duckdb.wal as an artifact. Anything a WAL here
+    # still held — a sequence position among it — would not be in the file
+    # that goes live, and every check above read it back through that WAL.
+    # Measured on 1.5.5: none exists after CHECKPOINT, after close, or while
+    # the file is open read-only, so this fires only on a real change.
+    wal = Path(str(NEW_DB) + ".wal")
+    if wal.exists():
+        msg = (f"clean DB left a WAL after close ({wal.stat().st_size:,} bytes) "
+               f"that the swap would strand")
+        log(f"  {msg}", "ERROR")
+        failures.append(msg)
+
     if failures:
         log(f"\n{len(failures)} VALIDATION FAILURES:", "ERROR")
         for f in failures:
             log(f"  • {f}", "ERROR")
         log("\nDO NOT SWAP — investigate failures before proceeding", "ERROR")
+        # One line that says why, last, for weekly_compact.sh to put in the
+        # alert. The line above it names no failure.
+        log(_fail_line(failures), "ERROR")
         sys.exit(1)
 
     log("\nALL VALIDATIONS PASSED", "OK")
@@ -746,6 +1007,15 @@ def main():
     log(f"Target: {NEW_DB}")
     log(f"DuckDB: {duckdb.__version__}")
     log(f"Memory limit: {MEM_LIMIT}")
+
+    # Resolve the application code before anything else. Phases 2 and 3 import
+    # it after phase 1 has spent minutes exporting with the services stopped;
+    # a path that cannot resolve should cost seconds and say so first.
+    _ensure_app_importable()
+    import core.duckdb_sequences  # noqa: F401
+    import core.duckdb_store  # noqa: F401
+    import core.migrations  # noqa: F401
+    log(f"Application code: {APP_ROOT}")
 
     preflight()
     manifest = phase1_export()
