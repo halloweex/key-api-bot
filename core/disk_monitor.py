@@ -40,7 +40,7 @@ elsewhere; this file owns only the contract.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from core.data_quality import Severity
@@ -271,6 +271,59 @@ FS_CRITICAL_GROWTH_GB_168H = 5.0
 # Not a path — the remainder, so it can never collide with `_classify_path`.
 UNATTRIBUTED = "unattributed"
 
+# THE RE-DERIVATION THE THRESHOLDS ABOVE ASKED FOR.
+#
+# `FS_WARN/FS_CRITICAL` were shipped provisional with a note to re-derive them
+# "once `data_dir_samples` holds a few weeks of `unattributed` rows". It now
+# holds 67, and they say the numbers were never the problem — the *comparison*
+# was. Measured over every 168h window the watchdog could have judged:
+#
+#     mean 168h delta   -0.93 GB   (the remainder SHRINKS on average)
+#     sd of that delta   4.14 GB
+#     sd between two consecutive 6-hourly samples   1.63 GB
+#
+# A 2.0 GB line under a delta whose own spread is 4.14 GB is a coin toss.
+# Back-tested: 11 of 40 judgeable windows crossed WARN and 3 crossed CRITICAL,
+# on a series with no upward trend at all. That is the eight `disk:WARN` fires
+# between 2026-09-07 and 09-17, and it is why the alert stopped meaning
+# anything.
+#
+# The remainder is deploy churn: images pulled and superseded, gate containers
+# built and destroyed, a build cache breathing. It is genuinely noisy, and no
+# amount of naming its parts makes a point-to-point difference of it stable.
+# (An attribution sampler was designed for exactly that and abandoned on this
+# measurement: labelling noise produces confidently-named artefacts, which are
+# worse than an honest "unattributed" because people believe them.)
+#
+# So the remainder is judged by PERSISTENCE instead: the whole recent window
+# must sit above the whole baseline window. `min(recent) - max(baseline)` is
+# that sentence as arithmetic — the least favourable reading now against the
+# most favourable reading a week ago. Growth survives it only by holding.
+#
+# Back-test of the replacement over the same 40 windows: 2 WARN, 0 CRITICAL —
+# and both survivors are 2026-09-08/09, the anonymous-volume leak that was
+# real and that this alert correctly found. Every other fire disappears.
+REMAINDER_RECENT_HOURS = 24
+REMAINDER_SLACK_HOURS = 12
+# A window needs at least this many samples to be judged. Two is enough to
+# have a spread; one is a point, which is what we are moving away from.
+REMAINDER_MIN_SAMPLES = 2
+
+# The cost of persistence is latency, and it is paid where it is cheapest.
+# Measured: a sustained +2 GB step is confirmed after ~96h, +5 GB after 24h.
+# For a weekly-growth detector that is the right trade — capacity (75%/90%)
+# is the emergency detector and is untouched by any of this.
+#
+# The one case that cannot wait is the cliff: 2026-08-05 put +8.93 GB on the
+# disk in an afternoon. So a single 6-hourly rise this large is CRITICAL on
+# its own, with no confirmation. Calibrated against the real consecutive-sample
+# noise rather than chosen: sd 1.63 GB, largest rise ever observed +3.60 GB,
+# and ZERO rises >= 4 GB in 66 samples. 5.0 GB is ~3 sd and clear of the
+# observed maximum, and the persistence path catches anything smaller within
+# 24h anyway — so the fast path is free to be deaf and is worth nothing if it
+# is not silent.
+FS_CLIFF_STEP_GB = 5.0
+
 # Until a week of history exists there is nothing to difference against, and a
 # detector that says nothing for its first seven days is a detector that is
 # absent exactly when a fresh deploy is most likely to regress. So: any single
@@ -358,6 +411,106 @@ def evaluate_dir_growth(
     )
 
 
+def evaluate_remainder_growth(
+    *,
+    series,
+    now=None,
+    warn_gb: float = FS_WARN_GROWTH_GB_168H,
+    critical_gb: float = FS_CRITICAL_GROWTH_GB_168H,
+    cliff_gb: float = FS_CLIFF_STEP_GB,
+    recent_hours: int = REMAINDER_RECENT_HOURS,
+    window_hours: int = 168,
+    slack_hours: int = REMAINDER_SLACK_HOURS,
+    min_samples: int = REMAINDER_MIN_SAMPLES,
+) -> Optional[GrowthAlert]:
+    """Judge the unattributable remainder by whether growth *held*.
+
+    Pure: takes the samples already read and decides. `series` is any iterable
+    of `(sampled_at, bytes)`; order does not matter.
+
+    Two paths, and they answer different questions.
+
+    **Persistence** is the ordinary one. The whole recent window must sit above
+    the whole baseline window — `min(recent) - max(baseline)` — so a spike in
+    either window cannot carry the verdict on its own. This is what makes the
+    remainder judgeable at all: point-to-point, its 168h delta has a spread of
+    4.14 GB around a mean of -0.93, and a 2 GB line under that fires on a
+    quarter of all windows with nothing happening.
+
+    **The cliff** is the exception. Persistence needs ~24h to confirm even a
+    large step, and the 2026-08-05 event put +8.93 GB down in an afternoon. A
+    single sample-to-sample rise past `cliff_gb` is CRITICAL immediately. It is
+    set well above the observed noise precisely so it stays quiet: a fast path
+    that speaks when nothing happened costs more than the hours it saves.
+
+    Returns None — never an alert — when either window is too thin to have a
+    spread. That is the honest answer in the first days after this ships, and
+    it is also what stops a fresh deploy inventing a week of growth from a
+    baseline that does not exist. Shrinkage is never an alert.
+    """
+    rows = sorted(
+        ((t, int(b)) for t, b in series if t is not None),
+        key=lambda tb: tb[0],
+    )
+    if not rows:
+        return None
+    if now is None:
+        now = rows[-1][0]
+
+    recent = [b for t, b in rows if now - timedelta(hours=recent_hours) <= t <= now]
+    baseline = [
+        b for t, b in rows
+        if (now - timedelta(hours=window_hours + slack_hours)
+            <= t <=
+            now - timedelta(hours=window_hours - slack_hours))
+    ]
+    if len(recent) < min_samples or len(baseline) < min_samples:
+        return None
+
+    held_gb = (min(recent) - max(baseline)) / _GB
+
+    # The cliff looks only at the newest pair, which is the whole point: it is
+    # asking "did the disk just move", not "has it been moving".
+    step_gb = None
+    tail = [b for t, b in rows if t <= now]
+    if len(tail) >= 2:
+        step_gb = (tail[-1] - tail[-2]) / _GB
+
+    if step_gb is not None and step_gb >= cliff_gb:
+        return GrowthAlert(
+            severity=Severity.CRITICAL,
+            reason=(
+                f"disk outside data/ jumped {step_gb:+.2f} GB since the last "
+                f"sample (>= {cliff_gb:.2f} GB); {UNATTRIBUTED} is now "
+                f"{tail[-1] / _GB:.2f} GB"
+            ),
+            total_delta_gb=round(step_gb, 3),
+            top_group=UNATTRIBUTED,
+            top_delta_gb=round(step_gb, 3),
+            window_hours=0,
+        )
+
+    if held_gb >= critical_gb:
+        severity, threshold = Severity.CRITICAL, critical_gb
+    elif held_gb >= warn_gb:
+        severity, threshold = Severity.WARN, warn_gb
+    else:
+        return None
+
+    return GrowthAlert(
+        severity=severity,
+        reason=(
+            f"disk outside data/ grew {held_gb:+.2f} GB in {window_hours}h "
+            f"and stayed there (>= {threshold:.2f} GB); every reading in the "
+            f"last {recent_hours}h is above every reading a week ago"
+        ),
+        total_delta_gb=round(held_gb, 3),
+        top_group=UNATTRIBUTED,
+        top_delta_gb=round(held_gb, 3),
+        window_hours=window_hours,
+    )
+
+
 def evaluate_growth(
     *,
     current: dict,
@@ -367,6 +520,7 @@ def evaluate_growth(
     critical_gb: float = CRITICAL_GROWTH_GB_168H,
     fs_warn_gb: float = FS_WARN_GROWTH_GB_168H,
     fs_critical_gb: float = FS_CRITICAL_GROWTH_GB_168H,
+    remainder_series=None,
 ) -> Optional[GrowthAlert]:
     """Judge the data directory and the rest of the disk, each on its own terms.
 
@@ -394,8 +548,18 @@ def evaluate_growth(
     # Only when both samples carry the remainder. A baseline taken before this
     # existed has no `unattributed` key, and treating its absence as zero would
     # report the whole disk as one week's growth on the first run after deploy.
+    # The remainder is judged by persistence when the caller supplies its
+    # series, and point-to-point only when it cannot — the bootstrap path with
+    # a 6h window, and every existing caller that predates the series. See
+    # `evaluate_remainder_growth` for why the point comparison is not
+    # trustworthy on this particular quantity.
     outside = None
-    if outside_now and outside_was:
+    if remainder_series is not None:
+        outside = evaluate_remainder_growth(
+            series=remainder_series, window_hours=window_hours,
+            warn_gb=fs_warn_gb, critical_gb=fs_critical_gb,
+        )
+    elif outside_now and outside_was:
         outside = evaluate_dir_growth(
             current=outside_now, baseline=outside_was, window_hours=window_hours,
             warn_gb=fs_warn_gb, critical_gb=fs_critical_gb,
@@ -551,6 +715,27 @@ def fetch_dir_sample_at_age(conn, hours: int = 168, slack_hours: int = 12) -> Op
         "SELECT path_group, bytes FROM data_dir_samples WHERE sampled_at = ?", [row[0]]
     ).fetchall()
     return {g: int(b) for g, b in rows}
+
+
+def fetch_remainder_series(conn, hours: int = 180):
+    """`(sampled_at, bytes)` for the remainder over the last `hours`, oldest first.
+
+    The whole series rather than two points, because that is the difference
+    this detector turns on: `evaluate_remainder_growth` needs a spread at both
+    ends to tell a held rise from a spike, and 180h covers the 168h baseline
+    plus its slack in one read.
+
+    Retention caps what is available at 21 days (`prune_old_dir_samples`), so
+    this can never grow unbounded.
+    """
+    from datetime import timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    rows = conn.execute(
+        "SELECT sampled_at, bytes FROM data_dir_samples "
+        "WHERE path_group = ? AND sampled_at >= ? ORDER BY sampled_at",
+        [UNATTRIBUTED, cutoff],
+    ).fetchall()
+    return [(ts, int(b)) for ts, b in rows]
 
 
 def prune_old_dir_samples(conn, retention_days: int = 21) -> int:
