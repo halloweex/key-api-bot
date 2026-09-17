@@ -2686,9 +2686,9 @@ async def reconcile_operational(
     #
     # It reads the same tuple the shipper stands down on, so the two cannot
     # disagree about which tables have changed hands.
-    from core.write_chains import stood_down_tables
+    from core.write_chains import stood_down_tables_checked
 
-    stood_down = stood_down_tables()
+    stood_down, chain_errors = stood_down_tables_checked()
 
     whole = tuple(s for s in OPERATIONAL_TABLES if s.pg_table not in stood_down)
 
@@ -2763,6 +2763,23 @@ async def reconcile_operational(
                 now=now, grace_minutes=grace_minutes,
             )
         issues += _divergence_findings(spec, found, max_samples=max_samples)
+
+    # A KS_WRITE_* value no chain understands: its tables were stood down here
+    # and by the shipper, so nothing compares or copies them until it is fixed.
+    # CRITICAL — the chain's own writers raise on every call in the meantime.
+    if chain_errors:
+        issues.append(IntegrityIssue(
+            check_name="write_chain_flag_invalid",
+            table_name="(write chains)",
+            severity=Severity.CRITICAL,
+            count=len(chain_errors),
+            description=(
+                "Write chain flag(s) not understood — "
+                + "; ".join(f"{name}: {err}" for name, err in sorted(chain_errors.items()))
+                + ". Those chains' writers raise, and their tables are neither "
+                "shipped nor compared until the value is corrected."
+            ),
+        ))
 
     return issues
 

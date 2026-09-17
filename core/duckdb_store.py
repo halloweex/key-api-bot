@@ -2167,8 +2167,12 @@ class DuckDBStore(
         after a switch syncs, and its stamp is the first one there.
         """
         full_key = f"last_sync_{key}"
-        from core.write_chains import stood_down_sync_keys
-        if full_key in stood_down_sync_keys():
+        # Only the chain that owns this key is asked — never every chain, or a
+        # typo in an unrelated KS_WRITE_* stops the orders sync (DN-01). A
+        # chain's own typo still raises here, stopping only its own sync.
+        from core.write_chains import chain_for_sync_key
+        chain = chain_for_sync_key(full_key)
+        if chain is not None and chain.writes_postgres():
             from core.pg_chain_watermarks import get_value
             return await get_value(full_key)
         async with self.connection() as conn:
@@ -2192,8 +2196,9 @@ class DuckDBStore(
         """
         timestamp = timestamp or datetime.now(DEFAULT_TZ)
         full_key = f"last_sync_{key}"
-        from core.write_chains import stood_down_sync_keys
-        if full_key in stood_down_sync_keys():
+        from core.write_chains import chain_for_sync_key
+        chain = chain_for_sync_key(full_key)
+        if chain is not None and chain.writes_postgres():
             from core.pg_chain_watermarks import set_value
             await set_value(full_key, timestamp.isoformat())
             return

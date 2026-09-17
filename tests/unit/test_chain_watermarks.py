@@ -169,14 +169,16 @@ class TestTheWiringHasOneHome:
             any(k.arg == "chain_watermarks" for k in c.keywords) for c in scan)
 
     def test_the_store_asks_the_registry_on_both_sides(self):
+        """Both ask the registry which chain owns the key — the same question,
+        so they cannot disagree — and never every chain, or a typo in an
+        unrelated KS_WRITE_* stops the orders sync (DN-01)."""
         for fn in (DuckDBStore.get_last_sync_time, DuckDBStore.set_last_sync_time):
             tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
             called = {n.func.id for n in ast.walk(tree)
                       if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-            assert "stood_down_sync_keys" in called, fn.__name__
-            assert "writes_postgres" not in called, (
-                f"{fn.__name__} asks one chain directly — the getter and the "
-                "setter came apart exactly that way")
+            assert "chain_for_sync_key" in called, fn.__name__
+            assert not called & {"stood_down_sync_keys", "stood_down_tables"}, (
+                f"{fn.__name__} evaluates every chain's flag for one key")
 
     def test_nothing_copies_or_compares_the_new_table(self):
         """`meta.chain_watermarks` is safe only because no copy out of DuckDB

@@ -359,6 +359,25 @@ def check_alerting_health(
     return []
 
 
+def check_write_chains(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `write_chains` block: a KS_WRITE_* value web did not understand.
+
+    Critical, unlike the derivation mode: that chain's writers raise on every
+    call — an expense typed on the form fails, a stock sync stops — and its
+    tables are neither shipped nor compared until the value is fixed. An absent
+    block is not a failure; an older web publishes none.
+    """
+    block = (payload or {}).get("write_chains")
+    if not isinstance(block, dict):
+        return []
+    bad = {name: state.get("error") for name, state in block.items()
+           if isinstance(state, dict) and state.get("error")}
+    if not bad:
+        return []
+    return [("write_chain_flag_invalid",
+             "write chains: " + "; ".join(f"{n}: {e}" for n, e in sorted(bad.items())))]
+
+
 def check_derivation_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
     """Judge the `derivation` block: a KS_PG_DERIVE value web did not understand.
 
@@ -469,6 +488,14 @@ async def run_canary(
             fail(key, message)
         if derivation_failures and severity == "ok":
             severity = "warn"
+
+        # A write chain's flag web did not understand: that chain's writers
+        # raise on every call, so this pages rather than warns.
+        chain_failures = check_write_chains(payload)
+        for key, message in chain_failures:
+            fail(key, message)
+        if chain_failures:
+            severity = "critical"
 
     if cert_err:
         fail("cert_unreachable", f"cert check failed: {cert_err}")

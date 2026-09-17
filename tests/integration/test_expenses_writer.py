@@ -186,3 +186,79 @@ class TestTheHourlyShipperCannotRollTheWriterBack:
         assert "error" not in result, result
         assert "app.manual_expenses" not in result.get("stood_down", [])
         assert await _row(pool, expense_id) is None, "the replace out of an empty DuckDB did not run"
+
+
+class TestAFlagNotUnderstoodStandsDownOnlyItsChain:
+    """DN-01. A typo in KS_WRITE_EXPENSES used to raise inside the shipper's
+    registry call and take the hourly copy of every stage-3 table with it. Now
+    that chain stands down — its Postgres row cannot be overwritten — its table
+    is stamped failing, and everything else ships."""
+
+    @pytest_asyncio.fixture
+    async def stores(self, tmp_path, monkeypatch):
+        from core.duckdb_store import DuckDBStore
+
+        monkeypatch.setenv("KS_PG_DSN", DSN)
+        for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES"):
+            monkeypatch.delenv(env, raising=False)
+        store = DuckDBStore(db_path=tmp_path / "typo.duckdb")
+        await store.connect()
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM app.manual_expenses")
+            await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = 'app.manual_expenses'")
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
+             patch("core.pg.require_revision", new=AsyncMock()):
+            yield store, pool, monkeypatch
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM app.manual_expenses")
+            await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = 'app.manual_expenses'")
+        await pool.close()
+        await store.close()
+
+    @pytest.mark.asyncio
+    async def test_the_row_survives_the_rest_ships_and_the_failure_is_stamped(self, stores):
+        from core import pg_expenses_write
+        from core.pg_operational import replicate_operational
+
+        store, pool, env = stores
+        env.setenv("KS_WRITE_EXPENSES", "postgres")
+        row = await pg_expenses_write.add_expense(
+            date(2026, 9, 17), "marketing", "Facebook Ads", 99, "UAH", "typed", "facebook")
+        env.setenv("KS_WRITE_EXPENSES", "postgrse")                 # the typo
+
+        result = await replicate_operational(store)
+
+        assert "error" not in result, result
+        assert "app.manual_expenses" in result["stood_down"]
+        assert "pg_expenses_write" in result["chain_flag_errors"]
+        assert "app.manual_expenses" not in result["replaced"]
+        assert "bronze.expense_types" in result["replaced"]         # the rest shipped
+        assert await _row(pool, row[0]) is not None, "the typo let the copy wipe the row"
+        async with pool.acquire() as conn:
+            state = await conn.fetchrow(
+                "SELECT failures_since_ok, last_error FROM meta.mirror_state WHERE table_name = 'app.manual_expenses'")
+        assert state["failures_since_ok"] >= 1 and "postgrse" in state["last_error"]
+
+    @pytest.mark.asyncio
+    async def test_stood_down_tables_are_not_even_read_out_of_duckdb(self, stores):
+        """After stage 5 those DuckDB tables will not exist. With both chains
+        writing Postgres and their DuckDB tables gone, the copy still runs."""
+        from core.pg_operational import replicate_operational
+
+        store, _pool, env = stores
+        env.setenv("KS_WRITE_EXPENSES", "postgres")
+        env.setenv("KS_WRITE_INVENTORY", "postgres")
+        async with store.connection() as conn:
+            views = [r[0] for r in conn.execute(
+                "SELECT view_name FROM duckdb_views() WHERE NOT internal").fetchall()]
+            for view in views:
+                conn.execute(f"DROP VIEW IF EXISTS {view}")
+            for table in ("manual_expenses", "offers", "offer_stocks", "stock_movements",
+                          "sku_inventory_status", "inventory_sku_history", "inventory_history"):
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+
+        result = await replicate_operational(store)
+
+        assert "error" not in result, result
+        assert result["movements_appended"] is None and result["sku_history_appended"] is None

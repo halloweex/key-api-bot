@@ -22,31 +22,95 @@ here — so a new chain cannot be written and forgotten.
 """
 from __future__ import annotations
 
-from typing import FrozenSet
+import logging
+from types import ModuleType
+from typing import Dict, FrozenSet, Optional, Tuple
 
 from core import pg_expenses_write, pg_inventory_write
 
+logger = logging.getLogger(__name__)
+
 WRITE_CHAINS = (pg_inventory_write, pg_expenses_write)
+
+# A KS_WRITE_* value no chain understands must stop that chain and nothing
+# else. The registry used to evaluate every chain's flag for every question, so
+# a typo in KS_WRITE_EXPENSES raised inside `get_last_sync_time("orders")` — the
+# first thing the incremental sync asks — and order intake stopped silently for
+# the eight hours the canary allows the orders mirror. Found planning stage 4's
+# remaining work (DN-01), 2026-09-17; the policy question is the owner's OD-18.
+#
+# The rule now:
+# - a sync key consults only the chain that declares it;
+# - a chain whose flag is not understood is STOOD DOWN — its tables are neither
+#   shipped nor compared, because shipping could overwrite rows Postgres alone
+#   holds — and the error is carried out to be seen, never swallowed;
+# - the chain's own writers still raise on their own typo.
+
+
+def chain_name(chain: ModuleType) -> str:
+    return chain.__name__.rsplit(".", 1)[-1]
+
+
+def chain_modes() -> Dict[str, Dict[str, Optional[str]]]:
+    """`{chain: {"env", "mode", "error"}}` — mode is "postgres", "duckdb" or
+    None when the value was not understood. Never raises."""
+    out: Dict[str, Dict[str, Optional[str]]] = {}
+    for chain in WRITE_CHAINS:
+        try:
+            mode, error = ("postgres" if chain.writes_postgres() else "duckdb"), None
+        except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
+            mode, error = None, str(exc)
+        out[chain_name(chain)] = {"env": chain.WRITE_ENV, "mode": mode, "error": error}
+    return out
+
+
+def chain_for_sync_key(key: str) -> Optional[ModuleType]:
+    """The one chain that declares `key` in its CHAIN_SYNC_KEYS, or None."""
+    for chain in WRITE_CHAINS:
+        if key in getattr(chain, "CHAIN_SYNC_KEYS", ()):
+            return chain
+    return None
+
+
+def stood_down_tables_checked() -> Tuple[FrozenSet[str], Dict[str, str]]:
+    """`(tables, {chain: error})`. A chain whose flag is not understood stands
+    down with the chains that write Postgres."""
+    tables, errors = set(), {}
+    for name, state in chain_modes().items():
+        chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
+        if state["mode"] != "duckdb":
+            tables.update(chain.CHAIN_TABLES)
+        if state["error"]:
+            errors[name] = state["error"]
+    if errors:
+        logger.error("write chain flag(s) not understood, stood down: %s", errors)
+    return frozenset(tables), errors
+
+
+def stood_down_sync_keys_checked() -> Tuple[FrozenSet[str], Dict[str, str]]:
+    """`(keys, {chain: error})`, the same rule for `last_sync_*` keys."""
+    keys, errors = set(), {}
+    for name, state in chain_modes().items():
+        chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
+        if state["mode"] != "duckdb":
+            keys.update(getattr(chain, "CHAIN_SYNC_KEYS", ()))
+        if state["error"]:
+            errors[name] = state["error"]
+    return frozenset(keys), errors
 
 
 def stood_down_tables() -> FrozenSet[str]:
-    """Every table whose chain currently writes Postgres."""
-    tables = set()
-    for chain in WRITE_CHAINS:
-        if chain.writes_postgres():
-            tables.update(chain.CHAIN_TABLES)
-    return frozenset(tables)
+    """Every table whose chain writes Postgres, or whose flag is not understood.
+    Never raises — see `stood_down_tables_checked` for the errors."""
+    return stood_down_tables_checked()[0]
 
 
 def stood_down_sync_keys() -> FrozenSet[str]:
-    """Every `last_sync_*` key whose chain currently writes Postgres.
+    """Every `last_sync_*` key whose chain writes Postgres, or whose flag is not
+    understood. Never raises.
 
-    The getter, the setter and the freshness check all ask this, so they cannot
-    come to disagree about where a watermark lives. A chain with no sync keys —
-    chain 8 — simply contributes none.
+    The freshness check asks this; the store's getter and setter ask
+    `chain_for_sync_key` instead, so a key no chain declares evaluates no flag
+    at all. A chain with no sync keys — chain 8 — contributes none.
     """
-    keys = set()
-    for chain in WRITE_CHAINS:
-        if chain.writes_postgres():
-            keys.update(getattr(chain, "CHAIN_SYNC_KEYS", ()))
-    return frozenset(keys)
+    return stood_down_sync_keys_checked()[0]

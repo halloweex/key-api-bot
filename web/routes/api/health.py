@@ -65,6 +65,14 @@ async def _mirror_freshness() -> "dict | None":
         return data
 
 
+def _write_chains() -> dict:
+    """Each write chain's KS_WRITE_* as understood now. Local state, no I/O.
+    Judged by the canary: a value not understood stops that chain's writers."""
+    from core.write_chains import chain_modes
+
+    return chain_modes()
+
+
 def _derivation_mode() -> dict:
     """KS_PG_DERIVE as the scheduler understood it at start. Local state, no I/O."""
     from core import pg_derivation
@@ -200,6 +208,7 @@ async def health_check(request: Request):
         "mirrors": mirrors,
         "alerting": alerting,
         "derivation": _derivation_mode(),
+        "write_chains": _write_chains(),
     }
 
 

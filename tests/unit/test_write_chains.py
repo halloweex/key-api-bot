@@ -63,7 +63,9 @@ class TestTheShipperAndTheComparisonAskOneAnswer:
             tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
             calls = {n.func.id for n in ast.walk(tree)
                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-            assert "stood_down_tables" in calls, fn.__name__
+            # The checked form since DN-01: it never raises on a flag typo and
+            # hands the error out to be recorded and reported.
+            assert "stood_down_tables_checked" in calls, fn.__name__
             assert "writes_postgres" not in calls, (
                 f"{fn.__name__} asks a single chain again — the rule would have two homes")
 
