@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.210
+
+- Pin that a new process rebuilds once with nothing owed
+- Chain 2, step 7: the admin levers reach the Postgres derivation
+- Name the derivation's alert keys where the registry test can see them
+- Keep the ClickHouse job's comment beside its job
+- Register the canary keys for the derived layers
+- Chain 2, steps 3–6: Postgres derives on its own signal, behind KS_PG_DERIVE=own
+
+
 ## 3.0.209
 
 - The cache bound was in one gate too, and I was looking right at it
