@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.220
+
+- DN-05b: cached modes configured before the boot sync; dropped marks heal and are published
+
+
 ## 3.0.219
 
 - DN-02: migration 0027 advances DuckDB sequences instead of DROP/CREATE
