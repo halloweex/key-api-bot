@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.217
+
+- DN-01: a KS_WRITE_* value no chain understands stops that chain, not order intake
+
+
 ## 3.0.216
 
 
