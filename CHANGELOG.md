@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.219
+
+- DN-02: migration 0027 advances DuckDB sequences instead of DROP/CREATE
+
+
 ## 3.0.218
 
 - DN-04: the UTM ship refuses a shrink instead of copying it to /traffic
