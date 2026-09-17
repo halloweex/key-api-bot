@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.218
+
+- DN-04: the UTM ship refuses a shrink instead of copying it to /traffic
+- DN-10: the sales_type CASE may only produce a KNOWN_SALES_TYPES value
+
+
 ## 3.0.217
 
 - DN-01: a KS_WRITE_* value no chain understands stops that chain, not order intake
