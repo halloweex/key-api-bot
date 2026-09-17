@@ -64,13 +64,14 @@ async def pool(monkeypatch):
         await conn.execute(
             "INSERT INTO meta.mirror_state (table_name, last_attempted_at, last_ok_at, failures_since_ok, backfilled_at)"
             " VALUES ('bronze.orders', now(), now(), 0, now())"
-            " ON CONFLICT (table_name) DO UPDATE SET last_ok_at = now(), failures_since_ok = 0,"
-            " backfilled_at = now(), last_error = NULL")
+            " ON CONFLICT (table_name) DO UPDATE SET last_attempted_at = now(), last_ok_at = now(),"
+            " failures_since_ok = 0, backfilled_at = now(), last_error = NULL")
         # Silver's watermark frozen three hours ago: the twin must not care.
         await conn.execute(
             "INSERT INTO meta.mirror_state (table_name, last_attempted_at, last_ok_at, failures_since_ok)"
             " VALUES ('silver.orders', now() - interval '3 hours', now() - interval '3 hours', 0)"
-            " ON CONFLICT (table_name) DO UPDATE SET last_ok_at = now() - interval '3 hours'")
+            " ON CONFLICT (table_name) DO UPDATE SET last_attempted_at = now() - interval '3 hours',"
+            " last_ok_at = now() - interval '3 hours'")
     with patch("core.pg.get_pool", new=AsyncMock(return_value=p)), \
          patch("core.pg.require_revision", new=AsyncMock()):
         yield p
