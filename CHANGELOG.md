@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.212
+
+- Bound the reconciliation lock test so a deadlock fails fast
+- State the Silver/UTM window under own, and why it waits for step 9
+- Pin the canary's wiring for a derivation mode web did not understand
+- Pin that the reconciliation resync writes under the lock and fetches outside it
+- Chain 2 review: a KS_PG_DERIVE typo is visible, and the reconciliation resync holds the lock
+
+
 ## 3.0.211
 
 - A run in which a check could not look does not announce its recovery
