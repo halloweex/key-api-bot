@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.211
+
+- A run in which a check could not look does not announce its recovery
+
+
 ## 3.0.210
 
 - Pin that a new process rebuilds once with nothing owed
