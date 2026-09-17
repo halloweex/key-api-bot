@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.209
+
+- The cache bound was in one gate too, and I was looking right at it
+
+
 ## 3.0.208
 
 - Pin that a successful mark puts the lock timeout back
