@@ -295,3 +295,81 @@ class TestHeaderOnlyOrdersGetTheirLineItems:
         finally:
             await store.close()
         assert result["header_only_repaired"] == 0 and ships.chunks == []
+
+
+class TestShipOrdersByIdHoldsTheLockItIsGiven:
+    """`ship_orders_by_id` takes the same optional `lock` as `backfill_orders`
+    and its docstring makes the same safety argument for it, but neither
+    caller passes one today: the route already holds the lock (an
+    `asyncio.Lock` is not reentrant) and the CLI runs in a process where that
+    lock does not exist. A parameter carrying a safety argument that nothing
+    exercises is a claim, so it is exercised here.
+
+    It stays rather than being deleted because the next caller is the one it
+    is for: anything that changes orders in DuckDB from inside the web
+    process without already holding the lock."""
+
+    @pytest.mark.asyncio
+    async def test_each_chunk_reads_and_writes_inside_one_hold(self, tmp_path):
+        import asyncio
+
+        from core.pg_backfill import ship_orders_by_id
+        from core.pg_order_versions import BACKFILL
+
+        lock = asyncio.Lock()
+        store = await _store_with(tmp_path, [1, 2, 3])
+        seen = {"reads": [], "writes": []}
+
+        original = store.connection
+
+        def _connection():
+            seen["reads"].append(lock.locked())
+            return original()
+
+        async def _write(orders, products, *, replace_products=True,
+                         version_kind=None):
+            seen["writes"].append(lock.locked())
+
+        try:
+            with patch("core.pg_landing.write_orders", new=_write), \
+                 patch("core.pg_landing.enabled", return_value=True), \
+                 patch("core.pg.require_revision", new=AsyncMock()), \
+                 patch.object(store, "connection", new=_connection):
+                result = await ship_orders_by_id(
+                    store, [1, 2, 3], version_kind=BACKFILL,
+                    lock=lock, chunk_size=1,
+                )
+        finally:
+            await store.close()
+
+        assert result["chunks"] == 3
+        assert seen["reads"] == [True, True, True]
+        assert seen["writes"] == [True, True, True]
+        # Released between chunks, which is what makes a long run survivable
+        # for the two-minute warehouse tick waiting behind it.
+        assert not lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_without_a_lock_it_takes_none(self, tmp_path):
+        """What both real callers do. The route is already inside the lock,
+        and `asyncio.Lock` is not reentrant — handing it down from there
+        would deadlock the request that did it."""
+        import asyncio
+
+        from core.pg_backfill import ship_orders_by_id
+        from core.pg_order_versions import BACKFILL
+
+        outer = asyncio.Lock()
+        store = await _store_with(tmp_path, [1])
+        try:
+            with patch("core.pg_landing.write_orders", new=AsyncMock()), \
+                 patch("core.pg_landing.enabled", return_value=True), \
+                 patch("core.pg.require_revision", new=AsyncMock()):
+                async with outer:
+                    result = await asyncio.wait_for(
+                        ship_orders_by_id(store, [1], version_kind=BACKFILL),
+                        timeout=10,
+                    )
+        finally:
+            await store.close()
+        assert result["orders_shipped"] == 1

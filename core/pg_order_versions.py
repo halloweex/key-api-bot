@@ -66,6 +66,53 @@ from typing import Sequence
 
 TABLE = "app.order_versions"
 
+# The four things a row of this table can be. `kind` has no CHECK constraint
+# (revision 0010), so these are the whole vocabulary and they live here.
+CREATE = "create"        # the archive's first sighting of an order
+CHANGE = "change"        # the sync wrote a header that actually moved
+BASELINE = "baseline"    # seeded by the migration, one per order it found
+BACKFILL = "backfill"    # a `manager_comment` restored from KeyCRM — OD-20 (b)
+
+# OD-20 (b), 2026-09-17. The two `manager_comment` backfills re-fetch a comment
+# KeyCRM has always held and fill it in where the column is NULL; the row does
+# change, so it is archived rather than skipped, but calling it a 'change'
+# would date a transition on the day an operator ran a script. Labelled instead
+# — the value, the order and the moment are all still recorded, and the two
+# liveness checks below can tell an operator's run from the writer's output.
+#
+# Neither of these is the sync writer's work, so neither may answer "is the
+# writer still running" or "is it writing too much":
+# `core/mirror_reconciliation.py` renders this tuple into both statements. The
+# baseline exclusion was found on production, filing a WARN with count=46,695
+# on the day revision 0010 landed — one seeded row per order the migration
+# found, and forty-six times the flood threshold.
+#
+# The backfill exclusion is that lesson taken before the event rather than
+# after it, and OD-20 asked for the volume to be measured before it was taken.
+# Measured on production 2026-09-17, and the numbers are smaller than the
+# argument first drafted here assumed: **0** orders where Postgres holds a
+# NULL `manager_comment` and DuckDB holds one, so nothing diverges today;
+# 10,192 orders carry a NULL comment in DuckDB inside the backfills' own
+# 730-day window, of which **26** are website orders (`source_id = 4`) — the
+# upper bound on what a KeyCRM re-fetch could actually fill, because an order
+# taken by hand in the Instagram inbox never carried a tag and never will.
+# So one run today is ~26 rows against a threshold of 1,000, and the flood is
+# not at risk at all.
+#
+# The exclusion stands anyway, because it is about what the count *means*
+# rather than how large it is: a repair an operator deliberately started is
+# not the content comparison having stopped discriminating, which is the one
+# failure `order_versions_flooding` exists to name. The volume can move — the
+# window is an argument (`--days`), and the shop's comment template has broken
+# once already, in July 2026, which is what put 10,192 NULLs there — while the
+# meaning cannot.
+NOT_THE_WRITER: tuple[str, ...] = (BASELINE, BACKFILL)
+
+# What a capture may label a row that moved. `create` is not here: a first
+# sighting is named by the statement itself, because it is a fact about the
+# archive rather than about the caller.
+WRITER_KINDS: tuple[str, ...] = (CHANGE, BACKFILL)
+
 # The columns that decide whether an order has changed. One home, rule 1: the
 # capture below renders them, and `tests/unit/test_order_versions.py` asserts
 # revision 0010 declares exactly these.
@@ -101,6 +148,17 @@ def _capture_sql() -> str:
     DISTINCT FROM` so that NULL compares as a value — `manager_id` is NULL on
     every Shopify order, and a NULL-unsafe comparison would write a version for
     each of them on every tick.
+
+    The label of a moved row is `$2`, not a rendered literal, so that one
+    statement text serves every caller (OD-20 (b)) instead of a second SQL
+    string per kind. That is all the parameter buys: it is **not** a guarantee
+    about the vocabulary. `kind` has never carried a CHECK — verified on a
+    migrated revision 0033 database, where `app.order_versions` holds only its
+    primary key and an `INSERT ... VALUES (1, 'nonsense')` is accepted — so
+    the vocabulary is enforced in code, by `capture_versions` before it binds
+    and by `write_orders` earlier still, before the pool is acquired. A first
+    sighting stays `'create'` under every caller, because that is the archive
+    speaking about itself rather than about the write.
     """
     versioned = ", ".join(VERSIONED_COLUMNS)
     stored = ", ".join(_ALL)
@@ -117,7 +175,7 @@ WITH latest AS (
 )
 INSERT INTO {TABLE} (order_id, kind, {stored})
 SELECT o.id,
-       CASE WHEN l.order_id IS NULL THEN 'create' ELSE 'change' END,
+       CASE WHEN l.order_id IS NULL THEN '{CREATE}' ELSE $2::text END,
        {o_stored}
 FROM bronze.orders o
 LEFT JOIN latest l ON l.order_id = o.id
@@ -131,7 +189,9 @@ RETURNING order_id
 CAPTURE_SQL = _capture_sql()
 
 
-async def capture_versions(conn, order_ids: Sequence[int]) -> int:
+async def capture_versions(
+    conn, order_ids: Sequence[int], kind: str = CHANGE,
+) -> int:
     """Archive a version for each of `order_ids` whose header actually moved.
 
     Takes an open connection and no pool: the caller is `write_orders`, already
@@ -139,11 +199,25 @@ async def capture_versions(conn, order_ids: Sequence[int]) -> int:
     version outside the transaction that writes the row it describes — which is
     the one thing this must not do.
 
+    `kind` is what a moved row is called — `CHANGE` for the sync, `BACKFILL`
+    for the two `manager_comment` backfills. It defaults to the sync's answer
+    so that every existing caller keeps writing exactly what it wrote before.
+
+    **The label is checked here, and not only in `write_orders`.** This is a
+    public function and it is where the string actually reaches the archive;
+    a caller arriving directly would otherwise write an unvetted `kind` into
+    an append-only table nothing can delete from, and both liveness checks
+    match kinds exactly, so they would silently count it as the writer's
+    output. `write_orders` keeps its own copy of the check because it can
+    refuse before acquiring the pool, which is a different thing worth having.
+
     Returns the number of versions written, which is `<= len(order_ids)` by
     construction and usually far less: the 05:15 status refresh offers ~1,400
     ids and, on a day when nothing moved, writes none.
     """
+    if kind not in WRITER_KINDS:
+        raise ValueError(f"kind={kind!r} is not one of {WRITER_KINDS}")
     if not order_ids:
         return 0
-    rows = await conn.fetch(CAPTURE_SQL, list(order_ids))
+    rows = await conn.fetch(CAPTURE_SQL, list(order_ids), kind)
     return len(rows)

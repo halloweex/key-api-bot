@@ -128,7 +128,7 @@ WRITER_MODULES = frozenset({
 WRITER_CALLS = frozenset({
     "upsert_orders", "upsert_managers", "upsert_buyers", "write_orders",
     "mirror_orders", "mirror_buyers", "backfill_orders", "backfill_buyers",
-    "replicate_managers",
+    "replicate_managers", "ship_orders_by_id",
 })
 
 
@@ -171,16 +171,17 @@ class TestScriptsConfigureBeforeTheyWrite:
         return out
 
     def test_the_walk_finds_the_scripts_that_write(self):
-        """One today, and that is the honest number, not a walk that stopped
-        looking. `force_resync.py` reaches `upsert_orders` through the sync
-        service. `backfill_utm.py` looks like a second and is not: it rewrites
-        `manager_comment` in DuckDB with a plain `UPDATE` and reaches Postgres
-        only through `ship_after_reparse`, whose table no derivation reads —
-        so it never reaches a writer that marks. Should it ever call one, this
-        walk finds it and the test below holds it to the same rule."""
+        """Two today, and the second is why the walk was written rather than a
+        list typed out. `force_resync.py` reaches `upsert_orders` through the
+        sync service. `backfill_utm.py` was named here as the near miss — it
+        rewrote `manager_comment` in DuckDB with a plain `UPDATE` and reached
+        Postgres only through `ship_after_reparse`, whose table no derivation
+        reads. DN-17 gave it `ship_orders_by_id`, so it writes `bronze.orders`
+        now, and this walk found it on the first run rather than a reviewer
+        finding it later."""
         found = self._scripts()
         assert "force_resync.py" in found, sorted(found)
-        assert len(found) >= 1
+        assert "backfill_utm.py" in found, sorted(found)
 
     def test_every_one_configures_the_modes_before_its_first_write(self):
         for name, (tree, writer_names) in self._scripts().items():

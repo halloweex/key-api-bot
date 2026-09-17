@@ -331,6 +331,11 @@ async def _run_backfill_inner(days: int):
         current_start = _dt.now(tz) - timedelta(days=days)
         api_fetched_total = 0
         db_updated_total = 0
+        pg_shipped_total = 0
+        # Orders this run changed in DuckDB and could not ship. Reported
+        # rather than retried: a re-run cannot find them again, so the list
+        # itself is what an operator needs.
+        pg_failed_ids: list[int] = []
         chunks_processed = 0
 
         while current_start < final_end:
@@ -357,28 +362,91 @@ async def _run_backfill_inner(days: int):
 
             api_fetched_total += len(orders_by_id)
             chunk_updated = 0
+            chunk_shipped = 0
 
             if orders_by_id:
-                async with store.connection() as conn:
-                    null_before = conn.execute(
-                        "SELECT COUNT(*) FROM orders WHERE manager_comment IS NULL"
-                    ).fetchone()[0]
-                    for order_id, comment in orders_by_id.items():
-                        conn.execute(
-                            "UPDATE orders SET manager_comment = ? "
-                            "WHERE id = ? AND manager_comment IS NULL",
-                            [comment, order_id],
-                        )
-                    null_after = conn.execute(
-                        "SELECT COUNT(*) FROM orders WHERE manager_comment IS NULL"
-                    ).fetchone()[0]
-                    conn.execute("CHECKPOINT")
-                    chunk_updated = null_before - null_after
+                # Both halves under the scheduler's heavy-job lock, because
+                # they are one write: the UPDATE moves DuckDB and the ship
+                # carries the same rows to `bronze.orders`. That is not what
+                # `/traffic` reads — the tab reads `silver.orders LEFT JOIN
+                # silver.order_utm` and the parsed rows already reach Postgres
+                # through `ship_after_reparse` below — it is what the daily
+                # `mirror_landing` fingerprint compares (`manager_comment` is
+                # one of its columns) and what step 9's Postgres UTM parser
+                # will read. The three scheduled syncs hold this lock across
+                # their own DuckDB write *and* their mirror call, so a chunk
+                # taken under it cannot straddle one — and without it a sync
+                # writing between our UPDATE and our read would leave Postgres
+                # holding whichever copy committed last.
+                #
+                # The KeyCRM pagination above stays outside it: the lock is
+                # for the two stores, and holding it across a network fetch
+                # would stall the two-minute warehouse tick for the length of
+                # a page.
+                from core.pg_backfill import ship_orders_by_id
+                from core.pg_order_versions import BACKFILL
+                from core.scheduler import get_scheduler
+
+                async with get_scheduler()._heavy_job_lock:
+                    async with store.connection() as conn:
+                        # The ids this chunk will actually change, read before
+                        # the UPDATE rather than counted after it. The old
+                        # before/after count over the whole table was both
+                        # racy with the sync and unable to say *which* orders
+                        # moved, and the ship needs exactly that list —
+                        # `COALESCE(EXCLUDED, stored)` means an order whose
+                        # comment did not change has nothing to carry.
+                        changed_ids = [
+                            int(r[0]) for r in conn.execute(
+                                "SELECT id FROM orders WHERE id IN "
+                                f"({', '.join('?' for _ in orders_by_id)}) "
+                                "AND manager_comment IS NULL",
+                                list(orders_by_id),
+                            ).fetchall()
+                        ]
+                        for order_id in changed_ids:
+                            conn.execute(
+                                "UPDATE orders SET manager_comment = ? "
+                                "WHERE id = ? AND manager_comment IS NULL",
+                                [orders_by_id[order_id], order_id],
+                            )
+                        conn.execute("CHECKPOINT")
+                    chunk_updated = len(changed_ids)
                     db_updated_total += chunk_updated
+                    # Already holding the lock, so the helper is told not to
+                    # take it: `asyncio.Lock` is not reentrant.
+                    #
+                    # Caught per chunk rather than allowed to end the run.
+                    # `ship_orders_by_id` raises — `backfill_orders`' contract
+                    # — but this caller has a second job the helper knows
+                    # nothing about: the DuckDB re-parse below, which was
+                    # Postgres-independent before DN-17 and must stay so. An
+                    # unreachable Postgres (or `web` running ahead of
+                    # `migrate`, where `require_revision()` raises) would
+                    # otherwise abort the run with the comments already
+                    # restored in DuckDB — and since the SELECT above only
+                    # offers rows whose comment is still NULL, a re-run never
+                    # re-offers them. The ids are kept so an operator has the
+                    # list the daily reconciliation will otherwise hand them
+                    # one bucket at a time.
+                    try:
+                        shipped = await ship_orders_by_id(
+                            store, changed_ids, version_kind=BACKFILL,
+                        )
+                        chunk_shipped = shipped["orders_shipped"]
+                        pg_shipped_total += chunk_shipped
+                    except Exception as ship_error:
+                        pg_failed_ids.extend(changed_ids)
+                        logger.error(
+                            "UTM backfill: shipping %d order(s) to Postgres "
+                            "failed, carrying on with the DuckDB re-parse: %s",
+                            len(changed_ids), ship_error, exc_info=True,
+                        )
 
             logger.info(
                 f"UTM backfill chunk {chunks_processed} ({start_str} to {end_str}): "
-                f"api={len(orders_by_id)}, db_changed={chunk_updated}"
+                f"api={len(orders_by_id)}, db_changed={chunk_updated}, "
+                f"pg_shipped={chunk_shipped}"
             )
 
             _backfill_status["result"] = {
@@ -386,12 +454,25 @@ async def _run_backfill_inner(days: int):
                 "chunks_processed": chunks_processed,
                 "api_fetched": api_fetched_total,
                 "db_updated": db_updated_total,
+                "pg_shipped": pg_shipped_total,
+                "pg_failed_ids": list(pg_failed_ids),
             }
             current_start = current_end
             # Pause between chunks to avoid tripping the circuit breaker
             await asyncio.sleep(3)
 
-        logger.info(f"UTM backfill: api_fetched={api_fetched_total}, db_updated={db_updated_total} across {chunks_processed} chunks")
+        logger.info(
+            f"UTM backfill: api_fetched={api_fetched_total}, "
+            f"db_updated={db_updated_total}, pg_shipped={pg_shipped_total} "
+            f"across {chunks_processed} chunks"
+        )
+        if pg_failed_ids:
+            logger.error(
+                "UTM backfill: %d order(s) were restored in DuckDB and never "
+                "reached Postgres. Re-ship them by id; a re-run of this "
+                "endpoint will not, because their comment is no longer NULL. "
+                "Ids: %s", len(pg_failed_ids), pg_failed_ids,
+            )
 
         # Force final checkpoint before UTM refresh
         async with store.connection() as conn:
@@ -414,11 +495,16 @@ async def _run_backfill_inner(days: int):
         logger.info(f"UTM backfill complete: {utm_count} UTM records")
 
         _backfill_status.update(running=False, result={
-            "status": "success",
+            # `partial` rather than `success` when anything failed to ship:
+            # DuckDB and Postgres disagree about those orders until somebody
+            # re-ships them, and a green status is how that gets forgotten.
+            "status": "partial" if pg_failed_ids else "success",
             "orders_missing_before": null_count,
             "orders_remaining_null": remaining_null,
             "api_fetched": api_fetched_total,
             "db_updated": db_updated_total,
+            "pg_shipped": pg_shipped_total,
+            "pg_failed_ids": pg_failed_ids,
             "chunks_processed": chunks_processed,
             "utm_records_parsed": utm_count,
         })

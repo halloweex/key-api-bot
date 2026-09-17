@@ -30,10 +30,15 @@ import pytest
 
 from core import pg
 from core.pg_order_versions import (
+    BACKFILL,
+    BASELINE,
     CAPTURE_SQL,
     CARRIED_COLUMNS,
+    CHANGE,
+    NOT_THE_WRITER,
     TABLE,
     VERSIONED_COLUMNS,
+    WRITER_KINDS,
     capture_versions,
 )
 
@@ -226,8 +231,21 @@ class TestTheCaptureReadsWhatWasWritten:
         comparison each of them would write a version on every tick."""
         assert "IS DISTINCT FROM" in CAPTURE_SQL
 
-    def test_a_first_sighting_is_named_differently_from_a_change(self):
-        assert "'create'" in CAPTURE_SQL and "'change'" in CAPTURE_SQL
+    def test_a_first_sighting_is_named_by_the_statement_itself(self):
+        """`create` is a fact about the archive — this order has no previous
+        version — so it is not the caller's to choose. What a *moved* row is
+        called is, since OD-20 (b), which is why it travels as `$2` and why
+        no kind but `create` is written into the SQL."""
+        assert "'create'" in CAPTURE_SQL
+        assert "$2::text" in CAPTURE_SQL
+        for kind in (CHANGE, BACKFILL, "baseline"):
+            assert f"'{kind}'" not in CAPTURE_SQL, kind
+
+    def test_a_backfilled_comment_may_be_labelled_but_never_skipped(self):
+        """OD-20 (b): the row is archived like any other, under its own name.
+        The alternative considered was not writing it at all, which would have
+        left the archive unable to answer when a comment appeared."""
+        assert set(WRITER_KINDS) == {CHANGE, BACKFILL}
 
     def test_the_baseline_is_seeded_by_the_migration_itself(self):
         """An empty archive makes the first row about each order ambiguous —
@@ -295,19 +313,45 @@ class TestTheSeedIsNotTheWritersOutput:
     necessarily contain the words a source-text search would look for, so a
     grep would have passed with the clause deleted."""
 
-    def test_the_daily_rate_excludes_the_baseline(self):
+    def test_the_daily_rate_excludes_both_kinds_by_name(self):
+        """Both literals, spelled out, because `ORDER_VERSIONS_RECENT_SQL` is
+        **rendered from** `NOT_THE_WRITER`. A loop over that tuple is a circle:
+        drop a kind and the statement loses the clause with it, so the loop
+        still passes on a check that no longer runs. Measured — the review
+        removed `BASELINE` from the tuple and the whole suite stayed green,
+        which is precisely the 46,695-row WARN this class was written about
+        coming back on the next fresh install."""
         from core.mirror_reconciliation import ORDER_VERSIONS_RECENT_SQL
 
-        assert "kind <> 'baseline'" in ORDER_VERSIONS_RECENT_SQL
         assert "captured_at >= $1" in ORDER_VERSIONS_RECENT_SQL
+        assert "kind NOT IN ('baseline', 'backfill')" in ORDER_VERSIONS_RECENT_SQL
+        assert f"'{CHANGE}'" not in ORDER_VERSIONS_RECENT_SQL
 
-    def test_the_staleness_check_does_not_exclude_it(self):
-        """The opposite decision, and deliberate: the baseline is what gives a
-        freshly migrated archive its first 24 hours before anyone is asked why
-        it is quiet."""
+    def test_both_kinds_are_in_the_tuple_the_statement_is_rendered_from(self):
+        """The other half of the same claim, and the side a reader edits.
+
+        `BASELINE`: revision 0010 seeds one row per order inside the migration,
+        all stamped `now()` — 46,695 of them measured on production, forty-six
+        times the flood threshold, filed as a WARN on the day it landed.
+        `BACKFILL`: OD-20 (b). Measured on production 2026-09-17, one run today
+        would be ~26 rows (26 website orders among 10,192 NULL comments in the
+        730-day window), so this is not about the volume — it is that a repair
+        an operator started is not the writer having stopped discriminating."""
+        assert BASELINE in NOT_THE_WRITER, "the migration's seed"
+        assert BACKFILL in NOT_THE_WRITER, "OD-20 (b)"
+
+    def test_the_staleness_check_keeps_the_baseline_and_drops_the_backfill(self):
+        """Two exclusions that look alike and are not. The baseline exists
+        only in the hours after the migration and its job there is to give a
+        fresh archive 24 h of quiet. A backfill is run by a human on a system
+        that has been writing for months, so counting it as proof the writer
+        is alive would hide a dead sync for a day after somebody repaired a
+        comment."""
         from core.mirror_reconciliation import ORDER_VERSIONS_NEWEST_SQL
 
         assert "baseline" not in ORDER_VERSIONS_NEWEST_SQL
+        # Spelled out, not rendered from `BACKFILL`, for the reason above.
+        assert "kind <> 'backfill'" in ORDER_VERSIONS_NEWEST_SQL
         assert "max(captured_at)" in ORDER_VERSIONS_NEWEST_SQL
 
 
@@ -374,7 +418,54 @@ class TestTheCountItReports:
         conn = _FakeConn()
         await capture_versions(conn, [7, 8])
         (_sql, args), = conn.calls
-        assert args == ([7, 8],)
+        assert args == ([7, 8], CHANGE)
+
+    @pytest.mark.asyncio
+    async def test_the_sync_is_what_it_labels_a_row_by_default(self):
+        """Every caller that existed before OD-20 keeps writing 'change', and
+        nothing had to be edited for that to stay true."""
+        conn = _FakeConn()
+        await capture_versions(conn, [7])
+        assert conn.calls[0][1][1] == CHANGE
+
+    @pytest.mark.asyncio
+    async def test_a_caller_can_name_the_label(self):
+        conn = _FakeConn()
+        await capture_versions(conn, [7], BACKFILL)
+        assert conn.calls[0][1][1] == BACKFILL
+
+    @pytest.mark.asyncio
+    async def test_a_label_outside_the_vocabulary_never_reaches_the_archive(self):
+        """The parameter keeps the statement text fixed; it guarantees nothing
+        about what goes into `kind`. Verified on a migrated revision 0033
+        database: `app.order_versions` carries only its primary key, and
+        `INSERT ... VALUES (1, 'nonsense')` is accepted. So the vocabulary is
+        checked here, where the string is actually bound — this is a public
+        function, the table cannot be deleted from, and both liveness checks
+        match kinds exactly, so an invented label would be counted as the
+        sync writer's output forever."""
+        conn = _FakeConn()
+        with pytest.raises(ValueError, match="nonsense"):
+            await capture_versions(conn, [7], "nonsense")
+        assert conn.calls == [], "refused before the statement is bound"
+
+    @pytest.mark.asyncio
+    async def test_the_archives_own_word_for_a_first_sighting_is_not_a_label(self):
+        """`create` is written by the CASE, never by a caller: it is a fact
+        about the archive rather than about the write, so offering it here is
+        a caller claiming something it cannot know."""
+        conn = _FakeConn()
+        with pytest.raises(ValueError):
+            await capture_versions(conn, [7], "create")
+
+    @pytest.mark.asyncio
+    async def test_an_empty_batch_is_still_checked(self):
+        """A typo is a defect whether or not this batch had ids, and a run
+        where every chunk happened to be empty must not be the run that hides
+        it until the day one is not."""
+        conn = _FakeConn()
+        with pytest.raises(ValueError):
+            await capture_versions(conn, [], "nonsense")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -426,8 +517,8 @@ class TestAgainstARealPostgres:
                    .replace(TABLE, "app.t_order_versions")
                    .replace("bronze.orders", "app.t_bronze_orders"))
 
-            async def capture():
-                return len(await conn.fetch(sql, [1]))
+            async def capture(kind=CHANGE):
+                return len(await conn.fetch(sql, [1], kind))
 
             # A Shopify order: manager_id NULL, which is the case a NULL-unsafe
             # comparison would rewrite on every tick.
@@ -456,12 +547,21 @@ class TestAgainstARealPostgres:
             await conn.execute("UPDATE app.t_bronze_orders SET grand_total = 100.00 WHERE id = 1")
             assert await capture() == 0, "same money, different literal, no row"
 
+            # OD-20 (b): a restored comment is a real change to the stored row
+            # and is archived like any other, under its own name. The label is
+            # the only thing that differs — same statement, same comparison.
+            await conn.execute(
+                "UPDATE app.t_bronze_orders SET manager_comment = 'utm=y' WHERE id = 1")
+            assert await capture(BACKFILL) == 1
+            assert await capture(BACKFILL) == 0, (
+                "the comparison does not change with the label")
+
             kinds = [r[0] for r in await conn.fetch(
                 "SELECT kind FROM app.t_order_versions ORDER BY id")]
-            assert kinds == ["create", "change", "change"]
+            assert kinds == ["create", "change", "change", BACKFILL]
 
             total = await conn.fetchval("SELECT count(*) FROM app.t_order_versions")
-            assert total == 3
+            assert total == 4
         finally:
             # Real tables outlive the connection, unlike the TEMP ones this
             # used to make, so they are dropped rather than forgotten.
