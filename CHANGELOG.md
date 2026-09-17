@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.215
+
+- The disk detector was measuring noise; growth now has to hold
+- "=" should mean since you last read this, not since a run six hours ago
+- The ClickHouse archive is live; the note said it did not exist
+
+
 ## 3.0.214
 
 - The hourly copy reports only what it wrote
