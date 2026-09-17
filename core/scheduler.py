@@ -243,10 +243,12 @@ class BackgroundScheduler:
 
         # Who derives Postgres' Silver and Gold, read once for the life of the
         # process — never on the write path, where the marks ride inside the
-        # landing writers' transactions. See `core/pg_derivation.py`.
-        from core import pg_derivation
+        # landing writers' transactions. See `core/pg_derivation.py`. Web's
+        # startup has already done this before its boot sync; calling it again
+        # is harmless, and keeps a scheduler started anywhere else correct.
+        from core.runtime_modes import configure_modes
 
-        pg_derivation.configure_mode()
+        configure_modes()
 
         # Register jobs
         await self._register_jobs()
@@ -1453,6 +1455,13 @@ class BackgroundScheduler:
                 async with pool.acquire() as conn:
                     validation = await derivation.validate(conn)
                     await derivation.complete(conn, seen)
+                    # Only a validated rebuild covers a dropped mark: one that
+                    # failed validation may not say what bronze holds, and the
+                    # count is the only trace the loss left. An errored rebuild
+                    # never reaches this line. `pg_derivation.heal_dropped_marks`
+                    # says why `started` is the right bound.
+                    if validation["passed"]:
+                        await derivation.heal_dropped_marks(conn, started)
                     await derivation.record_run(
                         conn, trigger=trigger, started_at=started,
                         ended_at=datetime.now(timezone.utc), requested_seen=seen,

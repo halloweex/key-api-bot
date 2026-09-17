@@ -19,6 +19,7 @@ from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
 from bot.database import init_database
 from core.duckdb_store import get_store, close_store
 from core.sync_service import init_and_sync
+from core.runtime_modes import configure_modes
 from core.config import validate_config, ConfigurationError
 from core.observability import setup_logging, get_logger
 from core.scheduler import start_scheduler, stop_scheduler
@@ -160,6 +161,12 @@ async def startup_event():
     # Initialize SQLite database (for bot operations)
     init_database()
     logger.info("SQLite database initialized")
+
+    # The cached modes, before the boot sync below writes a single order. The
+    # scheduler used to be the only caller, and it starts after that sync — so
+    # the boot's orders landed in Postgres unmarked under KS_PG_DERIVE=own.
+    # See `core/runtime_modes.py`.
+    configure_modes()
 
     # Initialize DuckDB analytics store and sync from API
     logger.info("Initializing DuckDB analytics store...")

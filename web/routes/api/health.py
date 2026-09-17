@@ -74,10 +74,77 @@ def _write_chains() -> dict:
 
 
 def _derivation_mode() -> dict:
-    """KS_PG_DERIVE as the scheduler understood it at start. Local state, no I/O."""
+    """KS_PG_DERIVE as this process understood it at start. Local state, no I/O."""
     from core import pg_derivation
 
     return {"mode": pg_derivation.mode(), "error": pg_derivation.mode_error()}
+
+
+# Marks dropped and not yet covered by a validated rebuild, on the same TTL as
+# the watermarks. Its own cache rather than a field of theirs: "nothing
+# dropped" is an answer here and must be cached, where the mirror block caches
+# only what it could read. The stamp is cached, not the age, so the age is
+# never a minute stale against the threshold it is judged by.
+_marks_cache: dict = {"data": None, "expires_at": 0}
+_marks_cache_lock = asyncio.Lock()
+_NOT_ASKED = {"marks_dropped_unhealed": None, "last_mark_drop_age_s": None}
+
+
+async def _dropped_marks() -> dict:
+    """`marks_dropped_unhealed` and `last_mark_drop_age_s` for the derivation block.
+
+    A mark that could not be raised leaves its rows landed and nothing owed, so
+    the loss shows only in the signal's watermark: `failures_since_ok` counts
+    the drops since a validated rebuild last covered them
+    (`pg_derivation.heal_dropped_marks`), and `last_attempted_at` is when the
+    latest one was recorded. The age is published only while the count is above
+    zero — a heal moves the stamp too, and its age would read as a drop.
+
+    The canary judges the pair, not the count: a drop the next rebuild will
+    cover is not a finding, a drop older than any rebuild should take is.
+
+    Both null when it is not a question — under piggyback nothing marks and
+    nothing heals, so a count left over from an earlier soak would page for
+    ever — and when Postgres cannot be read. A signal that has never dropped a
+    mark has no row, and that is a count of 0.
+    """
+    from datetime import datetime, timezone
+
+    from core import pg_derivation
+
+    if not pg_derivation.owns():
+        return dict(_NOT_ASKED)
+    now = time.time()
+    async with _marks_cache_lock:
+        if now < _marks_cache["expires_at"]:
+            count, dropped_at = _marks_cache["data"]
+        else:
+            try:
+                from core.pg import get_pool
+
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT failures_since_ok, last_attempted_at"
+                        " FROM meta.mirror_state WHERE table_name = $1",
+                        pg_derivation.SIGNAL_TABLE,
+                    )
+            except Exception as e:
+                logger.debug(f"Dropped derivation marks unavailable: {e}")
+                return dict(_NOT_ASKED)
+            count = int(row["failures_since_ok"] or 0) if row else 0
+            dropped_at = row["last_attempted_at"] if row and count > 0 else None
+            _marks_cache["data"] = (count, dropped_at)
+            _marks_cache["expires_at"] = now + _STATS_CACHE_TTL
+    age = (int((datetime.now(timezone.utc) - dropped_at).total_seconds())
+           if dropped_at is not None else None)
+    return {"marks_dropped_unhealed": count, "last_mark_drop_age_s": age}
+
+
+async def _derivation_block() -> dict:
+    """The `derivation` block: the mode and its error, which are local state,
+    plus the two numbers in it that have to be read out of Postgres."""
+    return {**_derivation_mode(), **await _dropped_marks()}
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -207,7 +274,7 @@ async def health_check(request: Request):
         "data_quality": data_quality,
         "mirrors": mirrors,
         "alerting": alerting,
-        "derivation": _derivation_mode(),
+        "derivation": await _derivation_block(),
         "write_chains": _write_chains(),
     }
 

@@ -378,6 +378,63 @@ def check_write_chains(payload: Optional[dict]) -> "list[tuple[str, str]]":
              "write chains: " + "; ".join(f"{n}: {e}" for n, e in sorted(bad.items())))]
 
 
+# How long a dropped derivation mark may stand before it says the heal is not
+# happening. A drop owes nothing — the rows landed, only the signal did not —
+# so in a quiet hour the rebuild that covers it is the hourly heartbeat. This is
+# `core.pg_derivation.HEARTBEAT` (60 min) plus fifteen for the ten-minute floor,
+# the one-minute tick and the heal's own 30 s margin. Written out rather than
+# imported: nothing under `bot/` may import `core.pg*`
+# (`tests/unit/test_pg_bot_state.py`), and a test pins the two together.
+DERIVATION_HEAL_WITHIN_S = 75 * 60
+
+# Marks failing this many times in a row page whatever their age. A mark that
+# fails on every landing keeps the latest drop minutes old, so the age alone
+# would never see the one failure that is not a blip.
+DERIVATION_MARKS_PERSISTENT = 10
+
+
+def _number(value: object) -> Optional[int]:
+    """A published number, or None for null, a bool or anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def check_derivation_marks(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the dropped derivation marks: page only where healing is not happening.
+
+    A dropped mark is cleared by the next validated rebuild, so a count above
+    zero is usually a drop already on its way out, and paging it would train
+    people to swipe. Two shapes are not:
+
+    - **the latest drop is older than a heal can take**
+      (`DERIVATION_HEAL_WITHIN_S`): a validated rebuild should have covered it
+      by now and has not, so the heal or the derivation itself is broken;
+    - **the count has reached `DERIVATION_MARKS_PERSISTENT`**: marks fail on
+      every landing, which keeps the latest drop young enough that the first
+      rule would never fire.
+
+    Null is never judged — an older web, piggyback, or Postgres unreadable, and
+    the derivation's own watermarks already page on the last of those. So with
+    no count nothing fires, and with no age only the persistent count can.
+    """
+    block = (payload or {}).get("derivation")
+    if not isinstance(block, dict):
+        return []
+    count = _number(block.get("marks_dropped_unhealed"))
+    if count is None or count <= 0:
+        return []
+    if count >= DERIVATION_MARKS_PERSISTENT:
+        return [("derivation_marks_failing",
+                 f"derivation: marks keep failing — {count} in a row")]
+    age = _number(block.get("last_mark_drop_age_s"))
+    if age is not None and age > DERIVATION_HEAL_WITHIN_S:
+        return [("derivation_marks_failing",
+                 f"derivation: dropped marks not rebuilt over for "
+                 f"{_format_age(age)} — {count}")]
+    return []
+
+
 def check_derivation_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
     """Judge the `derivation` block: a KS_PG_DERIVE value web did not understand.
 
@@ -489,6 +546,14 @@ async def run_canary(
         if derivation_failures and severity == "ok":
             severity = "warn"
 
+        # Derivation marks dropped and demonstrably not being healed. Warn:
+        # every row landed, and what is owed is a rebuild.
+        marks_failures = check_derivation_marks(payload)
+        for key, message in marks_failures:
+            fail(key, message)
+        if marks_failures and severity == "ok":
+            severity = "warn"
+
         # A write chain's flag web did not understand: that chain's writers
         # raise on every call, so this pages rather than warns.
         chain_failures = check_write_chains(payload)
@@ -538,6 +603,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("mirror_", "Check meta.mirror_state and web's log; the mirror re-ships itself"),
     ("dq_", "Check /api/jobs — nothing is verifying the warehouse meanwhile"),
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),
+    ("derivation_marks_",
+     "Read meta.derivation_signal's last_error in meta.mirror_state, then meta.derivation_runs"),
 )
 
 def _what_to_do(result: CanaryResult) -> Optional[str]:
