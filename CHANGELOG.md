@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.225
+
+- DN-17: a restored manager_comment reaches Postgres, labelled as a backfill
+
+
 ## 3.0.224
 
 - DN-09: Postgres leaves this host, encrypted, and a drill proves it came back
