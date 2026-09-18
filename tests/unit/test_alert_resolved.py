@@ -210,6 +210,89 @@ class TestEmitterWiring:
             await store.close()
 
     @pytest.mark.asyncio
+    async def test_a_disk_step_down_resolves_the_critical(self, tmp_path):
+        """CRITICAL → WARN through the real job. The key carries its severity,
+        so without this the CRITICAL series stands firing for as long as the
+        WARN holds — after 2026-09-17 that was a page about bytes gone by
+        morning, sitting in every digest tail."""
+        from datetime import datetime, timezone
+        from core.duckdb_store import DuckDBStore
+        from core.scheduler import BackgroundScheduler
+
+        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
+        await store.connect()
+        try:
+            scheduler = BackgroundScheduler()
+
+            def sample(pct, free):
+                return {"sampled_at": datetime.now(timezone.utc),
+                        "db_size_mb": 2480, "disk_pct_used": pct,
+                        "disk_free_gb": free}
+
+            with patch("core.duckdb_store.get_store",
+                       AsyncMock(return_value=store)), \
+                 _archived(), \
+                 patch("bot.main.send_admin_message",
+                       new=AsyncMock(return_value=2)) as send:
+                with patch("core.disk_monitor.sample_disk_state",
+                           return_value=sample(92.0, 6.0)):
+                    await scheduler._run_disk_watchdog()
+                # The page: the message carries the icon, not the key.
+                assert any("🚨" in str(c.args[0]) for c in send.await_args_list)
+
+                sent_before = send.await_count
+                # Between the capacity lines: still WARN, no longer CRITICAL.
+                with patch("core.disk_monitor.sample_disk_state",
+                           return_value=sample(80.0, 20.0)):
+                    await scheduler._run_disk_watchdog()
+
+                after = [str(c.args[0]) for c in send.await_args_list[sent_before:]]
+                resolved = [m for m in after if "✅ Resolved:" in m]
+                assert resolved, f"no resolve notice on the step down: {after!r}"
+                assert "disk:CRITICAL" in resolved[0]
+                assert "disk:WARN" not in resolved[0]
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_disk_step_up_does_not_call_the_warn_resolved(self, tmp_path):
+        """WARN → CRITICAL must not say the WARN cleared. It would be true of
+        the key and false of the disk, at the worst possible moment."""
+        from datetime import datetime, timezone
+        from core.duckdb_store import DuckDBStore
+        from core.scheduler import BackgroundScheduler
+
+        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
+        await store.connect()
+        try:
+            scheduler = BackgroundScheduler()
+
+            def sample(pct, free):
+                return {"sampled_at": datetime.now(timezone.utc),
+                        "db_size_mb": 2480, "disk_pct_used": pct,
+                        "disk_free_gb": free}
+
+            with patch("core.duckdb_store.get_store",
+                       AsyncMock(return_value=store)), \
+                 _archived(), \
+                 patch("bot.main.send_admin_message",
+                       new=AsyncMock(return_value=2)) as send:
+                with patch("core.disk_monitor.sample_disk_state",
+                           return_value=sample(80.0, 20.0)):
+                    await scheduler._run_disk_watchdog()
+                sent_before = send.await_count
+                with patch("core.disk_monitor.sample_disk_state",
+                           return_value=sample(92.0, 6.0)):
+                    await scheduler._run_disk_watchdog()
+
+                after = [str(c.args[0]) for c in send.await_args_list[sent_before:]]
+                assert not any("✅ Resolved:" in m for m in after), (
+                    f"a step up announced something resolved: {after!r}"
+                )
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
     async def test_a_failed_dq_run_resolves_nothing(self):
         """A run that produced no verdict proves nothing: the condition is
         unknown, not cleared."""

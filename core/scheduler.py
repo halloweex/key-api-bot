@@ -2285,6 +2285,33 @@ class BackgroundScheduler:
             logger.warning(f"Disk watchdog: {alert.severity.value} — {alert.reason}")
 
             disk_key = "disk:" + alert.severity.value
+
+            # A step DOWN is news too. The key carries its severity, so a pass
+            # that lands at WARN after a CRITICAL would otherwise leave the
+            # CRITICAL series firing for as long as the WARN holds — which,
+            # since the remainder is judged by persistence, can be days. That
+            # is what happened after 2026-09-17: a transient cliff paged at
+            # 22:00, the real growth behind it kept the watchdog at WARN, and
+            # `disk:CRITICAL` stood in the ledger and every digest tail as a
+            # live page about bytes that had gone by 04:00.
+            #
+            # Only downward. A pass that climbs from WARN to CRITICAL does not
+            # announce the WARN "resolved": telling someone a condition cleared
+            # at the moment it got worse is the one message here that would be
+            # both true and misleading. The WARN clears with the CRITICAL on
+            # the next quiet pass, through the branch above.
+            #
+            # The DQ emitter has done exactly this since step 04
+            # (`_resolve_dq_layer`, `still_firing`); disk was the one family
+            # that never learned it.
+            if alert.severity.value == "WARN":
+                try:
+                    from core.alerting import resolve_group
+
+                    await resolve_group("disk", still_firing=[disk_key])
+                except Exception as e:
+                    logger.warning(f"Disk step-down resolve failed: {e}")
+
             try:
                 from core.alerting import raise_alert
                 icon = "🚨" if alert.severity.value == "CRITICAL" else "⚠️"
