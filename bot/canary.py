@@ -110,6 +110,23 @@ MIRROR_MAX_AGE_S = {
     "bronze.orders": 8 * 3600,
 }
 
+# The most the canary will accept from a limit web *declares* for a table (the
+# layers Postgres derives on its own signal, `max_age_s` in the mirrors block).
+# Web declares those because only web knows its KS_PG_DERIVE, and until DN-05c
+# the canary adopted whatever it was told: one wrong constant in web —
+# `90 * 60 * 60` where `90 * 60` was meant, nearly four days — would have
+# switched the derived-table page off without a word, and the canary is the
+# watchdog meant to stand outside web's mistakes. So it judges
+# min(declared, this).
+#
+# Three hours, because it is twice what web declares today (90 minutes: the
+# 60-minute heartbeat, the 10-minute floor, a tick and grace) and so costs
+# nothing now, and because a derivation that has not run for three hours has
+# already left /summary, /marketing and /traffic behind by more than anyone
+# would read as current. A tighter declaration is honoured as it stands.
+# Live paging change: a declaration above three hours now pages at three.
+DECLARED_MAX_AGE_CEILING_S = 3 * 3600
+
 
 @dataclass
 class CanaryResult:
@@ -293,9 +310,11 @@ def check_mirror_freshness(
     # Tables web declares a limit for — the layers Postgres derives on its own
     # signal. Declared there because only web knows its KS_PG_DERIVE; a
     # threshold kept here would page on every deploy that has not switched.
+    # Never looser than DECLARED_MAX_AGE_CEILING_S, whatever web says.
     for table, entry in block.items():
         if isinstance(entry, dict) and isinstance(entry.get("max_age_s"), int):
-            thresholds.setdefault(table, entry["max_age_s"])
+            thresholds.setdefault(
+                table, min(entry["max_age_s"], DECLARED_MAX_AGE_CEILING_S))
 
     for table, limit in thresholds.items():
         entry = block.get(table)
