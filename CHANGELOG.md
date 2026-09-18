@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.227
+
+- A disk alert that steps down clears the one above it
+
+
 ## 3.0.226
 
 - A cliff that is gone by morning was never a cliff
