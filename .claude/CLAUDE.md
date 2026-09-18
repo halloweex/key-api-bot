@@ -2263,13 +2263,133 @@ The disagreement is never silent — `/api/health` publishes `latched`,
 `latched_at` and `mismatch` per chain, the canary pages `write_chain_flag_mismatch`
 (WARN) within one probe, the shipper stamps the chain's tables failing, and the
 daily comparison files `chain_latch_disagrees` and `chain_shipper_overwrote`
-(both CRITICAL). **The way back is `scripts/chain_copy_back.py`** — which
-copies the rows into DuckDB, compares them at zero and only then releases both
-copies, and which **DN-08 has not built yet**. Until it lands there is no
-rollback for a latched chain at all, so do not flip a latched chain's variable
-expecting one. Today nothing is latched: `app.manual_expenses` holds zero rows,
-so chain 8's flag can still be moved freely, and the first typed expense ends
-that.
+(both CRITICAL). Today nothing is latched: `app.manual_expenses` holds zero
+rows, so chain 8's flag can still be moved freely, and the first typed expense
+ends that.
+
+**The way back is `scripts/chain_copy_back.py`** (DN-08), and it is the only
+thing that may release a latch. It reads every table the chain owns out of
+Postgres and then, in **one DuckDB transaction**, writes them, carries the
+chain's `last_sync_*` values back into `sync_metadata`, moves the DuckDB id
+allocator above every id either store has used, and compares both sides
+**whole, with tolerance zero and no grace** — on the same connection, before
+COMMIT, and on every column it wrote **except the two bookkeeping stamps the
+daily spec forgives** (`ignore_columns`): `bronze.offers.synced_at` and
+`app.sku_inventory_status.updated_at`. That is right, not a gap: each is one
+value stamped across the whole table by one sync or one rebuild, so it says
+when that writer last ran and nothing about an offer or a SKU, and the writer
+restamps it wholesale on its next hourly run after `up -d` — a bad copy could
+cost a wrong "as of" on /inventory until then. Keeping the daily list is
+also what keeps the specs derived rather than a second opinion, and a unit
+test computes the set so a third cannot join it quietly.
+`stock_movements.recorded_at` is the opposite case and **is** compared: the
+daily check leaves it out only because it is that check's clock, but it dates
+one movement for good, and a review shifted every copied value by an hour and
+saw the latch released. It commits, and
+releases the marker and the `owner:` rows, **only on zero findings**. A
+difference is a ROLLBACK: DuckDB is left exactly as it was and Postgres stays
+the writer. A ROLLBACK does not undo a sequence burn — measured on 1.5.5, the
+burn stays in the process and reaches the file only if something commits
+afterwards — so the allocator ends at or above where it was: a gap, never a
+reissued id.
+
+**After the COMMIT come a checkpoint and the release, and either can fail.**
+That is exit 3, never exit 1: until it had its own code, an exception there
+left through the interpreter's exit 1 — "rolled back" — with the copy in
+DuckDB. The message reads which copies of the latch survived and names one
+step: owner rows still standing → `--execute` again (its handover finds DuckDB
+already equal, and it releases); owner rows UNREADABLE — Postgres gone
+between the comparison and the release, so the read that would answer fails
+too — → the same, once Postgres answers, and never a guess
+either way; owner rows gone and the marker not → the marker-only steps below,
+`--handover` first. The marker is read from disk, not the process's cache: an
+unlink whose directory fsync raised has removed the file and not the entry.
+
+**A comparison run after the copy cannot see what the copy destroyed.** A
+full-replace table is DELETE+INSERT, and afterwards the two stores agree by
+construction; the first draft released a latch exactly so, with an offer
+DuckDB had catalogued after the last shipment deleted by the copy it then
+"verified". So the handover question is asked first, of both stores as they
+stand — in the dry run as well — and any CRITICAL refuses before anything is
+written:
+
+- a key only DuckDB holds;
+- in an append-only table, two different rows under one key. There is no
+  "newer" there: they are two events, and the usual one is a movement id both
+  allocators issued, because Postgres floors its sequence on its own MAX(id);
+- in an append-only table, a Postgres row at or below DuckDB's watermark, which
+  a copy reading only above it can never bring back;
+- a DuckDB version later than Postgres's by a clock both stores carry as a value
+  (`manual_expenses`, `inventory_history`).
+
+Any other difference after the latch is taken as Postgres being newer, and that
+is true by construction only when `--handover` was clean before the flip —
+which is why the runbook puts it first. One refusal is knowingly too strict: an
+expense DuckDB held before the flip and Postgres deleted after the latch looks
+exactly like a stranded one (a row on one side has nothing to compare a clock
+against). Unreachable today, since DuckDB holds no expenses; the refusal names
+the ids and the two levers.
+
+Its specs are derived rather than written out — `_FULL_REPLACE` and
+`_APPEND_ABOVE` intersected with the chain's `CHAIN_TABLES`, plus the daily
+comparison's own specs — and a chain table with no shipping shape or no
+comparison spec **raises** instead of being skipped. The two big tables are
+compared row by row rather than by fingerprint, because the fingerprint's one
+blind spot — a text column rewritten to the same length — is affordable every
+morning and not affordable in the comparison that releases a latch.
+
+**Preconditions, and one deliberate absence.** Web must be stopped, which is
+proved by DuckDB opening read-write at all: the file lock is exclusive, so a
+check against the docker socket would only be a second opinion that can be
+wrong. The chain's **owner rows** must exist — they are written inside every
+Postgres write, so they are the proof that rows changed hands, marker or no
+marker (a lost `./data` loses the marker and keeps them). A **marker without
+owner rows** is a first write that failed, or a release that died between its
+two deletes: Postgres received nothing, a copy would be a rewind, and it is
+refused with the steps that clear it. **`--handover` is the first of them**:
+with no owner rows it applies the pre-flip rule, and a CRITICAL there is a row
+DuckDB wrote after the shipper stood down. Then the flag in `.env` — left at
+`postgres` only on exit 0, or the next write latches the chain over that row
+and every later copy-back refuses on it — then delete
+`data/write-chain-owners/<chain>`, then `up -d`. `KS_WRITE_*` is **not** a
+precondition: under OD-19 (a) it does not route writes while the chain is
+latched, and it is put back afterwards, by the runbook.
+
+**`--handover` comes first, in both directions.** It reads only and needs no
+latch, but it does need the database file to itself — DuckDB will not let a
+second process open a file web holds, not even read-only — so it runs in the
+stopped window. Before a flip it is the gate; before a rollback it is the
+preview, and its CRITICALs are exactly what `--execute` refuses on.
+
+```bash
+cd /opt/key-api-bot && docker compose stop web bot
+docker run --rm --name chain-copy-back \
+    -v /opt/key-api-bot/data:/app/data --env-file /opt/key-api-bot/.env \
+    --network key-api-bot_default halloweex/keycrm-web:latest \
+    python /app/scripts/chain_copy_back.py inventory --handover
+# BEFORE A FLIP: exit 0, or do not flip. A CRITICAL is a row the flip would
+#   strand: up -d web with the flag unchanged, let replicate_operational ship
+#   (POST /api/jobs/replicate_operational/trigger), stop, ask again.
+# TO ROLL BACK: the same command with --dry-run (also the default), then with
+#   --execute. Exit 0 released. 1 not committed (a difference rolled back, or
+#   a traceback before COMMIT): DuckDB as it was, latch kept. 2 refused before
+#   writing. 3 COMMITTED, then the checkpoint or the release failed: DuckDB
+#   HAS the copy; do what the message says for the latch it found. Only after
+#   exit 0:
+#   1. set KS_WRITE_INVENTORY=duckdb in .env   (the flag decides again)
+#   2. docker compose up -d web bot
+#   3. at +2 min: deploy/stage4_soak.sh — E1/E2 for chain 8, I1/I2/I3 for
+#      chain 1. The hourly copy must be shipping the chain's tables again.
+```
+
+`--network key-api-bot_default` is observed, not derived: on 2026-09-18 web and
+ks-postgres were both on it (and on `ks-data`). Postgres has no `ports:` key
+and the DSN names the compose service alias, which the weekly-compact sidecar
+never needed. At production's size — 162,883 history rows, 56,277 movements —
+the whole copy-back is ~9 s on a laptop, because rows go in 1,000 to a
+statement. `executemany` runs once per row in DuckDB's client: about eight
+minutes for the history alone with no memory limit, and under the store's own
+4 GB — what the one-off container gets — `OutOfMemoryException` in 17 s.
 
 ### What the warehouse validation can and cannot see
 `validation_passed` covers: Bronze→Silver row counts, Silver→Gold revenue
