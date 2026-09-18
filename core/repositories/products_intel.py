@@ -1,10 +1,13 @@
 """DuckDBStore product intelligence methods (basket analysis, pairs, momentum)."""
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Optional, Dict, Any, List
 
 from core.duckdb_constants import line_window_where
+
+logger = logging.getLogger(__name__)
 
 
 class ProductsIntelMixin:

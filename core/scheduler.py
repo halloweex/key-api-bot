@@ -2636,9 +2636,14 @@ class BackgroundScheduler:
         error_message = result["error"]
 
         store = await get_store()
+        # The run's id goes into the alert's evidence, so the agent can read the
+        # findings behind it. These two layers once passed `run_id` without ever
+        # assigning it: the first CRITICAL raised NameError before the page went
+        # out, and the rest of the reconciliation job with it.
+        run_id = None
         try:
             async with store.connection() as conn:
-                persist_run(
+                run_id = persist_run(
                     conn,
                     started_at=started_at,
                     ended_at=datetime.now(timezone.utc),
@@ -2805,9 +2810,14 @@ class BackgroundScheduler:
         error_message = result["error"]
 
         store = await get_store()
+        # The run's id goes into the alert's evidence, so the agent can read the
+        # findings behind it. These two layers once passed `run_id` without ever
+        # assigning it: the first CRITICAL raised NameError before the page went
+        # out, and the rest of the reconciliation job with it.
+        run_id = None
         try:
             async with store.connection() as conn:
-                persist_run(
+                run_id = persist_run(
                     conn,
                     started_at=started_at,
                     ended_at=datetime.now(timezone.utc),
@@ -2846,6 +2856,7 @@ class BackgroundScheduler:
         from datetime import datetime, timedelta, timezone
         from zoneinfo import ZoneInfo
         from core.data_quality import (
+            DiscrepancyClass,
             Severity,
             alert_fingerprint,
             evidence_for_agent,
@@ -2862,6 +2873,7 @@ class BackgroundScheduler:
             keycrm_orders_in_window,
             rollup_from_orders,
         )
+        from core.sync_service import get_sync_service
 
         WATERMARK_HOURS = 2
         # The daily run covers 90 days. Older months are checked by nobody —
@@ -2960,17 +2972,26 @@ class BackgroundScheduler:
             # 4b. The Postgres verdict, on its own layer so it gets its own age
             #     and its own digest section. Never allowed to disturb the one
             #     above it: if this raised, the DuckDB reconciliation still
-            #     happened and still has to be reported.
+            #     happened and still has to be reported. The guard is what keeps
+            #     that promise — it was written here long before it was, and a
+            #     NameError in the Postgres arm once stood to cost the DuckDB
+            #     alert, the repair and the ClickHouse verdict all at once.
             if pg_result is not None:
-                await self._persist_postgres_reconciliation(
-                    pg_result, started_at=started_at, as_of=as_of,
-                    window_start=window_start, window_end=window_end,
-                )
+                try:
+                    await self._persist_postgres_reconciliation(
+                        pg_result, started_at=started_at, as_of=as_of,
+                        window_start=window_start, window_end=window_end,
+                    )
+                except Exception:
+                    logger.exception("DQ Postgres reconciliation verdict failed")
             if ch_result is not None:
-                await self._persist_ch_reconciliation(
-                    ch_result, started_at=started_at, as_of=as_of,
-                    window_start=window_start, window_end=window_end,
-                )
+                try:
+                    await self._persist_ch_reconciliation(
+                        ch_result, started_at=started_at, as_of=as_of,
+                        window_start=window_start, window_end=window_end,
+                    )
+                except Exception:
+                    logger.exception("DQ ClickHouse reconciliation verdict failed")
 
             # 5. Repair what can only be repaired by id. A delta sync keyed on
             #    updated_at can never reach an order we do not hold, so finding

@@ -589,27 +589,3 @@ class UsersMixin:
         """, missing, mode="none")
 
         logger.info("Seeded %d missing role permissions", rows)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SINGLETON INSTANCE
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_store_instance: Optional[DuckDBStore] = None
-
-
-async def get_store() -> DuckDBStore:
-    """Get singleton DuckDB store instance."""
-    global _store_instance
-    if _store_instance is None:
-        _store_instance = DuckDBStore()
-        await _store_instance.connect()
-    return _store_instance
-
-
-async def close_store() -> None:
-    """Close singleton store instance."""
-    global _store_instance
-    if _store_instance:
-        await _store_instance.close()
-        _store_instance = None

@@ -33,6 +33,7 @@ from bot.config import (
 )
 from bot import database
 from core.i18n import DEFAULT_LANGUAGE, LANGUAGE_NAMES, normalize, t
+from core.permissions import surface_feature
 from bot.keyboards import Keyboards, ReplyKeyboards
 from bot.formatters import Messages, ReportFormatters, truncate_message
 from bot.services import ReportService, KeyCRMAPIError

@@ -33,3 +33,11 @@ sqlalchemy[asyncio]>=2.0
 # not a reason to leave it undeclared: a test that skips when its dependency
 # is missing is a test nobody reads.
 PyYAML>=6.0
+
+# Read by tests/unit/test_no_undefined_names.py, which walks every module
+# outside the suite for names used and never defined. Eight such NameErrors
+# sat on lines no test ran — one of them in front of every non-admin's bot
+# report for ten days — and a static check does not care which lines run.
+# Pinned: a new release may report something new, and that should arrive as
+# a deliberate bump, not as a red CI run on somebody else's change.
+pyflakes==3.4.0

@@ -1,10 +1,14 @@
 # GENERATED — do not hand-edit. What CI installs.
 #
-# `requirements.lock` plus the eleven packages the suite needs and the runtime
+# `requirements.lock` plus the twelve packages the suite needs and the runtime
 # images must not carry. A strict superset: verified at generation time that
 # installing the dev tools moved **no** runtime package — same 64 versions,
-# plus alembic, coverage, greenlet, iniconfig, mako, pluggy, pygments, pytest,
-# pytest-asyncio, pytest-cov and sqlalchemy.
+# plus alembic, coverage, greenlet, iniconfig, mako, pluggy, pyflakes,
+# pygments, pytest, pytest-asyncio, pytest-cov and sqlalchemy.
+#
+# pyflakes (2026-09-18) was added without re-resolving the rest: the previous
+# lock plus `pyflakes==3.4.0`, frozen in python:3.14-slim, so the diff is that
+# one line and not a drift of three unrelated dev tools.
 #
 # That property is the point. If the dev install were allowed to nudge, say,
 # `pydantic`, CI would be testing a set production does not run — which is the
@@ -70,6 +74,7 @@ pillow==12.3.0
 pluggy==1.6.0
 pydantic==2.13.4
 pydantic_core==2.46.4
+pyflakes==3.4.0
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
 pytest==9.1.1
