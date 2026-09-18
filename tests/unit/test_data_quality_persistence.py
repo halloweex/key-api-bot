@@ -531,3 +531,57 @@ class TestTheDigestBaselineIsWhatYouLastRead:
             "fetch_latest_run no longer ranks by run_id, so the digest "
             "baseline reconstruction is only coincidentally correct"
         )
+
+
+class TestTheWorstComesFirst:
+    """`severity` is text, and `ORDER BY severity DESC` ranked it WARN, INFO,
+    CRITICAL — the worst finding last in the digest, and the first to fall
+    past the digest's LIMIT 20 or into its "…+N more"."""
+
+    async def _persist(self, tmp_path):
+        from core.data_quality import fetch_run_diffs, fetch_run_issues
+
+        store = await _make_store(tmp_path)
+        started, ended = _now_pair()
+        # Names chosen so that alphabetical order would not rescue it either.
+        issues = [
+            IntegrityIssue(check_name=name, table_name="orders",
+                           severity=sev, count=1)
+            for name, sev in (("a_info", Severity.INFO),
+                              ("b_warn", Severity.WARN),
+                              ("z_critical", Severity.CRITICAL))
+        ]
+        diffs = [
+            Discrepancy(month="2026-09", source_id=src,
+                        diff_class=DiscrepancyClass.VALUE_MISMATCH,
+                        field="revenue", dk_value=1, kc_value=2, severity=sev)
+            for src, sev in ((1, Severity.INFO), (2, Severity.WARN),
+                             (4, Severity.CRITICAL))
+        ]
+        try:
+            async with store.connection() as conn:
+                run_id = persist_run(
+                    conn, started_at=started, ended_at=ended, as_of=started,
+                    window_start=date(2026, 6, 1), window_end=date(2026, 9, 1),
+                    layer="mirror_landing", issues=issues, discrepancies=diffs,
+                )
+                return (
+                    [r["severity"] for r in fetch_run_issues(conn, run_id)],
+                    [r["severity"] for r in fetch_run_issues(conn, run_id, limit=1)],
+                    [r["severity"] for r in fetch_run_diffs(conn, run_id)],
+                    [r["severity"] for r in fetch_run_diffs(conn, run_id, limit=1)],
+                )
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_issues_are_read_worst_first(self, tmp_path):
+        every, first, _, _ = await self._persist(tmp_path)
+        assert every == ["CRITICAL", "WARN", "INFO"]
+        assert first == ["CRITICAL"]
+
+    @pytest.mark.asyncio
+    async def test_diffs_are_read_worst_first(self, tmp_path):
+        _, _, every, first = await self._persist(tmp_path)
+        assert every == ["CRITICAL", "WARN", "INFO"]
+        assert first == ["CRITICAL"]
