@@ -128,9 +128,12 @@ def test_the_walk_reaches_the_code_that_broke():
     """A walk that silently skipped the application would pass forever."""
     walked = {str(rel) for rel, _ in _sources()}
     for expected in ("core/scheduler.py", "bot/handlers_legacy.py",
-                     "core/repositories/customers.py", "web/main.py",
-                     "deploy/restore_from_export.py"):
+                     "core/repositories/customers.py", "web/main.py"):
         assert expected in walked, expected
+    # Not in the runtime image, and not mounted by quick_gate: required only
+    # where it exists, which is CI and the full gate.
+    if (ROOT / "deploy").is_dir():
+        assert "deploy/restore_from_export.py" in walked
     assert not any(name.startswith("tests/") for name in walked)
 
 
