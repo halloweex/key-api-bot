@@ -2636,9 +2636,14 @@ class BackgroundScheduler:
         error_message = result["error"]
 
         store = await get_store()
+        # The run's id goes into the alert's evidence, so the agent can read the
+        # findings behind it. These two layers once passed `run_id` without ever
+        # assigning it: the first CRITICAL raised NameError before the page went
+        # out, and the rest of the reconciliation job with it.
+        run_id = None
         try:
             async with store.connection() as conn:
-                persist_run(
+                run_id = persist_run(
                     conn,
                     started_at=started_at,
                     ended_at=datetime.now(timezone.utc),
@@ -2805,9 +2810,14 @@ class BackgroundScheduler:
         error_message = result["error"]
 
         store = await get_store()
+        # The run's id goes into the alert's evidence, so the agent can read the
+        # findings behind it. These two layers once passed `run_id` without ever
+        # assigning it: the first CRITICAL raised NameError before the page went
+        # out, and the rest of the reconciliation job with it.
+        run_id = None
         try:
             async with store.connection() as conn:
-                persist_run(
+                run_id = persist_run(
                     conn,
                     started_at=started_at,
                     ended_at=datetime.now(timezone.utc),
