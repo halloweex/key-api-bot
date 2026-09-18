@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.223
+
+- DN-06: once a chain has written Postgres, the latch decides, not the flag
+- tests: the inventory carry-forward fixture reads the warehouse's date, not the runner's
+
+
 ## 3.0.222
 
 
