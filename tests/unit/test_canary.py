@@ -200,6 +200,50 @@ def test_dq_freshness_honours_custom_thresholds():
     assert [k for k, _ in failures] == ["dq_stale:integrity"]
 
 
+# ─── A declared age limit has a ceiling (DN-05c) ────────────────────────────
+
+def _declared(max_age_s: int, age: int) -> list:
+    """The mirror keys filed for a derived table web declared `max_age_s` for,
+    seen at `age` seconds."""
+    payload = _healthy_payload()
+    payload["mirrors"]["silver.orders"] = {
+        "last_ok_at": "2026-09-18T03:00:00+03:00", "age_seconds": age,
+        "failures_since_ok": 0, "failing": False, "max_age_s": max_age_s,
+    }
+    failures, _ = canary.check_mirror_freshness(payload)
+    return [k for k, _ in failures]
+
+
+def test_a_declaration_above_the_ceiling_is_judged_at_the_ceiling():
+    """One wrong constant in web must not switch the derived-table page off:
+    36,000 s declared pages at 10,800 s."""
+    assert canary.DECLARED_MAX_AGE_CEILING_S == 10_800
+    assert _declared(36_000, 10_801) == ["mirror_stale:silver.orders"]
+    assert _declared(36_000, 10_800) == []
+
+
+def test_a_declaration_under_the_ceiling_is_unchanged():
+    assert _declared(5_400, 5_401) == ["mirror_stale:silver.orders"]
+    assert _declared(5_400, 5_400) == []
+
+
+def test_the_ceiling_does_not_tighten_what_web_declares_today():
+    """Written out in bot/canary.py because nothing under bot/ may import
+    core.pg*; this keeps the ceiling from quietly becoming the limit."""
+    from core.pg_derivation import DERIVED_MAX_AGE_S
+
+    assert DERIVED_MAX_AGE_S < canary.DECLARED_MAX_AGE_CEILING_S
+
+
+def test_the_canarys_own_limits_are_not_capped():
+    """The ceiling is for what web declares; bronze.orders keeps its measured
+    eight hours even if a web build ever declared one for it."""
+    payload = _healthy_payload()
+    payload["mirrors"]["bronze.orders"].update(age_seconds=6 * 3600, max_age_s=36_000)
+    failures, _ = canary.check_mirror_freshness(payload)
+    assert failures == []
+
+
 # ─── run_canary integration ─────────────────────────────────────────────────
 
 @pytest.mark.asyncio
