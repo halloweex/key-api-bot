@@ -1914,6 +1914,10 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("pg_goods_shipped_without_sale", "By design (bloggers/seeding); the signal is growth"),
     ("pg_line_items_disagree", "One engine's Silver or line items differ: compare the two stores for the named finding"),
     ("pg_warehouse_", "The Postgres twins did not look: read the reason, then check KS_PG_DSN, PG_LAYER_LOCK holders and KS_DQ_PG_WAREHOUSE"),
+    # DN-16. The lever is upstream of the check, never the check: the parse
+    # or the ship stopped, and re-shipping by hand would hide which.
+    ("pg_order_utm_",
+     "The UTM parse or its ship stopped: read meta.mirror_state for silver.order_utm (a DN-04 refusal names itself), then the warehouse tick's log"),
     ("pg_silver_arc_unwatched", "The Postgres twins did not look: read the reason in the finding"),
     ("pg_attribution_coverage_unwatched", "The orders mirror is failing or silent: see mirror freshness in /api/health"),
     ("pg_line_items_unwatched", "The Postgres twins did not look: read the reason in the finding"),
@@ -1959,6 +1963,9 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "pg_line_items_unwatched": "Postgres line items not examined",
     "pg_warehouse_unwatched": "Postgres twins did not look",
     "pg_warehouse_dq_flag_invalid": "KS_DQ_PG_WAREHOUSE not understood",
+    "pg_order_utm_missing": "orders with no traffic verdict (Postgres)",
+    "pg_order_utm_stale": "traffic verdict older than its order (Postgres)",
+    "pg_order_utm_in_flight": "traffic verdicts still on their way",
     "gold_missing_cells": "days missing from Gold",
     "gold_cell_values": "Gold cells differ",
     "silver_row_values": "Silver differs between engines",

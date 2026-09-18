@@ -2645,6 +2645,207 @@ async def reconcile_order_utm(
     )
 
 
+# ─── The UTM classification's completeness: Postgres alone (DN-16) ───────────
+#
+# `reconcile_order_utm` asks whether Postgres holds the verdicts DuckDB holds.
+# That is not the question /traffic depends on, and it stops meaning anything
+# at step 9: once the parse runs inside Postgres there is no DuckDB copy to
+# agree with, and two copies missing the same order agree perfectly today. What
+# the tab needs is that every order the parser reads has a verdict, and a
+# current one — because an order with no row does not read as missing. It falls
+# through the COALESCE to organic or unattributed, on the chart and in the
+# Monday traffic report, with nothing on either to say so.
+#
+# **The population is the parser's own predicate**, `_parse_utm_into_silver`
+# in core/repositories/traffic.py: an order whose `manager_comment` is neither
+# NULL nor empty, with no row or with `updated_at > parsed_at`. `parsed_at` is
+# the order's `updated_at` at the moment its comment was read, not the wall
+# clock, so a finished parse leaves the two equal and a later edit compares
+# greater. An order with no comment never gets a row, by design, and is not
+# asked about. Read from `bronze.orders`, not Silver, because that is the
+# table the parser reads — Silver projects every one of those orders, so the
+# population is the same, and only bronze carries the comment and the clock.
+#
+# **The grace is absolute, on `bronze.orders.mirrored_at`**, which is when the
+# order as it now stands reached Postgres. Under KS_PG_DERIVE=own the order
+# reaches `silver.orders` on Postgres' own signal, while its verdict waits for
+# DuckDB's next warehouse tick (two minutes) and then the ship's floor
+# (`KS_PG_SILVER_INTERVAL_S`, 600 s) — the gap #213 accepted rather than
+# patched. `SILVER_GRACE_MINUTES` is sized against exactly that floor, and the
+# comparison above uses it for this same table, so this takes it rather than a
+# third number. `deploy/stage4_soak/11_utm_gap.sql` asks the same question by
+# hand with fifteen minutes: right for a reading, and a page on a slow tick
+# here.
+#
+# **Not the ship's watermark**, which was the other clock available. A ship
+# that stops being *called* records nothing at all — a warehouse refresh that
+# errors returns before `_rebuild_postgres_layers` ships anything, so
+# `last_ok_at` just ages and `failures_since_ok` stays at zero — and this
+# check is then the only witness left. The watermark is also the wrong shape:
+# a ship can land between an order's arrival and DuckDB's parse of it, so
+# "shipped since the order arrived" does not mean "should have carried it".
+#
+# **Inside the grace is INFO, counted, never nothing.** The plan asked for the
+# width of the two-clocks gap to be measured before step 9's flip, and a daily
+# count of orders caught in flight at 07:30 is that measurement; INFO rides the
+# digest and never summons it, so a busy morning costs a line and not a page.
+#
+# Report only, like everything in this module: no finding here repairs
+# anything or reaches `validation_passed`. The lever is the parse or the ship,
+# and a check that re-shipped what it found missing would hide which one broke.
+# It reads Postgres alone and takes no store, so it holds whichever store does
+# the parsing.
+
+ORDER_UTM_COMPLETENESS_SQL = """
+WITH owed AS (
+    SELECT b.id,
+           u.order_id IS NULL     AS missing,
+           b.mirrored_at >= $1    AS in_flight,
+           b.mirrored_at
+    FROM bronze.orders b
+    LEFT JOIN silver.order_utm u ON u.order_id = b.id
+    WHERE b.manager_comment IS NOT NULL
+      AND b.manager_comment <> ''
+      AND (u.order_id IS NULL OR b.updated_at > u.parsed_at)
+)
+SELECT
+    count(*) FILTER (WHERE missing AND NOT in_flight)                   AS missing,
+    (array_agg(id ORDER BY id)
+        FILTER (WHERE missing AND NOT in_flight))[1:$2]                 AS missing_ids,
+    min(mirrored_at) FILTER (WHERE missing AND NOT in_flight)           AS missing_since,
+    count(*) FILTER (WHERE NOT missing AND NOT in_flight)               AS stale,
+    (array_agg(id ORDER BY id)
+        FILTER (WHERE NOT missing AND NOT in_flight))[1:$2]             AS stale_ids,
+    min(mirrored_at) FILTER (WHERE NOT missing AND NOT in_flight)       AS stale_since,
+    count(*) FILTER (WHERE in_flight)                                   AS in_flight,
+    (array_agg(id ORDER BY id) FILTER (WHERE in_flight))[1:$2]          AS in_flight_ids
+FROM owed
+"""
+
+
+def order_utm_completeness_findings(
+    row: Mapping[str, Any], *, grace_minutes: int,
+) -> List[IntegrityIssue]:
+    """The findings one aggregate row of `ORDER_UTM_COMPLETENESS_SQL` makes.
+
+    Pure, so what each count means is testable without a server; the SQL that
+    produces the counts is tested against a real one.
+    """
+    issues: List[IntegrityIssue] = []
+    table = ORDER_UTM_TABLE.pg_table
+
+    def _ids(key: str) -> Tuple[int, ...]:
+        return tuple(int(i) for i in (row[key] or ()))
+
+    def _since(key: str) -> str:
+        value = row[key]
+        return value.isoformat() if isinstance(value, datetime) else "unknown"
+
+    missing = int(row["missing"] or 0)
+    if missing:
+        issues.append(IntegrityIssue(
+            check_name="pg_order_utm_missing",
+            table_name=table,
+            severity=Severity.CRITICAL,
+            count=missing,
+            sample_ids=_ids("missing_ids"),
+            description=(
+                f"{missing} order(s) in bronze.orders carry a manager_comment "
+                f"and have no row in {table}, and reached Postgres more than "
+                f"{grace_minutes} minutes ago (the oldest at "
+                f"{_since('missing_since')}). /traffic and the weekly traffic "
+                "report file each of them through the COALESCE as organic or "
+                "unattributed, with nothing on screen to say so. Either the "
+                "parse did not reach them or the ship stopped carrying them: "
+                f"read {table}'s row in meta.mirror_state first."
+            ),
+        ))
+
+    stale = int(row["stale"] or 0)
+    if stale:
+        issues.append(IntegrityIssue(
+            check_name="pg_order_utm_stale",
+            table_name=table,
+            severity=Severity.CRITICAL,
+            count=stale,
+            sample_ids=_ids("stale_ids"),
+            description=(
+                f"{stale} order(s) have a verdict in {table} older than the "
+                "order itself (updated_at > parsed_at), and the newer order "
+                f"reached Postgres more than {grace_minutes} minutes ago (the "
+                f"oldest at {_since('stale_since')}). parsed_at is the order's "
+                "own updated_at when its comment was read, so the parser has "
+                "not caught up with an edit, or its re-parse was not shipped. "
+                "/traffic shows the previous classification for these."
+            ),
+        ))
+
+    in_flight = int(row["in_flight"] or 0)
+    if in_flight:
+        issues.append(IntegrityIssue(
+            check_name="pg_order_utm_in_flight",
+            table_name=table,
+            severity=Severity.INFO,
+            count=in_flight,
+            sample_ids=_ids("in_flight_ids"),
+            description=(
+                f"{in_flight} order(s) reached Postgres in the last "
+                f"{grace_minutes} minutes without a current verdict in "
+                f"{table}. Not a defect yet: the verdict follows on DuckDB's "
+                "tick and the ship's floor, the gap #213 accepted, and /traffic "
+                "shows these without their current verdict until it lands. "
+                "Counted because that width is what step 9's parse inside "
+                "Postgres is meant to close."
+            ),
+        ))
+
+    return issues
+
+
+async def order_utm_completeness_row(
+    conn, *, now: datetime, grace_minutes: int, max_samples: int,
+) -> Mapping[str, Any]:
+    """One aggregate row, on a connection the caller holds.
+
+    Split from the job so a test can run it inside a transaction it then rolls
+    back: the query reads all of `bronze.orders`, and a scenario seeded in a
+    shared database is only a scenario if nothing else is in the table.
+    """
+    return await conn.fetchrow(
+        ORDER_UTM_COMPLETENESS_SQL,
+        now - timedelta(minutes=int(grace_minutes)),
+        int(max_samples),
+    )
+
+
+async def reconcile_order_utm_completeness(
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: int = SILVER_GRACE_MINUTES,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Does every order the UTM parser reads have a current verdict in
+    Postgres? Reports only.
+
+    Takes no store: both sides of the question are in Postgres, which is what
+    lets it outlive `reconcile_order_utm` when the parse moves there.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        return []
+
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    async with pool.acquire() as conn:
+        row = await order_utm_completeness_row(
+            conn, now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+        )
+    return order_utm_completeness_findings(row, grace_minutes=grace_minutes)
+
+
 # ─── The order-level expenses: a delta mirror read whole ─────────────────────
 #
 # `bronze.expenses` ships what a sync fetched, so it is gated on

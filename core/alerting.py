@@ -256,6 +256,13 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_line_items_unwatched": _c("the twin reads Postgres line items again"),
     "pg_warehouse_unwatched": _c("the twins read their snapshot again"),
     "pg_warehouse_dq_flag_invalid": _c("web restarts with a valid KS_DQ_PG_WAREHOUSE"),
+    # Every order the UTM parser reads has a current verdict in Postgres
+    # (DN-16, mirror_landing). Read from Postgres alone, so it clears on
+    # whichever store is parsing; nothing here repairs it.
+    "pg_order_utm_missing": _c("a finished parse is shipped and carries the orders"),
+    "pg_order_utm_stale": _c("a finished re-parse is shipped and carries the newer verdicts"),
+    # INFO and counted, never a page: the gap #213 accepted, measured.
+    "pg_order_utm_in_flight": _c("the verdicts land inside the grace, as they normally do"),
 
     # ── data-quality findings: ClickHouse copies and derivations ──
     "ch_reconcile_pending": _c("silver ships fresh again (hourly ch_sync)"),

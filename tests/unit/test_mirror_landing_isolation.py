@@ -1,11 +1,12 @@
-"""One reconciliation that raises must not silence the other fourteen.
+"""One reconciliation that raises must not silence the other fifteen.
 
-`dq_mirror_landing` runs fifteen comparisons in one job — landing, orders,
-Silver, UTM, expenses, Gold, the five irreplaceable tables, the bot's state,
-the order archive, buyers, SMS, dashboard users, the vitrina, ClickHouse and
-its archive. It used to wrap all of them in ONE try, so an exception anywhere
-skipped every check after it, and the alert gate's `and not error_message`
-then withheld the page for any CRITICAL already found above the failure.
+`dq_mirror_landing` runs sixteen checks in one job — landing, orders, Silver,
+UTM and its completeness, expenses, Gold, the five irreplaceable tables, the
+bot's state, the order archive, buyers, SMS, dashboard users, the vitrina,
+ClickHouse and its archive. It used to wrap all of them in ONE try, so an
+exception anywhere skipped every check after it, and the alert gate's
+`and not error_message` then withheld the page for any CRITICAL already found
+above the failure.
 
 What these pin, and what they deliberately do not change:
 
@@ -32,7 +33,8 @@ from core.data_quality import IntegrityIssue, Severity
 CHECKS_BY_MODULE = {
     "core.mirror_reconciliation": [
         "reconcile_mirror", "reconcile_orders", "reconcile_silver",
-        "reconcile_order_utm", "reconcile_expenses", "reconcile_gold",
+        "reconcile_order_utm", "reconcile_order_utm_completeness",
+        "reconcile_expenses", "reconcile_gold",
         "reconcile_operational", "reconcile_bot_state",
         "reconcile_order_versions", "reconcile_buyers", "reconcile_sms",
         "reconcile_dashboard_users",
@@ -65,9 +67,9 @@ def check_order() -> list:
 
 
 class TestEveryCheckIsIsolated:
-    def test_all_fifteen_run_through_check_and_each_exactly_once(self):
+    def test_all_sixteen_run_through_check_and_each_exactly_once(self):
         assert sorted(check_order()) == sorted(ALL_CHECKS)
-        assert len(check_order()) == len(set(check_order())) == 15
+        assert len(check_order()) == len(set(check_order())) == 16
 
 
 def _critical(name):
