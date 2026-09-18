@@ -80,9 +80,49 @@ flag_state() {
     fi
 }
 
+# ── the latch, which outranks the flag ────────────────────────────────────────
+# Since DN-06 a chain that has written Postgres keeps writing Postgres whatever
+# KS_WRITE_* says (owner decision OD-19 (a)), so a report that read the flag
+# alone would call the chain "not applicable" in the one state the latch exists
+# for: latched, and the variable put back by an operator expecting a rollback.
+# Every I-check would then be a PASS about a chain nobody is watching, I1 —
+# which asks whether the hourly copy is overwriting the six inventory tables —
+# included.
+#
+# The marker file is what routes the writes, so it is what is read, by its
+# path rather than through /api/health: no HTTP, no session, and it answers
+# while the dashboard does not. `tests/unit/test_stage4_soak_script.py` pins
+# the path against `core.chain_latch.MARKER_DIR` so the two cannot drift.
+MARKER_DIR_IN_CONTAINER="/app/data/write-chain-owners"
+
+latch_state() {
+    local chain="$1"
+    if [ "$(docker inspect -f '{{.State.Running}}' "$WEB_CONTAINER" 2>/dev/null || true)" != "true" ]; then
+        echo unknown
+        return 0
+    fi
+    if docker exec "$WEB_CONTAINER" test -f "$MARKER_DIR_IN_CONTAINER/$chain" 2>/dev/null; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
 INVENTORY_ON="$(flag_state KS_WRITE_INVENTORY postgres duckdb)"
+INVENTORY_LATCHED="$(latch_state pg_inventory_write)"
 DQ_PG_WAREHOUSE_ON="$(flag_state KS_DQ_PG_WAREHOUSE on off)"
 INVENTORY_FLIP_AT="${SOAK_INVENTORY_FLIP_AT:-}"
+
+# The latch wins, exactly as `writes_postgres()` resolves it — including over
+# `invalid`, because a latched chain with a misspelt variable goes on writing
+# Postgres and its stand-down still has to hold. The typo does not disappear
+# from the report: S0 greps the log for "is not understood", where the shipper
+# writes it every hour.
+INVENTORY_NOTE=""
+if [ "$INVENTORY_LATCHED" = "1" ] && [ "$INVENTORY_ON" != "1" ]; then
+    INVENTORY_NOTE=" (latched: chain 1 owns its tables in Postgres, and KS_WRITE_INVENTORY says otherwise — only scripts/chain_copy_back.py undoes that)"
+    INVENTORY_ON=1
+fi
 
 # ── S0, the log half ──────────────────────────────────────────────────────────
 # A failing orders job writes a line minutes before any watermark ages past a
@@ -159,7 +199,7 @@ fi
 
 # ── the table ─────────────────────────────────────────────────────────────────
 echo "Stage 4 soak report · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC')"
-echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY), dq_pg_warehouse_on=$DQ_PG_WAREHOUSE_ON (KS_DQ_PG_WAREHOUSE)${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
+echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY)${INVENTORY_NOTE}, dq_pg_warehouse_on=$DQ_PG_WAREHOUSE_ON (KS_DQ_PG_WAREHOUSE)${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
 echo
 printf '%s' "$ROWS" | awk '
     { lines[NR] = $0; c = $0; sub(/\|.*/, "", c); if (length(c) > w) w = length(c) }

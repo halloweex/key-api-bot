@@ -2173,6 +2173,41 @@ DuckDB уже удалась. Тест обходит AST: функция, зо�
 Часы сверки — `synced_at` (бухгалтерия DuckDB), не `created_at`: штамп KeyCRM
 прочитал бы только что синканный старый расход как потерянный.
 
+### A write flag is no longer a rollback
+
+Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`
+variable — `KS_WRITE_EXPENSES` (chain 8, on since 2026-09-17), `KS_WRITE_INVENTORY`
+(chain 1, off). Putting one back to `duckdb` reads like an undo and is not one:
+once rows have landed in Postgres, it starts a **second writer beside the
+first** — a typed expense in the store the page does not read, DuckDB's
+`seq_stock_movements_id` reissuing ids the Postgres sequence already handed out
+(the state revision 0030 forbids), and the hourly full replace rolling the
+Postgres rows back out of a frozen DuckDB, once an hour, looking healthy in
+between.
+
+So the first Postgres write a chain performs **latches** it (owner decision
+OD-19 (a), `core/chain_latch.py`): `writes_postgres()` answers True from then
+on whatever the variable says, and every consumer — the eight writers, the sync
+keys, the hourly shipper, the daily comparison — reads that one answer. The
+latch has two copies, a marker file under `data/write-chain-owners/` that
+routes the writes without needing a database, and an `owner:<table>` row in
+`meta.chain_watermarks` written inside the writing transaction; anything
+already holding a Postgres connection stands down on either. The cost is
+named: a latched chain whose Postgres is unreachable **fails its writes**
+rather than writing DuckDB.
+
+The disagreement is never silent — `/api/health` publishes `latched`,
+`latched_at` and `mismatch` per chain, the canary pages `write_chain_flag_mismatch`
+(WARN) within one probe, the shipper stamps the chain's tables failing, and the
+daily comparison files `chain_latch_disagrees` and `chain_shipper_overwrote`
+(both CRITICAL). **The way back is `scripts/chain_copy_back.py`** — which
+copies the rows into DuckDB, compares them at zero and only then releases both
+copies, and which **DN-08 has not built yet**. Until it lands there is no
+rollback for a latched chain at all, so do not flip a latched chain's variable
+expecting one. Today nothing is latched: `app.manual_expenses` holds zero rows,
+so chain 8's flag can still be moved freely, and the first typed expense ends
+that.
+
 ### What the warehouse validation can and cannot see
 `validation_passed` covers: Bronze→Silver row counts, Silver→Gold revenue
 checksum, product revenue checksum, and the **cell guard** — the set of

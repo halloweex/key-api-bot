@@ -378,6 +378,37 @@ def check_write_chains(payload: Optional[dict]) -> "list[tuple[str, str]]":
              "write chains: " + "; ".join(f"{n}: {e}" for n, e in sorted(bad.items())))]
 
 
+def check_write_chain_latch(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the latch against the flag: a chain that already writes Postgres
+    while its KS_WRITE_* says otherwise (DN-06, owner decision OD-19 (a)).
+
+    Warn, not critical: nothing is failing. The writes go where the rows are,
+    which is the safe answer and the deliberate one — but somebody has edited
+    a variable expecting a rollback that did not happen, and the shipper is
+    stamping those tables failing meanwhile. The only way back is
+    `scripts/chain_copy_back.py`.
+
+    Judged from the published block alone, and not from the marker files —
+    which this container *can* see, since `docker-compose.yml` mounts the same
+    `./data` into both. It must not: the question is where **web's** writes are
+    going, web is the process that answers it, and a bot reading the directory
+    itself would be a second opinion about a decision it never takes part in.
+    Nothing under `bot/` may import `core.pg*` either, so the Postgres copy is
+    out of reach here in any case.
+    """
+    block = (payload or {}).get("write_chains")
+    if not isinstance(block, dict):
+        return []
+    owned = {name: state.get("latched_at") or "an unknown time"
+             for name, state in block.items()
+             if isinstance(state, dict) and state.get("mismatch")}
+    if not owned:
+        return []
+    return [("write_chain_flag_mismatch",
+             "write chains own Postgres against their flag: "
+             + "; ".join(f"{n} since {t}" for n, t in sorted(owned.items())))]
+
+
 # How long a dropped derivation mark may stand before it says the heal is not
 # happening. A drop owes nothing — the rows landed, only the signal did not —
 # so in a quiet hour the rebuild that covers it is the hourly heartbeat. This is
@@ -562,6 +593,15 @@ async def run_canary(
         if chain_failures:
             severity = "critical"
 
+        # A chain that has already written Postgres against a flag that says
+        # otherwise. Warn: the writes are going to the right store, and what
+        # is wrong is that somebody believes they are not.
+        latch_failures = check_write_chain_latch(payload)
+        for key, message in latch_failures:
+            fail(key, message)
+        if latch_failures and severity == "ok":
+            severity = "warn"
+
     if cert_err:
         fail("cert_unreachable", f"cert check failed: {cert_err}")
         if severity == "ok":
@@ -605,6 +645,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),
     ("derivation_marks_",
      "Read meta.derivation_signal's last_error in meta.mirror_state, then meta.derivation_runs"),
+    ("write_chain_flag_mismatch",
+     "Set the named KS_WRITE_* back to postgres, or run scripts/chain_copy_back.py to hand the tables back"),
 )
 
 def _what_to_do(result: CanaryResult) -> Optional[str]:

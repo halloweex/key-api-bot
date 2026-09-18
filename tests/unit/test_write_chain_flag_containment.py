@@ -53,7 +53,12 @@ class TestTheRegistryNeverRaises:
         flags.setenv("KS_WRITE_EXPENSES", "postgres")
         flags.setenv("KS_WRITE_INVENTORY", "yes")
         modes = write_chains.chain_modes()
-        assert modes["pg_expenses_write"] == {"env": "KS_WRITE_EXPENSES", "mode": "postgres", "error": None}
+        # The latch fields are False/None here: nothing has written Postgres,
+        # which is production's state today and the only one in which a flag
+        # still decides anything (DN-06).
+        assert modes["pg_expenses_write"] == {
+            "env": "KS_WRITE_EXPENSES", "mode": "postgres", "error": None,
+            "latched": False, "latched_at": None, "mismatch": False}
         assert modes["pg_inventory_write"]["mode"] is None and "yes" in modes["pg_inventory_write"]["error"]
 
     def test_valid_flags_are_unchanged(self, flags):
@@ -143,8 +148,33 @@ class TestItIsSeen:
 
 class TestTheDailyComparisonFilesIt:
     def test_reconcile_operational_files_a_critical_for_each_chain_error(self):
-        """Structural: the comparison needs both stores end to end, and its
-        filing is two lines — asks the checked registry, appends the finding."""
+        """The finding is built by a pure helper the comparison calls, so this
+        runs it. It used to be appended at the end of `reconcile_operational`,
+        after the early return taken whenever no fingerprint disagrees — which
+        is every healthy run, so it was unreachable in practice (found by
+        DN-06, which had to file two more findings in the same place)."""
+        import ast
+        import inspect
+        import textwrap
+
+        from core.mirror_reconciliation import _chain_flag_findings, reconcile_operational
+        from core.data_quality import Severity
+
+        assert _chain_flag_findings({}) == []
+        (issue,) = _chain_flag_findings({"pg_expenses_write": "KS_WRITE_EXPENSES='postgrse'"})
+        assert issue.check_name == "write_chain_flag_invalid"
+        assert issue.severity is Severity.CRITICAL and "postgrse" in issue.description
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(reconcile_operational)))
+        called = {n.func.id for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert "stood_down_tables_checked" in called
+        assert "_chain_flag_findings" in called
+
+    def test_the_chain_findings_are_built_before_the_early_return(self):
+        """The drill-down returns as soon as no bucket disagrees, so anything
+        filed after it is filed only on a run that already found something
+        else."""
         import ast
         import inspect
         import textwrap
@@ -152,13 +182,14 @@ class TestTheDailyComparisonFilesIt:
         from core.mirror_reconciliation import reconcile_operational
 
         tree = ast.parse(textwrap.dedent(inspect.getsource(reconcile_operational)))
-        called = {n.func.id for n in ast.walk(tree)
-                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        assert "stood_down_tables_checked" in called
-        filed = [n for n in ast.walk(tree) if isinstance(n, ast.keyword) and n.arg == "check_name"
-                 and isinstance(n.value, ast.Constant) and n.value.value == "write_chain_flag_invalid"]
-        assert filed
-        severity = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                    and any(k.arg == "check_name" and getattr(k.value, "value", None) == "write_chain_flag_invalid"
-                            for k in n.keywords)]
-        assert "Severity.CRITICAL" in ast.unparse(severity[0])
+        built = [n.lineno for n in ast.walk(tree)
+                 if isinstance(n, ast.Call) and getattr(n.func, "id", "")
+                 in ("_chain_flag_findings", "_chain_latch_findings")]
+        # Every `return issues` — the early one and the last one. Anything
+        # built after the first of them is filed only sometimes.
+        returns = [n.lineno for n in ast.walk(tree)
+                   if isinstance(n, ast.Return) and isinstance(n.value, ast.Name)
+                   and n.value.id == "issues"]
+        assert len(built) == 2, "both chain-level findings must be built here"
+        assert len(returns) >= 2, "the early return moved — this test no longer guards it"
+        assert max(built) < min(returns), "a chain finding is built after a return"

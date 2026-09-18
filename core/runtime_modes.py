@@ -18,6 +18,13 @@ harmless; and the scripts that reach `write_orders`. A test walks all three.
 this function, not the modes behind it, so none of them has to learn about a
 new one — which is the whole reason this is a module rather than one more line
 at each call site.
+
+The write chains' ownership latch is loaded here too, for the same reason and
+one more: it is read from local marker files, so loading it at the one moment
+every entry point already calls keeps it synchronous and keeps Postgres off
+the path. A chain that has written Postgres must route there from the first
+question this process asks, including a boot where Postgres is unreachable —
+see `core/chain_latch.py`.
 """
 from __future__ import annotations
 
@@ -29,8 +36,16 @@ def configure_modes() -> Dict[str, str]:
 
     Idempotent: a second call reads the same environment into the same caches,
     so web's startup and the scheduler can both call it without either having
-    to know whether the other already has.
+    to know whether the other already has. The latch is re-read rather than
+    assumed unchanged, because a copy-back between two calls releases it.
     """
-    from core import pg_derivation
+    from core import chain_latch, pg_derivation
 
+    # Not in the returned mapping: that maps an environment variable to the
+    # value read from it, and the latch is read from disk and answers over the
+    # variable rather than out of it. It is empty in production today —
+    # `KS_WRITE_EXPENSES=postgres` has been on since 2026-09-17 08:33 UTC and
+    # `app.manual_expenses` still holds zero rows, so no chain has written
+    # Postgres and none is latched. The first typed expense takes it.
+    chain_latch.load()
     return {pg_derivation.ENV: pg_derivation.configure_mode()}

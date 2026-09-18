@@ -14,9 +14,12 @@
 -- and the copy says so ("not shipped: ...", DN-01).
 --
 -- WHAT A FAIL MEANS
--- The replace is running again, or the flag is broken. Until DN-06 is live,
--- setting KS_WRITE_EXPENSES back is safe only while the table is empty
--- (rollback case A in the plan) — read E2 before touching anything.
+-- The replace is running again, or the flag is broken. Since DN-06 the stand-
+-- down also holds on the latch, so `failures_since_ok` above zero can mean a
+-- third thing: "owned by Postgres since ..." — the chain has written Postgres
+-- and KS_WRITE_EXPENSES has been put back, which is no longer a rollback and
+-- undoes nothing. Read E2 before touching anything; the way back is
+-- scripts/chain_copy_back.py.
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now

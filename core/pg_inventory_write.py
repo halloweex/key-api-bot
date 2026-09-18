@@ -55,6 +55,15 @@ every SKU's first-seen date resets to its first order date or today — and the
 hourly replication then propagates the reset to the other store, so both copies
 lose it inside an hour.
 
+"EXACTLY ONE" IS A LATCH, NOT A VARIABLE
+
+`KS_WRITE_INVENTORY` decides which store writes until the first movement lands
+here; after that the latch does (`core/chain_latch.py`, OD-19 (a)). Setting the
+flag back would otherwise let DuckDB's `seq_stock_movements_id` reissue ids the
+Postgres sequence has already handed out — one movement with two names, which
+is the rule revision 0030 restated. Every writer below latches before its first
+write, and `scripts/chain_copy_back.py` is the only way back.
+
 FAILURE POLICY: THIS ONE RAISES
 
 The other Postgres modules here never raise, because they are copies and the
@@ -73,6 +82,7 @@ from typing import (
     Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
 )
 
+from core import chain_latch
 from core.landing_rows import (
     OFFER_COLUMNS,
     STOCK_MOVEMENT_COLUMNS,
@@ -85,6 +95,11 @@ from core.sql_dialect import POSTGRES, sku_status_rebuild_select
 logger = logging.getLogger(__name__)
 
 WRITE_ENV = "KS_WRITE_INVENTORY"
+
+# What this chain is called in `core.write_chains`, in the local latch marker
+# and in the `/api/health` block — one spelling, so a marker written by one
+# release is still read by the next.
+CHAIN = "pg_inventory_write"
 
 # What DuckDB's DDL defaults `stock_movements.source` to. Carried explicitly
 # here because the Postgres column has no default — it was built to receive the
@@ -111,12 +126,13 @@ CHAIN_TABLES: Tuple[str, ...] = (
 CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_offers", "last_sync_stocks")
 
 
-def writes_postgres() -> bool:
-    """Whether this chain writes Postgres.
+def env_writes_postgres() -> bool:
+    """What `KS_WRITE_INVENTORY` alone says.
 
     An unrecognised value raises, `KS_BOT_STORE`'s rule: a typo in the one
     variable that decides which store owns the only record of a stock change
-    must stop the process, not quietly pick the other one.
+    must stop the process, not quietly pick the other one. Since DN-01 it stops
+    this chain and nothing else.
     """
     value = (os.getenv(WRITE_ENV) or "duckdb").strip().lower()
     if value not in {"duckdb", "postgres"}:
@@ -125,6 +141,35 @@ def writes_postgres() -> bool:
             f"'duckdb' or 'postgres'"
         )
     return value == "postgres"
+
+
+def writes_postgres() -> bool:
+    """Whether this chain writes Postgres — the one answer every caller reads.
+
+    The latch outranks the flag (OD-19 (a)), and outranks a value nobody can
+    read: once a movement has been recorded here, the id allocator has moved
+    and no environment variable may move it back. See `core/chain_latch.py`.
+    """
+    if chain_latch.latched(CHAIN):
+        return True
+    return env_writes_postgres()
+
+
+def _latch() -> str:
+    """Take the local half of the latch before this process writes Postgres.
+
+    Raises if the marker cannot be written, and the write is then not attempted:
+    a movement in Postgres that no marker records is how the next boot comes to
+    believe DuckDB still allocates these ids.
+
+    **Called after the pool is in hand and `require_revision()` has passed**,
+    `pg_expenses_write._latch`'s reason and more sharply here: the sync tick
+    runs every minute, so a deploy that brings `web` up ahead of `migrate`, or a
+    Postgres restart, meets a writer within seconds. Latched there, the flip of
+    `KS_WRITE_INVENTORY` would become irreversible with not one movement
+    written — the chain's whole pre-flip rehearsal spent on an error.
+    """
+    return chain_latch.latch(CHAIN, WRITE_ENV)
 
 
 def _insert(table: str, columns: Sequence[str]) -> str:
@@ -176,6 +221,7 @@ async def upsert_offers(rows: List[OfferRow]) -> int:
 
     pool = await get_pool()
     await require_revision()
+    stamp = _latch()
     # `bronze.offers` carries `synced_at` — revision 0029 copied DuckDB's own
     # column, because this table is REPLICATED rather than mirrored.
     # `bronze.offer_stocks` beside it does not: it is older, from revision
@@ -185,6 +231,7 @@ async def upsert_offers(rows: List[OfferRow]) -> int:
         "bronze.offers", OFFER_COLUMNS + ("synced_at",), ("id",))
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             await conn.executemany(sql, [(*r, None) for r in rows])
             await conn.execute(
                 "UPDATE bronze.offers SET synced_at = now() "
@@ -210,8 +257,10 @@ async def upsert_stocks(stocks: List[Dict[str, Any]]) -> Tuple[int, int]:
 
     pool = await get_pool()
     await require_revision()
+    stamp = _latch()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             current: Dict[int, Tuple[int, int]] = {
                 r["id"]: (r["quantity"], r["reserve"])
                 for r in await conn.fetch(
@@ -283,8 +332,10 @@ async def rebuild_sku_inventory_status() -> int:
 
     pool = await get_pool()
     await require_revision()
+    stamp = _latch()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             try:
                 await conn.execute(
                     "CREATE TEMP TABLE _tmp_first_seen ON COMMIT DROP AS "
@@ -319,8 +370,10 @@ async def record_sku_inventory_snapshot(today: Optional[date] = None) -> bool:
 
     pool = await get_pool()
     await require_revision()
+    stamp = _latch()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             day = today or await conn.fetchval(
                 "SELECT (now() AT TIME ZONE 'Europe/Kyiv')::date")
             if await conn.fetchval(
@@ -351,8 +404,10 @@ async def record_inventory_snapshot(
 
     pool = await get_pool()
     await require_revision()
+    stamp = _latch()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             day = today or await conn.fetchval(
                 "SELECT (now() AT TIME ZONE 'Europe/Kyiv')::date")
             exists = await conn.fetchval(

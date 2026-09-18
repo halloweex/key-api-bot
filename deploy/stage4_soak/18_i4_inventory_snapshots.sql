@@ -76,7 +76,7 @@ SELECT 'I4 inventory snapshots'::text AS "check",
            ELSE 'UNKNOWN'
        END AS verdict,
        CASE flag.state
-           WHEN '0' THEN 'not applicable: KS_WRITE_INVENTORY is not postgres'
+           WHEN '0' THEN 'not applicable: chain 1 still writes DuckDB (KS_WRITE_INVENTORY is not postgres and no latch marker)'
            WHEN '1' THEN
                format('%s day(s) judged against %s SKUs%s%s',
                       COALESCE(agg.n_days, 0), status.n,

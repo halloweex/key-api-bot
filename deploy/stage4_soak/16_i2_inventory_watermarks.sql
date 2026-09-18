@@ -43,7 +43,7 @@ SELECT 'I2 inventory watermarks'::text AS "check",
            ELSE 'UNKNOWN'
        END AS verdict,
        CASE flag.state
-           WHEN '0' THEN 'not applicable: KS_WRITE_INVENTORY is not postgres'
+           WHEN '0' THEN 'not applicable: chain 1 still writes DuckDB (KS_WRITE_INVENTORY is not postgres and no latch marker)'
            WHEN '1' THEN agg.listed || ' (limit 75 min)'
            ELSE format('inventory_on=%s: see I1', flag.state)
        END AS detail
