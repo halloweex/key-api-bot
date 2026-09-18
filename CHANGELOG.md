@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.230
+
+- DN-08: copy a latched chain back out of Postgres, and only then release it
+
+
 ## 3.0.229
 
 - DN-05c: the canary caps the age limits web declares at three hours
