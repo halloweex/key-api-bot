@@ -62,6 +62,13 @@ def collect_static_check_names() -> set:
 
     names |= set(pg_warehouse_dq.UNWATCHED_NAMES.values())
     names |= {pg_warehouse_dq.WHOLE_UNWATCHED, pg_warehouse_dq.FLAG_INVALID}
+    # The chain invariants name theirs from module constants too, for the same
+    # reason: the check functions read them, so a literal in the finding and a
+    # literal in `CONDITIONS` would be two places to change.
+    from core import pg_chain_invariants
+
+    names |= set(pg_chain_invariants.CONDITIONS)
+    names.add(pg_chain_invariants.UNWATCHED)
     return names
 
 

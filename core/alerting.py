@@ -202,6 +202,26 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "chain_shipper_overwrote": _c(
         "nothing repairs the rows it replaced; it stops when the chain is "
         "handed back with scripts/chain_copy_back.py, which releases the latch"),
+    # The standing watch on the tables a chain has taken (DN-07). The hourly
+    # shipper and the daily comparison both stand down for them, so these are
+    # the only checks those tables have — and none of them clears by itself:
+    # some clear on a human fixing the writer or the rows, and the rest name a
+    # fact that has already happened and only age out.
+    "chain_sequence_behind": _c("the allocator is raised above MAX(id)"),
+    "chain_required_column_null": _c(
+        "the writer supplies the column again and the NULL rows are corrected"),
+    "chain_initial_movement_burst": _c(
+        "24 h without a burst — the deltas already recorded stay wrong"),
+    "chain_first_seen_reset": _c(
+        "the moved dates are restored from the nightly dump — a carry-forward "
+        "that works again does not clear it, because the rows stay wrong"),
+    "chain_daily_rollup_missing": _c(
+        "cannot heal — a missed day is missed forever; it ages out of the window"),
+    "chain_snapshot_rows_short": _c(
+        "the days since hold a full snapshot again; the short ones stay short"),
+    "chain_watermark_stale": _c("the chain's sync completes again"),
+    "chain_invariants_unwatched": _c(
+        "the integrity job reads the chain's facts again"),
 
     # ── data-quality findings: Silver / Gold arcs ──
     "silver_missing_rows": _c("the next rebuild carries the rows"),
