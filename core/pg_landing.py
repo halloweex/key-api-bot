@@ -38,7 +38,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 # At module level, unlike the other `core.pg_*` imports here, because
 # `write_orders` names one of its constants in a default argument. Safe: that
@@ -285,6 +285,35 @@ async def mirror_expenses(orders_with_expenses: List[Dict[str, Any]]) -> MirrorO
 ORDERS_TABLE = "bronze.orders"
 ORDER_PRODUCTS_TABLE = "bronze.order_products"
 
+
+def order_tables_stood_down() -> FrozenSet[str]:
+    """Which of the two order tables a write chain has taken. Never raises.
+
+    Every path that ships orders out of DuckDB asks this first (DN-22a): the
+    sync's mirror in `DuckDBStore.upsert_orders`, the ids-diff and header-only
+    repair in `core/pg_backfill.py`, the hourly diff, the admin backfill, and
+    the daily bucket comparison. None of them asked before, so a chain that
+    registered `bronze.orders` would have had DuckDB overwriting the rows its
+    new writer put there — and, worse, `write_orders` archiving each overwrite
+    in `app.order_versions` as a change that never happened, in the one table
+    nothing can delete from.
+
+    **Either table stands both down.** Headers and line items go in one
+    transaction (`write_orders`), so there is no shipping one without the
+    other, and a comparison of the one still "shipped" would report every
+    order the mirror stopped carrying as lost.
+
+    Asked BEFORE `write_orders` and never inside it. The capture's contract is
+    that the version and the row it describes land together or neither does
+    (`core/pg_order_versions.py`), and a refusal raised from inside that
+    transaction would be the mirror's to swallow — the rows lost to Postgres
+    over a question that could have been asked outside it.
+    """
+    from core.write_chains import stood_down_among
+
+    return stood_down_among((ORDERS_TABLE, ORDER_PRODUCTS_TABLE))
+
+
 # Every column except `manager_comment`, which has the COALESCE above.
 _ORDER_UPSERT = """
 INSERT INTO bronze.orders
@@ -460,6 +489,10 @@ async def mirror_orders(
     them through `core.landing_rows` and — more importantly — has already
     decided which ones it wrote. The mirror ships that decision rather than
     making its own, so the two stores cannot disagree about what a sync did.
+
+    It does not ask `order_tables_stood_down()`; its one caller does, before
+    calling it, and `tests/unit/test_write_chains.py` walks for any new caller
+    that does not.
     """
     tables = [ORDERS_TABLE] + ([ORDER_PRODUCTS_TABLE] if replace_products else [])
     counts = {ORDERS_TABLE: len(orders), ORDER_PRODUCTS_TABLE: len(products)}

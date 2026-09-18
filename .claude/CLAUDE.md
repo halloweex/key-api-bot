@@ -2518,6 +2518,23 @@ NULL count, and a Postgres it cannot read is `chain_invariants_unwatched`
 (WARN). Measured 2026-09-18, before chain 1's flip: 0 of 56 277
 `stock_movements` rows carry a NULL `recorded_at` or `source`.
 
+### The order write path asks the registry too (DN-22a)
+
+Until DN-22a nothing that ships orders out of DuckDB asked who owns the order
+tables, so registering a chain for `bronze.orders` would have had the sync's
+mirror overwrite the chain's rows and archive each overwrite in
+`app.order_versions` as a change that never happened. Now every such path asks
+`core.pg_landing.order_tables_stood_down()` **before** `write_orders`, never
+inside its transaction: the sync's mirror in `upsert_orders` skips, the ids-diff
+and header-only repair refuse, the hourly diff returns `stood_down`, the
+comment ship reports `skipped`, `POST /api/mirror/backfill/orders` answers 409,
+and the bucket comparison files `mirror_stood_down` (INFO). Either table stands
+both down, because they go in one transaction. The question is asked only of
+chains that declare an order table (`write_chains.stood_down_among`) — none do
+today, so it reads no variable and no file, and nothing changed in production.
+`tests/unit/test_write_chains.py` walks `core/`, `web/` and `scripts/` for any
+caller of `write_orders` or `mirror_orders` that does not ask.
+
 ## TODO: Full DuckDB Resync Solution
 
 ### Overview

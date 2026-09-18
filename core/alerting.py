@@ -202,6 +202,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "mirror_buckets_disagree": _c("the fingerprinted buckets agree again"),
     "mirror_disabled": _c("KS_PG_DSN is configured"),
     "mirror_failing": _c("failures_since_ok back to zero"),
+    # INFO, never a page: the order comparison stood down because a write
+    # chain owns an order table (DN-22a). A decision somebody took, not a fault.
+    "mirror_stood_down": _c(
+        "the chain hands the order tables back to DuckDB, or its flag returns "
+        "to duckdb before it ever latched"),
     # The ownership latch's two copies, compared daily (DN-06). Neither clears
     # by itself: one is a human putting the missing copy back, the other is a
     # shipment that has already overwritten rows and cannot be un-shipped.

@@ -121,8 +121,24 @@ async def backfill_mirror_orders(
 
     Foreground for a capped run you want to watch; background for the whole
     thing, which takes minutes and would otherwise sit on an HTTP request.
+
+    409 once a write chain owns either order table (DN-22a). Answered here,
+    before anything starts, because the background form would otherwise say
+    "started" and leave the refusal in a log line nobody reads.
     """
     from core.pg_backfill import backfill_orders
+    from core.pg_landing import order_tables_stood_down
+
+    moved = order_tables_stood_down()
+    if moved:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{', '.join(sorted(moved))} is written by a write chain, not "
+                "shipped out of DuckDB; a backfill would overwrite rows only "
+                "Postgres holds and archive each overwrite as an order change."
+            ),
+        )
 
     store = await get_store()
 

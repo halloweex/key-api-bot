@@ -209,8 +209,16 @@ async def ship_orders_by_id(
     callers only offer ids whose comment was NULL, so a re-run will not find
     them again and the divergence stands until the daily reconciliation
     reports it.
+
+    **Skipped, not raised, once a write chain owns the order tables** (DN-22a)
+    — the mirror-off shape above and for its reason: the caller's DuckDB
+    re-parse is the half that must still run. Shipping DuckDB's comment over
+    a header the chain's writer owns would overwrite it, and archive the
+    overwrite as a `'backfill'` version of a value Postgres never lost.
     """
-    from core.pg_landing import MIRROR_ENV, enabled, write_orders
+    from core.pg_landing import (
+        MIRROR_ENV, enabled, order_tables_stood_down, write_orders,
+    )
 
     ids = [int(i) for i in ids]
     result: Dict[str, Any] = {
@@ -224,6 +232,13 @@ async def ship_orders_by_id(
         # backfill that refused to run there would take the DuckDB repair with
         # it. Named in the result so the caller's log says which half ran.
         result["skipped"] = f"{MIRROR_ENV} is off"
+        return result
+    moved = order_tables_stood_down()
+    if moved:
+        result["skipped"] = "stood down: a write chain owns " + ", ".join(sorted(moved))
+        result["stood_down"] = sorted(moved)
+        logger.warning("Not shipping %d changed order(s) to Postgres: %s",
+                       len(ids), result["skipped"])
         return result
 
     # Asked once, before the first chunk, so `web` deployed ahead of `migrate`
@@ -276,14 +291,28 @@ async def backfill_orders(
     path: nothing depends on this call succeeding, so there is no working
     system to protect by staying quiet, and a backfill that reports success
     while shipping nothing is the worst of the available outcomes.
+
+    Refuses, the same way, once a write chain owns either order table
+    (DN-22a) — both the ids-diff and the header-only repair below, since each
+    ships DuckDB's copy through `write_orders`. "Missing from Postgres" stops
+    meaning "lost by the mirror" the moment another writer fills the table,
+    and a repair of rows that writer changed would overwrite them and archive
+    the overwrite as a change.
     """
     from core.pg import get_pool, require_revision
-    from core.pg_landing import enabled, write_orders
+    from core.pg_landing import enabled, order_tables_stood_down, write_orders
 
     if not enabled():
         raise RuntimeError(
             "The mirror is switched off (KS_MIRROR_LANDING); refusing to "
             "backfill into a store the sync will not keep up to date."
+        )
+    moved = order_tables_stood_down()
+    if moved:
+        raise RuntimeError(
+            f"{', '.join(sorted(moved))} is written by a write chain, not "
+            "shipped out of DuckDB; refusing to backfill over rows only "
+            "Postgres holds."
         )
 
     pool = await get_pool()
@@ -386,12 +415,21 @@ async def hourly_orders_ids_diff(store, *, lock: "asyncio.Lock | None" = None) -
     WARNING — the mirror lost something since the last hour. Never raises: the
     job's contract. Runs under the heavy-job lock per chunk (see
     `backfill_orders`), which is also why it rides a job rather than a route.
+
+    Stands down quietly once a write chain owns either order table (DN-22a),
+    before it asks Postgres anything. `backfill_orders` would refuse anyway,
+    but as a raise, and this job turns a raise into an ERROR every hour for a
+    state that is a decision, not a fault.
     """
     from core import pg_landing
 
     if not pg_landing.enabled():
         return {"skipped": "KS_PG_DSN is not set"}
     try:
+        moved = pg_landing.order_tables_stood_down()
+        if moved:
+            return {"stood_down": sorted(moved)}
+
         from core.pg import get_pool
         from core.pg_landing import ORDERS_TABLE
 

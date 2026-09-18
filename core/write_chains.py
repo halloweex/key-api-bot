@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from types import ModuleType
-from typing import Dict, FrozenSet, Optional, Tuple
+from typing import Dict, FrozenSet, Iterable, Optional, Tuple
 
 from core import pg_expenses_write, pg_inventory_write
 
@@ -58,6 +58,33 @@ def chain_name(chain: ModuleType) -> str:
     return chain.__name__.rsplit(".", 1)[-1]
 
 
+def _chain_state(chain: ModuleType) -> Dict[str, Optional[object]]:
+    """One chain's entry in `chain_modes()`. Never raises.
+
+    Separate so a question about particular tables can ask only the chains
+    that declare them (`stood_down_among`) and still reach the verdict through
+    the same lines as every other consumer — one rule, whichever door."""
+    from core import chain_latch
+
+    name = chain_name(chain)
+    # The environment on its own, so the published error survives the latch
+    # answering over it.
+    try:
+        env_mode, error = (
+            "postgres" if chain.env_writes_postgres() else "duckdb"), None
+    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
+        env_mode, error = None, str(exc)
+    since = chain_latch.latched_at(name)
+    return {
+        "env": chain.WRITE_ENV,
+        "mode": "postgres" if (since or env_mode == "postgres") else env_mode,
+        "error": error,
+        "latched": since is not None,
+        "latched_at": since,
+        "mismatch": since is not None and env_mode != "postgres",
+    }
+
+
 def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
     """`{chain: {"env", "mode", "error", "latched", "latched_at", "mismatch"}}`.
 
@@ -82,28 +109,7 @@ def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
     write is invisible until the next morning, and `latched: true` with
     `mismatch: false` is what it looks like here in the meantime.
     """
-    from core import chain_latch
-
-    out: Dict[str, Dict[str, Optional[object]]] = {}
-    for chain in WRITE_CHAINS:
-        name = chain_name(chain)
-        # The environment on its own, so the published error survives the latch
-        # answering over it.
-        try:
-            env_mode, error = (
-                "postgres" if chain.env_writes_postgres() else "duckdb"), None
-        except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-            env_mode, error = None, str(exc)
-        since = chain_latch.latched_at(name)
-        out[name] = {
-            "env": chain.WRITE_ENV,
-            "mode": "postgres" if (since or env_mode == "postgres") else env_mode,
-            "error": error,
-            "latched": since is not None,
-            "latched_at": since,
-            "mismatch": since is not None and env_mode != "postgres",
-        }
-    return out
+    return {chain_name(chain): _chain_state(chain) for chain in WRITE_CHAINS}
 
 
 def mismatched_chains() -> Dict[str, str]:
@@ -158,6 +164,37 @@ def stood_down_tables() -> FrozenSet[str]:
     """Every table whose chain writes Postgres, or whose flag is not understood.
     Never raises — see `stood_down_tables_checked` for the errors."""
     return stood_down_tables_checked()[0]
+
+
+def stood_down_among(tables: Iterable[str]) -> FrozenSet[str]:
+    """Which of `tables` have changed hands, asking only the chains that
+    declare one of them. Never raises.
+
+    Always `stood_down_tables() & tables` — the same `_chain_state` verdict,
+    so a flag error or a latch stands a table down here exactly as it does
+    for the shipper. What differs is who is asked, and that is DN-01's rule
+    carried from sync keys to tables: the order sync asks this on every
+    write, and evaluating every chain there would log an unrelated
+    `KS_WRITE_*` typo once a minute from the one path that must stay quiet
+    about other chains' business. With no chain declaring a table — every
+    order table today — nothing is evaluated at all: no variable read, no
+    marker file opened.
+    """
+    wanted = frozenset(tables)
+    moved: set = set()
+    errors: Dict[str, str] = {}
+    for chain in WRITE_CHAINS:
+        mine = wanted.intersection(chain.CHAIN_TABLES)
+        if not mine:
+            continue
+        state = _chain_state(chain)
+        if state["mode"] != "duckdb":
+            moved |= mine
+        if state["error"]:
+            errors[chain_name(chain)] = str(state["error"])
+    if errors:
+        logger.error("write chain flag(s) not understood, stood down: %s", errors)
+    return frozenset(moved)
 
 
 def stood_down_sync_keys() -> FrozenSet[str]:

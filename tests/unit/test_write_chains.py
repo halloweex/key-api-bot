@@ -107,3 +107,458 @@ class TestWhatStandsDown:
         from core.pg_expenses_write import CHAIN_TABLES
         from core.pg_operational import _FULL_REPLACE
         assert set(CHAIN_TABLES) <= {pg for pg, _d, _c, _o in _FULL_REPLACE}
+
+
+# ─── DN-22a: the order write path asks the registry ──────────────────────────
+#
+# No chain declares an order table today, so every assertion below that sees
+# the path stand down needs a fake chain 3 — the shape `test_chain_invariants`
+# already uses for a third chain. Each "it ships nothing" test has a sibling
+# without the fake chain that watches the same recorder fill up: a recorder that
+# could not see a write would pass every stand-down test and prove nothing.
+
+ORDERS = "bronze.orders"
+LINES = "bronze.order_products"
+WHEN = "2026-08-20T12:00:00+00:00"
+
+
+def _order(order_id, products=2):
+    return {
+        "id": order_id, "source_id": 1, "status_id": 12, "status_group_id": 4,
+        "grand_total": "100.00", "ordered_at": WHEN, "created_at": WHEN,
+        "updated_at": WHEN, "buyer": {"id": 500 + order_id},
+        "manager": {"id": 4}, "manager_comment": None, "promocode": None,
+        "products": [
+            {"name": f"Товар {i}", "quantity": 1, "price_sold": "50.00",
+             "offer": {"product_id": 700 + i}}
+            for i in range(products)
+        ],
+    }
+
+
+class _Ctx:
+    def __init__(self, value=None):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _Conn:
+    """Answers every read with nothing and remembers every statement."""
+
+    def __init__(self, recorder):
+        self.recorder = recorder
+
+    def transaction(self):
+        return _Ctx()
+
+    async def execute(self, sql, *args):
+        self.recorder.sql.append(sql)
+        return "UPDATE 1"
+
+    async def executemany(self, sql, rows):
+        self.recorder.sql.append(sql)
+
+    async def fetch(self, sql, *args):
+        self.recorder.sql.append(sql)
+        return []
+
+    async def fetchval(self, sql, *args):
+        self.recorder.sql.append(sql)
+        return None
+
+    async def fetchrow(self, sql, *args):
+        self.recorder.sql.append(sql)
+        return None
+
+
+class _RecordingPool:
+    def __init__(self):
+        self.sql = []
+        self.acquired = 0
+
+    def acquire(self):
+        self.acquired += 1
+        return _Ctx(_Conn(self))
+
+    def wrote(self, table: str) -> bool:
+        return any(table in s and "INSERT INTO" in s for s in self.sql)
+
+
+@pytest.fixture
+def pool(flags):
+    """The recording pool behind `core.pg.get_pool`, with the mirror on."""
+    from unittest.mock import AsyncMock
+
+    from core import pg_landing
+
+    flags.delenv(pg_landing.MIRROR_ENV, raising=False)
+    pg_landing.reset_health()
+    recorder = _RecordingPool()
+    flags.setattr("core.pg.get_pool", AsyncMock(return_value=recorder))
+    flags.setattr("core.pg.require_revision", AsyncMock())
+    yield recorder
+    pg_landing.reset_health()
+
+
+@pytest.fixture
+def order_chain(flags):
+    """Register a fake chain that owns `tables`; its flag is `env()`."""
+    import types
+
+    from core import write_chains
+
+    def register(tables=(ORDERS, LINES), env=lambda: True):
+        fake = types.ModuleType("core.pg_orders_write")
+        fake.WRITE_ENV = "KS_WRITE_ORDERS"
+        fake.CHAIN_TABLES = tuple(tables)
+        fake.env_writes_postgres = env
+        flags.setattr(write_chains, "WRITE_CHAINS",
+                      write_chains.WRITE_CHAINS + (fake,))
+        return fake
+
+    return register
+
+
+async def _store(tmp_path, ids=()):
+    """A DuckDB holding `ids`, written with the mirror patched out."""
+    from unittest.mock import AsyncMock, patch
+
+    from core.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(db_path=tmp_path / "dn22a.duckdb")
+    await store.connect()
+    if ids:
+        with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
+            await store.upsert_orders([_order(i) for i in ids])
+    return store
+
+
+class TestTheOrderTablesAskOnlyTheirOwnChain:
+    def test_nothing_stands_down_in_production_today(self, flags):
+        """KS_WRITE_EXPENSES=postgres is live; its table is not an order table."""
+        from core.pg_landing import order_tables_stood_down
+
+        flags.setenv("KS_WRITE_EXPENSES", "postgres")
+        assert order_tables_stood_down() == frozenset()
+
+    def test_a_chain_that_declares_no_order_table_is_not_even_asked(
+            self, flags, order_chain, caplog):
+        """DN-01's rule, carried from sync keys to tables: an unrelated typo is
+        not read, so the sync cannot log it once a minute."""
+        from core.pg_landing import order_tables_stood_down
+
+        asked = []
+        order_chain(tables=("app.something_else",),
+                    env=lambda: asked.append(1) or True)
+        flags.setenv("KS_WRITE_EXPENSES", "postgre")
+        with caplog.at_level("ERROR", logger="core.write_chains"):
+            assert order_tables_stood_down() == frozenset()
+        assert asked == []
+        assert not caplog.records
+
+    @pytest.mark.parametrize("tables", [(ORDERS,), (LINES,), (ORDERS, LINES)])
+    def test_a_chain_on_either_table_is_seen(self, order_chain, tables):
+        from core.pg_landing import order_tables_stood_down
+
+        order_chain(tables=tables)
+        assert order_tables_stood_down() == frozenset(tables)
+
+    def test_the_owning_chains_typo_stands_it_down_and_does_not_raise(
+            self, order_chain, caplog):
+        from core.pg_landing import order_tables_stood_down
+
+        def typo():
+            raise RuntimeError("KS_WRITE_ORDERS='postgre' is not understood")
+
+        order_chain(env=typo)
+        with caplog.at_level("ERROR", logger="core.write_chains"):
+            assert order_tables_stood_down() == frozenset({ORDERS, LINES})
+        assert "postgre" in caplog.text
+
+    def test_a_latched_owning_chain_stands_down_whatever_its_flag(self, order_chain):
+        from core import chain_latch
+        from core.pg_landing import order_tables_stood_down
+
+        order_chain(env=lambda: False)
+        chain_latch.MARKER_DIR.mkdir(parents=True, exist_ok=True)
+        chain_latch.marker_path("pg_orders_write").write_text(
+            '{"latched_at": "2026-09-18T12:00:00+00:00"}', encoding="utf-8")
+        chain_latch.load()
+        assert order_tables_stood_down() == frozenset({ORDERS, LINES})
+
+    @pytest.mark.parametrize("config", ["none", "expenses", "inventory", "orders",
+                                        "orders_typo", "orders_off"])
+    def test_it_is_the_shippers_answer_narrowed(self, flags, order_chain, config):
+        """One rule, two doors: the narrow question may never disagree with
+        the whole one about a table they both name."""
+        from core import pg_inventory_write
+        from core.write_chains import stood_down_among, stood_down_tables
+
+        def typo():
+            raise RuntimeError("not understood")
+
+        if config == "expenses":
+            flags.setenv("KS_WRITE_EXPENSES", "postgres")
+        elif config == "inventory":
+            flags.setenv("KS_WRITE_INVENTORY", "postgres")
+        elif config == "orders":
+            order_chain()
+        elif config == "orders_typo":
+            order_chain(env=typo)
+        elif config == "orders_off":
+            order_chain(env=lambda: False)
+
+        for asked in ({ORDERS, LINES}, {"app.manual_expenses", ORDERS},
+                      set(pg_inventory_write.CHAIN_TABLES)):
+            assert stood_down_among(asked) == stood_down_tables() & asked, asked
+
+
+class TestTheSyncMirror:
+    @pytest.mark.asyncio
+    async def test_without_a_chain_the_recorder_sees_the_rows_and_the_archive(
+            self, pool, tmp_path):
+        """The control. Nothing below means anything unless this recorder can
+        see a mirror write and a version capture when they happen."""
+        from core.pg_order_versions import TABLE
+
+        store = await _store(tmp_path)
+        await store.upsert_orders([_order(1)])
+        assert pool.wrote(ORDERS) and pool.wrote(LINES)
+        assert pool.wrote(TABLE)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tables", [(ORDERS,), (LINES,)])
+    async def test_either_table_owned_ships_nothing_at_all(
+            self, pool, order_chain, tmp_path, tables):
+        """Headers and line items go in one transaction, so a chain on either
+        one stops both — and DuckDB's own write is untouched."""
+        order_chain(tables=tables)
+        store = await _store(tmp_path)
+        result = await store.upsert_orders([_order(1)])
+
+        assert result.changed_ids == [1]
+        assert pool.acquired == 0 and pool.sql == []
+        async with store.connection() as conn:
+            assert conn.execute("SELECT count(*) FROM orders").fetchone()[0] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_status_refresh_ships_nothing_either(
+            self, pool, order_chain, tmp_path):
+        """The 05:15 shape: force_update, headers only — the path that would
+        otherwise archive 1,400 forced rewrites against the chain's rows."""
+        store = await _store(tmp_path, [1])
+        order_chain()
+        result = await store.upsert_orders(
+            [_order(1)], force_update=True, skip_products=True)
+        assert result.changed_ids == [1]
+        assert pool.acquired == 0
+
+
+class TestTheBackfillAndItsRepair:
+    @pytest.mark.asyncio
+    async def test_without_a_chain_it_writes(self, pool, tmp_path):
+        from core.pg_backfill import backfill_orders
+        from core.pg_order_versions import TABLE
+
+        store = await _store(tmp_path, [1, 2])
+        result = await backfill_orders(store)
+        assert result["orders_shipped"] == 2
+        assert pool.wrote(ORDERS) and pool.wrote(TABLE)
+
+    @pytest.mark.asyncio
+    async def test_the_ids_diff_and_the_header_only_repair_refuse_before_postgres(
+            self, pool, order_chain, tmp_path):
+        from core.pg_backfill import backfill_orders
+
+        store = await _store(tmp_path, [1, 2])
+        order_chain()
+        with pytest.raises(RuntimeError, match="write chain"):
+            await backfill_orders(store)
+        assert pool.acquired == 0
+
+    @pytest.mark.asyncio
+    async def test_the_hourly_diff_stands_down_quietly(
+            self, pool, order_chain, tmp_path, caplog):
+        """A decision, not a fault: no ERROR every hour."""
+        from core.pg_backfill import hourly_orders_ids_diff
+
+        store = await _store(tmp_path, [1])
+        order_chain(tables=(LINES,))
+        with caplog.at_level("ERROR"):
+            result = await hourly_orders_ids_diff(store)
+        assert result == {"stood_down": [LINES]}
+        assert pool.acquired == 0
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+class TestTheCommentShip:
+    @pytest.mark.asyncio
+    async def test_without_a_chain_it_writes_a_backfill_version(self, pool, tmp_path):
+        from core.pg_backfill import ship_orders_by_id
+        from core.pg_order_versions import BACKFILL, TABLE
+
+        store = await _store(tmp_path, [1])
+        result = await ship_orders_by_id(store, [1], version_kind=BACKFILL)
+        assert result["orders_shipped"] == 1
+        assert pool.wrote(ORDERS) and pool.wrote(TABLE)
+
+    @pytest.mark.asyncio
+    async def test_it_is_skipped_so_the_callers_duckdb_half_still_runs(
+            self, pool, order_chain, tmp_path):
+        from core import pg
+        from core.pg_backfill import ship_orders_by_id
+        from core.pg_order_versions import BACKFILL
+
+        store = await _store(tmp_path, [1])
+        order_chain()
+        result = await ship_orders_by_id(store, [1], version_kind=BACKFILL)
+        assert result["orders_shipped"] == 0
+        assert result["stood_down"] == [LINES, ORDERS]
+        assert "write chain" in result["skipped"]
+        assert pool.acquired == 0
+        pg.require_revision.assert_not_awaited()
+
+
+class _NoStore:
+    """A DuckDB the comparison must not open once it has stood down."""
+
+    def connection(self):  # pragma: no cover - the assertion is the point
+        raise AssertionError("the stood-down comparison read DuckDB")
+
+
+class TestTheBucketComparison:
+    @pytest.mark.asyncio
+    async def test_it_files_info_for_both_tables_and_reads_neither_store(
+            self, pool, order_chain):
+        from core.data_quality import Severity
+        from core.mirror_reconciliation import reconcile_orders
+
+        order_chain(tables=(ORDERS,))
+        issues = await reconcile_orders(_NoStore())
+
+        assert [(i.check_name, i.table_name, i.severity) for i in issues] == [
+            ("mirror_stood_down", ORDERS, Severity.INFO),
+            ("mirror_stood_down", LINES, Severity.INFO),
+        ]
+        assert ORDERS in issues[0].description
+        assert pool.acquired == 0
+
+    @pytest.mark.asyncio
+    async def test_without_a_chain_it_compares(self, pool, tmp_path):
+        """The control: the same call reads both stores and files no stand-down."""
+        from core.mirror_reconciliation import reconcile_orders
+
+        store = await _store(tmp_path, [1])
+        issues = await reconcile_orders(store)
+        assert pool.acquired > 0
+        assert "mirror_stood_down" not in {i.check_name for i in issues}
+
+    def test_its_lever_is_not_the_generic_mirror_advice(self):
+        """`mirror_` says "wait for the re-ship", which is the one thing the
+        stand-down exists to prevent."""
+        from core.data_quality import remediation_for
+
+        assert remediation_for(["mirror_stood_down"]) != remediation_for(
+            ["mirror_missing_rows"])
+        assert "never backfill" in remediation_for(["mirror_stood_down"])[0].lower()
+
+
+class TestTheAdminBackfill:
+    def _client(self, flags):
+        import time as _time
+
+        from fastapi.testclient import TestClient
+
+        from core.permissions import ADMIN_USER_IDS
+        from web.main import app
+        from web.routes.api._deps import limiter
+        from web.routes.auth import (
+            SESSION_COOKIE, create_session_data, session_serializer,
+        )
+
+        limiter.reset()
+        admin_id = sorted(ADMIN_USER_IDS)[0]
+
+        async def _resolve(session):
+            return {"user_id": admin_id, "role": "admin"}
+
+        flags.setattr("web.routes.auth._resolve_session", _resolve)
+        client = TestClient(app)
+        client.cookies.set(SESSION_COOKIE, session_serializer.dumps(create_session_data(
+            {"id": str(admin_id), "first_name": "T", "last_name": "U",
+             "username": "t", "auth_date": str(int(_time.time()))}, role="admin",
+        )))
+        return client
+
+    @pytest.fixture
+    def backfill(self, flags):
+        from unittest.mock import AsyncMock
+
+        run = AsyncMock(return_value={"complete": True})
+        flags.setattr("core.pg_backfill.backfill_orders", run)
+        flags.setattr("web.routes.api.admin.get_store", AsyncMock(return_value=object()))
+        return run
+
+    @pytest.mark.parametrize("background", ["true", "false"])
+    def test_409_before_anything_starts(self, flags, order_chain, backfill, background):
+        order_chain()
+        res = self._client(flags).post(
+            f"/api/mirror/backfill/orders?background={background}")
+        assert res.status_code == 409
+        assert "write chain" in res.json()["detail"]
+        backfill.assert_not_called()
+
+    def test_without_a_chain_it_runs(self, flags, backfill):
+        res = self._client(flags).post("/api/mirror/backfill/orders?background=false")
+        assert res.status_code == 200
+        backfill.assert_awaited_once()
+
+
+class TestEveryOrderShipperAsksFirst:
+    """Walked, not listed. A function that ships DuckDB's orders to Postgres —
+    it calls `write_orders` or `mirror_orders` — must ask
+    `order_tables_stood_down` itself. `mirror_orders` is the one exemption: it
+    is the wrapper every such caller reaches, and each of those is walked."""
+
+    SHIPPERS = {"write_orders", "mirror_orders"}
+    EXEMPT = {("core/pg_landing.py", "mirror_orders")}
+
+    @staticmethod
+    def _called(fn) -> set:
+        names = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                f = node.func
+                if isinstance(f, ast.Name):
+                    names.add(f.id)
+                elif isinstance(f, ast.Attribute):
+                    names.add(f.attr)
+        return names
+
+    def _sites(self):
+        root = CORE.parent
+        for folder in ("core", "web", "scripts"):
+            for path in sorted((root / folder).rglob("*.py")):
+                rel = path.relative_to(root).as_posix()
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                for fn in ast.walk(tree):
+                    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    if (rel, fn.name) in self.EXEMPT:
+                        continue
+                    called = self._called(fn)
+                    if called & self.SHIPPERS:
+                        yield rel, fn.name, "order_tables_stood_down" in called
+
+    def test_each_one_asks(self):
+        missing = [(rel, name) for rel, name, asks in self._sites() if not asks]
+        assert not missing, f"ships orders without asking the registry: {missing}"
+
+    def test_the_walk_is_not_vacuous(self):
+        found = {name for _rel, name, _asks in self._sites()}
+        assert {"upsert_orders", "backfill_orders", "ship_orders_by_id"} <= found

@@ -1413,6 +1413,39 @@ async def reconcile_orders(
     if not pg_landing.enabled():
         return []          # `reconcile_mirror` already says so, once.
 
+    # A write chain that owns either order table stands both down here, as it
+    # stands down the mirror that feeds them (DN-22a): the mirror stops
+    # shipping DuckDB's copy, so every order the chain writes would read as
+    # lost from DuckDB and every one DuckDB receives as missing from Postgres
+    # — findings the check itself created, `reconcile_operational`'s reason.
+    # Said at INFO rather than left as silence, because unlike that function's
+    # tables these have no standing watch of their own yet, and a comparison
+    # that stopped without a word reads the same as one that passed. Asked
+    # before any read, so a stood-down run costs neither store anything.
+    moved = pg_landing.order_tables_stood_down()
+    order_tables = {pg_landing.ORDERS_TABLE, pg_landing.ORDER_PRODUCTS_TABLE}
+    issues: List[IntegrityIssue] = []
+    if moved:
+        for spec in specs:
+            if spec.pg_table not in order_tables:
+                continue
+            issues.append(IntegrityIssue(
+                check_name="mirror_stood_down",
+                table_name=spec.pg_table,
+                severity=Severity.INFO,
+                count=1,
+                description=(
+                    f"Not compared: {', '.join(sorted(moved))} is written by a "
+                    "write chain, so the orders mirror no longer ships DuckDB's "
+                    "copy of either order table — they go in one transaction. "
+                    "A difference here would be the chain's own writes, not a "
+                    "loss."
+                ),
+            ))
+        specs = tuple(s for s in specs if s.pg_table not in order_tables)
+        if not specs:
+            return issues
+
     now = now or datetime.now(timezone.utc)
     pool = await get_pool()
     await require_revision()
@@ -1422,7 +1455,6 @@ async def reconcile_orders(
     async with store.connection() as conn:
         dk_prints = {s.pg_table: fingerprints(conn, s) for s in specs}
 
-    issues: List[IntegrityIssue] = []
     suspects: Dict[str, List[int]] = {}
     for spec in specs:
         dk_print = dk_prints[spec.pg_table]
