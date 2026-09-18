@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.224
+
+- DN-09: Postgres leaves this host, encrypted, and a drill proves it came back
+
+
 ## 3.0.223
 
 - DN-06: once a chain has written Postgres, the latch decides, not the flag
