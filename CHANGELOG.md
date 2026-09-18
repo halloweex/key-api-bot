@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.228
+
+- DN-05a: every own-derivation failure is recorded, and a frozen signal read counts
+
+
 ## 3.0.227
 
 - A disk alert that steps down clears the one above it
