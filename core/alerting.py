@@ -139,6 +139,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "warehouse_pg:derive_failed": _c("a Postgres derivation completes"),
     "warehouse_pg:validation_failed": _c("a Postgres derivation passes validation"),
     "warehouse_pg:sales_type_partition": _c("Postgres Gold's known types cover Silver again"),
+    # Five ticks in a row that could not read meta.derivation_signal — before
+    # DN-05a nothing but the derived tables' 90-minute age said so.
+    "warehouse_pg:signal_unreadable": _c("the derivation reads its signal again"),
     "warehouse:backup_preflight": _EVENT,   # one refused attempt, that night's fact
     "warehouse:backup_failed": _EVENT,      # one failed copy/validation
 

@@ -127,7 +127,10 @@ class HealthResponse(BaseModel):
             "derivation marks dropped since a validated rebuild last covered "
             "them, and `last_mark_drop_age_s` is how long ago the latest was "
             "dropped while that count is above zero — both null under "
-            "piggyback or when Postgres cannot be read."
+            "piggyback or when Postgres cannot be read. "
+            "`signal_unreadable_ticks` counts the consecutive ticks of this "
+            "process that could not read the derivation's signal; web pages on "
+            "the fifth itself. Null under piggyback."
         ),
     )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(

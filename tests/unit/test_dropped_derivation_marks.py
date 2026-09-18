@@ -91,7 +91,11 @@ class TestTheJobHealsOnlyAValidatedRun:
         heal = AsyncMock(return_value=True)
         gold = (AsyncMock(side_effect=RuntimeError("boom")) if gold_raises
                 else AsyncMock(return_value={"rows": 1, "cells": 1}))
-        ran = BackgroundScheduler._pg_derive_ran
+        # Everything the job keeps on the class or the module, put back: the
+        # run stamps `_pg_derive_started`, and a stamp left behind is a hidden
+        # ten-minute floor for whichever test drives the job next.
+        before = (BackgroundScheduler._pg_derive_ran, BackgroundScheduler._pg_derive_started,
+                  pg_derivation._signal_failures)
         try:
             with patch("core.pg_silver.rebuild_silver", AsyncMock(return_value={"rows": 1})), \
                  patch("core.pg_gold.rebuild_gold", gold), \
@@ -105,12 +109,13 @@ class TestTheJobHealsOnlyAValidatedRun:
                  patch.object(pg_derivation, "heal_dropped_marks", heal), \
                  patch("core.alerting.raise_alert", AsyncMock(return_value=1)), \
                  patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
-                before = datetime.now(timezone.utc)
+                started_after = datetime.now(timezone.utc)
                 result = asyncio.run(
                     BackgroundScheduler()._derive_pg_layers(_Pool(_Conn()), "signal"))
         finally:
-            BackgroundScheduler._pg_derive_ran = ran
-        return result, heal, before
+            (BackgroundScheduler._pg_derive_ran, BackgroundScheduler._pg_derive_started,
+             pg_derivation._signal_failures) = before
+        return result, heal, started_after
 
     def test_a_validated_run_heals_with_its_own_start(self):
         result, heal, before = self._derive(passed=True)
@@ -128,6 +133,20 @@ class TestTheJobHealsOnlyAValidatedRun:
         result, heal, _ = self._derive(gold_raises=True)
         assert result["status"] == "error"
         assert heal.await_count == 0
+
+    def test_the_process_state_is_left_as_it_was_found(self):
+        """A run stamps the class. Left behind, the stamp skipped the next test
+        that drove the job with `floor`, depending only on file order."""
+        from core.scheduler import BackgroundScheduler
+
+        def state():
+            return (BackgroundScheduler._pg_derive_ran,
+                    BackgroundScheduler._pg_derive_started,
+                    pg_derivation._signal_failures)
+
+        before = state()
+        self._derive(passed=True)
+        assert state() == before
 
 
 class TestTheHealItself:
@@ -176,8 +195,8 @@ class TestHealthPublishesTheDrops:
         dropped = datetime.now(timezone.utc) - timedelta(minutes=80)
         conn = _Conn(row={"failures_since_ok": 3, "last_attempted_at": dropped})
         block, _ = self._read(conn)
-        assert set(block) == {"mode", "error", "marks_dropped_unhealed",
-                              "last_mark_drop_age_s"}
+        assert set(block) == {"mode", "error", "signal_unreadable_ticks",
+                              "marks_dropped_unhealed", "last_mark_drop_age_s"}
         assert block["marks_dropped_unhealed"] == 3
         assert 80 * 60 <= block["last_mark_drop_age_s"] <= 80 * 60 + 5
         assert conn.calls[0][1] == (pg_derivation.SIGNAL_TABLE,)

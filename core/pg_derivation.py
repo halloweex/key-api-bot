@@ -75,6 +75,66 @@ def owns() -> bool:
     return _mode == OWN
 
 
+# ─── Signal reads that failed, in a row — this process only (DN-05a) ─────────
+#
+# A tick that cannot read `meta.derivation_signal` returns before
+# `_derive_pg_layers`, so until DN-05a it wrote no journal row, no alert and no
+# watermark failure: the only thing that ever noticed was the derived tables'
+# 90-minute age, an hour and a half after the fact. The realistic trigger is a
+# deploy window — `web` running ahead of `migrate`, `require_revision` raising
+# SchemaVersionError every minute — and a Postgres that has gone away.
+#
+# In-process, not in Postgres, because the one thing known about this failure
+# is that Postgres could not be asked. A restart forgets the count, and that is
+# harmless: the first tick of a process derives whatever the signal says, so a
+# fault that outlives the restart counts up again from its first tick.
+#
+# Five ticks is five minutes at the job's one-minute interval: past a pool
+# reconnect or a migration that is simply finishing, and still eighty-five
+# minutes before the age would have said anything.
+#
+# That arithmetic holds for a read that fails. A read that neither answers nor
+# fails — a Postgres frozen rather than gone, where the kernel still completes
+# the handshake — used to hold the tick for as long as the freeze lasted:
+# asyncpg times the query out, sends a cancel request and waits, in the pool's
+# release, for a server that never answers it, while `max_instances=1` skips
+# every tick behind it. Measured on a paused container: the count stayed at
+# zero. So a tick gives the read `signal_read_bound_s()` and counts it as
+# unreadable past that. Such a tick occupies the job for the whole bound and
+# the tick landing meanwhile is skipped, so a freeze pages in about ten minutes
+# instead of five — still eighty before the age.
+SIGNAL_UNREADABLE_TICKS = 5
+
+_signal_failures = 0
+
+
+def signal_read_bound_s() -> float:
+    """How long one tick may spend reading the signal: two of the pool's
+    command timeouts (`KS_PG_TIMEOUT`, 30 s), the revision check's query and
+    the signal's own. A healthy read takes milliseconds; one that takes a
+    minute is not a signal anyone should act on."""
+    return 2 * float(os.getenv("KS_PG_TIMEOUT", "30"))
+
+
+def note_signal_unreadable() -> int:
+    """Count one more tick that could not read the signal; the new count."""
+    global _signal_failures
+    _signal_failures += 1
+    return _signal_failures
+
+
+def note_signal_read() -> int:
+    """The signal was read: reset the count and return what it had reached."""
+    global _signal_failures
+    previous, _signal_failures = _signal_failures, 0
+    return previous
+
+
+def signal_unreadable_ticks() -> int:
+    """Consecutive ticks of this process that could not read the signal."""
+    return _signal_failures
+
+
 # Every function that writes a table the derivation reads, and so must raise
 # the signal in its own transaction. Silver reads `bronze.orders` and the
 # manager classification; the customer profile reads `bronze.buyers`. A test
@@ -244,6 +304,50 @@ async def heal_dropped_marks(conn, started: datetime) -> bool:
         logger.info("dropped derivation marks healed by the rebuild started at %s",
                     started.isoformat())
     return healed
+
+
+# ─── The run's own tail, as a row in meta.mirror_state (DN-05a) ─────────────
+#
+# Silver, Gold and the profile each stamp their watermark in the transaction
+# that rebuilds them, so a failure there is recorded against the table that
+# raised and the next rebuild clears it. The tail of a run — validate, settle
+# the debt, write the journal row — has no table of its own to stamp, and until
+# DN-05a a failure there was recorded nowhere but the journal it may have been
+# unable to write. It is recorded against the journal: the verdict lives in
+# `meta.derivation_runs.validation`, so a tail that failed is a run that could
+# not say what it built.
+#
+# Cleared only by a run whose tail completed, and only when it owes something:
+# a derivation that has never failed there has no row, like the signal's. A
+# verdict of "not passed" is not a failure of the tail — it is recorded in the
+# journal and alerted as `warehouse_pg:validation_failed`.
+#
+# Nothing reads this row yet, nor the profile's — a deliberate follow-up, and
+# `BackgroundScheduler._derive_pg_layers` says why.
+RUNS_TABLE = "meta.derivation_runs"
+
+_TAIL_OK = """
+    UPDATE meta.mirror_state
+       SET failures_since_ok = 0,
+           last_error        = NULL,
+           last_attempted_at = now(),
+           last_ok_at        = now()
+     WHERE table_name = $1
+       AND failures_since_ok > 0
+"""
+
+
+async def clear_tail_failures(conn) -> bool:
+    """Reset the tail's count after a run that journaled itself. Never raises:
+    the run has already succeeded, and a clear that failed leaves a count the
+    next completed run clears. True when a count was cleared."""
+    try:
+        status = await conn.execute(_TAIL_OK, RUNS_TABLE)
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        logger.warning("derivation tail failures not cleared: %s: %s",
+                       type(exc).__name__, exc)
+        return False
+    return not status.endswith(" 0")
 
 
 async def record_run(

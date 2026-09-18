@@ -27,6 +27,8 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
+PROFILE_TABLE = "app.customer_profile"
+
 # One statement, so the profile is one snapshot of one Silver. FILTER instead
 # of a WHERE on returns: a customer whose only orders are returns still gets a
 # row (orders_count 0, returns_count N) — invisible-because-filtered is how
@@ -65,15 +67,21 @@ async def rebuild_customer_profile(pool=None) -> Dict[str, Any]:
     """Replace the витрина from the Silver just written. Raises on fault —
     the caller's except block is the single place these failures are logged."""
     from core.pg import get_pool, require_revision
+    from core.pg_landing import _WATERMARK_OK
 
     pool = pool or await get_pool()
     await require_revision()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute("TRUNCATE app.customer_profile")
+            await conn.execute(f"TRUNCATE {PROFILE_TABLE}")
             result = await conn.execute(_REBUILD_SQL)
-    # asyncpg returns "INSERT 0 <n>"
-    rows = int(result.split()[-1])
+            # asyncpg returns "INSERT 0 <n>"
+            rows = int(result.split()[-1])
+            # Silver's and Gold's watermark one layer down, for DN-05a: the own
+            # derivation records a failed profile rebuild against this row, and
+            # `failures_since_ok` says "still failing" only if a success resets
+            # it. Without the stamp one failure would read as failing for good.
+            await conn.execute(_WATERMARK_OK, PROFILE_TABLE, rows)
     return {"rows": rows}
 
 

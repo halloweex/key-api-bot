@@ -1376,6 +1376,15 @@ class BackgroundScheduler:
     # of the signal: a deploy is exactly when an owed rebuild used to be lost.
     _pg_derive_ran = False
 
+    # When this process last started a derivation — the same instant the run's
+    # journal row records as `started_at`. The floor is judged against the later
+    # of this and the journal (DN-05a): the journal alone let a run whose row
+    # could not be written be followed by another on the very next tick, and
+    # the next, for as long as the journal stayed unwritable — exactly while
+    # Postgres was already in trouble. The journal still carries the floor
+    # across a deploy, which this cannot.
+    _pg_derive_started: Optional[datetime] = None
+
     async def _run_pg_derivation(
         self, *, trigger: Optional[str] = None, force: bool = False,
     ) -> Dict[str, Any]:
@@ -1402,13 +1411,43 @@ class BackgroundScheduler:
         if not derivation.owns():
             return {"skipped": True, "reason": "KS_PG_DERIVE is not own"}
 
-        try:
+        async def read_signal():
             pool = await get_pool()
             await require_revision()
-            floor = timedelta(seconds=int(os.getenv("KS_PG_SILVER_INTERVAL_S", "600")))
             async with pool.acquire() as conn:
                 requested, built, built_at = await derivation.read_owed(conn)
-                last_attempt = await derivation.last_attempt_at(conn)
+                journal_attempt = await derivation.last_attempt_at(conn)
+            return pool, requested, built, built_at, journal_attempt
+
+        try:
+            floor = timedelta(seconds=int(os.getenv("KS_PG_SILVER_INTERVAL_S", "600")))
+            bound = derivation.signal_read_bound_s()
+            # Bounded, and behind a shield (DN-05a): `pg_derivation` says why a
+            # read can hang. The hang is in the pool's release, waiting on the
+            # cancel request asyncpg sent to a server that will not answer.
+            # Measured on a paused container: a cut that lands in that release
+            # returns at the bound either way, because asyncpg shields it, but
+            # a cut that lands inside a query unwinds *into* it, and a bare
+            # `wait_for` then waits with it — still waiting 25 s later, where
+            # the shielded form returned at 2 s. So the tick returns at the
+            # bound wherever the cut lands; the read is cancelled and left to
+            # finish on its own, holding the one connection already stuck.
+            read = asyncio.ensure_future(read_signal())
+            try:
+                pool, requested, built, built_at, journal_attempt = await asyncio.wait_for(
+                    asyncio.shield(read), timeout=bound)
+            except asyncio.TimeoutError:
+                if read.done():
+                    raise   # the read's own: a query past KS_PG_TIMEOUT
+                raise TimeoutError(
+                    f"the signal read did not return within {bound:g} s") from None
+            finally:
+                read.cancel()
+            last_attempt = max(
+                (t for t in (journal_attempt, BackgroundScheduler._pg_derive_started)
+                 if t is not None),
+                default=None,
+            )
             run, why = derivation.due(
                 requested=requested, built=built, built_at=built_at,
                 last_attempt=last_attempt, now=datetime.now(timezone.utc),
@@ -1418,12 +1457,63 @@ class BackgroundScheduler:
         except Exception as e:
             logger.error("Postgres derivation could not read its signal: %s", e,
                          exc_info=True)
+            await self._pg_signal_unreadable(e)
             return {"skipped": True, "reason": f"signal unreadable: {e}"}
+        if derivation.note_signal_read() >= derivation.SIGNAL_UNREADABLE_TICKS:
+            # Readable again after this process paged on it. A run that follows
+            # resolves the whole group anyway; one skipped by the floor or with
+            # nothing owed would otherwise leave the page standing until the
+            # heartbeat's run, up to an hour after the fault had gone.
+            try:
+                from core.alerting import resolve_group
+
+                await resolve_group("warehouse_pg",
+                                    only_prefix="warehouse_pg:signal_unreadable")
+            except Exception as resolve_error:  # noqa: BLE001
+                logger.warning("warehouse_pg resolve failed: %s", resolve_error)
         if not run:
             return {"skipped": True, "reason": why}
 
         async with self._heavy_job_lock:
             return await self._derive_pg_layers(pool, trigger or why)
+
+    async def _pg_signal_unreadable(self, error: Exception) -> None:
+        """Count a tick that could not read the signal, and page from the fifth.
+
+        Raised on every tick past the threshold, not once at it: the gate turns
+        a standing condition into a loud half hour and then a daily reminder,
+        and a send the transport dropped is retried by the next tick rather than
+        lost. Nothing is written to Postgres — it is the thing that could not be
+        read.
+
+        The page carries the error's own words, not only its class, and the
+        lever claims no more than they do. The class alone was read as a
+        diagnosis — "a SchemaVersionError means migrate has not run" — and it
+        is not one: `core.pg.current_revision` returns None on *any* failure of
+        its read, a timeout included, so a migrated database that is merely
+        slow raises "absent or empty: never been migrated". Only an error that
+        names two revisions has read one of them."""
+        import html
+
+        from core import pg_derivation as derivation
+
+        ticks = derivation.note_signal_unreadable()
+        if ticks < derivation.SIGNAL_UNREADABLE_TICKS:
+            return
+        # 120 characters: enough for what tells require_revision's two messages
+        # apart — "absent or empty", or both revisions by name — and short
+        # enough that an asyncpg error does not become the whole page. Escaped
+        # after cutting, so the cut cannot land inside an entity.
+        said = " ".join(str(error).split()) or "(no message)"
+        if len(said) > 120:
+            said = said[:120] + "…"
+        await self._pg_derivation_alert(
+            f"Postgres derivation: signal unreadable — {ticks} ticks in a row, "
+            "nothing derived meanwhile\n"
+            f"{html.escape(type(error).__name__)}: {html.escape(said)}\n"
+            "→ Read the web log; only an error naming two revisions means migrate and web disagree",
+            key="warehouse_pg:signal_unreadable",
+        )
 
     async def _derive_pg_layers(self, pool, trigger: str) -> Dict[str, Any]:
         """One whole derivation, its validation, its journal row and its alerts."""
@@ -1433,13 +1523,33 @@ class BackgroundScheduler:
         from core.pg_gold import GOLD_TABLE, rebuild_gold
         from core.pg_landing import _record_failure
         from core.pg_silver import PG_LAYER_LOCK, SILVER_TABLE, rebuild_silver
-        from core.pg_vitrina import rebuild_customer_profile
+        from core.pg_vitrina import PROFILE_TABLE, rebuild_customer_profile
+
+        # Where a failure at each stage is recorded in `meta.mirror_state`. The
+        # three layers against their own watermark, which their next rebuild
+        # clears; the tail against the journal (`pg_derivation.RUNS_TABLE`
+        # says why). Not the signal read inside the lock: its failure is the
+        # journal row and the alert below, and the signal's own row counts
+        # dropped marks, which the canary pages on by that name.
+        #
+        # The profile's row and the tail's have no reader yet, on purpose.
+        # Neither is in WATCHED_MIRRORS or DERIVED_TABLES, so /api/health does
+        # not publish them and the canary does not judge them, and soak check
+        # D6 lists Silver and Gold alone. A failure there reaches a human as
+        # `warehouse_pg:derive_failed`, as it did before; the rows are the
+        # record, kept so that whoever decides to watch them has one. Which of
+        # health, the canary or D6 reads them is the owner's follow-up — a
+        # watched row is a new page, and this change does not add one quietly.
+        failure_rows = {SILVER_TABLE: SILVER_TABLE, GOLD_TABLE: GOLD_TABLE,
+                        PROFILE_TABLE: PROFILE_TABLE,
+                        "validation": derivation.RUNS_TABLE}
 
         started = datetime.now(timezone.utc)
         counts: Dict[str, Optional[int]] = {}
         stage = "signal"
         seen: Optional[int] = None
         BackgroundScheduler._pg_derive_ran = True
+        BackgroundScheduler._pg_derive_started = started
         try:
             async with PG_LAYER_LOCK:
                 async with pool.acquire() as conn:
@@ -1449,7 +1559,7 @@ class BackgroundScheduler:
                 stage = GOLD_TABLE
                 gold = await rebuild_gold(pool)
                 counts["gold_rows"], counts["gold_cells"] = gold["rows"], gold["cells"]
-                stage = "app.customer_profile"
+                stage = PROFILE_TABLE
                 counts["profile_rows"] = (await rebuild_customer_profile(pool))["rows"]
                 stage = "validation"
                 async with pool.acquire() as conn:
@@ -1468,10 +1578,11 @@ class BackgroundScheduler:
                         counts=counts, validation_passed=validation["passed"],
                         validation=validation,
                     )
+                    await derivation.clear_tail_failures(conn)
         except Exception as e:
             logger.error("Postgres derivation failed at %s: %s", stage, e, exc_info=True)
-            if stage in (SILVER_TABLE, GOLD_TABLE):
-                await _record_failure(stage, f"{type(e).__name__}: {e}")
+            if stage in failure_rows:
+                await _record_failure(failure_rows[stage], f"{type(e).__name__}: {e}")
             try:
                 async with pool.acquire() as conn:
                     await derivation.record_run(

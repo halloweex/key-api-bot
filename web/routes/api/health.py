@@ -149,10 +149,27 @@ async def _dropped_marks() -> dict:
     return {"marks_dropped_unhealed": count, "last_mark_drop_age_s": age}
 
 
+def _signal_reads() -> dict:
+    """`signal_unreadable_ticks`: consecutive ticks of this process that could
+    not read `meta.derivation_signal` (DN-05a). Local state, no I/O — the one
+    number in this block that must answer while Postgres cannot, because that
+    is when it is not zero. Null under piggyback, where the job that counts is
+    not registered and a zero would claim a watch nobody keeps. Web pages on it
+    itself (`warehouse_pg:signal_unreadable`); it is published so that the
+    minutes before the page, and a page that could not be delivered, are
+    visible from outside."""
+    from core import pg_derivation
+
+    if not pg_derivation.owns():
+        return {"signal_unreadable_ticks": None}
+    return {"signal_unreadable_ticks": pg_derivation.signal_unreadable_ticks()}
+
+
 async def _derivation_block() -> dict:
-    """The `derivation` block: the mode and its error, which are local state,
-    plus the two numbers in it that have to be read out of Postgres."""
-    return {**_derivation_mode(), **await _dropped_marks()}
+    """The `derivation` block: the mode, its error and the unreadable-signal
+    count, which are local state, plus the two numbers in it that have to be
+    read out of Postgres."""
+    return {**_derivation_mode(), **_signal_reads(), **await _dropped_marks()}
 
 
 @router.get("/health", response_model=HealthResponse)

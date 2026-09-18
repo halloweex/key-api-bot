@@ -45,7 +45,8 @@ async def _reset(pool):
         await conn.execute("DELETE FROM meta.derivation_runs")
         await conn.execute(
             "DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
-            ["silver.orders", "gold.daily_revenue", "meta.derivation_signal"])
+            ["silver.orders", "gold.daily_revenue", "app.customer_profile",
+             "meta.derivation_signal", "meta.derivation_runs"])
 
 
 @pytest_asyncio.fixture
@@ -56,9 +57,12 @@ async def own(monkeypatch):
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_PG_DERIVE", "own")
     monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
-    before = (pg_derivation._mode, pg_derivation._mode_error, BackgroundScheduler._pg_derive_ran)
+    before = (pg_derivation._mode, pg_derivation._mode_error, BackgroundScheduler._pg_derive_ran,
+              BackgroundScheduler._pg_derive_started, pg_derivation._signal_failures)
     pg_derivation.configure_mode()
     BackgroundScheduler._pg_derive_ran = False
+    BackgroundScheduler._pg_derive_started = None
+    pg_derivation._signal_failures = 0
     pool = await asyncpg.create_pool(DSN, min_size=2, max_size=8)
     await _reset(pool)
     raise_alert, resolve = AsyncMock(return_value=1), AsyncMock(return_value=0)
@@ -69,7 +73,8 @@ async def own(monkeypatch):
         yield pool, BackgroundScheduler(), raise_alert
     await _reset(pool)
     await pool.close()
-    pg_derivation._mode, pg_derivation._mode_error, BackgroundScheduler._pg_derive_ran = before
+    (pg_derivation._mode, pg_derivation._mode_error, BackgroundScheduler._pg_derive_ran,
+     BackgroundScheduler._pg_derive_started, pg_derivation._signal_failures) = before
 
 
 async def _signal(pool):
@@ -192,6 +197,117 @@ class TestAFailureLeavesTheRebuildOwed:
                 "SELECT failures_since_ok FROM meta.mirror_state WHERE table_name = 'gold.daily_revenue'")
         assert failures and failures >= 1
         assert _alerted(raise_alert) == ["warehouse_pg:derive_failed"]
+
+
+async def _watermark(pool, table):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT last_attempted_at, last_ok_at, failures_since_ok, last_error, last_rows"
+            " FROM meta.mirror_state WHERE table_name = $1", table)
+
+
+class TestEveryStageLeavesAWatermark:
+    """DN-05a: Silver and Gold recorded their failures and the profile and the
+    run's tail did not, so a failure there left every row in meta.mirror_state
+    reading clean. Each is recorded now, and each is cleared by the success
+    that follows it — a count nothing resets says only that it happened once."""
+
+    @pytest.mark.asyncio
+    async def test_the_profile_raising_is_recorded_and_the_next_rebuild_clears_it(self, own):
+        pool, scheduler, raise_alert = own
+        with patch("core.pg_vitrina.rebuild_customer_profile",
+                   AsyncMock(side_effect=RuntimeError("profile boom"))):
+            result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "error" and result["stage"] == "app.customer_profile"
+        state = await _watermark(pool, "app.customer_profile")
+        assert state["failures_since_ok"] == 1 and "profile boom" in state["last_error"]
+        assert state["last_ok_at"] is None
+        assert await _signal(pool) == (1, 0), "a failed rebuild settled the debt"
+        assert _alerted(raise_alert) == ["warehouse_pg:derive_failed"]
+
+        result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "success", result
+        state = await _watermark(pool, "app.customer_profile")
+        assert state["failures_since_ok"] == 0 and state["last_error"] is None
+        assert state["last_ok_at"] == state["last_attempted_at"]
+        assert state["last_rows"] == result["profile_rows"]
+
+    @pytest.mark.asyncio
+    async def test_the_tail_raising_is_recorded_against_the_journal_and_cleared(self, own):
+        from core import pg_derivation
+
+        pool, scheduler, _a = own
+        with patch.object(pg_derivation, "validate",
+                          AsyncMock(side_effect=RuntimeError("validate boom"))):
+            result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "error" and result["stage"] == "validation"
+        state = await _watermark(pool, "meta.derivation_runs")
+        assert state["failures_since_ok"] == 1 and "validate boom" in state["last_error"]
+        assert (await _runs(pool))[-1]["error"].startswith("validation:")
+
+        result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "success" and result["validation_passed"] is True, result
+        state = await _watermark(pool, "meta.derivation_runs")
+        assert state["failures_since_ok"] == 0 and state["last_error"] is None
+        assert state["last_ok_at"] == state["last_attempted_at"]
+
+    @pytest.mark.asyncio
+    async def test_a_tail_that_never_failed_has_no_row(self, own):
+        pool, scheduler, _a = own
+        assert (await scheduler._run_pg_derivation())["status"] == "success"
+        assert await _watermark(pool, "meta.derivation_runs") is None
+
+    @pytest.mark.asyncio
+    async def test_an_unwritable_journal_does_not_lift_the_floor(self, own, monkeypatch):
+        """The floor read the journal alone: a run whose row could not be
+        written was followed by another on the next tick, every minute."""
+        from core import pg_derivation
+        from core.pg_landing import write_orders
+
+        pool, scheduler, _a = own
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "600")
+        with patch.object(pg_derivation, "record_run",
+                          AsyncMock(side_effect=RuntimeError("journal boom"))):
+            first = await scheduler._run_pg_derivation()
+            assert first["status"] == "error" and first["stage"] == "validation"
+            assert await _runs(pool) == []
+            await write_orders([_order(IDS[0])], [], replace_products=False)
+            requested, built = await _signal(pool)
+            assert requested > built, "the test needs a debt for the floor to hold"
+            assert await scheduler._run_pg_derivation() == {"skipped": True, "reason": "floor"}
+
+        state = await _watermark(pool, "meta.derivation_runs")
+        assert state["failures_since_ok"] == 1 and "journal boom" in state["last_error"]
+
+    @pytest.mark.asyncio
+    async def test_an_older_journal_row_does_not_undercut_it(self, own, monkeypatch):
+        """Production's journal is never empty. With a row older than the floor
+        in it, the floor is the later of that row and this process's own
+        unjournaled run — the earlier is the journal-only floor, which re-ran
+        every minute."""
+        from core import pg_derivation
+        from core.pg_landing import write_orders
+
+        pool, scheduler, _a = own
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "600")
+        long_ago = datetime.now(timezone.utc) - timedelta(minutes=11)
+        async with pool.acquire() as conn:
+            await pg_derivation.record_run(conn, trigger="heartbeat", started_at=long_ago,
+                                           ended_at=long_ago, error="an earlier run")
+        with patch.object(pg_derivation, "record_run",
+                          AsyncMock(side_effect=RuntimeError("journal boom"))):
+            first = await scheduler._run_pg_derivation()
+            assert first["status"] == "error" and first["stage"] == "validation"
+            await write_orders([_order(IDS[0])], [], replace_products=False)
+            requested, built = await _signal(pool)
+            assert requested > built, "the test needs a debt for the floor to hold"
+            assert await scheduler._run_pg_derivation() == {"skipped": True, "reason": "floor"}
+
+        assert [r["started_at"] for r in await _runs(pool)] == [long_ago]
 
 
 class TestValidation:
