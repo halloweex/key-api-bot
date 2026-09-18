@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.232
+
+- test: require deploy/ in the walk only where it exists
+- test: the guard exempts only annotations nothing evaluates; both arm guards pinned
+- fix: six more names used and never defined, and a guard that walks the tree
+- fix: a CRITICAL from the Postgres or ClickHouse reconciliation reaches a human
+
+
 ## 3.0.231
 
 - DN-07: a chain that moves its tables to Postgres gains a watch of its own
