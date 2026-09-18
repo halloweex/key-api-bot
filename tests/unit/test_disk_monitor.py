@@ -846,7 +846,8 @@ PROD_SERIES = [
     (312.0, 26.2281), (318.0, 29.8283), (324.0, 28.3939), (330.0, 25.1370),
     (336.0, 25.4544), (342.0, 25.7885), (348.0, 25.8272), (354.0, 25.2412),
     (360.0, 25.5273), (366.0, 25.9074), (372.0, 25.9368), (378.0, 25.3501),
-    (384.0, 26.1040), (390.0, 27.0287), (396.0, 27.1078),
+    (384.0, 26.1040), (390.0, 27.0287), (396.0, 27.1078), (402.0, 28.3873),
+    (408.0, 27.9506), (414.0, 34.4562), (420.0, 28.5533),
 ]
 
 
@@ -873,32 +874,34 @@ class TestTheRemainderIsJudgedByPersistence:
     09-17. Growth now has to hold to count.
     """
 
-    def test_the_real_series_fires_twice_and_both_are_the_volume_leak(self):
-        """The whole point, replayed on production data.
+    def test_the_real_series_fires_only_on_growth_that_held(self):
+        """The whole point, replayed on every sample this host has taken.
 
-        Two windows survive, 2026-09-08 22:00 and 09-09 04:00, and they are
-        the 173 anonymous volumes (7.13 GB) leaked by container removal
-        without its volume flag. That was real, this alert found it, and a
-        detector that lost it would have bought quiet at the price of the one
-        thing it ever caught.
+        Four windows survive, in two clusters, and both are real:
+
+        * 2026-09-08/09 — the 173 anonymous volumes leaked by container
+          removal without its volume flag. This alert is what found them.
+        * 2026-09-17/18 — the build cache climbing 1.6 to 3.8 GB in four days
+          as the gate began running far more often, plus another project's
+          images. Confirmed against the host, not inferred.
+
+        Every other window is silent, including the 22:00 transient below.
         """
         from core.disk_monitor import Severity, evaluate_remainder_growth
 
         series = _prod_series()
         fired = [
-            (now, alert.severity)
+            (now, alert)
             for now, _ in series
             if (alert := evaluate_remainder_growth(series=series, now=now))
         ]
 
-        assert len(fired) == 2, (
-            "expected the volume leak and nothing else, got "
-            + repr([(t.isoformat(), s.value) for t, s in fired])
-        )
-        assert all(s is Severity.WARN for _, s in fired)
         assert [t.strftime("%m-%d %H") for t, _ in fired] == [
-            "09-08 22", "09-09 04",
-        ]
+            "09-08 22", "09-09 04", "09-17 22", "09-18 04",
+        ], repr([(t.isoformat(), a.severity.value) for t, a in fired])
+        assert all(a.severity is Severity.WARN for _, a in fired)
+        # All four are the held-growth path; none is a cliff.
+        assert all("stayed there" in a.reason for _, a in fired)
 
     def test_the_series_it_is_judging_has_no_upward_trend(self):
         """Guards the premise, not the code. If this fixture is ever replaced
@@ -960,9 +963,11 @@ class TestTheRemainderIsJudgedByPersistence:
         assert alert.total_delta_gb == 6.0
         assert "stayed there" in alert.reason
 
-    def test_a_cliff_is_critical_without_waiting(self):
+    def test_a_cliff_must_still_be_there_a_sample_later(self):
         """Persistence needs about a day to confirm even a large step, and the
-        2026-08-05 event put +8.93 GB on the disk in an afternoon."""
+        2026-08-05 event put +8.93 GB on the disk in an afternoon. So the cliff
+        fires on one sample of confirmation rather than twenty-four hours of
+        it — but it does need that one."""
         from datetime import datetime, timedelta, timezone
 
         from core.disk_monitor import Severity, evaluate_remainder_growth
@@ -970,26 +975,92 @@ class TestTheRemainderIsJudgedByPersistence:
         gb = 1024 ** 3
         base = datetime(2026, 9, 1, tzinfo=timezone.utc)
         series = [(base + timedelta(hours=6 * i), 20 * gb) for i in range(40)]
+        # The jump, then a reading that shows it stayed.
+        series.append((series[-1][0] + timedelta(hours=6), 29 * gb))
         series.append((series[-1][0] + timedelta(hours=6), 29 * gb))
 
         alert = evaluate_remainder_growth(series=series, now=series[-1][0])
         assert alert is not None
         assert alert.severity is Severity.CRITICAL
-        assert "jumped" in alert.reason
+        assert "jumped" in alert.reason and "still there" in alert.reason
         assert alert.window_hours == 0
 
-    def test_the_cliff_stays_above_every_rise_the_host_has_shown(self):
-        """A fast path that speaks when nothing happened costs more than the
-        hours it saves, so it is set from the data rather than chosen."""
+    def test_the_jump_alone_is_not_yet_a_cliff(self):
+        """The sample that first sees the jump cannot know whether it is a
+        build in flight. Six hours of patience is what separates the two."""
+        from datetime import datetime, timedelta, timezone
+
+        from core.disk_monitor import evaluate_remainder_growth
+
+        gb = 1024 ** 3
+        base = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        series = [(base + timedelta(hours=6 * i), 20 * gb) for i in range(40)]
+        series.append((series[-1][0] + timedelta(hours=6), 29 * gb))
+
+        assert evaluate_remainder_growth(
+            series=series, now=series[-1][0]) is None
+
+    def test_a_spike_that_returns_is_not_a_cliff(self):
+        """2026-09-17 22:00, reproduced from what actually happened: the sample
+        caught a gate build in flight at 34.46 GB, the next reading was 28.55,
+        and the unconfirmed form had already paged and escalated over bytes
+        that no longer existed."""
+        from core.disk_monitor import evaluate_remainder_growth
+
+        series = _prod_series()
+        # The transient is the second-to-last real sample.
+        assert round(series[-2][1] / (1024 ** 3), 2) == 34.46
+        assert round(series[-1][1] / (1024 ** 3), 2) == 28.55
+
+        alert = evaluate_remainder_growth(series=series, now=series[-1][0])
+        assert alert is None or "jumped" not in alert.reason
+
+    def test_no_cliff_fires_anywhere_in_the_real_series(self):
+        """Every sample this host has ever taken, judged as it arrived. The
+        unconfirmed form fired once — the transient above. This form fires on
+        none of them, and still catches a jump that stays."""
+        from core.disk_monitor import evaluate_remainder_growth
+
+        series = _prod_series()
+        cliffs = [
+            now for now, _ in series
+            if (a := evaluate_remainder_growth(series=series, now=now))
+            and "jumped" in a.reason
+        ]
+        assert cliffs == [], (
+            "a cliff fired on real data: "
+            + repr([t.isoformat() for t in cliffs])
+        )
+
+    def test_the_cliff_is_calibrated_on_held_rises_not_raw_ones(self):
+        """Why the cliff needs a confirming sample, in two numbers.
+
+        The threshold was first set from raw sample-to-sample rises, whose
+        largest was +3.60 GB across 66 samples — comfortably under 5.0. On
+        2026-09-17 a gate build in flight produced a raw rise of +6.51 GB that
+        was gone six hours later, and the unconfirmed form paged and escalated
+        on it. So raw rises are not the quantity to calibrate against: a
+        *held* rise is, and the largest this host has produced is well under
+        the line.
+        """
         from core.disk_monitor import FS_CLIFF_STEP_GB
 
-        rises = [
+        raw = [
             PROD_SERIES[i + 1][1] - PROD_SERIES[i][1]
             for i in range(len(PROD_SERIES) - 1)
         ]
-        assert max(rises) < FS_CLIFF_STEP_GB, (
-            "the cliff threshold is below the largest rise this host has "
-            "actually shown: " + repr(round(max(rises), 2))
+        held = [
+            min(PROD_SERIES[i + 1][1], PROD_SERIES[i][1]) - PROD_SERIES[i - 1][1]
+            for i in range(1, len(PROD_SERIES) - 1)
+        ]
+
+        assert max(raw) > FS_CLIFF_STEP_GB, (
+            "no raw rise exceeds the cliff any more, so the transient that "
+            "motivated confirmation has been dropped from the fixture"
+        )
+        assert max(held) < FS_CLIFF_STEP_GB, (
+            "a held rise now exceeds the cliff: "
+            + repr(round(max(held), 2))
         )
 
     def test_thin_windows_say_nothing(self):

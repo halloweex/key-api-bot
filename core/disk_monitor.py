@@ -469,20 +469,36 @@ def evaluate_remainder_growth(
 
     held_gb = (min(recent) - max(baseline)) / _GB
 
-    # The cliff looks only at the newest pair, which is the whole point: it is
-    # asking "did the disk just move", not "has it been moving".
+    # The cliff asks "did the disk move suddenly", not "has it been moving" —
+    # but it must still ask whether the move STAYED. Shipped unconfirmed on
+    # 2026-09-17 and it cost a CRITICAL the same night: the 22:00 sample caught
+    # a gate build in flight at 34.46 GB, six hours later it was 28.55, and the
+    # page escalated at 22:11 over ~6.5 GB that no longer existed by morning.
+    # An alert a reader cannot act on by the time they read it is the shape
+    # this whole module was rewritten to stop producing.
+    #
+    # So the jump is measured against the sample BEFORE it and confirmed by the
+    # one AFTER: `min(last two) - the one before them` is "rose by this much
+    # and both readings since are still that high". A spike that returns is
+    # arithmetically excluded rather than tolerated.
+    #
+    # It costs one sample — six hours — and buys back eighteen, because
+    # persistence needs twenty-four. Measured over all 71 samples this host has:
+    # the unconfirmed form fires once, on the transient above; the confirmed
+    # form fires zero times. The 2026-08-05 event it exists for (+8.93 GB in an
+    # afternoon, and it stayed) is caught either way.
     step_gb = None
     tail = [b for t, b in rows if t <= now]
-    if len(tail) >= 2:
-        step_gb = (tail[-1] - tail[-2]) / _GB
+    if len(tail) >= 3:
+        step_gb = (min(tail[-1], tail[-2]) - tail[-3]) / _GB
 
     if step_gb is not None and step_gb >= cliff_gb:
         return GrowthAlert(
             severity=Severity.CRITICAL,
             reason=(
-                f"disk outside data/ jumped {step_gb:+.2f} GB since the last "
-                f"sample (>= {cliff_gb:.2f} GB); {UNATTRIBUTED} is now "
-                f"{tail[-1] / _GB:.2f} GB"
+                f"disk outside data/ jumped {step_gb:+.2f} GB and is still "
+                f"there a sample later (>= {cliff_gb:.2f} GB); {UNATTRIBUTED} "
+                f"is now {tail[-1] / _GB:.2f} GB"
             ),
             total_delta_gb=round(step_gb, 3),
             top_group=UNATTRIBUTED,
