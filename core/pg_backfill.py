@@ -27,6 +27,13 @@ disagreements is the reconciliation's business, downstream of a check that can
 say which rows disagree. Running this after such a divergence will report
 nothing missing and be right.
 
+`ship_orders_by_id` is the other half of that sentence, and not an exception to
+it. It repairs nothing it discovered: a caller that has *just changed* rows in
+DuckDB hands it exactly those ids. The `manager_comment` backfills are the two
+callers, and an ids-diff could never serve them — the orders they touch exist
+on both sides and merely differ, which is the one shape this file's set
+difference is blind to by construction.
+
 WHY IT CHUNKS, AND WHAT THE CHUNK BOUNDARY MEANS
 
 The DuckDB connection is a lock every request shares. A single read of 46,446
@@ -50,6 +57,21 @@ logger = logging.getLogger(__name__)
 # Orders per chunk. 2,000 orders carry ~6,400 line items, which is one
 # comfortable transaction and about a second of the DuckDB lock.
 DEFAULT_CHUNK_SIZE = 2000
+
+# Said by a caller that writes DuckDB orders and ships them from outside the
+# web container, where the scheduler's heavy-job lock does not exist: a CLI
+# runs in its own process, so `get_scheduler()._heavy_job_lock` there would be
+# a brand-new lock guarding nothing. `tests/unit/test_heavy_lock_coverage.py`
+# accepts this constant in place of the lock, which is why it is a constant a
+# script prints rather than a sentence in a docstring.
+WEB_MUST_BE_STOPPED = (
+    "Stop the web container before running this. It updates DuckDB orders and "
+    "ships them to Postgres without the scheduler's heavy-job lock, which "
+    "lives in the web process and cannot be taken from here — and a sync tick "
+    "landing between the read and the write leaves Postgres holding the older "
+    "copy, with the version archive recording a transition that never "
+    "happened."
+)
 
 _ORDER_SELECT = """
     SELECT id, source_id, status_id, status_group_id, grand_total,
@@ -89,16 +111,24 @@ def _duckdb_orders_with_items(conn) -> set:
         "SELECT DISTINCT order_id FROM order_products").fetchall()}
 
 
-def _read_chunk(conn, ids: Sequence[int]) -> tuple:
-    """One chunk's headers and line items, in the stores' shared column order."""
+def _read_chunk(conn, ids: Sequence[int], *, products: bool = True) -> tuple:
+    """One chunk's headers and line items, in the stores' shared column order.
+
+    `products=False` skips the line-item read entirely, for a caller shipping
+    headers alone. Not a micro-optimisation: this runs under the DuckDB
+    connection every request shares, so a scan nobody will use is a scan
+    everybody waits for.
+    """
     placeholders = ", ".join("?" for _ in ids)
     orders = conn.execute(
         _ORDER_SELECT.format(placeholders=placeholders), list(ids),
     ).fetchall()
-    products = conn.execute(
+    if not products:
+        return orders, []
+    items = conn.execute(
         _ORDER_PRODUCT_SELECT.format(placeholders=placeholders), list(ids),
     ).fetchall()
-    return orders, products
+    return orders, items
 
 
 async def _mark_backfilled(pool) -> None:
@@ -125,6 +155,100 @@ async def _mark_backfilled(pool) -> None:
                 """,
                 table,
             )
+
+
+async def ship_orders_by_id(
+    store,
+    ids: Sequence[int],
+    *,
+    version_kind: str,
+    lock: "asyncio.Lock | None" = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+) -> Dict[str, Any]:
+    """Ship these exact orders, as DuckDB now holds them, headers only.
+
+    The ids-diff above ships what Postgres is *missing*. This ships what a
+    caller has just *changed*, which the ids-diff can never reach: both
+    `manager_comment` backfills UPDATE rows that exist on both sides, and the
+    hourly diff is a set difference over ids. Until DN-17 they wrote DuckDB
+    and stopped there, so a restored comment never reached `bronze.orders` or
+    the version archive at all.
+
+    **What that costs is not the /traffic tab**, and an earlier draft of this
+    docstring said it was. The tab reads `silver.orders LEFT JOIN
+    silver.order_utm` (`core/pg_traffic_read.py` names neither `bronze` nor
+    `manager_comment`), and both backfills have shipped the *parsed* UTM rows
+    through `ship_after_reparse` since DN-04 — so the screen already saw the
+    result. What the missing header costs is two other things: the daily
+    `mirror_landing` orders fingerprint compares `manager_comment` (it is in
+    `_ORDER_FIELDS`, by text length), so every restored comment was a bucket
+    reported as disagreeing; and step 9's Postgres UTM parser reads
+    `bronze.orders.manager_comment` directly, so a comment that never arrived
+    is an attribution it can never parse. That is why DN-17 comes before the
+    parser is wired up.
+
+    **Headers only, `replace_products=False`.** Neither caller looks at a line
+    item, and the `order_products` watermark must only move when line items
+    moved — the same rule the 05:15 status refresh follows, for the same
+    reason: stamping them here would tell the reconciliation they are current
+    when nothing touched them.
+
+    **`version_kind` is required**, with no default. The archive labels what
+    these callers do `'backfill'` (OD-20 (b)) and the whole point of the label
+    is that it is chosen deliberately; a default would be a way to forget.
+
+    **`lock` is the scheduler's heavy-job lock, held across each chunk's read
+    and write together**, exactly as `backfill_orders` holds it: without it a
+    chunk read before a sync wrote an order and shipped after it leaves
+    Postgres holding the older copy. Pass None when the caller already holds
+    it — `asyncio.Lock` is not reentrant, so handing it down from inside a
+    `async with` deadlocks the request that does it.
+
+    **Raises**, like `backfill_orders` and unlike the mirror. There is no
+    working system to protect here, and a failure is worse than it looks: the
+    callers only offer ids whose comment was NULL, so a re-run will not find
+    them again and the divergence stands until the daily reconciliation
+    reports it.
+    """
+    from core.pg_landing import MIRROR_ENV, enabled, write_orders
+
+    ids = [int(i) for i in ids]
+    result: Dict[str, Any] = {
+        "requested": len(ids), "orders_shipped": 0, "chunks": 0,
+        "version_kind": version_kind,
+    }
+    if not ids:
+        return result
+    if not enabled():
+        # Not an error: a DuckDB-only installation is a supported shape, and a
+        # backfill that refused to run there would take the DuckDB repair with
+        # it. Named in the result so the caller's log says which half ran.
+        result["skipped"] = f"{MIRROR_ENV} is off"
+        return result
+
+    # Asked once, before the first chunk, so `web` deployed ahead of `migrate`
+    # fails as `SchemaVersionError` with nothing half-shipped — the same
+    # recognisable break the UTM shipper takes deliberately, rather than a
+    # column error out of the middle of a run.
+    from core.pg import require_revision
+
+    await require_revision()
+
+    held = lock if lock is not None else contextlib.nullcontext()
+    for start in range(0, len(ids), chunk_size):
+        chunk = ids[start:start + chunk_size]
+        async with held:
+            async with store.connection() as conn:
+                orders, _ = _read_chunk(conn, chunk, products=False)
+            await write_orders(
+                orders, [], replace_products=False, version_kind=version_kind,
+            )
+        result["orders_shipped"] += len(orders)
+        result["chunks"] += 1
+
+    logger.info("Shipped %d of %d changed order(s) to Postgres as %r: %s",
+                result["orders_shipped"], len(ids), version_kind, result)
+    return result
 
 
 async def backfill_orders(

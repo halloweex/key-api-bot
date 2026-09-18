@@ -6,6 +6,16 @@ Most orders were synced before the manager_comment column existed,
 so they have NULL. This script re-fetches orders from KeyCRM API
 and updates the manager_comment column, then refreshes UTM layers.
 
+It also ships every comment it restores to `bronze.orders`. Not for the
+/traffic tab — that reads `silver.order_utm`, which the re-parse below already
+ships — but because the daily `mirror_landing` fingerprint compares
+`manager_comment` between the two stores, and because step 9's Postgres UTM
+parser reads `bronze.orders.manager_comment` directly.
+
+**Stop the web container first** — see `WEB_MUST_BE_STOPPED` in
+`core/pg_backfill.py`, which this logs at startup: the scheduler's heavy-job
+lock lives in that process and cannot be taken from here.
+
 Usage:
     PYTHONPATH=. python scripts/backfill_utm.py
     PYTHONPATH=. python scripts/backfill_utm.py --days 90   # Only last 90 days
@@ -36,6 +46,22 @@ DEFAULT_TZ = ZoneInfo("Europe/Kyiv")
 async def backfill_utm(days_back: int = 730, force_ship: bool = False):
     from core.duckdb_store import get_store
     from core.keycrm import get_async_client
+    from core.pg_backfill import WEB_MUST_BE_STOPPED, ship_orders_by_id
+    from core.pg_order_versions import BACKFILL
+    from core.runtime_modes import configure_modes
+
+    # Said out loud, once, at the top. The admin endpoint next door does this
+    # work under the scheduler's heavy-job lock; this process has no such lock
+    # to take, so the only thing that separates it from a sync tick is the
+    # operator.
+    logger.warning(WEB_MUST_BE_STOPPED)
+
+    # Before the first write, because this script reaches a landing writer as
+    # of DN-17 and did not before. `KS_PG_DERIVE` is read once and cached, and
+    # in a process that never configured it `owns()` answers False — so every
+    # order this ships would land unmarked and the derivation would not know
+    # it owed a rebuild over the comments just restored.
+    configure_modes()
 
     store = await get_store()
     client = await get_async_client()
@@ -58,6 +84,10 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
     chunk_days = 90
     current_start = datetime.now(DEFAULT_TZ) - timedelta(days=days_back)
     updated_total = 0
+    pg_shipped_total = 0
+    # Orders changed in DuckDB that could not be shipped. Collected rather
+    # than retried, for the reason at the catch below.
+    pg_failed_ids: list[int] = []
 
     while current_start < final_end:
         current_end = min(current_start + timedelta(days=chunk_days), final_end)
@@ -85,24 +115,77 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
 
         if orders_by_id:
             # Batch update manager_comment in DuckDB
+            changed_ids = []
             async with store.connection() as conn:
                 conn.execute("BEGIN TRANSACTION")
                 try:
-                    for order_id, comment in orders_by_id.items():
+                    # The ids this chunk will actually change, read before the
+                    # UPDATE. `COALESCE(EXCLUDED, stored)` on the Postgres side
+                    # means an order whose comment did not move has nothing to
+                    # carry, and the ship below needs exactly this list.
+                    changed_ids = [int(r[0]) for r in conn.execute(
+                        "SELECT id FROM orders WHERE id IN "
+                        f"({', '.join('?' for _ in orders_by_id)}) "
+                        "AND manager_comment IS NULL",
+                        list(orders_by_id),
+                    ).fetchall()]
+                    for order_id in changed_ids:
                         conn.execute(
                             "UPDATE orders SET manager_comment = ? WHERE id = ? AND manager_comment IS NULL",
-                            [comment, order_id]
+                            [orders_by_id[order_id], order_id]
                         )
                     conn.execute("COMMIT")
-                    updated_total += len(orders_by_id)
-                    logger.info(f"  Updated {len(orders_by_id)} orders with manager_comment")
+                    updated_total += len(changed_ids)
+                    logger.info(f"  Updated {len(changed_ids)} orders with manager_comment")
                 except Exception as e:
                     conn.execute("ROLLBACK")
+                    changed_ids = []
                     logger.error(f"  Failed to update chunk: {e}")
+
+            # And on to `bronze.orders`. Not for `/traffic` — that reads
+            # `silver.order_utm`, which the re-parse at the end of this run
+            # ships — but for the daily `mirror_landing` fingerprint, which
+            # compares `manager_comment` between the stores, and for step 9's
+            # Postgres parser, which reads this column. The hourly ids-diff
+            # can never carry it: that ships the orders Postgres is *missing*,
+            # and these exist on both sides and differ. Same helper the admin
+            # endpoint calls, so the two backfills cannot drift;
+            # `version_kind` is OD-20 (b). No lock is passed — there is none
+            # to pass from a separate process, which is what
+            # `WEB_MUST_BE_STOPPED` above is about.
+            #
+            # Caught per chunk. The helper raises by contract, and that
+            # contract was written for `backfill_orders`, which has no second
+            # job to lose. This run does: the DuckDB re-parse below was
+            # Postgres-independent before DN-17 and must stay so, or an
+            # unreachable Postgres costs an operator the whole restore — and
+            # the SELECT above only offers rows whose comment is still NULL,
+            # so a re-run never re-offers what this chunk just changed.
+            try:
+                shipped = await ship_orders_by_id(
+                    store, changed_ids, version_kind=BACKFILL,
+                )
+                pg_shipped_total += shipped["orders_shipped"]
+            except Exception as ship_error:
+                pg_failed_ids.extend(changed_ids)
+                logger.error(
+                    "  Failed to ship %d order(s) to Postgres, carrying on: "
+                    "%s", len(changed_ids), ship_error,
+                )
 
         current_start = current_end
 
-    logger.info(f"Backfill complete: updated {updated_total} orders")
+    logger.info(
+        f"Backfill complete: updated {updated_total} orders, "
+        f"shipped {pg_shipped_total} to Postgres"
+    )
+    if pg_failed_ids:
+        # Named, because nothing else will name them: a re-run skips these
+        # rows and the daily reconciliation reports them a bucket at a time.
+        logger.error(
+            "%d order(s) were restored in DuckDB and never reached Postgres. "
+            "Ids: %s", len(pg_failed_ids), pg_failed_ids,
+        )
 
     # Now refresh UTM layers
     logger.info("Clearing silver_order_utm to re-parse all comments...")
@@ -145,7 +228,14 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Backfill UTM data from KeyCRM")
+    # The warning is logged at startup too, but by then the operator has
+    # already typed the command; `--help` is where they are still deciding.
+    from core.pg_backfill import WEB_MUST_BE_STOPPED
+
+    parser = argparse.ArgumentParser(
+        description="Backfill UTM data from KeyCRM",
+        epilog=WEB_MUST_BE_STOPPED,
+    )
     parser.add_argument("--days", type=int, default=730, help="Days of history to backfill (default: 730)")
     parser.add_argument(
         "--force-ship", action="store_true",

@@ -1632,6 +1632,69 @@ Three decisions that read as details and are not:
 `updated_at` is stored and deliberately **not** compared: if it moves while every
 stored column is identical, nothing this store holds has changed.
 
+**A restored `manager_comment` is a fourth kind** (owner's decision OD-20 (b),
+2026-09-17). The two `manager_comment` backfills — `POST /api/traffic/backfill-utm`
+and `scripts/backfill_utm.py` — re-fetch a comment KeyCRM has always held and
+fill it in where the column is NULL. The stored row genuinely changes, so it is
+archived like any other; what would be false is calling it a `'change'`, which
+dates a transition on the day an operator ran a script. It is written as
+`kind = 'backfill'` instead — no migration, because `kind` has never carried a
+CHECK — and the two liveness checks exclude it exactly as they exclude the
+migration's `'baseline'`.
+
+**The volume was measured before the exclusion was taken** (OD-20 asked for
+that, production, 2026-09-17): **0** orders where Postgres holds a NULL comment
+and DuckDB holds one, so nothing diverges today; 10 192 orders carry a NULL
+comment in DuckDB inside the backfills' 730-day window, of which **26** are
+website orders (`source_id = 4`) — the upper bound on what a KeyCRM re-fetch
+could fill, since an order taken by hand in the Instagram inbox never carried a
+tag. One run today is therefore ~26 rows against a threshold of 1 000, and the
+flood is **not** at risk. The exclusion stands on what the count *means*: a
+repair an operator deliberately started is not the content comparison having
+stopped discriminating, which is the only thing `order_versions_flooding` can
+honestly name — and the volume can move (the window is a `--days` argument, and
+the July 2026 template break is what put 10 192 NULLs there) while the meaning
+cannot. The **stall** check excludes it too, and that is the opposite of what it
+does with `'baseline'` — a baseline exists only in the hours after a migration
+and buys a fresh archive its first quiet day, while a backfill runs on a system
+that has been writing for months, where counting it would certify the sync as
+alive for a day after the one event that distracts everybody from watching it.
+
+Both backfills reach Postgres through **`core.pg_backfill.ship_orders_by_id`**,
+headers only. Until 2026-09-18 they wrote DuckDB and stopped, so a restored
+comment never reached `bronze.orders` or `app.order_versions`. **That was never
+a /traffic problem**, and an earlier draft of this paragraph said it was: the
+tab reads `silver.orders LEFT JOIN silver.order_utm` (`core/pg_traffic_read.py`
+mentions neither `bronze` nor `manager_comment`) and both backfills have shipped
+the *parsed* UTM rows through `ship_after_reparse` since DN-04, so the screen
+always saw the result. What the missing header actually costs is the daily
+`mirror_landing` orders fingerprint, which compares `manager_comment` and
+therefore reported every restored comment as a disagreeing bucket, and step 9's
+Postgres UTM parser, which reads `bronze.orders.manager_comment` — which is why
+this lands before that parser is wired up. The
+hourly ids-diff cannot carry this and never could: it ships the orders Postgres
+is *missing*, and these exist on both sides and merely differ. The route holds
+`get_scheduler()._heavy_job_lock` across the UPDATE and the ship (the KeyCRM
+fetch stays outside it); the CLI cannot — that lock lives in the web process —
+so it logs `WEB_MUST_BE_STOPPED` and says so in its own `--help`.
+`tests/unit/test_heavy_lock_coverage.py` walks `web/` and `scripts/` for any
+function executing an `UPDATE orders`, and requires one of those two answers as
+a *name the code evaluates*: the first draft read the source text and a comment
+mentioning the constant satisfied it, and the second accepted the bare `import`
+the deleted warning left behind, so `WEB_MUST_BE_STOPPED` now has to be an
+argument to a call the function makes.
+
+**The ship raises and both callers catch it, per chunk.**
+`ship_orders_by_id` inherits `backfill_orders`' "stop loudly" contract, which
+was written for a helper with no second job. These two have one: the DuckDB UTM
+re-parse at the end of each run, which was Postgres-independent before this and
+must stay so. So an unreachable Postgres — or `web` deployed ahead of `migrate`,
+where `require_revision()` raises — costs the ship and nothing else. The ids are
+recorded (`pg_failed_ids` in the endpoint's status, an ERROR naming them in the
+CLI) and the endpoint's final status becomes `partial`, because a re-run cannot
+find those rows again: the SELECT that chooses them only offers comments that
+are still NULL.
+
 **The check is liveness, because a healthy archive is quiet.** Comparing version
 count against `updated_ids` — the obvious check — fails by construction, since
 writing fewer rows than ids offered is the design. What breaks the tie is that a

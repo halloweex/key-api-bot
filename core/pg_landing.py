@@ -40,6 +40,11 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence
 
+# At module level, unlike the other `core.pg_*` imports here, because
+# `write_orders` names one of its constants in a default argument. Safe: that
+# module imports nothing from this package and holds no connection of its own.
+from core import pg_order_versions as order_versions
+
 logger = logging.getLogger(__name__)
 
 # One deploy turns the mirror off, which is charter rule 6's rollback. It is ON
@@ -346,6 +351,7 @@ async def write_orders(
     products: Sequence[Any],
     *,
     replace_products: bool,
+    version_kind: str = order_versions.CHANGE,
 ) -> None:
     """Headers, line items and both watermarks, in one transaction.
 
@@ -356,8 +362,24 @@ async def write_orders(
     One transaction across both tables because a half-applied order — header
     updated, line items still the old ones — is the exact state the
     `orders_without_line_items` check spent months chasing on the other store.
+
+    `version_kind` labels what the archive calls a header that moved. It
+    defaults to the sync's `'change'`, so every caller that existed before
+    OD-20 writes exactly what it wrote before; `core/pg_backfill.py` passes
+    `'backfill'` for the two `manager_comment` repairs.
     """
     from core.pg import get_pool
+
+    # Validated here, before the pool is acquired, rather than inside the
+    # capture. A typo could only come from code, but a raise from inside the
+    # transaction would roll back the header upsert as well — and on the sync
+    # path `mirror_orders` would swallow it, so the order would be lost to
+    # Postgres over a misspelt constant. Refusing early costs nothing.
+    if version_kind not in order_versions.WRITER_KINDS:
+        raise ValueError(
+            f"version_kind={version_kind!r} is not one of "
+            f"{order_versions.WRITER_KINDS}"
+        )
 
     order_ids = [int(r[0]) for r in orders]
 
@@ -378,11 +400,11 @@ async def write_orders(
                 # afford to lose a write and the archive cannot.
                 from core.pg_order_versions import capture_versions
 
-                versions = await capture_versions(conn, order_ids)
+                versions = await capture_versions(conn, order_ids, version_kind)
                 if versions:
                     logger.info(
-                        f"order_versions: {versions} new version(s) "
-                        f"from {len(order_ids)} written order(s)"
+                        f"order_versions: {versions} new {version_kind} "
+                        f"version(s) from {len(order_ids)} written order(s)"
                     )
 
             if replace_products and order_ids:

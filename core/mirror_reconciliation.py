@@ -119,6 +119,7 @@ from core.pg_operational import (
 )
 from core.landing_rows import EXPENSE_COLUMNS, EXPENSE_TYPE_COLUMNS
 from core.pg_order_utm import UTM_COLUMNS
+from core import pg_order_versions as _versions
 from core.pg_dashboard_users import USER_COLUMNS
 from core.pg_replication import CLASSIFICATION_COLUMNS, MANAGER_COLUMNS
 from core.pg_sms import (
@@ -3321,19 +3322,29 @@ ORDER_VERSIONS_STALL_HOURS = 24
 # design is built to avoid.
 ORDER_VERSIONS_FLOOD_PER_DAY = 1000
 
-# Named, rather than inline, so a test can assert on the statement instead of on
-# the source text around it. The comment below explains the `kind <> 'baseline'`
-# and therefore contains it — a test grepping this module would pass with the
-# clause deleted, which is the seventh time that trap has come up here.
+# Rendered from `core.pg_order_versions.NOT_THE_WRITER`, which is where the
+# argument for each excluded kind is written down. Named, rather than inline,
+# so a test can assert on the statement instead of on the source text around
+# it: the comments here explain the exclusion and therefore contain the words
+# it is made of, and a test grepping this module would pass with the clause
+# deleted — the seventh time that trap has come up here.
+_NOT_THE_WRITER_SQL = ", ".join(f"'{k}'" for k in _versions.NOT_THE_WRITER)
+
 ORDER_VERSIONS_RECENT_SQL = (
     f"SELECT count(*) FROM {ORDER_VERSIONS_TABLE} "
-    f"WHERE captured_at >= $1 AND kind <> 'baseline'"
+    f"WHERE captured_at >= $1 AND kind NOT IN ({_NOT_THE_WRITER_SQL})"
 )
 
-# No such exclusion here, deliberately: see the two paragraphs in
-# `reconcile_order_versions`.
+# The baseline is deliberately *not* excluded here — see the two paragraphs in
+# `reconcile_order_versions`. The backfill is, and the two are not the same
+# case: a baseline exists only in the hours after the migration and its whole
+# job there is to give a fresh archive 24 h of quiet, while a backfill is run
+# by a human on a system that has been writing for months. Counting one as
+# proof the writer is alive would hide a dead sync for a day after somebody
+# repaired a comment, which is the one moment nobody is watching the sync.
 ORDER_VERSIONS_NEWEST_SQL = (
-    f"SELECT max(captured_at) FROM {ORDER_VERSIONS_TABLE}"
+    f"SELECT max(captured_at) FROM {ORDER_VERSIONS_TABLE} "
+    f"WHERE kind <> '{_versions.BACKFILL}'"
 )
 
 
@@ -3380,7 +3391,20 @@ async def reconcile_order_versions(
         #
         # `newest` above deliberately does *not* exclude it: there the baseline
         # is the right answer, because it gives a fresh archive its first 24
-        # hours before anyone is asked why it is quiet.
+        # hours before anyone is asked why it is quiet. It does exclude the
+        # backfill, which has no such grace to grant — see the constant.
+        #
+        # The backfill exclusion here is *not* the baseline's arithmetic, and
+        # OD-20 asked for that to be measured rather than assumed. Production,
+        # 2026-09-17: **0** orders where Postgres holds a NULL
+        # `manager_comment` and DuckDB holds one, and 10,192 NULL comments in
+        # DuckDB across the backfills' 730-day window, of which **26** are
+        # website orders — the only ones a KeyCRM re-fetch could fill. One run
+        # today is ~26 rows against this threshold of 1,000. The exclusion is
+        # about what the count means: a repair somebody deliberately started
+        # is not the content comparison having stopped discriminating, which
+        # is the only thing this finding can honestly name. See
+        # `core.pg_order_versions.NOT_THE_WRITER` for the whole argument.
         recent = await conn.fetchval(
             ORDER_VERSIONS_RECENT_SQL, now - timedelta(hours=24),
         )
