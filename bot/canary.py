@@ -78,11 +78,19 @@ DQ_MAX_AGE_S = {
     # The same 05:30 job's Postgres half, compared against the same KeyCRM
     # snapshot, and so the same limit — the digest's too. It is a layer of its
     # own so that a Postgres half which stops cannot hide behind a fresh DuckDB
-    # one, and until DN-21 only the 09:00 digest would say so. It is also the
-    # comparison against the source that outlives chain 3: once DuckDB stops
-    # being fed, `reconciliation` above goes with it and this is what is left.
-    # Opted in on 18.09 after the stage-4 soak showed 15 runs over 14 days,
-    # every day clean. A web with no Postgres configured never writes the layer
+    # one, and until DN-21 only the 09:00 digest would say so.
+    # It is meant to be the comparison against the source that is left once
+    # DuckDB stops being fed. It is not independent of DuckDB yet: the job
+    # runs it only after the DuckDB extraction succeeded, inside the same try,
+    # and journals it in DuckDB's data_quality_runs, which is where the age
+    # /api/health publishes comes from. So a DuckDB failure silences it too,
+    # and since DN-21 that pages under this key as well as `reconciliation`.
+    # Decoupling it belongs with step 13.
+    # Opted in on 18.09 on what the stage-4 soak checked then: a successful
+    # run on each of the 14 days before it, none CRITICAL. That counted
+    # calendar days, not the silence this limit measures; the check asks both
+    # now (deploy/stage4_soak/20_reconciliation_pg_history.sql).
+    # A web with no Postgres configured never writes the layer
     # (`_reconcile_postgres` returns None — silence, not a clean run), so such
     # a host now pages `dq_never:reconciliation_pg`; production web always
     # carries `KS_PG_DSN`.

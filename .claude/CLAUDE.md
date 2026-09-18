@@ -1246,9 +1246,12 @@ Cap what rebounds; only delete what stays deleted.
   *other* container every 15 min: 30 h for reconciliation, 12 h for integrity,
   30 h for mirror_landing, and since DN-21 (2026-09-18) 30 h for
   reconciliation_pg — the Postgres half of the 05:30 job, and the comparison
-  against KeyCRM that outlives DuckDB. A missing block or a layer that never
-  succeeded both count as failures. `reconciliation_ch` is published and
-  digested but not paged on.
+  against KeyCRM meant to outlive DuckDB. It does not yet: the job runs it
+  only once the DuckDB extraction has succeeded, and journals it in DuckDB,
+  which is where its age comes from — so a DuckDB failure silences it too
+  and, since DN-21, pages under both keys. Decoupling it belongs with step 13.
+  A missing block or a layer that never succeeded both count as failures.
+  `reconciliation_ch` is published and digested but not paged on.
 - **Every message is signed with `KS_INSTANCE`** (default `gethostname()`,
   `prod-vps` in compose on both services). Applied by the two HTTP transports
   and by the bot's Application path — three call sites, so nothing that merely
