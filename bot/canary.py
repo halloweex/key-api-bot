@@ -70,11 +70,23 @@ def defer_flaky(
 # How stale the last *successful* data-quality run may get before we say so.
 # One missed cycle plus grace: the job either ran late or did not run, and
 # either way nobody is checking the warehouse against KeyCRM meanwhile.
-# Reconciliation is daily at 05:00 Kyiv; integrity every 6h (01/07/13/19).
+# Reconciliation is daily at 05:30 Kyiv; integrity every 6h (01/07/13/19).
 # Reconciliation matters most — it is the only check that can see a wrong
 # status, a wrong source, or two errors that cancel out.
 DQ_MAX_AGE_S = {
     "reconciliation": 30 * 3600,  # 24h cycle + 6h grace
+    # The same 05:30 job's Postgres half, compared against the same KeyCRM
+    # snapshot, and so the same limit — the digest's too. It is a layer of its
+    # own so that a Postgres half which stops cannot hide behind a fresh DuckDB
+    # one, and until DN-21 only the 09:00 digest would say so. It is also the
+    # comparison against the source that outlives chain 3: once DuckDB stops
+    # being fed, `reconciliation` above goes with it and this is what is left.
+    # Opted in on 18.09 after the stage-4 soak showed 15 runs over 14 days,
+    # every day clean. A web with no Postgres configured never writes the layer
+    # (`_reconcile_postgres` returns None — silence, not a clean run), so such
+    # a host now pages `dq_never:reconciliation_pg`; production web always
+    # carries `KS_PG_DSN`.
+    "reconciliation_pg": 30 * 3600,  # 24h cycle + 6h grace
     "integrity": 12 * 3600,       # 6h cycle + 6h grace
     # Daily at 07:30 Kyiv, same shape as reconciliation. Added 28.08 after the
     # layer grew the step-2/5/6 comparisons (buyers, витрина, two engines'

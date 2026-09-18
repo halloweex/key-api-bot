@@ -31,6 +31,8 @@ def _healthy_payload():
             "integrity": {"last_success_at": "2026-08-08T19:00:00+03:00", "age_seconds": 1800},
             "reconciliation": {"last_success_at": "2026-08-08T05:00:00+03:00", "age_seconds": 52200},
             "mirror_landing": {"last_success_at": "2026-08-08T07:30:00+03:00", "age_seconds": 43200},
+            # The same 05:30 job's Postgres half (DN-21).
+            "reconciliation_pg": {"last_success_at": "2026-08-08T05:30:00+03:00", "age_seconds": 50400},
         },
         # The Postgres copy of landing. Absent, `run_canary` reports
         # `mirror_block_missing` — that is the point of the block, and it is
@@ -146,7 +148,7 @@ def test_dq_freshness_passes_when_all_layers_recent():
     failures, ages = canary.check_dq_freshness(_healthy_payload())
     assert failures == []
     assert ages == {"integrity": 1800, "reconciliation": 52200,
-                    "mirror_landing": 43200}
+                    "mirror_landing": 43200, "reconciliation_pg": 50400}
 
 
 def test_dq_freshness_flags_stale_reconciliation():
@@ -176,6 +178,7 @@ def test_dq_freshness_missing_layer_is_a_failure():
     failures, ages = canary.check_dq_freshness(payload)
     assert sorted(k for k, _ in failures) == [
         "dq_missing:mirror_landing", "dq_missing:reconciliation",
+        "dq_missing:reconciliation_pg",
     ]
     assert ages["reconciliation"] is None
 
@@ -186,11 +189,12 @@ def test_dq_freshness_never_succeeded_is_a_failure():
         integrity={"last_success_at": None, "age_seconds": None},
         reconciliation={"last_success_at": None, "age_seconds": None},
         mirror_landing={"last_success_at": None, "age_seconds": None},
+        reconciliation_pg={"last_success_at": None, "age_seconds": None},
     )
     failures, _ = canary.check_dq_freshness(payload)
     assert sorted(k for k, _ in failures) == [
         "dq_never:integrity", "dq_never:mirror_landing",
-        "dq_never:reconciliation",
+        "dq_never:reconciliation", "dq_never:reconciliation_pg",
     ]
 
 
@@ -198,6 +202,87 @@ def test_dq_freshness_honours_custom_thresholds():
     payload = _dq_payload(integrity={"age_seconds": 100})
     failures, _ = canary.check_dq_freshness(payload, max_age_s={"integrity": 50})
     assert [k for k, _ in failures] == ["dq_stale:integrity"]
+
+
+# ─── The Postgres half of the reconciliation is watched (DN-21) ─────────────
+#
+# `reconciliation_pg` is its own layer so that a Postgres comparison which
+# stops cannot hide behind a fresh DuckDB one. These go through the default
+# thresholds on purpose: the watch is the entry in DQ_MAX_AGE_S, and a test
+# that passed its own `max_age_s` would stay green with the entry gone.
+
+def _pg_layer_aged(age_seconds):
+    """The healthy payload with only `reconciliation_pg`'s age changed."""
+    payload = _healthy_payload()
+    payload["data_quality"]["reconciliation_pg"]["age_seconds"] = age_seconds
+    return payload
+
+
+def test_reconciliation_pg_silent_31h_fails():
+    failures, ages = canary.check_dq_freshness(_pg_layer_aged(31 * 3600))
+    assert [k for k, _ in failures] == ["dq_stale:reconciliation_pg"]
+    assert "31h" in failures[0][1]
+    assert ages["reconciliation_pg"] == 31 * 3600
+
+
+def test_reconciliation_pg_29h_passes():
+    """One missed 05:30 is past 24h; the six hours of grace are what keep a
+    late run from paging."""
+    failures, _ = canary.check_dq_freshness(_pg_layer_aged(29 * 3600))
+    assert failures == []
+
+
+def test_reconciliation_pg_absent_from_the_block_fails():
+    """Web stopped publishing the layer, the rest still there."""
+    payload = _healthy_payload()
+    del payload["data_quality"]["reconciliation_pg"]
+    failures, ages = canary.check_dq_freshness(payload)
+    assert [k for k, _ in failures] == ["dq_missing:reconciliation_pg"]
+    assert ages["reconciliation_pg"] is None
+
+
+def test_reconciliation_pg_never_succeeded_fails():
+    """Every run errored — or, on a web with no Postgres, none was written."""
+    failures, _ = canary.check_dq_freshness(_pg_layer_aged(None))
+    assert [k for k, _ in failures] == ["dq_never:reconciliation_pg"]
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_pg_pages_through_run_canary():
+    """The same judgement reaches the result the Gate throttles on, as a warn
+    and under its own key — never folded into the DuckDB half's."""
+    payload = _pg_layer_aged(31 * 3600)
+
+    def handler(request):
+        return httpx.Response(200, json=payload)
+
+    future = datetime.now(timezone.utc) + timedelta(days=60)
+    fake_cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+
+    async with _mock_transport(handler) as client:
+        with patch.object(canary, "_fetch_peer_cert", return_value=fake_cert):
+            result = await run_canary(DASHBOARD, client=client)
+    assert result.severity == "warn"
+    assert result.failure_keys == ["dq_stale:reconciliation_pg"]
+    assert result.dq_ages["reconciliation_pg"] == 31 * 3600
+
+
+def test_reconciliation_pg_keys_are_registered_conditions():
+    """Alert keys are exact-match: an unregistered one would be delivered as
+    an inert EVENT, with no lifecycle and no resolve."""
+    from core.alerting import is_condition
+
+    for key in ("dq_missing:reconciliation_pg", "dq_never:reconciliation_pg",
+                "dq_stale:reconciliation_pg"):
+        assert is_condition(key), key
+
+
+def test_every_watched_layer_is_one_web_publishes():
+    """A layer the canary watches but /api/health never reports would read as
+    `dq_missing` on every probe, forever."""
+    from core.data_quality import WATCHED_LAYERS
+
+    assert set(canary.DQ_MAX_AGE_S) <= set(WATCHED_LAYERS)
 
 
 # ─── A declared age limit has a ceiling (DN-05c) ────────────────────────────
