@@ -2438,6 +2438,29 @@ deliberately **not** part of `validation_passed`: no rebuild can invent a
 sales_type the code does not know, so it reports and stops rather than driving
 a rebuild every two minutes.
 
+### The standing watch on a moved chain's tables
+
+Once a chain is latched or flagged, `replicate_operational` and
+`reconcile_operational` both stand down for its tables — the comparison without
+a finding — so `core/pg_chain_invariants.py` watches them on the integrity layer
+instead (01, 07, 13, 19). It judges what is true of the Postgres copy alone: the
+allocator above `MAX(id)`; no NULL where Postgres has no default
+(`manual_expenses.created_at`, `stock_movements.recorded_at` and `.source`);
+chain 1's `last_sync_*` under 90 minutes; and from chain 1's handover on, no
+burst of `initial` movements, no offer first seen after a day it was already
+photographed, and both snapshots every day. Who is watched comes from
+`chain_modes()`, a watched chain with no invariants written for it is reported
+unwatched rather than clean, and nothing is repaired. **It is judged in the
+integrity job beside the Postgres twins, not inside the DuckDB scan**: these
+are Postgres facts about tables DuckDB no longer writes, so a DuckDB half that
+raises neither loses a chain finding nor holds back its page, and the
+`chain_*` conditions resolve on such a run the way the twins' `pg_*` ones do.
+**Production reads chain 8 on every run**: `KS_WRITE_EXPENSES=postgres` is live
+and nothing is latched, so each run reads `app.manual_expenses`' allocator and
+NULL count, and a Postgres it cannot read is `chain_invariants_unwatched`
+(WARN). Measured 2026-09-18, before chain 1's flip: 0 of 56 277
+`stock_movements` rows carry a NULL `recorded_at` or `source`.
+
 ## TODO: Full DuckDB Resync Solution
 
 ### Overview

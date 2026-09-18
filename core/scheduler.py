@@ -1838,7 +1838,31 @@ class BackgroundScheduler:
                 pg_issues = pg_warehouse_dq.check_pg_warehouse(
                     pg_facts, duckdb_issues=issues, duckdb_looked=duckdb_looked,
                     held_out=pg_held)
-            issues = issues + pg_issues
+
+            # The standing watch on the tables a write chain has taken to
+            # Postgres (DN-07), here beside the twins and for their reason: these
+            # are Postgres facts about tables DuckDB no longer writes, so they
+            # are read and judged after the DuckDB half whatever it did — never
+            # inside `check_internal_integrity`, where a DuckDB fault would
+            # discard every one of them and hold back the page. No flag: who is
+            # watched is `chain_modes()`'s answer, and with no chain moved the
+            # read asks Postgres nothing. Production is not that state — chain 8
+            # is flagged, so this reads `app.manual_expenses`' allocator and NULL
+            # count every run. Neither call raises; a failure comes back as
+            # `chain_invariants_unwatched`, which holds every condition. The
+            # `except` is for that promise being broken, not the failure it
+            # handles.
+            from core import pg_chain_invariants
+
+            try:
+                chain_facts = await pg_chain_invariants.read_facts()
+            except Exception as e:  # noqa: BLE001 — it promises not to; if it does, it is blindness
+                logger.exception("chain invariants' read raised")
+                chain_facts = pg_chain_invariants.Facts.blind(
+                    (), f"{type(e).__name__}: {e}")
+            chain_issues = pg_chain_invariants.judge(chain_facts)
+            chain_unverified = pg_chain_invariants.unverified_conditions(chain_issues)
+            issues = issues + pg_issues + chain_issues
 
             ended_at = datetime.now(timezone.utc)
             window_day = ended_at.date()
@@ -1861,10 +1885,13 @@ class BackgroundScheduler:
 
             sev = overall_severity(issues, [])
             # A failed DuckDB half leaves `issues` holding only the Postgres
-            # twins' findings, and a CRITICAL among them still pages: the twins
-            # did look, and their verdict does not depend on DuckDB's.
+            # side's findings — the twins' and the chain invariants' — and a
+            # CRITICAL among them still pages: they did look, and their verdict
+            # does not depend on DuckDB's.
             pg_critical = any(i.severity == Severity.CRITICAL for i in pg_issues)
-            if sev == Severity.CRITICAL and (not error_message or pg_critical):
+            chain_critical = any(i.severity == Severity.CRITICAL for i in chain_issues)
+            if sev == Severity.CRITICAL and (
+                    not error_message or pg_critical or chain_critical):
                 msg = format_alert_message(
                     "integrity", sev, issues, [],
                     machine_note=machine_attempts_note(),
@@ -1882,7 +1909,8 @@ class BackgroundScheduler:
                 ran=pg_ran, flag_invalid=bool(pg_flag_error), held=pg_held)
             await self._resolve_dq_layer(
                 "integrity", issues, error_message,
-                unverified=unverified_conditions(raised_checks, issues) + pg_unverified)
+                unverified=(unverified_conditions(raised_checks, issues)
+                            + pg_unverified + chain_unverified))
             if error_message and pg_ran:
                 # The DuckDB half failed, so its conditions stay unknown — but
                 # the twins did look, and a pg_* page they now see clear must
@@ -1897,6 +1925,25 @@ class BackgroundScheduler:
                         only_prefix="pg_")
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"DQ resolve for the Postgres twins failed: {e}")
+            if error_message and chain_facts.watched:
+                # The same for the chain invariants, whenever a chain is watched
+                # — they looked, whatever DuckDB did. A blind read holds every
+                # condition through `chain_unverified`, so this can only clear
+                # what was re-examined. With no chain watched, nothing looked
+                # this run, and a page left over from a chain that has since
+                # stood down clears on the next run whose DuckDB half finishes,
+                # as the twins' pages do when their flag is off.
+                try:
+                    from core.alerting import resolve_group
+
+                    await resolve_group(
+                        "dq:integrity",
+                        still_firing=[i.check_name for i in chain_issues
+                                      if i.severity == Severity.CRITICAL]
+                        + chain_unverified,
+                        only_prefix=pg_chain_invariants.PREFIX)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"DQ resolve for the chain invariants failed: {e}")
 
             result = {
                 "run_id": run_id,

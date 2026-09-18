@@ -1588,6 +1588,14 @@ def check_internal_integrity(
                       lambda: _inventory_snapshot_continuity_check(
                           conn, calendar=inventory_calendar))
 
+    # Deliberately NOT here: the invariants over the tables a write chain has
+    # taken to Postgres (`core/pg_chain_invariants.py`, DN-07). They are facts
+    # about tables DuckDB no longer writes, so their verdict must not depend on
+    # DuckDB being readable — and this function runs under the DuckDB
+    # connection, where a raise would take every chain finding of the run with
+    # it and hold back the page. The integrity job judges them beside the
+    # Postgres twins instead, outside this call.
+
     if raised:
         issues.append(IntegrityIssue(
             check_name="integrity_check_raised",
@@ -1859,6 +1867,26 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Do not re-run the shipper: it replaced rows only Postgres held. Read meta.mirror_state.last_ok_at, then restore from the nightly dump"),
     ("sync_watermarks_unwatched",
      "The integrity job must pre-read meta.chain_watermarks, or the chain's flag goes back"),
+    # The standing watch on a chain's own tables (DN-07). Nothing here is
+    # repairable by a job, and the last two must never be: an initial burst has
+    # already recorded the wrong deltas, a reset first_seen_at has already lost
+    # the dates, and a missed snapshot day cannot be photographed again.
+    ("chain_sequence_behind",
+     "Raise the sequence above MAX(id) with setval before the next write — one insert away from a duplicate id"),
+    ("chain_required_column_null",
+     "Find the writer that stopped supplying the column; the Postgres table has no default by design"),
+    ("chain_initial_movement_burst",
+     "Do not repair: those deltas were computed against zero. Check bronze.offer_stocks survived the last sync"),
+    ("chain_first_seen_reset",
+     "Do not repair: the dates are gone. Check the status rebuild's carry-forward, then restore from the nightly dump"),
+    ("chain_daily_rollup_missing",
+     "A missed day is gone for good; check the hourly stocks sync reached record_inventory_snapshot"),
+    ("chain_snapshot_rows_short",
+     "The status table was empty when the snapshot was taken; check the rebuild ran first"),
+    ("chain_watermark_stale",
+     "The sync, not the warehouse: see the sync block in /api/health, then the KeyCRM errors in the web log"),
+    ("chain_invariants_unwatched",
+     "Nothing else watches these tables: read the reason, then check KS_PG_DSN and that the integrity job still reads the facts"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),
     # No lever in this repository: the tags stop arriving at the website, so
     # the fix is the order-comment template and nothing here can repair it.
