@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.235
+
+- test: a failure after the owner rows never stamps a table Postgres owns
+- The boot net under the compaction says when it has a hole, and cannot be skipped
+
+
 ## 3.0.234
 
 - compact: restore sequences with advance_to, and refuse a file whose sequences lag
