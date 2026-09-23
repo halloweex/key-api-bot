@@ -99,15 +99,16 @@ class TestGreenMeansWhatItSaysOnALaptop:
         The blanket "no step sets `env`" this used to assert stopped being
         available when the throwaway PostgreSQL arrived. The guarantee it
         stood for is narrower and is asserted directly: no secret reaches
-        this workflow, and the only variable any step sets points at a
-        database on the runner itself.
+        this workflow, and the only variables any step sets are the two
+        logins to a database on the runner itself.
         """
         assert "-m " not in self._run_step()["run"]
         assert "secrets." not in CI_TEXT
 
         for step in STEPS:
             for name, value in (step.get("env") or {}).items():
-                assert name == "KS_PG_DSN", f"{name} is not the throwaway DSN"
+                assert name in ("KS_PG_DSN", "KS_PG_READONLY_DSN"), \
+                    f"{name} is not a throwaway DSN"
                 assert "127.0.0.1" in value, f"{name} must not leave the runner"
 
 
@@ -252,6 +253,24 @@ class TestTheStoreTestsActuallyRun:
 
     def test_the_suite_is_given_the_dsn(self):
         assert "KS_PG_DSN" in (self._step("Run the suite").get("env") or {})
+
+    def test_the_dry_run_s_roles_are_provisioned(self):
+        """The reclassify dry run's tests need two roles `ks_app` cannot
+        make: a `ks_readonly` login, handed to the suite as its DSN, and a
+        NOINHERIT member of `ks_app`. Named here from the test module's own
+        constant, so renaming one side without the other fails here and not
+        as a skip a person has to notice."""
+        start = self._step("Start a throwaway PostgreSQL")["run"]
+        suite_env = self._step("Run the suite").get("env") or {}
+        assert "ALTER ROLE ks_readonly WITH PASSWORD 'ci-only'" in start
+        assert suite_env.get("KS_PG_READONLY_DSN", "").startswith(
+            "postgresql://ks_readonly:ci-only@127.0.0.1:")
+
+        module = REPO / "tests" / "integration" / "test_utm_reclassify_dryrun_pg.py"
+        role = re.search(r'^NOINHERIT_ROLE = "(\w+)"$', module.read_text(), re.M)
+        assert role, "the dry run's test no longer names its NOINHERIT role"
+        assert f"CREATE ROLE {role.group(1)} NOLOGIN NOINHERIT" in start
+        assert f"GRANT ks_app TO {role.group(1)}" in start
 
     def test_a_postgres_skip_fails_the_job(self):
         """Otherwise this whole arrangement can stop working — a renamed

@@ -14,10 +14,17 @@ it copies, and the refusal of the login CI actually has. That login is
 the tests below go through `read_state` behind that door, which is where every
 remaining guarantee lives. What the door asks of `ks_readonly` is asked in CI
 too, by name from the `ks_app` login, so a revision that grants the read-only
-role a write fails here rather than in front of the owner. The one test that
-walks in through the front door as `ks_readonly` needs `KS_PG_READONLY_DSN`,
-which CI does not provision, and skips without it — run it locally against a
-throwaway with the role's password set.
+role a write fails here rather than in front of the owner. Each kind of write
+privilege the door looks for is granted for real, inside a transaction that
+is rolled back, and has to be named.
+
+Two tests need what `ks_app` cannot make: a login for `ks_readonly` (the
+front door walked as production walks it) and a NOINHERIT member of `ks_app`
+(making a role takes CREATEROLE). `.github/workflows/ci.yml` provisions both
+as the superuser, and their skip reasons carry the sentence its "no store test
+may have skipped" step greps for — so in CI they run or the job fails. Locally,
+against the recipe in `.claude/CLAUDE.md`, they skip unless provisioned the
+same way.
 
 Seeded rows use ids from 991 500 001 and are removed after each test, and every
 assertion is about those ids: the database is shared with the rest of the
@@ -54,6 +61,10 @@ READONLY_DSN = os.getenv("KS_PG_READONLY_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
 BASE = 991_500_000
+# Created by CI as the superuser: NOINHERIT, a member of ks_app.
+NOINHERIT_ROLE = "ks_ci_noinherit"
+PROVISIONED = ("needs a live PostgreSQL provisioned as .github/workflows/ci.yml "
+               "provisions it")
 STAMP = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
 DAY = date(2026, 9, 1)
 WINDOW = (date(2026, 6, 29), date(2026, 9, 20))
@@ -178,6 +189,93 @@ class TestTheFrontDoor:
             await conn.close()
         assert roles == ["pg_monitor", "pg_read_all_settings", "pg_read_all_stats",
                          "pg_stat_scan_tables"]
+
+    @pytest.mark.asyncio
+    async def test_a_noinherit_member_of_the_writer_is_refused_through_it(self):
+        """The hole the membership walk closes, on a real one. A NOINHERIT
+        member of ks_app holds no privilege itself — every privilege function
+        says no for it — and holds all of ks_app's one `SET ROLE` later. Only
+        MEMBER sees that membership; USAGE, which is what inheritance
+        follows, does not, so a door asking USAGE would let it in."""
+        conn = await _session()
+        try:
+            if not await conn.fetchval(
+                    "SELECT 1 FROM pg_roles WHERE rolname = $1", NOINHERIT_ROLE):
+                pytest.skip(f"{PROVISIONED}: role {NOINHERIT_ROLE}")
+            # The premise, so a role provisioned wrongly fails loudly here
+            # rather than passing for the wrong reason.
+            assert not await conn.fetchval(
+                "SELECT has_table_privilege($1, 'bronze.orders', 'INSERT')",
+                NOINHERIT_ROLE)
+            assert await conn.fetchval(
+                "SELECT pg_has_role($1, 'ks_app', 'MEMBER') "
+                "AND NOT pg_has_role($1, 'ks_app', 'USAGE')", NOINHERIT_ROLE)
+            roles = [r["name"] for r in await conn.fetch(script.ROLES_SQL, NOINHERIT_ROLE)]
+            found = await script.write_privileges(conn, NOINHERIT_ROLE)
+        finally:
+            await conn.close()
+        assert roles == [NOINHERIT_ROLE, "ks_app"]
+        through = f" (through ks_app, which {NOINHERIT_ROLE} can SET ROLE to)"
+        assert any(f.endswith(through) and f.startswith("INSERT/UPDATE/DELETE/TRUNCATE on ")
+                   for f in found), found
+        # Nothing is found for the role itself, which is the whole trap.
+        assert all(f.endswith(through) for f in found), found
+
+    @pytest.mark.asyncio
+    async def test_role_attributes_are_read_from_the_catalogue(self):
+        """CREATEROLE and CREATEDB change the cluster without a table
+        privilege. The bootstrap superuser (oid 10) holds both in every
+        cluster, so it is the one role whose answer is known without making
+        one; the owner's TEMPORARY is the database privilege."""
+        conn = await _session()
+        try:
+            bootstrap = await conn.fetchval("SELECT rolname FROM pg_roles WHERE oid = 10")
+            found = await script.write_privileges(conn, bootstrap)
+            owner = await script.write_privileges(conn, "ks_app")
+        finally:
+            await conn.close()
+        assert {f"{bootstrap} is a superuser", "CREATEROLE", "CREATEDB"} <= set(found)
+        assert "CREATE or TEMPORARY on the database" in owner, owner
+
+    # Each relation kind a write can pass through, each granted a different
+    # one of the four table privileges, and both sequence privileges.
+    PROBES = [
+        ("CREATE TABLE {} (x int)", "GRANT DELETE ON {} TO ks_readonly",
+         "INSERT/UPDATE/DELETE/TRUNCATE on"),
+        ("CREATE TABLE {} (x int) PARTITION BY RANGE (x)",
+         "GRANT TRUNCATE ON {} TO ks_readonly", "INSERT/UPDATE/DELETE/TRUNCATE on"),
+        ("CREATE VIEW {} AS SELECT 1 AS x", "GRANT INSERT ON {} TO ks_readonly",
+         "INSERT/UPDATE/DELETE/TRUNCATE on"),
+        ("CREATE MATERIALIZED VIEW {} AS SELECT 1 AS x",
+         "GRANT UPDATE ON {} TO ks_readonly", "INSERT/UPDATE/DELETE/TRUNCATE on"),
+        ("CREATE SEQUENCE {}", "GRANT USAGE ON SEQUENCE {} TO ks_readonly",
+         "USAGE/UPDATE on sequence"),
+        ("CREATE SEQUENCE {}", "GRANT UPDATE ON SEQUENCE {} TO ks_readonly",
+         "USAGE/UPDATE on sequence"),
+    ]
+
+    @pytest.mark.parametrize("create, grant, finding", PROBES,
+                             ids=["table", "partitioned", "view", "matview",
+                                  "sequence-usage", "sequence-update"])
+    @pytest.mark.asyncio
+    async def test_each_write_privilege_granted_to_the_read_only_role_is_named(
+            self, create, grant, finding):
+        """Granted for real, as the owner, inside a transaction that is
+        rolled back — the privilege functions answer inside it. A foreign
+        table, the one kind not here, needs a foreign-data wrapper only a
+        superuser can install; the unit test holds the kind list whole."""
+        name = "silver.dn15_probe"
+        conn = await asyncpg.connect(DSN)
+        probe = conn.transaction()
+        await probe.start()
+        try:
+            await conn.execute(create.format(name))
+            await conn.execute(grant.format(name))
+            found = await script.write_privileges(conn, script.READONLY_ROLE)
+        finally:
+            await probe.rollback()
+            await conn.close()
+        assert found == [f"{finding} {name}"]
 
     def test_ks_app_is_refused_before_a_row_is_read(self, tmp_path, capsys):
         path = tmp_path / "s.csv.gz"
@@ -395,12 +493,16 @@ class TestTheServerRefusesToBeWrittenThrough:
 
 
 @pytest.mark.skipif(not READONLY_DSN,
-                    reason="KS_PG_READONLY_DSN not set (CI has no ks_readonly login)")
+                    reason=f"{PROVISIONED}: a ks_readonly login at KS_PG_READONLY_DSN")
 class TestAsKsReadonlyUnderAudit:
-    def test_the_whole_command_writes_only_the_snapshot(self, tmp_path):
+    def test_the_whole_command_writes_only_the_snapshot(self, seeded, tmp_path):
         """The front door, as production runs it: `ks_readonly`, a real
         server, the real `main()`, in a fresh interpreter under the audit
-        hook. One file written, and one kind of connection — to the database."""
+        hook. One file written, and one kind of connection — to the database.
+
+        Seeded, because the database is shared: an emptied Silver beside a
+        Bronze other tests left behind would be refused, rightly, and this
+        is about the door and the writes, not about their leftovers."""
         path = tmp_path / "order_utm.csv.gz"
         run = run_main_audited(
             "scripts.utm_reclassify_dryrun",

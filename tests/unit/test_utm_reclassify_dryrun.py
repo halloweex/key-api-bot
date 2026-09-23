@@ -604,6 +604,17 @@ class TestTheRole:
         ]
         assert await script.write_privileges(FakeConn()) == []
 
+    def test_every_relation_kind_a_write_can_pass_through_is_asked_about(self):
+        """Tables and partitioned tables, views (an auto-updatable one writes
+        its base table), materialized views, foreign tables — and sequences,
+        whose `nextval` no ROLLBACK undoes. The real-PG test grants each kind
+        but the foreign table for real and requires it named; that one needs
+        a wrapper only a superuser can install, so the list is held whole
+        here, read out of the statement."""
+        match = re.search(r"c\.relkind IN \(([^)]*)\)", script.WRITABLE_RELATIONS_SQL)
+        assert match, "the relation kinds are no longer a list in the statement"
+        assert set(re.findall(r"'(\w)'", match.group(1))) == {"r", "p", "v", "m", "f", "S"}
+
     @pytest.mark.asyncio
     async def test_a_role_it_can_become_is_asked_the_same_questions(self):
         """A NOINHERIT member of a writer holds nothing itself, and everything
