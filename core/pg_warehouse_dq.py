@@ -38,9 +38,35 @@ spec and two critics). What this module takes from it:
   `pg_line_items_disagree` when the engines differ by more than the orders still
   in flight. Only when DuckDB did not look does the twin stand in for it.
 
-Deferred to 8b, with the owner's decisions they need: the Silver row-values
-recompute, the positive pairing record for the soak, and making blindness news in
-every digest.
+Step 8b adds the fourth group, **`pg_silver_row_values`**: every Silver row
+recomputed from bronze and compared with what is stored. Silver is rebuilt
+whole, so the arc cannot see a row that exists and kept its old values — a
+status rewrite, a return that took revenue away — and neither can the
+derivation's own validation, whose count and checksum net such changes out.
+It stands alone: it compares Postgres with Postgres, not with DuckDB, because
+it is the check that has to keep working once DuckDB stops deriving.
+
+- **One recompute text for both engines.** `silver_recompute_ctes` renders pass
+  1 and a SELECT form of pass 2; DuckDB's `silver_row_values` reads the same
+  function, and the tolerances are its `_SILVER_ROW_COLUMNS`.
+- **A row is judged by when its inputs last changed**, not by its own stamp
+  alone: `bronze.orders.mirrored_at`; the classification's `mirrored_at` when
+  `sales_type` is what moved; and, when a pass-2 column moved, the latest
+  change to any order of the buyer's, before or after the change — a first
+  order cancelled today makes a months-old second order the buyer's first.
+- **Covered is CRITICAL, whatever its age.** A change made before the last
+  error-free derivation began is in that rebuild's snapshot, so a row still
+  wrong after it is a rebuild that does not produce what bronze holds.
+- **Not covered is the missing twin's windows**: in flight (not filed) inside
+  the settle grace, WARN inside the repair window, CRITICAL past it — the
+  absolute bound, so a derivation that stopped leaves rows paging rather than
+  in flight for ever.
+- **Last in the snapshot.** It reads the whole of Silver and bronze, so a hold
+  budget it spends blinds it alone and the three cheap groups keep their
+  verdicts.
+
+Still deferred, with the owner's decisions they need: the positive pairing
+record for the soak (DN-14) and making blindness news in every digest (OD-05).
 """
 from __future__ import annotations
 
@@ -48,6 +74,7 @@ import asyncio
 import logging
 import math
 import os
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
@@ -59,6 +86,12 @@ _VALID = ("off", "on")
 
 # How long to wait for PG_LAYER_LOCK — a derivation or a ClickHouse ship holds
 # it — and how long this may then hold it, pool acquire included.
+#
+# The row-values recompute (step 8b) shares this budget rather than taking a
+# snapshot of its own, because it fits with room to spare: the whole snapshot,
+# recompute included, took 0.26 s over 48,000 orders and 0.55 s over 96,000
+# (medians of nine, postgres:17.2-alpine on a laptop; production held 47,756).
+# Every run logs the recompute's own time beside this number.
 LOCK_WAIT_S = 120
 HOLD_BUDGET_S = 20
 STATEMENT_TIMEOUT = "15s"
@@ -146,7 +179,28 @@ class LineItems:
     goods_sample: Tuple[int, ...]
 
 
-Group = Union[SilverArc, Attribution, LineItems, Unwatched, None]
+@dataclass(frozen=True)
+class RowValues:
+    """Silver rows whose stored values a recompute from bronze does not produce.
+
+    `reported` is `covered` + `abandoned` + the rows inside the repair window;
+    `in_flight` are the ones still inside the settle grace, counted apart and
+    never filed. `compared` and `elapsed_ms` are the recompute's size and cost,
+    kept so the hold budget can be judged against the real thing.
+    """
+    reported: int
+    covered: int
+    abandoned: int
+    in_flight: int
+    columns: Tuple[Tuple[str, int], ...]
+    sample: Tuple[int, ...]
+    oldest_age_s: Optional[int]
+    rebuilt_at: Optional[datetime]
+    compared: int
+    elapsed_ms: int
+
+
+Group = Union[SilverArc, Attribution, LineItems, RowValues, Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -156,13 +210,17 @@ class Facts:
     silver_arc: Group = None
     attribution: Group = None
     line_items: Group = None
+    silver_row_values: Group = None
 
     @classmethod
     def blind(cls, reason: str) -> "Facts":
         return cls(whole=Unwatched(reason))
 
 
-GROUPS = ("silver_arc", "attribution", "line_items")
+# In reading order. The recompute is last on purpose: it is the one group heavy
+# enough to spend the hold budget, and a budget spent on it should blind it
+# alone rather than the cheap groups queued behind it.
+GROUPS = ("silver_arc", "attribution", "line_items", "silver_row_values")
 
 # Each guard and the conditions its twin emits — `data_quality.GUARDED_CHECK_CONDITIONS`'
 # shape, for the same use: what a blind run must hold rather than resolve.
@@ -171,11 +229,13 @@ GUARD_CONDITIONS: Dict[str, Tuple[str, ...]] = {
     "attribution": ("pg_attribution_coverage_website",),
     "line_items": ("pg_headline_vs_line_items", "pg_goods_shipped_without_sale",
                    "pg_line_items_disagree"),
+    "silver_row_values": ("pg_silver_row_values",),
 }
 UNWATCHED_NAMES: Dict[str, str] = {
     "silver_arc": "pg_silver_arc_unwatched",
     "attribution": "pg_attribution_coverage_unwatched",
     "line_items": "pg_line_items_unwatched",
+    "silver_row_values": "pg_silver_row_values_unwatched",
 }
 WHOLE_UNWATCHED = "pg_warehouse_unwatched"
 FLAG_INVALID = "pg_warehouse_dq_flag_invalid"
@@ -252,6 +312,102 @@ GROUP BY 1
 """
 
 
+def _row_values_sql() -> str:
+    """Silver recomputed from bronze, compared row by row, judged in SQL.
+
+    $1 the settle grace and $2 the repair window, in minutes; $3 the margin a
+    change must clear to count as inside a derivation's snapshot; $4 the
+    derivation's layer. Rendered per call rather than at import: every import
+    in this module is lazy, and this one would otherwise pull the DuckDB store
+    in with it.
+
+    **When a row's inputs last changed** (`changed_at`) is the latest of:
+
+    - its own `bronze.orders.mirrored_at` — every column but three reads only
+      the order's own row;
+    - the classification's `mirrored_at`, when `sales_type` is what moved: a
+      reclassified manager changes the rows of orders nobody touched, and until
+      the rebuild it owes, that is in flight rather than stale;
+    - the buyer's latest change, when `is_new_customer` or
+      `buyer_first_order_date` moved: pass 2 reads every order the buyer has.
+      Counted over both the recomputed buyer and the stored one, so an order
+      moved from one buyer to another is a recent change for both.
+    """
+    from core.data_quality import _SILVER_ROW_COLUMNS, _silver_row_differs
+    from core.duckdb_store import silver_recompute_ctes
+    from core.pg_replication import CLASSIFICATIONS_TABLE, MANAGERS_TABLE
+    from core.sql_dialect import POSTGRES
+
+    columns = [c for c, _ in _SILVER_ROW_COLUMNS]
+    flags = ",\n           ".join(
+        f"({_silver_row_differs(c, t)}) AS d_{c}" for c, t in _SILVER_ROW_COLUMNS)
+    any_differs = " OR ".join(f"c.d_{c}" for c in columns)
+    per_column = ",\n       ".join(
+        f"count(*) FILTER (WHERE reported AND d_{c}) AS n_{c}" for c in columns)
+    orders, silver = POSTGRES.orders, POSTGRES.silver_orders
+    return f"""
+WITH {silver_recompute_ctes(POSTGRES)},
+inputs AS (
+    SELECT GREATEST((SELECT max(mirrored_at) FROM {MANAGERS_TABLE}),
+                    (SELECT max(mirrored_at) FROM {CLASSIFICATIONS_TABLE})) AS classified_at,
+           (SELECT max(started_at) FROM meta.derivation_runs
+             WHERE layer = $4 AND error IS NULL) AS rebuilt_at
+),
+buyer_clock AS (
+    SELECT buyer_id, max(mirrored_at) AS changed_at
+    FROM (SELECT o.buyer_id, o.mirrored_at FROM {orders} o
+           WHERE o.buyer_id IS NOT NULL
+          UNION ALL
+          SELECT s.buyer_id, o.mirrored_at FROM {silver} s
+            JOIN {orders} o ON o.id = s.id
+           WHERE s.buyer_id IS NOT NULL) b
+    GROUP BY buyer_id
+),
+compared AS (
+    SELECT r.id, o.mirrored_at,
+           GREATEST(bn.changed_at, bo.changed_at) AS buyer_changed_at,
+           {flags}
+    FROM recomputed r
+    JOIN {silver} s ON s.id = r.id
+    JOIN {orders} o ON o.id = r.id
+    LEFT JOIN buyer_clock bn ON bn.buyer_id = r.buyer_id
+    LEFT JOIN buyer_clock bo ON bo.buyer_id = s.buyer_id
+),
+stale AS (
+    SELECT c.*,
+           GREATEST(c.mirrored_at,
+                    CASE WHEN c.d_sales_type THEN i.classified_at END,
+                    CASE WHEN c.d_is_new_customer OR c.d_buyer_first_order_date
+                         THEN c.buyer_changed_at END) AS changed_at,
+           i.rebuilt_at
+    FROM compared c CROSS JOIN inputs i
+    WHERE {any_differs}
+),
+judged AS (
+    SELECT st.*,
+           (st.rebuilt_at IS NOT NULL
+            AND st.changed_at < st.rebuilt_at - $3::interval) AS covered,
+           st.changed_at < now() - make_interval(mins => $2) AS abandoned,
+           st.changed_at < now() - make_interval(mins => $1) AS settled
+    FROM stale st
+),
+marked AS (
+    SELECT j.*, (j.covered OR j.settled) AS reported FROM judged j
+)
+SELECT (SELECT count(*) FROM compared) AS compared,
+       (SELECT rebuilt_at FROM inputs) AS rebuilt_at,
+       count(*) FILTER (WHERE reported) AS reported,
+       count(*) FILTER (WHERE covered) AS covered,
+       count(*) FILTER (WHERE abandoned AND NOT covered) AS abandoned,
+       count(*) FILTER (WHERE NOT reported) AS in_flight,
+       EXTRACT(EPOCH FROM now() - MIN(changed_at) FILTER (WHERE reported))::int AS oldest_age_s,
+       (array_agg(id ORDER BY (covered OR abandoned) DESC, id DESC)
+            FILTER (WHERE reported))[1:10] AS sample,
+       {per_column}
+FROM marked
+"""
+
+
 def _ids(value) -> Tuple[int, ...]:
     return tuple(int(v) for v in (value or ()))
 
@@ -297,6 +453,39 @@ async def _read_line_items(conn, watermark: Watermark) -> Union[LineItems, Unwat
     return LineItems(h[0], h[1], h[2], g[0], g[1], g[2])
 
 
+async def _read_row_values(conn, grace: int, page_after: int) -> RowValues:
+    """The recompute. Not gated on the backfill, unlike attribution and line
+    items: Silver is derived from whatever bronze holds, history or not, so a
+    partial bronze still has a Silver that must match it."""
+    from core.data_quality import _SILVER_ROW_COLUMNS
+    from core.pg_derivation import DROPPED_MARK_MARGIN, LAYER
+
+    # The margin is DROPPED_MARK_MARGIN, for its two reasons: a derivation's
+    # `started_at` comes from the web container's clock and `mirrored_at` from
+    # Postgres', and a writer outside `_heavy_job_lock` commits a round trip
+    # after the instant its rows are stamped with.
+    started = time.monotonic()
+    row = await conn.fetchrow(_row_values_sql(), grace, page_after,
+                              DROPPED_MARK_MARGIN, LAYER)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    columns = tuple(sorted(
+        ((c, int(row[f"n_{c}"])) for c, _ in _SILVER_ROW_COLUMNS if row[f"n_{c}"]),
+        key=lambda kv: (-kv[1], kv[0])))
+    facts = RowValues(
+        reported=int(row["reported"]), covered=int(row["covered"]),
+        abandoned=int(row["abandoned"]), in_flight=int(row["in_flight"]),
+        columns=columns, sample=_ids(row["sample"]),
+        oldest_age_s=row["oldest_age_s"], rebuilt_at=row["rebuilt_at"],
+        compared=int(row["compared"]), elapsed_ms=elapsed_ms)
+    # INFO on every run: the cost is what decides whether this group can keep
+    # sharing the snapshot's hold budget, and a number nobody logged is a
+    # number nobody can compare with HOLD_BUDGET_S when Silver has grown.
+    logger.info("Postgres Silver recomputed for the row-values twin: %d rows "
+                "compared in %d ms (hold budget %d s)",
+                facts.compared, elapsed_ms, HOLD_BUDGET_S)
+    return facts
+
+
 async def read_facts(*, today: Optional[date] = None, pool=None) -> Facts:
     """Every fact the twins judge, from one snapshot. Never raises: a failure is
     `Facts.blind(reason)` or an Unwatched group."""
@@ -335,6 +524,13 @@ async def read_facts(*, today: Optional[date] = None, pool=None) -> Facts:
             async with pool.acquire(timeout=HOLD_BUDGET_S) as conn:
                 async with conn.transaction(isolation="repeatable_read", readonly=True):
                     await conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
+                    # No JIT. The row-values recompute is costed past the JIT
+                    # thresholds, and compiling it cost more than running it:
+                    # 1.2 s against 0.22 s over 48,000 orders, 1.4 s against
+                    # 0.48 s over 96,000 (postgres:17.2-alpine, measured for
+                    # DN-13) — time spent holding PG_LAYER_LOCK, to speed up a
+                    # query that runs four times a day.
+                    await conn.execute("SET LOCAL jit = off")
                     w = await conn.fetchrow(_WATERMARK_SQL, grace)
                     watermark = Watermark(
                         today=today or w["today"], in_flight=int(w["in_flight"]),
@@ -346,6 +542,8 @@ async def read_facts(*, today: Optional[date] = None, pool=None) -> Facts:
                         ("silver_arc", lambda c: _read_silver_arc(c, grace, page_after)),
                         ("attribution", lambda c: _read_attribution(c, watermark)),
                         ("line_items", lambda c: _read_line_items(c, watermark)),
+                        ("silver_row_values",
+                         lambda c: _read_row_values(c, grace, page_after)),
                     )
                     for name, reader in readers:
                         try:
@@ -435,6 +633,48 @@ def _silver_arc_check(arc: SilverArc) -> list:
                          "number read from Postgres. No grace applies: Silver is only "
                          "written from landing.")))
     return issues
+
+
+def _row_values_check(rv: RowValues) -> list:
+    """One finding, CRITICAL when any row is covered or abandoned.
+
+    Covered and abandoned are told apart in the words because their levers
+    differ: an abandoned row is a derivation that stopped, and a rebuild fixes
+    it; a covered row is a rebuild that ran and still did not produce what
+    bronze holds, and another rebuild would only repeat it.
+    """
+    from core.data_quality import Severity
+
+    if not rv.reported:
+        return []
+    grace, page_after = silver_grace_minutes(), page_after_minutes()
+    critical = rv.covered + rv.abandoned
+    waiting = rv.reported - critical
+    columns = ", ".join(f"{c} ({n})" for c, n in rv.columns[:5]) or "none named"
+    oldest = "" if rv.oldest_age_s is None else f" The oldest changed {rv.oldest_age_s // 60} min ago."
+    parts = [f"{rv.reported} silver.orders row(s) hold values a recompute from "
+             f"bronze.orders does not produce. Columns: {columns}.{oldest}"]
+    if rv.covered:
+        since = "?" if rv.rebuilt_at is None else rv.rebuilt_at.isoformat(timespec="seconds")
+        parts.append(f"{rv.covered} changed before the last error-free derivation began "
+                     f"({since}), so its snapshot held them: the rebuild is not producing "
+                     "what bronze holds, and another would repeat it.")
+    if rv.abandoned:
+        parts.append(f"{rv.abandoned} changed more than {page_after} minutes ago with no "
+                     "error-free derivation begun since — past the heartbeat and the "
+                     "floor, so no rebuild is coming on its own.")
+    if waiting:
+        parts.append(f"{waiting} changed {grace}+ minutes ago and are inside the "
+                     f"{page_after}-minute repair window: under own the next mark or the "
+                     "hourly heartbeat rebuilds them, under piggyback the next DuckDB "
+                     "dirty tick.")
+    if rv.in_flight:
+        parts.append(f"{rv.in_flight} more changed in the last {grace} minutes and are "
+                     "in flight, not counted.")
+    return [_issue(
+        check_name="pg_silver_row_values", table_name="silver.orders",
+        severity=Severity.CRITICAL if critical else Severity.WARN,
+        count=rv.reported, sample_ids=rv.sample, description=" ".join(parts))]
 
 
 def _attribution_check(att: Attribution, watermark: Watermark) -> list:
@@ -568,6 +808,7 @@ def check_pg_warehouse(
         "line_items": lambda: _line_items_check(
             facts.line_items, facts.watermark,
             duckdb_issues=duckdb_issues, duckdb_looked=duckdb_looked),
+        "silver_row_values": lambda: _row_values_check(facts.silver_row_values),
     }
     for group, judge in judges.items():
         if group in blind:

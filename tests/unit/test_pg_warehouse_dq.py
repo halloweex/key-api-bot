@@ -9,19 +9,32 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
 from core import pg_warehouse_dq as twins
 from core.data_quality import IntegrityIssue, Severity
-from core.pg_warehouse_dq import Attribution, Facts, LineItems, SilverArc, Unwatched, Watermark
+from core.pg_warehouse_dq import (
+    Attribution, Facts, LineItems, RowValues, SilverArc, Unwatched, Watermark,
+)
 
 WM = Watermark(today=date(2026, 9, 17), in_flight=2, backfilled=True,
                landing_age_s=120, landing_failures=0)
 ARC_CLEAN = SilverArc(0, 0, 0.0, None, (), 0, 0.0, ())
 ATT_OK = Attribution(orders=100, tagged=30, base_orders=400, base_tagged=120)
 LI_NONE = LineItems(0, 0.0, (), 0, 0.0, ())
+REBUILT = datetime(2026, 9, 17, 6, 50, tzinfo=timezone.utc)
+
+
+def _rv(**kw):
+    base = dict(reported=0, covered=0, abandoned=0, in_flight=0, columns=(), sample=(),
+                oldest_age_s=None, rebuilt_at=REBUILT, compared=48000, elapsed_ms=230)
+    base.update(kw)
+    return RowValues(**base)
+
+
+RV_CLEAN = _rv()
 
 
 def _names(issues):
@@ -135,9 +148,132 @@ class TestLineItems:
 
 
 def _facts(**groups):
-    base = dict(silver_arc=ARC_CLEAN, attribution=ATT_OK, line_items=LI_NONE)
+    base = dict(silver_arc=ARC_CLEAN, attribution=ATT_OK, line_items=LI_NONE,
+                silver_row_values=RV_CLEAN)
     base.update(groups)
     return Facts(whole=None, watermark=WM, **base)
+
+
+class TestTheRowValues:
+    """Step 8b's verdict over pre-read counts. What decides covered, abandoned
+    and in flight is SQL, and `tests/integration/test_pg_warehouse_dq.py` reads
+    it from a real Postgres; here, what each count becomes."""
+
+    def test_nothing_stale_files_nothing(self):
+        assert twins._row_values_check(RV_CLEAN) == []
+
+    def test_rows_only_in_flight_file_nothing(self):
+        """Inside the settle grace a change has not had its rebuild yet, and
+        filing it would put a WARN in most daytime runs' digest."""
+        assert twins._row_values_check(_rv(in_flight=3)) == []
+
+    def test_rows_inside_the_repair_window_warn(self):
+        (issue,) = twins._row_values_check(_rv(
+            reported=2, columns=(("grand_total", 2),), sample=(7, 5), oldest_age_s=1800))
+        assert (issue.check_name, issue.severity, issue.count, issue.sample_ids) == (
+            "pg_silver_row_values", Severity.WARN, 2, (7, 5))
+        assert "repair window" in issue.description and "grand_total (2)" in issue.description
+
+    def test_a_covered_row_is_critical_and_names_the_rebuild(self):
+        (issue,) = twins._row_values_check(_rv(
+            reported=1, covered=1, columns=(("is_new_customer", 1),), sample=(42,)))
+        assert issue.severity == Severity.CRITICAL and issue.sample_ids == (42,)
+        assert REBUILT.isoformat(timespec="seconds") in issue.description
+        assert "another would repeat it" in issue.description
+
+    def test_an_abandoned_row_is_critical_and_says_nothing_is_coming(self):
+        (issue,) = twins._row_values_check(_rv(reported=1, abandoned=1, rebuilt_at=None))
+        assert issue.severity == Severity.CRITICAL
+        assert "no rebuild is coming" in issue.description
+
+    def test_the_count_is_every_reported_row_not_the_sample(self):
+        """DuckDB's own check counts only the rows it samples; this one counts
+        them all, so a count above ten is a count, not a cap."""
+        (issue,) = twins._row_values_check(_rv(
+            reported=37, covered=30, sample=tuple(range(10))))
+        assert issue.count == 37 and len(issue.sample_ids) == 10
+
+    def test_in_flight_rides_along_uncounted(self):
+        (issue,) = twins._row_values_check(_rv(reported=1, in_flight=4))
+        assert issue.count == 1 and "4 more" in issue.description
+
+    def test_a_budget_spent_on_the_recompute_blinds_it_alone(self):
+        held = []
+        issues = twins.check_pg_warehouse(_facts(silver_row_values=Unwatched(
+            f"the {twins.HOLD_BUDGET_S} s hold budget was spent before this group was read")),
+            held_out=held)
+        assert _names(issues) == ["pg_silver_row_values_unwatched"]
+        assert held == ["pg_silver_row_values"]
+
+
+class TestTheRowValuesSql:
+    """Structure, parsed or rendered — never grepped out of prose."""
+
+    def test_the_recompute_is_the_shared_text_rendered_for_postgres(self):
+        """Rule 1: a Postgres copy of pass 2 would be a third statement of it."""
+        from core.duckdb_store import silver_recompute_ctes
+        from core.sql_dialect import POSTGRES
+
+        sql = twins._row_values_sql()
+        assert silver_recompute_ctes(POSTGRES) in sql
+        assert "FROM bronze.orders o" in silver_recompute_ctes(POSTGRES)
+
+    def test_the_duckdb_check_reads_the_same_function(self):
+        from core import data_quality
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(data_quality._silver_arc_check)))
+        called = {n.func.id for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert {"silver_recompute_ctes", "_silver_row_differs"} <= called
+
+    def test_every_silver_column_is_compared_and_counted(self):
+        """A column Silver gains and the twin does not compare is a column that
+        drifts in silence."""
+        from core.data_quality import _SILVER_ROW_COLUMNS
+        from core.pg_silver import SILVER_COLUMNS
+
+        compared = [c for c, _ in _SILVER_ROW_COLUMNS]
+        assert set(compared) | {"id"} == set(SILVER_COLUMNS)
+        sql = twins._row_values_sql()
+        for column in compared:
+            assert f"AS d_{column}" in sql and f"AS n_{column}" in sql
+
+    def test_the_journal_is_read_for_error_free_runs_of_the_warehouse_layer(self):
+        """The layer is a bind parameter, and it is the derivation's own."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from core.data_quality import _SILVER_ROW_COLUMNS
+        from core.pg_derivation import DROPPED_MARK_MARGIN, LAYER
+
+        row = {"reported": 0, "covered": 0, "abandoned": 0, "in_flight": 0, "sample": None,
+               "oldest_age_s": None, "rebuilt_at": None, "compared": 0,
+               **{f"n_{c}": 0 for c, _ in _SILVER_ROW_COLUMNS}}
+        conn = MagicMock(fetchrow=AsyncMock(return_value=row))
+        asyncio.run(twins._read_row_values(conn, 20, 80))
+        sql, *args = conn.fetchrow.await_args.args
+        assert "error IS NULL" in sql and "layer = $4" in sql
+        assert args == [20, 80, DROPPED_MARK_MARGIN, LAYER]
+
+    def test_the_snapshot_runs_without_jit(self):
+        """~950 ms of a 1.2 s read was JIT compilation, all of it under
+        PG_LAYER_LOCK. Parsed out of `read_facts`: the SET must be a statement
+        the snapshot executes."""
+        tree = ast.parse(textwrap.dedent(inspect.getsource(twins.read_facts)))
+        executed = [ast.literal_eval(n.args[0]) for n in ast.walk(tree)
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "execute" and n.args
+                    and isinstance(n.args[0], ast.Constant)]
+        assert "SET LOCAL jit = off" in executed
+
+    def test_the_recompute_is_read_last(self):
+        """A hold budget spent on the heavy group must not blind the cheap ones
+        queued behind it."""
+        assert twins.GROUPS[-1] == "silver_row_values"
+        tree = ast.parse(textwrap.dedent(inspect.getsource(twins.read_facts)))
+        (readers,) = [n.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                      and any(isinstance(t, ast.Name) and t.id == "readers" for t in n.targets)]
+        assert [ast.literal_eval(e.elts[0]) for e in readers.elts] == list(twins.GROUPS)
 
 
 class TestBlindness:
@@ -280,5 +416,19 @@ class TestKyivsToday:
         sql = twins._WATERMARK_SQL
         assert "AT TIME ZONE 'Europe/Kyiv'" in sql
         for text in (twins._WATERMARK_SQL, twins._ATTRIBUTION_SQL, twins._MISSING_SQL,
-                     twins._ORPHAN_SQL, twins._LINE_ITEMS_SQL):
+                     twins._ORPHAN_SQL, twins._LINE_ITEMS_SQL, twins._row_values_sql()):
             assert "CURRENT_DATE" not in text.upper()
+
+
+class TestTheLevers:
+    def test_the_row_values_twin_has_its_own_lever(self):
+        """Longest prefix: without its own entry `pg_silver_` would answer
+        "rebuild", which is the wrong advice for a row a rebuild already covered."""
+        from core.data_quality import remediation_for
+
+        (row_values,) = remediation_for(["pg_silver_row_values"])
+        (unwatched,) = remediation_for(["pg_silver_row_values_unwatched"])
+        (generic,) = remediation_for(["pg_silver_missing_rows"])
+        assert len({row_values, unwatched, generic}) == 3
+        assert "compare silver.orders with bronze.orders" in row_values
+        assert "HOLD_BUDGET_S" in unwatched

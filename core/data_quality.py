@@ -1248,6 +1248,16 @@ _SILVER_ROW_COLUMNS = (
     ("promocode", 0),
 )
 
+
+def _silver_row_differs(column: str, tolerance: float) -> str:
+    """The predicate for one column of a recomputed row `r` against a stored
+    row `s`. Shared by this check and its Postgres twin, so the two cannot
+    disagree about what counts as a difference."""
+    if tolerance:
+        return f"ABS(COALESCE(r.{column}, 0) - COALESCE(s.{column}, 0)) > {tolerance}"
+    return f"r.{column} IS DISTINCT FROM s.{column}"
+
+
 # A row written to `orders` is not in Silver until the next warehouse refresh,
 # and that runs every two minutes. Anything inside this window is in flight,
 # not missing — without it the check fires on every sync. Outside it, seven
@@ -1315,7 +1325,7 @@ def _silver_arc_check(
     Silver match what the rule says today", not "is the rule right".
     Reconciliation against KeyCRM remains the only check that sees the latter.
     """
-    from core.duckdb_store import silver_select_sql
+    from core.duckdb_store import silver_recompute_ctes
 
     missing_severity = missing_severity or Severity.CRITICAL
     drift_severity = drift_severity or Severity.WARN
@@ -1393,48 +1403,15 @@ def _silver_arc_check(
 
     # ── both hold the row, and disagree ──
     #
-    # Pass 2 is recomputed here as well, from the recomputed rows rather than
-    # from stored Silver. That is the point: the real pass 2 takes its baseline
-    # from whatever `silver_orders` currently holds, so a stale baseline
-    # reproduces itself, and only a recompute from landing can tell.
-    # The LEFT JOIN reproduces pass 2's own semantics for a buyer with no
-    # qualifying order — the real UPDATE joins those rows away and leaves
-    # pass 1's `FALSE` / `NULL` standing.
-    diffs = []
-    for column, tolerance in _SILVER_ROW_COLUMNS:
-        if tolerance:
-            diffs.append(
-                f"ABS(COALESCE(r.{column}, 0) - COALESCE(s.{column}, 0)) > {tolerance}"
-            )
-        else:
-            diffs.append(f"r.{column} IS DISTINCT FROM s.{column}")
+    # Pass 2 is recomputed as well, from the recomputed rows rather than from
+    # stored Silver — `silver_recompute_ctes` says why. One text for this check
+    # and its Postgres twin (`core/pg_warehouse_dq.py`), so the two cannot ask
+    # different questions of the same rule.
+    diffs = [_silver_row_differs(column, tolerance)
+             for column, tolerance in _SILVER_ROW_COLUMNS]
 
     rows = conn.execute(f"""
-        WITH pass1 AS (
-            SELECT {silver_select_sql()} FROM orders o
-        ),
-        baseline AS (
-            SELECT buyer_id, MIN(order_date) AS first_order_date
-            FROM pass1
-            WHERE buyer_id IS NOT NULL AND NOT is_return
-            GROUP BY buyer_id
-        ),
-        recomputed AS (
-            SELECT p.id, p.source_id, p.status_id, p.grand_total, p.ordered_at,
-                   p.buyer_id, p.manager_id, p.order_date, p.is_return,
-                   p.sales_type, p.is_active_source, p.source_name,
-                   CASE
-                       WHEN p.buyer_id IS NOT NULL
-                            AND NOT p.is_return
-                            AND p.is_active_source
-                            AND p.order_date = b.first_order_date
-                       THEN TRUE ELSE FALSE
-                   END AS is_new_customer,
-                   b.first_order_date AS buyer_first_order_date,
-                   p.promocode
-            FROM pass1 p
-            LEFT JOIN baseline b ON b.buyer_id = p.buyer_id
-        )
+        WITH {silver_recompute_ctes()}
         SELECT r.id,
                {", ".join(f"r.{c} AS r_{c}, s.{c} AS s_{c}" for c, _ in _SILVER_ROW_COLUMNS)}
         FROM recomputed r
@@ -1931,6 +1908,14 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("pg_silver_arc_unwatched", "The Postgres twins did not look: read the reason in the finding"),
     ("pg_attribution_coverage_unwatched", "The orders mirror is failing or silent: see mirror freshness in /api/health"),
     ("pg_line_items_unwatched", "The Postgres twins did not look: read the reason in the finding"),
+    # Step 8b. The finding says which of two things it is: a row no rebuild has
+    # reached yet wants the generic Silver lever above; a row an error-free
+    # rebuild already covered means the rebuild is not producing what bronze
+    # holds, and rebuilding again would only repeat it.
+    ("pg_silver_row_values",
+     "Postgres Silver kept old values: POST /api/warehouse/refresh; if the finding says a rebuild already covered them, compare silver.orders with bronze.orders for the ids first"),
+    ("pg_silver_row_values_unwatched",
+     "The Silver recompute did not finish: read the reason; a spent hold budget means it outgrew HOLD_BUDGET_S"),
     ("status_group_vs_return_list", "The source's status group wins over the legacy list"),
     ("inventory_snapshot_gaps", "A missed day is gone for good; check the snapshot job"),
     ("ch_reconcile_pending", "Wait for a fresh ch_sync — never reconcile a lagging copy"),
@@ -1971,6 +1956,8 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "pg_silver_arc_unwatched": "Postgres Silver not examined",
     "pg_attribution_coverage_unwatched": "Postgres attribution not examined",
     "pg_line_items_unwatched": "Postgres line items not examined",
+    "pg_silver_row_values": "stale values in Postgres Silver",
+    "pg_silver_row_values_unwatched": "Postgres Silver values not examined",
     "pg_warehouse_unwatched": "Postgres twins did not look",
     "pg_warehouse_dq_flag_invalid": "KS_DQ_PG_WAREHOUSE not understood",
     "pg_order_utm_missing": "orders with no traffic verdict (Postgres)",

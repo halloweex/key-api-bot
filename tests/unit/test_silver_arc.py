@@ -80,15 +80,25 @@ class TestOneDefinitionOfASilverRow:
         """A check with its own copy of the projection asks a different
         question: whether two hand-written queries agree. Rule 1 of the
         charter, as a test."""
+        import ast
         import inspect
+        import textwrap
         from core import data_quality, duckdb_store
+
+        def calls(func):
+            tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+            return {n.func.id for n in ast.walk(tree)
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
 
         assert "silver_select_sql" in inspect.getsource(
             duckdb_store.DuckDBStore.refresh_warehouse_layers
         )
-        assert "silver_select_sql" in inspect.getsource(
-            data_quality._silver_arc_check
-        )
+        # Parsed, not grepped: the check's docstring names `silver_select_sql`,
+        # and a grep would pass on the prose after the call had gone. The
+        # recompute moved into `silver_recompute_ctes` for step 8b, so its
+        # Postgres twin reads the same text.
+        assert "silver_recompute_ctes" in calls(data_quality._silver_arc_check)
+        assert "silver_select_sql" in calls(duckdb_store.silver_recompute_ctes)
 
     @pytest.mark.asyncio
     async def test_every_silver_column_is_compared(self, tmp_path):

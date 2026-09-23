@@ -321,6 +321,57 @@ def silver_pass2_sql(buyer_filter: str = "", dialect: "Dialect" = None) -> str:
     """
 
 
+def silver_recompute_ctes(dialect: "Dialect" = None) -> str:
+    """Every Silver row as pass 1 then pass 2 would write it — as three CTEs,
+    `pass1`, `baseline` and `recomputed`, for a caller that writes
+    `WITH {this} SELECT ... FROM recomputed r`.
+
+    The two checks that ask whether stored Silver is what the rule says today
+    read this one text: DuckDB's `silver_row_values` and its Postgres twin,
+    `pg_silver_row_values` (chain 2, step 8b). It used to live inside the
+    DuckDB check; a Postgres copy of it would have been a third statement of
+    pass 2, and the first time pass 2 changed the twin would have asked a
+    different question from the rebuild it watches.
+
+    Pass 2 is recomputed from the recomputed rows rather than from stored
+    Silver. That is the point: the real pass 2 takes its baseline from whatever
+    Silver currently holds, so a stale baseline reproduces itself, and only a
+    recompute from landing can tell. The LEFT JOIN reproduces pass 2's own
+    semantics for a buyer with no qualifying order — the real UPDATE joins
+    those rows away and leaves pass 1's `FALSE` / `NULL` standing.
+    """
+    from core.sql_dialect import DUCKDB
+
+    dialect = dialect or DUCKDB
+    return f"""
+        pass1 AS (
+            SELECT {silver_select_sql(dialect)} FROM {dialect.orders} o
+        ),
+        baseline AS (
+            SELECT buyer_id, MIN(order_date) AS first_order_date
+            FROM pass1
+            WHERE buyer_id IS NOT NULL AND NOT is_return
+            GROUP BY buyer_id
+        ),
+        recomputed AS (
+            SELECT p.id, p.source_id, p.status_id, p.grand_total, p.ordered_at,
+                   p.buyer_id, p.manager_id, p.order_date, p.is_return,
+                   p.sales_type, p.is_active_source, p.source_name,
+                   CASE
+                       WHEN p.buyer_id IS NOT NULL
+                            AND NOT p.is_return
+                            AND p.is_active_source
+                            AND p.order_date = b.first_order_date
+                       THEN TRUE ELSE FALSE
+                   END AS is_new_customer,
+                   b.first_order_date AS buyer_first_order_date,
+                   p.promocode
+            FROM pass1 p
+            LEFT JOIN baseline b ON b.buyer_id = p.buyer_id
+        )
+    """
+
+
 # ─── The one definition of a Gold revenue row ────────────────────────────────
 #
 # Same treatment as the Silver projection above, and for the same reason:

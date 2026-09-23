@@ -265,6 +265,270 @@ class TestBlindness:
         assert facts.whole is not None and "KS_PG_DSN" in facts.whole.reason
 
 
+ROW_IDS = IDS[30:40]
+MANAGER = 979901
+
+
+async def _landed(conn, oid, *, buyer=None, manager=None, days_ago=2, minutes_ago=180,
+                  status=1, group=1, total=100):
+    at = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0,
+                                            microsecond=0) - timedelta(days=days_ago)
+    await conn.execute(
+        "INSERT INTO bronze.orders (id, source_id, status_id, status_group_id, grand_total,"
+        " ordered_at, created_at, updated_at, buyer_id, manager_id, mirrored_at)"
+        " VALUES ($1, 1, $2, $3, $4, $5, $5, $5, $6, $7, now() - make_interval(mins => $8))",
+        oid, status, group, total, at, buyer, manager, minutes_ago)
+
+
+async def _touch(conn, oid, *, minutes_ago=None, at=None, **changes):
+    """Change a landed order the way a mirror would: new values, new stamp —
+    `minutes_ago` by Postgres' clock, or exactly `at`."""
+    sets = [f"{column} = ${i}" for i, column in enumerate(changes, start=2)]
+    n = len(changes) + 2
+    if at is None:
+        stamp, value = f"now() - make_interval(secs => ${n})", float(minutes_ago * 60)
+    else:
+        stamp, value = f"${n}::timestamptz", at
+    await conn.execute(
+        f"UPDATE bronze.orders SET {', '.join(sets + [f'mirrored_at = {stamp}'])} WHERE id = $1",
+        oid, *changes.values(), value)
+
+
+async def _journal(conn, *, minutes_ago=0, error=None, layer="warehouse"):
+    """One derivation run as `_derive_pg_layers` records it, started
+    `minutes_ago` by Postgres' clock. Returns its `started_at`."""
+    from core.pg_derivation import record_run
+
+    started = await conn.fetchval("SELECT now() - make_interval(secs => $1)",
+                                  float(minutes_ago * 60))
+    await record_run(conn, trigger="signal", started_at=started, ended_at=started,
+                     error=error, layer=layer)
+    return started
+
+
+@pytest_asyncio.fixture
+async def rv(pool):
+    from core.pg_silver import rebuild_silver
+
+    async def reset():
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM meta.derivation_runs")
+            await conn.execute("DELETE FROM app.manager_classifications WHERE manager_id = $1", MANAGER)
+            await conn.execute("DELETE FROM bronze.managers WHERE id = $1", MANAGER)
+
+    await reset()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO bronze.managers (id, name, is_retail, mirrored_at)"
+            " VALUES ($1, 'dn13', true, now() - interval '3 hours')", MANAGER)
+        await conn.execute(
+            "INSERT INTO app.manager_classifications (manager_id, is_retail, valid_from, mirrored_at)"
+            " VALUES ($1, true, DATE '1970-01-01', now() - interval '3 hours')", MANAGER)
+        a, b, c, d, e, f, g = ROW_IDS[:7]
+        await _landed(conn, a)                                   # the plain row
+        await _landed(conn, b, buyer=97001, days_ago=10)         # buyer 1's first
+        await _landed(conn, c, buyer=97001, days_ago=2)          # buyer 1's second
+        await _landed(conn, d, buyer=97002, days_ago=12)         # buyer 2's first
+        await _landed(conn, e, buyer=97002, days_ago=5)          # buyer 2's second
+        await _landed(conn, f, manager=MANAGER)                  # retail by classification
+        await _landed(conn, g)
+    await rebuild_silver(pool)
+    async with pool.acquire() as conn:
+        await _journal(conn, minutes_ago=120)
+    yield pool
+    await reset()
+
+
+class TestTheRowValues:
+    """Step 8b against a real Postgres: bronze landed three hours ago, Silver
+    rebuilt by the real `rebuild_silver`, and one error-free derivation two
+    hours ago — then a row broken in exactly one way per test.
+
+    `meta.derivation_runs` and the one test manager are this class's to empty,
+    the way `test_pg_own_derivation` empties the journal."""
+
+    async def _read(self, pool):
+        from core.pg_warehouse_dq import read_facts
+
+        facts = await read_facts(pool=pool)
+        return facts.silver_row_values, _judge(facts)
+
+    @pytest.mark.asyncio
+    async def test_the_rebuilds_own_silver_files_nothing(self, rv):
+        values, judged = await self._read(rv)
+        assert (values.reported, values.in_flight) == (0, 0)
+        assert values.compared >= len(ROW_IDS[:7]) and values.rebuilt_at is not None
+        assert "pg_silver_row_values" not in judged
+
+    @pytest.mark.asyncio
+    async def test_an_old_rows_grand_total_changed_under_a_later_rebuild_is_critical_with_the_id(self, rv):
+        """Changed half an hour ago, and an error-free derivation began ten
+        minutes ago: that snapshot held the change, and Silver still lacks it."""
+        from core.data_quality import Severity
+
+        a = ROW_IDS[0]
+        async with rv.acquire() as conn:
+            await _touch(conn, a, minutes_ago=30, grand_total=150)
+            await _journal(conn, minutes_ago=10)
+        values, judged = await self._read(rv)
+        assert (values.reported, values.covered, values.abandoned) == (1, 1, 0)
+        assert values.columns == (("grand_total", 1),)
+        issue = judged["pg_silver_row_values"]
+        assert issue.severity == Severity.CRITICAL and issue.sample_ids == (a,)
+
+    @pytest.mark.asyncio
+    async def test_a_row_mirrored_after_the_last_rebuild_warns_inside_the_repair_window(self, rv):
+        from core.data_quality import Severity
+
+        a = ROW_IDS[0]
+        async with rv.acquire() as conn:
+            await _touch(conn, a, minutes_ago=30, grand_total=150)
+        values, judged = await self._read(rv)
+        assert (values.reported, values.covered, values.abandoned) == (1, 0, 0)
+        assert judged["pg_silver_row_values"].severity == Severity.WARN
+
+    @pytest.mark.asyncio
+    async def test_past_the_repair_window_with_no_rebuild_since_it_is_critical(self, rv):
+        """The absolute bound: a derivation that stopped must not leave a
+        changed row in the repair window for ever."""
+        from core.data_quality import Severity
+
+        a = ROW_IDS[0]
+        async with rv.acquire() as conn:
+            await _touch(conn, a, minutes_ago=100, grand_total=150)
+        values, judged = await self._read(rv)
+        assert (values.reported, values.covered, values.abandoned) == (1, 0, 1)
+        assert judged["pg_silver_row_values"].severity == Severity.CRITICAL
+
+    @pytest.mark.asyncio
+    async def test_inside_the_settle_grace_it_is_in_flight_and_not_filed(self, rv):
+        async with rv.acquire() as conn:
+            await _touch(conn, ROW_IDS[0], minutes_ago=5, grand_total=150)
+        values, judged = await self._read(rv)
+        assert (values.reported, values.in_flight) == (0, 1)
+        assert "pg_silver_row_values" not in judged
+
+    @pytest.mark.asyncio
+    async def test_a_change_inside_the_margin_before_a_rebuild_began_is_not_covered(self, rv):
+        """Ten seconds before a derivation's `started_at` may still have
+        committed after its snapshot; thirty is the margin."""
+        from core.data_quality import Severity
+
+        async with rv.acquire() as conn:
+            started = await _journal(conn, minutes_ago=30)
+            await _touch(conn, ROW_IDS[0], at=started - timedelta(seconds=10), grand_total=150)
+        values, judged = await self._read(rv)
+        assert (values.covered, values.reported) == (0, 1)
+        assert judged["pg_silver_row_values"].severity == Severity.WARN
+
+    @pytest.mark.asyncio
+    async def test_a_failed_derivation_covers_nothing(self, rv):
+        from core.data_quality import Severity
+
+        async with rv.acquire() as conn:
+            await _touch(conn, ROW_IDS[0], minutes_ago=30, grand_total=150)
+            await _journal(conn, minutes_ago=10, error="silver.orders: RuntimeError: boom")
+            await _journal(conn, minutes_ago=10, layer="not-the-warehouse")
+        values, judged = await self._read(rv)
+        assert values.covered == 0
+        assert judged["pg_silver_row_values"].severity == Severity.WARN
+
+    @pytest.mark.asyncio
+    async def test_a_flipped_is_new_customer_is_caught(self, rv):
+        """Bronze untouched, Silver's pass-2 column wrong: only a recompute of
+        pass 2 from landing can see it, since the real pass 2 would take its
+        baseline from the Silver that is wrong."""
+        from core.data_quality import Severity
+
+        b = ROW_IDS[1]
+        async with rv.acquire() as conn:
+            await conn.execute(
+                "UPDATE silver.orders SET is_new_customer = NOT is_new_customer WHERE id = $1", b)
+        values, judged = await self._read(rv)
+        assert values.columns == (("is_new_customer", 1),) and values.covered == 1
+        issue = judged["pg_silver_row_values"]
+        assert issue.severity == Severity.CRITICAL and issue.sample_ids == (b,)
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_first_order_leaves_the_buyers_later_order_in_flight(self, rv):
+        """The later order's own stamp is three hours old, but its pass-2
+        columns moved because its sibling changed two minutes ago. Judged by
+        its own stamp it would page before the rebuild it is owed."""
+        b, c = ROW_IDS[1], ROW_IDS[2]
+        async with rv.acquire() as conn:
+            await _touch(conn, b, minutes_ago=2, status_id=19, status_group_id=6)
+        values, judged = await self._read(rv)
+        assert (values.reported, values.in_flight) == (0, 2)
+        assert "pg_silver_row_values" not in judged
+
+    @pytest.mark.asyncio
+    async def test_an_order_moved_to_another_buyer_is_a_recent_change_for_the_old_one(self, rv):
+        """Buyer 2's first order moves to a new buyer: in bronze buyer 2 no
+        longer holds it, so only the stored Silver row says it was theirs."""
+        d, e = ROW_IDS[3], ROW_IDS[4]
+        async with rv.acquire() as conn:
+            await _touch(conn, d, minutes_ago=2, buyer_id=97003)
+        values, judged = await self._read(rv)
+        assert (values.reported, values.in_flight) == (0, 2)
+        assert "pg_silver_row_values" not in judged
+
+    @pytest.mark.asyncio
+    async def test_a_reclassified_manager_is_in_flight_until_a_rebuild_begins_after_it(self, rv):
+        from core.data_quality import Severity
+
+        f = ROW_IDS[5]
+        async with rv.acquire() as conn:
+            for table, key in (("app.manager_classifications", "manager_id"), ("bronze.managers", "id")):
+                await conn.execute(
+                    f"UPDATE {table} SET is_retail = false, mirrored_at = now() - interval '1 minute'"
+                    f" WHERE {key} = $1", MANAGER)
+        values, judged = await self._read(rv)
+        assert (values.reported, values.in_flight) == (0, 1)
+
+        async with rv.acquire() as conn:
+            await _journal(conn, minutes_ago=0)
+        values, judged = await self._read(rv)
+        assert (values.covered, values.columns) == (1, (("sales_type", 1),))
+        issue = judged["pg_silver_row_values"]
+        assert issue.severity == Severity.CRITICAL and issue.sample_ids == (f,)
+
+    @pytest.mark.asyncio
+    async def test_a_budget_spent_on_the_recompute_blinds_it_alone(self, rv, monkeypatch):
+        """Read last, so the three cheap groups keep their verdicts."""
+        from core import pg_warehouse_dq
+
+        monkeypatch.setattr(pg_warehouse_dq, "HOLD_BUDGET_S", 2)
+        monkeypatch.setattr(pg_warehouse_dq, "_row_values_sql", lambda: (
+            "SELECT pg_sleep(10), $1::int, $2::int, $3::interval, $4::text"))
+        facts = await asyncio.wait_for(pg_warehouse_dq.read_facts(pool=rv), timeout=30)
+        assert isinstance(facts.silver_row_values, pg_warehouse_dq.Unwatched)
+        assert "hold budget" in facts.silver_row_values.reason
+        for group in ("silver_arc", "attribution", "line_items"):
+            assert not isinstance(getattr(facts, group), pg_warehouse_dq.Unwatched), group
+        held = []
+        issues = pg_warehouse_dq.check_pg_warehouse(facts, held_out=held)
+        names = {i.check_name for i in issues}
+        assert "pg_silver_row_values_unwatched" in names and "pg_warehouse_unwatched" not in names
+        assert held == ["pg_silver_row_values"]
+
+    @pytest.mark.asyncio
+    async def test_the_snapshot_runs_without_jit(self, rv, monkeypatch):
+        from core import pg_warehouse_dq
+
+        seen = {}
+
+        async def spy(conn, grace, page_after):
+            seen["jit"] = await conn.fetchval("SELECT current_setting('jit')")
+            return await real(conn, grace, page_after)
+
+        real = pg_warehouse_dq._read_row_values
+        monkeypatch.setattr(pg_warehouse_dq, "_read_row_values", spy)
+        await pg_warehouse_dq.read_facts(pool=rv)
+        async with rv.acquire() as conn:
+            default = await conn.fetchval("SELECT current_setting('jit')")
+        assert seen["jit"] == "off", f"server default is {default}"
+
+
 class TestTheJobEndToEnd:
     """The integrity job with KS_DQ_PG_WAREHOUSE=on, against a clean DuckDB and a
     Postgres Silver that has lost an order: the twin's CRITICAL is journalled in
@@ -400,3 +664,44 @@ class TestTheJobEndToEnd:
         issues = await self._issues(store, result["run_id"])
         assert "pg_headline_vs_line_items" in issues
         assert "pg_line_items_disagree" not in issues
+
+    @pytest.mark.asyncio
+    async def test_on_a_stale_postgres_silver_row_is_journalled_and_pages(
+        self, rv, job, monkeypatch,
+    ):
+        """Step 8b through the job: a row a later rebuild covered and still did
+        not carry is a CRITICAL in the run, and it pages."""
+        scheduler, store, sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        async with rv.acquire() as conn:
+            await _touch(conn, ROW_IDS[0], minutes_ago=30, grand_total=150)
+            await _journal(conn, minutes_ago=10)
+
+        result = await scheduler._run_dq_integrity()
+
+        issues = await self._issues(store, result["run_id"])
+        assert issues["pg_silver_row_values"]["severity"] == "CRITICAL"
+        assert "pg_silver_row_values" in sent.await_args.kwargs["conditions"]
+        unverified = scheduler._resolve_dq_layer.await_args.kwargs["unverified"]
+        assert "pg_silver_row_values" not in unverified                 # it looked
+
+    @pytest.mark.asyncio
+    async def test_off_a_stale_postgres_silver_row_is_not_read(self, rv, job, monkeypatch):
+        """Flag off: the recompute is never run, not run and discarded."""
+        from core import pg_warehouse_dq
+
+        scheduler, store, sent = job
+        monkeypatch.delenv("KS_DQ_PG_WAREHOUSE", raising=False)
+        async with rv.acquire() as conn:
+            await _touch(conn, ROW_IDS[0], minutes_ago=30, grand_total=150)
+            await _journal(conn, minutes_ago=10)
+
+        with patch.object(pg_warehouse_dq, "read_facts",
+                          AsyncMock(wraps=pg_warehouse_dq.read_facts)) as read, \
+             patch.object(pg_warehouse_dq, "_read_row_values",
+                          AsyncMock(wraps=pg_warehouse_dq._read_row_values)) as recompute:
+            result = await scheduler._run_dq_integrity()
+
+        assert read.await_count == 0 and recompute.await_count == 0
+        assert "pg_silver_row_values" not in await self._issues(store, result["run_id"])
+        assert sent.await_count == 0
