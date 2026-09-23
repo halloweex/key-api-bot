@@ -117,8 +117,14 @@ $(cat "$task")"
     rc=$?
 
     if [ $rc -ne 0 ] || [ -z "$report" ]; then
-        log "task $base: agent failed rc=$rc"
-        notify "🔎 Агент-диагност не справился с $bucket (rc=$rc) — смотри $SPOOL/agent.log" "agent:failed"
+        # `claude -p` prints its own refusals on stdout, not stderr — "Credit
+        # balance is too low" among them — so the reason was in `$report` and
+        # this branch threw it away. From 2026-09-22 04:01 five failures in a
+        # row each said "смотри agent.log", and the log held nothing but
+        # "agent failed rc=1". The first line says why, in both places.
+        why="$(printf '%s' "$report" | tr -d '\r' | grep -m1 . | cut -c1-200)"
+        log "task $base: agent failed rc=$rc: ${why:-no output}"
+        notify "🔎 Агент-диагност не справился с $bucket (rc=$rc: ${why:-нет вывода}) — смотри $SPOOL/agent.log" "agent:failed"
         mv "$task" "$SPOOL/done/$base.failed"
         return 0
     fi

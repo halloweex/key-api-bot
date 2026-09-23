@@ -233,3 +233,133 @@ class TestPreThrottledChannel:
             await bot_main.send_admin_message("same", pre_throttled=True)
             await bot_main.send_admin_message("same", pre_throttled=True)
         assert http.await_count == 2
+
+
+class TestTheEmitterSetsTheRhythm:
+    """"An hour of quiet = a new incident" holds only for emitters that run
+    more often than hourly. The disk watchdog and the integrity layer run every
+    six hours, the reconciliation layers daily, so between two of their passes
+    there is always more than an hour of quiet — and every pass of theirs was a
+    new incident: loud, and a fresh summons for the diagnostic agent.
+
+    Measured 2026-09-23: fourteen disk deliveries, fourteen agent runs, standing
+    WARNs every 6.0 h, and the agent's API credit spent to nothing on 09-22.
+    """
+
+    SIX_H = 6 * 3600.0
+    DAY = 86400.0
+
+    @staticmethod
+    def replay(gate, times, cadence_s, bucket="disk:WARN"):
+        """Raise at each time; deliver whatever the Gate admits."""
+        sent = []
+        for t in times:
+            ok, suffix = gate.decide(bucket, has_condition=True, now=t,
+                                     cadence_s=cadence_s)
+            if ok:
+                sent.append((t, suffix))
+                gate.record_delivery(bucket, now=t)
+        return sent
+
+    def test_a_six_hour_emitter_reminds_once_a_day_not_every_pass(self):
+        """The 2026-09-18..23 WARN, replayed: one raise every six hours for
+        five days. One loud first message, then one reminder a day."""
+        times = [i * self.SIX_H for i in range(21)]  # 0h .. 120h
+        sent = self.replay(AlertGate(), times, self.SIX_H)
+
+        assert [t / 3600 for t, _ in sent] == [0, 24, 48, 72, 96, 120]
+        # Exactly one fresh incident — the only raise that summons the agent.
+        assert [sfx for _, sfx in sent].count("") == 1
+        assert all("standing" in sfx for _, sfx in sent[1:])
+
+    def test_without_a_cadence_the_old_rule_still_applies(self):
+        """What every slow emitter got until now, pinned so the difference is
+        visible: every six-hour pass a new incident, every one loud. Callers
+        outside the scheduler — a webhook, a startup path — still get this,
+        which is right for them: they have no rhythm to measure quiet by."""
+        times = [i * self.SIX_H for i in range(5)]
+        sent = self.replay(AlertGate(), times, None)
+
+        assert len(sent) == 5
+        assert all(sfx == "" for _, sfx in sent)
+
+    def test_a_return_after_a_clear_is_loud_again(self):
+        """The case the reset cannot be allowed to swallow. The condition
+        holds for two passes, one pass finds it clear (the emitter resolves
+        it and a "✅ Resolved" goes out), and the next pass finds it back. The
+        reader was just told it cleared; silence now would be a lie.
+
+        This is why the reset is one period, not two: the earliest a
+        condition can come back after being seen clear is two periods after
+        its last raise, and one period plus the hour keeps that loud."""
+        g = AlertGate()
+        self.replay(g, [0.0, self.SIX_H], self.SIX_H)
+        # 12h: a pass that saw the condition clear raises nothing.
+        ok, suffix = g.decide("disk:WARN", has_condition=True,
+                              now=3 * self.SIX_H, cadence_s=self.SIX_H)
+        assert ok and suffix == ""
+
+    def test_cron_jitter_does_not_push_the_reminder_a_period_late(self):
+        """The first delivery lands a second after its slot and the pass a
+        day later lands exactly on it, so the gap is 24h minus a second.
+        Without slack that reminder waits for the next pass: 30h for this
+        emitter, 48h for a daily one, depending on which side of the second
+        the scheduler woke."""
+        g = AlertGate()
+        g.decide("disk:WARN", has_condition=True, now=1.0, cadence_s=self.SIX_H)
+        g.record_delivery("disk:WARN", now=1.0)
+        for i in (1, 2, 3):
+            assert g.decide("disk:WARN", has_condition=True, now=i * self.SIX_H,
+                            cadence_s=self.SIX_H)[0] is False
+        ok, suffix = g.decide("disk:WARN", has_condition=True, now=self.DAY,
+                              cadence_s=self.SIX_H)
+        assert ok and "standing 23h" in suffix
+
+    def test_a_daily_emitter_reminds_daily_and_summons_the_agent_once(self):
+        times = [i * self.DAY for i in range(5)]
+        sent = self.replay(AlertGate(), times, self.DAY,
+                           bucket="dq:reconciliation:CRITICAL:x")
+
+        assert len(sent) == 5
+        assert [sfx for _, sfx in sent].count("") == 1
+        assert all("standing" in sfx for _, sfx in sent[1:])
+
+    def test_a_fast_emitter_is_unchanged(self):
+        """The validator's two-minute rhythm, replayed exactly as the original
+        daily-reminder test does. A cadence this short moves the reset by two
+        minutes and the reminder by one — nothing a reader could notice."""
+        sent = self.replay(AlertGate(), [float(t) for t in range(0, 25 * 3600, 120)],
+                           120.0, bucket="b")
+        assert [t for t, _ in sent if t < 3600] == [0, 1800]
+        assert len([t for t, _ in sent if t >= 3600]) == 1
+
+
+class TestRaiseAlertHearsTheRhythm:
+    def teardown_method(self):
+        reset_gate()
+
+    @pytest.mark.asyncio
+    async def test_the_cadence_in_context_reaches_the_gate(self):
+        from core.alerting import ALERT_CADENCE_S, _gate
+
+        token = ALERT_CADENCE_S.set(21600.0)
+        try:
+            with patch.object(_gate, "decide",
+                              wraps=_gate.decide) as decide, \
+                 patch("bot.main.send_admin_message",
+                       new=AsyncMock(return_value=1)):
+                await raise_alert("x", conditions=["disk:WARN"],
+                                  bucket="disk:WARN")
+        finally:
+            ALERT_CADENCE_S.reset(token)
+        assert decide.call_args.kwargs["cadence_s"] == 21600.0
+
+    @pytest.mark.asyncio
+    async def test_outside_a_job_there_is_no_cadence(self):
+        from core.alerting import _gate
+
+        with patch.object(_gate, "decide", wraps=_gate.decide) as decide, \
+             patch("bot.main.send_admin_message",
+                   new=AsyncMock(return_value=1)):
+            await raise_alert("x", conditions=["disk:WARN"], bucket="disk:WARN")
+        assert decide.call_args.kwargs["cadence_s"] is None

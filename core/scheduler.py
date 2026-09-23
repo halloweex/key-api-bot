@@ -18,6 +18,7 @@ Features:
 - Graceful shutdown
 """
 import asyncio
+import functools
 import os
 import threading
 import time
@@ -828,6 +829,39 @@ class BackgroundScheduler:
 
         logger.info(f"Registered {len(self._job_info)} background jobs")
 
+    @staticmethod
+    def _trigger_cadence_s(trigger) -> Optional[float]:
+        """The longest normal gap between two firings of `trigger`, in seconds.
+
+        What the alert Gate needs to know to tell a new incident from the next
+        pass of a standing one — see `core.alerting.ALERT_CADENCE_S`. The
+        longest gap, not the typical one: a cron across a DST change has one
+        hour-longer period, and a day that fires at uneven hours has a longest
+        silence that is still normal. Overestimating only keeps an incident
+        open slightly longer; underestimating re-announces a standing one.
+
+        None for a trigger that fires once (a catch-up, a DateTrigger), which
+        has no rhythm — and the Gate then behaves exactly as it always has.
+        """
+        if isinstance(trigger, IntervalTrigger):
+            return trigger.interval.total_seconds()
+        if not isinstance(trigger, CronTrigger):
+            return None
+        try:
+            t = trigger.get_next_fire_time(None, datetime.now(SCHEDULER_TIMEZONE))
+            gaps = []
+            for _ in range(12):
+                if t is None:
+                    break
+                nxt = trigger.get_next_fire_time(t, t + timedelta(microseconds=1))
+                if nxt is None:
+                    break
+                gaps.append((nxt - t).total_seconds())
+                t = nxt
+            return max(gaps) if gaps else None
+        except Exception:  # noqa: BLE001 — a cadence is advice; the job must register
+            return None
+
     def _add_job(
         self,
         job_id: str,
@@ -861,8 +895,27 @@ class BackgroundScheduler:
                 datetime.now(timezone.utc) + timedelta(seconds=first_run_delay_s)
             )
 
+        # Every alert raised while this job runs is raised at this job's
+        # rhythm, and the Gate uses that to decide what is a new incident.
+        # Captured here, from the trigger the job was registered with, so the
+        # catch-up (which reuses `job.func` under a one-shot DateTrigger) and a
+        # manual trigger (`job.modify(next_run_time=now)`) carry the same
+        # cadence as the scheduled runs. Every job here is a coroutine
+        # function, and a test pins that — a sync one would need its own path.
+        cadence_s = self._trigger_cadence_s(trigger)
+
+        @functools.wraps(func)
+        async def _at_cadence(*args, **kwargs):
+            from core.alerting import ALERT_CADENCE_S
+
+            token = ALERT_CADENCE_S.set(cadence_s)
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                ALERT_CADENCE_S.reset(token)
+
         self._scheduler.add_job(
-            func,
+            _at_cadence,
             trigger=trigger,
             id=job_id,
             name=name,
