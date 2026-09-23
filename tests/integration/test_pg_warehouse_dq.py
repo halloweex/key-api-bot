@@ -266,18 +266,24 @@ class TestBlindness:
 
 
 ROW_IDS = IDS[30:40]
+RULE_IDS = IDS[40:60]
 MANAGER = 979901
+# The managers `test_every_branch_of_the_rule_...` classifies, one per branch of
+# `silver_sales_type_case` that reads a table. MANAGER is the first of them.
+WAS_RETAIL, UNCLASSIFIED_RETAIL, UNCLASSIFIED = 979902, 979903, 979904
+TEST_MANAGERS = [MANAGER, WAS_RETAIL, UNCLASSIFIED_RETAIL, UNCLASSIFIED]
 
 
 async def _landed(conn, oid, *, buyer=None, manager=None, days_ago=2, minutes_ago=180,
-                  status=1, group=1, total=100):
-    at = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0,
-                                            microsecond=0) - timedelta(days=days_ago)
+                  status=1, group=1, total=100, source=1, promocode=None, at=None):
+    at = at or datetime.now(timezone.utc).replace(hour=12, minute=0, second=0,
+                                                  microsecond=0) - timedelta(days=days_ago)
     await conn.execute(
         "INSERT INTO bronze.orders (id, source_id, status_id, status_group_id, grand_total,"
-        " ordered_at, created_at, updated_at, buyer_id, manager_id, mirrored_at)"
-        " VALUES ($1, 1, $2, $3, $4, $5, $5, $5, $6, $7, now() - make_interval(mins => $8))",
-        oid, status, group, total, at, buyer, manager, minutes_ago)
+        " ordered_at, created_at, updated_at, buyer_id, manager_id, promocode, mirrored_at)"
+        " VALUES ($1, $9, $2, $3, $4, $5, $5, $5, $6, $7, $10,"
+        " now() - make_interval(mins => $8))",
+        oid, status, group, total, at, buyer, manager, minutes_ago, source, promocode)
 
 
 async def _touch(conn, oid, *, minutes_ago=None, at=None, **changes):
@@ -313,8 +319,10 @@ async def rv(pool):
     async def reset():
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM meta.derivation_runs")
-            await conn.execute("DELETE FROM app.manager_classifications WHERE manager_id = $1", MANAGER)
-            await conn.execute("DELETE FROM bronze.managers WHERE id = $1", MANAGER)
+            await conn.execute("DELETE FROM app.manager_classifications"
+                               " WHERE manager_id = ANY($1::int[])", TEST_MANAGERS)
+            await conn.execute("DELETE FROM bronze.managers WHERE id = ANY($1::int[])",
+                               TEST_MANAGERS)
 
     await reset()
     async with pool.acquire() as conn:
@@ -359,6 +367,81 @@ class TestTheRowValues:
         assert (values.reported, values.in_flight) == (0, 0)
         assert values.compared >= len(ROW_IDS[:7]) and values.rebuilt_at is not None
         assert "pg_silver_row_values" not in judged
+
+    @pytest.mark.asyncio
+    async def test_every_branch_of_the_rule_recomputes_to_what_the_rebuild_wrote(self, rv):
+        """The recompute's pass 2 is a SELECT, the rebuild's an UPDATE
+        (`silver_pass2_sql`): two statements of one rule, and nothing ties them
+        but a fixture on which both run. So this one takes every branch either
+        can take — each sales_type, a return by group and by the legacy status
+        list, an inactive source first in a buyer's history, a return on the
+        buyer's first day, no buyer, a promocode — and the real rebuild must
+        recompute to itself with nothing reported and nothing in flight.
+
+        Then the fixture proves its own coverage from what the rebuild wrote, so
+        an edit that stops exercising a branch fails here rather than going
+        quiet."""
+        from core.duckdb_constants import B2B_MANAGER_ID, KNOWN_SALES_TYPES
+        from core.pg_silver import rebuild_silver
+
+        r = RULE_IDS
+        noon = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+        async with rv.acquire() as conn:
+            await conn.executemany(
+                "INSERT INTO bronze.managers (id, name, is_retail, mirrored_at)"
+                " VALUES ($1, 'dn13', $2, now() - interval '3 hours')",
+                [(WAS_RETAIL, True), (UNCLASSIFIED_RETAIL, True), (UNCLASSIFIED, False)])
+            await conn.execute(
+                "INSERT INTO app.manager_classifications"
+                " (manager_id, is_retail, valid_from, valid_to, mirrored_at)"
+                " VALUES ($1, true, DATE '1970-01-01', $2, now() - interval '3 hours')",
+                WAS_RETAIL, (noon - timedelta(days=5)).date())
+            await _landed(conn, r[0], source=5, buyer=97101, days_ago=20)        # exhibition, first
+            await _landed(conn, r[1], manager=B2B_MANAGER_ID, buyer=97101, days_ago=3)  # b2b
+            await _landed(conn, r[2], source=3, buyer=97102, days_ago=30)        # Opencart, first
+            await _landed(conn, r[3], buyer=97102, days_ago=4)                   # not new: the trap
+            await _landed(conn, r[4], source=3, buyer=97103, days_ago=6)         # first, inactive
+            await _landed(conn, r[5], buyer=97104, days_ago=15, status=19, group=6)  # a return, earliest
+            await _landed(conn, r[6], buyer=97104, days_ago=9, status=19, group=6)   # return, first day
+            await _landed(conn, r[7], buyer=97104, days_ago=9)                   # the real first
+            await _landed(conn, r[8], buyer=97104, days_ago=2)
+            await _landed(conn, r[9], source=2, buyer=97105, days_ago=7, status=19, group=None)
+            await _landed(conn, r[10], manager=WAS_RETAIL, days_ago=8)          # inside the interval
+            await _landed(conn, r[11], manager=WAS_RETAIL, days_ago=2)          # after it closed
+            await _landed(conn, r[12], source=4, manager=UNCLASSIFIED_RETAIL)
+            await _landed(conn, r[13], source=4, manager=UNCLASSIFIED)
+            await _landed(conn, r[14], promocode="DN13", total=1234.56)          # no buyer
+            await _landed(conn, r[15], buyer=97106,                              # a Kyiv midnight
+                          at=noon - timedelta(days=3) + timedelta(hours=9, minutes=30))
+            await _landed(conn, r[16], buyer=97106, days_ago=2)
+        await rebuild_silver(rv)
+
+        # The verdict first: a rebuild that drifts from the rule is what this
+        # check exists to see, and it should say so before the coverage below
+        # does.
+        values, judged = await self._read(rv)
+        assert (values.reported, values.in_flight) == (0, 0), (values.columns, values.sample)
+        assert "pg_silver_row_values" not in judged
+
+        async with rv.acquire() as conn:
+            s = {row["id"]: row for row in await conn.fetch(
+                f"SELECT {SILVER_COLS} FROM silver.orders WHERE id = ANY($1::int[])", r[:17])}
+        assert len(s) == 17
+        assert {row["sales_type"] for row in s.values()} == set(KNOWN_SALES_TYPES)
+        assert (s[r[10]]["sales_type"], s[r[11]]["sales_type"]) == ("retail", "internal")
+        assert (s[r[12]]["sales_type"], s[r[13]]["sales_type"]) == ("retail", "internal")
+        # an inactive source is still a purchase: the buyer's later order is not new
+        assert not s[r[2]]["is_active_source"] and not s[r[3]]["is_new_customer"]
+        assert s[r[3]]["buyer_first_order_date"] == s[r[2]]["order_date"]
+        # first and only purchase, on an inactive source: not new, for that reason alone
+        assert not s[r[4]]["is_new_customer"]
+        assert s[r[4]]["buyer_first_order_date"] == s[r[4]]["order_date"]
+        # a return on the first day is not new; the purchase beside it is
+        assert s[r[6]]["is_return"] and not s[r[6]]["is_new_customer"]
+        assert s[r[6]]["order_date"] == s[r[7]]["buyer_first_order_date"] == s[r[7]]["order_date"]
+        assert s[r[7]]["is_new_customer"] and not s[r[8]]["is_new_customer"]
+        assert s[r[9]]["is_return"] and s[r[9]]["buyer_first_order_date"] is None
+        assert s[r[14]]["buyer_id"] is None and s[r[14]]["promocode"] == "DN13"
 
     @pytest.mark.asyncio
     async def test_an_old_rows_grand_total_changed_under_a_later_rebuild_is_critical_with_the_id(self, rv):
