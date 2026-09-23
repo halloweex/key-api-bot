@@ -220,6 +220,18 @@ def pool(flags):
     pg_landing.reset_health()
 
 
+def _never_reached_postgres(pool) -> None:
+    """The local stand-down asked Postgres nothing at all. A pool that was
+    never acquired is not enough to say so: `get_pool()` hands back the pool
+    without acquiring anything, and `require_revision()` is patched out here,
+    so either could run before the refusal and leave `acquired` at zero."""
+    from core import pg
+
+    assert pool.acquired == 0
+    pg.get_pool.assert_not_awaited()
+    pg.require_revision.assert_not_awaited()
+
+
 @pytest.fixture
 def order_chain(flags):
     """Register a fake chain that owns `tables`; its flag is `env()`."""
@@ -431,7 +443,7 @@ class TestTheBackfillAndItsRepair:
         order_chain()
         with pytest.raises(RuntimeError, match="write chain"):
             await backfill_orders(store)
-        assert pool.acquired == 0
+        _never_reached_postgres(pool)
 
     @pytest.mark.asyncio
     async def test_the_hourly_diff_stands_down_quietly(
@@ -444,7 +456,7 @@ class TestTheBackfillAndItsRepair:
         with caplog.at_level("ERROR"):
             result = await hourly_orders_ids_diff(store)
         assert result == {"stood_down": [LINES]}
-        assert pool.acquired == 0
+        _never_reached_postgres(pool)
         assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
 
@@ -462,7 +474,6 @@ class TestTheCommentShip:
     @pytest.mark.asyncio
     async def test_it_is_skipped_so_the_callers_duckdb_half_still_runs(
             self, pool, order_chain, tmp_path):
-        from core import pg
         from core.pg_backfill import ship_orders_by_id
         from core.pg_order_versions import BACKFILL
 
@@ -472,8 +483,7 @@ class TestTheCommentShip:
         assert result["orders_shipped"] == 0
         assert result["stood_down"] == [LINES, ORDERS]
         assert "write chain" in result["skipped"]
-        assert pool.acquired == 0
-        pg.require_revision.assert_not_awaited()
+        _never_reached_postgres(pool)
 
 
 class _NoStore:
@@ -498,7 +508,7 @@ class TestTheBucketComparison:
             ("mirror_stood_down", LINES, Severity.INFO),
         ]
         assert ORDERS in issues[0].description
-        assert pool.acquired == 0
+        _never_reached_postgres(pool)
 
     @pytest.mark.asyncio
     async def test_without_a_chain_it_compares(self, pool, tmp_path):
