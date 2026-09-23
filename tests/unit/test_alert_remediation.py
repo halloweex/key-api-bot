@@ -75,6 +75,19 @@ class TestRemediationLookup:
         for prefix, line in REMEDIATION:
             assert prefix and len(line) > 30, prefix
 
+    # The charter's alert is three lines with one "→" and a one-line
+    # imperative (CLAUDE.md, «How a failure reaches a human»), and an entry is
+    # that line verbatim. 150 is where the table stands: the DN-16 entry
+    # reached 315 by carrying its reasons, and was cut back to its levers.
+    ARROW_LINE_MAX = 150
+
+    def test_every_entry_is_one_line_of_levers(self):
+        """A reason written into an entry pushes the lever off a phone's
+        screen; reasons belong in the finding's description."""
+        for prefix, line in REMEDIATION + (("<default>", DEFAULT_REMEDIATION),):
+            assert "\n" not in line, prefix
+            assert len(line) <= self.ARROW_LINE_MAX, (prefix, len(line))
+
 
 class TestMachineAttemptsNote:
     def test_quiet_when_nothing_has_healed(self, monkeypatch):

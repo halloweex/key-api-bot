@@ -2680,8 +2680,11 @@ async def reconcile_order_utm(
 # REMEDIATION name this second cause beside the first. The same morning's
 # orders fingerprint sees the divergence too — it compares `manager_comment`
 # and names it in `mirror_row_values` on `bronze.orders` — and the lever is
-# putting the comment back in DuckDB (the `manager_comment` backfill, or an
-# UPDATE from this copy), never the ship.
+# putting the comment back in DuckDB from this copy, never the ship. Not the
+# `manager_comment` backfill either: it re-fetches the field from KeyCRM,
+# whose payload after a purge is the NULL DuckDB stored, skips it as empty,
+# and still reports success. It helps only where KeyCRM serves the comment
+# today, as after a restore from an export older than a backfill.
 #
 # **The grace is absolute, on `bronze.orders.mirrored_at`.** Under
 # KS_PG_DERIVE=own the order reaches `silver.orders` on Postgres' own signal,
@@ -2758,6 +2761,27 @@ FROM owed
 """
 
 
+# Why the `pg_order_utm_` REMEDIATION line names its levers in the order it
+# does. That line is the single "→" of a Telegram alert and has room for the
+# levers alone, so the reasons ride in the two paging descriptions, which
+# /api/health/data-quality carries whole. One text for both, because both page
+# with the same line.
+_ORDER_UTM_LEVER_REASONS = (
+    "The alert's levers, in order. If the fingerprint names manager_comment, "
+    "copy the comment into DuckDB from bronze.orders, which holds it after a "
+    "purge and after a restore alike. POST /api/traffic/backfill-utm is not "
+    "that lever: it re-fetches the comment from KeyCRM, so it restores one "
+    "only where KeyCRM serves it today (a restore from an export older than "
+    "a backfill), and after a purge, where KeyCRM's payload was the NULL "
+    "DuckDB stored, it skips the order and the run still reports success. "
+    "Otherwise read {table}'s row in meta.mirror_state before anything "
+    "ships: a refused ship names itself in last_error, and the next "
+    "successful one clears it. Then POST /api/traffic/refresh, which parses "
+    "and ships whether or not the warehouse is dirty; POST "
+    "/api/warehouse/refresh never ships this table."
+)
+
+
 def order_utm_completeness_findings(
     row: Mapping[str, Any], *, grace_minutes: int,
 ) -> List[IntegrityIssue]:
@@ -2791,13 +2815,13 @@ def order_utm_completeness_findings(
                 f"{_since('missing_since')}). /traffic and the weekly traffic "
                 "report file each of them through the COALESCE as organic or "
                 "unattributed, with nothing on screen to say so. Either the "
-                "parse did not reach them or the ship stopped carrying them "
-                f"(read {table}'s row in meta.mirror_state first), or DuckDB's "
-                "copy of the order has no comment: the parser reads DuckDB's "
-                "orders, not bronze.orders, so it never sees them, and no "
-                "parse or ship clears this. The orders fingerprint names that "
-                "case as manager_comment in mirror_row_values on bronze.orders; "
-                "the fix is the comment back in DuckDB, not a ship."
+                "parse did not reach them or the ship stopped carrying them, "
+                "or DuckDB's copy of the order has no comment: the parser "
+                "reads DuckDB's orders, not bronze.orders, so it never sees "
+                "them, and no parse or ship clears this. The orders "
+                "fingerprint names that case as manager_comment in "
+                "mirror_row_values on bronze.orders. "
+                + _ORDER_UTM_LEVER_REASONS.format(table=table)
             ),
         ))
 
@@ -2821,7 +2845,8 @@ def order_utm_completeness_findings(
                 "parser, which reads DuckDB, no longer re-reads it (the orders "
                 "fingerprint then names manager_comment in mirror_row_values "
                 "on bronze.orders). "
-                "/traffic shows the previous classification for these."
+                "/traffic shows the previous classification for these. "
+                + _ORDER_UTM_LEVER_REASONS.format(table=table)
             ),
         ))
 

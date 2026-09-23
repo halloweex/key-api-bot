@@ -1914,19 +1914,20 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("pg_goods_shipped_without_sale", "By design (bloggers/seeding); the signal is growth"),
     ("pg_line_items_disagree", "One engine's Silver or line items differ: compare the two stores for the named finding"),
     ("pg_warehouse_", "The Postgres twins did not look: read the reason, then check KS_PG_DSN, PG_LAYER_LOCK holders and KS_DQ_PG_WAREHOUSE"),
-    # DN-16. Three causes, and the line names them in the order that
-    # separates them. A comment Postgres holds and DuckDB lost is first,
-    # because no parse or ship can reach it: the parser reads DuckDB, and the
-    # orders fingerprint names that case the same morning. Then the watermark,
-    # read before anything ships — a successful ship clears `last_error` and
-    # with it the reason the last one failed. Then the one lever that ships
-    # with nothing marked dirty: the 05:15 status refresh, the weekly full
-    # sync and the sync of today parse without marking it, a restart forgets
-    # the deferral, and `POST /api/warehouse/refresh` never ships this table
-    # at all. The traffic refresh re-parses and calls `ship_after_reparse`.
+    # DN-16. One lever per cause, in the order that separates the causes;
+    # the reasons ride in the findings' descriptions
+    # (`mirror_reconciliation._ORDER_UTM_LEVER_REASONS`), because this is the
+    # single "→" line of a Telegram alert. A comment Postgres holds and DuckDB
+    # lost is first, because no parse or ship can reach it: the parser reads
+    # DuckDB. Its lever is the copy in bronze.orders, which covers a purge and
+    # a restore alike — not `POST /api/traffic/backfill-utm`, which re-fetches
+    # from KeyCRM the NULL a purge stored, skips it, and reports success.
+    # Then the watermark, read before anything ships: a successful ship
+    # clears `last_error`. Then the one lever that ships with nothing marked
+    # dirty; `POST /api/warehouse/refresh` never ships this table at all.
     ("pg_order_utm_",
-     "If the fingerprint names manager_comment on bronze.orders, restore it in DuckDB (POST /api/traffic/backfill-utm, or an UPDATE from bronze.orders): no ship reaches it. "
-     "Else read meta.mirror_state for silver.order_utm first (a DN-04 refusal names itself). Then POST /api/traffic/refresh parses and ships, dirty or not"),
+     "manager_comment in fingerprint? Copy it to DuckDB from bronze.orders. "
+     "Else read meta.mirror_state for silver.order_utm. Then POST /api/traffic/refresh"),
     ("pg_silver_arc_unwatched", "The Postgres twins did not look: read the reason in the finding"),
     ("pg_attribution_coverage_unwatched", "The orders mirror is failing or silent: see mirror freshness in /api/health"),
     ("pg_line_items_unwatched", "The Postgres twins did not look: read the reason in the finding"),
