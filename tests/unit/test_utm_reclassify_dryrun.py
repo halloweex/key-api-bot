@@ -328,10 +328,11 @@ def snapshot_csv(n_rows):
 class FakeConn:
     """Answers the script's reads and records what it was asked."""
 
-    def __init__(self, records=None, *, utm_rows=3, csv_rows=None, xid=None,
-                 privileges=None, members=None, known=True, copy_error=None):
+    def __init__(self, records=None, *, utm_rows=3, silver_rows=None, csv_rows=None,
+                 xid=None, privileges=None, members=None, known=True, copy_error=None):
         self.records = fake_records() if records is None else records
         self.utm_rows = utm_rows
+        self.silver_rows = len(self.records) if silver_rows is None else silver_rows
         self.csv_rows = utm_rows if csv_rows is None else csv_rows
         self.xid = xid
         # What the login holds, and what each role it can SET ROLE to holds.
@@ -370,8 +371,10 @@ class FakeConn:
     async def fetchval(self, sql, *args):
         self._log(sql)
         answers = {
+            script.LOCK_SQL: None,
             script.NOW_SQL: NOW,
             "SELECT current_user": "ks_readonly",
+            script.SILVER_ROWS_SQL: self.silver_rows,
             script.UTM_ROWS_SQL: self.utm_rows,
             script.ORPHAN_ROWS_SQL: 0,
             script.XID_SQL: self.xid,
@@ -497,6 +500,13 @@ class TestNothingIsWritten:
         assert len(statements) >= 8
         for name, sql in statements.items():
             code = sql.strip().lower()
+            if name == "LOCK_SQL":
+                # The one statement that is not a SELECT, and it is held to
+                # its whole text: a table list and the weakest mode there is.
+                assert re.fullmatch(
+                    r"lock table [a-z_]+\.[a-z_]+(, [a-z_]+\.[a-z_]+)* in access share mode",
+                    code), sql
+                continue
             assert code.startswith("select"), name
             words = set(re.findall(r"[a-z_]+", re.sub(r"'[^']*'", "''", code)))
             assert not words & set(verbs), (name, sorted(words & set(verbs)))
@@ -506,12 +516,30 @@ class TestNothingIsWritten:
         conn = FakeConn()
         state = await script.read_state(conn, tmp_path / "s.csv.gz")
         assert conn.transactions == [{"isolation": "repeatable_read", "readonly": True}]
+        # The LOCK before anything that reads. LOCK sets no snapshot, so it
+        # waits out a Silver tick's TRUNCATE and the snapshot is fixed after
+        # it; one statement later and the snapshot predates the TRUNCATE and
+        # reads the table empty (the real-PG test shows both).
+        assert conn.statements[:3] == ["BEGIN", script.LOCK_SQL, script.NOW_SQL]
         # The transaction-id question is the last thing asked inside it —
         # before COMMIT, where a raise still rolls the write back. Asked after,
         # it would find no id in a fresh transaction and bless what committed.
         assert conn.statements[-2:] == [script.XID_SQL, "COMMIT"]
         assert script.SESSION["default_transaction_read_only"] == "on"
         assert state.snapshot is not None and state.snapshot.rows == 3
+
+    def test_the_lock_covers_every_table_any_statement_reads(self):
+        """Derived from the statements, not listed beside them: a read of a
+        table the LOCK does not name is a read a TRUNCATE can empty. Walks
+        every `_SQL` constant, so a new read cannot be left out by not being
+        thought of."""
+        ours = r"\b(?:bronze|silver|gold|meta|app)\.[a-z_]+\b"
+        named = set()
+        for name in dir(script):
+            if name.endswith("_SQL") and name != "LOCK_SQL":
+                named |= set(re.findall(ours, getattr(script, name)))
+        assert named == set(script.READ_TABLES), named ^ set(script.READ_TABLES)
+        assert re.findall(ours, script.LOCK_SQL) == list(script.READ_TABLES)
 
     @pytest.mark.asyncio
     async def test_a_transaction_that_was_given_an_id_fails_and_keeps_no_snapshot(
@@ -648,6 +676,31 @@ class TestTheSnapshot:
         with pytest.raises(script.SnapshotMismatch):
             await script.write_snapshot(FakeConn(csv_rows=2), path, 3)
         assert not path.exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("empty", [{"utm_rows": 0}, {"silver_rows": 0}])
+    async def test_a_silver_table_read_as_empty_fails_the_run(self, tmp_path, empty):
+        """What a TRUNCATE read through an older snapshot looks like — or a
+        Silver never built. Reported, it would be every verdict "unparsed",
+        or no order in the 12 weeks, and a snapshot "checked" against the
+        same empty table. So the run fails, and before the snapshot."""
+        conn = FakeConn(**empty)
+        path = tmp_path / "s.csv.gz"
+        with pytest.raises(script.EmptySilver):
+            await script.read_state(conn, path)
+        assert not path.exists()
+        assert script.SNAPSHOT_SQL not in conn.statements
+        assert conn.statements[-1] == "ROLLBACK"
+
+    @pytest.mark.asyncio
+    async def test_empty_is_only_a_failure_beside_a_bronze_that_is_not(self, tmp_path):
+        """No orders at all is an empty report, not a broken read; and a
+        table of comment-less orders has nothing for the UTM table to hold."""
+        state = await script.read_state(FakeConn(records=[], utm_rows=0, silver_rows=0))
+        assert state.orders == [] and state.utm_rows == 0
+        bare = [r for r in fake_records() if r["manager_comment"] == ""]
+        state = await script.read_state(FakeConn(records=bare, utm_rows=0))
+        assert len(state.orders) == 1
 
     @pytest.mark.asyncio
     async def test_a_copy_that_fails_halfway_removes_the_file(self, tmp_path):

@@ -26,6 +26,7 @@ suite, so the whole-table numbers are whatever other tests left behind.
 from __future__ import annotations
 
 import ast
+import asyncio
 import csv
 import gzip
 import os
@@ -264,6 +265,75 @@ class TestTheSnapshot:
         assert ours[BASE + 6][platform] == ""           # a NULL is an empty field
         parsed_at = header.index("parsed_at")
         assert ours[BASE + 1][parsed_at] == "2026-09-01 09:00:00+00"
+
+
+async def _until_the_read_waits_on_a_lock(conn, timeout=8.0):
+    """Until the script's session is queued behind a lock — well inside the
+    session's own 10 s `lock_timeout`, after which it would give up."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if await conn.fetchval(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE application_name = $1 AND wait_event_type = 'Lock'",
+                script.SESSION["application_name"]):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the read never queued behind the tick's lock")
+
+
+class TestASilverTickDuringTheRead:
+    """Every Silver tick TRUNCATEs `silver.orders` and `silver.order_utm` and
+    refills them in one transaction. A TRUNCATE is not MVCC-safe: a read whose
+    snapshot was fixed before the tick committed, and which then waited for
+    it, sees the new file and reads the table as empty. Measured before the
+    fix at production size: rule_change 0 where 2,043 were true, every 12-week
+    table "no orders", exit 0 — and a 0-row snapshot "checked against the
+    table in the same snapshot"."""
+
+    @pytest.mark.parametrize("table", ["silver.order_utm", "silver.orders"])
+    @pytest.mark.asyncio
+    async def test_a_tick_committed_while_the_read_waits_is_read_after_it(
+            self, seeded, table):
+        conn = await _session()
+        try:
+            undisturbed = await script.read_state(conn)
+        finally:
+            await conn.close()
+
+        # The tick's shape, as `rebuild_silver` and `ship_order_utm` write
+        # it: TRUNCATE, then the rows again, in one transaction.
+        writer = await asyncpg.connect(DSN)
+        tick = writer.transaction()
+        await tick.start()
+        conn = await _session()
+        read = None
+        try:
+            await writer.execute(
+                f"CREATE TEMP TABLE dn15_tick ON COMMIT DROP AS SELECT * FROM {table}")
+            await writer.execute(f"TRUNCATE {table}")
+            await writer.execute(f"INSERT INTO {table} SELECT * FROM dn15_tick")
+            read = asyncio.create_task(script.read_state(conn))
+            await _until_the_read_waits_on_a_lock(seeded)
+            committing = await seeded.fetchval("SELECT clock_timestamp()")
+            await tick.commit()
+            raced = await read
+        finally:
+            # Closing a connection with its transaction open rolls it back,
+            # which is the cleanup for every way this can fail half-way.
+            await writer.close()
+            if read is not None and not read.done():
+                read.cancel()
+            await conn.close()
+
+        assert _ours(raced) == _ours(undisturbed)
+        assert (raced.utm_rows, raced.orphan_rows) == (
+            undisturbed.utm_rows, undisturbed.orphan_rows)
+        assert raced.utm_rows == await seeded.fetchval(
+            "SELECT count(*) FROM silver.order_utm")
+        # And the instant the report prints is the snapshot's, after the
+        # tick — not BEGIN's, which was before the wait.
+        assert raced.taken_at > committing
 
 
 class _ReadWrite:

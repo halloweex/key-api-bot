@@ -46,12 +46,20 @@ and `bronze.orders` is what step 9's parser will read. The DuckDB reclassify
 reads DuckDB's `orders`, which the mirror keeps identical and the daily
 comparison checks.
 
-The transaction is kept short on purpose: every Silver tick `TRUNCATE`s
-`silver.orders` and `silver.order_utm` under ACCESS EXCLUSIVE, which waits for
-this read, and every reader of /traffic then waits behind that. So the rows
-come out first and all the work happens after COMMIT, `lock_timeout` refuses
-to queue behind a tick for long, and the report prints how long the snapshot
-was held.
+That instant comes AFTER the three tables are locked. Every Silver tick
+`TRUNCATE`s `silver.orders` and `silver.order_utm` under ACCESS EXCLUSIVE, and
+a TRUNCATE is not MVCC-safe: a snapshot taken before one commits, whose read
+then waits for it, finds the table's new, emptied file and reads it as empty —
+a run that exits 0 on no verdicts, and a snapshot "checked" against the same
+empty table. So the transaction's first statement is a `LOCK ... IN ACCESS
+SHARE MODE`, which waits out a tick without fixing the snapshot. A table read
+as empty all the same is refused (exit 1) rather than reported.
+
+The transaction is kept short on purpose: the same TRUNCATE waits for this
+read, and every reader of /traffic then waits behind that. So the rows come
+out first and all the work happens after COMMIT, `lock_timeout` refuses to
+queue behind a tick for long, and the report prints how long the snapshot was
+held.
 
 WHAT IT WRITES: NOTHING, EXCEPT THE ONE FILE YOU NAME
 
@@ -234,7 +242,25 @@ ORDER BY 1
 LIMIT 5
 """
 
-NOW_SQL = "SELECT now()"
+# Every table the reads below name, in the order they are locked. A test holds
+# this to the statements, so a table added to a read without being added here
+# fails there instead of being read through a snapshot a TRUNCATE can empty.
+READ_TABLES = ("bronze.orders", "silver.orders", "silver.order_utm")
+# The first statement of the read transaction, before anything sets its
+# snapshot; `read_state` says why. ACCESS SHARE is the lock the SELECTs take
+# anyway, so it blocks nothing they would not — a stronger mode would stall
+# the sync's writes to `bronze.orders` for the whole read — and it is the only
+# mode SELECT alone permits, which is all `ks_readonly` holds (measured: SHARE
+# is refused it). It assigns no transaction id. It cannot close a deadlock:
+# this side holds nothing stronger, and no writer holds ACCESS EXCLUSIVE on
+# one of these tables while asking for another — the Silver rebuild and the
+# UTM ship each truncate one, in a transaction of their own.
+LOCK_SQL = f"LOCK TABLE {', '.join(READ_TABLES)} IN ACCESS SHARE MODE"
+# `statement_timestamp()`, not `now()`: `now()` is when BEGIN ran, and the
+# LOCK before this may have waited for a tick in between. This statement is
+# the one that fixes the snapshot, so its start is the instant reported.
+NOW_SQL = "SELECT statement_timestamp()"
+SILVER_ROWS_SQL = "SELECT count(*) FROM silver.orders"
 UTM_ROWS_SQL = "SELECT count(*) FROM silver.order_utm"
 ORPHAN_ROWS_SQL = """
 SELECT count(*) FROM silver.order_utm u
@@ -269,6 +295,15 @@ class WroteSomething(RuntimeError):
 
 class SnapshotMismatch(RuntimeError):
     """The file on disk does not hold the rows the table held."""
+
+
+class EmptySilver(RuntimeError):
+    """A Silver table read as empty beside a `bronze.orders` that is not.
+
+    What a TRUNCATE read through an older snapshot looks like, and what a
+    Silver that was never built looks like: either way every number in the
+    report would be an answer about nothing. Exit 1, no snapshot kept.
+    """
 
 
 # ─── the model ───────────────────────────────────────────────────────────────
@@ -752,17 +787,43 @@ async def write_snapshot(conn, path: Path, expected_rows: int) -> Snapshot:
         raise
 
 
+def check_not_emptied(records: Sequence[Any], silver_rows: int, utm_rows: int) -> None:
+    """Raise `EmptySilver` when a Silver table reads as empty and Bronze does not."""
+    if records and not silver_rows:
+        raise EmptySilver(
+            f"silver.orders read as empty while bronze.orders holds {len(records):,} "
+            "orders; nothing the report says about the 12 weeks would be true")
+    commented = sum(1 for record in records if _has_comment(record["manager_comment"]))
+    if commented and not utm_rows:
+        raise EmptySilver(
+            f"silver.order_utm read as empty while {commented:,} orders carry a "
+            "comment; every stored verdict would read as unparsed")
+
+
 async def read_state(conn, snapshot_path: Optional[Path] = None) -> State:
-    """Everything the report needs, and the snapshot, in one read-only transaction."""
-    started = time.monotonic()
+    """Everything the report needs, and the snapshot, in one read-only transaction.
+
+    The LOCK comes first because a REPEATABLE READ snapshot is fixed by the
+    first statement that reads, and LOCK is not one — PostgreSQL exempts it
+    precisely so it can run at the start of such a transaction. The other way
+    round, the snapshot is fixed before a Silver tick's TRUNCATE commits, the
+    read waits for that commit, and then reads the truncated table through
+    the older snapshot: empty, since TRUNCATE is not MVCC-safe.
+    """
     snapshot = None
     try:
         async with conn.transaction(isolation="repeatable_read", readonly=True):
+            await conn.fetchval(LOCK_SQL)
+            # "Held" counts from here, where the snapshot starts, and not from
+            # BEGIN: a wait for a tick is not time this read held anything up.
+            started = time.monotonic()
             taken_at = await conn.fetchval(NOW_SQL)
             role = await conn.fetchval("SELECT current_user")
             records = await conn.fetch(ORDERS_SQL)
+            silver_rows = await conn.fetchval(SILVER_ROWS_SQL)
             utm_rows = await conn.fetchval(UTM_ROWS_SQL)
             orphan_rows = await conn.fetchval(ORPHAN_ROWS_SQL)
+            check_not_emptied(records, silver_rows, utm_rows)
             if snapshot_path is not None:
                 snapshot = await write_snapshot(conn, snapshot_path, utm_rows)
             await assert_wrote_nothing(conn)
