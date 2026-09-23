@@ -173,6 +173,23 @@ class TestTheDiff:
         assert report.rewrites["rule_change"] == 4
         assert report.column_changes == {"platform": 4}
 
+    def test_the_window_holds_its_first_and_last_day_and_nothing_either_side(self):
+        """A Monday and a Sunday are both inside "12 complete weeks"; the
+        Sunday before and the Monday after are not. Off by one at either end
+        and the hryvnia no longer match the Monday reports they are read
+        beside."""
+        start, end = WINDOW
+        old = verdict_row("pixel_only", "facebook")
+        new = verdict_row("pixel_only", "unattributed")
+        orders = [order(i, comment="p", stored=old, day=day, total=str(10 ** i))
+                  for i, day in enumerate([start - timedelta(days=1), start, end,
+                                           end + timedelta(days=1)], start=1)]
+        report = diff_verdicts(orders, WINDOW, reclassify=_fake_parse({"p": new}))
+        (t,) = report.transitions
+        assert t.orders == 4
+        assert t.window_orders == {"retail": 2, "all": 2}
+        assert t.window_revenue["all"] == Decimal(100 + 1000)
+
     def test_a_row_changed_since_it_was_parsed_is_pending_not_a_rule_change(self):
         """The next tick reparses it whatever anybody decides, so it must not
         swell the number OD-06 is about."""
