@@ -660,6 +660,19 @@ class TestReconciliationPgHistory:
         assert "the longest silence 29.5 h" in detail, detail
 
     @pytest.mark.asyncio
+    async def test_a_silence_of_exactly_the_limit_passes(self, pool):
+        """05:30 one day, 11:30 the next: 30.0 h. The canary pages on
+        `age > limit`, so on this history it stayed quiet, and a check that
+        failed here would restart DN-21's fourteen days over a page that never
+        went out."""
+        async with scenario(pool) as conn:
+            await self.seed(conn, self.every_morning(moved={5: self.at(5, 11, 30)}))
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS", detail
+        assert "the longest silence 30.0 h" in detail, detail
+        assert "silent for" not in detail, detail
+
+    @pytest.mark.asyncio
     async def test_a_failed_run_does_not_end_a_silence(self, pool):
         """The canary's age is taken over successful runs, so the 05:30 run that
         errored leaves the 30.5 h standing."""
@@ -684,6 +697,21 @@ class TestReconciliationPgHistory:
         assert "silent for 30.3 h, from 30.05 05:30 to 31.05 11:45 Kyiv" in detail, detail
 
     @pytest.mark.asyncio
+    async def test_a_silence_starts_when_the_last_success_started(self, pool):
+        """The 05:30 run was written at 06:15 and the next started 30 h 20 min
+        after it. /api/health's age counts from `started_at`, so the canary
+        paged from 11:30; measured from when the run was written the gap would
+        read 29.6 h and pass."""
+        async with scenario(pool) as conn:
+            await self.seed(conn, self.every_morning(moved={5: self.at(5, 11, 50)}))
+            await conn.execute(
+                "UPDATE app.data_quality_runs SET ended_at = started_at + interval '45 minutes'"
+                " WHERE layer = 'reconciliation_pg' AND started_at = $1", self.at(6))
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "silent for 30.3 h, from 30.05 05:30 to 31.05 11:50 Kyiv" in detail, detail
+
+    @pytest.mark.asyncio
     async def test_the_silence_the_window_opens_in_is_measured_whole(self, pool):
         """The last run before the window was three days before it: the canary
         was already paging when the window opened."""
@@ -705,6 +733,20 @@ class TestReconciliationPgHistory:
         assert v == "FAIL", detail
         assert "no successful run on 31.05" in detail, detail
         assert "silent for" not in detail and "the longest silence 29.5 h" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_day_whose_only_run_failed_is_a_day_without_one(self, pool):
+        """The same drift, with the stepped-over day's 05:30 run on record and
+        errored. It wrote a row and checked nothing, so 31.05 still has no
+        successful run."""
+        drift = {8: self.at(8, 11, 0), 7: self.at(7, 16, 30), 6: self.at(6, 22, 0),
+                 5: None, 4: self.at(4, 3, 30)}
+        async with scenario(pool) as conn:
+            await self.seed(conn, self.every_morning(moved=drift), failed=[self.at(5)])
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "no successful run on 31.05" in detail, detail
+        assert "silent for" not in detail, detail
 
     @pytest.mark.asyncio
     async def test_no_run_by_noon_fails(self, pool):
@@ -738,6 +780,18 @@ class TestReconciliationPgHistory:
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
         assert "CRITICAL on 26.05" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_stale_copy_of_a_clean_history_is_unknown(self, pool):
+        """A run every morning, and a copy two hours old. This is the history a
+        frozen replication would certify: without the staleness rule it reads
+        PASS, where the empty journal in TestStaleEvidenceIsUnknown would at
+        least have read FAIL."""
+        async with scenario(pool) as conn:
+            await self.seed(conn, self.every_morning(), copied=ago(hours=2))
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "UNKNOWN", detail
+        assert "is 120 min old (limit 75)" in detail, detail
 
 
 @needs_pg
