@@ -64,9 +64,12 @@ table:
    `KS_PG_READONLY_DSN` (or `--dsn`), or else `KS_READONLY_PASSWORD` for the
    `ks_readonly` role at the compose alias. A test walks this module for every
    environment name it reads.
-2. It refuses a role that could change anything — superuser, any write
-   privilege on any table, CREATE on a schema, CREATE or TEMPORARY on the
-   database — before reading a row. `ks_readonly` holds none of those.
+2. It refuses a role that could change anything — superuser, CREATEROLE,
+   CREATEDB, any write privilege on a table, view or foreign table, USAGE or
+   UPDATE on a sequence, CREATE on a schema, CREATE or TEMPORARY on the
+   database — before reading a row, and asks the same of every role the login
+   could `SET ROLE` to. `ks_readonly` as the migrations leave it holds none of
+   those; a test asks the server that on every run of the suite.
 3. The session starts with `default_transaction_read_only`, the transaction is
    declared READ ONLY, and before it ends the script asks the server whether a
    transaction id was ever assigned. One is assigned on the first write and
@@ -76,7 +79,9 @@ table:
    record of verdicts that may since have been overwritten — is never replaced.
    The file is removed if anything fails before it is complete and verified;
    no other path is ever opened for writing. A test runs the script under an
-   audit hook and fails on any other write, and on any network connection.
+   audit hook and fails on any other write, and on any network connection —
+   with `KS_PG_DSN` pointed at a port of its own, so a stray read of it would
+   show — and on DuckDB, whose writes the hook cannot see, being loaded at all.
 
 The sha256 is printed rather than written beside the file, so the named file
 stays the only one; saved as it is, the printed line is what `sha256sum -c`
@@ -182,16 +187,40 @@ SCOPES = ("retail", "all")
 
 # ─── SQL: reads only ─────────────────────────────────────────────────────────
 
-# What makes a role able to change something. `has_table_privilege` with a
-# list is true when ANY of them is held.
-WRITABLE_TABLES_SQL = r"""
-SELECT format('%I.%I', n.nspname, c.relname) AS name
+# What makes a role able to change something, asked of one role by name
+# (`$1`) so that the same statements answer for the login and for every role it
+# can become — and, in a test, for `ks_readonly` as seen from another login.
+#
+# Every role the login can act as: itself and each role it may `SET ROLE` to.
+# A NOINHERIT member of a writer holds nothing through inheritance, so the
+# privilege functions say "no" for the login and "yes" one statement later.
+ROLES_SQL = """
+SELECT rolname AS name
+FROM pg_roles
+WHERE pg_has_role($1::name, oid, 'MEMBER')
+ORDER BY rolname <> $1::name, rolname
+"""
+ROLE_SQL = """
+SELECT rolsuper AS superuser, rolcreaterole AS createrole, rolcreatedb AS createdb,
+       has_database_privilege(rolname, current_database(), 'CREATE, TEMPORARY') AS db_write
+FROM pg_roles WHERE rolname = $1::name
+"""
+# Tables and everything a write can pass through: a view (an auto-updatable one
+# writes its base table), a foreign table, and a sequence, whose `nextval` is a
+# write that no ROLLBACK undoes. `has_table_privilege` with a list is true when
+# ANY of them is held.
+WRITABLE_RELATIONS_SQL = r"""
+SELECT format('%I.%I', n.nspname, c.relname) AS name,
+       c.relkind = 'S' AS is_sequence
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind IN ('r', 'p')
+WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
   AND n.nspname NOT IN ('pg_catalog', 'information_schema')
   AND n.nspname NOT LIKE 'pg\_%'
-  AND has_table_privilege(c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE')
+  AND CASE WHEN c.relkind = 'S'
+           THEN has_sequence_privilege($1::name, c.oid, 'USAGE, UPDATE')
+           ELSE has_table_privilege($1::name, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE')
+      END
 ORDER BY 1
 LIMIT 5
 """
@@ -200,14 +229,9 @@ SELECT nspname AS name
 FROM pg_namespace
 WHERE nspname NOT IN ('pg_catalog', 'information_schema')
   AND nspname NOT LIKE 'pg\_%'
-  AND has_schema_privilege(oid, 'CREATE')
+  AND has_schema_privilege($1::name, oid, 'CREATE')
 ORDER BY 1
 LIMIT 5
-"""
-ROLE_SQL = """
-SELECT current_user AS role, rolsuper AS superuser,
-       has_database_privilege(current_database(), 'CREATE, TEMPORARY') AS db_write
-FROM pg_roles WHERE rolname = current_user
 """
 
 NOW_SQL = "SELECT now()"
@@ -626,20 +650,38 @@ async def connect(args: argparse.Namespace):
         f"for {READONLY_ROLE}@{COMPOSE_HOST}")
 
 
-async def write_privileges(conn) -> List[str]:
-    """Everything this login could change, or [] for a read-only one."""
-    role = await conn.fetchrow(ROLE_SQL)
+async def write_privileges(conn, role: Optional[str] = None) -> List[str]:
+    """Everything `role` could change, or [] for a read-only one.
+
+    `role` defaults to this login. Asked of every role the login can become,
+    each finding naming the role it came through, so "member of ks_app" reads
+    as what it is rather than as a clean bill of health.
+    """
+    login = role or await conn.fetchval("SELECT current_user")
+    roles = [record["name"] for record in await conn.fetch(ROLES_SQL, login)]
+    if not roles:
+        # Every role is a member of itself, so an empty answer is a login the
+        # catalogue does not know — nothing anybody has checked. Refused
+        # rather than read as "holds nothing".
+        return [f"role {login} is not in pg_roles"]
     found: List[str] = []
-    if role is None:
-        return [f"role {await conn.fetchval('SELECT current_user')} is not in pg_roles"]
-    if role["superuser"]:
-        found.append(f"{role['role']} is a superuser")
-    if role["db_write"]:
-        found.append("CREATE or TEMPORARY on the database")
-    for record in await conn.fetch(CREATABLE_SCHEMAS_SQL):
-        found.append(f"CREATE on schema {record['name']}")
-    for record in await conn.fetch(WRITABLE_TABLES_SQL):
-        found.append(f"INSERT/UPDATE/DELETE/TRUNCATE on {record['name']}")
+    for name in roles:
+        via = "" if name == login else f" (through {name}, which {login} can SET ROLE to)"
+        attributes = await conn.fetchrow(ROLE_SQL, name)
+        if attributes["superuser"]:
+            found.append(f"{name} is a superuser{via}")
+        if attributes["createrole"]:
+            found.append(f"CREATEROLE{via}")
+        if attributes["createdb"]:
+            found.append(f"CREATEDB{via}")
+        if attributes["db_write"]:
+            found.append(f"CREATE or TEMPORARY on the database{via}")
+        for record in await conn.fetch(CREATABLE_SCHEMAS_SQL, name):
+            found.append(f"CREATE on schema {record['name']}{via}")
+        for record in await conn.fetch(WRITABLE_RELATIONS_SQL, name):
+            what = ("USAGE/UPDATE on sequence" if record["is_sequence"]
+                    else "INSERT/UPDATE/DELETE/TRUNCATE on")
+            found.append(f"{what} {record['name']}{via}")
     return found
 
 
@@ -774,9 +816,14 @@ async def _run(args: argparse.Namespace) -> int:
     try:
         refusals = await write_privileges(conn)
         if refusals:
+            # A superuser can become every role in the cluster, so the full
+            # list runs to dozens of lines that all say the same thing.
+            shown = "; ".join(refusals[:10])
+            if len(refusals) > 10:
+                shown += f"; and {len(refusals) - 10} more"
             raise Refused(
                 "this login can write, and this script reads only as a role that "
-                f"cannot ({READONLY_ROLE}): " + "; ".join(refusals))
+                f"cannot ({READONLY_ROLE}): " + shown)
         state = await read_state(conn, args.snapshot)
     finally:
         await conn.close()

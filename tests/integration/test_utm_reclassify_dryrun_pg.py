@@ -12,10 +12,12 @@ source-based fallback as Postgres evaluates it), the snapshot against the table
 it copies, and the refusal of the login CI actually has. That login is
 `ks_app`, which can write, so the script's front door refuses it by design;
 the tests below go through `read_state` behind that door, which is where every
-remaining guarantee lives. The one test that walks in through the front door
-as `ks_readonly` needs `KS_PG_READONLY_DSN`, which CI does not provision, and
-skips without it — run it locally against a throwaway with the role's password
-set.
+remaining guarantee lives. What the door asks of `ks_readonly` is asked in CI
+too, by name from the `ks_app` login, so a revision that grants the read-only
+role a write fails here rather than in front of the owner. The one test that
+walks in through the front door as `ks_readonly` needs `KS_PG_READONLY_DSN`,
+which CI does not provision, and skips without it — run it locally against a
+throwaway with the role's password set.
 
 Seeded rows use ids from 991 500 001 and are removed after each test, and every
 assertion is about those ids: the database is shared with the rest of the
@@ -23,6 +25,7 @@ suite, so the whole-table numbers are whatever other tests left behind.
 """
 from __future__ import annotations
 
+import ast
 import csv
 import gzip
 import os
@@ -39,6 +42,10 @@ asyncpg = pytest.importorskip("asyncpg")
 from core.repositories.traffic import TrafficMixin  # noqa: E402
 from core.utm_classify import UTM_VERDICT_COLUMNS, utm_columns  # noqa: E402
 from scripts import utm_reclassify_dryrun as script  # noqa: E402
+from tests.unit.test_utm_reclassify_dryrun import (  # noqa: E402
+    POISONED_PG_DSN,
+    UNSEEN_WRITERS,
+)
 from tests.write_audit import run_main_audited  # noqa: E402
 
 DSN = os.getenv("KS_PG_DSN")
@@ -132,6 +139,28 @@ class TestTheFrontDoor:
             await conn.close()
         assert any(f.startswith("INSERT/UPDATE/DELETE/TRUNCATE on ") for f in found)
         assert "CREATE on schema bronze" in found
+
+    @pytest.mark.asyncio
+    async def test_ks_readonly_as_the_migrations_leave_it_holds_nothing(self):
+        """The role the script is for, asked the script's own questions on
+        the schema at head — from ks_app, because CI has no ks_readonly
+        login, but the privilege functions answer for any role by name. What
+        this pins is that no revision since 0001 has granted the read-only
+        role a write (or a sequence, or a schema): the day one does, the
+        script would refuse production's login, and this fails first."""
+        conn = await _session()
+        try:
+            assert await script.write_privileges(conn, script.READONLY_ROLE) == []
+            # And the questions are able to say yes: the same statements,
+            # asked of the owner, find its tables, its sequences and its
+            # schemas, so an empty answer above is not a query that finds
+            # nothing for anybody.
+            owner = await script.write_privileges(conn, "ks_app")
+        finally:
+            await conn.close()
+        assert any(f.startswith("USAGE/UPDATE on sequence ") for f in owner), owner
+        assert any(f.startswith("INSERT/UPDATE/DELETE/TRUNCATE on ") for f in owner), owner
+        assert "CREATE on schema silver" in owner, owner
 
     def test_ks_app_is_refused_before_a_row_is_read(self, tmp_path, capsys):
         path = tmp_path / "s.csv.gz"
@@ -290,10 +319,17 @@ class TestAsKsReadonlyUnderAudit:
         run = run_main_audited(
             "scripts.utm_reclassify_dryrun",
             ["--today", "2026-09-23", "--snapshot", str(path)],
-            env={"KS_PG_READONLY_DSN": READONLY_DSN}, cwd=tmp_path)
+            env={"KS_PG_READONLY_DSN": READONLY_DSN, "KS_PG_DSN": POISONED_PG_DSN},
+            cwd=tmp_path)
         assert run.code == 0, run.stderr
         assert run.writes == [str(path)]
         assert run.mutations == [] and run.commands == []
+        # Every connection is to the read-only DSN's port. `KS_PG_DSN` is
+        # poisoned with another, because the real one names the same server
+        # and port as the read-only login and a connection through it would
+        # otherwise pass this check.
         target = urlsplit(READONLY_DSN)
-        assert run.connects and all(str(target.port) in c for c in run.connects), run.connects
+        ports = {ast.literal_eval(c)[1] for c in run.connects}
+        assert ports == {target.port}, run.connects
+        assert not set(UNSEEN_WRITERS) & set(run.modules)
         assert "the server assigned it no transaction id" in run.stdout

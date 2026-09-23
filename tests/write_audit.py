@@ -11,6 +11,13 @@ hook cannot be removed once added, and the suite's own imports have already
 happened in the test process, so an import that wrote a file would be invisible
 there. `-B` because the interpreter's bytecode cache is the interpreter writing,
 not the script.
+
+The hook sees what Python does, and nothing a C extension does on its own. The
+one store client that matters here is DuckDB, which opens and writes its file
+from C++ without raising a single audit event; SQLite's `connect` is audited,
+and every networked store is a `socket.connect`. So the child also reports the
+modules loaded when `main()` returned, and a test asserts DuckDB is not among
+them: a library never imported cannot have written anything.
 """
 from __future__ import annotations
 
@@ -62,7 +69,8 @@ script = importlib.import_module(MODULE)
 SETUP
 _code = script.main(ARGV)
 sys.stdout.flush()
-sys.stderr.write("\n" + MARK + json.dumps({"code": _code, "events": _EVENTS}) + "\n")
+sys.stderr.write("\n" + MARK + json.dumps(
+    {"code": _code, "events": _EVENTS, "modules": sorted(sys.modules)}) + "\n")
 '''
 
 
@@ -72,6 +80,8 @@ class Audited:
     stdout: str
     stderr: str
     events: List[list]
+    # Every module loaded when `main()` returned.
+    modules: List[str]
 
     @property
     def writes(self) -> List[str]:
@@ -123,4 +133,4 @@ def run_main_audited(
             f"the child never reached the end of main():\n{proc.stdout}\n{proc.stderr}")
     result = json.loads(tail.strip())
     return Audited(code=result["code"], stdout=proc.stdout, stderr=head,
-                   events=result["events"])
+                   events=result["events"], modules=result["modules"])

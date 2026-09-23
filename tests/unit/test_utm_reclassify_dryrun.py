@@ -53,6 +53,18 @@ NOW = datetime(2026, 9, 23, 8, 0, tzinfo=timezone.utc)
 WINDOW = (date(2026, 6, 29), date(2026, 9, 20))
 NULL_ROW = (None,) * len(UTM_VERDICT_COLUMNS)
 
+# What the audit hook cannot see, so what a run may not even load. DuckDB opens
+# and writes its file from C++ without raising a single audit event, so a
+# DuckDB write would leave the event list empty; `core.pg` is the application's
+# pool and the one reader of `KS_PG_DSN`, whose server is the very one the
+# read-only login reaches, so its connection would look like the script's own.
+# A module never imported can do neither.
+UNSEEN_WRITERS = ("duckdb", "core.duckdb_store", "core.pg")
+# The application's read-write DSN, handed to every audited run pointing at a
+# port nothing listens on: reading it and connecting shows up as a connection
+# there, which none of these runs may make.
+POISONED_PG_DSN = "postgresql://ks_app:poison@127.0.0.1:9/poison"
+
 
 def verdict_row(traffic_type, platform, campaign=None):
     """A stored or reparsed row carrying only what these tests look at."""
@@ -299,12 +311,14 @@ class FakeConn:
     """Answers the script's reads and records what it was asked."""
 
     def __init__(self, records=None, *, utm_rows=3, csv_rows=None, xid=None,
-                 privileges=None, copy_error=None):
+                 privileges=None, members=None, known=True, copy_error=None):
         self.records = fake_records() if records is None else records
         self.utm_rows = utm_rows
         self.csv_rows = utm_rows if csv_rows is None else csv_rows
         self.xid = xid
-        self.privileges = privileges or {}
+        # What the login holds, and what each role it can SET ROLE to holds.
+        self.roles = {"ks_readonly": privileges or {}, **(members or {})}
+        self.known = known
         self.copy_error = copy_error
         self.statements = []
         self.transactions = []
@@ -316,18 +330,23 @@ class FakeConn:
     async def fetchrow(self, sql, *args):
         self._log(sql)
         assert sql == script.ROLE_SQL, sql
-        return FakeRecord(role="ks_readonly",
-                          superuser=self.privileges.get("superuser", False),
-                          db_write=self.privileges.get("db_write", False))
+        held = self.roles[args[0]]
+        return FakeRecord(**{k: held.get(k, False)
+                             for k in ("superuser", "createrole", "createdb", "db_write")})
 
     async def fetch(self, sql, *args):
         self._log(sql)
         if sql == script.ORDERS_SQL:
             return self.records
-        if sql == script.WRITABLE_TABLES_SQL:
-            return [FakeRecord(name=n) for n in self.privileges.get("tables", [])]
+        if sql == script.ROLES_SQL:
+            assert args == ("ks_readonly",), args
+            return [FakeRecord(name=n) for n in self.roles] if self.known else []
+        held = self.roles[args[0]] if args else {}
+        if sql == script.WRITABLE_RELATIONS_SQL:
+            return [FakeRecord(name=n, is_sequence=False) for n in held.get("tables", [])] \
+                + [FakeRecord(name=n, is_sequence=True) for n in held.get("sequences", [])]
         if sql == script.CREATABLE_SCHEMAS_SQL:
-            return [FakeRecord(name=n) for n in self.privileges.get("schemas", [])]
+            return [FakeRecord(name=n) for n in held.get("schemas", [])]
         raise AssertionError(f"unexpected fetch: {sql}")
 
     async def fetchval(self, sql, *args):
@@ -488,20 +507,24 @@ class TestNothingIsWritten:
             "    return FakeConn()\n"
             "script.connect = _connect\n"
         )
+        env = {"KS_PG_DSN": POISONED_PG_DSN}
         run = run_main_audited(
             "scripts.utm_reclassify_dryrun",
             ["--today", "2026-09-23", "--snapshot", str(path)],
-            setup=setup, cwd=tmp_path)
+            setup=setup, env=env, cwd=tmp_path)
         assert run.code == 0, run.stderr
         assert run.writes == [str(path)]
         assert run.mutations == [] and run.connects == [] and run.commands == []
         assert path.exists() and "rule_change" in run.stdout
+        assert not set(UNSEEN_WRITERS) & set(run.modules), \
+            sorted(set(UNSEEN_WRITERS) & set(run.modules))
 
         bare = run_main_audited(
             "scripts.utm_reclassify_dryrun", ["--today", "2026-09-23", "--json"],
-            setup=setup, cwd=tmp_path)
+            setup=setup, env=env, cwd=tmp_path)
         assert bare.code == 0, bare.stderr
         assert bare.events == []
+        assert not set(UNSEEN_WRITERS) & set(bare.modules)
         assert json.loads(bare.stdout)["wrote_nothing"] is True
 
 
@@ -511,15 +534,37 @@ class TestTheRole:
     @pytest.mark.asyncio
     async def test_each_kind_of_write_privilege_is_named(self):
         found = await script.write_privileges(FakeConn(privileges={
-            "superuser": True, "db_write": True, "schemas": ["bronze"],
-            "tables": ["silver.order_utm"]}))
+            "superuser": True, "createrole": True, "createdb": True,
+            "db_write": True, "schemas": ["bronze"],
+            "tables": ["silver.order_utm"], "sequences": ["app.stock_movements_id_seq"]}))
         assert found == [
             "ks_readonly is a superuser",
+            "CREATEROLE",
+            "CREATEDB",
             "CREATE or TEMPORARY on the database",
             "CREATE on schema bronze",
             "INSERT/UPDATE/DELETE/TRUNCATE on silver.order_utm",
+            "USAGE/UPDATE on sequence app.stock_movements_id_seq",
         ]
         assert await script.write_privileges(FakeConn()) == []
+
+    @pytest.mark.asyncio
+    async def test_a_role_it_can_become_is_asked_the_same_questions(self):
+        """A NOINHERIT member of a writer holds nothing itself, and everything
+        one `SET ROLE` later — so what the login can become is refused as if
+        it were the login, naming the role it came through."""
+        conn = FakeConn(members={"ks_app": {"tables": ["bronze.orders"]},
+                                 "pg_read_all_data": {}})
+        assert await script.write_privileges(conn) == [
+            "INSERT/UPDATE/DELETE/TRUNCATE on bronze.orders "
+            "(through ks_app, which ks_readonly can SET ROLE to)"]
+
+    @pytest.mark.asyncio
+    async def test_a_login_the_catalogue_does_not_know_is_not_read_only(self):
+        """Every role is a member of itself, so no answer at all is not "holds
+        nothing" — it is nothing checked, and it is refused."""
+        assert await script.write_privileges(FakeConn(known=False)) == [
+            "role ks_readonly is not in pg_roles"]
 
     def test_a_login_that_can_write_is_refused_before_a_row_is_read(
             self, monkeypatch, tmp_path, capsys):
