@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.234
+
+- compact: restore sequences with advance_to, and refuse a file whose sequences lag
+
+
 ## 3.0.233
 
 - fix: DQ findings are read worst first
