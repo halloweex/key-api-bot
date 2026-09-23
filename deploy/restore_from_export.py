@@ -50,9 +50,14 @@ def main() -> None:
 
     # The commit the snapshot was taken at. phase2_import rebuilds the schema
     # from the application's own DDL, so restoring an old snapshot with new code
-    # can silently drop columns the export has and the target does not — see the
-    # column-coverage WARN inside phase2_import. If these differ, read that
-    # report rather than trusting the row counts alone.
+    # meets every column dropped since. Nothing is dropped silently: INSERT BY
+    # NAME raises a Binder Error for a column the target lacks, the column-
+    # coverage WARN inside phase2_import names it first, and the drill exits 1
+    # with a FAIL line naming the table. Such an archive restores only with
+    # code at or before this SHA — check out that commit, or run the image
+    # built from it, rather than reading the failure as a damaged snapshot. A
+    # table dropped since is the other case, and it is skipped with a WARN
+    # saying how many archived rows are not restored.
     deploy_path = manifest_path.parent / "_deploy.json"
     if deploy_path.exists():
         deploy = json.loads(deploy_path.read_text())
