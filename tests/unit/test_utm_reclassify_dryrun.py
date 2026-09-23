@@ -10,7 +10,8 @@ changes nothing. These tests hold it from four sides —
   against a recording connection;
 - a whole run in a fresh interpreter under an audit hook, which fails on any
   file opened for writing other than the snapshot, any filesystem change, any
-  network connection and any command;
+  network connection and any command, and on DuckDB or the application's pool
+  being loaded at all — the two writers the hook itself cannot see;
 - the server's own word, `tests/integration/test_utm_reclassify_dryrun_pg.py`,
   where a write inside the read is refused and one that got through is rolled
   back by the transaction-id check.
