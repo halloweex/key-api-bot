@@ -52,8 +52,8 @@ it is the check that has to keep working once DuckDB stops deriving.
 - **A row is judged by when its inputs last changed**, not by its own stamp
   alone: `bronze.orders.mirrored_at`; the classification's `mirrored_at` when
   `sales_type` is what moved; and, when a pass-2 column moved, the latest
-  change to any order of the buyer's, before or after the change — a first
-  order cancelled today makes a months-old second order the buyer's first.
+  change to any order the buyer has or had — a first order cancelled today
+  makes a months-old second order the buyer's first.
 - **Covered is CRITICAL, whatever its age.** A change made before the last
   error-free derivation began is in that rebuild's snapshot, so a row still
   wrong after it is a rebuild that does not produce what bronze holds.
@@ -330,8 +330,10 @@ def _row_values_sql() -> str:
       the rebuild it owes, that is in flight rather than stale;
     - the buyer's latest change, when `is_new_customer` or
       `buyer_first_order_date` moved: pass 2 reads every order the buyer has.
-      Counted over both the recomputed buyer and the stored one, so an order
-      moved from one buyer to another is a recent change for both.
+      A buyer's clock runs over the orders bronze gives them *and* the orders
+      Silver still gives them, so an order moved to another buyer is a recent
+      change for the buyer it left — bronze alone no longer says it was theirs.
+      (The moved order itself needs no such help: its own stamp is recent.)
     """
     from core.data_quality import _SILVER_ROW_COLUMNS, _silver_row_differs
     from core.duckdb_store import silver_recompute_ctes
@@ -364,14 +366,12 @@ buyer_clock AS (
     GROUP BY buyer_id
 ),
 compared AS (
-    SELECT r.id, o.mirrored_at,
-           GREATEST(bn.changed_at, bo.changed_at) AS buyer_changed_at,
+    SELECT r.id, o.mirrored_at, bc.changed_at AS buyer_changed_at,
            {flags}
     FROM recomputed r
     JOIN {silver} s ON s.id = r.id
     JOIN {orders} o ON o.id = r.id
-    LEFT JOIN buyer_clock bn ON bn.buyer_id = r.buyer_id
-    LEFT JOIN buyer_clock bo ON bo.buyer_id = s.buyer_id
+    LEFT JOIN buyer_clock bc ON bc.buyer_id = r.buyer_id
 ),
 stale AS (
     SELECT c.*,
