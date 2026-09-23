@@ -288,9 +288,11 @@ def claimed_chains(owners: Mapping[str, str]) -> Dict[str, str]:
     put the table back the way a frozen DuckDB remembers it.
 
     So anything that is **already holding a Postgres connection** asks this as
-    well, and stands down on either copy. It costs one query on an hourly job
-    and a daily one, and it cannot be done on the write path itself: that is
-    the read `writes_postgres()` exists to avoid.
+    well, and stands down on either copy. It costs one query per run of the
+    hourly and daily jobs that ask it — the operational pair here, the order
+    paths through `pg_landing.order_tables_stood_down_or_owned` (DN-22a) — and
+    it cannot be done on the write path itself: that is the read
+    `writes_postgres()` exists to avoid.
 
     A chain, not a table: ownership passes for a chain as a unit, so one owner
     row holds all of its tables down. DN-08's copy-back deletes both copies, so

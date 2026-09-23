@@ -2535,6 +2535,16 @@ today, so it reads no variable and no file, and nothing changed in production.
 `tests/unit/test_write_chains.py` walks `core/`, `web/` and `scripts/` for any
 caller of `write_orders` or `mirror_orders` that does not ask.
 
+The paths that already hold a pool — the ids-diff and its repair, the hourly
+diff, the comment ship and the bucket comparison — then ask
+`order_tables_stood_down_or_owned(pool)` too, which adds the `owner:` rows in
+`meta.chain_watermarks`: DN-06's rule that anything holding a Postgres
+connection stands down on either copy of the latch, so a lost marker cannot
+make the chain's rows look like DuckDB's again. It is asked after
+`require_revision()` and a read that fails raises into each path's own
+handling, as in `replicate_operational`. Only the sync's per-tick mirror stays
+on the local answer — the write path, where that read is the one to avoid.
+
 ## TODO: Full DuckDB Resync Solution
 
 ### Overview

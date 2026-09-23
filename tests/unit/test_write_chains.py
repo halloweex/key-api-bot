@@ -165,6 +165,12 @@ class _Conn:
 
     async def fetch(self, sql, *args):
         self.recorder.sql.append(sql)
+        if "meta.chain_watermarks" in sql:
+            # The audit copy of the latch (`chain_latch.read_owners`).
+            if self.recorder.owner_error is not None:
+                raise self.recorder.owner_error
+            return [{"key": f"owner:{table}", "value": at}
+                    for table, at in self.recorder.owner_rows.items()]
         return []
 
     async def fetchval(self, sql, *args):
@@ -180,6 +186,10 @@ class _RecordingPool:
     def __init__(self):
         self.sql = []
         self.acquired = 0
+        # `{table: latched_at}` as `meta.chain_watermarks` holds it, and what
+        # reading it raises instead, when set.
+        self.owner_rows = {}
+        self.owner_error = None
 
     def acquire(self):
         self.acquired += 1
@@ -187,6 +197,11 @@ class _RecordingPool:
 
     def wrote(self, table: str) -> bool:
         return any(table in s and "INSERT INTO" in s for s in self.sql)
+
+    def only_asked_who_owns(self) -> bool:
+        """Read the owner rows and nothing else: no order table, no watermark,
+        no write — and so no `app.order_versions` insert either."""
+        return bool(self.sql) and all("meta.chain_watermarks" in s for s in self.sql)
 
 
 @pytest.fixture
@@ -468,6 +483,120 @@ class TestTheBucketComparison:
         assert "never backfill" in remediation_for(["mirror_stood_down"])[0].lower()
 
 
+class TestTheOwnerRowsStandTheOrderTablesDownToo:
+    """DN-06's rule on the order paths that already hold a pool: stand down on
+    either copy of the latch. The marker is the copy a lost `./data` loses;
+    the owner row in Postgres is the one that survives it, beside the rows the
+    chain wrote. Every case below has the flag at `duckdb` and NO marker, so
+    the local answer is empty and only the owner row can say the tables moved.
+    Each "writes nothing" is watched by the same recorder whose controls above
+    see the rows and the version capture when they do happen."""
+
+    @pytest.fixture
+    def owned(self, pool, order_chain):
+        from core import chain_latch
+        from core.pg_landing import order_tables_stood_down
+
+        order_chain(env=lambda: False)
+        pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
+        assert not chain_latch.latched("pg_orders_write"), "the marker must be absent"
+        assert order_tables_stood_down() == frozenset(), "the local answer must be empty"
+        return pool
+
+    @pytest.mark.asyncio
+    async def test_one_owner_row_holds_both_order_tables(self, owned):
+        """Ownership passes for a chain as a unit (`claimed_tables`)."""
+        from core.pg_landing import order_tables_stood_down_or_owned
+
+        assert await order_tables_stood_down_or_owned(owned) == frozenset({ORDERS, LINES})
+        assert owned.only_asked_who_owns()
+
+    @pytest.mark.asyncio
+    async def test_another_chains_owner_row_is_not_an_order_table(self, pool):
+        from core.pg_landing import order_tables_stood_down_or_owned
+
+        pool.owner_rows = {"app.manual_expenses": "2026-09-20T08:00:00+00:00"}
+        assert await order_tables_stood_down_or_owned(pool) == frozenset()
+
+    @pytest.mark.asyncio
+    async def test_the_local_answer_is_still_part_of_it(self, pool, order_chain):
+        from core.pg_landing import order_tables_stood_down_or_owned
+
+        order_chain()          # the flag says postgres; no owner row yet
+        assert await order_tables_stood_down_or_owned(pool) == frozenset({ORDERS, LINES})
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_owner_row_is_not_an_absent_one(self, pool, order_chain):
+        """No new failure policy: the read raises through, as it does in
+        `replicate_operational` and `reconcile_operational`."""
+        from core.pg_landing import order_tables_stood_down_or_owned
+
+        order_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        with pytest.raises(RuntimeError, match="unreadable"):
+            await order_tables_stood_down_or_owned(pool)
+
+    @pytest.mark.asyncio
+    async def test_the_backfill_refuses_and_writes_nothing(self, owned, tmp_path):
+        from core import pg
+        from core.pg_backfill import backfill_orders
+
+        store = await _store(tmp_path, [1, 2])
+        with pytest.raises(RuntimeError, match="write chain"):
+            await backfill_orders(store)
+        assert owned.only_asked_who_owns()
+        pg.require_revision.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_hourly_diff_stands_down_quietly(self, owned, tmp_path, caplog):
+        from core.pg_backfill import hourly_orders_ids_diff
+
+        store = await _store(tmp_path, [1])
+        with caplog.at_level("ERROR"):
+            result = await hourly_orders_ids_diff(store)
+        assert result == {"stood_down": [LINES, ORDERS]}
+        assert owned.only_asked_who_owns()
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_owner_row_is_the_hourly_diffs_error_not_a_ship(
+            self, pool, order_chain, tmp_path):
+        """The job's own contract — returned, never raised — and nothing
+        shipped on the strength of a read that failed."""
+        from core.pg_backfill import hourly_orders_ids_diff
+
+        order_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        store = await _store(tmp_path, [1])
+        result = await hourly_orders_ids_diff(store)
+        assert "unreadable" in result["error"]
+        assert pool.only_asked_who_owns()
+
+    @pytest.mark.asyncio
+    async def test_the_comment_ship_is_skipped_and_writes_nothing(self, owned, tmp_path):
+        from core.pg_backfill import ship_orders_by_id
+        from core.pg_order_versions import BACKFILL
+
+        store = await _store(tmp_path, [1])
+        result = await ship_orders_by_id(store, [1], version_kind=BACKFILL)
+        assert result["orders_shipped"] == 0
+        assert result["stood_down"] == [LINES, ORDERS]
+        assert "write chain" in result["skipped"]
+        assert owned.only_asked_who_owns()
+
+    @pytest.mark.asyncio
+    async def test_the_bucket_comparison_files_info_and_reads_no_order_table(self, owned):
+        from core.data_quality import Severity
+        from core.mirror_reconciliation import reconcile_orders
+
+        issues = await reconcile_orders(_NoStore())
+        assert [(i.check_name, i.table_name, i.severity) for i in issues] == [
+            ("mirror_stood_down", ORDERS, Severity.INFO),
+            ("mirror_stood_down", LINES, Severity.INFO),
+        ]
+        assert owned.only_asked_who_owns()
+
+
 class TestTheAdminBackfill:
     def _client(self, flags):
         import time as _time
@@ -553,12 +682,25 @@ class TestEveryOrderShipperAsksFirst:
                         continue
                     called = self._called(fn)
                     if called & self.SHIPPERS:
-                        yield rel, fn.name, "order_tables_stood_down" in called
+                        yield rel, fn.name, called
 
     def test_each_one_asks(self):
-        missing = [(rel, name) for rel, name, asks in self._sites() if not asks]
+        missing = [(rel, name) for rel, name, called in self._sites()
+                   if "order_tables_stood_down" not in called]
         assert not missing, f"ships orders without asking the registry: {missing}"
 
     def test_the_walk_is_not_vacuous(self):
-        found = {name for _rel, name, _asks in self._sites()}
+        found = {name for _rel, name, _called in self._sites()}
         assert {"upsert_orders", "backfill_orders", "ship_orders_by_id"} <= found
+
+    def test_one_that_takes_the_pool_asks_the_owner_rows_too(self):
+        """DN-06: anything already holding a Postgres connection stands down on
+        either copy of the latch. The sync's mirror in `upsert_orders` takes
+        no pool — the write path, where that read is the one to avoid — and so
+        is not held to it."""
+        holding = [(rel, name, called) for rel, name, called in self._sites()
+                   if "get_pool" in called]
+        assert {"backfill_orders", "ship_orders_by_id"} <= {n for _r, n, _c in holding}
+        missing = [(rel, name) for rel, name, called in holding
+                   if "order_tables_stood_down_or_owned" not in called]
+        assert not missing, f"holds a pool but reads only the local latch: {missing}"

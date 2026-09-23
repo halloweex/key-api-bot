@@ -34,6 +34,18 @@ def _payload(order_id, products=2):
     }
 
 
+@pytest.fixture(autouse=True)
+def _no_order_table_owner_rows(monkeypatch):
+    """No write chain has claimed an order table anywhere in this file.
+
+    Since DN-22a the backfill, the hourly diff and the comment ship read the
+    owner rows out of the pool they hold before they touch an order table, and
+    the pools here are opaque stand-ins that answer nothing. The stand-down
+    itself is tested against a pool that does answer, in
+    `tests/unit/test_write_chains.py`."""
+    monkeypatch.setattr("core.chain_latch.read_owners", AsyncMock(return_value={}))
+
+
 async def _store_with(tmp_path: Path, ids) -> DuckDBStore:
     store = DuckDBStore(db_path=tmp_path / "backfill.duckdb")
     await store.connect()
@@ -262,6 +274,7 @@ class TestTheHourlyOrdersDiff:
 
         with patch("core.pg_landing.enabled", return_value=True), \
              patch("core.pg.get_pool", new=AsyncMock(return_value=_Pool())), \
+             patch("core.pg.require_revision", new=AsyncMock()), \
              patch("core.pg_backfill.backfill_orders",
                    new=AsyncMock(return_value={"orders_shipped": 3, "remaining": 0})):
             with caplog.at_level(logging.WARNING, logger="core.pg_backfill"):
@@ -333,6 +346,7 @@ class TestShipOrdersByIdHoldsTheLockItIsGiven:
         try:
             with patch("core.pg_landing.write_orders", new=_write), \
                  patch("core.pg_landing.enabled", return_value=True), \
+                 patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
                  patch("core.pg.require_revision", new=AsyncMock()), \
                  patch.object(store, "connection", new=_connection):
                 result = await ship_orders_by_id(
@@ -364,6 +378,7 @@ class TestShipOrdersByIdHoldsTheLockItIsGiven:
         try:
             with patch("core.pg_landing.write_orders", new=AsyncMock()), \
                  patch("core.pg_landing.enabled", return_value=True), \
+                 patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
                  patch("core.pg.require_revision", new=AsyncMock()):
                 async with outer:
                     result = await asyncio.wait_for(

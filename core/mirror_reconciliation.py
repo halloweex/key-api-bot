@@ -81,7 +81,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 from core.data_quality import IntegrityIssue, Severity
 from core.landing_rows import CATEGORY_COLUMNS, PRODUCT_COLUMNS
@@ -1390,6 +1390,39 @@ def _divergence_findings(
     return issues
 
 
+def _orders_stood_down(
+    specs: Sequence[BucketedTable], moved: FrozenSet[str],
+) -> Tuple[List[IntegrityIssue], Tuple[BucketedTable, ...]]:
+    """The INFO findings for the order tables a write chain holds, and the
+    specs left to compare. Nothing and every spec when `moved` is empty.
+
+    One function for both of `reconcile_orders`' questions — the local answer
+    and the owner rows — so a stand-down found either way reads the same."""
+    from core import pg_landing
+
+    specs = tuple(specs)
+    if not moved:
+        return [], specs
+    order_tables = {pg_landing.ORDERS_TABLE, pg_landing.ORDER_PRODUCTS_TABLE}
+    issues = [
+        IntegrityIssue(
+            check_name="mirror_stood_down",
+            table_name=spec.pg_table,
+            severity=Severity.INFO,
+            count=1,
+            description=(
+                f"Not compared: {', '.join(sorted(moved))} is written by a "
+                "write chain, so the orders mirror no longer ships DuckDB's "
+                "copy of either order table — they go in one transaction. "
+                "A difference here would be the chain's own writes, not a "
+                "loss."
+            ),
+        )
+        for spec in specs if spec.pg_table in order_tables
+    ]
+    return issues, tuple(s for s in specs if s.pg_table not in order_tables)
+
+
 async def reconcile_orders(
     store,
     *,
@@ -1422,33 +1455,24 @@ async def reconcile_orders(
     # tables these have no standing watch of their own yet, and a comparison
     # that stopped without a word reads the same as one that passed. Asked
     # before any read, so a stood-down run costs neither store anything.
-    moved = pg_landing.order_tables_stood_down()
-    order_tables = {pg_landing.ORDERS_TABLE, pg_landing.ORDER_PRODUCTS_TABLE}
-    issues: List[IntegrityIssue] = []
-    if moved:
-        for spec in specs:
-            if spec.pg_table not in order_tables:
-                continue
-            issues.append(IntegrityIssue(
-                check_name="mirror_stood_down",
-                table_name=spec.pg_table,
-                severity=Severity.INFO,
-                count=1,
-                description=(
-                    f"Not compared: {', '.join(sorted(moved))} is written by a "
-                    "write chain, so the orders mirror no longer ships DuckDB's "
-                    "copy of either order table — they go in one transaction. "
-                    "A difference here would be the chain's own writes, not a "
-                    "loss."
-                ),
-            ))
-        specs = tuple(s for s in specs if s.pg_table not in order_tables)
-        if not specs:
-            return issues
+    issues, specs = _orders_stood_down(
+        specs, pg_landing.order_tables_stood_down())
+    if not specs:
+        return issues
 
     now = now or datetime.now(timezone.utc)
     pool = await get_pool()
     await require_revision()
+
+    # And the owner rows, now that the pool is in hand — `reconcile_operational`'s
+    # union, for its reason: a lost marker leaves the chain's rows in Postgres
+    # and the comparison would file each one as lost from DuckDB. Before the
+    # watermarks and the fingerprints, so this run too reads no order table.
+    found, specs = _orders_stood_down(
+        specs, await pg_landing.order_tables_stood_down_or_owned(pool))
+    issues += found
+    if not specs:
+        return issues
     watermarks = await fetch_watermarks(pool)
 
     # Phase 1, DuckDB side: one acquisition for every table.
