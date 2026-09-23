@@ -342,6 +342,112 @@ class TestTheRead:
         assert {r["id"]: (r["t"], r["p"]) for r in rows} == shown
 
 
+# The 12-week figures are the OD-06 input, so what the read counts is seeded
+# on both sides of every line it draws. All five orders carry the same stale
+# pixel verdict, and only two may reach the window. Totals are powers of ten,
+# so the hryvnia say exactly which orders were counted.
+#   offset → (source, ordered_at, is_return, is_active_source, total)
+WINDOW_SEED = {
+    101: (4, STAMP, False, True, "1.00"),                        # counted
+    102: (4, STAMP, True, True, "10.00"),                        # a return
+    103: (3, STAMP, False, False, "100.00"),                     # Opencart, inactive
+    # 22:30 UTC on the window's last Sunday is 01:30 on Monday in Kyiv: out.
+    104: (4, datetime(2026, 9, 20, 22, 30, tzinfo=timezone.utc), False, True, "1000.00"),
+    # 21:30 UTC on the Sunday before it opens is 00:30 on its Monday: in.
+    105: (4, datetime(2026, 6, 28, 21, 30, tzinfo=timezone.utc), False, True, "10000.00"),
+}
+# A verdict whose order is not in bronze at all.
+ORPHAN = BASE + 106
+
+
+@pytest_asyncio.fixture
+async def window_seeded():
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        stale = _stored("stale", PIXEL)
+        for offset, (source, ordered_at, is_return, active, total) in WINDOW_SEED.items():
+            oid = BASE + offset
+            # Updated when it was parsed, so every one of them is a
+            # rule_change and none is merely pending.
+            await conn.execute(
+                "INSERT INTO bronze.orders (id, source_id, status_id, grand_total, "
+                "ordered_at, created_at, updated_at, buyer_id, manager_comment) "
+                "VALUES ($1, $2, 1, $3, $4, $4, $5, 10, $6)",
+                oid, source, Decimal(total), ordered_at, STAMP, PIXEL)
+            # `order_date` by Silver's own rule, the Kyiv date
+            # (`core.sql_dialect`), so the seed cannot disagree with it.
+            await conn.execute(
+                "INSERT INTO silver.orders (id, source_id, status_id, grand_total, "
+                "ordered_at, buyer_id, order_date, is_return, sales_type, "
+                "is_active_source, source_name) "
+                "VALUES ($1, $2, 1, $3, $4, 10, (timezone('Europe/Kyiv', $4))::date, "
+                "$5, 'retail', $6, 'x')",
+                oid, source, Decimal(total), ordered_at, is_return, active)
+        for oid in [BASE + offset for offset in WINDOW_SEED] + [ORPHAN]:
+            await conn.execute(
+                "INSERT INTO silver.order_utm (order_id, "
+                + ", ".join(UTM_VERDICT_COLUMNS) + ", parsed_at) VALUES ("
+                + ", ".join(f"${i}" for i in range(1, len(UTM_VERDICT_COLUMNS) + 3))
+                + ")",
+                oid, *stale, STAMP)
+        yield conn
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+class TestWhatTheWindowCounts:
+    """The tab's predicate less the date — not a return, an active source —
+    and Silver's Kyiv `order_date`, as Postgres evaluates them. The unit tests
+    hand `counted` and the date to the diff ready-made, so only here can the
+    SQL behind them be wrong."""
+
+    @pytest.mark.asyncio
+    async def test_returns_inactive_sources_and_the_kyiv_date_decide_the_12_weeks(
+            self, window_seeded):
+        conn = await _session()
+        try:
+            state = await script.read_state(conn)
+        finally:
+            await conn.close()
+        ours = {o.order_id - BASE: o for o in _ours(state)}
+        assert sorted(ours) == sorted(WINDOW_SEED)
+        # The premise: Kyiv puts the two boundary orders on the other side of
+        # the line from UTC.
+        assert (ours[104].order_date, ours[105].order_date) == (
+            date(2026, 9, 21), date(2026, 6, 29))
+
+        report = script.diff_verdicts(list(ours.values()), WINDOW)
+        (moved,) = report.transitions
+        assert (moved.cause, moved.before, moved.after) == (
+            "rule_change", ("pixel_only", "facebook"), ("pixel_only", "unattributed"))
+        assert moved.orders == 5
+        assert moved.window_orders == {"retail": 2, "all": 2}
+        assert moved.window_revenue == {"retail": Decimal("10001.00"),
+                                        "all": Decimal("10001.00")}
+        assert report.platforms["retail"] == {
+            "facebook": [2, Decimal("10001.00"), 0, Decimal("0")],
+            "unattributed": [0, Decimal("0"), 2, Decimal("10001.00")],
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_verdict_with_no_order_is_counted_as_one(self, window_seeded):
+        """Whole-table, so held to an identity rather than to a number other
+        tests' rows would move: every stored verdict either belongs to an
+        order in bronze — and then came back as that order's row — or is an
+        orphan. One snapshot, so the three counts cannot drift apart."""
+        conn = await _session()
+        try:
+            state = await script.read_state(conn)
+        finally:
+            await conn.close()
+        assert ORPHAN not in {o.order_id for o in state.orders}
+        with_a_row = sum(o.stored is not None for o in state.orders)
+        assert state.orphan_rows >= 1
+        assert state.orphan_rows == state.utm_rows - with_a_row
+
+
 class TestTheSnapshot:
     @pytest.mark.asyncio
     async def test_it_is_the_table_row_for_row(self, seeded, tmp_path):
