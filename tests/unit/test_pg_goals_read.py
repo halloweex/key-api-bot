@@ -61,7 +61,16 @@ ROUTED = ("get_goals", "get_smart_goals", "get_historical_revenue",
 # the read comes from another, an hour behind.
 #
 # It belongs to the writes, with the calculators it drives.
+#
+# Since DN-12 it does reach the router along exactly one path: its ML signal,
+# `_get_ml_forecast_total`, which reads Gold and `revenue_predictions` — both
+# of which Postgres has — before the method takes its own connection. That
+# path is excluded from the walk below by name, and what it routes is checked
+# separately, so the compute-then-read loop over the three seasonality tables
+# stays whole on DuckDB.
 NOT_ROUTED = ("generate_smart_goals",)
+ROUTED_ONLY_VIA = {"generate_smart_goals": ("_get_ml_forecast_total",)}
+ABSENT_FROM_POSTGRES_READS = ("seasonal_indices", "weekly_patterns", "growth_metrics")
 
 # The writes. These *may* reach the router — `set_goal` computes a suggestion
 # from the revenue history before storing it, and reading that history from
@@ -114,7 +123,7 @@ class TestTheBoundary:
                     if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
                     and n.name == name)
 
-    def _reaches_router(self, name, seen=None):
+    def _reaches_router(self, name, excluding=()):
         source = REPOSITORY.read_text(encoding="utf-8")
         tree = ast.parse(source)
         bodies, calls = {}, {}
@@ -133,7 +142,7 @@ class TestTheBoundary:
                 return True
             return any(walk(c, seen) for c in calls.get(fn, ()) if c in bodies)
 
-        return walk(name, set())
+        return walk(name, set(excluding))
 
     @pytest.mark.parametrize("name", ROUTED)
     def test_the_four_that_can_move_go_through_the_router(self, name):
@@ -141,12 +150,54 @@ class TestTheBoundary:
 
     @pytest.mark.parametrize("name", NOT_ROUTED)
     def test_the_two_reading_absent_tables_do_not(self, name):
-        assert not self._reaches_router(name), (
+        assert not self._reaches_router(
+            name, excluding=ROUTED_ONLY_VIA.get(name, ())), (
             f"{name} reads a table Postgres does not have "
             f"(revenue_predictions / seasonal_indices / weekly_patterns / "
             f"growth_metrics) — routed, it would fall back for ever while "
             f"looking switched."
         )
+
+    @pytest.mark.parametrize("name", sorted(
+        {via for vias in ROUTED_ONLY_VIA.values() for via in vias}))
+    def test_the_one_permitted_path_reads_only_what_postgres_has(self, name):
+        """The exclusion above is only honest if what that path routes names
+        none of the tables Postgres lacks. Walked, not listed: every body any
+        function under it hands to `_goals_run`."""
+        source = REPOSITORY.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        module = {n.targets[0].id: n.value.value
+                  for n in ast.walk(tree)
+                  if isinstance(n, ast.Assign) and len(n.targets) == 1
+                  and isinstance(n.targets[0], ast.Name)
+                  and isinstance(n.value, ast.Constant)
+                  and isinstance(n.value.value, str)}
+        bodies = {n.name: n for n in ast.walk(tree)
+                  if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))}
+
+        routed, todo, seen = [], [name], set()
+        while todo:
+            fn = todo.pop()
+            if fn in seen or fn not in bodies:
+                continue
+            seen.add(fn)
+            for call in ast.walk(bodies[fn]):
+                if not (isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Attribute)):
+                    continue
+                if call.func.attr == "_goals_run":
+                    routed += [n.id for n in ast.walk(call.args[0])
+                               if isinstance(n, ast.Name) and n.id in module]
+                else:
+                    todo.append(call.func.attr)
+
+        assert routed, f"{name} no longer reaches the router — drop the exclusion"
+        for body in routed:
+            for table in ABSENT_FROM_POSTGRES_READS:
+                assert table not in module[body], (
+                    f"{body}, routed from {name}, reads {table}: Postgres has "
+                    f"only an hourly replica of it, behind the recompute this "
+                    f"path follows")
 
     @pytest.mark.parametrize("name", WRITERS)
     def test_a_writer_still_writes_to_duckdb(self, name):

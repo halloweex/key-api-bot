@@ -1600,44 +1600,6 @@ class DuckDBStore(
         self._connection.execute(views_sql)
         logger.info("Inventory analytics views created")
 
-    def _build_sales_type_filter(self, sales_type: str, table_alias: str = "o") -> str:
-        """Build the SQL clause selecting one `sales_type`, for any orders-shaped table.
-
-        This reads the answer Silver already stored; it does **not** re-derive
-        it from `manager_id`. Deriving it a second time was a second definition
-        in all but name, and the two had already parted company: #101 gave
-        source 5 its own `sales_type`, and this filter — knowing only about
-        managers — went on counting those 176 orders (₴267,416) as retail while
-        Gold counted them as exhibition. Ten of its eleven call sites query raw
-        `orders`, which is how a Gold-free corner of the dashboard ended up with
-        its own opinion.
-
-        Reading the column also makes the classification as-of-order-date for
-        every consumer at once, which is the whole point of
-        `manager_classifications`.
-
-        Silver covers every order — 46,272 of 46,272, verified 2026-08-20 — so
-        the EXISTS excludes nothing the old clause admitted.
-
-        Args:
-            sales_type: one of KNOWN_SALES_TYPES, or 'all' for no filter
-            table_alias: alias of the orders-shaped table to constrain
-
-        Returns:
-            SQL WHERE clause fragment
-        """
-        if sales_type == "all":
-            return "1=1"
-        if sales_type not in KNOWN_SALES_TYPES:
-            raise ValueError(
-                f"unknown sales_type {sales_type!r}; expected one of "
-                f"{', '.join(KNOWN_SALES_TYPES)} or 'all'"
-            )
-        return (
-            f"EXISTS (SELECT 1 FROM silver_orders sv "
-            f"WHERE sv.id = {table_alias}.id AND sv.sales_type = '{sales_type}')"
-        )
-
     # ─── Warehouse Layer Refresh ─────────────────────────────────────────────
 
     async def refresh_warehouse_layers(
