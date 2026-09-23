@@ -162,6 +162,22 @@ class TestTheFrontDoor:
         assert any(f.startswith("INSERT/UPDATE/DELETE/TRUNCATE on ") for f in owner), owner
         assert "CREATE on schema silver" in owner, owner
 
+    @pytest.mark.asyncio
+    async def test_the_roles_asked_about_are_every_role_the_login_can_become(self):
+        """A NOINHERIT member of a writer holds nothing itself, so the door
+        asks its questions of every role the login may SET ROLE to. Making
+        such a member takes CREATEROLE, which CI's login does not have; a
+        built-in role stands in. `pg_monitor` is a member of three others in
+        every cluster since PostgreSQL 10, so the statement that lists "what
+        this login can become" must name all four, itself first."""
+        conn = await _session()
+        try:
+            roles = [r["name"] for r in await conn.fetch(script.ROLES_SQL, "pg_monitor")]
+        finally:
+            await conn.close()
+        assert roles == ["pg_monitor", "pg_read_all_settings", "pg_read_all_stats",
+                         "pg_stat_scan_tables"]
+
     def test_ks_app_is_refused_before_a_row_is_read(self, tmp_path, capsys):
         path = tmp_path / "s.csv.gz"
         assert script.main(["--dsn", DSN, "--snapshot", str(path)]) == 2
