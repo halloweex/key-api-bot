@@ -272,6 +272,48 @@ class TestInsideTheGraceIsCountedNotPaged:
         assert found["pg_order_utm_missing"].severity is Severity.CRITICAL
 
 
+class TestTheGraceClockIsTheLastWrite:
+    """The blind spot the module states, held to the real mirror write.
+
+    `mirrored_at` is stamped on every upsert of the row, identical rewrites
+    included — the 05:15 status refresh force-writes ~1,400 unchanged orders
+    and a backfill ship re-stamps what it carries. So an order whose verdict
+    has been missing for days reads as in flight for one grace after such a
+    rewrite. If the mirror ever stops re-stamping an unchanged row, this
+    fails, and the comment that says otherwise has to move with it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_identical_rewrite_puts_a_long_missing_verdict_in_flight(
+            self, conn, monkeypatch):
+        from core import pg_landing
+
+        # Postgres stamps `now()`, which is the wall clock; the fixed NOW of
+        # the other scenarios cannot stand in for it here.
+        wall = datetime.now(timezone.utc)
+        await order(conn, 601, mirrored_at=wall - timedelta(days=3))
+
+        async def names():
+            row = await mr.order_utm_completeness_row(
+                conn, now=wall, grace_minutes=GRACE, max_samples=10)
+            return [i.check_name
+                    for i in mr.order_utm_completeness_findings(row, grace_minutes=GRACE)]
+
+        assert await names() == ["pg_order_utm_missing"]
+
+        # The order exactly as it stands, written again by the mirror's own
+        # writer: nothing about it changes but the stamp.
+        same = await conn.fetchrow(
+            "SELECT id, source_id, status_id, status_group_id, grand_total, "
+            "ordered_at, created_at, updated_at, buyer_id, manager_id, "
+            "manager_comment, promocode FROM bronze.orders WHERE id = 601")
+        with patch("core.pg.get_pool",
+                   new=AsyncMock(return_value=_OneConnectionPool(conn))):
+            await pg_landing.write_orders([tuple(same)], [], replace_products=False)
+
+        assert await names() == ["pg_order_utm_in_flight"]
+
+
 # ── through the job ───────────────────────────────────────────────────────────
 
 class TestThroughTheJob:

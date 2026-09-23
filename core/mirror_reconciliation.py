@@ -2662,29 +2662,61 @@ async def reconcile_order_utm(
 # the order's `updated_at` at the moment its comment was read, not the wall
 # clock, so a finished parse leaves the two equal and a later edit compares
 # greater. An order with no comment never gets a row, by design, and is not
-# asked about. Read from `bronze.orders`, not Silver, because that is the
-# table the parser reads — Silver projects every one of those orders, so the
-# population is the same, and only bronze carries the comment and the clock.
+# asked about.
 #
-# **The grace is absolute, on `bronze.orders.mirrored_at`**, which is when the
-# order as it now stands reached Postgres. Under KS_PG_DERIVE=own the order
-# reaches `silver.orders` on Postgres' own signal, while its verdict waits for
-# DuckDB's next warehouse tick (two minutes) and then the ship's floor
-# (`KS_PG_SILVER_INTERVAL_S`, 600 s by default) — the gap #213 accepted rather
-# than patched. So the grace is resolved from that variable when the check
-# runs, through `pg_warehouse_dq.silver_grace_minutes()`: the floor plus the
-# twins' ten-minute margin, twenty minutes at the default — the number
+# **Read from `bronze.orders`, which is not the table the parser reads.** The
+# parser reads DuckDB's `orders`; `bronze.orders` is the only copy of that
+# input Postgres holds, and the one step 9's parser will read. Both are fed the
+# same tuple in the same call, so they normally hold the same comment — but
+# not always. The Postgres upsert keeps a stored `manager_comment` when the
+# payload carries NULL (`COALESCE` on conflict), while DuckDB applies that rule
+# only on its UPDATE path: an order it INSERTs afresh — the next sync after
+# `POST /api/duckdb/purge-orders` — stores whatever the payload carries, NULL
+# included, and a restore from an export taken before a backfill brings the
+# NULL back with it. A resync does neither; it updates rows that exist. Such
+# an order has its comment here and none in DuckDB, so the parser never reads
+# it and no parse or ship can clear the finding: it would page CRITICAL every
+# morning with a lever that cannot move it. So the findings and the
+# REMEDIATION name this second cause beside the first. The same morning's
+# orders fingerprint sees the divergence too — it compares `manager_comment`
+# and names it in `mirror_row_values` on `bronze.orders` — and the lever is
+# putting the comment back in DuckDB (the `manager_comment` backfill, or an
+# UPDATE from this copy), never the ship.
+#
+# **The grace is absolute, on `bronze.orders.mirrored_at`.** Under
+# KS_PG_DERIVE=own the order reaches `silver.orders` on Postgres' own signal,
+# while its verdict waits for DuckDB's next warehouse tick (two minutes) and
+# then the ship's floor (`KS_PG_SILVER_INTERVAL_S`, 600 s by default) — the
+# gap #213 accepted rather than patched. So the grace is resolved from that
+# variable when the check runs, through
+# `pg_warehouse_dq.silver_grace_minutes()`: the floor plus the twins'
+# ten-minute margin, twenty minutes at the default — the number
 # `SILVER_GRACE_MINUTES` fixes for the comparison above. A constant here would
 # go on paging the old floor's width the day somebody raised it, and the floor
 # and the grace would then be two numbers somebody has to remember to move
 # together. `deploy/stage4_soak/11_utm_gap.sql` asks the same question by hand
 # with fifteen minutes: right for a reading, and a page on a slow tick here.
 #
+# **`mirrored_at` is when the row was last written, not when the order
+# arrived**, and that is the grace's blind spot. The upsert stamps it on every
+# write, identical rewrites included: the 05:15 status refresh force-writes
+# ~1,400 unchanged orders, and a backfill ship re-stamps every order it
+# carries. A verdict missing for days therefore reads as in flight — INFO,
+# counted, not paged — for one grace after such a rewrite. Not changed here:
+# the stamp belongs to the mirror's upsert, and Reconciliation A reads it too.
+# The scheduled run does not meet the 05:15 case, since 07:30 is two hours
+# past that window; a backfill run by hand in the grace before 07:30 would
+# hide the orders it re-stamps for that one morning, as INFO.
+#
 # **Not the ship's watermark**, which was the other clock available. A ship
 # that stops being *called* records nothing at all — a warehouse refresh that
 # errors returns before `_rebuild_postgres_layers` ships anything, so
 # `last_ok_at` just ages and `failures_since_ok` stays at zero — and this
-# check is then the only witness left. The watermark is also the wrong shape:
+# check is then the only witness left. It is also an ordinary morning: the
+# 05:15 status refresh, the weekly full sync and the sync of today each parse
+# in DuckDB without marking the warehouse dirty, and a restart forgets the
+# in-memory deferral (`_pg_layers_pending`), so their verdicts wait for the
+# next dirty tick. The watermark is also the wrong shape:
 # a ship can land between an order's arrival and DuckDB's parse of it, so
 # "shipped since the order arrived" does not mean "should have carried it".
 #
@@ -2694,10 +2726,10 @@ async def reconcile_order_utm(
 # digest and never summons it, so a busy morning costs a line and not a page.
 #
 # Report only, like everything in this module: no finding here repairs
-# anything or reaches `validation_passed`. The lever is the parse or the ship,
-# and a check that re-shipped what it found missing would hide which one broke.
-# It reads Postgres alone and takes no store, so it holds whichever store does
-# the parsing.
+# anything or reaches `validation_passed`. The lever is the parse, the ship, or
+# DuckDB's copy of the comment, and a check that re-shipped what it found
+# missing would hide which one broke. It reads Postgres alone and takes no
+# store, so it holds whichever store does the parsing.
 
 ORDER_UTM_COMPLETENESS_SQL = """
 WITH owed AS (
@@ -2754,13 +2786,18 @@ def order_utm_completeness_findings(
             sample_ids=_ids("missing_ids"),
             description=(
                 f"{missing} order(s) in bronze.orders carry a manager_comment "
-                f"and have no row in {table}, and reached Postgres more than "
-                f"{grace_minutes} minutes ago (the oldest at "
+                f"and have no row in {table}, and were last written to Postgres "
+                f"more than {grace_minutes} minutes ago (the oldest at "
                 f"{_since('missing_since')}). /traffic and the weekly traffic "
                 "report file each of them through the COALESCE as organic or "
                 "unattributed, with nothing on screen to say so. Either the "
-                "parse did not reach them or the ship stopped carrying them: "
-                f"read {table}'s row in meta.mirror_state first."
+                "parse did not reach them or the ship stopped carrying them "
+                f"(read {table}'s row in meta.mirror_state first), or DuckDB's "
+                "copy of the order has no comment: the parser reads DuckDB's "
+                "orders, not bronze.orders, so it never sees them, and no "
+                "parse or ship clears this. The orders fingerprint names that "
+                "case as manager_comment in mirror_row_values on bronze.orders; "
+                "the fix is the comment back in DuckDB, not a ship."
             ),
         ))
 
@@ -2775,10 +2812,15 @@ def order_utm_completeness_findings(
             description=(
                 f"{stale} order(s) have a verdict in {table} older than the "
                 "order itself (updated_at > parsed_at), and the newer order "
-                f"reached Postgres more than {grace_minutes} minutes ago (the "
-                f"oldest at {_since('stale_since')}). parsed_at is the order's "
+                "was last written to Postgres more than "
+                f"{grace_minutes} minutes ago (the oldest at "
+                f"{_since('stale_since')}). parsed_at is the order's "
                 "own updated_at when its comment was read, so the parser has "
-                "not caught up with an edit, or its re-parse was not shipped. "
+                "not caught up with an edit, or its re-parse was not shipped, "
+                "or DuckDB's copy of the order has lost its comment and the "
+                "parser, which reads DuckDB, no longer re-reads it (the orders "
+                "fingerprint then names manager_comment in mirror_row_values "
+                "on bronze.orders). "
                 "/traffic shows the previous classification for these."
             ),
         ))
@@ -2792,11 +2834,14 @@ def order_utm_completeness_findings(
             count=in_flight,
             sample_ids=_ids("in_flight_ids"),
             description=(
-                f"{in_flight} order(s) reached Postgres in the last "
+                f"{in_flight} order(s) were written to Postgres in the last "
                 f"{grace_minutes} minutes without a current verdict in "
                 f"{table}. Not a defect yet: the verdict follows on DuckDB's "
                 "tick and the ship's floor, the gap #213 accepted, and /traffic "
                 "shows these without their current verdict until it lands. "
+                "The clock is the row's last write, so a rewrite of an "
+                "unchanged order (the 05:15 refresh, a backfill) puts one long "
+                "without a verdict here for one grace too. "
                 "Counted because that width is what step 9's parse inside "
                 "Postgres is meant to close."
             ),
