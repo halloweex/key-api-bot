@@ -155,7 +155,7 @@ async def _write(table: str, columns: Sequence[str], rows: Sequence[tuple]) -> N
             await conn.execute(_WATERMARK_OK, table, len(rows))
 
 
-async def _record_failure(table: str, error: str) -> None:
+async def _record_failure(table: str, error: str) -> bool:
     """Best effort: say in Postgres that the mirror failed.
 
     Usually pointless — if the write failed because Postgres is unreachable,
@@ -163,6 +163,10 @@ async def _record_failure(table: str, error: str) -> None:
     misleads: a write that failed on *its own* data while the connection was
     fine. Without this the watermark would keep the last success and read as
     healthy.
+
+    Returns whether the failure was written, so a caller stamping many tables
+    can stop at the first one that could not be, rather than waiting on an
+    unreachable server once per table.
     """
     try:
         from core.pg import get_pool
@@ -181,8 +185,10 @@ async def _record_failure(table: str, error: str) -> None:
                 """,
                 table, error[:2000],
             )
+        return True
     except Exception as exc:
         logger.debug("mirror: could not record the failure either: %s", exc)
+        return False
 
 
 async def _mirror(table: str, columns: Sequence[str], rows: List[tuple]) -> MirrorOutcome:

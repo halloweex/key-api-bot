@@ -1,12 +1,21 @@
 """Move a DuckDB sequence above the ids a table already holds.
 
-DuckDB 1.5.5 has no way to *set* a sequence. `ALTER SEQUENCE ... RESTART`
-raises "Not implemented", and every sequence this store owns backs a column
-DEFAULT, so `DROP SEQUENCE` and `CREATE OR REPLACE SEQUENCE` both raise
-DependencyException ("Cannot drop entry ... because there are entries that
-depend on it"), while `DROP ... CASCADE` would take the DEFAULT with it. The
-only lever left is the one `scripts/compact_duckdb.py` already pulls: read
-where the sequence stands and burn the difference with `nextval`.
+DuckDB 1.5.5 has no way to *set* a sequence in place: `ALTER SEQUENCE ...
+RESTART` raises "Not implemented", before and after a reopen. Replacing one
+depends on the session. Every sequence this store owns backs a column DEFAULT,
+and in the session that created that table `DROP SEQUENCE` and `CREATE OR
+REPLACE SEQUENCE` both raise DependencyException ("Cannot drop entry ...
+because there are entries that depend on it"). After the file is reopened —
+even once the schema's `IF NOT EXISTS` statements have run again, as they do
+at every boot — both succeed, and the DEFAULT goes on using the new sequence.
+That was measured after this module was written; its first version said the
+DependencyException was unconditional.
+
+Burning values is still the lever used here, and still the better one: it is
+not DDL, so it works in any session, including the compaction's own, where
+the tables were created moments earlier; and a burn read to the end is durable
+without a checkpoint. `scripts/compact_duckdb.py` pulls the same lever, but
+without reading the burn to the end — see below for what that costs.
 
 Two things about that lever are not obvious, and both were measured on 1.5.5
 before this module was written.
@@ -101,6 +110,14 @@ def _state(conn, sequence_name: str) -> Tuple[int, int]:
     # The rendering is the only exact source and it is not a documented
     # interface. If it ever stops agreeing with the columns, trust the reading
     # that cannot collide.
+    #
+    # One state where they already disagree was measured after this was
+    # written: a file reopened from a WAL that its writer never checkpointed.
+    # There `last_value` and `start_value` are the counter as of the last
+    # checkpoint while `sql` renders the true next value — 50,001 against
+    # 300,001 in the measurement. The fallback reads 50,001, so a floor of
+    # 51,000 burned 1,000 values the sequence was already past and left it
+    # handing out 301,001: a gap, never a collision.
     return conservative, increment
 
 
