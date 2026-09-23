@@ -70,11 +70,31 @@ def defer_flaky(
 # How stale the last *successful* data-quality run may get before we say so.
 # One missed cycle plus grace: the job either ran late or did not run, and
 # either way nobody is checking the warehouse against KeyCRM meanwhile.
-# Reconciliation is daily at 05:00 Kyiv; integrity every 6h (01/07/13/19).
+# Reconciliation is daily at 05:30 Kyiv; integrity every 6h (01/07/13/19).
 # Reconciliation matters most — it is the only check that can see a wrong
 # status, a wrong source, or two errors that cancel out.
 DQ_MAX_AGE_S = {
     "reconciliation": 30 * 3600,  # 24h cycle + 6h grace
+    # The same 05:30 job's Postgres half, compared against the same KeyCRM
+    # snapshot, and so the same limit — the digest's too. It is a layer of its
+    # own so that a Postgres half which stops cannot hide behind a fresh DuckDB
+    # one, and until DN-21 only the 09:00 digest would say so.
+    # It is meant to be the comparison against the source that is left once
+    # DuckDB stops being fed. It is not independent of DuckDB yet: the job
+    # runs it only after the DuckDB extraction succeeded, inside the same try,
+    # and journals it in DuckDB's data_quality_runs, which is where the age
+    # /api/health publishes comes from. So a DuckDB failure silences it too,
+    # and since DN-21 that pages under this key as well as `reconciliation`.
+    # Decoupling it belongs with step 13.
+    # DN-21's opt-in rested on what the stage-4 soak checked on 18.09: a
+    # successful run on each of the 14 days before that, none CRITICAL. That
+    # counted calendar days, not the silence this limit measures; the check
+    # asks both now (deploy/stage4_soak/20_reconciliation_pg_history.sql).
+    # A web with no Postgres configured never writes the layer
+    # (`_reconcile_postgres` returns None — silence, not a clean run), so such
+    # a host now pages `dq_never:reconciliation_pg`; production web always
+    # carries `KS_PG_DSN`.
+    "reconciliation_pg": 30 * 3600,  # 24h cycle + 6h grace
     "integrity": 12 * 3600,       # 6h cycle + 6h grace
     # Daily at 07:30 Kyiv, same shape as reconciliation. Added 28.08 after the
     # layer grew the step-2/5/6 comparisons (buyers, витрина, two engines'

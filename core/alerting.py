@@ -98,6 +98,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "dq_stale:reconciliation": _c("a successful run inside the age limit"),
     "dq_stale:integrity": _c("a successful run inside the age limit"),
     "dq_stale:mirror_landing": _c("a successful run inside the age limit"),
+    # The Postgres half of the 05:30 reconciliation, which the canary pages on
+    # since DN-21 — until then only the 09:00 digest said it had gone quiet.
+    "dq_missing:reconciliation_pg": _c("the layer reports freshness again"),
+    "dq_never:reconciliation_pg": _c("the layer's first successful run"),
+    "dq_stale:reconciliation_pg": _c("a successful run inside the age limit"),
     "mirror_block_missing": _c("health payload carries a mirrors block again"),
     # KS_PG_DERIVE set to a value web did not understand (fell back to piggyback).
     "derivation_mode_invalid": _c("web restarts with a valid KS_PG_DERIVE"),

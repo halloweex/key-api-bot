@@ -271,6 +271,64 @@ class TestItIsWatchedOnItsOwn:
         assert "repair_orders" not in source
 
 
+class TestItRidesOnTheDuckDBHalfToday:
+    """What bot/canary.py and CLAUDE.md say about this arm, held to the code.
+
+    It is meant to be the comparison against the source that outlives DuckDB.
+    Today it is not: the job runs it only once the DuckDB extraction has
+    succeeded, and its run is written into DuckDB's journal (the persist test
+    above patches `core.duckdb_store.get_store`). So a DuckDB failure silences
+    `reconciliation_pg` as well, and since DN-21 that pages under its key too.
+    Decoupling it is step 13's; when that lands, this class changes with the
+    two paragraphs that describe it."""
+
+    async def _run(self, *, duckdb_extract):
+        persisted = []
+
+        def _persist(conn, **kw):
+            persisted.append(kw["layer"])
+            return len(persisted)
+
+        class _Conn:
+            async def __aenter__(self): return object()
+            async def __aexit__(self, *a): return False
+
+        class _Store:
+            def connection(self): return _Conn()
+
+        scheduler = BackgroundScheduler()
+        clean = {"issues": [], "discrepancies": [], "error": None}
+        with patch("core.reconciliation_io.keycrm_orders_in_window",
+                   new=AsyncMock(return_value=(_facts(1), 1, set()))), \
+             patch("core.reconciliation_io.duckdb_orders_in_window", **duckdb_extract), \
+             patch("core.duckdb_store.get_store", new=AsyncMock(return_value=_Store())), \
+             patch("core.data_quality.persist_run", new=_persist), \
+             patch.object(scheduler, "_reconcile_postgres",
+                          new=AsyncMock(return_value=clean)) as pg_arm, \
+             patch.object(scheduler, "_reconcile_clickhouse",
+                          new=AsyncMock(return_value=None)), \
+             patch.object(scheduler, "_resolve_dq_layer", new=AsyncMock()), \
+             patch.object(scheduler, "_send_dq_alert_throttled", new=AsyncMock()):
+            result = await scheduler._run_dq_reconciliation()
+        return result, pg_arm, persisted
+
+    @pytest.mark.asyncio
+    async def test_with_the_duckdb_half_healthy_both_runs_are_written(self):
+        result, pg_arm, persisted = await self._run(
+            duckdb_extract={"return_value": _facts(1)})
+        assert result["error"] is None
+        pg_arm.assert_awaited_once()
+        assert persisted == ["reconciliation", "reconciliation_pg"]
+
+    @pytest.mark.asyncio
+    async def test_a_duckdb_failure_writes_no_postgres_run(self):
+        result, pg_arm, persisted = await self._run(
+            duckdb_extract={"side_effect": RuntimeError("duckdb is locked")})
+        assert "duckdb is locked" in result["error"]
+        pg_arm.assert_not_awaited()
+        assert persisted == ["reconciliation"]
+
+
 class TestFloatOrderIsNotADiscrepancy:
     """Measured on 90 days of production, not imagined.
 
